@@ -209,7 +209,7 @@ InspectorWidget::InspectorWidget(QWidget* parent)
     root->setSpacing(0);
 
     auto* header = new QHBoxLayout;
-    header->addWidget(textLabel(QStringLiteral("INSPECTOR"), "section"));
+    header->addWidget(textLabel(QStringLiteral("INSPECTOR · PREVIEW"), "section"));
     header->addStretch();
     auto* hide = new QPushButton(QStringLiteral("Hide"));
     hide->setProperty("kind", "subtle");

@@ -215,30 +215,13 @@ void WorkbenchWidget::refreshState()
 
     sidebar->setThreads(state, selectedThreadId);
 
-    const auto* selected = selectedThreadId.isEmpty()
-                               ? nullptr
-                               : state.thread(selectedThreadId.toStdString());
-    if (!selected) {
-        conversation->setThreadIdentity({}, {}, {});
-        return;
-    }
+    // ConversationWidget resolves the stable selection against this exact
+    // immutable State and never retains backend object addresses.
+    conversation->render(state, selectedThreadId);
 
-    const QString title = selected->title && !selected->title->empty()
-                              ? QString::fromStdString(*selected->title)
-                              : QString::fromStdString(selected->id.value);
-    QStringList metadata;
-    if (selected->status && !selected->status->empty())
-        metadata.append(QString::fromStdString(*selected->status));
-    if (selected->model)
-        metadata.append(QString::fromStdString(selected->model->value));
-    if (selected->cwd)
-        metadata.append(QString::fromStdString(selected->cwd->value));
-    if (metadata.isEmpty())
-        metadata.append(QStringLiteral("Synchronized thread identity"));
-    metadata.append(QStringLiteral("details below remain demo data"));
-
-    conversation->setThreadIdentity(QString::fromStdString(selected->id.value), title,
-                                    metadata.join(QStringLiteral(" · ")));
+    const auto* selected = selectedThreadId.isEmpty() ? nullptr : state.thread(selectedThreadId.toStdString());
+    if (selected && !selected->fullyLoaded)
+        frontendSession.loadThread(selectedThreadId);
 }
 
 void WorkbenchWidget::selectThread(const QString& threadId)

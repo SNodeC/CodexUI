@@ -17,10 +17,14 @@ codex app-server
 
 CodexUI connects automatically to the local `codex-backend` Unix frontend
 socket through Qt and delegates authentication, protocol handling, and state
-synchronization to AISuite's public frontend SDK. The sidebar and selected
-thread identity display synchronized live state. Detailed conversation,
-activity, agent, inspector, and composer content remains deterministic
-presentation data for now.
+synchronization to AISuite's public frontend SDK. The sidebar displays real
+synchronized threads, and the center work area renders the selected thread's
+real turns, messages, semantic items, activity, token usage, and failures from
+the current immutable frontend State.
+
+CodexUI remains read-only. Composer actions, thread actions, approvals, and
+interrupt/stop are not connected. The right inspector still contains
+presentation/demo content.
 
 ## Build
 

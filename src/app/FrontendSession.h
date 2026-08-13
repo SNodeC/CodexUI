@@ -10,6 +10,7 @@
 #include <ai/openai/codex/frontend/client/Client.h>
 
 #include <memory>
+#include <set>
 #include <string>
 
 namespace codexui {
@@ -28,6 +29,7 @@ public:
     [[nodiscard]] Lifecycle lifecycle() const noexcept;
     [[nodiscard]] QString statusText() const;
     [[nodiscard]] const ai::openai::codex::frontend::client::State& state() const noexcept;
+    void loadThread(const QString& threadId);
 
 signals:
     void lifecycleChanged();
@@ -54,6 +56,7 @@ private:
     ai::openai::codex::frontend::client::State currentState;
     Lifecycle currentLifecycle = Lifecycle::Disconnected;
     QString detail;
+    std::set<std::string> requestedThreadReads;
     bool localShutdown = false;
 };
 
