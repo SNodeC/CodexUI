@@ -7,12 +7,14 @@ project(CodexUI LANGUAGES CXX)
 set(CMAKE_AUTOMOC ON)
 
 find_package(AISuite CONFIG REQUIRED)
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Network Widgets)
 
 qt_add_executable(
     codex-ui
     src/app/Application.cpp
     src/app/Application.h
+    src/app/FrontendSession.cpp
+    src/app/FrontendSession.h
     src/main.cpp
     src/ui/ConversationWidget.cpp
     src/ui/ConversationWidget.h
@@ -33,5 +35,6 @@ target_link_libraries(
     codex-ui
     PRIVATE
         AISuite::OpenAICodexFrontendClient
+        Qt6::Network
         Qt6::Widgets
 )

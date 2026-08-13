@@ -7,6 +7,7 @@ namespace codexui {
 void Application::show()
 {
     mainWindow.show();
+    frontendSession.connectToBackend();
 }
 
 } // namespace codexui

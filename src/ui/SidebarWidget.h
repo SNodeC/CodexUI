@@ -5,6 +5,14 @@
 
 #include <QWidget>
 
+class QFrame;
+class QLabel;
+class QVBoxLayout;
+
+namespace ai::openai::codex::frontend::client {
+class State;
+}
+
 namespace codexui {
 
 class SidebarWidget : public QWidget
@@ -13,9 +21,18 @@ class SidebarWidget : public QWidget
 
 public:
     explicit SidebarWidget(QWidget* parent = nullptr);
+    void setThreads(const ai::openai::codex::frontend::client::State& state, const QString& selectedThreadId);
+    void setConnectionStatus(const QString& title, const QString& detail, const QString& color);
 
 signals:
     void hideRequested();
+    void threadSelected(const QString& threadId);
+
+private:
+    QVBoxLayout* threadItems = nullptr;
+    QFrame* serverDot = nullptr;
+    QLabel* serverTitle = nullptr;
+    QLabel* serverDetail = nullptr;
 };
 
 } // namespace codexui

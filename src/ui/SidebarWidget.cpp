@@ -2,16 +2,22 @@
 
 #include "ui/SidebarWidget.h"
 
+#include <ai/openai/codex/frontend/client/State.h>
+
 #include <QEnterEvent>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QVBoxLayout>
 
 #include <functional>
+#include <optional>
+#include <string>
+#include <utility>
 
 namespace codexui {
 namespace {
@@ -34,14 +40,18 @@ QLabel* section(const QString& text, bool attention = false)
 class ThreadRow final : public QFrame
 {
 public:
-    ThreadRow(QString title, QString details, QString extra, QString color, int height, QWidget* parent = nullptr)
+    ThreadRow(QString stableId, QString title, QString details, QString color, QWidget* parent = nullptr)
         : QFrame(parent)
+        , stableId(std::move(stableId))
     {
         setObjectName(QStringLiteral("threadRow"));
+        setProperty("threadId", this->stableId);
         setCursor(Qt::PointingHandCursor);
-        setFixedHeight(height);
+        setFixedHeight(58);
         setProperty("selected", false);
         dotColor = std::move(color);
+        fullTitle = std::move(title);
+        fullDetails = std::move(details);
 
         auto* row = new QHBoxLayout(this);
         row->setContentsMargins(12, 7, 10, 7);
@@ -54,15 +64,17 @@ public:
         auto* content = new QVBoxLayout;
         content->setContentsMargins(0, 0, 0, 0);
         content->setSpacing(3);
-        auto* titleLabel = textLabel(title, "title");
+        titleLabel = textLabel(fullTitle, "title");
         titleLabel->setStyleSheet(QStringLiteral("font-size:13px;font-weight:500;"));
+        titleLabel->setTextFormat(Qt::PlainText);
+        titleLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        titleLabel->setToolTip(fullTitle);
         content->addWidget(titleLabel);
-        if (!details.isEmpty()) {
-            detailsLabel = textLabel(details, "meta");
+        if (!fullDetails.isEmpty()) {
+            detailsLabel = textLabel(fullDetails, "meta");
+            detailsLabel->setToolTip(fullDetails);
             content->addWidget(detailsLabel);
         }
-        if (!extra.isEmpty())
-            content->addWidget(textLabel(extra, "meta"));
         row->addLayout(content, 1);
         updateStyle();
     }
@@ -73,10 +85,9 @@ public:
         updateStyle();
     }
 
-    void setAttentionText(bool value)
+    [[nodiscard]] const QString& id() const noexcept
     {
-        if (value && detailsLabel)
-            detailsLabel->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:11px;font-weight:600;"));
+        return stableId;
     }
 
     std::function<void(ThreadRow*)> clicked;
@@ -103,6 +114,15 @@ protected:
         QFrame::mousePressEvent(event);
     }
 
+    void resizeEvent(QResizeEvent* event) override
+    {
+        const int availableWidth = qMax(0, event->size().width() - 42);
+        titleLabel->setText(titleLabel->fontMetrics().elidedText(fullTitle, Qt::ElideRight, availableWidth));
+        if (detailsLabel)
+            detailsLabel->setText(detailsLabel->fontMetrics().elidedText(fullDetails, Qt::ElideRight, availableWidth));
+        QFrame::resizeEvent(event);
+    }
+
 private:
     void updateStyle()
     {
@@ -112,11 +132,38 @@ private:
     }
 
     QFrame* dot = nullptr;
+    QLabel* titleLabel = nullptr;
     QLabel* detailsLabel = nullptr;
+    QString stableId;
+    QString fullTitle;
+    QString fullDetails;
     QString dotColor;
     bool selected = false;
     bool hovered = false;
 };
+
+QString threadStatusColor(const std::optional<std::string>& status)
+{
+    if (!status)
+        return QStringLiteral("#949ead");
+    const QString value = QString::fromStdString(*status).toLower();
+    if (value.contains(QStringLiteral("fail")) || value.contains(QStringLiteral("error"))
+        || value.contains(QStringLiteral("approval")) || value.contains(QStringLiteral("attention")))
+        return QStringLiteral("#f5a83b");
+    if (value.contains(QStringLiteral("running")) || value.contains(QStringLiteral("active"))
+        || value.contains(QStringLiteral("complete")))
+        return QStringLiteral("#40c27d");
+    return QStringLiteral("#4f94f5");
+}
+
+void clearLayout(QLayout* layout)
+{
+    while (auto* item = layout->takeAt(0)) {
+        if (auto* widget = item->widget())
+            widget->deleteLater();
+        delete item;
+    }
+}
 
 } // namespace
 
@@ -154,48 +201,13 @@ SidebarWidget::SidebarWidget(QWidget* parent)
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     auto* list = new QWidget;
     list->setStyleSheet(QStringLiteral("background:transparent;"));
-    auto* items = new QVBoxLayout(list);
-    items->setContentsMargins(0, 0, 0, 0);
-    items->setSpacing(4);
-    items->addWidget(section(QStringLiteral("ACTIVE")));
-
-    QList<ThreadRow*> rows;
-    auto addRow = [&](const QString& title, const QString& detail, const QString& extra, const QString& color, int height) {
-        auto* row = new ThreadRow(title, detail, extra, color, height);
-        rows.append(row);
-        items->addWidget(row);
-        return row;
-    };
-
-    auto* active = addRow(QStringLiteral("A1.8 protocol lifecycle"),
-                          QStringLiteral("Running · 3 agents · 4m"),
-                          QStringLiteral("3 files changed"), QStringLiteral("#40c27d"), 76);
-    active->setSelected(true);
-    items->addWidget(section(QStringLiteral("NEEDS ATTENTION"), true));
-    auto* attention = addRow(QStringLiteral("CI investigation"), QStringLiteral("Approval required"), {},
-                             QStringLiteral("#f5a83b"), 54);
-    attention->setAttentionText(true);
-    items->addSpacing(8);
-    addRow(QStringLiteral("FrontendService review"), QStringLiteral("Completed · 18m ago"), {},
-           QStringLiteral("#40c27d"), 54);
-    items->addSpacing(26);
-    items->addWidget(section(QStringLiteral("REVIEWS")));
-    addRow(QStringLiteral("PR #13 final audit"), QStringLiteral("Completed"), {},
-           QStringLiteral("transparent"), 52);
-    items->addSpacing(26);
-    items->addWidget(section(QStringLiteral("ARCHIVED")));
-    auto* archived = textLabel(QStringLiteral("12 threads"), "muted");
-    archived->setContentsMargins(30, 6, 0, 0);
-    archived->setFixedHeight(42);
-    items->addWidget(archived);
-    items->addStretch();
-
-    for (auto* row : rows) {
-        row->clicked = [rows](ThreadRow* selected) {
-            for (auto* candidate : rows)
-                candidate->setSelected(candidate == selected);
-        };
-    }
+    threadItems = new QVBoxLayout(list);
+    threadItems->setContentsMargins(0, 0, 0, 0);
+    threadItems->setSpacing(4);
+    threadItems->setSizeConstraint(QLayout::SetMinAndMaxSize);
+    threadItems->addWidget(section(QStringLiteral("THREADS")));
+    threadItems->addWidget(textLabel(QStringLiteral("Waiting for synchronized state…"), "muted"));
+    threadItems->addStretch();
 
     scroll->setWidget(list);
     root->addWidget(scroll, 1);
@@ -209,20 +221,63 @@ SidebarWidget::SidebarWidget(QWidget* parent)
     auto* serverRow = new QHBoxLayout;
     serverRow->setContentsMargins(8, 0, 0, 0);
     serverRow->setSpacing(10);
-    auto* serverDot = new QFrame;
+    serverDot = new QFrame;
     serverDot->setFixedSize(8, 8);
     serverDot->setStyleSheet(QStringLiteral("background:#40c27d;border-radius:4px;"));
     serverRow->addWidget(serverDot, 0, Qt::AlignTop);
     auto* serverCopy = new QVBoxLayout;
     serverCopy->setSpacing(3);
-    auto* connected = textLabel(QStringLiteral("App server connected"), "meta");
-    connected->setStyleSheet(QStringLiteral("color:#e8edf2;font-size:11px;font-weight:500;"));
-    serverCopy->addWidget(connected);
-    serverCopy->addWidget(textLabel(QStringLiteral("Local · stdio"), "meta"));
+    serverTitle = textLabel(QStringLiteral("Not connected"), "meta");
+    serverTitle->setStyleSheet(QStringLiteral("color:#e8edf2;font-size:11px;font-weight:500;"));
+    serverCopy->addWidget(serverTitle);
+    serverDetail = textLabel(QStringLiteral("Unix frontend"), "meta");
+    serverCopy->addWidget(serverDetail);
     serverRow->addLayout(serverCopy, 1);
     root->addLayout(serverRow);
 
     connect(hide, &QPushButton::clicked, this, &SidebarWidget::hideRequested);
+}
+
+void SidebarWidget::setThreads(const ai::openai::codex::frontend::client::State& state,
+                               const QString& selectedThreadId)
+{
+    clearLayout(threadItems);
+    threadItems->addWidget(section(QStringLiteral("THREADS")));
+
+    const auto threads = state.threads();
+    if (threads.empty()) {
+        auto* empty = textLabel(QStringLiteral("No synchronized threads"), "muted");
+        empty->setContentsMargins(12, 8, 0, 0);
+        threadItems->addWidget(empty);
+    } else {
+        for (const auto& thread : threads) {
+            const QString id = QString::fromStdString(thread.id.value);
+            const QString title = thread.title && !thread.title->empty() ? QString::fromStdString(*thread.title) : id;
+            QString secondary;
+            if (thread.status && !thread.status->empty())
+                secondary = QString::fromStdString(*thread.status);
+            if (thread.preview && !thread.preview->empty() && QString::fromStdString(*thread.preview) != title) {
+                if (!secondary.isEmpty())
+                    secondary += QStringLiteral(" · ");
+                secondary += QString::fromStdString(*thread.preview);
+            }
+            if (secondary.isEmpty())
+                secondary = QStringLiteral("Synchronized thread");
+
+            auto* row = new ThreadRow(id, title, secondary, threadStatusColor(thread.status));
+            row->setSelected(id == selectedThreadId);
+            row->clicked = [this](ThreadRow* selected) { emit threadSelected(selected->id()); };
+            threadItems->addWidget(row);
+        }
+    }
+    threadItems->addStretch();
+}
+
+void SidebarWidget::setConnectionStatus(const QString& title, const QString& connectionDetail, const QString& color)
+{
+    serverTitle->setText(title);
+    serverDetail->setText(connectionDetail);
+    serverDot->setStyleSheet(QStringLiteral("background:%1;border-radius:4px;").arg(color));
 }
 
 } // namespace codexui

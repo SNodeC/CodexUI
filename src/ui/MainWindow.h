@@ -7,10 +7,12 @@
 
 namespace codexui {
 
+class FrontendSession;
+
 class MainWindow : public QMainWindow
 {
 public:
-    explicit MainWindow(QWidget* parent = nullptr);
+    explicit MainWindow(FrontendSession& frontendSession, QWidget* parent = nullptr);
 };
 
 } // namespace codexui

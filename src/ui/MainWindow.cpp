@@ -10,7 +10,7 @@
 
 namespace codexui {
 
-MainWindow::MainWindow(QWidget* parent)
+MainWindow::MainWindow(FrontendSession& frontendSession, QWidget* parent)
     : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("CodexUI — Codex Workbench"));
@@ -22,7 +22,7 @@ MainWindow::MainWindow(QWidget* parent)
     qApp->setFont(font);
     qApp->setStyleSheet(UiStyle::applicationStyleSheet());
 
-    setCentralWidget(new WorkbenchWidget(this));
+    setCentralWidget(new WorkbenchWidget(frontendSession, this));
 }
 
 } // namespace codexui
