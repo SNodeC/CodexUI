@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
-#include <iostream>
+#include "app/Application.h"
 
-int main()
+#include <QApplication>
+
+int main(int argc, char* argv[])
 {
-    std::cout << "CodexUI bootstrap\n";
-    return 0;
+    QApplication qtApplication(argc, argv);
+    codexui::Application application;
+    application.show();
+
+    return qtApplication.exec();
 }
