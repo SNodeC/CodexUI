@@ -3,6 +3,7 @@
 #include "app/FrontendSession.h"
 
 #include <ai/openai/codex/frontend/Security.h>
+#include <ai/openai/codex/frontend/client/Threads.h>
 
 #include <QByteArray>
 #include <QDir>
@@ -129,6 +130,25 @@ QString FrontendSession::statusText() const
 const sdk::State& FrontendSession::state() const noexcept
 {
     return currentState;
+}
+
+void FrontendSession::loadThread(const QString& threadId)
+{
+    if (currentLifecycle != Lifecycle::Ready || threadId.isEmpty())
+        return;
+    const std::string id = threadId.toStdString();
+    const auto* thread = currentState.thread(id);
+    if (!thread || thread->fullyLoaded || requestedThreadReads.contains(id))
+        return;
+
+    requestedThreadReads.insert(id);
+    sdk::Submission submission = client->threads().read(
+        {ai::openai::codex::typed::ThreadId{id}, true},
+        [this, id](const sdk::OperationResult<sdk::ThreadReadResult>&) {
+            requestedThreadReads.erase(id);
+        });
+    if (!submission)
+        requestedThreadReads.erase(id);
 }
 
 QString FrontendSession::defaultSocketPath()
