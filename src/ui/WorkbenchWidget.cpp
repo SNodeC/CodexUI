@@ -289,7 +289,8 @@ void WorkbenchWidget::refreshControls()
     const bool promptSubmissionInFlight = threadStartInFlight || threadResumeInFlight || turnStartInFlight;
 
     sidebar->setNewThreadEnabled(ready && !promptSubmissionInFlight && !pendingControllerWrite);
-    conversation->setActionState(ready && (newThreadDraft || selected != nullptr) && active == nullptr
+    conversation->setActionState(ready && (newThreadDraft || (selected != nullptr && selected->fullyLoaded))
+                                     && active == nullptr
                                      && !promptSubmissionInFlight && !pendingControllerWrite,
                                  ready && selected != nullptr && active != nullptr && !interruptInFlight
                                      && !pendingControllerWrite,
@@ -343,7 +344,7 @@ void WorkbenchWidget::sendPrompt(const QString& prompt)
 
     const auto& state = frontendSession.state();
     const auto* selected = selectedThreadId.isEmpty() ? nullptr : state.thread(selectedThreadId.toStdString());
-    if (!newThreadDraft && (!selected || activeTurn(state, selected)))
+    if (!newThreadDraft && (!selected || !selected->fullyLoaded || activeTurn(state, selected)))
         return;
 
     pendingAction = newThreadDraft ? PendingAction::SendNewThread : PendingAction::SendExistingThread;
@@ -487,10 +488,12 @@ void WorkbenchWidget::startTurn(const QString& threadId, const QString& prompt)
         if (!self)
             return;
         self->turnStartInFlight = false;
-        if (!error.isEmpty())
+        if (!error.isEmpty()) {
             self->showWriteError(error);
-        else
+        } else {
+            self->conversation->clearPrompt();
             self->conversation->setWriteStatus({});
+        }
         self->refreshState();
     });
     if (immediateError) {
@@ -500,9 +503,6 @@ void WorkbenchWidget::startTurn(const QString& threadId, const QString& prompt)
         return;
     }
 
-    // The prompt crossed the typed turn.start submission boundary. Canonical
-    // State, not this command result, supplies the visible user message.
-    conversation->clearPrompt();
     conversation->setWriteStatus(QStringLiteral("Prompt submitted"));
     refreshControls();
 }

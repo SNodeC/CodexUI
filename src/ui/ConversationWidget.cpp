@@ -665,7 +665,6 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     composerLayout->setSpacing(4);
     editor = new QPlainTextEdit;
     editor->setPlaceholderText(QStringLiteral("Message Codex"));
-    editor->setMaximumBlockCount(20);
     editor->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     editor->installEventFilter(this);
     composerLayout->addWidget(editor, 1);
