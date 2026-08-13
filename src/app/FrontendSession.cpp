@@ -155,8 +155,25 @@ void FrontendSession::socketConnected()
 
 void FrontendSession::socketReadyRead()
 {
+    const auto rejectOversizedFrame = [this] {
+        setLifecycle(Lifecycle::Failed, QStringLiteral("Backend frame exceeds the SDK input limit"));
+        socket.abort();
+    };
+
     while (socket.canReadLine()) {
-        QByteArray frame = socket.readLine();
+        const QByteArray prefix = socket.peek(maximumFrameBytes + 2);
+        const qsizetype newline = prefix.indexOf('\n');
+        if (newline < 0) {
+            rejectOversizedFrame();
+            return;
+        }
+        const qsizetype payloadBytes = newline > 0 && prefix.at(newline - 1) == '\r' ? newline - 1 : newline;
+        if (payloadBytes > maximumFrameBytes) {
+            rejectOversizedFrame();
+            return;
+        }
+
+        QByteArray frame = socket.read(newline + 1);
         if (frame.endsWith('\n'))
             frame.chop(1);
         if (frame.endsWith('\r'))
@@ -173,8 +190,7 @@ void FrontendSession::socketReadyRead()
         }
     }
     if (socket.bytesAvailable() > maximumFrameBytes) {
-        setLifecycle(Lifecycle::Failed, QStringLiteral("Backend frame exceeds the SDK input limit"));
-        socket.abort();
+        rejectOversizedFrame();
     }
 }
 
