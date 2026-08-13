@@ -1,9 +1,9 @@
 # CodexUI
 
-CodexUI is a native graphical Codex client built on AISuite's public Codex
-frontend C++ SDK. It connects to an independently running `codex-backend`,
-which owns persistent and shared Codex state and communicates with the Codex
-app-server.
+CodexUI is a native Qt 6 Widgets graphical Codex client built on AISuite's
+public Codex frontend C++ SDK. It connects to an independently running
+`codex-backend`, which owns persistent and shared Codex state and communicates
+with the Codex app-server.
 
 ```text
 CodexUI
@@ -22,8 +22,8 @@ Codex app-server directly.
 
 ## Build
 
-An installed AISuite package that exports its public Codex frontend client is
-required.
+Qt 6 Widgets and an installed AISuite package that exports its public Codex
+frontend client are required.
 
 ```sh
 cmake -S . -B build -G Ninja
