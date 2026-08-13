@@ -9,7 +9,9 @@
 
 #include <ai/openai/codex/frontend/client/Client.h>
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -22,6 +24,9 @@ class FrontendSession : public QObject
 public:
     enum class Lifecycle { Disconnected, Connecting, Authenticating, Synchronizing, Ready, Failed };
 
+    using OperationCompletion = std::function<void(const QString& error)>;
+    using ThreadStartCompletion = std::function<void(const QString& threadId, const QString& error)>;
+
     explicit FrontendSession(QObject* parent = nullptr);
     ~FrontendSession() override;
 
@@ -29,7 +34,17 @@ public:
     [[nodiscard]] Lifecycle lifecycle() const noexcept;
     [[nodiscard]] QString statusText() const;
     [[nodiscard]] const ai::openai::codex::frontend::client::State& state() const noexcept;
+    [[nodiscard]] bool ownsController() const noexcept;
     void loadThread(const QString& threadId);
+    [[nodiscard]] std::optional<QString> acquireController(OperationCompletion completion);
+    [[nodiscard]] std::optional<QString> startThread(ThreadStartCompletion completion);
+    [[nodiscard]] std::optional<QString> resumeThread(const QString& threadId, ThreadStartCompletion completion);
+    [[nodiscard]] std::optional<QString> startTurn(const QString& threadId,
+                                                   const QString& prompt,
+                                                   OperationCompletion completion);
+    [[nodiscard]] std::optional<QString> interruptTurn(const QString& threadId,
+                                                       const QString& turnId,
+                                                       OperationCompletion completion);
 
 signals:
     void lifecycleChanged();
