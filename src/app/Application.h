@@ -3,6 +3,7 @@
 #ifndef CODEXUI_APP_APPLICATION_H
 #define CODEXUI_APP_APPLICATION_H
 
+#include "app/FrontendSession.h"
 #include "ui/MainWindow.h"
 
 namespace codexui {
@@ -13,7 +14,8 @@ public:
     void show();
 
 private:
-    MainWindow mainWindow;
+    FrontendSession frontendSession;
+    MainWindow mainWindow{frontendSession};
 };
 
 } // namespace codexui

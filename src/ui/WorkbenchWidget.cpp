@@ -2,9 +2,12 @@
 
 #include "ui/WorkbenchWidget.h"
 
+#include "app/FrontendSession.h"
 #include "ui/ConversationWidget.h"
 #include "ui/InspectorWidget.h"
 #include "ui/SidebarWidget.h"
+
+#include <ai/openai/codex/frontend/client/State.h>
 
 #include <QFrame>
 #include <QHBoxLayout>
@@ -93,7 +96,7 @@ QWidget* makeTopBar(QPushButton*& restoreLeft, QPushButton*& restoreRight)
     return bar;
 }
 
-QWidget* makeStatusBar()
+QWidget* makeStatusBar(QFrame*& codexStatusDot, QLabel*& synchronizationStatus)
 {
     auto* bar = new QFrame;
     bar->setObjectName(QStringLiteral("customStatusBar"));
@@ -103,7 +106,8 @@ QWidget* makeStatusBar()
     row->setContentsMargins(18, 0, 80, 0);
     row->setSpacing(8);
 
-    row->addWidget(dot(QStringLiteral("#40c27d")));
+    codexStatusDot = dot(QStringLiteral("#949ead"));
+    row->addWidget(codexStatusDot);
     row->addWidget(label(QStringLiteral("Codex"), "meta"));
     row->addSpacing(22);
     row->addWidget(dot(QStringLiteral("#40c27d")));
@@ -113,9 +117,9 @@ QWidget* makeStatusBar()
     row->addSpacing(62);
     row->addWidget(label(QStringLiteral("3 agents running"), "meta"));
     row->addSpacing(24);
-    auto* synced = label(QStringLiteral("State synced"), "meta");
-    synced->setStyleSheet(QStringLiteral("color:#40c27d;font-size:10px;font-weight:600;"));
-    row->addWidget(synced);
+    synchronizationStatus = label(QStringLiteral("Disconnected"), "meta");
+    synchronizationStatus->setStyleSheet(QStringLiteral("color:#949ead;font-size:10px;font-weight:600;"));
+    row->addWidget(synchronizationStatus);
     row->addStretch();
     auto* attention = label(QStringLiteral("2 attention"), "meta");
     attention->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:10px;font-weight:600;"));
@@ -125,8 +129,9 @@ QWidget* makeStatusBar()
 
 } // namespace
 
-WorkbenchWidget::WorkbenchWidget(QWidget* parent)
+WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     : QWidget(parent)
+    , frontendSession(session)
 {
     setObjectName(QStringLiteral("workbench"));
     auto* layout = new QVBoxLayout(this);
@@ -138,7 +143,7 @@ WorkbenchWidget::WorkbenchWidget(QWidget* parent)
     splitter->setChildrenCollapsible(false);
     splitter->setHandleWidth(8);
     sidebar = new SidebarWidget;
-    auto* conversation = new ConversationWidget;
+    conversation = new ConversationWidget;
     inspector = new InspectorWidget;
     splitter->addWidget(sidebar);
     splitter->addWidget(conversation);
@@ -148,12 +153,98 @@ WorkbenchWidget::WorkbenchWidget(QWidget* parent)
     splitter->setStretchFactor(2, 0);
     splitter->setSizes({282, 834, 404});
     layout->addWidget(splitter, 1);
-    layout->addWidget(makeStatusBar());
+    layout->addWidget(makeStatusBar(codexStatusDot, synchronizationStatus));
 
     connect(sidebar, &SidebarWidget::hideRequested, this, [this] { setSidebarVisible(false); });
     connect(inspector, &InspectorWidget::hideRequested, this, [this] { setInspectorVisible(false); });
     connect(restoreSidebar, &QPushButton::clicked, this, [this] { setSidebarVisible(true); });
     connect(restoreInspector, &QPushButton::clicked, this, [this] { setInspectorVisible(true); });
+    connect(sidebar, &SidebarWidget::threadSelected, this, &WorkbenchWidget::selectThread);
+    connect(&frontendSession, &FrontendSession::lifecycleChanged, this, &WorkbenchWidget::refreshLifecycle);
+    connect(&frontendSession, &FrontendSession::stateChanged, this, &WorkbenchWidget::refreshState);
+
+    refreshLifecycle();
+    refreshState();
+}
+
+void WorkbenchWidget::refreshLifecycle()
+{
+    using Lifecycle = FrontendSession::Lifecycle;
+    QString color = QStringLiteral("#949ead");
+    QString title = QStringLiteral("App server disconnected");
+    QString detail = frontendSession.statusText();
+
+    switch (frontendSession.lifecycle()) {
+        case Lifecycle::Connecting:
+        case Lifecycle::Authenticating:
+        case Lifecycle::Synchronizing:
+            color = QStringLiteral("#4f94f5");
+            title = QStringLiteral("Connecting to app server");
+            break;
+        case Lifecycle::Ready:
+            color = QStringLiteral("#40c27d");
+            title = QStringLiteral("App server connected");
+            detail = QStringLiteral("Local · Unix · synchronized");
+            break;
+        case Lifecycle::Failed:
+            color = QStringLiteral("#f5a83b");
+            title = QStringLiteral("App server unavailable");
+            break;
+        case Lifecycle::Disconnected:
+            break;
+    }
+
+    sidebar->setConnectionStatus(title, detail, color);
+    codexStatusDot->setStyleSheet(QStringLiteral("background:%1;border-radius:3px;").arg(color));
+    synchronizationStatus->setText(frontendSession.statusText());
+    synchronizationStatus->setToolTip(frontendSession.statusText());
+    synchronizationStatus->setStyleSheet(
+        QStringLiteral("color:%1;font-size:10px;font-weight:600;").arg(color));
+}
+
+void WorkbenchWidget::refreshState()
+{
+    const auto& state = frontendSession.state();
+    const auto threads = state.threads();
+
+    if (!selectedThreadId.isEmpty()
+        && state.thread(selectedThreadId.toStdString()) == nullptr)
+        selectedThreadId.clear();
+    if (selectedThreadId.isEmpty() && !threads.empty())
+        selectedThreadId = QString::fromStdString(threads.front().id.value);
+
+    sidebar->setThreads(state, selectedThreadId);
+
+    const auto* selected = selectedThreadId.isEmpty()
+                               ? nullptr
+                               : state.thread(selectedThreadId.toStdString());
+    if (!selected) {
+        conversation->setThreadIdentity({}, {}, {});
+        return;
+    }
+
+    const QString title = selected->title && !selected->title->empty()
+                              ? QString::fromStdString(*selected->title)
+                              : QString::fromStdString(selected->id.value);
+    QStringList metadata;
+    if (selected->status && !selected->status->empty())
+        metadata.append(QString::fromStdString(*selected->status));
+    if (selected->model)
+        metadata.append(QString::fromStdString(selected->model->value));
+    if (selected->cwd)
+        metadata.append(QString::fromStdString(selected->cwd->value));
+    if (metadata.isEmpty())
+        metadata.append(QStringLiteral("Synchronized thread identity"));
+    metadata.append(QStringLiteral("details below remain demo data"));
+
+    conversation->setThreadIdentity(QString::fromStdString(selected->id.value), title,
+                                    metadata.join(QStringLiteral(" · ")));
+}
+
+void WorkbenchWidget::selectThread(const QString& threadId)
+{
+    selectedThreadId = threadId;
+    refreshState();
 }
 
 void WorkbenchWidget::setSidebarVisible(bool visible)

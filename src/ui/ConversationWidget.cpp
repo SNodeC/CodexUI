@@ -184,14 +184,18 @@ ConversationWidget::ConversationWidget(QWidget* parent)
     auto* context = new QHBoxLayout;
     context->setSpacing(10);
     context->addWidget(badge(QStringLiteral("THREAD"), QStringLiteral("#181c21"), QStringLiteral("#949ead"), 54, 18));
-    auto* path = textLabel(QStringLiteral("A1.8 / Protocol lifecycle"), "small");
-    path->setStyleSheet(QStringLiteral("color:#949ead;font-size:9px;font-weight:500;"));
-    context->addWidget(path);
+    contextPath = textLabel(QStringLiteral("Waiting for synchronized thread"), "small");
+    contextPath->setStyleSheet(QStringLiteral("color:#949ead;font-size:9px;font-weight:500;"));
+    context->addWidget(contextPath);
     context->addStretch();
     root->addLayout(context);
     root->addSpacing(2);
-    root->addWidget(textLabel(QStringLiteral("A1.8 Protocol lifecycle"), "heading"));
-    root->addWidget(textLabel(QStringLiteral("Goal: complete lifecycle refactoring while preserving ABI"), "meta"));
+    threadTitle = textLabel(QStringLiteral("No synchronized thread"), "heading");
+    threadTitle->setTextFormat(Qt::PlainText);
+    root->addWidget(threadTitle);
+    threadDetail = textLabel(QStringLiteral("Detailed conversation below remains deterministic presentation data"), "meta");
+    threadDetail->setTextFormat(Qt::PlainText);
+    root->addWidget(threadDetail);
     root->addSpacing(7);
     root->addWidget(divider());
     root->addSpacing(7);
@@ -269,6 +273,18 @@ ConversationWidget::ConversationWidget(QWidget* parent)
 
     scroll->setWidget(content);
     root->addWidget(scroll, 1);
+}
+
+void ConversationWidget::setThreadIdentity(const QString& id, const QString& title, const QString& detail)
+{
+    contextPath->setText(id.isEmpty() ? QStringLiteral("No thread selected") : id);
+    contextPath->setToolTip(id);
+    threadTitle->setText(title.isEmpty() ? QStringLiteral("No synchronized thread") : title);
+    threadTitle->setToolTip(title);
+    threadDetail->setText(detail.isEmpty()
+                              ? QStringLiteral("Detailed conversation below remains deterministic presentation data")
+                              : detail);
+    threadDetail->setToolTip(detail);
 }
 
 bool ConversationWidget::eventFilter(QObject* watched, QEvent* event)
