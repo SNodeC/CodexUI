@@ -773,7 +773,7 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
             qsizetype subagents = 0;
             for (const auto& itemId : currentTurn->orderedItems)
             {
-                const auto* item = state.item(itemId);
+                const auto* item = state.item(thread->id, currentTurn->id, itemId);
                 if (!item) continue;
                 commands += item->kind.is(frontend::ThreadItemKind::CommandExecution) ? 1 : 0;
                 changes += item->kind.is(frontend::ThreadItemKind::FileChange) ? 1 : 0;
@@ -848,7 +848,7 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
                 };
                 for (const auto& itemId : turn->orderedItems)
                 {
-                    const auto* item = state.item(itemId);
+                    const auto* item = state.item(thread->id, turn->id, itemId);
                     if (!item)
                     {
                         flushActivities();

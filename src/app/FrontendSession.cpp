@@ -68,7 +68,6 @@ FrontendSession::FrontendSession(QObject* parent)
     };
     callbacks.onSynchronized = [this](const sdk::SynchronizationInfo& info) {
         currentState = info.state;
-        requestedThreadReads.clear();
         setLifecycle(Lifecycle::Ready);
         emit stateChanged();
     };
@@ -145,9 +144,8 @@ void FrontendSession::loadThread(const QString& threadId)
     requestedThreadReads.insert(id);
     sdk::Submission submission = client->threads().read(
         {ai::openai::codex::typed::ThreadId{id}, true},
-        [this, id](const sdk::OperationResult<sdk::ThreadReadResult>& result) {
-            if (result.error)
-                requestedThreadReads.erase(id);
+        [this, id](const sdk::OperationResult<sdk::ThreadReadResult>&) {
+            requestedThreadReads.erase(id);
         });
     if (!submission)
         requestedThreadReads.erase(id);
