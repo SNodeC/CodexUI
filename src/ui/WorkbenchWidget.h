@@ -35,6 +35,7 @@ private:
     void refreshControls();
     void refreshControllerStatus();
     void selectThread(const QString& threadId);
+    void selectProjectedAgentThread(const QString& threadId);
     void beginNewThread();
     void sendPrompt(const QString& prompt);
     void stopActiveTurn();
@@ -70,6 +71,7 @@ private:
     QPushButton* attentionButton = nullptr;
     InteractiveRequestDialog* interactiveRequestDialog = nullptr;
     QString selectedThreadId;
+    QString projectedAgentThreadId;
     QString newThreadIdAwaitingState;
     QString pendingPrompt;
     QString pendingThreadId;

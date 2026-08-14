@@ -56,10 +56,6 @@ QWidget* makeTopBar(QPushButton*& restoreLeft,
     auto* brand = label(QStringLiteral("CODEX WORKBENCH"), "title");
     brand->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
     row->addWidget(brand);
-    row->addSpacing(18);
-    auto* workspace = label(QStringLiteral("Workspace  /  AISuite"), "muted");
-    workspace->setStyleSheet(QStringLiteral("font-size:13px;font-weight:500;"));
-    row->addWidget(workspace);
 
     restoreLeft = new QPushButton(QStringLiteral("Show threads"));
     restoreLeft->setProperty("kind", "subtle");
@@ -119,9 +115,6 @@ QWidget* makeStatusBar(QFrame*& codexStatusDot,
     codexStatusDot = dot(QStringLiteral("#949ead"));
     row->addWidget(codexStatusDot);
     row->addWidget(label(QStringLiteral("Codex"), "meta"));
-    row->addSpacing(22);
-    row->addWidget(dot(QStringLiteral("#40c27d")));
-    row->addWidget(label(QStringLiteral("Environment"), "meta"));
     row->addSpacing(48);
     threadContextStatus = label(QStringLiteral("No thread context"), "meta");
     row->addWidget(threadContextStatus);
@@ -212,7 +205,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     connect(sidebar, &SidebarWidget::newThreadRequested, this, &WorkbenchWidget::beginNewThread);
     connect(sidebar, &SidebarWidget::threadSelected, this, &WorkbenchWidget::selectThread);
     connect(inspector, &InspectorWidget::selectionChanged, this, &WorkbenchWidget::refreshState);
-    connect(inspector, &InspectorWidget::threadOpenRequested, this, &WorkbenchWidget::selectThread);
+    connect(inspector, &InspectorWidget::threadOpenRequested, this, &WorkbenchWidget::selectProjectedAgentThread);
     connect(conversation, &ConversationWidget::sendRequested, this, &WorkbenchWidget::sendPrompt);
     connect(conversation, &ConversationWidget::stopRequested, this, &WorkbenchWidget::stopActiveTurn);
     connect(&frontendSession, &FrontendSession::lifecycleChanged, this, &WorkbenchWidget::refreshLifecycle);
@@ -330,8 +323,11 @@ void WorkbenchWidget::refreshState()
             if (!item)
                 continue;
             const auto semantic = ai::openai::codex::frontend::client::itemSemanticView(*item);
-            if (semantic && std::holds_alternative<ai::openai::codex::frontend::client::SubAgentActivitySemanticView>(
-                                semantic->details))
+            if (semantic
+                && (std::holds_alternative<
+                        ai::openai::codex::frontend::client::SubAgentActivitySemanticView>(semantic->details)
+                    || std::holds_alternative<
+                        ai::openai::codex::frontend::client::CollabAgentToolCallSemanticView>(semantic->details)))
                 ++agentActivities;
         }
     }
@@ -360,7 +356,7 @@ void WorkbenchWidget::refreshState()
                                                : QStringLiteral("Codex has no pending requests"));
     interactiveRequestDialog->synchronize(state);
 
-    if (selected && !selected->fullyLoaded)
+    if (selected && !selected->fullyLoaded && projectedAgentThreadId != selectedThreadId)
         frontendSession.loadThread(selectedThreadId);
 
     controllerUnavailable = controllerUnavailable && !frontendSession.ownsController();
@@ -376,6 +372,16 @@ void WorkbenchWidget::refreshState()
 void WorkbenchWidget::selectThread(const QString& threadId)
 {
     selectedThreadId = threadId;
+    projectedAgentThreadId.clear();
+    newThreadDraft = false;
+    conversation->setWriteStatus({});
+    refreshState();
+}
+
+void WorkbenchWidget::selectProjectedAgentThread(const QString& threadId)
+{
+    selectedThreadId = threadId;
+    projectedAgentThreadId = threadId;
     newThreadDraft = false;
     conversation->setWriteStatus({});
     refreshState();
@@ -569,6 +575,7 @@ void WorkbenchWidget::beginNewThread()
     if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready || threadStartInFlight)
         return;
     selectedThreadId.clear();
+    projectedAgentThreadId.clear();
     newThreadDraft = true;
     newThreadIdAwaitingState.clear();
     conversation->setWriteStatus({});
