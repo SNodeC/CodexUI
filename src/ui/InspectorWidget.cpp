@@ -10,14 +10,78 @@
 #include <QScrollArea>
 #include <QStackedWidget>
 #include <QTabBar>
+#include <QTimer>
 #include <QVBoxLayout>
+
+#include <algorithm>
+#include <optional>
+#include <variant>
+#include <vector>
 
 namespace codexui {
 namespace {
+namespace sdk = ai::openai::codex::frontend::client;
+
+struct AgentPresentation
+{
+    QStringList itemIds;
+    QString agentPath;
+    QString agentThreadId;
+    QString kind;
+    QString status;
+    QString summary;
+    QString duration;
+};
+
+struct CollaborationPresentation
+{
+    QString title;
+    QString status;
+    QString detail;
+    bool truncated = false;
+};
+
+QString fromUtf8(std::string_view value)
+{
+    return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
+}
+
+QString fromUtf8(const std::string& value)
+{
+    return QString::fromStdString(value);
+}
+
+QString humanize(QString value)
+{
+    value.replace(QLatin1Char('_'), QLatin1Char(' '));
+    value.replace(QLatin1Char('-'), QLatin1Char(' '));
+    for (qsizetype index = 1; index < value.size(); ++index) {
+        if (value.at(index).isUpper() && value.at(index - 1).isLower()) {
+            value.insert(index, QLatin1Char(' '));
+            ++index;
+        }
+    }
+    if (!value.isEmpty())
+        value[0] = value.at(0).toUpper();
+    return value;
+}
+
+QString compactId(const std::string& id)
+{
+    const QString value = fromUtf8(id);
+    return value.size() > 18 ? value.left(8) + QChar(0x2026) + value.right(7) : value;
+}
+
+QString compact(QString value, qsizetype maximum = 500)
+{
+    value = value.trimmed();
+    return value.size() > maximum ? value.left(maximum).trimmed() + QChar(0x2026) : value;
+}
 
 QLabel* textLabel(const QString& text, const char* kind = nullptr)
 {
     auto* result = new QLabel(text);
+    result->setTextFormat(Qt::PlainText);
     if (kind)
         result->setProperty("kind", kind);
     return result;
@@ -31,167 +95,300 @@ QFrame* divider()
     return line;
 }
 
-QFrame* dot(const QString& color, int size = 7)
+void clearLayout(QLayout* layout)
 {
-    auto* result = new QFrame;
-    result->setFixedSize(size, size);
-    result->setStyleSheet(QStringLiteral("background:%1;border-radius:%2px;").arg(color).arg(size / 2));
-    return result;
-}
-
-QWidget* agentRow(int indent, const QString& title, const QString& subtitle,
-                  const QString& color, const QString& state = {})
-{
-    auto* widget = new QWidget;
-    widget->setFixedHeight(subtitle.isEmpty() ? 32 : 48);
-    auto* row = new QHBoxLayout(widget);
-    row->setContentsMargins(indent, 0, 4, 0);
-    row->setSpacing(8);
-    if (indent > 0) {
-        auto* branch = textLabel(indent > 30 ? QStringLiteral("└─") : QStringLiteral("├─"));
-        branch->setFixedWidth(18);
-        branch->setStyleSheet(QStringLiteral("color:#2b3038;font-size:12px;"));
-        row->addWidget(branch);
+    while (QLayoutItem* item = layout->takeAt(0)) {
+        if (QLayout* child = item->layout()) {
+            clearLayout(child);
+        } else if (QWidget* widget = item->widget()) {
+            widget->hide();
+            widget->deleteLater();
+        }
+        delete item;
     }
-    row->addWidget(dot(color, indent == 0 ? 8 : 7), 0, Qt::AlignTop);
-    auto* copy = new QVBoxLayout;
-    copy->setContentsMargins(0, 0, 0, 0);
-    copy->setSpacing(2);
-    auto* name = textLabel(title);
-    name->setStyleSheet(QStringLiteral("font-size:%1px;font-weight:%2;")
-                            .arg(indent == 0 ? 13 : 12).arg(indent == 0 ? 600 : 500));
-    copy->addWidget(name);
-    if (!subtitle.isEmpty())
-        copy->addWidget(textLabel(subtitle, "meta"));
-    row->addLayout(copy, 1);
-    if (!state.isEmpty()) {
-        auto* stateLabel = textLabel(state);
-        stateLabel->setStyleSheet(QStringLiteral("color:%1;font-size:10px;font-weight:500;").arg(color));
-        row->addWidget(stateLabel, 0, Qt::AlignTop);
-    }
-    return widget;
 }
 
-void addFact(QGridLayout* grid, int row, const QString& name, const QString& value, bool running = false)
-{
-    grid->addWidget(textLabel(name, "meta"), row, 0);
-    auto* valueLabel = textLabel(value);
-    valueLabel->setStyleSheet(QStringLiteral("color:%1;font-size:11px;font-weight:500;")
-                                  .arg(running ? QStringLiteral("#40c27d") : QStringLiteral("#e8edf2")));
-    grid->addWidget(valueLabel, row, 1);
-}
-
-QWidget* placeholderView(const QString& title, const QString& copy)
-{
-    auto* page = new QWidget;
-    auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(0, 18, 0, 0);
-    layout->setSpacing(8);
-    layout->addWidget(textLabel(title.toUpper(), "section"));
-    auto* card = new QFrame;
-    card->setProperty("kind", "raised");
-    auto* cardLayout = new QVBoxLayout(card);
-    cardLayout->setContentsMargins(14, 14, 14, 14);
-    auto* body = textLabel(copy, "muted");
-    body->setWordWrap(true);
-    cardLayout->addWidget(body);
-    layout->addWidget(card);
-    layout->addStretch();
-    return page;
-}
-
-QWidget* agentsView()
+QWidget* scrollPage(QVBoxLayout*& content)
 {
     auto* scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     auto* page = new QWidget;
     page->setStyleSheet(QStringLiteral("background:transparent;"));
-    auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(0, 14, 0, 24);
-    layout->setSpacing(0);
-
-    layout->addWidget(textLabel(QStringLiteral("AGENT TREE"), "section"));
-    layout->addSpacing(8);
-    layout->addWidget(agentRow(0, QStringLiteral("Main agent"), {}, QStringLiteral("#40c27d"), QStringLiteral("Running")));
-    layout->addWidget(agentRow(18, QStringLiteral("Aristotle"), QStringLiteral("Architecture audit"),
-                               QStringLiteral("#40c27d"), QStringLiteral("✓")));
-    layout->addWidget(agentRow(18, QStringLiteral("Curie"), QStringLiteral("Test analysis"),
-                               QStringLiteral("#4f94f5"), QStringLiteral("●")));
-    layout->addWidget(agentRow(44, QStringLiteral("Turing"), QStringLiteral("Build investigation"),
-                               QStringLiteral("#4f94f5")));
-    layout->addWidget(agentRow(18, QStringLiteral("Hopper"), QStringLiteral("Documentation · waiting"),
-                               QStringLiteral("#949ead")));
-    layout->addSpacing(32);
-    layout->addWidget(divider());
-    layout->addSpacing(16);
-    layout->addWidget(textLabel(QStringLiteral("SELECTED AGENT"), "section"));
-    layout->addSpacing(9);
-    auto* curie = textLabel(QStringLiteral("Curie"));
-    curie->setStyleSheet(QStringLiteral("font-size:17px;font-weight:600;"));
-    layout->addWidget(curie);
-    layout->addWidget(textLabel(QStringLiteral("Test analysis"), "muted"));
-    layout->addSpacing(28);
-
-    auto* facts = new QGridLayout;
-    facts->setContentsMargins(0, 0, 0, 0);
-    facts->setHorizontalSpacing(26);
-    facts->setVerticalSpacing(9);
-    facts->setColumnMinimumWidth(0, 84);
-    addFact(facts, 0, QStringLiteral("Model"), QStringLiteral("gpt-5.6"));
-    addFact(facts, 1, QStringLiteral("Reasoning"), QStringLiteral("high"));
-    addFact(facts, 2, QStringLiteral("Status"), QStringLiteral("Running · 1m 18s"), true);
-    layout->addLayout(facts);
-    layout->addSpacing(32);
-    auto* current = textLabel(QStringLiteral("Current activity"), "section");
-    current->setStyleSheet(QStringLiteral("color:#949ead;font-size:10px;font-weight:600;"));
-    layout->addWidget(current);
-    layout->addSpacing(9);
-
-    auto* activity = new QFrame;
-    activity->setProperty("kind", "raised");
-    activity->setFixedHeight(74);
-    activity->setStyleSheet(QStringLiteral("background:#181c21;border-radius:8px;"));
-    auto* activityLayout = new QVBoxLayout(activity);
-    activityLayout->setContentsMargins(14, 11, 14, 11);
-    activityLayout->setSpacing(6);
-    auto* reviewing = textLabel(QStringLiteral("Reviewing lifecycle regression tests"));
-    reviewing->setStyleSheet(QStringLiteral("font-size:11px;font-weight:500;"));
-    activityLayout->addWidget(reviewing);
-    activityLayout->addWidget(textLabel(QStringLiteral("5 actions · 2 files inspected"), "meta"));
-    layout->addWidget(activity);
-    layout->addSpacing(1);
-
-    auto* open = new QPushButton(QStringLiteral("Open Curie thread                                      ↗"));
-    open->setProperty("kind", "agentLink");
-    open->setStyleSheet(QStringLiteral("QPushButton{background:#1a2940;color:#4f94f5;border-radius:7px;text-align:left;}"
-                                        "QPushButton:hover{background:#223653;}"));
-    open->setFixedHeight(34);
-    layout->addWidget(open);
-    QObject::connect(open, &QPushButton::clicked, open, [open] {
-        open->setText(QStringLiteral("Curie thread previewed locally                         ↗"));
-    });
-    layout->addSpacing(0);
-    layout->addWidget(divider());
-    layout->addSpacing(16);
-    layout->addWidget(textLabel(QStringLiteral("SESSION"), "section"));
-    layout->addSpacing(8);
-    layout->addWidget(textLabel(QStringLiteral("3 running agents")));
-    layout->addSpacing(5);
-    layout->addWidget(textLabel(QStringLiteral("1 waiting"), "muted"));
-    layout->addStretch();
-
-    auto* attentionRow = new QHBoxLayout;
-    attentionRow->addStretch();
-    auto* attention = new QLabel(QStringLiteral("2 need attention"));
-    attention->setAlignment(Qt::AlignCenter);
-    attention->setStyleSheet(QStringLiteral("background:#3d2912;color:#f5a83b;border-radius:7px;font-size:9px;font-weight:600;"));
-    attention->setFixedSize(118, 30);
-    attentionRow->addWidget(attention);
-    layout->addLayout(attentionRow);
-
+    content = new QVBoxLayout(page);
+    content->setContentsMargins(0, 14, 0, 24);
+    content->setSpacing(0);
+    content->setAlignment(Qt::AlignTop);
     scroll->setWidget(page);
     return scroll;
+}
+
+void addEmpty(QVBoxLayout* layout, const QString& title, const QString& detail)
+{
+    layout->addWidget(textLabel(title.toUpper(), "section"));
+    layout->addSpacing(8);
+    auto* card = new QFrame;
+    card->setProperty("kind", "raised");
+    auto* cardLayout = new QVBoxLayout(card);
+    cardLayout->setContentsMargins(14, 14, 14, 14);
+    cardLayout->setSpacing(6);
+    auto* heading = textLabel(title);
+    heading->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
+    cardLayout->addWidget(heading);
+    auto* copy = textLabel(detail, "muted");
+    copy->setWordWrap(true);
+    cardLayout->addWidget(copy);
+    layout->addWidget(card);
+    layout->addStretch();
+}
+
+QString statusColor(const QString& status)
+{
+    const QString normalized = status.toLower();
+    if (normalized.contains(QStringLiteral("fail")) || normalized.contains(QStringLiteral("error")))
+        return QStringLiteral("#ed6a6a");
+    if (normalized.contains(QStringLiteral("complete")) || normalized.contains(QStringLiteral("success"))
+        || normalized == QStringLiteral("done"))
+        return QStringLiteral("#40c27d");
+    if (normalized.contains(QStringLiteral("progress")) || normalized.contains(QStringLiteral("running"))
+        || normalized.contains(QStringLiteral("active")) || normalized.contains(QStringLiteral("stream")))
+        return QStringLiteral("#4f94f5");
+    if (normalized.contains(QStringLiteral("interrupt")) || normalized.contains(QStringLiteral("cancel")))
+        return QStringLiteral("#f5a83b");
+    return QStringLiteral("#949ead");
+}
+
+QString itemStatus(const sdk::ItemState& item)
+{
+    return item.status && !item.status->empty() ? humanize(fromUtf8(*item.status)) : QString{};
+}
+
+QString durationText(const sdk::ItemState& item)
+{
+    if (!item.startedAtMs || !item.completedAtMs || *item.completedAtMs < *item.startedAtMs)
+        return {};
+    const qint64 duration = *item.completedAtMs - *item.startedAtMs;
+    if (duration < 1000)
+        return QStringLiteral("%1 ms").arg(duration);
+    if (duration < 60000)
+        return QStringLiteral("%1 s").arg(QString::number(duration / 1000.0, 'f', 1));
+    return QStringLiteral("%1 min").arg(QString::number(duration / 60000.0, 'f', 1));
+}
+
+const sdk::TurnState* latestTurn(const sdk::State& state, const sdk::ThreadState& thread)
+{
+    for (auto iterator = thread.orderedTurns.rbegin(); iterator != thread.orderedTurns.rend(); ++iterator) {
+        if (const auto* turn = state.turn(*iterator))
+            return turn;
+    }
+    return nullptr;
+}
+
+QFrame* detailCard()
+{
+    auto* card = new QFrame;
+    card->setProperty("kind", "raised");
+    card->setStyleSheet(QStringLiteral("background:#181c21;border-radius:8px;"));
+    return card;
+}
+
+void addFact(QGridLayout* grid, int& row, const QString& name, const QString& value,
+             const QString& color = QStringLiteral("#e8edf2"))
+{
+    if (value.isEmpty())
+        return;
+    grid->addWidget(textLabel(name, "meta"), row, 0, Qt::AlignTop);
+    auto* copy = textLabel(value);
+    copy->setWordWrap(true);
+    copy->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    copy->setStyleSheet(QStringLiteral("color:%1;font-size:11px;font-weight:500;").arg(color));
+    grid->addWidget(copy, row, 1);
+    ++row;
+}
+
+QString freshnessText(sdk::StateFreshness freshness)
+{
+    switch (freshness) {
+        case sdk::StateFreshness::Current:
+            return QStringLiteral("Current");
+        case sdk::StateFreshness::Stale:
+            return QStringLiteral("Stale");
+        case sdk::StateFreshness::Synchronizing:
+            return QStringLiteral("Synchronizing");
+    }
+    return QStringLiteral("Unavailable");
+}
+
+QString representationText(sdk::RepresentationMode mode)
+{
+    switch (mode) {
+        case sdk::RepresentationMode::LegacyV1:
+            return QStringLiteral("Legacy v1");
+        case sdk::RepresentationMode::ExpandedV1:
+            return QStringLiteral("Expanded v1");
+        case sdk::RepresentationMode::Unknown:
+            break;
+    }
+    return QStringLiteral("Unknown");
+}
+
+QString providerLifecycleText(sdk::ProviderLifecycle lifecycle)
+{
+    switch (lifecycle) {
+        case sdk::ProviderLifecycle::Stopped:
+            return QStringLiteral("Stopped");
+        case sdk::ProviderLifecycle::Starting:
+            return QStringLiteral("Starting");
+        case sdk::ProviderLifecycle::Initializing:
+            return QStringLiteral("Initializing");
+        case sdk::ProviderLifecycle::Ready:
+            return QStringLiteral("Ready");
+        case sdk::ProviderLifecycle::Stopping:
+            return QStringLiteral("Stopping");
+        case sdk::ProviderLifecycle::Failed:
+            return QStringLiteral("Failed");
+        case sdk::ProviderLifecycle::Recovering:
+            return QStringLiteral("Recovering");
+    }
+    return {};
+}
+
+QString tokenCountsText(const sdk::TokenCountsView& counts)
+{
+    QStringList values;
+    if (counts.inputTokens)
+        values.append(QStringLiteral("%1 input").arg(*counts.inputTokens));
+    if (counts.outputTokens)
+        values.append(QStringLiteral("%1 output").arg(*counts.outputTokens));
+    if (counts.reasoningOutputTokens)
+        values.append(QStringLiteral("%1 reasoning").arg(*counts.reasoningOutputTokens));
+    if (counts.cachedInputTokens)
+        values.append(QStringLiteral("%1 cached").arg(*counts.cachedInputTokens));
+    if (counts.totalTokens)
+        values.append(QStringLiteral("%1 total").arg(*counts.totalTokens));
+    return values.join(QStringLiteral(" · "));
+}
+
+QString tokenUsageText(const sdk::TurnState& turn)
+{
+    const auto usage = sdk::tokenUsageView(turn);
+    if (!usage)
+        return {};
+    QStringList values;
+    if (usage->total) {
+        const QString total = tokenCountsText(*usage->total);
+        if (!total.isEmpty())
+            values.append(total);
+    } else if (usage->last) {
+        const QString last = tokenCountsText(*usage->last);
+        if (!last.isEmpty())
+            values.append(QStringLiteral("Latest: %1").arg(last));
+    }
+    if (usage->modelContextWindowPresent && usage->modelContextWindow)
+        values.append(QStringLiteral("%1 context window").arg(*usage->modelContextWindow));
+    if (usage->truncated || !usage->omittedFields.empty())
+        values.append(QStringLiteral("usage projection truncated"));
+    return values.join(QStringLiteral(" · "));
+}
+
+QString failureText(const sdk::TurnState& turn)
+{
+    const auto failure = sdk::failureView(turn);
+    if (!failure)
+        return {};
+    QStringList values;
+    if (failure->message)
+        values.append(fromUtf8(*failure->message));
+    if (failure->additionalDetails)
+        values.append(fromUtf8(*failure->additionalDetails));
+    if (failure->codexErrorCategory)
+        values.append(humanize(fromUtf8(*failure->codexErrorCategory)));
+    else if (failure->unknownErrorDiscriminator)
+        values.append(humanize(fromUtf8(*failure->unknownErrorDiscriminator)));
+    if (failure->httpStatusCode)
+        values.append(QStringLiteral("HTTP %1").arg(*failure->httpStatusCode));
+    if (failure->redacted)
+        values.append(QStringLiteral("Sensitive detail redacted"));
+    if (failure->decodingOmitted)
+        values.append(QStringLiteral("Additional detail omitted"));
+    return values.isEmpty() ? QStringLiteral("Failure details unavailable") : values.join(QStringLiteral(" · "));
+}
+
+std::vector<AgentPresentation> agentPresentations(const sdk::State& state,
+                                                  const sdk::ThreadState& thread,
+                                                  const sdk::TurnState& turn)
+{
+    std::vector<AgentPresentation> result;
+    for (const auto& itemId : turn.orderedItems) {
+        const auto* item = state.item(thread.id, turn.id, itemId);
+        if (!item)
+            continue;
+        const auto semantic = sdk::itemSemanticView(*item);
+        const auto* activity = semantic ? std::get_if<sdk::SubAgentActivitySemanticView>(&semantic->details) : nullptr;
+        if (!activity)
+            continue;
+
+        const QString path = activity->agentPath ? fromUtf8(*activity->agentPath) : QString{};
+        const QString agentThreadId = activity->agentThreadId ? fromUtf8(activity->agentThreadId->value) : QString{};
+        const auto match = std::find_if(result.begin(), result.end(), [&](const AgentPresentation& existing) {
+            if (!agentThreadId.isEmpty() && existing.agentThreadId == agentThreadId)
+                return true;
+            return agentThreadId.isEmpty() && existing.agentThreadId.isEmpty() && !path.isEmpty()
+                   && existing.agentPath == path;
+        });
+        AgentPresentation* presentation = nullptr;
+        if (match == result.end()) {
+            result.push_back({});
+            presentation = &result.back();
+            presentation->agentPath = path;
+            presentation->agentThreadId = agentThreadId;
+        } else {
+            presentation = &*match;
+        }
+        presentation->itemIds.append(fromUtf8(item->id.value));
+        if (activity->kind)
+            presentation->kind = humanize(fromUtf8(*activity->kind));
+        if (item->status && !item->status->empty())
+            presentation->status = humanize(fromUtf8(*item->status));
+        if (item->summary && !item->summary->empty())
+            presentation->summary = fromUtf8(*item->summary);
+        const QString duration = durationText(*item);
+        if (!duration.isEmpty())
+            presentation->duration = duration;
+    }
+    return result;
+}
+
+std::vector<CollaborationPresentation> collaborationPresentations(const sdk::State& state,
+                                                                  const sdk::ThreadState& thread,
+                                                                  const sdk::TurnState& turn)
+{
+    std::vector<CollaborationPresentation> result;
+    for (const auto& itemId : turn.orderedItems) {
+        const auto* item = state.item(thread.id, turn.id, itemId);
+        if (!item)
+            continue;
+        const auto semantic = sdk::itemSemanticView(*item);
+        const auto* collab = semantic ? std::get_if<sdk::CollabAgentToolCallSemanticView>(&semantic->details) : nullptr;
+        if (!collab)
+            continue;
+        CollaborationPresentation presentation;
+        presentation.title = collab->tool ? humanize(fromUtf8(*collab->tool)) : QStringLiteral("Collaboration activity");
+        presentation.status = collab->status ? humanize(fromUtf8(*collab->status)) : itemStatus(*item);
+        QStringList detail;
+        if (collab->senderThreadId)
+            detail.append(QStringLiteral("Sender %1").arg(compactId(collab->senderThreadId->value)));
+        if (collab->receiverCount)
+            detail.append(QStringLiteral("%1 receiver%2").arg(*collab->receiverCount)
+                              .arg(*collab->receiverCount == 1 ? QString{} : QStringLiteral("s")));
+        if (collab->agentStateCount)
+            detail.append(QStringLiteral("%1 agent state%2").arg(*collab->agentStateCount)
+                              .arg(*collab->agentStateCount == 1 ? QString{} : QStringLiteral("s")));
+        presentation.detail = detail.join(QStringLiteral(" · "));
+        presentation.truncated = semantic->truncated || !semantic->omittedFields.empty() || item->truncated;
+        result.push_back(std::move(presentation));
+    }
+    return result;
 }
 
 } // namespace
@@ -209,7 +406,7 @@ InspectorWidget::InspectorWidget(QWidget* parent)
     root->setSpacing(0);
 
     auto* header = new QHBoxLayout;
-    header->addWidget(textLabel(QStringLiteral("INSPECTOR · PREVIEW"), "section"));
+    header->addWidget(textLabel(QStringLiteral("INSPECTOR"), "section"));
     header->addStretch();
     auto* hide = new QPushButton(QStringLiteral("Hide"));
     hide->setProperty("kind", "subtle");
@@ -230,18 +427,531 @@ InspectorWidget::InspectorWidget(QWidget* parent)
     root->addWidget(divider());
 
     auto* pages = new QStackedWidget;
-    pages->addWidget(placeholderView(QStringLiteral("Plan"),
-                                     QStringLiteral("Plan 3 / 6\nLifecycle refactoring is in progress.")));
-    pages->addWidget(agentsView());
-    pages->addWidget(placeholderView(QStringLiteral("Changes"),
-                                     QStringLiteral("3 files changed\n+74 additions · −21 deletions")));
-    pages->addWidget(placeholderView(QStringLiteral("Info"),
-                                     QStringLiteral("A1.8 protocol lifecycle\ngpt-5.6 · high · local")));
+    pages->addWidget(scrollPage(planContent));
+    pages->addWidget(scrollPage(agentsContent));
+    pages->addWidget(scrollPage(changesContent));
+    pages->addWidget(scrollPage(infoContent));
     pages->setCurrentIndex(1);
     root->addWidget(pages, 1);
 
     connect(tabs, &QTabBar::currentChanged, pages, &QStackedWidget::setCurrentIndex);
     connect(hide, &QPushButton::clicked, this, &InspectorWidget::hideRequested);
+    renderUnavailable(QStringLiteral("Select a thread"),
+                      QStringLiteral("Choose a synchronized thread to inspect its current state."));
+}
+
+void InspectorWidget::renderUnavailable(const QString& title, const QString& detail)
+{
+    inspectedThreadId.clear();
+    selectedAgentItemId.clear();
+    for (QVBoxLayout* layout : {planContent, agentsContent, changesContent, infoContent})
+        clearLayout(layout);
+    addEmpty(planContent, title, detail);
+    addEmpty(agentsContent, title, detail);
+    addEmpty(changesContent, title, detail);
+    addEmpty(infoContent, title, detail);
+    refreshLayoutGeometry();
+}
+
+void InspectorWidget::refreshLayoutGeometry()
+{
+    for (QVBoxLayout* layout : {planContent, agentsContent, changesContent, infoContent}) {
+        layout->invalidate();
+        layout->activate();
+        if (QWidget* page = layout->parentWidget()) {
+            page->adjustSize();
+            page->updateGeometry();
+            page->update();
+        }
+    }
+    update();
+    QTimer::singleShot(0, this, [this] {
+        for (QVBoxLayout* layout : {planContent, agentsContent, changesContent, infoContent}) {
+            layout->activate();
+            if (QWidget* page = layout->parentWidget())
+                page->update();
+        }
+        update();
+    });
+}
+
+void InspectorWidget::render(const sdk::State& state,
+                             const QString& threadId,
+                             bool backendReady,
+                             const QString& backendStatus)
+{
+    if (!backendReady) {
+        renderUnavailable(QStringLiteral("Inspector unavailable"),
+                          backendStatus.isEmpty() ? QStringLiteral("The synchronized backend is not ready.")
+                                                  : backendStatus);
+        return;
+    }
+    if (threadId.isEmpty()) {
+        renderUnavailable(QStringLiteral("Select a thread"),
+                          QStringLiteral("Choose a synchronized thread to inspect its current state."));
+        return;
+    }
+    const auto* thread = state.thread(threadId.toStdString());
+    if (!thread) {
+        renderUnavailable(QStringLiteral("Thread unavailable"),
+                          QStringLiteral("The selected thread is not retained in the current State."));
+        return;
+    }
+    if (inspectedThreadId != threadId) {
+        inspectedThreadId = threadId;
+        selectedAgentItemId.clear();
+    }
+
+    for (QVBoxLayout* layout : {planContent, agentsContent, changesContent, infoContent})
+        clearLayout(layout);
+    const auto* turn = latestTurn(state, *thread);
+
+    // Plan: the installed public SDK projects current plan text, but not typed
+    // step records. No progress value is derived from the text.
+    const sdk::ItemState* planItem = nullptr;
+    std::optional<sdk::PlanSemanticView> planView;
+    if (turn) {
+        for (auto iterator = turn->orderedItems.rbegin(); iterator != turn->orderedItems.rend(); ++iterator) {
+            const auto* item = state.item(thread->id, turn->id, *iterator);
+            if (!item)
+                continue;
+            const auto semantic = sdk::itemSemanticView(*item);
+            const auto* plan = semantic ? std::get_if<sdk::PlanSemanticView>(&semantic->details) : nullptr;
+            if (!plan)
+                continue;
+            planItem = item;
+            planView = *plan;
+            break;
+        }
+    }
+    if (!turn) {
+        addEmpty(planContent, QStringLiteral("No plan"), QStringLiteral("This thread has no retained turns."));
+    } else if (!planItem || !planView) {
+        addEmpty(planContent, QStringLiteral("No plan"),
+                 thread->fullyLoaded ? QStringLiteral("No plan is projected for the latest turn.")
+                                     : QStringLiteral("No plan is retained in this partial thread projection."));
+    } else {
+        planContent->addWidget(textLabel(QStringLiteral("CURRENT PLAN"), "section"));
+        planContent->addSpacing(8);
+        auto* card = detailCard();
+        auto* layout = new QVBoxLayout(card);
+        layout->setContentsMargins(14, 14, 14, 14);
+        layout->setSpacing(7);
+        auto* header = new QHBoxLayout;
+        auto* title = textLabel(QStringLiteral("Latest turn plan"));
+        title->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
+        header->addWidget(title);
+        header->addStretch();
+        const QString status = itemStatus(*planItem);
+        if (!status.isEmpty()) {
+            auto* statusLabel = textLabel(status, "small");
+            statusLabel->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;")
+                                           .arg(statusColor(status)));
+            header->addWidget(statusLabel);
+        }
+        layout->addLayout(header);
+        if (planView->text && !planView->text->empty()) {
+            auto* text = textLabel(fromUtf8(*planView->text));
+            text->setWordWrap(true);
+            text->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            text->setStyleSheet(QStringLiteral("font-size:12px;"));
+            layout->addWidget(text);
+        } else {
+            auto* absent = textLabel(QStringLiteral("Plan text is unavailable in the current projection."), "muted");
+            absent->setWordWrap(true);
+            layout->addWidget(absent);
+        }
+        if (planView->textTruncated || planItem->truncated || !planItem->omittedFields.empty()) {
+            auto* truncated = textLabel(QStringLiteral("Plan projection is truncated or partially omitted"), "small");
+            truncated->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
+            layout->addWidget(truncated);
+        }
+        planContent->addWidget(card);
+        planContent->addStretch();
+    }
+
+    // Agents: SubAgentActivitySemanticView is flat in this SDK. Keep the
+    // representation flat rather than inferring a parent/child tree.
+    std::vector<AgentPresentation> agents;
+    std::vector<CollaborationPresentation> collaborations;
+    if (turn) {
+        agents = agentPresentations(state, *thread, *turn);
+        collaborations = collaborationPresentations(state, *thread, *turn);
+    }
+    const auto selected = std::find_if(agents.begin(), agents.end(), [this](const AgentPresentation& agent) {
+        return agent.itemIds.contains(selectedAgentItemId);
+    });
+    if (selected == agents.end())
+        selectedAgentItemId = agents.empty() ? QString{} : agents.front().itemIds.back();
+
+    if (agents.empty() && collaborations.empty()) {
+        addEmpty(agentsContent, QStringLiteral("No agent activity"),
+                 turn ? QStringLiteral("No collab or subagent activity is projected for the latest turn.")
+                      : QStringLiteral("This thread has no retained turns."));
+    } else {
+        if (!agents.empty()) {
+            agentsContent->addWidget(textLabel(QStringLiteral("AGENT ACTIVITY"), "section"));
+            agentsContent->addSpacing(8);
+            for (const auto& agent : agents) {
+                const QString primaryId = agent.itemIds.back();
+                const bool active = agent.itemIds.contains(selectedAgentItemId);
+                const QString name = agent.agentPath.isEmpty() ? QStringLiteral("Subagent activity") : agent.agentPath;
+                QStringList details;
+                if (!agent.kind.isEmpty())
+                    details.append(agent.kind);
+                if (!agent.status.isEmpty())
+                    details.append(agent.status);
+                if (!agent.duration.isEmpty())
+                    details.append(agent.duration);
+                if (!agent.agentThreadId.isEmpty())
+                    details.append(QStringLiteral("thread %1").arg(compactId(agent.agentThreadId.toStdString())));
+                if (agent.itemIds.size() > 1)
+                    details.append(QStringLiteral("%1 activities").arg(agent.itemIds.size()));
+                auto* row = new QPushButton(QStringLiteral("%1\n%2").arg(name, details.join(QStringLiteral(" · "))));
+                row->setCursor(Qt::PointingHandCursor);
+                row->setFixedHeight(details.isEmpty() ? 38 : 52);
+                row->setStyleSheet(QStringLiteral(
+                    "QPushButton{background:%1;color:#e8edf2;border-radius:8px;text-align:left;padding:6px 10px;"
+                    "font-size:11px;font-weight:500;}QPushButton:hover{background:#20252c;}")
+                                       .arg(active ? QStringLiteral("#1a2940") : QStringLiteral("transparent")));
+                row->setToolTip(name);
+                connect(row, &QPushButton::clicked, this, [this, primaryId] {
+                    selectedAgentItemId = primaryId;
+                    emit selectionChanged();
+                });
+                agentsContent->addWidget(row);
+            }
+        }
+
+        if (!collaborations.empty()) {
+            if (!agents.empty()) {
+                agentsContent->addSpacing(16);
+                agentsContent->addWidget(divider());
+                agentsContent->addSpacing(16);
+            }
+            agentsContent->addWidget(textLabel(QStringLiteral("COLLABORATION"), "section"));
+            agentsContent->addSpacing(8);
+            for (const auto& collaboration : collaborations) {
+                auto* card = detailCard();
+                auto* layout = new QVBoxLayout(card);
+                layout->setContentsMargins(12, 10, 12, 10);
+                layout->setSpacing(4);
+                auto* header = new QHBoxLayout;
+                header->addWidget(textLabel(collaboration.title));
+                header->addStretch();
+                if (!collaboration.status.isEmpty()) {
+                    auto* status = textLabel(collaboration.status, "small");
+                    status->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;")
+                                              .arg(statusColor(collaboration.status)));
+                    header->addWidget(status);
+                }
+                layout->addLayout(header);
+                if (!collaboration.detail.isEmpty()) {
+                    auto* detail = textLabel(collaboration.detail, "meta");
+                    detail->setWordWrap(true);
+                    layout->addWidget(detail);
+                }
+                if (collaboration.truncated) {
+                    auto* truncated = textLabel(QStringLiteral("Projected detail is truncated or omitted"), "small");
+                    truncated->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
+                    layout->addWidget(truncated);
+                }
+                agentsContent->addWidget(card);
+                agentsContent->addSpacing(6);
+            }
+        }
+
+        const auto selectedAgent = std::find_if(agents.begin(), agents.end(), [this](const AgentPresentation& agent) {
+            return agent.itemIds.contains(selectedAgentItemId);
+        });
+        if (selectedAgent != agents.end()) {
+            agentsContent->addSpacing(18);
+            agentsContent->addWidget(divider());
+            agentsContent->addSpacing(16);
+            agentsContent->addWidget(textLabel(QStringLiteral("SELECTED AGENT"), "section"));
+            agentsContent->addSpacing(9);
+            const QString name = selectedAgent->agentPath.isEmpty() ? QStringLiteral("Subagent activity")
+                                                                    : selectedAgent->agentPath;
+            auto* heading = textLabel(name);
+            heading->setWordWrap(true);
+            heading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:600;"));
+            agentsContent->addWidget(heading);
+            if (!selectedAgent->summary.isEmpty()) {
+                auto* summary = textLabel(selectedAgent->summary, "muted");
+                summary->setWordWrap(true);
+                agentsContent->addWidget(summary);
+            }
+            agentsContent->addSpacing(20);
+
+            auto* facts = new QGridLayout;
+            facts->setContentsMargins(0, 0, 0, 0);
+            facts->setHorizontalSpacing(18);
+            facts->setVerticalSpacing(9);
+            facts->setColumnMinimumWidth(0, 84);
+            int row = 0;
+            addFact(facts, row, QStringLiteral("Activity"), selectedAgent->kind);
+            addFact(facts, row, QStringLiteral("Status"), selectedAgent->status,
+                    statusColor(selectedAgent->status));
+            addFact(facts, row, QStringLiteral("Duration"), selectedAgent->duration);
+            addFact(facts, row, QStringLiteral("Thread"),
+                    selectedAgent->agentThreadId.isEmpty()
+                        ? QString{}
+                        : compactId(selectedAgent->agentThreadId.toStdString()));
+            const auto* agentThread = selectedAgent->agentThreadId.isEmpty()
+                                          ? nullptr
+                                          : state.thread(selectedAgent->agentThreadId.toStdString());
+            if (selectedAgent->status.isEmpty() && agentThread && agentThread->status)
+                addFact(facts, row, QStringLiteral("Status"), humanize(fromUtf8(*agentThread->status)),
+                        statusColor(fromUtf8(*agentThread->status)));
+            if (agentThread && agentThread->model)
+                addFact(facts, row, QStringLiteral("Model"), fromUtf8(agentThread->model->value));
+            if (agentThread && agentThread->modelProvider)
+                addFact(facts, row, QStringLiteral("Provider"), fromUtf8(*agentThread->modelProvider));
+            std::size_t pending = 0;
+            if (!selectedAgent->agentThreadId.isEmpty() && state.hasPendingRequestProjection()) {
+                for (const auto& request : state.pendingRequests())
+                    pending += request.threadId && request.threadId->value == selectedAgent->agentThreadId.toStdString();
+            }
+            if (pending > 0)
+                addFact(facts, row, QStringLiteral("Attention"),
+                        QStringLiteral("%1 pending request%2").arg(pending)
+                            .arg(pending == 1 ? QString{} : QStringLiteral("s")),
+                        QStringLiteral("#f5a83b"));
+            agentsContent->addLayout(facts);
+
+            if (agentThread) {
+                agentsContent->addSpacing(18);
+                auto* open = new QPushButton(QStringLiteral("Open thread                                      ↗"));
+                open->setProperty("kind", "agentLink");
+                open->setFixedHeight(34);
+                const QString target = selectedAgent->agentThreadId;
+                connect(open, &QPushButton::clicked, this, [this, target] { emit threadOpenRequested(target); });
+                agentsContent->addWidget(open);
+            }
+        }
+        agentsContent->addStretch();
+    }
+
+    // Changes: only canonical projected metadata is shown. The installed view
+    // does not expose path strings, typed change kinds, or line counts.
+    std::vector<std::pair<const sdk::ItemState*, sdk::FileChangeSemanticView>> fileChanges;
+    if (turn) {
+        for (const auto& itemId : turn->orderedItems) {
+            const auto* item = state.item(thread->id, turn->id, itemId);
+            if (!item)
+                continue;
+            const auto semantic = sdk::itemSemanticView(*item);
+            const auto* changes = semantic ? std::get_if<sdk::FileChangeSemanticView>(&semantic->details) : nullptr;
+            if (changes)
+                fileChanges.emplace_back(item, *changes);
+        }
+    }
+    if (fileChanges.empty()) {
+        addEmpty(changesContent, QStringLiteral("No file changes"),
+                 turn ? QStringLiteral("No file-change items are projected for the latest turn.")
+                      : QStringLiteral("This thread has no retained turns."));
+    } else {
+        changesContent->addWidget(textLabel(QStringLiteral("REPORTED CHANGES"), "section"));
+        changesContent->addSpacing(8);
+        std::size_t reportedChanges = 0;
+        bool hasCompleteReportedCount = true;
+        for (const auto& [item, view] : fileChanges) {
+            if (view.changeCount)
+                reportedChanges += *view.changeCount;
+            else
+                hasCompleteReportedCount = false;
+        }
+        auto* summary = textLabel(hasCompleteReportedCount
+                                      ? QStringLiteral("%1 reported change entr%2")
+                                            .arg(reportedChanges)
+                                            .arg(reportedChanges == 1 ? QStringLiteral("y") : QStringLiteral("ies"))
+                                      : QStringLiteral("%1 file-change item%2")
+                                            .arg(fileChanges.size())
+                                            .arg(fileChanges.size() == 1 ? QString{} : QStringLiteral("s")));
+        summary->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
+        changesContent->addWidget(summary);
+        changesContent->addSpacing(10);
+
+        for (const auto& [item, view] : fileChanges) {
+            auto* card = detailCard();
+            auto* layout = new QVBoxLayout(card);
+            layout->setContentsMargins(12, 11, 12, 11);
+            layout->setSpacing(5);
+            auto* header = new QHBoxLayout;
+            const QString title = item->summary && !item->summary->empty()
+                                      ? compact(fromUtf8(*item->summary), 120)
+                                      : view.changeCount ? QStringLiteral("%1 change entr%2")
+                                                               .arg(*view.changeCount)
+                                                               .arg(*view.changeCount == 1 ? QStringLiteral("y")
+                                                                                           : QStringLiteral("ies"))
+                                                         : QStringLiteral("File-change item");
+            auto* heading = textLabel(title);
+            heading->setWordWrap(true);
+            heading->setStyleSheet(QStringLiteral("font-size:11px;font-weight:600;"));
+            header->addWidget(heading, 1);
+            const QString status = view.status ? humanize(fromUtf8(*view.status)) : itemStatus(*item);
+            if (!status.isEmpty()) {
+                auto* statusLabel = textLabel(status, "small");
+                statusLabel->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;")
+                                               .arg(statusColor(status)));
+                header->addWidget(statusLabel, 0, Qt::AlignTop);
+            }
+            layout->addLayout(header);
+
+            for (const auto& change : view.changes) {
+                QStringList detail;
+                if (change.pathRedacted)
+                    detail.append(QStringLiteral("Affected path redacted"));
+                else if (change.pathBytes)
+                    detail.append(QStringLiteral("Affected path unavailable · %1 projected bytes").arg(*change.pathBytes));
+                else
+                    detail.append(QStringLiteral("Affected path unavailable"));
+                if (change.diffOmitted)
+                    detail.append(QStringLiteral("diff omitted"));
+                else if (change.diffBytes)
+                    detail.append(QStringLiteral("%1 diff bytes").arg(*change.diffBytes));
+                auto* entry = textLabel(QStringLiteral("•  %1").arg(detail.join(QStringLiteral(" · "))), "meta");
+                entry->setWordWrap(true);
+                layout->addWidget(entry);
+            }
+            if (view.changes.empty()) {
+                auto* unavailable = textLabel(QStringLiteral("Per-change detail is not retained."), "meta");
+                unavailable->setWordWrap(true);
+                layout->addWidget(unavailable);
+            }
+            if (view.changesTruncated || item->truncated || !item->omittedFields.empty()) {
+                auto* truncated = textLabel(QStringLiteral("Change projection is truncated or partially omitted"), "small");
+                truncated->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
+                layout->addWidget(truncated);
+            }
+            changesContent->addWidget(card);
+            changesContent->addSpacing(7);
+        }
+        changesContent->addStretch();
+    }
+
+    // Info: a compact product view over typed thread, turn, provider, usage,
+    // failure, synchronization, and projection state.
+    infoContent->addWidget(textLabel(QStringLiteral("THREAD"), "section"));
+    infoContent->addSpacing(8);
+    auto* threadCard = detailCard();
+    auto* threadFacts = new QGridLayout(threadCard);
+    threadFacts->setContentsMargins(12, 11, 12, 11);
+    threadFacts->setHorizontalSpacing(16);
+    threadFacts->setVerticalSpacing(8);
+    threadFacts->setColumnMinimumWidth(0, 78);
+    int threadRow = 0;
+    addFact(threadFacts, threadRow, QStringLiteral("Title"),
+            thread->title && !thread->title->empty() ? fromUtf8(*thread->title) : QString{});
+    addFact(threadFacts, threadRow, QStringLiteral("Thread ID"), fromUtf8(thread->id.value));
+    addFact(threadFacts, threadRow, QStringLiteral("CWD"), thread->cwd ? fromUtf8(thread->cwd->value) : QString{});
+    addFact(threadFacts, threadRow, QStringLiteral("Status"),
+            thread->status ? humanize(fromUtf8(*thread->status)) : QString{});
+    addFact(threadFacts, threadRow, QStringLiteral("Model"), thread->model ? fromUtf8(thread->model->value) : QString{});
+    addFact(threadFacts, threadRow, QStringLiteral("Provider"),
+            thread->modelProvider ? fromUtf8(*thread->modelProvider) : QString{});
+    addFact(threadFacts, threadRow, QStringLiteral("Projection"),
+            thread->fullyLoaded ? QStringLiteral("Fully loaded") : QStringLiteral("Partial"),
+            thread->fullyLoaded ? QStringLiteral("#40c27d") : QStringLiteral("#f5a83b"));
+    infoContent->addWidget(threadCard);
+
+    if (turn) {
+        infoContent->addSpacing(16);
+        infoContent->addWidget(textLabel(QStringLiteral("LATEST TURN"), "section"));
+        infoContent->addSpacing(8);
+        auto* turnCard = detailCard();
+        auto* turnFacts = new QGridLayout(turnCard);
+        turnFacts->setContentsMargins(12, 11, 12, 11);
+        turnFacts->setHorizontalSpacing(16);
+        turnFacts->setVerticalSpacing(8);
+        turnFacts->setColumnMinimumWidth(0, 78);
+        int turnRow = 0;
+        addFact(turnFacts, turnRow, QStringLiteral("Turn ID"), fromUtf8(turn->id.value));
+        addFact(turnFacts, turnRow, QStringLiteral("Status"), humanize(fromUtf8(turn->status.value)),
+                statusColor(fromUtf8(turn->status.value)));
+        addFact(turnFacts, turnRow, QStringLiteral("Lifecycle"),
+                turn->active ? QStringLiteral("Active")
+                             : turn->terminal ? QStringLiteral("Terminal") : QStringLiteral("Retained"));
+        addFact(turnFacts, turnRow, QStringLiteral("Token usage"), tokenUsageText(*turn));
+        addFact(turnFacts, turnRow, QStringLiteral("Failure"), failureText(*turn), QStringLiteral("#ed6a6a"));
+        infoContent->addWidget(turnCard);
+    }
+
+    infoContent->addSpacing(16);
+    infoContent->addWidget(textLabel(QStringLiteral("SYNCHRONIZATION"), "section"));
+    infoContent->addSpacing(8);
+    auto* stateCard = detailCard();
+    auto* stateFacts = new QGridLayout(stateCard);
+    stateFacts->setContentsMargins(12, 11, 12, 11);
+    stateFacts->setHorizontalSpacing(16);
+    stateFacts->setVerticalSpacing(8);
+    stateFacts->setColumnMinimumWidth(0, 78);
+    int stateRow = 0;
+    const QString freshness = freshnessText(state.freshness());
+    addFact(stateFacts, stateRow, QStringLiteral("State"), freshness,
+            freshness == QStringLiteral("Current") ? QStringLiteral("#40c27d")
+                                                   : QStringLiteral("#f5a83b"));
+    addFact(stateFacts, stateRow, QStringLiteral("Revision"), QString::number(state.revision()));
+    addFact(stateFacts, stateRow, QStringLiteral("Representation"), representationText(state.representationMode()));
+    const auto& provider = state.provider();
+    if (provider.value) {
+        addFact(stateFacts, stateRow, QStringLiteral("Provider"), providerLifecycleText(provider.value->lifecycle),
+                provider.value->ready ? QStringLiteral("#40c27d") : statusColor(providerLifecycleText(provider.value->lifecycle)));
+        if (provider.value->lastError && provider.value->lastError->message)
+            addFact(stateFacts, stateRow, QStringLiteral("Provider error"),
+                    fromUtf8(*provider.value->lastError->message), QStringLiteral("#ed6a6a"));
+    }
+    const auto& controller = state.controller();
+    if (controller.value) {
+        addFact(stateFacts, stateRow, QStringLiteral("Controller"),
+                controller.value->ownedByThisClient
+                    ? QStringLiteral("Owned by this frontend")
+                    : controller.value->present ? QStringLiteral("Owned by another frontend")
+                                                : QStringLiteral("Unowned"));
+    }
+    std::size_t pendingForThread = 0;
+    if (state.hasPendingRequestProjection()) {
+        for (const auto& request : state.pendingRequests())
+            pendingForThread += request.threadId && request.threadId->value == thread->id.value;
+        addFact(stateFacts, stateRow, QStringLiteral("Attention"),
+                QStringLiteral("%1 pending request%2").arg(pendingForThread)
+                    .arg(pendingForThread == 1 ? QString{} : QStringLiteral("s")),
+                pendingForThread > 0 ? QStringLiteral("#f5a83b") : QStringLiteral("#949ead"));
+    }
+    const auto& truncation = state.truncation();
+    if (truncation.truncated || (truncation.value && truncation.value->truncated)) {
+        QString detail = QStringLiteral("State projection truncated");
+        if (truncation.value && truncation.value->omittedEntries)
+            detail += QStringLiteral(" · %1 entries omitted").arg(*truncation.value->omittedEntries);
+        addFact(stateFacts, stateRow, QStringLiteral("Truncation"), detail, QStringLiteral("#f5a83b"));
+    }
+    const auto& threadList = state.threadList();
+    if (threadList.value)
+        addFact(stateFacts, stateRow, QStringLiteral("Thread list"),
+                threadList.value->complete ? QStringLiteral("Complete") : QStringLiteral("Partial"),
+                threadList.value->complete ? QStringLiteral("#40c27d") : QStringLiteral("#f5a83b"));
+    const auto& projection = state.projectionMetadata();
+    if (!projection.omittedFields.empty() || !projection.redactedFields.empty()) {
+        QStringList detail;
+        if (!projection.omittedFields.empty())
+            detail.append(QStringLiteral("%1 fields omitted").arg(projection.omittedFields.size()));
+        if (!projection.redactedFields.empty())
+            detail.append(QStringLiteral("%1 fields redacted").arg(projection.redactedFields.size()));
+        addFact(stateFacts, stateRow, QStringLiteral("Scope"), detail.join(QStringLiteral(" · ")),
+                QStringLiteral("#f5a83b"));
+    }
+    if (thread->realtime) {
+        const auto realtime = sdk::realtimeSemanticView(*thread->realtime);
+        QStringList detail{humanize(fromUtf8(realtime.lifecycle)), QStringLiteral("%1 items").arg(realtime.itemCount)};
+        if (realtime.transcriptTruncated)
+            detail.append(QStringLiteral("transcript truncated"));
+        if (realtime.lastError)
+            detail.append(fromUtf8(*realtime.lastError));
+        addFact(stateFacts, stateRow, QStringLiteral("Realtime"), detail.join(QStringLiteral(" · ")));
+    }
+    infoContent->addWidget(stateCard);
+    infoContent->addStretch();
+    refreshLayoutGeometry();
 }
 
 } // namespace codexui

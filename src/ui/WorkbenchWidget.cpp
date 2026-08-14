@@ -19,6 +19,8 @@
 #include <QSplitter>
 #include <QVBoxLayout>
 
+#include <variant>
+
 namespace codexui {
 namespace {
 
@@ -38,7 +40,10 @@ QFrame* dot(const QString& color, int size = 7)
     return result;
 }
 
-QWidget* makeTopBar(QPushButton*& restoreLeft, QPushButton*& restoreRight, QPushButton*& attention)
+QWidget* makeTopBar(QPushButton*& restoreLeft,
+                    QPushButton*& restoreRight,
+                    QPushButton*& attention,
+                    QLabel*& modelStatus)
 {
     auto* bar = new QFrame;
     bar->setObjectName(QStringLiteral("topBar"));
@@ -51,10 +56,6 @@ QWidget* makeTopBar(QPushButton*& restoreLeft, QPushButton*& restoreRight, QPush
     auto* brand = label(QStringLiteral("CODEX WORKBENCH"), "title");
     brand->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
     row->addWidget(brand);
-    row->addSpacing(18);
-    auto* workspace = label(QStringLiteral("Workspace  /  AISuite"), "muted");
-    workspace->setStyleSheet(QStringLiteral("font-size:13px;font-weight:500;"));
-    row->addWidget(workspace);
 
     restoreLeft = new QPushButton(QStringLiteral("Show threads"));
     restoreLeft->setProperty("kind", "subtle");
@@ -67,17 +68,17 @@ QWidget* makeTopBar(QPushButton*& restoreLeft, QPushButton*& restoreRight, QPush
     auto* commands = new QPushButton(QStringLiteral("Commands"));
     commands->setFixedSize(132, 32);
     auto* menu = new QMenu(commands);
-    menu->addAction(QStringLiteral("Command palette unavailable in Q1"));
+    menu->addAction(QStringLiteral("Command palette is not implemented"));
     QObject::connect(commands, &QPushButton::clicked, commands, [commands, menu] {
         menu->popup(commands->mapToGlobal(QPoint(0, commands->height() + 4)));
     });
     row->addWidget(commands);
 
-    auto* model = new QLabel(QStringLiteral("gpt-5.6 · high · local"));
-    model->setAlignment(Qt::AlignCenter);
-    model->setStyleSheet(QStringLiteral("background:#181c21;border-radius:8px;font-size:12px;font-weight:500;"));
-    model->setFixedSize(210, 32);
-    row->addWidget(model);
+    modelStatus = new QLabel(QStringLiteral("Model unavailable"));
+    modelStatus->setAlignment(Qt::AlignCenter);
+    modelStatus->setStyleSheet(QStringLiteral("background:#181c21;border-radius:8px;font-size:12px;font-weight:500;"));
+    modelStatus->setFixedSize(210, 32);
+    row->addWidget(modelStatus);
 
     attention = new QPushButton(QStringLiteral("0 requests"));
     attention->setFixedSize(106, 32);
@@ -89,7 +90,7 @@ QWidget* makeTopBar(QPushButton*& restoreLeft, QPushButton*& restoreRight, QPush
     restoreRight->hide();
     row->addWidget(restoreRight);
     row->addSpacing(70);
-    auto* account = label(QStringLiteral("Volker"), "muted");
+    auto* account = label(QStringLiteral("CodexUI"), "muted");
     account->setStyleSheet(QStringLiteral("font-size:12px;font-weight:500;"));
     row->addWidget(account);
     row->addSpacing(35);
@@ -97,6 +98,8 @@ QWidget* makeTopBar(QPushButton*& restoreLeft, QPushButton*& restoreRight, QPush
 }
 
 QWidget* makeStatusBar(QFrame*& codexStatusDot,
+                       QLabel*& threadContextStatus,
+                       QLabel*& agentActivityStatus,
                        QLabel*& synchronizationStatus,
                        QLabel*& controllerStatus,
                        QLabel*& attentionStatus)
@@ -112,13 +115,12 @@ QWidget* makeStatusBar(QFrame*& codexStatusDot,
     codexStatusDot = dot(QStringLiteral("#949ead"));
     row->addWidget(codexStatusDot);
     row->addWidget(label(QStringLiteral("Codex"), "meta"));
-    row->addSpacing(22);
-    row->addWidget(dot(QStringLiteral("#40c27d")));
-    row->addWidget(label(QStringLiteral("Environment"), "meta"));
     row->addSpacing(48);
-    row->addWidget(label(QStringLiteral("branch: main"), "meta"));
+    threadContextStatus = label(QStringLiteral("No thread context"), "meta");
+    row->addWidget(threadContextStatus);
     row->addSpacing(62);
-    row->addWidget(label(QStringLiteral("3 agents running"), "meta"));
+    agentActivityStatus = label(QStringLiteral("No agent activity"), "meta");
+    row->addWidget(agentActivityStatus);
     row->addSpacing(24);
     synchronizationStatus = label(QStringLiteral("Disconnected"), "meta");
     synchronizationStatus->setStyleSheet(QStringLiteral("color:#949ead;font-size:10px;font-weight:600;"));
@@ -148,6 +150,19 @@ activeTurn(const ai::openai::codex::frontend::client::State& state,
     return nullptr;
 }
 
+const ai::openai::codex::frontend::client::TurnState*
+latestTurn(const ai::openai::codex::frontend::client::State& state,
+           const ai::openai::codex::frontend::client::ThreadState* thread)
+{
+    if (!thread)
+        return nullptr;
+    for (auto iterator = thread->orderedTurns.rbegin(); iterator != thread->orderedTurns.rend(); ++iterator) {
+        if (const auto* turn = state.turn(*iterator))
+            return turn;
+    }
+    return nullptr;
+}
+
 } // namespace
 
 WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
@@ -158,7 +173,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    layout->addWidget(makeTopBar(restoreSidebar, restoreInspector, attentionButton));
+    layout->addWidget(makeTopBar(restoreSidebar, restoreInspector, attentionButton, modelStatus));
 
     splitter = new QSplitter(Qt::Horizontal);
     splitter->setChildrenCollapsible(false);
@@ -174,7 +189,8 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     splitter->setStretchFactor(2, 0);
     splitter->setSizes({282, 834, 404});
     layout->addWidget(splitter, 1);
-    layout->addWidget(makeStatusBar(codexStatusDot, synchronizationStatus, controllerStatus, attentionStatus));
+    layout->addWidget(makeStatusBar(codexStatusDot, threadContextStatus, agentActivityStatus,
+                                    synchronizationStatus, controllerStatus, attentionStatus));
 
     interactiveRequestDialog = new InteractiveRequestDialog(
         [this]() -> const ai::openai::codex::frontend::client::State& { return frontendSession.state(); },
@@ -188,6 +204,8 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     connect(attentionButton, &QPushButton::clicked, interactiveRequestDialog, &InteractiveRequestDialog::present);
     connect(sidebar, &SidebarWidget::newThreadRequested, this, &WorkbenchWidget::beginNewThread);
     connect(sidebar, &SidebarWidget::threadSelected, this, &WorkbenchWidget::selectThread);
+    connect(inspector, &InspectorWidget::selectionChanged, this, &WorkbenchWidget::refreshState);
+    connect(inspector, &InspectorWidget::threadOpenRequested, this, &WorkbenchWidget::selectProjectedAgentThread);
     connect(conversation, &ConversationWidget::sendRequested, this, &WorkbenchWidget::sendPrompt);
     connect(conversation, &ConversationWidget::stopRequested, this, &WorkbenchWidget::stopActiveTurn);
     connect(&frontendSession, &FrontendSession::lifecycleChanged, this, &WorkbenchWidget::refreshLifecycle);
@@ -230,6 +248,14 @@ void WorkbenchWidget::refreshLifecycle()
     synchronizationStatus->setToolTip(frontendSession.statusText());
     synchronizationStatus->setStyleSheet(
         QStringLiteral("color:%1;font-size:10px;font-weight:600;").arg(color));
+    if (frontendSession.lifecycle() != Lifecycle::Ready) {
+        modelStatus->setText(QStringLiteral("Model unavailable"));
+        modelStatus->setToolTip({});
+        threadContextStatus->setText(QStringLiteral("No thread context"));
+        threadContextStatus->setToolTip({});
+        agentActivityStatus->setText(QStringLiteral("No agent activity"));
+        inspector->render(frontendSession.state(), {}, false, frontendSession.statusText());
+    }
 
     if (frontendSession.lifecycle() != Lifecycle::Ready) {
         const bool writeWasPending = pendingAction != PendingAction::None || controllerAcquireInFlight
@@ -268,6 +294,50 @@ void WorkbenchWidget::refreshState()
     // immutable State and never retains backend object addresses.
     conversation->render(state, selectedThreadId, newThreadDraft);
 
+    const bool ready = frontendSession.lifecycle() == FrontendSession::Lifecycle::Ready;
+    inspector->render(state, newThreadDraft ? QString{} : selectedThreadId,
+                      ready, frontendSession.statusText());
+
+    const auto* selected = !newThreadDraft && !selectedThreadId.isEmpty()
+                               ? state.thread(selectedThreadId.toStdString())
+                               : nullptr;
+    QStringList modelDetails;
+    if (ready && selected && selected->model)
+        modelDetails.append(QString::fromStdString(selected->model->value));
+    if (ready && selected && selected->modelProvider)
+        modelDetails.append(QString::fromStdString(*selected->modelProvider));
+    modelStatus->setText(modelDetails.isEmpty() ? QStringLiteral("Model unavailable")
+                                                : modelDetails.join(QStringLiteral(" · ")));
+    modelStatus->setToolTip(modelStatus->text());
+
+    const QString context = ready && selected && selected->cwd
+                                ? QString::fromStdString(selected->cwd->value)
+                                : QStringLiteral("No thread context");
+    threadContextStatus->setText(context.size() > 44 ? context.left(20) + QChar(0x2026) + context.right(20) : context);
+    threadContextStatus->setToolTip(ready && selected && selected->cwd ? context : QString{});
+
+    std::size_t agentActivities = 0;
+    if (const auto* turn = ready ? latestTurn(state, selected) : nullptr) {
+        for (const auto& itemId : turn->orderedItems) {
+            const auto* item = state.item(selected->id, turn->id, itemId);
+            if (!item)
+                continue;
+            const auto semantic = ai::openai::codex::frontend::client::itemSemanticView(*item);
+            if (semantic
+                && (std::holds_alternative<
+                        ai::openai::codex::frontend::client::SubAgentActivitySemanticView>(semantic->details)
+                    || std::holds_alternative<
+                        ai::openai::codex::frontend::client::CollabAgentToolCallSemanticView>(semantic->details)))
+                ++agentActivities;
+        }
+    }
+    agentActivityStatus->setText(agentActivities == 0
+                                     ? QStringLiteral("No agent activity")
+                                     : QStringLiteral("%1 agent activit%2")
+                                           .arg(agentActivities)
+                                           .arg(agentActivities == 1 ? QStringLiteral("y")
+                                                                    : QStringLiteral("ies")));
+
     const std::size_t attentionCount = state.hasPendingRequestProjection() ? state.pendingRequests().size() : 0;
     const QString attentionText = QStringLiteral("%1 request%2")
                                       .arg(attentionCount)
@@ -286,8 +356,7 @@ void WorkbenchWidget::refreshState()
                                                : QStringLiteral("Codex has no pending requests"));
     interactiveRequestDialog->synchronize(state);
 
-    const auto* selected = selectedThreadId.isEmpty() ? nullptr : state.thread(selectedThreadId.toStdString());
-    if (selected && !selected->fullyLoaded)
+    if (selected && !selected->fullyLoaded && projectedAgentThreadId != selectedThreadId)
         frontendSession.loadThread(selectedThreadId);
 
     controllerUnavailable = controllerUnavailable && !frontendSession.ownsController();
@@ -303,6 +372,16 @@ void WorkbenchWidget::refreshState()
 void WorkbenchWidget::selectThread(const QString& threadId)
 {
     selectedThreadId = threadId;
+    projectedAgentThreadId.clear();
+    newThreadDraft = false;
+    conversation->setWriteStatus({});
+    refreshState();
+}
+
+void WorkbenchWidget::selectProjectedAgentThread(const QString& threadId)
+{
+    selectedThreadId = threadId;
+    projectedAgentThreadId = threadId;
     newThreadDraft = false;
     conversation->setWriteStatus({});
     refreshState();
@@ -496,6 +575,7 @@ void WorkbenchWidget::beginNewThread()
     if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready || threadStartInFlight)
         return;
     selectedThreadId.clear();
+    projectedAgentThreadId.clear();
     newThreadDraft = true;
     newThreadIdAwaitingState.clear();
     conversation->setWriteStatus({});

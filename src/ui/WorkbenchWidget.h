@@ -35,6 +35,7 @@ private:
     void refreshControls();
     void refreshControllerStatus();
     void selectThread(const QString& threadId);
+    void selectProjectedAgentThread(const QString& threadId);
     void beginNewThread();
     void sendPrompt(const QString& prompt);
     void stopActiveTurn();
@@ -61,12 +62,16 @@ private:
     QPushButton* restoreSidebar = nullptr;
     QPushButton* restoreInspector = nullptr;
     QFrame* codexStatusDot = nullptr;
+    QLabel* modelStatus = nullptr;
+    QLabel* threadContextStatus = nullptr;
+    QLabel* agentActivityStatus = nullptr;
     QLabel* synchronizationStatus = nullptr;
     QLabel* controllerStatus = nullptr;
     QLabel* attentionStatus = nullptr;
     QPushButton* attentionButton = nullptr;
     InteractiveRequestDialog* interactiveRequestDialog = nullptr;
     QString selectedThreadId;
+    QString projectedAgentThreadId;
     QString newThreadIdAwaitingState;
     QString pendingPrompt;
     QString pendingThreadId;
