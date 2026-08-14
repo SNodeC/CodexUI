@@ -206,57 +206,12 @@ QString truncationText(const sdk::ItemState& item)
     return QStringLiteral("Content truncated or omitted by the synchronized state");
 }
 
-QString userMessageText(const sdk::ItemState& item)
+QString userMessageTruncationText(const sdk::UserMessageSemanticView& message)
 {
-    // AISuite currently has no UserMessageSemanticView. This is the one
-    // narrow fallback over its already-bounded public SafeDetail position.
-    if (item.data && item.data->is_object())
-    {
-        const auto content = item.data->find("content");
-        if (content != item.data->end() && content->is_array())
-        {
-            QStringList parts;
-            for (const frontend::Json& entry : *content)
-            {
-                if (entry.is_string())
-                {
-                    parts.append(fromUtf8(entry.get<std::string>()));
-                    continue;
-                }
-                if (!entry.is_object())
-                {
-                    parts.append(QStringLiteral("[Retained message content]"));
-                    continue;
-                }
-                const auto typeMember = entry.find("type");
-                const QString type = typeMember != entry.end() && typeMember->is_string()
-                                         ? fromUtf8(typeMember->get<std::string>())
-                                         : QString{};
-                const auto textMember = entry.find("text");
-                if ((type == QStringLiteral("text") || type == QStringLiteral("input_text") || type.isEmpty()) &&
-                    textMember != entry.end() && textMember->is_string())
-                {
-                    parts.append(fromUtf8(textMember->get<std::string>()));
-                }
-                else if (type.contains(QStringLiteral("image"), Qt::CaseInsensitive))
-                {
-                    parts.append(QStringLiteral("[Image attachment]"));
-                }
-                else if (!type.isEmpty())
-                {
-                    parts.append(QStringLiteral("[%1 content]").arg(humanize(compact(type, 64))));
-                }
-                else
-                {
-                    parts.append(QStringLiteral("[Retained message content]"));
-                }
-            }
-            if (!parts.isEmpty()) return parts.join(QLatin1Char('\n'));
-        }
-    }
-    if (item.summary && !item.summary->empty()) return fromUtf8(*item.summary);
-    if (item.agentText && !item.agentText->empty()) return fromUtf8(*item.agentText);
-    return {};
+    QStringList details;
+    if (message.textTruncated) details.append(QStringLiteral("Retained text is truncated"));
+    if (message.contentTruncated) details.append(QStringLiteral("Some original user content is not shown"));
+    return details.join(QStringLiteral(" · "));
 }
 
 QString pendingRequestDetail(const sdk::State& state, const sdk::ItemState& item)
@@ -483,14 +438,37 @@ void addMessage(QVBoxLayout* timeline, const sdk::ItemState& item, bool user)
     timeline->addLayout(header);
     timeline->addSpacing(3);
 
-    QString content =
-        user ? userMessageText(item)
-             : (item.agentText && !item.agentText->empty() ? fromUtf8(*item.agentText)
-                                                           : (item.summary ? fromUtf8(*item.summary) : QString{}));
-    const bool missing = content.isEmpty();
-    if (missing)
-        content = user ? QStringLiteral("User message content is not retained in the public State")
-                       : QStringLiteral("No retained message content");
+    const auto userMessage = user ? sdk::userMessageSemanticView(item) : std::nullopt;
+    QString content;
+    bool missing = false;
+    if (user)
+    {
+        if (!userMessage)
+        {
+            content = QStringLiteral("User message is unavailable");
+            missing = true;
+        }
+        else if (userMessage->text.empty())
+        {
+            content = QStringLiteral("User message contains no retained text");
+            missing = true;
+        }
+        else
+        {
+            content = fromUtf8(userMessage->text);
+        }
+    }
+    else
+    {
+        content = item.agentText && !item.agentText->empty()
+                      ? fromUtf8(*item.agentText)
+                      : (item.summary ? fromUtf8(*item.summary) : QString{});
+        if (content.isEmpty())
+        {
+            content = QStringLiteral("No retained message content");
+            missing = true;
+        }
+    }
 
     QWidget* container = nullptr;
     QVBoxLayout* layout = nullptr;
@@ -515,7 +493,8 @@ void addMessage(QVBoxLayout* timeline, const sdk::ItemState& item, bool user)
     copy->setWordWrap(true);
     copy->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(copy);
-    const QString truncation = truncationText(item);
+    QString truncation = userMessage ? userMessageTruncationText(*userMessage) : QString{};
+    if (truncation.isEmpty()) truncation = truncationText(item);
     if (!truncation.isEmpty())
     {
         auto* marker = textLabel(truncation, "small");
