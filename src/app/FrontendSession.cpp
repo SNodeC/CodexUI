@@ -3,7 +3,9 @@
 #include "app/FrontendSession.h"
 
 #include <ai/openai/codex/frontend/Security.h>
+#include <ai/openai/codex/frontend/client/Controller.h>
 #include <ai/openai/codex/frontend/client/Threads.h>
+#include <ai/openai/codex/frontend/client/Turns.h>
 
 #include <QByteArray>
 #include <QDir>
@@ -22,6 +24,20 @@ namespace frontend = ai::openai::codex::frontend;
 namespace {
 
 constexpr qsizetype maximumFrameBytes = 16 * 1024 * 1024;
+
+QString operationError(const std::optional<sdk::Error>& error, const QString& fallback)
+{
+    if (error && !error->message.empty())
+        return QString::fromStdString(error->message);
+    return fallback;
+}
+
+std::optional<QString> submissionError(const sdk::Submission& submission, const QString& fallback)
+{
+    if (submission)
+        return std::nullopt;
+    return operationError(submission.error, fallback);
+}
 
 } // namespace
 
@@ -132,6 +148,12 @@ const sdk::State& FrontendSession::state() const noexcept
     return currentState;
 }
 
+bool FrontendSession::ownsController() const noexcept
+{
+    const auto& projection = currentState.controller();
+    return projection.value && projection.value->ownedByThisClient;
+}
+
 void FrontendSession::loadThread(const QString& threadId)
 {
     if (currentLifecycle != Lifecycle::Ready || threadId.isEmpty())
@@ -149,6 +171,110 @@ void FrontendSession::loadThread(const QString& threadId)
         });
     if (!submission)
         requestedThreadReads.erase(id);
+}
+
+std::optional<QString> FrontendSession::acquireController(OperationCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+
+    sdk::Submission submission = client->controller().acquire(
+        [completion = std::move(completion)](const sdk::OperationResult<sdk::ControllerResult>& result) {
+            if (!result) {
+                completion(operationError(result.error, QStringLiteral("Controller acquisition failed")));
+                return;
+            }
+            if (!result.value->ownedByThisClient) {
+                completion(QStringLiteral("Controller is owned by another frontend"));
+                return;
+            }
+            completion({});
+        });
+    return submissionError(submission, QStringLiteral("Controller acquisition was not accepted"));
+}
+
+std::optional<QString> FrontendSession::startThread(ThreadStartCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+
+    sdk::Submission submission = client->threads().start(
+        ai::openai::codex::typed::ThreadStartParams{},
+        [completion = std::move(completion)](const sdk::OperationResult<sdk::ThreadStartResult>& result) {
+            if (!result) {
+                completion({}, operationError(result.error, QStringLiteral("New thread could not be created")));
+                return;
+            }
+            if (result.value->threadId.value.empty()) {
+                completion({}, QStringLiteral("New thread response did not contain a stable thread ID"));
+                return;
+            }
+            completion(QString::fromStdString(result.value->threadId.value), {});
+        });
+    return submissionError(submission, QStringLiteral("New thread submission was not accepted"));
+}
+
+std::optional<QString> FrontendSession::resumeThread(const QString& threadId, ThreadStartCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+
+    const std::string requestedId = threadId.toStdString();
+    ai::openai::codex::typed::ThreadResumeParams parameters;
+    parameters.threadId = ai::openai::codex::typed::ThreadId{requestedId};
+    sdk::Submission submission = client->threads().resume(
+        std::move(parameters),
+        [completion = std::move(completion), requestedId](const sdk::OperationResult<sdk::ThreadResumeResult>& result) {
+            if (!result) {
+                completion({}, operationError(result.error, QStringLiteral("Thread could not be attached")));
+                return;
+            }
+            if (result.value->threadId.value != requestedId) {
+                completion({}, QStringLiteral("Thread attach returned an unexpected thread ID"));
+                return;
+            }
+            completion(QString::fromStdString(result.value->threadId.value), {});
+        });
+    return submissionError(submission, QStringLiteral("Thread attach submission was not accepted"));
+}
+
+std::optional<QString> FrontendSession::startTurn(const QString& threadId,
+                                                  const QString& prompt,
+                                                  OperationCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+
+    ai::openai::codex::typed::TurnStartParams parameters;
+    parameters.threadId = ai::openai::codex::typed::ThreadId{threadId.toStdString()};
+    ai::openai::codex::typed::TextInput input;
+    input.text = prompt.toStdString();
+    parameters.input.emplace_back(std::move(input));
+    sdk::Submission submission = client->turns().start(
+        std::move(parameters),
+        [completion = std::move(completion)](const sdk::OperationResult<sdk::TurnStartResult>& result) {
+            completion(result ? QString{} : operationError(result.error, QStringLiteral("Turn could not be started")));
+        });
+    return submissionError(submission, QStringLiteral("Turn submission was not accepted"));
+}
+
+std::optional<QString> FrontendSession::interruptTurn(const QString& threadId,
+                                                      const QString& turnId,
+                                                      OperationCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+
+    ai::openai::codex::typed::TurnInterruptParams parameters{
+        ai::openai::codex::typed::ThreadId{threadId.toStdString()},
+        ai::openai::codex::typed::TurnId{turnId.toStdString()},
+    };
+    sdk::Submission submission = client->turns().interrupt(
+        std::move(parameters),
+        [completion = std::move(completion)](const sdk::OperationResult<ai::openai::codex::typed::Unit>& result) {
+            completion(result ? QString{} : operationError(result.error, QStringLiteral("Turn could not be interrupted")));
+        });
+    return submissionError(submission, QStringLiteral("Interrupt submission was not accepted"));
 }
 
 QString FrontendSession::defaultSocketPath()

@@ -20,11 +20,17 @@ socket through Qt and delegates authentication, protocol handling, and state
 synchronization to AISuite's public frontend SDK. The sidebar displays real
 synchronized threads, and the center work area renders the selected thread's
 real turns, messages, semantic items, activity, token usage, and failures from
-the current immutable frontend State.
+the current immutable frontend State. The composer can lazily acquire
+controller ownership, create a thread, start or continue a real turn, and
+interrupt the selected active turn. Live output continues to arrive entirely
+through AISuite's immutable State projection.
 
-CodexUI remains read-only. Composer actions, thread actions, approvals, and
-interrupt/stop are not connected. The right inspector still contains
-presentation/demo content.
+Sending on a persisted thread automatically resumes it in the running Codex
+App Server before starting the turn; selecting a thread still performs only the
+read-side synchronization needed to render it.
+
+Approvals, user-input requests, attachments, advanced thread management, and
+the right inspector remain outside the current interactive core.
 
 ## Build
 

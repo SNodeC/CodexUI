@@ -7,6 +7,7 @@
 
 class QFrame;
 class QLabel;
+class QPushButton;
 class QVBoxLayout;
 
 namespace ai::openai::codex::frontend::client {
@@ -23,9 +24,11 @@ public:
     explicit SidebarWidget(QWidget* parent = nullptr);
     void setThreads(const ai::openai::codex::frontend::client::State& state, const QString& selectedThreadId);
     void setConnectionStatus(const QString& title, const QString& detail, const QString& color);
+    void setNewThreadEnabled(bool enabled);
 
 signals:
     void hideRequested();
+    void newThreadRequested();
     void threadSelected(const QString& threadId);
 
 private:
@@ -33,6 +36,7 @@ private:
     QFrame* serverDot = nullptr;
     QLabel* serverTitle = nullptr;
     QLabel* serverDetail = nullptr;
+    QPushButton* newThread = nullptr;
 };
 
 } // namespace codexui

@@ -24,9 +24,24 @@ public:
     explicit WorkbenchWidget(FrontendSession& frontendSession, QWidget* parent = nullptr);
 
 private:
+    enum class PendingAction { None, SendExistingThread, SendNewThread, InterruptTurn };
+
     void refreshLifecycle();
     void refreshState();
+    void refreshControls();
+    void refreshControllerStatus();
     void selectThread(const QString& threadId);
+    void beginNewThread();
+    void sendPrompt(const QString& prompt);
+    void stopActiveTurn();
+    void ensureController();
+    void executePendingAction();
+    void startNewThread(const QString& prompt);
+    void resumeThread(const QString& threadId, const QString& prompt);
+    void startTurn(const QString& threadId, const QString& prompt);
+    void interruptTurn(const QString& threadId, const QString& turnId);
+    void showWriteError(const QString& error);
+    void clearWriteTransients();
     void setSidebarVisible(bool visible);
     void setInspectorVisible(bool visible);
 
@@ -39,7 +54,20 @@ private:
     QPushButton* restoreInspector = nullptr;
     QFrame* codexStatusDot = nullptr;
     QLabel* synchronizationStatus = nullptr;
+    QLabel* controllerStatus = nullptr;
     QString selectedThreadId;
+    QString newThreadIdAwaitingState;
+    QString pendingPrompt;
+    QString pendingThreadId;
+    QString pendingTurnId;
+    PendingAction pendingAction = PendingAction::None;
+    bool newThreadDraft = false;
+    bool controllerAcquireInFlight = false;
+    bool threadStartInFlight = false;
+    bool threadResumeInFlight = false;
+    bool turnStartInFlight = false;
+    bool interruptInFlight = false;
+    bool controllerUnavailable = false;
 };
 
 } // namespace codexui

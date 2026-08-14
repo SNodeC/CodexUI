@@ -8,6 +8,8 @@
 #include <QEvent>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -662,8 +664,7 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     composerLayout->setContentsMargins(16, 12, 12, 10);
     composerLayout->setSpacing(4);
     editor = new QPlainTextEdit;
-    editor->setPlaceholderText(QStringLiteral("Draft locally — sending is not connected yet"));
-    editor->setMaximumBlockCount(20);
+    editor->setPlaceholderText(QStringLiteral("Message Codex"));
     editor->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     editor->installEventFilter(this);
     composerLayout->addWidget(editor, 1);
@@ -674,16 +675,36 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     attach->setStyleSheet(QStringLiteral("text-align:left;padding:0;"));
     attach->setFixedSize(54, 24);
     attach->setEnabled(false);
+    attach->setToolTip(QStringLiteral("File attachments are outside the Q4 interactive core"));
     actions->addWidget(attach);
     actions->addStretch();
-    actions->addWidget(textLabel(QStringLiteral("Read-only · composer actions unavailable"), "meta"));
-    auto* stop = new QPushButton(QStringLiteral("Stop"));
+    composerStatus = textLabel(
+        QStringLiteral("%1 to send")
+            .arg(QKeySequence(Qt::CTRL | Qt::Key_Enter).toString(QKeySequence::NativeText)),
+        "meta");
+    actions->addWidget(composerStatus);
+    send = new QPushButton(QStringLiteral("Send"));
+    send->setProperty("kind", "primary");
+    send->setFixedSize(66, 32);
+    send->setEnabled(false);
+    actions->addWidget(send);
+    stop = new QPushButton(QStringLiteral("Stop"));
     stop->setProperty("kind", "stop");
     stop->setFixedSize(66, 32);
     stop->setEnabled(false);
     actions->addWidget(stop);
     composerLayout->addLayout(actions);
     conversation->addWidget(composer);
+
+    connect(editor, &QPlainTextEdit::textChanged, this, &ConversationWidget::updateSendEnabled);
+    connect(send, &QPushButton::clicked, this, [this] {
+        if (send->isEnabled())
+            emit sendRequested(editor->toPlainText());
+    });
+    connect(stop, &QPushButton::clicked, this, [this] {
+        if (stop->isEnabled())
+            emit stopRequested();
+    });
 
     editor->setFocus(Qt::OtherFocusReason);
     scrollArea->setWidget(content);
@@ -693,13 +714,14 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
                   QStringLiteral("Choose a synchronized thread from the sidebar."));
 }
 
-void ConversationWidget::render(const sdk::State& state, const QString& threadId)
+void ConversationWidget::render(const sdk::State& state, const QString& threadId, bool newThreadDraft)
 {
     auto* scrollBar = scrollArea->verticalScrollBar();
     const int previousScroll = scrollBar->value();
     const bool wasNearBottom = scrollBar->maximum() - previousScroll <= 72;
-    const bool threadChanged = renderedThreadId != threadId;
+    const bool threadChanged = renderedThreadId != threadId || renderedNewThreadDraft != newThreadDraft;
     renderedThreadId = threadId;
+    renderedNewThreadDraft = newThreadDraft;
 
     clearLayout(timeline);
     clearLayout(turnSummaryLayout);
@@ -709,14 +731,21 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
     const auto* thread = threadId.isEmpty() ? nullptr : state.thread(threadId.toStdString());
     if (!thread)
     {
-        contextPath->setText(QStringLiteral("No thread selected"));
+        contextPath->setText(newThreadDraft ? QStringLiteral("New thread draft")
+                                            : QStringLiteral("No thread selected"));
         contextPath->setToolTip({});
-        threadTitle->setText(QStringLiteral("No synchronized thread"));
+        threadTitle->setText(newThreadDraft ? QStringLiteral("New conversation")
+                                            : QStringLiteral("No synchronized thread"));
         threadTitle->setToolTip({});
-        threadDetail->setText(QStringLiteral("Select a synchronized thread to view its conversation"));
+        threadDetail->setText(newThreadDraft
+                                  ? QStringLiteral("A real thread will be created when the first prompt is sent")
+                                  : QStringLiteral("Select a synchronized thread to view its conversation"));
         threadDetail->setToolTip({});
-        addEmptyState(timeline, QStringLiteral("No thread selected"),
-                      QStringLiteral("Choose a synchronized thread from the sidebar."));
+        addEmptyState(timeline,
+                      newThreadDraft ? QStringLiteral("Start a new conversation")
+                                     : QStringLiteral("No thread selected"),
+                      newThreadDraft ? QStringLiteral("Type a prompt below. Backend defaults will be used for the new thread.")
+                                     : QStringLiteral("Choose a synchronized thread from the sidebar."));
     }
     else
     {
@@ -904,8 +933,59 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
                        });
 }
 
+void ConversationWidget::clearPrompt()
+{
+    editor->clear();
+}
+
+void ConversationWidget::focusComposer()
+{
+    editor->setFocus(Qt::OtherFocusReason);
+}
+
+void ConversationWidget::setActionState(bool sendAllowed, bool stopAllowed, bool editorAllowed)
+{
+    sendContextAllowed = sendAllowed;
+    editor->setEnabled(editorAllowed);
+    stop->setEnabled(stopAllowed);
+    updateSendEnabled();
+}
+
+void ConversationWidget::setWriteStatus(const QString& text, bool error)
+{
+    if (text.isEmpty()) {
+        composerStatus->setText(
+            QStringLiteral("%1 to send")
+                .arg(QKeySequence(Qt::CTRL | Qt::Key_Enter).toString(QKeySequence::NativeText)));
+        composerStatus->setToolTip({});
+        composerStatus->setStyleSheet({});
+        return;
+    }
+    composerStatus->setText(compact(text, 100));
+    composerStatus->setToolTip(text);
+    composerStatus->setStyleSheet(error ? QStringLiteral("color:#ed6a6a;font-size:10px;")
+                                        : QStringLiteral("color:#949ead;font-size:10px;"));
+}
+
+void ConversationWidget::updateSendEnabled()
+{
+    send->setEnabled(sendContextAllowed && editor->isEnabled() && !editor->toPlainText().trimmed().isEmpty());
+}
+
 bool ConversationWidget::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == editor && event->type() == QEvent::KeyPress)
+    {
+        auto* key = static_cast<QKeyEvent*>(event);
+        const bool enter = key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter;
+        const auto modifiers = key->modifiers() & ~Qt::KeypadModifier;
+        if (enter && modifiers == Qt::ControlModifier)
+        {
+            if (!key->isAutoRepeat() && send->isEnabled())
+                emit sendRequested(editor->toPlainText());
+            return true;
+        }
+    }
     if (watched == editor && (event->type() == QEvent::FocusIn || event->type() == QEvent::FocusOut))
     {
         const auto border =

@@ -189,7 +189,7 @@ SidebarWidget::SidebarWidget(QWidget* parent)
     header->addWidget(hide);
     root->addLayout(header);
 
-    auto* newThread = new QPushButton(QStringLiteral("+  New thread"));
+    newThread = new QPushButton(QStringLiteral("+  New thread"));
     newThread->setProperty("kind", "primary");
     newThread->setFixedHeight(36);
     newThread->setStyleSheet(QStringLiteral("text-align:left;padding-left:14px;"));
@@ -236,6 +236,7 @@ SidebarWidget::SidebarWidget(QWidget* parent)
     root->addLayout(serverRow);
 
     connect(hide, &QPushButton::clicked, this, &SidebarWidget::hideRequested);
+    connect(newThread, &QPushButton::clicked, this, &SidebarWidget::newThreadRequested);
 }
 
 void SidebarWidget::setThreads(const ai::openai::codex::frontend::client::State& state,
@@ -278,6 +279,11 @@ void SidebarWidget::setConnectionStatus(const QString& title, const QString& con
     serverTitle->setText(title);
     serverDetail->setText(connectionDetail);
     serverDot->setStyleSheet(QStringLiteral("background:%1;border-radius:4px;").arg(color));
+}
+
+void SidebarWidget::setNewThreadEnabled(bool enabled)
+{
+    newThread->setEnabled(enabled);
 }
 
 } // namespace codexui

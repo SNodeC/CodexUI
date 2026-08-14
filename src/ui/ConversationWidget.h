@@ -10,6 +10,7 @@
 class QFrame;
 class QLabel;
 class QPlainTextEdit;
+class QPushButton;
 class QScrollArea;
 class QVBoxLayout;
 
@@ -21,16 +22,33 @@ namespace codexui {
 
 class ConversationWidget : public QWidget
 {
+    Q_OBJECT
+
 public:
     explicit ConversationWidget(QWidget* parent = nullptr);
-    void render(const ai::openai::codex::frontend::client::State& state, const QString& threadId);
+    void render(const ai::openai::codex::frontend::client::State& state,
+                const QString& threadId,
+                bool newThreadDraft = false);
+    void clearPrompt();
+    void focusComposer();
+    void setActionState(bool sendAllowed, bool stopAllowed, bool editorAllowed);
+    void setWriteStatus(const QString& text, bool error = false);
+
+signals:
+    void sendRequested(const QString& prompt);
+    void stopRequested();
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    void updateSendEnabled();
+
     QFrame* composer = nullptr;
     QPlainTextEdit* editor = nullptr;
+    QLabel* composerStatus = nullptr;
+    QPushButton* send = nullptr;
+    QPushButton* stop = nullptr;
     QLabel* contextPath = nullptr;
     QLabel* threadTitle = nullptr;
     QLabel* threadDetail = nullptr;
@@ -40,6 +58,8 @@ private:
     QScrollArea* scrollArea = nullptr;
     QVBoxLayout* timeline = nullptr;
     QString renderedThreadId;
+    bool renderedNewThreadDraft = false;
+    bool sendContextAllowed = false;
 };
 
 } // namespace codexui
