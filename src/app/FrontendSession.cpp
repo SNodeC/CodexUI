@@ -4,6 +4,7 @@
 
 #include <ai/openai/codex/frontend/Security.h>
 #include <ai/openai/codex/frontend/client/Controller.h>
+#include <ai/openai/codex/frontend/client/Requests.h>
 #include <ai/openai/codex/frontend/client/Threads.h>
 #include <ai/openai/codex/frontend/client/Turns.h>
 
@@ -275,6 +276,64 @@ std::optional<QString> FrontendSession::interruptTurn(const QString& threadId,
             completion(result ? QString{} : operationError(result.error, QStringLiteral("Turn could not be interrupted")));
         });
     return submissionError(submission, QStringLiteral("Interrupt submission was not accepted"));
+}
+
+std::optional<QString> FrontendSession::respondApproval(const sdk::PendingRequestId& requestId,
+                                                        ai::openai::codex::typed::ApprovalDecision decision,
+                                                        OperationCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+    sdk::Submission submission = client->requests().respond(
+        {requestId, std::move(decision)},
+        [completion = std::move(completion)](const sdk::OperationResult<ai::openai::codex::typed::Unit>& result) {
+            completion(result ? QString{} : operationError(result.error, QStringLiteral("Approval response failed")));
+        });
+    return submissionError(submission, QStringLiteral("Approval response was not accepted"));
+}
+
+std::optional<QString>
+FrontendSession::respondApplyPatchApproval(const sdk::PendingRequestId& requestId,
+                                           ai::openai::codex::typed::ApplyPatchApprovalResponse response,
+                                           OperationCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+    sdk::Submission submission = client->requests().respond(
+        {requestId, std::move(response)},
+        [completion = std::move(completion)](const sdk::OperationResult<ai::openai::codex::typed::Unit>& result) {
+            completion(result ? QString{} : operationError(result.error, QStringLiteral("Patch approval response failed")));
+        });
+    return submissionError(submission, QStringLiteral("Patch approval response was not accepted"));
+}
+
+std::optional<QString>
+FrontendSession::respondExecCommandApproval(const sdk::PendingRequestId& requestId,
+                                            ai::openai::codex::typed::ExecCommandApprovalResponse response,
+                                            OperationCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+    sdk::Submission submission = client->requests().respond(
+        {requestId, std::move(response)},
+        [completion = std::move(completion)](const sdk::OperationResult<ai::openai::codex::typed::Unit>& result) {
+            completion(result ? QString{} : operationError(result.error, QStringLiteral("Command approval response failed")));
+        });
+    return submissionError(submission, QStringLiteral("Command approval response was not accepted"));
+}
+
+std::optional<QString> FrontendSession::respondUserInput(const sdk::PendingRequestId& requestId,
+                                                         std::vector<ai::openai::codex::typed::UserInputAnswer> answers,
+                                                         OperationCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+    sdk::Submission submission = client->requests().respond(
+        {requestId, std::move(answers)},
+        [completion = std::move(completion)](const sdk::OperationResult<ai::openai::codex::typed::Unit>& result) {
+            completion(result ? QString{} : operationError(result.error, QStringLiteral("User-input response failed")));
+        });
+    return submissionError(submission, QStringLiteral("User-input response was not accepted"));
 }
 
 QString FrontendSession::defaultSocketPath()

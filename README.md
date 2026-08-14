@@ -29,8 +29,14 @@ Sending on a persisted thread automatically resumes it in the running Codex
 App Server before starting the turn; selecting a thread still performs only the
 read-side synchronization needed to render it.
 
-Approvals, user-input requests, attachments, advanced thread management, and
-the right inspector remain outside the current interactive core.
+CodexUI also presents real command and file-change approvals and typed
+user-input requests from AISuite's canonical pending-request collection. A real
+attention count opens the compact request dialog, responses acquire controller
+ownership only when submitted, and requests remain visible until a subsequent
+immutable State update removes or changes them.
+
+Attachments, Inspector conversion, advanced thread management, and
+settings/persistence remain outside the current interactive core.
 
 ## Build
 

@@ -20,6 +20,8 @@ qt_add_executable(
     src/ui/ConversationWidget.h
     src/ui/InspectorWidget.cpp
     src/ui/InspectorWidget.h
+    src/ui/InteractiveRequestDialog.cpp
+    src/ui/InteractiveRequestDialog.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
     src/ui/SidebarWidget.cpp

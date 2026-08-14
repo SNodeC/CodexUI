@@ -5,6 +5,7 @@
 #include "app/FrontendSession.h"
 #include "ui/ConversationWidget.h"
 #include "ui/InspectorWidget.h"
+#include "ui/InteractiveRequestDialog.h"
 #include "ui/SidebarWidget.h"
 
 #include <ai/openai/codex/frontend/client/State.h>
@@ -37,7 +38,7 @@ QFrame* dot(const QString& color, int size = 7)
     return result;
 }
 
-QWidget* makeTopBar(QPushButton*& restoreLeft, QPushButton*& restoreRight)
+QWidget* makeTopBar(QPushButton*& restoreLeft, QPushButton*& restoreRight, QPushButton*& attention)
 {
     auto* bar = new QFrame;
     bar->setObjectName(QStringLiteral("topBar"));
@@ -78,9 +79,7 @@ QWidget* makeTopBar(QPushButton*& restoreLeft, QPushButton*& restoreRight)
     model->setFixedSize(210, 32);
     row->addWidget(model);
 
-    auto* attention = new QLabel(QStringLiteral("2 attention"));
-    attention->setAlignment(Qt::AlignCenter);
-    attention->setStyleSheet(QStringLiteral("background:#3d2912;color:#f5a83b;border-radius:8px;font-size:11px;font-weight:600;"));
+    attention = new QPushButton(QStringLiteral("0 requests"));
     attention->setFixedSize(106, 32);
     row->addWidget(attention);
 
@@ -97,7 +96,10 @@ QWidget* makeTopBar(QPushButton*& restoreLeft, QPushButton*& restoreRight)
     return bar;
 }
 
-QWidget* makeStatusBar(QFrame*& codexStatusDot, QLabel*& synchronizationStatus, QLabel*& controllerStatus)
+QWidget* makeStatusBar(QFrame*& codexStatusDot,
+                       QLabel*& synchronizationStatus,
+                       QLabel*& controllerStatus,
+                       QLabel*& attentionStatus)
 {
     auto* bar = new QFrame;
     bar->setObjectName(QStringLiteral("customStatusBar"));
@@ -126,9 +128,9 @@ QWidget* makeStatusBar(QFrame*& codexStatusDot, QLabel*& synchronizationStatus, 
     controllerStatus->setStyleSheet(QStringLiteral("color:#949ead;font-size:10px;font-weight:600;"));
     row->addWidget(controllerStatus);
     row->addStretch();
-    auto* attention = label(QStringLiteral("2 attention"), "meta");
-    attention->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:10px;font-weight:600;"));
-    row->addWidget(attention);
+    attentionStatus = label(QStringLiteral("0 requests"), "meta");
+    attentionStatus->setStyleSheet(QStringLiteral("color:#949ead;font-size:10px;font-weight:600;"));
+    row->addWidget(attentionStatus);
     return bar;
 }
 
@@ -156,7 +158,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    layout->addWidget(makeTopBar(restoreSidebar, restoreInspector));
+    layout->addWidget(makeTopBar(restoreSidebar, restoreInspector, attentionButton));
 
     splitter = new QSplitter(Qt::Horizontal);
     splitter->setChildrenCollapsible(false);
@@ -172,12 +174,18 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     splitter->setStretchFactor(2, 0);
     splitter->setSizes({282, 834, 404});
     layout->addWidget(splitter, 1);
-    layout->addWidget(makeStatusBar(codexStatusDot, synchronizationStatus, controllerStatus));
+    layout->addWidget(makeStatusBar(codexStatusDot, synchronizationStatus, controllerStatus, attentionStatus));
+
+    interactiveRequestDialog = new InteractiveRequestDialog(
+        [this]() -> const ai::openai::codex::frontend::client::State& { return frontendSession.state(); },
+        [this](InteractiveRequestResponse response) { submitInteractiveResponse(std::move(response)); },
+        this);
 
     connect(sidebar, &SidebarWidget::hideRequested, this, [this] { setSidebarVisible(false); });
     connect(inspector, &InspectorWidget::hideRequested, this, [this] { setInspectorVisible(false); });
     connect(restoreSidebar, &QPushButton::clicked, this, [this] { setSidebarVisible(true); });
     connect(restoreInspector, &QPushButton::clicked, this, [this] { setInspectorVisible(true); });
+    connect(attentionButton, &QPushButton::clicked, interactiveRequestDialog, &InteractiveRequestDialog::present);
     connect(sidebar, &SidebarWidget::newThreadRequested, this, &WorkbenchWidget::beginNewThread);
     connect(sidebar, &SidebarWidget::threadSelected, this, &WorkbenchWidget::selectThread);
     connect(conversation, &ConversationWidget::sendRequested, this, &WorkbenchWidget::sendPrompt);
@@ -230,6 +238,8 @@ void WorkbenchWidget::refreshLifecycle()
         clearWriteTransients();
         if (writeWasPending)
             showWriteError(QStringLiteral("Backend disconnected before the write completed"));
+        if (requestControllerAcquireInFlight || requestResponseInFlight || pendingInteractiveResponse)
+            clearInteractiveTransients(QStringLiteral("Backend disconnected before the response completed"));
     }
     refreshControllerStatus();
     refreshControls();
@@ -258,6 +268,24 @@ void WorkbenchWidget::refreshState()
     // immutable State and never retains backend object addresses.
     conversation->render(state, selectedThreadId, newThreadDraft);
 
+    const std::size_t attentionCount = state.hasPendingRequestProjection() ? state.pendingRequests().size() : 0;
+    const QString attentionText = QStringLiteral("%1 request%2")
+                                      .arg(attentionCount)
+                                      .arg(attentionCount == 1 ? QString{} : QStringLiteral("s"));
+    attentionButton->setText(attentionText);
+    attentionStatus->setText(attentionText);
+    const bool needsAttention = attentionCount > 0;
+    attentionButton->setStyleSheet(
+        needsAttention
+            ? QStringLiteral("background:#3d2912;color:#f5a83b;border-radius:8px;font-size:11px;font-weight:600;")
+            : QStringLiteral("background:#181c21;color:#949ead;border-radius:8px;font-size:11px;font-weight:600;"));
+    attentionStatus->setStyleSheet(
+        QStringLiteral("color:%1;font-size:10px;font-weight:600;")
+            .arg(needsAttention ? QStringLiteral("#f5a83b") : QStringLiteral("#949ead")));
+    attentionButton->setToolTip(needsAttention ? QStringLiteral("Open pending Codex requests")
+                                               : QStringLiteral("Codex has no pending requests"));
+    interactiveRequestDialog->synchronize(state);
+
     const auto* selected = selectedThreadId.isEmpty() ? nullptr : state.thread(selectedThreadId.toStdString());
     if (selected && !selected->fullyLoaded)
         frontendSession.loadThread(selectedThreadId);
@@ -266,6 +294,9 @@ void WorkbenchWidget::refreshState()
     refreshControllerStatus();
     if (pendingAction != PendingAction::None && frontendSession.ownsController())
         executePendingAction();
+    if (pendingInteractiveResponse && !requestControllerAcquireInFlight && !requestResponseInFlight
+        && frontendSession.ownsController())
+        performInteractiveResponse();
     refreshControls();
 }
 
@@ -285,7 +316,8 @@ void WorkbenchWidget::refreshControls()
                                ? state.thread(selectedThreadId.toStdString())
                                : nullptr;
     const auto* active = activeTurn(state, selected);
-    const bool pendingControllerWrite = controllerAcquireInFlight || pendingAction != PendingAction::None;
+    const bool pendingControllerWrite = controllerAcquireInFlight || pendingAction != PendingAction::None
+                                        || requestControllerAcquireInFlight || requestResponseInFlight;
     const bool promptSubmissionInFlight = threadStartInFlight || threadResumeInFlight || turnStartInFlight;
 
     sidebar->setNewThreadEnabled(ready && !promptSubmissionInFlight && !pendingControllerWrite);
@@ -321,6 +353,142 @@ void WorkbenchWidget::refreshControllerStatus()
     controllerStatus->setToolTip(tooltip);
     controllerStatus->setStyleSheet(
         QStringLiteral("color:%1;font-size:10px;font-weight:600;").arg(color));
+}
+
+void WorkbenchWidget::submitInteractiveResponse(InteractiveRequestResponse response)
+{
+    const std::string id = response.requestId.value;
+    const auto* current = frontendSession.state().pendingRequest(response.requestId);
+    if (!current) {
+        interactiveRequestDialog->responseFailed(id, QStringLiteral("This request is no longer pending"));
+        return;
+    }
+    if (current->kind != response.kind) {
+        interactiveRequestDialog->responseFailed(id, QStringLiteral("This request changed; review it and retry"));
+        return;
+    }
+    if (requestControllerAcquireInFlight || requestResponseInFlight || pendingInteractiveResponse) {
+        interactiveRequestDialog->responseFailed(id, QStringLiteral("Another response is already being submitted"));
+        return;
+    }
+    if (controllerAcquireInFlight || pendingAction != PendingAction::None) {
+        interactiveRequestDialog->responseFailed(id, QStringLiteral("Another write is acquiring controller; retry shortly"));
+        return;
+    }
+
+    pendingInteractiveResponse = std::move(response);
+    activeInteractiveRequestId = id;
+    ensureInteractiveController();
+}
+
+void WorkbenchWidget::ensureInteractiveController()
+{
+    if (!pendingInteractiveResponse)
+        return;
+    if (frontendSession.ownsController()) {
+        performInteractiveResponse();
+        return;
+    }
+
+    requestControllerAcquireInFlight = true;
+    controllerUnavailable = false;
+    const std::string requestId = pendingInteractiveResponse->requestId.value;
+    interactiveRequestDialog->setSubmitting(requestId, QStringLiteral("Acquiring controller…"));
+    refreshControllerStatus();
+    refreshControls();
+    const QPointer<WorkbenchWidget> self(this);
+    const auto immediateError = frontendSession.acquireController([self, requestId](const QString& error) {
+        if (!self)
+            return;
+        self->requestControllerAcquireInFlight = false;
+        if (self->frontendSession.ownsController()) {
+            self->controllerUnavailable = false;
+            self->performInteractiveResponse();
+        } else if (!error.isEmpty()) {
+            self->pendingInteractiveResponse.reset();
+            self->activeInteractiveRequestId.clear();
+            self->controllerUnavailable = true;
+            self->interactiveRequestDialog->responseFailed(requestId, error);
+        } else {
+            self->interactiveRequestDialog->setSubmitting(requestId, QStringLiteral("Waiting for controller state…"));
+        }
+        self->refreshControllerStatus();
+        self->refreshControls();
+    });
+    if (immediateError) {
+        requestControllerAcquireInFlight = false;
+        pendingInteractiveResponse.reset();
+        activeInteractiveRequestId.clear();
+        controllerUnavailable = true;
+        interactiveRequestDialog->responseFailed(requestId, *immediateError);
+        refreshControllerStatus();
+        refreshControls();
+    }
+}
+
+void WorkbenchWidget::performInteractiveResponse()
+{
+    if (!pendingInteractiveResponse || !frontendSession.ownsController() || requestResponseInFlight)
+        return;
+
+    InteractiveRequestResponse response = std::move(*pendingInteractiveResponse);
+    pendingInteractiveResponse.reset();
+    const std::string requestId = response.requestId.value;
+    const auto* current = frontendSession.state().pendingRequest(response.requestId);
+    if (!current) {
+        activeInteractiveRequestId.clear();
+        interactiveRequestDialog->responseFailed(requestId, QStringLiteral("This request is no longer pending"));
+        return;
+    }
+    if (current->kind != response.kind) {
+        activeInteractiveRequestId.clear();
+        interactiveRequestDialog->responseFailed(requestId, QStringLiteral("This request changed; review it and retry"));
+        return;
+    }
+
+    requestResponseInFlight = true;
+    interactiveRequestDialog->setSubmitting(requestId, QStringLiteral("Submitting response…"));
+    refreshControls();
+    const QPointer<WorkbenchWidget> self(this);
+    const auto completion = [self, requestId](const QString& error) {
+        if (!self)
+            return;
+        self->requestResponseInFlight = false;
+        if (error.isEmpty())
+            self->interactiveRequestDialog->responseAccepted(requestId);
+        else
+            self->interactiveRequestDialog->responseFailed(requestId, error);
+        self->activeInteractiveRequestId.clear();
+        self->refreshControls();
+    };
+
+    std::optional<QString> immediateError;
+    if (auto* approval = std::get_if<ai::openai::codex::typed::ApprovalDecision>(&response.value)) {
+        immediateError = frontendSession.respondApproval(response.requestId, std::move(*approval), completion);
+    } else if (auto* patch = std::get_if<ai::openai::codex::typed::ApplyPatchApprovalResponse>(&response.value)) {
+        immediateError = frontendSession.respondApplyPatchApproval(response.requestId, std::move(*patch), completion);
+    } else if (auto* command = std::get_if<ai::openai::codex::typed::ExecCommandApprovalResponse>(&response.value)) {
+        immediateError = frontendSession.respondExecCommandApproval(response.requestId, std::move(*command), completion);
+    } else if (auto* answers = std::get_if<std::vector<ai::openai::codex::typed::UserInputAnswer>>(&response.value)) {
+        immediateError = frontendSession.respondUserInput(response.requestId, std::move(*answers), completion);
+    }
+    if (immediateError) {
+        requestResponseInFlight = false;
+        activeInteractiveRequestId.clear();
+        interactiveRequestDialog->responseFailed(requestId, *immediateError);
+        refreshControls();
+    }
+}
+
+void WorkbenchWidget::clearInteractiveTransients(const QString& error)
+{
+    const std::string requestId = activeInteractiveRequestId;
+    pendingInteractiveResponse.reset();
+    activeInteractiveRequestId.clear();
+    requestControllerAcquireInFlight = false;
+    requestResponseInFlight = false;
+    if (!requestId.empty())
+        interactiveRequestDialog->responseFailed(requestId, error);
 }
 
 void WorkbenchWidget::beginNewThread()

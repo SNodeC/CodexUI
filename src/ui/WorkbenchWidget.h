@@ -3,8 +3,12 @@
 #ifndef CODEXUI_UI_WORKBENCHWIDGET_H
 #define CODEXUI_UI_WORKBENCHWIDGET_H
 
+#include "ui/InteractiveRequestDialog.h"
+
 #include <QWidget>
 #include <QString>
+
+#include <optional>
 
 class QFrame;
 class QLabel;
@@ -42,6 +46,10 @@ private:
     void interruptTurn(const QString& threadId, const QString& turnId);
     void showWriteError(const QString& error);
     void clearWriteTransients();
+    void submitInteractiveResponse(InteractiveRequestResponse response);
+    void ensureInteractiveController();
+    void performInteractiveResponse();
+    void clearInteractiveTransients(const QString& error = {});
     void setSidebarVisible(bool visible);
     void setInspectorVisible(bool visible);
 
@@ -55,6 +63,9 @@ private:
     QFrame* codexStatusDot = nullptr;
     QLabel* synchronizationStatus = nullptr;
     QLabel* controllerStatus = nullptr;
+    QLabel* attentionStatus = nullptr;
+    QPushButton* attentionButton = nullptr;
+    InteractiveRequestDialog* interactiveRequestDialog = nullptr;
     QString selectedThreadId;
     QString newThreadIdAwaitingState;
     QString pendingPrompt;
@@ -68,6 +79,10 @@ private:
     bool turnStartInFlight = false;
     bool interruptInFlight = false;
     bool controllerUnavailable = false;
+    std::optional<InteractiveRequestResponse> pendingInteractiveResponse;
+    std::string activeInteractiveRequestId;
+    bool requestControllerAcquireInFlight = false;
+    bool requestResponseInFlight = false;
 };
 
 } // namespace codexui
