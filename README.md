@@ -35,8 +35,14 @@ attention count opens the compact request dialog, responses acquire controller
 ownership only when submitted, and requests remain visible until a subsequent
 immutable State update removes or changes them.
 
-Attachments, Inspector conversion, advanced thread management, and
-settings/persistence remain outside the current interactive core.
+The Inspector follows the selected thread and renders its latest plan,
+subagent/collaboration activity, reported file changes, and compact factual
+thread/turn/synchronization information from public typed AISuite projections.
+Unavailable or truncated fields remain visibly absent rather than being
+reconstructed from protocol JSON or the local filesystem.
+
+Attachments, advanced thread management, and settings/persistence remain
+outside the current interactive core.
 
 ## Build
 

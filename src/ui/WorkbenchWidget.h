@@ -61,6 +61,9 @@ private:
     QPushButton* restoreSidebar = nullptr;
     QPushButton* restoreInspector = nullptr;
     QFrame* codexStatusDot = nullptr;
+    QLabel* modelStatus = nullptr;
+    QLabel* threadContextStatus = nullptr;
+    QLabel* agentActivityStatus = nullptr;
     QLabel* synchronizationStatus = nullptr;
     QLabel* controllerStatus = nullptr;
     QLabel* attentionStatus = nullptr;
