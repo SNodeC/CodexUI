@@ -98,11 +98,15 @@ FrontendSession::FrontendSession(QObject* parent)
     connect(&socket, &QLocalSocket::readyRead, this, &FrontendSession::socketReadyRead);
     connect(&socket, &QLocalSocket::disconnected, this, &FrontendSession::socketDisconnected);
     connect(&socket, &QLocalSocket::errorOccurred, this, &FrontendSession::socketFailed);
+    reconnectTimer.setInterval(1'000);
+    reconnectTimer.setSingleShot(true);
+    connect(&reconnectTimer, &QTimer::timeout, this, &FrontendSession::retryConnection);
 }
 
 FrontendSession::~FrontendSession()
 {
     localShutdown = true;
+    reconnectTimer.stop();
     if (connection.isOpen())
         connection.close("CodexUI is closing");
     client->close("CodexUI is closing");
@@ -346,6 +350,7 @@ QString FrontendSession::defaultSocketPath()
 
 void FrontendSession::socketConnected()
 {
+    reconnectTimer.stop();
     connection = client->openConnection({
         [this](OutboundMessage message) { return send(std::move(message)); },
         [this](std::string reason) { closeTransport(QString::fromStdString(reason)); },
@@ -408,8 +413,11 @@ void FrontendSession::socketDisconnected()
             connection.transportDisconnected(sdk::TransportError{"Unix backend disconnected", true});
     }
     connection = Connection{};
-    if (!localShutdown && currentLifecycle != Lifecycle::Failed)
-        setLifecycle(Lifecycle::Disconnected);
+    if (!localShutdown) {
+        if (currentLifecycle != Lifecycle::Failed)
+            setLifecycle(Lifecycle::Disconnected);
+        reconnectTimer.start();
+    }
 }
 
 void FrontendSession::socketFailed(QLocalSocket::LocalSocketError)
@@ -420,6 +428,18 @@ void FrontendSession::socketFailed(QLocalSocket::LocalSocketError)
         connection.transportDisconnected(sdk::TransportError{socket.errorString().toStdString(), true});
     connection = Connection{};
     setLifecycle(Lifecycle::Failed, socket.errorString());
+    reconnectTimer.start();
+}
+
+void FrontendSession::retryConnection()
+{
+    if (localShutdown)
+        return;
+    if (socket.state() != QLocalSocket::UnconnectedState) {
+        reconnectTimer.start();
+        return;
+    }
+    connectToBackend();
 }
 
 FrontendSession::SendResult FrontendSession::send(OutboundMessage message) noexcept
