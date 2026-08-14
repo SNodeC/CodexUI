@@ -6,7 +6,6 @@
 #include <QObject>
 #include <QLocalSocket>
 #include <QString>
-#include <QTimer>
 
 #include <ai/openai/codex/frontend/client/Client.h>
 
@@ -79,13 +78,11 @@ private:
     void socketReadyRead();
     void socketDisconnected();
     void socketFailed(QLocalSocket::LocalSocketError error);
-    void retryConnection();
     [[nodiscard]] SendResult send(OutboundMessage message) noexcept;
     void closeTransport(QString reason) noexcept;
     void setLifecycle(Lifecycle value, QString detail = {});
 
     QLocalSocket socket;
-    QTimer reconnectTimer;
     std::unique_ptr<Client> client;
     Connection connection;
     ai::openai::codex::frontend::client::State currentState;
