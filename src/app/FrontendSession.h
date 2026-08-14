@@ -14,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace codexui {
 
@@ -45,6 +46,22 @@ public:
     [[nodiscard]] std::optional<QString> interruptTurn(const QString& threadId,
                                                        const QString& turnId,
                                                        OperationCompletion completion);
+    [[nodiscard]] std::optional<QString>
+    respondApproval(const ai::openai::codex::frontend::client::PendingRequestId& requestId,
+                    ai::openai::codex::typed::ApprovalDecision decision,
+                    OperationCompletion completion);
+    [[nodiscard]] std::optional<QString>
+    respondApplyPatchApproval(const ai::openai::codex::frontend::client::PendingRequestId& requestId,
+                              ai::openai::codex::typed::ApplyPatchApprovalResponse response,
+                              OperationCompletion completion);
+    [[nodiscard]] std::optional<QString>
+    respondExecCommandApproval(const ai::openai::codex::frontend::client::PendingRequestId& requestId,
+                               ai::openai::codex::typed::ExecCommandApprovalResponse response,
+                               OperationCompletion completion);
+    [[nodiscard]] std::optional<QString>
+    respondUserInput(const ai::openai::codex::frontend::client::PendingRequestId& requestId,
+                     std::vector<ai::openai::codex::typed::UserInputAnswer> answers,
+                     OperationCompletion completion);
 
 signals:
     void lifecycleChanged();

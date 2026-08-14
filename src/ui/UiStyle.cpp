@@ -63,6 +63,16 @@ QString applicationStyleSheet()
             selection-background-color: #1a2940;
         }
         QPlainTextEdit[empty="true"] { color: #949ead; }
+        QLineEdit {
+            background: #13161a;
+            border: 1px solid #343b45;
+            border-radius: 7px;
+            min-height: 32px;
+            padding: 0 9px;
+        }
+        QLineEdit:focus { border-color: #4f94f5; }
+        QCheckBox, QRadioButton { spacing: 8px; }
+        QDialog { background: #0e1013; }
         QScrollArea { background: transparent; border: 0; }
         QScrollArea > QWidget > QWidget { background: transparent; }
         QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
