@@ -37,6 +37,16 @@ QLabel* section(const QString& text, bool attention = false)
     return result;
 }
 
+QString boundedRowText(QString value)
+{
+    constexpr qsizetype maximumCharacters = 512;
+    if (value.size() <= maximumCharacters)
+        return value;
+    value.truncate(maximumCharacters);
+    value.append(QChar(0x2026));
+    return value;
+}
+
 class ThreadRow final : public QFrame
 {
 public:
@@ -72,6 +82,7 @@ public:
         content->addWidget(titleLabel);
         if (!fullDetails.isEmpty()) {
             detailsLabel = textLabel(fullDetails, "meta");
+            detailsLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
             detailsLabel->setToolTip(fullDetails);
             content->addWidget(detailsLabel);
         }
@@ -117,9 +128,17 @@ protected:
     void resizeEvent(QResizeEvent* event) override
     {
         const int availableWidth = qMax(0, event->size().width() - 42);
-        titleLabel->setText(titleLabel->fontMetrics().elidedText(fullTitle, Qt::ElideRight, availableWidth));
-        if (detailsLabel)
-            detailsLabel->setText(detailsLabel->fontMetrics().elidedText(fullDetails, Qt::ElideRight, availableWidth));
+        if (availableWidth != lastAvailableWidth) {
+            lastAvailableWidth = availableWidth;
+            const QString title = titleLabel->fontMetrics().elidedText(fullTitle, Qt::ElideRight, availableWidth);
+            if (titleLabel->text() != title)
+                titleLabel->setText(title);
+            if (detailsLabel) {
+                const QString details = detailsLabel->fontMetrics().elidedText(fullDetails, Qt::ElideRight, availableWidth);
+                if (detailsLabel->text() != details)
+                    detailsLabel->setText(details);
+            }
+        }
         QFrame::resizeEvent(event);
     }
 
@@ -138,6 +157,7 @@ private:
     QString fullTitle;
     QString fullDetails;
     QString dotColor;
+    int lastAvailableWidth = -1;
     bool selected = false;
     bool hovered = false;
 };
@@ -159,8 +179,10 @@ QString threadStatusColor(const std::optional<std::string>& status)
 void clearLayout(QLayout* layout)
 {
     while (auto* item = layout->takeAt(0)) {
-        if (auto* widget = item->widget())
+        if (auto* widget = item->widget()) {
+            widget->hide();
             widget->deleteLater();
+        }
         delete item;
     }
 }
@@ -242,31 +264,46 @@ SidebarWidget::SidebarWidget(QWidget* parent)
 void SidebarWidget::setThreads(const ai::openai::codex::frontend::client::State& state,
                                const QString& selectedThreadId)
 {
+    std::vector<ThreadPresentation> presentations;
+    const auto threads = state.threads();
+    presentations.reserve(threads.size());
+    for (const auto& thread : threads) {
+        const QString id = QString::fromStdString(thread.id.value);
+        const QString title = boundedRowText(
+            thread.title && !thread.title->empty() ? QString::fromStdString(*thread.title) : id);
+        QString secondary;
+        if (thread.status && !thread.status->empty())
+            secondary = boundedRowText(QString::fromStdString(*thread.status));
+        if (thread.preview && !thread.preview->empty()) {
+            const QString preview = boundedRowText(QString::fromStdString(*thread.preview));
+            if (preview != title) {
+                if (!secondary.isEmpty())
+                    secondary += QStringLiteral(" · ");
+                secondary += preview;
+            }
+        }
+        if (secondary.isEmpty())
+            secondary = QStringLiteral("Synchronized thread");
+        presentations.push_back({id, title, boundedRowText(secondary), threadStatusColor(thread.status)});
+    }
+
+    if (threadsRendered && presentations == renderedThreads && selectedThreadId == renderedSelection)
+        return;
+    threadsRendered = true;
+    renderedThreads = std::move(presentations);
+    renderedSelection = selectedThreadId;
+
     clearLayout(threadItems);
     threadItems->addWidget(section(QStringLiteral("THREADS")));
 
-    const auto threads = state.threads();
-    if (threads.empty()) {
+    if (renderedThreads.empty()) {
         auto* empty = textLabel(QStringLiteral("No synchronized threads"), "muted");
         empty->setContentsMargins(12, 8, 0, 0);
         threadItems->addWidget(empty);
     } else {
-        for (const auto& thread : threads) {
-            const QString id = QString::fromStdString(thread.id.value);
-            const QString title = thread.title && !thread.title->empty() ? QString::fromStdString(*thread.title) : id;
-            QString secondary;
-            if (thread.status && !thread.status->empty())
-                secondary = QString::fromStdString(*thread.status);
-            if (thread.preview && !thread.preview->empty() && QString::fromStdString(*thread.preview) != title) {
-                if (!secondary.isEmpty())
-                    secondary += QStringLiteral(" · ");
-                secondary += QString::fromStdString(*thread.preview);
-            }
-            if (secondary.isEmpty())
-                secondary = QStringLiteral("Synchronized thread");
-
-            auto* row = new ThreadRow(id, title, secondary, threadStatusColor(thread.status));
-            row->setSelected(id == selectedThreadId);
+        for (const auto& presentation : renderedThreads) {
+            auto* row = new ThreadRow(presentation.id, presentation.title, presentation.details, presentation.color);
+            row->setSelected(presentation.id == selectedThreadId);
             row->clicked = [this](ThreadRow* selected) { emit threadSelected(selected->id()); };
             threadItems->addWidget(row);
         }

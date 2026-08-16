@@ -7,10 +7,13 @@
 
 #include <QString>
 
+#include <cstdint>
+
 class QFrame;
 class QLabel;
 class QPlainTextEdit;
 class QPushButton;
+class QResizeEvent;
 class QScrollArea;
 class QVBoxLayout;
 
@@ -40,8 +43,10 @@ signals:
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
+    void synchronizeTimelineHeight();
     void updateSendEnabled();
 
     QFrame* composer = nullptr;
@@ -56,8 +61,11 @@ private:
     QVBoxLayout* turnSummaryLayout = nullptr;
     QLabel* turnFailure = nullptr;
     QScrollArea* scrollArea = nullptr;
+    QWidget* timelineHost = nullptr;
     QVBoxLayout* timeline = nullptr;
     QString renderedThreadId;
+    std::uint64_t renderGeneration = 0;
+    bool followLatestPending = false;
     bool renderedNewThreadDraft = false;
     bool sendContextAllowed = false;
 };

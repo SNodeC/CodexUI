@@ -5,6 +5,8 @@
 
 #include <QWidget>
 
+#include <vector>
+
 class QFrame;
 class QLabel;
 class QPushButton;
@@ -32,11 +34,23 @@ signals:
     void threadSelected(const QString& threadId);
 
 private:
+    struct ThreadPresentation {
+        QString id;
+        QString title;
+        QString details;
+        QString color;
+
+        bool operator==(const ThreadPresentation&) const = default;
+    };
+
     QVBoxLayout* threadItems = nullptr;
     QFrame* serverDot = nullptr;
     QLabel* serverTitle = nullptr;
     QLabel* serverDetail = nullptr;
     QPushButton* newThread = nullptr;
+    std::vector<ThreadPresentation> renderedThreads;
+    QString renderedSelection;
+    bool threadsRendered = false;
 };
 
 } // namespace codexui

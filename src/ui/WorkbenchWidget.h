@@ -31,6 +31,7 @@ private:
     enum class PendingAction { None, SendExistingThread, SendNewThread, InterruptTurn };
 
     void refreshLifecycle();
+    void scheduleStateRefresh();
     void refreshState();
     void refreshControls();
     void refreshControllerStatus();
@@ -88,6 +89,7 @@ private:
     std::string activeInteractiveRequestId;
     bool requestControllerAcquireInFlight = false;
     bool requestResponseInFlight = false;
+    bool stateRefreshPending = false;
 };
 
 } // namespace codexui

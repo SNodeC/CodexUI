@@ -17,6 +17,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSplitter>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <variant>
@@ -209,10 +210,23 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     connect(conversation, &ConversationWidget::sendRequested, this, &WorkbenchWidget::sendPrompt);
     connect(conversation, &ConversationWidget::stopRequested, this, &WorkbenchWidget::stopActiveTurn);
     connect(&frontendSession, &FrontendSession::lifecycleChanged, this, &WorkbenchWidget::refreshLifecycle);
-    connect(&frontendSession, &FrontendSession::stateChanged, this, &WorkbenchWidget::refreshState);
+    connect(&frontendSession, &FrontendSession::stateChanged, this, &WorkbenchWidget::scheduleStateRefresh);
 
     refreshLifecycle();
     refreshState();
+}
+
+void WorkbenchWidget::scheduleStateRefresh()
+{
+    if (stateRefreshPending)
+        return;
+    stateRefreshPending = true;
+    QTimer::singleShot(0, this, [this] {
+        if (!stateRefreshPending)
+            return;
+        stateRefreshPending = false;
+        refreshState();
+    });
 }
 
 void WorkbenchWidget::refreshLifecycle()
@@ -273,6 +287,7 @@ void WorkbenchWidget::refreshLifecycle()
 
 void WorkbenchWidget::refreshState()
 {
+    stateRefreshPending = false;
     const auto& state = frontendSession.state();
     const auto threads = state.threads();
 

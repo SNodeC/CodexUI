@@ -7,6 +7,7 @@
 
 #include <QEvent>
 #include <QFrame>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QKeySequence>
@@ -15,6 +16,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSizePolicy>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -80,6 +82,45 @@ QLabel* textLabel(const QString& text, const char* kind = nullptr)
 {
     auto* result = new QLabel(text);
     result->setTextFormat(Qt::PlainText);
+    if (kind) result->setProperty("kind", kind);
+    return result;
+}
+
+class WrappingLabel final : public QLabel
+{
+public:
+    explicit WrappingLabel(const QString& text) : QLabel(text)
+    {
+        setTextFormat(Qt::PlainText);
+        setWordWrap(true);
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    }
+
+    int heightForWidth(int width) const override
+    {
+        const auto found = heightCache.constFind(width);
+        if (found != heightCache.cend())
+            return *found;
+        const int height = QLabel::heightForWidth(width);
+        heightCache.insert(width, height);
+        return height;
+    }
+
+protected:
+    void changeEvent(QEvent* event) override
+    {
+        if (event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange)
+            heightCache.clear();
+        QLabel::changeEvent(event);
+    }
+
+private:
+    mutable QHash<int, int> heightCache;
+};
+
+QLabel* wrappingLabel(const QString& text, const char* kind = nullptr)
+{
+    auto* result = new WrappingLabel(text);
     if (kind) result->setProperty("kind", kind);
     return result;
 }
@@ -364,14 +405,12 @@ void addActivityRow(QVBoxLayout* rows, const ActivityPresentation& item)
     auto* copyLayout = new QVBoxLayout(copy);
     copyLayout->setContentsMargins(0, 0, 0, 0);
     copyLayout->setSpacing(2);
-    auto* title = textLabel(item.title);
+    auto* title = wrappingLabel(item.title);
     title->setStyleSheet(QStringLiteral("font-size:12px;font-weight:500;"));
-    title->setWordWrap(true);
     copyLayout->addWidget(title);
     if (!item.detail.isEmpty())
     {
-        auto* detail = textLabel(compact(item.detail), "meta");
-        detail->setWordWrap(true);
+        auto* detail = wrappingLabel(compact(item.detail), "meta");
         detail->setToolTip(item.detail);
         copyLayout->addWidget(detail);
     }
@@ -489,8 +528,7 @@ void addMessage(QVBoxLayout* timeline, const sdk::ItemState& item, bool user)
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(5);
     }
-    auto* copy = textLabel(content, missing ? "meta" : "body");
-    copy->setWordWrap(true);
+    auto* copy = wrappingLabel(content, missing ? "meta" : "body");
     copy->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(copy);
     QString truncation = userMessage ? userMessageTruncationText(*userMessage) : QString{};
@@ -565,8 +603,7 @@ void addEmptyState(QVBoxLayout* timeline, const QString& title, const QString& d
     auto* heading = textLabel(title);
     heading->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
     layout->addWidget(heading);
-    auto* copy = textLabel(detail, "meta");
-    copy->setWordWrap(true);
+    auto* copy = wrappingLabel(detail, "meta");
     layout->addWidget(copy);
     timeline->addWidget(empty);
     timeline->addSpacing(16);
@@ -620,6 +657,17 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     scrollArea = new QScrollArea;
     scrollArea->setWidgetResizable(true);
     scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto* conversationScroll = scrollArea->verticalScrollBar();
+    connect(conversationScroll, &QScrollBar::rangeChanged, this,
+            [this, conversationScroll](int, int maximum)
+            {
+                if (followLatestPending)
+                    conversationScroll->setValue(maximum);
+            });
+    connect(conversationScroll, &QScrollBar::actionTriggered, this,
+            [this](int) { followLatestPending = false; });
+    connect(conversationScroll, &QScrollBar::sliderPressed, this,
+            [this] { followLatestPending = false; });
     auto* content = new QWidget;
     content->setStyleSheet(QStringLiteral("background:transparent;"));
     auto* conversation = new QVBoxLayout(content);
@@ -627,7 +675,7 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     conversation->setSpacing(0);
     conversation->setAlignment(Qt::AlignTop);
 
-    auto* timelineHost = new QWidget;
+    timelineHost = new QWidget;
     timeline = new QVBoxLayout(timelineHost);
     timeline->setContentsMargins(0, 0, 0, 0);
     timeline->setSpacing(0);
@@ -699,6 +747,9 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
     const int previousScroll = scrollBar->value();
     const bool wasNearBottom = scrollBar->maximum() - previousScroll <= 72;
     const bool threadChanged = renderedThreadId != threadId || renderedNewThreadDraft != newThreadDraft;
+    const bool followLatest = threadChanged || wasNearBottom || followLatestPending;
+    followLatestPending = followLatest;
+    const std::uint64_t generation = ++renderGeneration;
     renderedThreadId = threadId;
     renderedNewThreadDraft = newThreadDraft;
 
@@ -797,8 +848,7 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
             const QString usage = tokenUsageText(*currentTurn);
             if (!usage.isEmpty())
             {
-                auto* tokens = textLabel(usage, "small");
-                tokens->setWordWrap(true);
+                auto* tokens = wrappingLabel(usage, "small");
                 tokens->setToolTip(usage);
                 turnSummaryLayout->addWidget(tokens);
             }
@@ -895,20 +945,51 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
         }
     }
 
+    synchronizeTimelineHeight();
     QTimer::singleShot(0, this,
-                       [this, previousScroll, wasNearBottom, threadChanged]
+                       [this, previousScroll, followLatest, generation]
                        {
+                           if (generation != renderGeneration)
+                               return;
+                           synchronizeTimelineHeight();
                            scrollArea->widget()->layout()->activate();
                            scrollArea->widget()->adjustSize();
                            QTimer::singleShot(0, this,
-                                              [this, previousScroll, wasNearBottom, threadChanged]
+                                              [this, previousScroll, followLatest, generation]
                                               {
+                                                  if (generation != renderGeneration)
+                                                      return;
+                                                  synchronizeTimelineHeight();
+                                                  scrollArea->widget()->layout()->activate();
+                                                  scrollArea->widget()->adjustSize();
                                                   auto* bar = scrollArea->verticalScrollBar();
-                                                  if (threadChanged || wasNearBottom)
+                                                  if (followLatest)
                                                       bar->setValue(bar->maximum());
                                                   else
                                                       bar->setValue(qMin(previousScroll, bar->maximum()));
                                               });
+                       });
+}
+
+void ConversationWidget::synchronizeTimelineHeight()
+{
+    timeline->invalidate();
+    const int height = timeline->minimumSize().height();
+    timelineHost->setFixedHeight(qMax(0, height));
+}
+
+void ConversationWidget::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    const std::uint64_t generation = renderGeneration;
+    QTimer::singleShot(0, this,
+                       [this, generation]
+                       {
+                           if (generation != renderGeneration)
+                               return;
+                           synchronizeTimelineHeight();
+                           scrollArea->widget()->layout()->activate();
+                           scrollArea->widget()->adjustSize();
                        });
 }
 
