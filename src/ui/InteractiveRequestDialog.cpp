@@ -167,6 +167,8 @@ void InteractiveRequestDialog::synchronize(const sdk::State& state)
 {
     saveCurrentDraft();
 
+    const std::vector<std::string> previousRequestIds = orderedRequestIds;
+    const std::string previousRequestId = currentRequestId;
     orderedRequestIds.clear();
     std::set<std::string> currentIds;
     for (const auto& request : state.pendingRequests()) {
@@ -192,7 +194,10 @@ void InteractiveRequestDialog::synchronize(const sdk::State& state)
     if (!currentIds.contains(currentRequestId))
         currentRequestId = orderedRequestIds.front();
 
-    rebuild(state);
+    const bool presentationChanged = previousRequestIds != orderedRequestIds
+                                     || previousRequestId != currentRequestId;
+    if (presentationChanged && !newlyNeedsAttention)
+        rebuild(state);
     if (newlyNeedsAttention)
         present();
 }

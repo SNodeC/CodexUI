@@ -25,6 +25,12 @@
 namespace codexui {
 namespace {
 
+void setStyleSheetIfChanged(QWidget* widget, const QString& styleSheet)
+{
+    if (widget->styleSheet() != styleSheet)
+        widget->setStyleSheet(styleSheet);
+}
+
 QLabel* label(const QString& text, const char* kind = nullptr)
 {
     auto* result = new QLabel(text);
@@ -257,11 +263,11 @@ void WorkbenchWidget::refreshLifecycle()
     }
 
     sidebar->setConnectionStatus(title, detail, color);
-    codexStatusDot->setStyleSheet(QStringLiteral("background:%1;border-radius:3px;").arg(color));
+    setStyleSheetIfChanged(codexStatusDot, QStringLiteral("background:%1;border-radius:3px;").arg(color));
     synchronizationStatus->setText(frontendSession.statusText());
     synchronizationStatus->setToolTip(frontendSession.statusText());
-    synchronizationStatus->setStyleSheet(
-        QStringLiteral("color:%1;font-size:10px;font-weight:600;").arg(color));
+    setStyleSheetIfChanged(synchronizationStatus,
+                           QStringLiteral("color:%1;font-size:10px;font-weight:600;").arg(color));
     if (frontendSession.lifecycle() != Lifecycle::Ready) {
         modelStatus->setText(QStringLiteral("Model unavailable"));
         modelStatus->setToolTip({});
@@ -361,11 +367,13 @@ void WorkbenchWidget::refreshState()
     attentionButton->setText(attentionText);
     attentionStatus->setText(attentionText);
     const bool needsAttention = attentionCount > 0;
-    attentionButton->setStyleSheet(
+    setStyleSheetIfChanged(
+        attentionButton,
         needsAttention
             ? QStringLiteral("background:#3d2912;color:#f5a83b;border-radius:8px;font-size:11px;font-weight:600;")
             : QStringLiteral("background:#181c21;color:#949ead;border-radius:8px;font-size:11px;font-weight:600;"));
-    attentionStatus->setStyleSheet(
+    setStyleSheetIfChanged(
+        attentionStatus,
         QStringLiteral("color:%1;font-size:10px;font-weight:600;")
             .arg(needsAttention ? QStringLiteral("#f5a83b") : QStringLiteral("#949ead")));
     attentionButton->setToolTip(needsAttention ? QStringLiteral("Open pending Codex requests")
@@ -446,8 +454,8 @@ void WorkbenchWidget::refreshControllerStatus()
     }
     controllerStatus->setText(text);
     controllerStatus->setToolTip(tooltip);
-    controllerStatus->setStyleSheet(
-        QStringLiteral("color:%1;font-size:10px;font-weight:600;").arg(color));
+    setStyleSheetIfChanged(controllerStatus,
+                           QStringLiteral("color:%1;font-size:10px;font-weight:600;").arg(color));
 }
 
 void WorkbenchWidget::submitInteractiveResponse(InteractiveRequestResponse response)

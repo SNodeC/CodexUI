@@ -59,39 +59,54 @@ public:
         setCursor(Qt::PointingHandCursor);
         setFixedHeight(58);
         setProperty("selected", false);
-        dotColor = std::move(color);
-        fullTitle = std::move(title);
-        fullDetails = std::move(details);
 
         auto* row = new QHBoxLayout(this);
         row->setContentsMargins(12, 7, 10, 7);
         row->setSpacing(10);
         dot = new QFrame;
         dot->setFixedSize(8, 8);
-        dot->setStyleSheet(QStringLiteral("background:%1;border-radius:4px;").arg(dotColor));
         row->addWidget(dot, 0, Qt::AlignTop);
 
         auto* content = new QVBoxLayout;
         content->setContentsMargins(0, 0, 0, 0);
         content->setSpacing(3);
-        titleLabel = textLabel(fullTitle, "title");
+        titleLabel = textLabel({}, "title");
         titleLabel->setStyleSheet(QStringLiteral("font-size:13px;font-weight:500;"));
         titleLabel->setTextFormat(Qt::PlainText);
         titleLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        titleLabel->setToolTip(fullTitle);
         content->addWidget(titleLabel);
-        if (!fullDetails.isEmpty()) {
-            detailsLabel = textLabel(fullDetails, "meta");
-            detailsLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-            detailsLabel->setToolTip(fullDetails);
-            content->addWidget(detailsLabel);
-        }
+        detailsLabel = textLabel({}, "meta");
+        detailsLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        content->addWidget(detailsLabel);
         row->addLayout(content, 1);
+        updatePresentation(std::move(title), std::move(details), std::move(color));
         updateStyle();
+    }
+
+    void updatePresentation(QString title, QString details, QString color)
+    {
+        if (dotColor != color) {
+            dotColor = std::move(color);
+            dot->setStyleSheet(QStringLiteral("background:%1;border-radius:4px;").arg(dotColor));
+        }
+        if (fullTitle != title) {
+            fullTitle = std::move(title);
+            titleLabel->setToolTip(fullTitle);
+            lastAvailableWidth = -1;
+        }
+        if (fullDetails != details) {
+            fullDetails = std::move(details);
+            detailsLabel->setToolTip(fullDetails);
+            detailsLabel->setVisible(!fullDetails.isEmpty());
+            lastAvailableWidth = -1;
+        }
+        updateElision(width());
     }
 
     void setSelected(bool value)
     {
+        if (selected == value)
+            return;
         selected = value;
         updateStyle();
     }
@@ -127,7 +142,14 @@ protected:
 
     void resizeEvent(QResizeEvent* event) override
     {
-        const int availableWidth = qMax(0, event->size().width() - 42);
+        updateElision(event->size().width());
+        QFrame::resizeEvent(event);
+    }
+
+private:
+    void updateElision(int width)
+    {
+        const int availableWidth = qMax(0, width - 42);
         if (availableWidth != lastAvailableWidth) {
             lastAvailableWidth = availableWidth;
             const QString title = titleLabel->fontMetrics().elidedText(fullTitle, Qt::ElideRight, availableWidth);
@@ -139,10 +161,8 @@ protected:
                     detailsLabel->setText(details);
             }
         }
-        QFrame::resizeEvent(event);
     }
 
-private:
     void updateStyle()
     {
         const auto background = selected ? QStringLiteral("#1a2940")
@@ -289,6 +309,27 @@ void SidebarWidget::setThreads(const ai::openai::codex::frontend::client::State&
 
     if (threadsRendered && presentations == renderedThreads && selectedThreadId == renderedSelection)
         return;
+
+    bool sameOrder = threadsRendered && presentations.size() == renderedThreads.size();
+    for (std::size_t index = 0; sameOrder && index < presentations.size(); ++index)
+        sameOrder = presentations[index].id == renderedThreads[index].id;
+    if (sameOrder) {
+        renderedThreads = presentations;
+        renderedSelection = selectedThreadId;
+        for (std::size_t index = 0; index < renderedThreads.size(); ++index) {
+            auto* item = threadItems->itemAt(static_cast<int>(index + 1));
+            auto* row = item ? dynamic_cast<ThreadRow*>(item->widget()) : nullptr;
+            if (!row) {
+                sameOrder = false;
+                break;
+            }
+            const auto& presentation = renderedThreads[index];
+            row->updatePresentation(presentation.title, presentation.details, presentation.color);
+            row->setSelected(presentation.id == selectedThreadId);
+        }
+        if (sameOrder)
+            return;
+    }
     threadsRendered = true;
     renderedThreads = std::move(presentations);
     renderedSelection = selectedThreadId;

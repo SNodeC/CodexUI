@@ -3,6 +3,7 @@
 #include "ui/InspectorWidget.h"
 
 #include <QFrame>
+#include <QCryptographicHash>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -10,7 +11,6 @@
 #include <QScrollArea>
 #include <QStackedWidget>
 #include <QTabBar>
-#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -391,6 +391,28 @@ std::vector<CollaborationPresentation> collaborationPresentations(const sdk::Sta
     return result;
 }
 
+void addPresentationValue(QCryptographicHash& hash, const QByteArray& value)
+{
+    hash.addData(QByteArray::number(value.size()));
+    hash.addData(QByteArrayLiteral(":"));
+    hash.addData(value);
+}
+
+void addPresentationValue(QCryptographicHash& hash, const QString& value)
+{
+    addPresentationValue(hash, value.toUtf8());
+}
+
+void addPresentationValue(QCryptographicHash& hash, std::string_view value)
+{
+    addPresentationValue(hash, QByteArray(value.data(), static_cast<qsizetype>(value.size())));
+}
+
+void addPresentationValue(QCryptographicHash& hash, bool value)
+{
+    addPresentationValue(hash, value ? QByteArrayLiteral("1") : QByteArrayLiteral("0"));
+}
+
 } // namespace
 
 InspectorWidget::InspectorWidget(QWidget* parent)
@@ -442,37 +464,36 @@ InspectorWidget::InspectorWidget(QWidget* parent)
 
 void InspectorWidget::renderUnavailable(const QString& title, const QString& detail)
 {
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    addPresentationValue(hash, title);
+    addPresentationValue(hash, detail);
+    const QByteArray presentationKey = hash.result();
+    if (presentationKey == unavailablePresentationKey)
+        return;
+    unavailablePresentationKey = presentationKey;
     inspectedThreadId.clear();
     selectedAgentItemId.clear();
+    planPresentationKey.clear();
+    agentsPresentationKey.clear();
+    changesPresentationKey.clear();
+    infoPresentationKey.clear();
     for (QVBoxLayout* layout : {planContent, agentsContent, changesContent, infoContent})
+    {
         clearLayout(layout);
-    addEmpty(planContent, title, detail);
-    addEmpty(agentsContent, title, detail);
-    addEmpty(changesContent, title, detail);
-    addEmpty(infoContent, title, detail);
-    refreshLayoutGeometry();
+        addEmpty(layout, title, detail);
+        refreshLayoutGeometry(layout);
+    }
 }
 
-void InspectorWidget::refreshLayoutGeometry()
+void InspectorWidget::refreshLayoutGeometry(QVBoxLayout* layout)
 {
-    for (QVBoxLayout* layout : {planContent, agentsContent, changesContent, infoContent}) {
-        layout->invalidate();
-        layout->activate();
-        if (QWidget* page = layout->parentWidget()) {
-            page->adjustSize();
-            page->updateGeometry();
-            page->update();
-        }
+    layout->invalidate();
+    layout->activate();
+    if (QWidget* page = layout->parentWidget()) {
+        page->adjustSize();
+        page->updateGeometry();
+        page->update();
     }
-    update();
-    QTimer::singleShot(0, this, [this] {
-        for (QVBoxLayout* layout : {planContent, agentsContent, changesContent, infoContent}) {
-            layout->activate();
-            if (QWidget* page = layout->parentWidget())
-                page->update();
-        }
-        update();
-    });
 }
 
 void InspectorWidget::render(const sdk::State& state,
@@ -497,13 +518,16 @@ void InspectorWidget::render(const sdk::State& state,
                           QStringLiteral("The selected thread is not retained in the current State."));
         return;
     }
+    unavailablePresentationKey.clear();
     if (inspectedThreadId != threadId) {
         inspectedThreadId = threadId;
         selectedAgentItemId.clear();
+        planPresentationKey.clear();
+        agentsPresentationKey.clear();
+        changesPresentationKey.clear();
+        infoPresentationKey.clear();
     }
 
-    for (QVBoxLayout* layout : {planContent, agentsContent, changesContent, infoContent})
-        clearLayout(layout);
     const auto* turn = latestTurn(state, *thread);
 
     // Plan: the installed public SDK projects current plan text, but not typed
@@ -524,50 +548,67 @@ void InspectorWidget::render(const sdk::State& state,
             break;
         }
     }
-    if (!turn) {
-        addEmpty(planContent, QStringLiteral("No plan"), QStringLiteral("This thread has no retained turns."));
-    } else if (!planItem || !planView) {
-        addEmpty(planContent, QStringLiteral("No plan"),
-                 thread->fullyLoaded ? QStringLiteral("No plan is projected for the latest turn.")
-                                     : QStringLiteral("No plan is retained in this partial thread projection."));
-    } else {
-        planContent->addWidget(textLabel(QStringLiteral("CURRENT PLAN"), "section"));
-        planContent->addSpacing(8);
-        auto* card = detailCard();
-        auto* layout = new QVBoxLayout(card);
-        layout->setContentsMargins(14, 14, 14, 14);
-        layout->setSpacing(7);
-        auto* header = new QHBoxLayout;
-        auto* title = textLabel(QStringLiteral("Latest turn plan"));
-        title->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
-        header->addWidget(title);
-        header->addStretch();
-        const QString status = itemStatus(*planItem);
-        if (!status.isEmpty()) {
-            auto* statusLabel = textLabel(status, "small");
-            statusLabel->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;")
-                                           .arg(statusColor(status)));
-            header->addWidget(statusLabel);
-        }
-        layout->addLayout(header);
-        if (planView->text && !planView->text->empty()) {
-            auto* text = textLabel(fromUtf8(*planView->text));
-            text->setWordWrap(true);
-            text->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            text->setStyleSheet(QStringLiteral("font-size:12px;"));
-            layout->addWidget(text);
+    QCryptographicHash planHash(QCryptographicHash::Sha256);
+    addPresentationValue(planHash, turn != nullptr);
+    addPresentationValue(planHash, thread->fullyLoaded);
+    addPresentationValue(planHash, planItem != nullptr && planView.has_value());
+    if (planItem && planView) {
+        addPresentationValue(planHash, planItem->id.value);
+        addPresentationValue(planHash, itemStatus(*planItem));
+        addPresentationValue(planHash, planView->text ? std::string_view(*planView->text) : std::string_view{});
+        addPresentationValue(planHash, planView->textTruncated);
+        addPresentationValue(planHash, planItem->truncated || !planItem->omittedFields.empty());
+    }
+    const QByteArray nextPlanKey = planHash.result();
+    const bool planChanged = nextPlanKey != planPresentationKey;
+    if (planChanged) {
+        planPresentationKey = nextPlanKey;
+        clearLayout(planContent);
+        if (!turn) {
+            addEmpty(planContent, QStringLiteral("No plan"), QStringLiteral("This thread has no retained turns."));
+        } else if (!planItem || !planView) {
+            addEmpty(planContent, QStringLiteral("No plan"),
+                     thread->fullyLoaded ? QStringLiteral("No plan is projected for the latest turn.")
+                                         : QStringLiteral("No plan is retained in this partial thread projection."));
         } else {
-            auto* absent = textLabel(QStringLiteral("Plan text is unavailable in the current projection."), "muted");
-            absent->setWordWrap(true);
-            layout->addWidget(absent);
+            planContent->addWidget(textLabel(QStringLiteral("CURRENT PLAN"), "section"));
+            planContent->addSpacing(8);
+            auto* card = detailCard();
+            auto* layout = new QVBoxLayout(card);
+            layout->setContentsMargins(14, 14, 14, 14);
+            layout->setSpacing(7);
+            auto* header = new QHBoxLayout;
+            auto* title = textLabel(QStringLiteral("Latest turn plan"));
+            title->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
+            header->addWidget(title);
+            header->addStretch();
+            const QString status = itemStatus(*planItem);
+            if (!status.isEmpty()) {
+                auto* statusLabel = textLabel(status, "small");
+                statusLabel->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;")
+                                               .arg(statusColor(status)));
+                header->addWidget(statusLabel);
+            }
+            layout->addLayout(header);
+            if (planView->text && !planView->text->empty()) {
+                auto* text = textLabel(fromUtf8(*planView->text));
+                text->setWordWrap(true);
+                text->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                text->setStyleSheet(QStringLiteral("font-size:12px;"));
+                layout->addWidget(text);
+            } else {
+                auto* absent = textLabel(QStringLiteral("Plan text is unavailable in the current projection."), "muted");
+                absent->setWordWrap(true);
+                layout->addWidget(absent);
+            }
+            if (planView->textTruncated || planItem->truncated || !planItem->omittedFields.empty()) {
+                auto* truncated = textLabel(QStringLiteral("Plan projection is truncated or partially omitted"), "small");
+                truncated->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
+                layout->addWidget(truncated);
+            }
+            planContent->addWidget(card);
+            planContent->addStretch();
         }
-        if (planView->textTruncated || planItem->truncated || !planItem->omittedFields.empty()) {
-            auto* truncated = textLabel(QStringLiteral("Plan projection is truncated or partially omitted"), "small");
-            truncated->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
-            layout->addWidget(truncated);
-        }
-        planContent->addWidget(card);
-        planContent->addStretch();
     }
 
     // Agents: SubAgentActivitySemanticView is flat in this SDK. Keep the
@@ -584,12 +625,53 @@ void InspectorWidget::render(const sdk::State& state,
     if (selected == agents.end())
         selectedAgentItemId = agents.empty() ? QString{} : agents.front().itemIds.back();
 
-    if (agents.empty() && collaborations.empty()) {
-        addEmpty(agentsContent, QStringLiteral("No agent activity"),
-                 turn ? QStringLiteral("No collab or subagent activity is projected for the latest turn.")
-                      : QStringLiteral("This thread has no retained turns."));
-    } else {
-        if (!agents.empty()) {
+    QCryptographicHash agentsHash(QCryptographicHash::Sha256);
+    addPresentationValue(agentsHash, turn != nullptr);
+    addPresentationValue(agentsHash, selectedAgentItemId);
+    for (const auto& agent : agents) {
+        for (const QString& id : agent.itemIds)
+            addPresentationValue(agentsHash, id);
+        addPresentationValue(agentsHash, agent.agentPath);
+        addPresentationValue(agentsHash, agent.agentThreadId);
+        addPresentationValue(agentsHash, agent.kind);
+        addPresentationValue(agentsHash, agent.status);
+        addPresentationValue(agentsHash, agent.summary);
+        addPresentationValue(agentsHash, agent.duration);
+        if (const auto* agentThread = agent.agentThreadId.isEmpty()
+                                          ? nullptr
+                                          : state.thread(agent.agentThreadId.toStdString())) {
+            addPresentationValue(agentsHash,
+                                 agentThread->status ? std::string_view(*agentThread->status) : std::string_view{});
+            addPresentationValue(agentsHash,
+                                 agentThread->model ? std::string_view(agentThread->model->value) : std::string_view{});
+            addPresentationValue(agentsHash,
+                                 agentThread->modelProvider ? std::string_view(*agentThread->modelProvider)
+                                                            : std::string_view{});
+        }
+    }
+    for (const auto& collaboration : collaborations) {
+        addPresentationValue(agentsHash, collaboration.title);
+        addPresentationValue(agentsHash, collaboration.status);
+        addPresentationValue(agentsHash, collaboration.detail);
+        addPresentationValue(agentsHash, collaboration.truncated);
+    }
+    if (!agents.empty() && state.hasPendingRequestProjection()) {
+        for (const auto& request : state.pendingRequests()) {
+            if (request.threadId)
+                addPresentationValue(agentsHash, request.threadId->value);
+        }
+    }
+    const QByteArray nextAgentsKey = agentsHash.result();
+    const bool agentsChanged = nextAgentsKey != agentsPresentationKey;
+    if (agentsChanged) {
+        agentsPresentationKey = nextAgentsKey;
+        clearLayout(agentsContent);
+        if (agents.empty() && collaborations.empty()) {
+            addEmpty(agentsContent, QStringLiteral("No agent activity"),
+                     turn ? QStringLiteral("No collab or subagent activity is projected for the latest turn.")
+                          : QStringLiteral("This thread has no retained turns."));
+        } else {
+            if (!agents.empty()) {
             agentsContent->addWidget(textLabel(QStringLiteral("AGENT ACTIVITY"), "section"));
             agentsContent->addSpacing(8);
             for (const auto& agent : agents) {
@@ -621,9 +703,9 @@ void InspectorWidget::render(const sdk::State& state,
                 });
                 agentsContent->addWidget(row);
             }
-        }
+            }
 
-        if (!collaborations.empty()) {
+            if (!collaborations.empty()) {
             if (!agents.empty()) {
                 agentsContent->addSpacing(16);
                 agentsContent->addWidget(divider());
@@ -659,12 +741,12 @@ void InspectorWidget::render(const sdk::State& state,
                 agentsContent->addWidget(card);
                 agentsContent->addSpacing(6);
             }
-        }
+            }
 
-        const auto selectedAgent = std::find_if(agents.begin(), agents.end(), [this](const AgentPresentation& agent) {
-            return agent.itemIds.contains(selectedAgentItemId);
-        });
-        if (selectedAgent != agents.end()) {
+            const auto selectedAgent = std::find_if(agents.begin(), agents.end(), [this](const AgentPresentation& agent) {
+                return agent.itemIds.contains(selectedAgentItemId);
+            });
+            if (selectedAgent != agents.end()) {
             agentsContent->addSpacing(18);
             agentsContent->addWidget(divider());
             agentsContent->addSpacing(16);
@@ -728,8 +810,9 @@ void InspectorWidget::render(const sdk::State& state,
                 connect(open, &QPushButton::clicked, this, [this, target] { emit threadOpenRequested(target); });
                 agentsContent->addWidget(open);
             }
+            }
+            agentsContent->addStretch();
         }
-        agentsContent->addStretch();
     }
 
     // Changes: only canonical projected metadata is shown. The installed view
@@ -746,92 +829,128 @@ void InspectorWidget::render(const sdk::State& state,
                 fileChanges.emplace_back(item, *changes);
         }
     }
-    if (fileChanges.empty()) {
-        addEmpty(changesContent, QStringLiteral("No file changes"),
-                 turn ? QStringLiteral("No file-change items are projected for the latest turn.")
-                      : QStringLiteral("This thread has no retained turns."));
-    } else {
-        changesContent->addWidget(textLabel(QStringLiteral("REPORTED CHANGES"), "section"));
-        changesContent->addSpacing(8);
-        std::size_t reportedChanges = 0;
-        bool hasCompleteReportedCount = true;
-        for (const auto& [item, view] : fileChanges) {
-            if (view.changeCount)
-                reportedChanges += *view.changeCount;
-            else
-                hasCompleteReportedCount = false;
+    QCryptographicHash changesHash(QCryptographicHash::Sha256);
+    addPresentationValue(changesHash, turn != nullptr);
+    for (const auto& [item, view] : fileChanges) {
+        addPresentationValue(changesHash, item->id.value);
+        addPresentationValue(changesHash, itemStatus(*item));
+        addPresentationValue(changesHash,
+                             item->summary ? std::string_view(*item->summary) : std::string_view{});
+        addPresentationValue(changesHash,
+                             view.status ? std::string_view(*view.status) : std::string_view{});
+        addPresentationValue(changesHash,
+                             view.changeCount ? QByteArray::number(*view.changeCount) : QByteArray{});
+        addPresentationValue(changesHash, view.changesTruncated);
+        addPresentationValue(changesHash, item->truncated || !item->omittedFields.empty());
+        for (const auto& change : view.changes) {
+            addPresentationValue(changesHash, change.pathRedacted);
+            addPresentationValue(changesHash,
+                                 change.pathBytes ? QByteArray::number(*change.pathBytes) : QByteArray{});
+            addPresentationValue(changesHash, change.diffOmitted);
+            addPresentationValue(changesHash,
+                                 change.diffBytes ? QByteArray::number(*change.diffBytes) : QByteArray{});
         }
-        auto* summary = textLabel(hasCompleteReportedCount
-                                      ? QStringLiteral("%1 reported change entr%2")
-                                            .arg(reportedChanges)
-                                            .arg(reportedChanges == 1 ? QStringLiteral("y") : QStringLiteral("ies"))
-                                      : QStringLiteral("%1 file-change item%2")
-                                            .arg(fileChanges.size())
-                                            .arg(fileChanges.size() == 1 ? QString{} : QStringLiteral("s")));
-        summary->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
-        changesContent->addWidget(summary);
-        changesContent->addSpacing(10);
-
-        for (const auto& [item, view] : fileChanges) {
-            auto* card = detailCard();
-            auto* layout = new QVBoxLayout(card);
-            layout->setContentsMargins(12, 11, 12, 11);
-            layout->setSpacing(5);
-            auto* header = new QHBoxLayout;
-            const QString title = item->summary && !item->summary->empty()
-                                      ? compact(fromUtf8(*item->summary), 120)
-                                      : view.changeCount ? QStringLiteral("%1 change entr%2")
-                                                               .arg(*view.changeCount)
-                                                               .arg(*view.changeCount == 1 ? QStringLiteral("y")
-                                                                                           : QStringLiteral("ies"))
-                                                         : QStringLiteral("File-change item");
-            auto* heading = textLabel(title);
-            heading->setWordWrap(true);
-            heading->setStyleSheet(QStringLiteral("font-size:11px;font-weight:600;"));
-            header->addWidget(heading, 1);
-            const QString status = view.status ? humanize(fromUtf8(*view.status)) : itemStatus(*item);
-            if (!status.isEmpty()) {
-                auto* statusLabel = textLabel(status, "small");
-                statusLabel->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;")
-                                               .arg(statusColor(status)));
-                header->addWidget(statusLabel, 0, Qt::AlignTop);
-            }
-            layout->addLayout(header);
-
-            for (const auto& change : view.changes) {
-                QStringList detail;
-                if (change.pathRedacted)
-                    detail.append(QStringLiteral("Affected path redacted"));
-                else if (change.pathBytes)
-                    detail.append(QStringLiteral("Affected path unavailable · %1 projected bytes").arg(*change.pathBytes));
+    }
+    const QByteArray nextChangesKey = changesHash.result();
+    const bool changesChanged = nextChangesKey != changesPresentationKey;
+    if (changesChanged) {
+        changesPresentationKey = nextChangesKey;
+        clearLayout(changesContent);
+        if (fileChanges.empty()) {
+            addEmpty(changesContent, QStringLiteral("No file changes"),
+                     turn ? QStringLiteral("No file-change items are projected for the latest turn.")
+                          : QStringLiteral("This thread has no retained turns."));
+        } else {
+            changesContent->addWidget(textLabel(QStringLiteral("REPORTED CHANGES"), "section"));
+            changesContent->addSpacing(8);
+            std::size_t reportedChanges = 0;
+            bool hasCompleteReportedCount = true;
+            for (const auto& [item, view] : fileChanges) {
+                if (view.changeCount)
+                    reportedChanges += *view.changeCount;
                 else
-                    detail.append(QStringLiteral("Affected path unavailable"));
-                if (change.diffOmitted)
-                    detail.append(QStringLiteral("diff omitted"));
-                else if (change.diffBytes)
-                    detail.append(QStringLiteral("%1 diff bytes").arg(*change.diffBytes));
-                auto* entry = textLabel(QStringLiteral("•  %1").arg(detail.join(QStringLiteral(" · "))), "meta");
-                entry->setWordWrap(true);
-                layout->addWidget(entry);
+                    hasCompleteReportedCount = false;
             }
-            if (view.changes.empty()) {
-                auto* unavailable = textLabel(QStringLiteral("Per-change detail is not retained."), "meta");
-                unavailable->setWordWrap(true);
-                layout->addWidget(unavailable);
+            auto* summary = textLabel(hasCompleteReportedCount
+                                          ? QStringLiteral("%1 reported change entr%2")
+                                                .arg(reportedChanges)
+                                                .arg(reportedChanges == 1 ? QStringLiteral("y") : QStringLiteral("ies"))
+                                          : QStringLiteral("%1 file-change item%2")
+                                                .arg(fileChanges.size())
+                                                .arg(fileChanges.size() == 1 ? QString{} : QStringLiteral("s")));
+            summary->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
+            changesContent->addWidget(summary);
+            changesContent->addSpacing(10);
+
+            for (const auto& [item, view] : fileChanges) {
+                auto* card = detailCard();
+                auto* layout = new QVBoxLayout(card);
+                layout->setContentsMargins(12, 11, 12, 11);
+                layout->setSpacing(5);
+                auto* header = new QHBoxLayout;
+                const QString title = item->summary && !item->summary->empty()
+                                          ? compact(fromUtf8(*item->summary), 120)
+                                          : view.changeCount ? QStringLiteral("%1 change entr%2")
+                                                                   .arg(*view.changeCount)
+                                                                   .arg(*view.changeCount == 1 ? QStringLiteral("y")
+                                                                                               : QStringLiteral("ies"))
+                                                             : QStringLiteral("File-change item");
+                auto* heading = textLabel(title);
+                heading->setWordWrap(true);
+                heading->setStyleSheet(QStringLiteral("font-size:11px;font-weight:600;"));
+                header->addWidget(heading, 1);
+                const QString status = view.status ? humanize(fromUtf8(*view.status)) : itemStatus(*item);
+                if (!status.isEmpty()) {
+                    auto* statusLabel = textLabel(status, "small");
+                    statusLabel->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;")
+                                                   .arg(statusColor(status)));
+                    header->addWidget(statusLabel, 0, Qt::AlignTop);
+                }
+                layout->addLayout(header);
+
+                for (const auto& change : view.changes) {
+                    QStringList detail;
+                    if (change.pathRedacted)
+                        detail.append(QStringLiteral("Affected path redacted"));
+                    else if (change.pathBytes)
+                        detail.append(QStringLiteral("Affected path unavailable · %1 projected bytes").arg(*change.pathBytes));
+                    else
+                        detail.append(QStringLiteral("Affected path unavailable"));
+                    if (change.diffOmitted)
+                        detail.append(QStringLiteral("diff omitted"));
+                    else if (change.diffBytes)
+                        detail.append(QStringLiteral("%1 diff bytes").arg(*change.diffBytes));
+                    auto* entry = textLabel(QStringLiteral("•  %1").arg(detail.join(QStringLiteral(" · "))), "meta");
+                    entry->setWordWrap(true);
+                    layout->addWidget(entry);
+                }
+                if (view.changes.empty()) {
+                    auto* unavailable = textLabel(QStringLiteral("Per-change detail is not retained."), "meta");
+                    unavailable->setWordWrap(true);
+                    layout->addWidget(unavailable);
+                }
+                if (view.changesTruncated || item->truncated || !item->omittedFields.empty()) {
+                    auto* truncated = textLabel(QStringLiteral("Change projection is truncated or partially omitted"), "small");
+                    truncated->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
+                    layout->addWidget(truncated);
+                }
+                changesContent->addWidget(card);
+                changesContent->addSpacing(7);
             }
-            if (view.changesTruncated || item->truncated || !item->omittedFields.empty()) {
-                auto* truncated = textLabel(QStringLiteral("Change projection is truncated or partially omitted"), "small");
-                truncated->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
-                layout->addWidget(truncated);
-            }
-            changesContent->addWidget(card);
-            changesContent->addSpacing(7);
+            changesContent->addStretch();
         }
-        changesContent->addStretch();
     }
 
     // Info: a compact product view over typed thread, turn, provider, usage,
     // failure, synchronization, and projection state.
+    QCryptographicHash infoHash(QCryptographicHash::Sha256);
+    addPresentationValue(infoHash, QByteArray::number(state.revision()));
+    addPresentationValue(infoHash, threadId);
+    const QByteArray nextInfoKey = infoHash.result();
+    const bool infoChanged = nextInfoKey != infoPresentationKey;
+    if (infoChanged) {
+    infoPresentationKey = nextInfoKey;
+    clearLayout(infoContent);
     infoContent->addWidget(textLabel(QStringLiteral("THREAD"), "section"));
     infoContent->addSpacing(8);
     auto* threadCard = detailCard();
@@ -951,7 +1070,16 @@ void InspectorWidget::render(const sdk::State& state,
     }
     infoContent->addWidget(stateCard);
     infoContent->addStretch();
-    refreshLayoutGeometry();
+    }
+
+    if (planChanged)
+        refreshLayoutGeometry(planContent);
+    if (agentsChanged)
+        refreshLayoutGeometry(agentsContent);
+    if (changesChanged)
+        refreshLayoutGeometry(changesContent);
+    if (infoChanged)
+        refreshLayoutGeometry(infoContent);
 }
 
 } // namespace codexui

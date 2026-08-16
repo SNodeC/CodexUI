@@ -6,13 +6,16 @@
 #include <QWidget>
 
 #include <QByteArray>
+#include <QHash>
 #include <QString>
+#include <QStringList>
 
 #include <cstdint>
 
 class QFrame;
 class QLabel;
 class QPlainTextEdit;
+class QPropertyAnimation;
 class QPushButton;
 class QResizeEvent;
 class QScrollArea;
@@ -64,11 +67,22 @@ private:
     QScrollArea* scrollArea = nullptr;
     QWidget* timelineHost = nullptr;
     QVBoxLayout* timeline = nullptr;
+    QPropertyAnimation* scrollAnimation = nullptr;
     QString renderedThreadId;
     // Identity only; conversation content remains owned by immutable AISuite State.
     QByteArray renderedPresentationKey;
+    QByteArray renderedSummaryKey;
+    QStringList renderedTurnIds;
+    QHash<QString, QWidget*> renderedTurnWidgets;
+    QHash<QString, QLabel*> renderedTurnStatusLabels;
+    QHash<QString, QVBoxLayout*> renderedTurnItemLayouts;
+    QHash<QString, QStringList> renderedSegmentIds;
+    QHash<QString, QByteArray> renderedSegmentKeys;
+    QHash<QString, QWidget*> renderedSegmentWidgets;
     std::uint64_t renderGeneration = 0;
-    bool followLatestPending = false;
+    std::uint64_t pinLatestGeneration = 0;
+    bool pinLatestDuringLayout = false;
+    bool followingLatest = false;
     bool renderedNewThreadDraft = false;
     bool sendContextAllowed = false;
 };

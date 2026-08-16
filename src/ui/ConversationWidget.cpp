@@ -14,12 +14,14 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QPlainTextEdit>
+#include <QPropertyAnimation>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSizePolicy>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QEasingCurve>
 
 #include <optional>
 #include <variant>
@@ -716,6 +718,215 @@ void addEmptyState(QVBoxLayout* timeline, const QString& title, const QString& d
     timeline->addSpacing(16);
 }
 
+struct TimelineSegment
+{
+    QString id;
+    std::vector<const sdk::ItemState*> items;
+    bool missing = false;
+};
+
+QString segmentStorageKey(const QString& turnId, const QString& segmentId)
+{
+    return turnId + QChar(0x1f) + segmentId;
+}
+
+std::vector<TimelineSegment> timelineSegments(const sdk::State& state,
+                                              const sdk::ThreadState& thread,
+                                              const sdk::TurnState& turn)
+{
+    std::vector<TimelineSegment> result;
+    std::vector<const sdk::ItemState*> activities;
+    const auto flushActivities = [&]
+    {
+        if (activities.empty())
+            return;
+        result.push_back({QStringLiteral("activities:") + fromUtf8(activities.front()->id.value), activities, false});
+        activities.clear();
+    };
+
+    for (const auto& itemId : turn.orderedItems)
+    {
+        const auto* item = state.item(thread.id, turn.id, itemId);
+        if (!item)
+        {
+            flushActivities();
+            result.push_back({QStringLiteral("missing:") + fromUtf8(itemId.value), {}, true});
+            continue;
+        }
+        const bool message = item->kind.is(frontend::ThreadItemKind::UserMessage)
+                             || item->kind.is(frontend::ThreadItemKind::AgentMessage);
+        if (message)
+        {
+            flushActivities();
+            result.push_back({QStringLiteral("message:") + fromUtf8(item->id.value), {item}, false});
+        }
+        else
+        {
+            activities.push_back(item);
+        }
+    }
+    flushActivities();
+    if (result.empty())
+        result.push_back({QStringLiteral("empty"), {}, false});
+    return result;
+}
+
+QByteArray segmentPresentationKey(const sdk::State& state, const TimelineSegment& segment)
+{
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    addPresentationValue(hash, segment.id);
+    addPresentationValue(hash, segment.missing);
+    for (const auto* item : segment.items)
+    {
+        addPresentationValue(hash, item != nullptr);
+        if (!item)
+            continue;
+        addPresentationValue(hash, item->id.value);
+        addPresentationValue(hash, item->kind.identity);
+        addPresentationValue(hash, itemStatus(*item));
+        addPresentationValue(hash, truncationText(*item));
+        if (item->kind.is(frontend::ThreadItemKind::UserMessage))
+        {
+            const auto message = sdk::userMessageSemanticView(*item);
+            addPresentationValue(hash, message.has_value());
+            if (message)
+            {
+                addPresentationValue(hash, message->text);
+                addPresentationValue(hash, userMessageTruncationText(*message));
+            }
+        }
+        else if (item->kind.is(frontend::ThreadItemKind::AgentMessage))
+        {
+            const QString content = item->agentText && !item->agentText->empty()
+                                        ? fromUtf8(*item->agentText)
+                                        : (item->summary ? fromUtf8(*item->summary) : QString{});
+            addPresentationValue(hash, content);
+            const auto semantic = sdk::itemSemanticView(*item);
+            const auto* agent = semantic ? std::get_if<sdk::AgentMessageSemanticView>(&semantic->details) : nullptr;
+            addPresentationValue(hash,
+                                 agent && agent->phase ? std::string_view(*agent->phase) : std::string_view{});
+        }
+        else
+        {
+            const ActivityPresentation presentation = activityPresentation(state, *item);
+            addPresentationValue(hash, presentation.title);
+            addPresentationValue(hash, presentation.detail);
+            addPresentationValue(hash, presentation.status);
+            addPresentationValue(hash, presentation.tail);
+            addPresentationValue(hash, presentation.truncated);
+        }
+    }
+    return hash.result();
+}
+
+QWidget* timelineSegmentWidget(const sdk::State& state, const TimelineSegment& segment)
+{
+    auto* host = new QWidget;
+    host->setStyleSheet(QStringLiteral("background:transparent;"));
+    auto* layout = new QVBoxLayout(host);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    if (segment.missing)
+    {
+        ActivityPresentation omitted{
+            QStringLiteral("Unavailable item"),
+            QStringLiteral("The ordered item shell is not retained in current State"),
+            QStringLiteral("Omitted"),
+            {},
+            true};
+        auto* card = new QFrame;
+        card->setProperty("kind", "panel");
+        auto* rows = new QVBoxLayout(card);
+        rows->setContentsMargins(16, 8, 16, 8);
+        addActivityRow(rows, omitted);
+        layout->addWidget(card);
+        layout->addSpacing(16);
+    }
+    else if (segment.items.empty())
+    {
+        addEmptyState(layout, QStringLiteral("No items in this turn"),
+                      QStringLiteral("The synchronized turn currently has no retained items."));
+    }
+    else if (segment.items.size() == 1
+             && (segment.items.front()->kind.is(frontend::ThreadItemKind::UserMessage)
+                 || segment.items.front()->kind.is(frontend::ThreadItemKind::AgentMessage)))
+    {
+        const auto* item = segment.items.front();
+        addMessage(layout, *item, item->kind.is(frontend::ThreadItemKind::UserMessage));
+    }
+    else
+    {
+        layout->addWidget(activityCard(state, segment.items));
+        layout->addSpacing(16);
+    }
+    return host;
+}
+
+QWidget* timelineTurnWidget(const sdk::TurnState& turn,
+                            qsizetype visibleTurn,
+                            QVBoxLayout*& itemLayout,
+                            QLabel*& statusLabel)
+{
+    auto* host = new QWidget;
+    host->setObjectName(QStringLiteral("conversationTurn"));
+    host->setProperty("turnId", fromUtf8(turn.id.value));
+    host->setStyleSheet(QStringLiteral("background:transparent;"));
+    auto* layout = new QVBoxLayout(host);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    if (visibleTurn > 1)
+    {
+        layout->addSpacing(7);
+        layout->addWidget(divider());
+        layout->addSpacing(12);
+    }
+
+    auto* turnHeader = new QHBoxLayout;
+    auto* turnLabel = textLabel(
+        QStringLiteral("TURN %1 · %2").arg(visibleTurn).arg(compactId(turn.id.value)), "section");
+    turnLabel->setToolTip(fromUtf8(turn.id.value));
+    turnHeader->addWidget(turnLabel);
+    turnHeader->addStretch();
+    const QString status = humanize(fromUtf8(turn.status.value));
+    statusLabel = textLabel(status, "small");
+    statusLabel->setStyleSheet(
+        QStringLiteral("color:%1;font-size:9px;font-weight:600;").arg(statusColor(status)));
+    turnHeader->addWidget(statusLabel);
+    layout->addLayout(turnHeader);
+    layout->addSpacing(10);
+
+    auto* itemHost = new QWidget;
+    itemHost->setStyleSheet(QStringLiteral("background:transparent;"));
+    itemLayout = new QVBoxLayout(itemHost);
+    itemLayout->setContentsMargins(0, 0, 0, 0);
+    itemLayout->setSpacing(0);
+    layout->addWidget(itemHost);
+    return host;
+}
+
+QByteArray turnSummaryPresentationKey(const sdk::State& state,
+                                      const sdk::ThreadState& thread,
+                                      const sdk::TurnState* turn,
+                                      qsizetype index)
+{
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    addPresentationValue(hash, turn != nullptr);
+    if (!turn)
+        return hash.result();
+    addPresentationValue(hash, turn->id.value);
+    addPresentationValue(hash, QByteArray::number(index));
+    addPresentationValue(hash, turn->status.value);
+    addPresentationValue(hash, tokenUsageText(*turn));
+    addPresentationValue(hash, failureText(*turn));
+    for (const auto& itemId : turn->orderedItems)
+    {
+        const auto* item = state.item(thread.id, turn->id, itemId);
+        addPresentationValue(hash, item ? item->kind.identity : std::string_view{});
+    }
+    return hash.result();
+}
+
 } // namespace
 
 ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
@@ -765,16 +976,28 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     scrollArea->setWidgetResizable(true);
     scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     auto* conversationScroll = scrollArea->verticalScrollBar();
+    scrollAnimation = new QPropertyAnimation(conversationScroll, "value", this);
+    scrollAnimation->setEasingCurve(QEasingCurve::OutCubic);
+    connect(scrollAnimation, &QPropertyAnimation::finished, this,
+            [this] { followingLatest = false; });
     connect(conversationScroll, &QScrollBar::rangeChanged, this,
             [this, conversationScroll](int, int maximum)
             {
-                if (followLatestPending)
+                if (pinLatestDuringLayout)
                     conversationScroll->setValue(maximum);
             });
     connect(conversationScroll, &QScrollBar::actionTriggered, this,
-            [this](int) { followLatestPending = false; });
+            [this](int)
+            {
+                scrollAnimation->stop();
+                followingLatest = false;
+            });
     connect(conversationScroll, &QScrollBar::sliderPressed, this,
-            [this] { followLatestPending = false; });
+            [this]
+            {
+                scrollAnimation->stop();
+                followingLatest = false;
+            });
     auto* content = new QWidget;
     content->setStyleSheet(QStringLiteral("background:transparent;"));
     auto* conversation = new QVBoxLayout(content);
@@ -858,23 +1081,54 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
     const int previousScroll = scrollBar->value();
     const bool wasNearBottom = scrollBar->maximum() - previousScroll <= 72;
     const bool threadChanged = renderedThreadId != threadId || renderedNewThreadDraft != newThreadDraft;
-    const bool followLatest = threadChanged || wasNearBottom || followLatestPending;
-    followLatestPending = followLatest;
+    const bool followLatest = threadChanged || wasNearBottom || followingLatest;
     const std::uint64_t generation = ++renderGeneration;
     renderedThreadId = threadId;
     renderedNewThreadDraft = newThreadDraft;
     renderedPresentationKey = presentationKey;
-    // Retain the previous backing store until Qt has polished the rebuilt tree.
-    scrollArea->viewport()->setUpdatesEnabled(false);
+    if (threadChanged)
+    {
+        followingLatest = false;
+        pinLatestDuringLayout = true;
+        pinLatestGeneration = generation;
+        QTimer::singleShot(250, this,
+                           [this, generation]
+                           {
+                               if (generation != pinLatestGeneration)
+                                   return;
+                               synchronizeTimelineHeight();
+                               scrollArea->widget()->layout()->activate();
+                               scrollArea->widget()->adjustSize();
+                               auto* latestBar = scrollArea->verticalScrollBar();
+                               latestBar->setValue(latestBar->maximum());
+                               pinLatestDuringLayout = false;
+                           });
+    }
 
-    clearLayout(timeline);
-    clearLayout(turnSummaryLayout);
-    turnSummary->hide();
-    turnFailure->hide();
+    const auto clearTimelineState = [this]
+    {
+        renderedTurnIds.clear();
+        renderedTurnWidgets.clear();
+        renderedTurnStatusLabels.clear();
+        renderedTurnItemLayouts.clear();
+        renderedSegmentIds.clear();
+        renderedSegmentKeys.clear();
+        renderedSegmentWidgets.clear();
+        clearLayout(timeline);
+    };
 
     const auto* thread = threadId.isEmpty() ? nullptr : state.thread(threadId.toStdString());
     if (!thread)
     {
+        if (timeline->count() > 0)
+            clearTimelineState();
+        if (!renderedSummaryKey.isEmpty() || turnSummary->isVisible() || turnFailure->isVisible())
+        {
+            clearLayout(turnSummaryLayout);
+            renderedSummaryKey.clear();
+            turnSummary->hide();
+            turnFailure->hide();
+        }
         contextPath->setText(newThreadDraft ? QStringLiteral("New thread draft")
                                             : QStringLiteral("No thread selected"));
         contextPath->setToolTip({});
@@ -927,135 +1181,176 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
             }
         }
 
-        if (currentTurn)
+        const QByteArray summaryKey = turnSummaryPresentationKey(state, *thread, currentTurn, currentIndex);
+        if (summaryKey != renderedSummaryKey)
         {
-            turnSummary->show();
-            auto* summaryRow = new QHBoxLayout;
-            summaryRow->setContentsMargins(0, 0, 0, 0);
-            summaryRow->setSpacing(14);
-            auto* identity = textLabel(
-                QStringLiteral("TURN %1 · %2").arg(currentIndex + 1).arg(compactId(currentTurn->id.value)), "small");
-            identity->setToolTip(fromUtf8(currentTurn->id.value));
-            summaryRow->addWidget(identity);
-            const QString turnStatus = humanize(fromUtf8(currentTurn->status.value));
-            summaryRow->addWidget(badge(turnStatus.toUpper(), QStringLiteral("#181c21"), statusColor(turnStatus)));
-            summaryRow->addSpacing(4);
+            renderedSummaryKey = summaryKey;
+            clearLayout(turnSummaryLayout);
+            turnSummary->hide();
+            turnFailure->hide();
+            if (currentTurn)
+            {
+                turnSummary->show();
+                auto* summaryRow = new QHBoxLayout;
+                summaryRow->setContentsMargins(0, 0, 0, 0);
+                summaryRow->setSpacing(14);
+                auto* identity = textLabel(
+                    QStringLiteral("TURN %1 · %2").arg(currentIndex + 1).arg(compactId(currentTurn->id.value)), "small");
+                identity->setToolTip(fromUtf8(currentTurn->id.value));
+                summaryRow->addWidget(identity);
+                const QString turnStatus = humanize(fromUtf8(currentTurn->status.value));
+                summaryRow->addWidget(badge(turnStatus.toUpper(), QStringLiteral("#181c21"), statusColor(turnStatus)));
+                summaryRow->addSpacing(4);
 
-            qsizetype commands = 0;
-            qsizetype changes = 0;
-            qsizetype subagents = 0;
-            for (const auto& itemId : currentTurn->orderedItems)
-            {
-                const auto* item = state.item(thread->id, currentTurn->id, itemId);
-                if (!item) continue;
-                commands += item->kind.is(frontend::ThreadItemKind::CommandExecution) ? 1 : 0;
-                changes += item->kind.is(frontend::ThreadItemKind::FileChange) ? 1 : 0;
-                subagents += item->kind.is(frontend::ThreadItemKind::SubAgentActivity) ? 1 : 0;
-            }
-            summaryRow->addWidget(textLabel(QStringLiteral("%1 items").arg(currentTurn->orderedItems.size()), "small"));
-            if (commands) summaryRow->addWidget(textLabel(QStringLiteral("%1 commands").arg(commands), "small"));
-            if (changes) summaryRow->addWidget(textLabel(QStringLiteral("%1 file-change items").arg(changes), "small"));
-            if (subagents)
-                summaryRow->addWidget(textLabel(QStringLiteral("%1 subagent items").arg(subagents), "small"));
-            summaryRow->addStretch();
-            turnSummaryLayout->addLayout(summaryRow);
-            const QString usage = tokenUsageText(*currentTurn);
-            if (!usage.isEmpty())
-            {
-                auto* tokens = wrappingLabel(usage, "small");
-                tokens->setToolTip(usage);
-                turnSummaryLayout->addWidget(tokens);
-            }
-            const QString failure = failureText(*currentTurn);
-            if (!failure.isEmpty())
-            {
-                turnFailure->setText(failure);
-                turnFailure->setToolTip(failure);
-                turnFailure->show();
+                qsizetype commands = 0;
+                qsizetype changes = 0;
+                qsizetype subagents = 0;
+                for (const auto& itemId : currentTurn->orderedItems)
+                {
+                    const auto* item = state.item(thread->id, currentTurn->id, itemId);
+                    if (!item) continue;
+                    commands += item->kind.is(frontend::ThreadItemKind::CommandExecution) ? 1 : 0;
+                    changes += item->kind.is(frontend::ThreadItemKind::FileChange) ? 1 : 0;
+                    subagents += item->kind.is(frontend::ThreadItemKind::SubAgentActivity) ? 1 : 0;
+                }
+                summaryRow->addWidget(
+                    textLabel(QStringLiteral("%1 items").arg(currentTurn->orderedItems.size()), "small"));
+                if (commands) summaryRow->addWidget(textLabel(QStringLiteral("%1 commands").arg(commands), "small"));
+                if (changes)
+                    summaryRow->addWidget(textLabel(QStringLiteral("%1 file-change items").arg(changes), "small"));
+                if (subagents)
+                    summaryRow->addWidget(textLabel(QStringLiteral("%1 subagent items").arg(subagents), "small"));
+                summaryRow->addStretch();
+                turnSummaryLayout->addLayout(summaryRow);
+                const QString usage = tokenUsageText(*currentTurn);
+                if (!usage.isEmpty())
+                {
+                    auto* tokens = wrappingLabel(usage, "small");
+                    tokens->setToolTip(usage);
+                    turnSummaryLayout->addWidget(tokens);
+                }
+                const QString failure = failureText(*currentTurn);
+                if (!failure.isEmpty())
+                {
+                    turnFailure->setText(failure);
+                    turnFailure->setToolTip(failure);
+                    turnFailure->show();
+                }
             }
         }
 
         if (!currentTurn)
         {
-            addEmptyState(timeline, QStringLiteral("No conversation loaded"),
-                          thread->fullyLoaded ? QStringLiteral("This synchronized thread does not contain any turns.")
-                                              : QStringLiteral("No turn projection is currently retained for "
-                                                               "this thread."));
+            if (threadChanged || !renderedTurnIds.isEmpty() || timeline->count() == 0)
+            {
+                clearTimelineState();
+                addEmptyState(timeline, QStringLiteral("No conversation loaded"),
+                              thread->fullyLoaded
+                                  ? QStringLiteral("This synchronized thread does not contain any turns.")
+                                  : QStringLiteral("No turn projection is currently retained for this thread."));
+            }
         }
         else
         {
-            qsizetype visibleTurn = 0;
+            std::vector<const sdk::TurnState*> visibleTurns;
+            QStringList visibleTurnIds;
             for (const auto& turnId : thread->orderedTurns)
             {
                 const auto* turn = state.turn(turnId);
-                if (!turn) continue;
-                ++visibleTurn;
-                if (visibleTurn > 1)
-                {
-                    timeline->addSpacing(7);
-                    timeline->addWidget(divider());
-                    timeline->addSpacing(12);
-                }
-                auto* turnHeader = new QHBoxLayout;
-                auto* turnLabel = textLabel(
-                    QStringLiteral("TURN %1 · %2").arg(visibleTurn).arg(compactId(turn->id.value)), "section");
-                turnLabel->setToolTip(fromUtf8(turn->id.value));
-                turnHeader->addWidget(turnLabel);
-                turnHeader->addStretch();
-                const QString status = humanize(fromUtf8(turn->status.value));
-                auto* statusLabel = textLabel(status, "small");
-                statusLabel->setStyleSheet(
-                    QStringLiteral("color:%1;font-size:9px;font-weight:600;").arg(statusColor(status)));
-                turnHeader->addWidget(statusLabel);
-                timeline->addLayout(turnHeader);
-                timeline->addSpacing(10);
+                if (!turn)
+                    continue;
+                visibleTurns.push_back(turn);
+                visibleTurnIds.append(fromUtf8(turn->id.value));
+            }
 
-                std::vector<const sdk::ItemState*> activities;
-                const auto flushActivities = [&]
+            bool compatibleTurns = !threadChanged && timeline->count() == renderedTurnIds.size()
+                                   && renderedTurnIds.size() <= visibleTurnIds.size();
+            for (qsizetype index = 0; compatibleTurns && index < renderedTurnIds.size(); ++index)
+                compatibleTurns = renderedTurnIds.at(index) == visibleTurnIds.at(index)
+                                  && renderedTurnWidgets.contains(renderedTurnIds.at(index));
+            if (!compatibleTurns)
+                clearTimelineState();
+
+            for (qsizetype index = 0; index < static_cast<qsizetype>(visibleTurns.size()); ++index)
+            {
+                const auto* turn = visibleTurns.at(index);
+                const QString turnId = visibleTurnIds.at(index);
+                QVBoxLayout* itemLayout = renderedTurnItemLayouts.value(turnId);
+                QLabel* statusLabel = renderedTurnStatusLabels.value(turnId);
+                if (!renderedTurnWidgets.contains(turnId))
                 {
-                    if (activities.empty()) return;
-                    timeline->addWidget(activityCard(state, activities));
-                    timeline->addSpacing(16);
-                    activities.clear();
-                };
-                for (const auto& itemId : turn->orderedItems)
+                    auto* turnWidget = timelineTurnWidget(*turn, index + 1, itemLayout, statusLabel);
+                    timeline->addWidget(turnWidget);
+                    renderedTurnWidgets.insert(turnId, turnWidget);
+                    renderedTurnItemLayouts.insert(turnId, itemLayout);
+                    renderedTurnStatusLabels.insert(turnId, statusLabel);
+                }
+                else
                 {
-                    const auto* item = state.item(thread->id, turn->id, itemId);
-                    if (!item)
+                    const QString status = humanize(fromUtf8(turn->status.value));
+                    if (statusLabel && statusLabel->text() != status)
                     {
-                        flushActivities();
-                        ActivityPresentation omitted{
-                            QStringLiteral("Unavailable item"),
-                            QStringLiteral("The ordered item shell is not retained in current State"),
-                            QStringLiteral("Omitted"),
-                            {},
-                            true};
-                        auto* card = new QFrame;
-                        card->setProperty("kind", "panel");
-                        auto* rows = new QVBoxLayout(card);
-                        rows->setContentsMargins(16, 8, 16, 8);
-                        addActivityRow(rows, omitted);
-                        timeline->addWidget(card);
-                        timeline->addSpacing(16);
-                        continue;
+                        statusLabel->setText(status);
+                        statusLabel->setStyleSheet(
+                            QStringLiteral("color:%1;font-size:9px;font-weight:600;").arg(statusColor(status)));
                     }
-                    const bool user = item->kind.is(frontend::ThreadItemKind::UserMessage);
-                    const bool agent = item->kind.is(frontend::ThreadItemKind::AgentMessage);
-                    if (user || agent)
+                }
+
+                const auto segments = timelineSegments(state, *thread, *turn);
+                QStringList segmentIds;
+                segmentIds.reserve(static_cast<qsizetype>(segments.size()));
+                for (const auto& segment : segments)
+                    segmentIds.append(segment.id);
+
+                const QStringList oldSegmentIds = renderedSegmentIds.value(turnId);
+                bool compatibleSegments = oldSegmentIds.size() <= segmentIds.size();
+                for (qsizetype segmentIndex = 0;
+                     compatibleSegments && segmentIndex < oldSegmentIds.size();
+                     ++segmentIndex)
+                {
+                    const QString storage = segmentStorageKey(turnId, oldSegmentIds.at(segmentIndex));
+                    compatibleSegments = oldSegmentIds.at(segmentIndex) == segmentIds.at(segmentIndex)
+                                         && renderedSegmentWidgets.contains(storage);
+                }
+                if (!compatibleSegments)
+                {
+                    clearLayout(itemLayout);
+                    for (const QString& oldId : oldSegmentIds)
                     {
-                        flushActivities();
-                        addMessage(timeline, *item, user);
+                        const QString storage = segmentStorageKey(turnId, oldId);
+                        renderedSegmentKeys.remove(storage);
+                        renderedSegmentWidgets.remove(storage);
+                    }
+                }
+
+                for (qsizetype segmentIndex = 0; segmentIndex < static_cast<qsizetype>(segments.size()); ++segmentIndex)
+                {
+                    const TimelineSegment& segment = segments.at(segmentIndex);
+                    const QString storage = segmentStorageKey(turnId, segment.id);
+                    const QByteArray segmentKey = segmentPresentationKey(state, segment);
+                    QWidget* oldWidget = renderedSegmentWidgets.value(storage);
+                    if (oldWidget && renderedSegmentKeys.value(storage) == segmentKey)
+                        continue;
+
+                    QWidget* newWidget = timelineSegmentWidget(state, segment);
+                    if (oldWidget)
+                    {
+                        const int position = itemLayout->indexOf(oldWidget);
+                        itemLayout->removeWidget(oldWidget);
+                        oldWidget->hide();
+                        oldWidget->deleteLater();
+                        itemLayout->insertWidget(position, newWidget);
                     }
                     else
                     {
-                        activities.push_back(item);
+                        itemLayout->addWidget(newWidget);
                     }
+                    renderedSegmentWidgets.insert(storage, newWidget);
+                    renderedSegmentKeys.insert(storage, segmentKey);
                 }
-                flushActivities();
-                if (turn->orderedItems.empty())
-                    addEmptyState(timeline, QStringLiteral("No items in this turn"),
-                                  QStringLiteral("The synchronized turn currently has no retained items."));
+                renderedSegmentIds.insert(turnId, segmentIds);
             }
+            renderedTurnIds = visibleTurnIds;
         }
     }
 
@@ -1063,21 +1358,15 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
     scrollArea->widget()->layout()->activate();
     scrollArea->widget()->adjustSize();
     QTimer::singleShot(0, this,
-                       [this, previousScroll, followLatest, generation]
+                       [this, previousScroll, followLatest, threadChanged, generation]
                        {
                            if (generation != renderGeneration)
-                           {
-                               scrollArea->viewport()->setUpdatesEnabled(true);
-                               scrollArea->viewport()->update();
                                return;
-                           }
                            synchronizeTimelineHeight();
                            scrollArea->widget()->layout()->activate();
                            scrollArea->widget()->adjustSize();
-                           scrollArea->viewport()->setUpdatesEnabled(true);
-                           scrollArea->viewport()->update();
                            QTimer::singleShot(0, this,
-                                              [this, previousScroll, followLatest, generation]
+                                              [this, previousScroll, followLatest, threadChanged, generation]
                                               {
                                                   if (generation != renderGeneration)
                                                       return;
@@ -1085,10 +1374,34 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
                                                   scrollArea->widget()->layout()->activate();
                                                   scrollArea->widget()->adjustSize();
                                                   auto* bar = scrollArea->verticalScrollBar();
-                                                  if (followLatest)
+                                                  if (threadChanged)
+                                                  {
+                                                      scrollAnimation->stop();
                                                       bar->setValue(bar->maximum());
+                                                  }
+                                                  else if (followLatest)
+                                                  {
+                                                      scrollAnimation->stop();
+                                                      const int distance = bar->maximum() - bar->value();
+                                                      if (distance <= 0 || renderedThreadId.isEmpty())
+                                                      {
+                                                          followingLatest = false;
+                                                          bar->setValue(bar->maximum());
+                                                      }
+                                                      else
+                                                      {
+                                                          followingLatest = true;
+                                                          scrollAnimation->setDuration(qBound(90, distance, 220));
+                                                          scrollAnimation->setStartValue(bar->value());
+                                                          scrollAnimation->setEndValue(bar->maximum());
+                                                          scrollAnimation->start();
+                                                      }
+                                                  }
                                                   else
+                                                  {
+                                                      followingLatest = false;
                                                       bar->setValue(qMin(previousScroll, bar->maximum()));
+                                                  }
                                               });
                        });
 }
