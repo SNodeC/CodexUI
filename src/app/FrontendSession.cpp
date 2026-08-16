@@ -11,6 +11,7 @@
 #include <QByteArray>
 #include <QDir>
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -66,7 +67,8 @@ FrontendSession::FrontendSession(QObject* parent)
                 setLifecycle(Lifecycle::Synchronizing);
                 break;
             case sdk::ConnectionState::Ready:
-                setLifecycle(Lifecycle::Ready);
+                // onSynchronized owns the Ready transition so consumers never
+                // treat a transient reconnect projection as authoritative.
                 break;
             case sdk::ConnectionState::Disconnected:
             case sdk::ConnectionState::Closed:
@@ -84,6 +86,7 @@ FrontendSession::FrontendSession(QObject* parent)
         emit stateChanged();
     };
     callbacks.onSynchronized = [this](const sdk::SynchronizationInfo& info) {
+        reconnectDelayMs = initialReconnectDelayMs;
         currentState = info.state;
         setLifecycle(Lifecycle::Ready);
         emit stateChanged();
@@ -98,11 +101,14 @@ FrontendSession::FrontendSession(QObject* parent)
     connect(&socket, &QLocalSocket::readyRead, this, &FrontendSession::socketReadyRead);
     connect(&socket, &QLocalSocket::disconnected, this, &FrontendSession::socketDisconnected);
     connect(&socket, &QLocalSocket::errorOccurred, this, &FrontendSession::socketFailed);
+    reconnectTimer.setSingleShot(true);
+    connect(&reconnectTimer, &QTimer::timeout, this, &FrontendSession::retryConnection);
 }
 
 FrontendSession::~FrontendSession()
 {
     localShutdown = true;
+    reconnectTimer.stop();
     if (connection.isOpen())
         connection.close("CodexUI is closing");
     client->close("CodexUI is closing");
@@ -346,6 +352,7 @@ QString FrontendSession::defaultSocketPath()
 
 void FrontendSession::socketConnected()
 {
+    reconnectTimer.stop();
     connection = client->openConnection({
         [this](OutboundMessage message) { return send(std::move(message)); },
         [this](std::string reason) { closeTransport(QString::fromStdString(reason)); },
@@ -408,8 +415,12 @@ void FrontendSession::socketDisconnected()
             connection.transportDisconnected(sdk::TransportError{"Unix backend disconnected", true});
     }
     connection = Connection{};
-    if (!localShutdown && currentLifecycle != Lifecycle::Failed)
-        setLifecycle(Lifecycle::Disconnected);
+    requestedThreadReads.clear();
+    if (!localShutdown) {
+        if (currentLifecycle != Lifecycle::Failed)
+            setLifecycle(Lifecycle::Disconnected);
+        scheduleReconnect();
+    }
 }
 
 void FrontendSession::socketFailed(QLocalSocket::LocalSocketError)
@@ -419,7 +430,28 @@ void FrontendSession::socketFailed(QLocalSocket::LocalSocketError)
     if (connection.isOpen())
         connection.transportDisconnected(sdk::TransportError{socket.errorString().toStdString(), true});
     connection = Connection{};
+    requestedThreadReads.clear();
     setLifecycle(Lifecycle::Failed, socket.errorString());
+    scheduleReconnect();
+}
+
+void FrontendSession::scheduleReconnect()
+{
+    if (localShutdown || reconnectTimer.isActive())
+        return;
+    reconnectTimer.start(reconnectDelayMs);
+    reconnectDelayMs = std::min(reconnectDelayMs * 2, maximumReconnectDelayMs);
+}
+
+void FrontendSession::retryConnection()
+{
+    if (localShutdown)
+        return;
+    if (socket.state() != QLocalSocket::UnconnectedState) {
+        scheduleReconnect();
+        return;
+    }
+    connectToBackend();
 }
 
 FrontendSession::SendResult FrontendSession::send(OutboundMessage message) noexcept

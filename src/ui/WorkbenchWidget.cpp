@@ -290,6 +290,8 @@ void WorkbenchWidget::refreshState()
     stateRefreshPending = false;
     const auto& state = frontendSession.state();
     const auto threads = state.threads();
+    const bool ready = frontendSession.lifecycle() == FrontendSession::Lifecycle::Ready;
+    const bool threadListComplete = state.threadList().value && state.threadList().value->complete;
 
     if (!newThreadIdAwaitingState.isEmpty()
         && state.thread(newThreadIdAwaitingState.toStdString()) != nullptr) {
@@ -298,7 +300,7 @@ void WorkbenchWidget::refreshState()
         newThreadDraft = false;
     }
     if (!selectedThreadId.isEmpty()
-        && state.thread(selectedThreadId.toStdString()) == nullptr)
+        && state.thread(selectedThreadId.toStdString()) == nullptr && ready && threadListComplete)
         selectedThreadId.clear();
     if (!newThreadDraft && selectedThreadId.isEmpty() && !threads.empty())
         selectedThreadId = QString::fromStdString(threads.front().id.value);
@@ -309,7 +311,6 @@ void WorkbenchWidget::refreshState()
     // immutable State and never retains backend object addresses.
     conversation->render(state, selectedThreadId, newThreadDraft);
 
-    const bool ready = frontendSession.lifecycle() == FrontendSession::Lifecycle::Ready;
     inspector->render(state, newThreadDraft ? QString{} : selectedThreadId,
                       ready, frontendSession.statusText());
 

@@ -6,6 +6,7 @@
 #include <QObject>
 #include <QLocalSocket>
 #include <QString>
+#include <QTimer>
 
 #include <ai/openai/codex/frontend/client/Client.h>
 
@@ -68,6 +69,9 @@ signals:
     void stateChanged();
 
 private:
+    static constexpr int initialReconnectDelayMs = 250;
+    static constexpr int maximumReconnectDelayMs = 5'000;
+
     using Client = ai::openai::codex::frontend::client::Client;
     using Connection = ai::openai::codex::frontend::client::Connection;
     using OutboundMessage = ai::openai::codex::frontend::client::OutboundMessage;
@@ -78,17 +82,21 @@ private:
     void socketReadyRead();
     void socketDisconnected();
     void socketFailed(QLocalSocket::LocalSocketError error);
+    void scheduleReconnect();
+    void retryConnection();
     [[nodiscard]] SendResult send(OutboundMessage message) noexcept;
     void closeTransport(QString reason) noexcept;
     void setLifecycle(Lifecycle value, QString detail = {});
 
     QLocalSocket socket;
+    QTimer reconnectTimer;
     std::unique_ptr<Client> client;
     Connection connection;
     ai::openai::codex::frontend::client::State currentState;
     Lifecycle currentLifecycle = Lifecycle::Disconnected;
     QString detail;
     std::set<std::string> requestedThreadReads;
+    int reconnectDelayMs = initialReconnectDelayMs;
     bool localShutdown = false;
 };
 
