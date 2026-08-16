@@ -702,8 +702,15 @@ void WorkbenchWidget::executePendingAction()
 
     switch (action) {
         case PendingAction::SendExistingThread:
-            resumeThread(threadId, prompt);
+        {
+            const auto* thread = frontendSession.state().thread(threadId.toStdString());
+            // Resuming an already attached thread can replay its existing item projection.
+            if (thread && thread->status && *thread->status == "idle")
+                startTurn(threadId, prompt);
+            else
+                resumeThread(threadId, prompt);
             break;
+        }
         case PendingAction::SendNewThread:
             startNewThread(prompt);
             break;

@@ -5,6 +5,7 @@
 #include <ai/openai/codex/frontend/Messages.h>
 #include <ai/openai/codex/frontend/client/State.h>
 
+#include <QCryptographicHash>
 #include <QEvent>
 #include <QFrame>
 #include <QHash>
@@ -592,6 +593,112 @@ QString failureText(const sdk::TurnState& turn)
                              : QStringLiteral("Turn failed · ") + details.join(QStringLiteral(" · "));
 }
 
+void addPresentationValue(QCryptographicHash& hash, const QByteArray& value)
+{
+    hash.addData(QByteArray::number(value.size()));
+    hash.addData(QByteArrayLiteral(":"));
+    hash.addData(value);
+}
+
+void addPresentationValue(QCryptographicHash& hash, const QString& value)
+{
+    addPresentationValue(hash, value.toUtf8());
+}
+
+void addPresentationValue(QCryptographicHash& hash, std::string_view value)
+{
+    addPresentationValue(hash, QByteArray(value.data(), static_cast<qsizetype>(value.size())));
+}
+
+void addPresentationValue(QCryptographicHash& hash, bool value)
+{
+    addPresentationValue(hash, value ? QByteArrayLiteral("1") : QByteArrayLiteral("0"));
+}
+
+QByteArray conversationPresentationKey(const sdk::State& state, const QString& threadId, bool newThreadDraft)
+{
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    addPresentationValue(hash, threadId);
+    addPresentationValue(hash, newThreadDraft);
+
+    const auto* thread = threadId.isEmpty() ? nullptr : state.thread(threadId.toStdString());
+    addPresentationValue(hash, thread != nullptr);
+    if (!thread)
+        return hash.result();
+
+    addPresentationValue(hash, thread->id.value);
+    addPresentationValue(hash, thread->title ? std::string_view(*thread->title) : std::string_view{});
+    addPresentationValue(hash, thread->status ? std::string_view(*thread->status) : std::string_view{});
+    addPresentationValue(hash, thread->model ? std::string_view(thread->model->value) : std::string_view{});
+    addPresentationValue(hash, thread->cwd ? std::string_view(thread->cwd->value) : std::string_view{});
+    addPresentationValue(hash, thread->fullyLoaded);
+    addPresentationValue(hash, thread->realtime.has_value());
+    if (thread->realtime)
+    {
+        const auto realtime = sdk::realtimeSemanticView(*thread->realtime);
+        addPresentationValue(hash, realtime.lifecycle);
+        addPresentationValue(hash, QByteArray::number(realtime.itemCount));
+        addPresentationValue(hash, realtime.transcriptTruncated);
+    }
+
+    for (const auto& turnId : thread->orderedTurns)
+    {
+        addPresentationValue(hash, turnId.value);
+        const auto* turn = state.turn(turnId);
+        addPresentationValue(hash, turn != nullptr);
+        if (!turn)
+            continue;
+
+        addPresentationValue(hash, turn->status.value);
+        addPresentationValue(hash, tokenUsageText(*turn));
+        addPresentationValue(hash, failureText(*turn));
+        for (const auto& itemId : turn->orderedItems)
+        {
+            const auto* item = state.item(thread->id, turn->id, itemId);
+            addPresentationValue(hash, item != nullptr);
+            if (!item)
+                continue;
+
+            addPresentationValue(hash, item->kind.identity);
+            addPresentationValue(hash, itemStatus(*item));
+            addPresentationValue(hash, truncationText(*item));
+            if (item->kind.is(frontend::ThreadItemKind::UserMessage))
+            {
+                const auto message = sdk::userMessageSemanticView(*item);
+                addPresentationValue(hash, message.has_value());
+                if (message)
+                {
+                    addPresentationValue(hash, message->text);
+                    addPresentationValue(hash, userMessageTruncationText(*message));
+                }
+            }
+            else if (item->kind.is(frontend::ThreadItemKind::AgentMessage))
+            {
+                const QString content = item->agentText && !item->agentText->empty()
+                                            ? fromUtf8(*item->agentText)
+                                            : (item->summary ? fromUtf8(*item->summary) : QString{});
+                addPresentationValue(hash, content);
+                const auto semantic = sdk::itemSemanticView(*item);
+                const auto* agent = semantic
+                                        ? std::get_if<sdk::AgentMessageSemanticView>(&semantic->details)
+                                        : nullptr;
+                addPresentationValue(hash,
+                                     agent && agent->phase ? std::string_view(*agent->phase) : std::string_view{});
+            }
+            else
+            {
+                const ActivityPresentation presentation = activityPresentation(state, *item);
+                addPresentationValue(hash, presentation.title);
+                addPresentationValue(hash, presentation.detail);
+                addPresentationValue(hash, presentation.status);
+                addPresentationValue(hash, presentation.tail);
+                addPresentationValue(hash, presentation.truncated);
+            }
+        }
+    }
+    return hash.result();
+}
+
 void addEmptyState(QVBoxLayout* timeline, const QString& title, const QString& detail)
 {
     auto* empty = new QFrame;
@@ -743,6 +850,10 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
 
 void ConversationWidget::render(const sdk::State& state, const QString& threadId, bool newThreadDraft)
 {
+    const QByteArray presentationKey = conversationPresentationKey(state, threadId, newThreadDraft);
+    if (presentationKey == renderedPresentationKey)
+        return;
+
     auto* scrollBar = scrollArea->verticalScrollBar();
     const int previousScroll = scrollBar->value();
     const bool wasNearBottom = scrollBar->maximum() - previousScroll <= 72;
@@ -752,6 +863,9 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
     const std::uint64_t generation = ++renderGeneration;
     renderedThreadId = threadId;
     renderedNewThreadDraft = newThreadDraft;
+    renderedPresentationKey = presentationKey;
+    // Retain the previous backing store until Qt has polished the rebuilt tree.
+    scrollArea->viewport()->setUpdatesEnabled(false);
 
     clearLayout(timeline);
     clearLayout(turnSummaryLayout);
@@ -946,14 +1060,22 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
     }
 
     synchronizeTimelineHeight();
+    scrollArea->widget()->layout()->activate();
+    scrollArea->widget()->adjustSize();
     QTimer::singleShot(0, this,
                        [this, previousScroll, followLatest, generation]
                        {
                            if (generation != renderGeneration)
+                           {
+                               scrollArea->viewport()->setUpdatesEnabled(true);
+                               scrollArea->viewport()->update();
                                return;
+                           }
                            synchronizeTimelineHeight();
                            scrollArea->widget()->layout()->activate();
                            scrollArea->widget()->adjustSize();
+                           scrollArea->viewport()->setUpdatesEnabled(true);
+                           scrollArea->viewport()->update();
                            QTimer::singleShot(0, this,
                                               [this, previousScroll, followLatest, generation]
                                               {

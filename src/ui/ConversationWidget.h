@@ -5,6 +5,7 @@
 
 #include <QWidget>
 
+#include <QByteArray>
 #include <QString>
 
 #include <cstdint>
@@ -64,6 +65,8 @@ private:
     QWidget* timelineHost = nullptr;
     QVBoxLayout* timeline = nullptr;
     QString renderedThreadId;
+    // Identity only; conversation content remains owned by immutable AISuite State.
+    QByteArray renderedPresentationKey;
     std::uint64_t renderGeneration = 0;
     bool followLatestPending = false;
     bool renderedNewThreadDraft = false;
