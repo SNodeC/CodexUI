@@ -92,4 +92,21 @@ if(BUILD_TESTING)
     )
     add_test(NAME CodexUIConversationLayoutTest COMMAND CodexUIConversationLayoutTest)
     set_tests_properties(CodexUIConversationLayoutTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(
+        CodexUIInteractiveRequestDialogTest
+        tests/InteractiveRequestDialogTest.cpp
+        src/ui/InteractiveRequestDialog.cpp
+        src/ui/InteractiveRequestDialog.h
+    )
+    target_compile_features(CodexUIInteractiveRequestDialogTest PRIVATE cxx_std_20)
+    target_include_directories(CodexUIInteractiveRequestDialogTest PRIVATE src)
+    target_link_libraries(
+        CodexUIInteractiveRequestDialogTest
+        PRIVATE
+            AISuite::OpenAICodexFrontendClient
+            Qt6::Widgets
+    )
+    add_test(NAME CodexUIInteractiveRequestDialogTest COMMAND CodexUIInteractiveRequestDialogTest)
+    set_tests_properties(CodexUIInteractiveRequestDialogTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()

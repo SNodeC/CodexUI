@@ -12,6 +12,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollArea>
+#include <QTextDocument>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -71,11 +72,23 @@ bool isReviewApproval(frontend::PendingRequestKind kind)
 QLabel* wrappedLabel(const QString& value, const char* kind = nullptr)
 {
     auto* result = new QLabel(value);
+    result->setTextFormat(Qt::PlainText);
     result->setWordWrap(true);
     result->setTextInteractionFlags(Qt::TextSelectableByMouse);
     if (kind)
         result->setProperty("kind", kind);
     return result;
+}
+
+QString plainTooltip(const QString& value)
+{
+    return Qt::convertFromPlainText(value, Qt::WhiteSpaceNormal);
+}
+
+QString checkBoxText(const QString& value)
+{
+    QString result = value;
+    return result.replace(QLatin1Char('&'), QStringLiteral("&&"));
 }
 
 void addDetail(QVBoxLayout* layout, const QString& value)
@@ -97,16 +110,41 @@ void clearLayout(QLayout* layout)
     }
 }
 
-const sdk::PendingRequestState* pendingRequest(const sdk::State& state, const std::string& id)
+} // namespace
+
+namespace detail {
+
+std::optional<InteractiveRequestSource> interactiveRequestSource(const sdk::State& state,
+                                                                 const sdk::PendingRequestId& requestId)
 {
-    const auto requests = state.pendingRequests();
-    const auto found = std::find_if(requests.begin(), requests.end(), [&id](const auto& request) {
-        return request.id.value == id;
-    });
-    return found == requests.end() ? nullptr : &*found;
+    const auto* request = state.pendingRequest(requestId);
+    if (!request)
+        return std::nullopt;
+
+    InteractiveRequestSource result{*request, std::nullopt};
+    if (request->itemId) {
+        if (const auto* item = state.item(*request->itemId)) {
+            result.linkedItem = sdk::itemSemanticView(*item);
+            if (result.linkedItem)
+                result.linkedItem->stamp.reset();
+        }
+    }
+    return result;
 }
 
-} // namespace
+bool interactiveRequestCanRespond(const InteractiveRequestSource& source)
+{
+    const auto view = sdk::pendingRequestPresentation(source.request);
+    if (source.request.connectionInvalidated || view.truncated || !view.omittedFields.empty())
+        return false;
+    if (source.request.itemId && !source.linkedItem)
+        return false;
+    return !source.linkedItem
+           || (!source.linkedItem->connectionInvalidated && !source.linkedItem->truncated
+               && source.linkedItem->omittedFields.empty());
+}
+
+} // namespace detail
 
 InteractiveRequestDialog::InteractiveRequestDialog(StateProvider provider,
                                                    ResponseHandler handler,
@@ -157,6 +195,7 @@ InteractiveRequestDialog::InteractiveRequestDialog(StateProvider provider,
     connect(nextButton, &QPushButton::clicked, this, [this] { showNext(); });
     buttons->addWidget(nextButton);
     submitButton = new QPushButton(QStringLiteral("Submit response"));
+    submitButton->setObjectName(QStringLiteral("interactiveRequestSubmit"));
     submitButton->setProperty("kind", "primary");
     connect(submitButton, &QPushButton::clicked, this, [this] { submitCurrent(); });
     buttons->addWidget(submitButton);
@@ -188,14 +227,23 @@ void InteractiveRequestDialog::synchronize(const sdk::State& state)
     if (orderedRequestIds.empty()) {
         currentRequestId.clear();
         submittingRequestId.clear();
+        presentedSource.reset();
+        currentRequestRespondable = false;
         hide();
         return;
     }
     if (!currentIds.contains(currentRequestId))
         currentRequestId = orderedRequestIds.front();
 
+    const auto source = detail::interactiveRequestSource(state, sdk::PendingRequestId{currentRequestId});
+    const bool sameRequestChanged = source && presentedSource
+                                    && source->request.id == presentedSource->request.id
+                                    && *source != *presentedSource;
+    if (sameRequestChanged)
+        drafts.erase(currentRequestId);
     const bool presentationChanged = previousRequestIds != orderedRequestIds
-                                     || previousRequestId != currentRequestId;
+                                     || previousRequestId != currentRequestId
+                                     || source != presentedSource;
     if (presentationChanged && !newlyNeedsAttention)
         rebuild(state);
     if (newlyNeedsAttention)
@@ -264,23 +312,27 @@ void InteractiveRequestDialog::saveCurrentDraft()
 
 void InteractiveRequestDialog::rebuild(const sdk::State& state)
 {
-    const auto* request = pendingRequest(state, currentRequestId);
-    if (!request) {
+    const auto source = detail::interactiveRequestSource(state, sdk::PendingRequestId{currentRequestId});
+    if (!source) {
+        presentedSource.reset();
+        currentRequestRespondable = false;
         hide();
         return;
     }
+    const sdk::PendingRequestState& request = source->request;
 
     approvalChoices.clear();
     questionEditors.clear();
     clearLayout(body->layout());
     auto* content = static_cast<QVBoxLayout*>(body->layout());
-    const auto view = sdk::pendingRequestPresentation(*request);
+    const auto view = sdk::pendingRequestPresentation(request);
+    currentRequestRespondable = detail::interactiveRequestCanRespond(*source);
 
-    auto* heading = wrappedLabel(kindTitle(request->kind), "heading");
-    heading->setToolTip(QStringLiteral("Request ID: %1").arg(text(request->id.value)));
+    auto* heading = wrappedLabel(kindTitle(request.kind), "heading");
+    heading->setToolTip(plainTooltip(QStringLiteral("Request ID: %1").arg(text(request.id.value))));
     content->addWidget(heading);
-    if (request->summary && !request->summary->empty())
-        addDetail(content, text(*request->summary));
+    if (request.summary && !request.summary->empty())
+        addDetail(content, text(*request.summary));
 
     QStringList provenance;
     if (view.threadId)
@@ -291,20 +343,16 @@ void InteractiveRequestDialog::rebuild(const sdk::State& state)
         provenance.append(QStringLiteral("Item %1").arg(text(view.itemId->value)));
     addDetail(content, provenance.join(QStringLiteral(" · ")));
 
-    if (view.itemId) {
-        if (const auto* item = state.item(*view.itemId)) {
-            const auto semantic = sdk::itemSemanticView(*item);
-            if (semantic) {
-                if (const auto* command = std::get_if<sdk::CommandExecutionSemanticView>(&semantic->details)) {
-                    if (command->command)
-                        addDetail(content, QStringLiteral("Command: %1").arg(text(*command->command)));
-                    if (command->cwd)
-                        addDetail(content, QStringLiteral("Working directory: %1").arg(text(command->cwd->value)));
-                } else if (const auto* changes = std::get_if<sdk::FileChangeSemanticView>(&semantic->details)) {
-                    if (changes->changeCount)
-                        addDetail(content, QStringLiteral("Affected changes: %1").arg(*changes->changeCount));
-                }
-            }
+    if (source->linkedItem) {
+        const auto& semantic = *source->linkedItem;
+        if (const auto* command = std::get_if<sdk::CommandExecutionSemanticView>(&semantic.details)) {
+            if (command->command)
+                addDetail(content, QStringLiteral("Command: %1").arg(text(*command->command)));
+            if (command->cwd)
+                addDetail(content, QStringLiteral("Working directory: %1").arg(text(command->cwd->value)));
+        } else if (const auto* changes = std::get_if<sdk::FileChangeSemanticView>(&semantic.details)) {
+            if (changes->changeCount)
+                addDetail(content, QStringLiteral("Affected changes: %1").arg(*changes->changeCount));
         }
     }
     if (view.fileChangeCount)
@@ -321,16 +369,24 @@ void InteractiveRequestDialog::rebuild(const sdk::State& state)
         addDetail(content, QStringLiteral("Approval reason is redacted by AISuite"));
     if (view.truncated || !view.omittedFields.empty())
         addDetail(content, QStringLiteral("Some projected request details were omitted"));
+    if (request.connectionInvalidated)
+        addDetail(content, QStringLiteral("This request belongs to an earlier connection and cannot be answered"));
+    if (request.itemId && !source->linkedItem)
+        addDetail(content, QStringLiteral("Linked request details are unavailable and cannot be safely approved"));
+    if (source->linkedItem
+        && (source->linkedItem->connectionInvalidated || source->linkedItem->truncated
+            || !source->linkedItem->omittedFields.empty()))
+        addDetail(content, QStringLiteral("Linked request details are incomplete and cannot be safely approved"));
 
     RequestDraft& draft = drafts[currentRequestId];
-    if (isSimpleApproval(request->kind) || isReviewApproval(request->kind)) {
+    if (isSimpleApproval(request.kind) || isReviewApproval(request.kind)) {
         auto* prompt = wrappedLabel(QStringLiteral("Choose how Codex should continue:"), "body");
         content->addWidget(prompt);
         const QStringList decisions{
             QStringLiteral("Approve"),
             QStringLiteral("Approve for this session"),
-            isSimpleApproval(request->kind) ? QStringLiteral("Decline") : QStringLiteral("Deny"),
-            isSimpleApproval(request->kind) ? QStringLiteral("Cancel") : QStringLiteral("Abort"),
+            isSimpleApproval(request.kind) ? QStringLiteral("Decline") : QStringLiteral("Deny"),
+            isSimpleApproval(request.kind) ? QStringLiteral("Cancel") : QStringLiteral("Abort"),
         };
         for (int index = 0; index < decisions.size(); ++index) {
             auto* choice = new QRadioButton(decisions[index]);
@@ -339,9 +395,9 @@ void InteractiveRequestDialog::rebuild(const sdk::State& state)
             approvalChoices.push_back(choice);
             content->addWidget(choice);
         }
-    } else if (request->kind == frontend::PendingRequestKind::UserInput && request->questions
-               && !request->questions->empty()) {
-        for (const auto& question : *request->questions) {
+    } else if (request.kind == frontend::PendingRequestKind::UserInput && request.questions
+               && !request.questions->empty()) {
+        for (const auto& question : *request.questions) {
             auto* section = new QFrame;
             section->setProperty("kind", "raised");
             auto* sectionLayout = new QVBoxLayout(section);
@@ -355,10 +411,10 @@ void InteractiveRequestDialog::rebuild(const sdk::State& state)
             editor.id = question.id;
             const QuestionDraft& questionDraft = draft.questions[question.id];
             for (const auto& option : question.options) {
-                auto* checkbox = new QCheckBox(text(option.label));
+                auto* checkbox = new QCheckBox(checkBoxText(text(option.label)));
                 checkbox->setChecked(questionDraft.selectedOptions.contains(option.label));
                 if (!option.description.empty())
-                    checkbox->setToolTip(text(option.description));
+                    checkbox->setToolTip(plainTooltip(text(option.description)));
                 connect(checkbox, &QCheckBox::toggled, this, [this](bool) { updateSubmitEnabled(); });
                 sectionLayout->addWidget(checkbox);
                 if (!option.description.empty()) {
@@ -398,6 +454,7 @@ void InteractiveRequestDialog::rebuild(const sdk::State& state)
         setStatus(QStringLiteral("Response submitted… Waiting for canonical state."));
     else
         setStatus({});
+    presentedSource = std::move(source);
     updateSubmitEnabled();
 }
 
@@ -418,18 +475,30 @@ void InteractiveRequestDialog::submitCurrent()
 {
     saveCurrentDraft();
     const auto& state = stateProvider();
-    const auto* request = pendingRequest(state, currentRequestId);
-    if (!request) {
+    const auto source = detail::interactiveRequestSource(state, sdk::PendingRequestId{currentRequestId});
+    if (!source) {
         responseFailed(currentRequestId, QStringLiteral("This request is no longer pending"));
         synchronize(state);
         return;
     }
+    if (!presentedSource || *source != *presentedSource) {
+        drafts.erase(currentRequestId);
+        rebuild(state);
+        setStatus(QStringLiteral("This request changed; review it and retry"), true);
+        return;
+    }
+    if (!detail::interactiveRequestCanRespond(*source)) {
+        setStatus(QStringLiteral("This request is incomplete and cannot be safely answered"), true);
+        updateSubmitEnabled();
+        return;
+    }
+    const sdk::PendingRequestState& request = source->request;
     if (submittingRequestId == currentRequestId || submittedRequestIds.contains(currentRequestId))
         return;
 
-    InteractiveRequestResponse response{request->id, request->kind, typed::ApprovalDecision::cancel()};
+    InteractiveRequestResponse response{request.id, request.kind, *source, typed::ApprovalDecision::cancel()};
     const RequestDraft& draft = drafts[currentRequestId];
-    if (isSimpleApproval(request->kind)) {
+    if (isSimpleApproval(request.kind)) {
         switch (draft.approvalIndex) {
             case 1: response.value = typed::ApprovalDecision::accept(); break;
             case 2: response.value = typed::ApprovalDecision::acceptForSession(); break;
@@ -439,7 +508,7 @@ void InteractiveRequestDialog::submitCurrent()
                 setStatus(QStringLiteral("Choose an approval decision"), true);
                 return;
         }
-    } else if (isReviewApproval(request->kind)) {
+    } else if (isReviewApproval(request.kind)) {
         typed::ReviewDecision decision;
         switch (draft.approvalIndex) {
             case 1: decision = typed::ApprovedReviewDecision{}; break;
@@ -450,15 +519,15 @@ void InteractiveRequestDialog::submitCurrent()
                 setStatus(QStringLiteral("Choose an approval decision"), true);
                 return;
         }
-        if (request->kind == frontend::PendingRequestKind::ApplyPatchApproval)
+        if (request.kind == frontend::PendingRequestKind::ApplyPatchApproval)
             response.value = typed::ApplyPatchApprovalResponse{std::move(decision)};
         else
             response.value = typed::ExecCommandApprovalResponse{std::move(decision)};
-    } else if (request->kind == frontend::PendingRequestKind::UserInput && request->questions
-               && !request->questions->empty()) {
+    } else if (request.kind == frontend::PendingRequestKind::UserInput && request.questions
+               && !request.questions->empty()) {
         std::vector<typed::UserInputAnswer> answers;
-        answers.reserve(request->questions->size());
-        for (const auto& question : *request->questions) {
+        answers.reserve(request.questions->size());
+        for (const auto& question : *request.questions) {
             const QuestionDraft& questionDraft = draft.questions.at(question.id);
             std::vector<std::string> values(questionDraft.selectedOptions.begin(), questionDraft.selectedOptions.end());
             if (!questionDraft.freeText.trimmed().isEmpty())
@@ -493,7 +562,7 @@ void InteractiveRequestDialog::updateSubmitEnabled()
     const bool decisionChosen = approvalChoices.empty()
                                 || std::ranges::any_of(approvalChoices, [](const auto* choice) { return choice->isChecked(); });
     const bool busy = !submittingRequestId.empty() || submittedRequestIds.contains(currentRequestId);
-    submitButton->setEnabled(supported && decisionChosen && !busy);
+    submitButton->setEnabled(currentRequestRespondable && supported && decisionChosen && !busy);
 }
 
 } // namespace codexui
