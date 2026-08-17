@@ -52,7 +52,10 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
-    void scheduleTimelineLayout(int previousScroll, bool followLatest, bool threadChanged);
+    void scheduleTimelineLayout(int previousScroll,
+                                bool followLatest,
+                                bool threadChanged,
+                                bool timelineShrank);
     void captureTimelineAnchor();
     void settleTimelineLayout();
     void settleThreadSwitchLayout(std::uint64_t generation, int remainingPasses);
@@ -71,6 +74,8 @@ private:
     QVBoxLayout* turnSummaryLayout = nullptr;
     QLabel* turnFailure = nullptr;
     QScrollArea* scrollArea = nullptr;
+    QFrame* timelineWindowNotice = nullptr;
+    QLabel* timelineWindowDetail = nullptr;
     QWidget* timelineHost = nullptr;
     QVBoxLayout* timeline = nullptr;
     QPropertyAnimation* scrollAnimation = nullptr;
@@ -80,6 +85,7 @@ private:
     QByteArray renderedSummaryKey;
     QStringList renderedTurnIds;
     QHash<QString, QWidget*> renderedTurnWidgets;
+    QHash<QString, QLabel*> renderedTurnLabels;
     QHash<QString, QLabel*> renderedTurnStatusLabels;
     QHash<QString, QVBoxLayout*> renderedTurnItemLayouts;
     QHash<QString, QStringList> renderedSegmentIds;
@@ -92,6 +98,7 @@ private:
     bool followingLatest = false;
     bool pendingFollowLatest = false;
     bool pendingThreadChanged = false;
+    bool pendingTimelineShrink = false;
     bool resizeLayoutPending = false;
     int pendingPreviousScroll = 0;
     int pendingViewportAnchorY = 0;
