@@ -14,6 +14,7 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -21,11 +22,30 @@
 #include <utility>
 #include <variant>
 
+#include <sys/socket.h>
 #include <unistd.h>
 
 namespace codexui {
 namespace sdk = ai::openai::codex::frontend::client;
 namespace frontend = ai::openai::codex::frontend;
+
+namespace detail {
+
+std::optional<QString> unixPeerCredentialError(qintptr socketDescriptor, uid_t expectedUserId) noexcept
+{
+    if (socketDescriptor < 0 || socketDescriptor > std::numeric_limits<int>::max())
+        return QStringLiteral("Could not authenticate the Unix backend peer");
+    ucred credentials{};
+    socklen_t credentialsSize = sizeof(credentials);
+    if (::getsockopt(static_cast<int>(socketDescriptor), SOL_SOCKET, SO_PEERCRED, &credentials, &credentialsSize) != 0
+        || credentialsSize != sizeof(credentials))
+        return QStringLiteral("Could not authenticate the Unix backend peer");
+    if (credentials.uid != expectedUserId)
+        return QStringLiteral("Unix backend peer belongs to a different user");
+    return std::nullopt;
+}
+
+} // namespace detail
 
 namespace {
 
@@ -486,6 +506,11 @@ void FrontendSession::socketConnected()
     reconnectTimer.stop();
     inboundBuffer.clear();
     receiveContinuationScheduled = false;
+    if (const auto error = detail::unixPeerCredentialError(socket.socketDescriptor(), ::geteuid())) {
+        failWithoutReconnect(*error);
+        socket.abort();
+        return;
+    }
     connection = client->openConnection({
         [this](OutboundMessage message) { return send(std::move(message)); },
         [this](std::string reason) { closeTransport(QString::fromStdString(reason)); },

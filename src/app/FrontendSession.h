@@ -17,7 +17,14 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <sys/types.h>
 #include <vector>
+
+namespace codexui::detail {
+
+[[nodiscard]] std::optional<QString> unixPeerCredentialError(qintptr socketDescriptor, uid_t expectedUserId) noexcept;
+
+} // namespace codexui::detail
 
 namespace codexui {
 
