@@ -17,9 +17,18 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <sys/types.h>
 #include <vector>
 
+namespace codexui::detail {
+
+[[nodiscard]] std::optional<QString> unixPeerCredentialError(qintptr socketDescriptor, uid_t expectedUserId) noexcept;
+
+} // namespace codexui::detail
+
 namespace codexui {
+
+struct FrontendSessionTestAccess;
 
 class FrontendSession : public QObject
 {
@@ -35,6 +44,7 @@ public:
     ~FrontendSession() override;
 
     void connectToBackend();
+    void reconnectToBackend();
     [[nodiscard]] Lifecycle lifecycle() const noexcept;
     [[nodiscard]] QString statusText() const;
     [[nodiscard]] static std::optional<QString> promptValidationError(const QString& prompt);
@@ -69,11 +79,14 @@ public:
 
 signals:
     void lifecycleChanged();
+    void statusChanged();
     void stateChanged(const QStringList& affectedThreadIds,
                       bool allThreadsAffected,
                       bool inspectorAffected);
 
 private:
+    friend struct FrontendSessionTestAccess;
+
     static constexpr int initialReconnectDelayMs = 250;
     static constexpr int maximumReconnectDelayMs = 5'000;
 
@@ -87,11 +100,14 @@ private:
     void socketReadyRead();
     void socketDisconnected();
     void socketFailed(QLocalSocket::LocalSocketError error);
+    void handleConnectionStateChange(const ai::openai::codex::frontend::client::ConnectionStateChange& change);
+    void reportDiagnostic(QString message);
     void scheduleSocketRead();
     void reconcileRequestedThreadReads();
     void startConnection();
     void scheduleReconnect();
     void retryConnection();
+    void resetReconnectPolicy();
     void failWithoutReconnect(QString reason);
     [[nodiscard]] SendResult send(OutboundMessage message) noexcept;
     void closeTransport(QString reason) noexcept;
@@ -105,6 +121,7 @@ private:
     ai::openai::codex::frontend::client::State currentState;
     Lifecycle currentLifecycle = Lifecycle::Disconnected;
     QString detail;
+    QString diagnosticDetail;
     std::set<std::string> requestedThreadReads;
     int reconnectDelayMs = initialReconnectDelayMs;
     bool receiveContinuationScheduled = false;

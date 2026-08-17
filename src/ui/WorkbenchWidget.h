@@ -12,6 +12,7 @@
 #include <optional>
 
 class QFrame;
+class QAction;
 class QLabel;
 class QPushButton;
 class QSplitter;
@@ -73,6 +74,7 @@ private:
     QLabel* controllerStatus = nullptr;
     QLabel* attentionStatus = nullptr;
     QPushButton* attentionButton = nullptr;
+    QAction* reconnectAction = nullptr;
     InteractiveRequestDialog* interactiveRequestDialog = nullptr;
     QString selectedThreadId;
     QString projectedAgentThreadId;

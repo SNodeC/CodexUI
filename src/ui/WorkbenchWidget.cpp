@@ -10,6 +10,7 @@
 
 #include <ai/openai/codex/frontend/client/State.h>
 
+#include <QAction>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -50,7 +51,8 @@ QFrame* dot(const QString& color, int size = 7)
 QWidget* makeTopBar(QPushButton*& restoreLeft,
                     QPushButton*& restoreRight,
                     QPushButton*& attention,
-                    QLabel*& modelStatus)
+                    QLabel*& modelStatus,
+                    QAction*& reconnectAction)
 {
     auto* bar = new QFrame;
     bar->setObjectName(QStringLiteral("topBar"));
@@ -75,6 +77,8 @@ QWidget* makeTopBar(QPushButton*& restoreLeft,
     auto* commands = new QPushButton(QStringLiteral("Commands"));
     commands->setFixedSize(132, 32);
     auto* menu = new QMenu(commands);
+    reconnectAction = menu->addAction(QStringLiteral("Reconnect to app server"));
+    menu->addSeparator();
     menu->addAction(QStringLiteral("Command palette is not implemented"));
     QObject::connect(commands, &QPushButton::clicked, commands, [commands, menu] {
         menu->popup(commands->mapToGlobal(QPoint(0, commands->height() + 4)));
@@ -180,7 +184,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    layout->addWidget(makeTopBar(restoreSidebar, restoreInspector, attentionButton, modelStatus));
+    layout->addWidget(makeTopBar(restoreSidebar, restoreInspector, attentionButton, modelStatus, reconnectAction));
 
     splitter = new QSplitter(Qt::Horizontal);
     splitter->setChildrenCollapsible(false);
@@ -209,6 +213,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     connect(restoreSidebar, &QPushButton::clicked, this, [this] { setSidebarVisible(true); });
     connect(restoreInspector, &QPushButton::clicked, this, [this] { setInspectorVisible(true); });
     connect(attentionButton, &QPushButton::clicked, interactiveRequestDialog, &InteractiveRequestDialog::present);
+    connect(reconnectAction, &QAction::triggered, &frontendSession, &FrontendSession::reconnectToBackend);
     connect(sidebar, &SidebarWidget::newThreadRequested, this, &WorkbenchWidget::beginNewThread);
     connect(sidebar, &SidebarWidget::threadSelected, this, &WorkbenchWidget::selectThread);
     connect(inspector, &InspectorWidget::selectionChanged, this, [this] { refreshState(); });
@@ -216,6 +221,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     connect(conversation, &ConversationWidget::sendRequested, this, &WorkbenchWidget::sendPrompt);
     connect(conversation, &ConversationWidget::stopRequested, this, &WorkbenchWidget::stopActiveTurn);
     connect(&frontendSession, &FrontendSession::lifecycleChanged, this, &WorkbenchWidget::refreshLifecycle);
+    connect(&frontendSession, &FrontendSession::statusChanged, this, &WorkbenchWidget::refreshLifecycle);
     connect(&frontendSession, &FrontendSession::stateChanged, this, &WorkbenchWidget::scheduleStateRefresh);
 
     refreshLifecycle();
@@ -275,6 +281,9 @@ void WorkbenchWidget::refreshLifecycle()
         case Lifecycle::Disconnected:
             break;
     }
+
+    reconnectAction->setEnabled(frontendSession.lifecycle() == Lifecycle::Disconnected
+                                || frontendSession.lifecycle() == Lifecycle::Failed);
 
     sidebar->setConnectionStatus(title, detail, color);
     setStyleSheetIfChanged(codexStatusDot, QStringLiteral("background:%1;border-radius:3px;").arg(color));

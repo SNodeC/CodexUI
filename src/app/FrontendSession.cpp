@@ -14,6 +14,7 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -21,11 +22,30 @@
 #include <utility>
 #include <variant>
 
+#include <sys/socket.h>
 #include <unistd.h>
 
 namespace codexui {
 namespace sdk = ai::openai::codex::frontend::client;
 namespace frontend = ai::openai::codex::frontend;
+
+namespace detail {
+
+std::optional<QString> unixPeerCredentialError(qintptr socketDescriptor, uid_t expectedUserId) noexcept
+{
+    if (socketDescriptor < 0 || socketDescriptor > std::numeric_limits<int>::max())
+        return QStringLiteral("Could not authenticate the Unix backend peer");
+    ucred credentials{};
+    socklen_t credentialsSize = sizeof(credentials);
+    if (::getsockopt(static_cast<int>(socketDescriptor), SOL_SOCKET, SO_PEERCRED, &credentials, &credentialsSize) != 0
+        || credentialsSize != sizeof(credentials))
+        return QStringLiteral("Could not authenticate the Unix backend peer");
+    if (credentials.uid != expectedUserId)
+        return QStringLiteral("Unix backend peer belongs to a different user");
+    return std::nullopt;
+}
+
+} // namespace detail
 
 namespace {
 
@@ -152,34 +172,7 @@ FrontendSession::FrontendSession(QObject* parent)
 
     sdk::ClientCallbacks callbacks;
     callbacks.onConnectionStateChanged = [this](const sdk::ConnectionStateChange& change) {
-        if (change.error && !change.error->retryable) {
-            automaticReconnectEnabled = false;
-            reconnectTimer.stop();
-        }
-        switch (change.current) {
-            case sdk::ConnectionState::Connecting:
-                setLifecycle(Lifecycle::Connecting);
-                break;
-            case sdk::ConnectionState::Authenticating:
-                setLifecycle(Lifecycle::Authenticating);
-                break;
-            case sdk::ConnectionState::Synchronizing:
-                setLifecycle(Lifecycle::Synchronizing);
-                break;
-            case sdk::ConnectionState::Ready:
-                // onSynchronized owns the Ready transition so consumers never
-                // treat a transient reconnect projection as authoritative.
-                break;
-            case sdk::ConnectionState::Disconnected:
-            case sdk::ConnectionState::Closed:
-                setLifecycle(Lifecycle::Disconnected,
-                             change.error ? QString::fromStdString(change.error->message) : QString{});
-                break;
-            case sdk::ConnectionState::Closing:
-                break;
-        }
-        if (change.error)
-            setLifecycle(Lifecycle::Failed, QString::fromStdString(change.error->message));
+        handleConnectionStateChange(change);
     };
     callbacks.onStateUpdated = [this](const sdk::StateUpdate& update) {
         currentState = update.state;
@@ -197,12 +190,19 @@ FrontendSession::FrontendSession(QObject* parent)
         automaticReconnectEnabled = true;
         currentState = info.state;
         reconcileRequestedThreadReads();
+        const bool clearReadyDiagnostic = currentLifecycle == Lifecycle::Ready
+                                          && detail.isEmpty()
+                                          && !diagnosticDetail.isEmpty();
+        if (clearReadyDiagnostic)
+            diagnosticDetail.clear();
         setLifecycle(Lifecycle::Ready);
+        if (clearReadyDiagnostic)
+            emit statusChanged();
         emit stateChanged({}, true, true);
     };
     callbacks.onDiagnostic = [this](const sdk::Diagnostic& diagnostic) {
         if (diagnostic.severity == sdk::Diagnostic::Severity::Error)
-            setLifecycle(Lifecycle::Failed, QString::fromStdString(diagnostic.message));
+            reportDiagnostic(QString::fromStdString(diagnostic.message));
     };
     client = std::make_unique<Client>(std::move(options), std::move(callbacks));
 
@@ -226,7 +226,26 @@ FrontendSession::~FrontendSession()
 
 void FrontendSession::connectToBackend()
 {
-    automaticReconnectEnabled = true;
+    resetReconnectPolicy();
+    startConnection();
+}
+
+void FrontendSession::reconnectToBackend()
+{
+    reconnectTimer.stop();
+    if (connection.isOpen())
+        connection.close("User requested reconnect");
+    connection = Connection{};
+    inboundBuffer.clear();
+    receiveContinuationScheduled = false;
+    requestedThreadReads.clear();
+    if (socket.state() != QLocalSocket::UnconnectedState) {
+        socket.abort();
+        resetReconnectPolicy();
+        reconnectTimer.start(0);
+        return;
+    }
+    resetReconnectPolicy();
     startConnection();
 }
 
@@ -248,6 +267,8 @@ QString FrontendSession::statusText() const
 {
     if (!detail.isEmpty())
         return detail;
+    if (!diagnosticDetail.isEmpty())
+        return diagnosticDetail;
     switch (currentLifecycle) {
         case Lifecycle::Disconnected:
             return QStringLiteral("Disconnected");
@@ -486,6 +507,11 @@ void FrontendSession::socketConnected()
     reconnectTimer.stop();
     inboundBuffer.clear();
     receiveContinuationScheduled = false;
+    if (const auto error = detail::unixPeerCredentialError(socket.socketDescriptor(), ::geteuid())) {
+        failWithoutReconnect(*error);
+        socket.abort();
+        return;
+    }
     connection = client->openConnection({
         [this](OutboundMessage message) { return send(std::move(message)); },
         [this](std::string reason) { closeTransport(QString::fromStdString(reason)); },
@@ -631,16 +657,59 @@ void FrontendSession::socketFailed(QLocalSocket::LocalSocketError)
     inboundBuffer.clear();
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
-    if (automaticReconnectEnabled)
+    if (automaticReconnectEnabled && currentLifecycle != Lifecycle::Failed)
         setLifecycle(Lifecycle::Failed, socket.errorString());
     scheduleReconnect();
+}
+
+void FrontendSession::handleConnectionStateChange(const sdk::ConnectionStateChange& change)
+{
+    if (change.error) {
+        if (!change.error->retryable) {
+            automaticReconnectEnabled = false;
+            reconnectTimer.stop();
+        }
+        setLifecycle(Lifecycle::Failed, QString::fromStdString(change.error->message));
+        return;
+    }
+
+    switch (change.current) {
+        case sdk::ConnectionState::Connecting:
+            setLifecycle(Lifecycle::Connecting);
+            break;
+        case sdk::ConnectionState::Authenticating:
+            setLifecycle(Lifecycle::Authenticating);
+            break;
+        case sdk::ConnectionState::Synchronizing:
+            setLifecycle(Lifecycle::Synchronizing);
+            break;
+        case sdk::ConnectionState::Ready:
+            // onSynchronized owns the Ready transition so consumers never
+            // treat a transient reconnect projection as authoritative.
+            break;
+        case sdk::ConnectionState::Disconnected:
+        case sdk::ConnectionState::Closed:
+            if (currentLifecycle != Lifecycle::Failed)
+                setLifecycle(Lifecycle::Disconnected);
+            break;
+        case sdk::ConnectionState::Closing:
+            break;
+    }
+}
+
+void FrontendSession::reportDiagnostic(QString message)
+{
+    if (message.isEmpty() || diagnosticDetail == message)
+        return;
+    diagnosticDetail = std::move(message);
+    emit statusChanged();
 }
 
 void FrontendSession::failWithoutReconnect(QString reason)
 {
     // Retrying the same stream after a protocol/state rejection only replays
-    // the offending suffix. A fresh explicit connect (application restart)
-    // remains available after the underlying incompatibility is corrected.
+    // the offending suffix. The explicit reconnect action remains available
+    // after the underlying incompatibility is corrected.
     automaticReconnectEnabled = false;
     reconnectTimer.stop();
     setLifecycle(Lifecycle::Failed, std::move(reason));
@@ -663,6 +732,13 @@ void FrontendSession::retryConnection()
         return;
     }
     startConnection();
+}
+
+void FrontendSession::resetReconnectPolicy()
+{
+    automaticReconnectEnabled = true;
+    reconnectTimer.stop();
+    reconnectDelayMs = initialReconnectDelayMs;
 }
 
 FrontendSession::SendResult FrontendSession::send(OutboundMessage message) noexcept
@@ -688,15 +764,14 @@ void FrontendSession::closeTransport(QString reason) noexcept
 
 void FrontendSession::setLifecycle(Lifecycle value, QString newDetail)
 {
-    if (value != Lifecycle::Failed && newDetail.isEmpty())
-        detail.clear();
-    else
-        detail = std::move(newDetail);
-    if (currentLifecycle == value) {
-        emit lifecycleChanged();
+    QString nextDetail;
+    if (value == Lifecycle::Failed || !newDetail.isEmpty())
+        nextDetail = std::move(newDetail);
+    if (currentLifecycle == value && detail == nextDetail)
         return;
-    }
     currentLifecycle = value;
+    detail = std::move(nextDetail);
+    diagnosticDetail.clear();
     emit lifecycleChanged();
 }
 
