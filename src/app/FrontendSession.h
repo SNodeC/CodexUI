@@ -11,7 +11,10 @@
 #include <QTimer>
 
 #include <ai/openai/codex/frontend/client/Client.h>
+#include <ai/openai/codex/frontend/Protocol.h>
 
+#include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -89,15 +92,28 @@ private:
 
     static constexpr int initialReconnectDelayMs = 250;
     static constexpr int maximumReconnectDelayMs = 5'000;
+    static constexpr int outboundDrainRetryMs = 10;
+    static constexpr qint64 maximumBufferedOutboundBytes = static_cast<qint64>(
+        4U * (ai::openai::codex::frontend::DefaultFrontendMaximumInboundMessageBytes + 1U));
 
     using Client = ai::openai::codex::frontend::client::Client;
     using Connection = ai::openai::codex::frontend::client::Connection;
     using OutboundMessage = ai::openai::codex::frontend::client::OutboundMessage;
     using SendResult = ai::openai::codex::frontend::client::SendResult;
+    using OutboundWriter = std::function<qint64(const char*, qint64)>;
+
+    struct PendingWrite
+    {
+        std::string frame;
+        qint64 offset = 0;
+    };
+
+    enum class DrainResult { Progress, Blocked, Failed, Reset };
 
     static QString defaultSocketPath();
     void socketConnected();
     void socketReadyRead();
+    void socketBytesWritten(qint64 bytes);
     void socketDisconnected();
     void socketFailed(QLocalSocket::LocalSocketError error);
     void handleConnectionStateChange(const ai::openai::codex::frontend::client::ConnectionStateChange& change);
@@ -109,12 +125,24 @@ private:
     void retryConnection();
     void resetReconnectPolicy();
     void failWithoutReconnect(QString reason);
-    [[nodiscard]] SendResult send(OutboundMessage message) noexcept;
+    [[nodiscard]] SendResult send(OutboundMessage&& message);
+    [[nodiscard]] SendResult sendToTransport(OutboundMessage&& message,
+                                             bool transportConnected,
+                                             qint64 socketBufferedBytes,
+                                             const OutboundWriter& writer) noexcept;
+    [[nodiscard]] SendResult acceptOutbound(OutboundMessage&& message,
+                                            qint64 socketBufferedBytes,
+                                            const OutboundWriter& writer) noexcept;
+    [[nodiscard]] DrainResult drainOutbound(const OutboundWriter& writer) noexcept;
+    void drainSocketWrites();
+    void scheduleOutboundDrain();
+    void clearOutbound() noexcept;
     void closeTransport(QString reason) noexcept;
     void setLifecycle(Lifecycle value, QString detail = {});
 
     QLocalSocket socket;
     QTimer reconnectTimer;
+    QTimer outboundDrainTimer;
     QByteArray inboundBuffer;
     std::unique_ptr<Client> client;
     Connection connection;
@@ -123,8 +151,13 @@ private:
     QString detail;
     QString diagnosticDetail;
     std::set<std::string> requestedThreadReads;
+    std::deque<PendingWrite> pendingWrites;
+    qint64 pendingWriteBytes = 0;
+    std::uint64_t outboundEpoch = 0;
     int reconnectDelayMs = initialReconnectDelayMs;
     bool receiveContinuationScheduled = false;
+    bool drainingOutbound = false;
+    bool outboundClearPending = false;
     bool automaticReconnectEnabled = true;
     bool localShutdown = false;
 };
