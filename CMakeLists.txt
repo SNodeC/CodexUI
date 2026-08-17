@@ -61,20 +61,20 @@ if(BUILD_TESTING)
     add_test(NAME CodexUIPromptLimitTest COMMAND CodexUIPromptLimitTest)
 
     add_executable(
-        CodexUIUnixPeerCredentialsTest
-        tests/UnixPeerCredentialsTest.cpp
+        CodexUIFrontendSessionTest
+        tests/FrontendSessionTest.cpp
         src/app/FrontendSession.cpp
         src/app/FrontendSession.h
     )
-    target_compile_features(CodexUIUnixPeerCredentialsTest PRIVATE cxx_std_20)
-    target_include_directories(CodexUIUnixPeerCredentialsTest PRIVATE src)
+    target_compile_features(CodexUIFrontendSessionTest PRIVATE cxx_std_20)
+    target_include_directories(CodexUIFrontendSessionTest PRIVATE src)
     target_link_libraries(
-        CodexUIUnixPeerCredentialsTest
+        CodexUIFrontendSessionTest
         PRIVATE
             AISuite::OpenAICodexFrontendClient
             Qt6::Network
     )
-    add_test(NAME CodexUIUnixPeerCredentialsTest COMMAND CodexUIUnixPeerCredentialsTest)
+    add_test(NAME CodexUIFrontendSessionTest COMMAND CodexUIFrontendSessionTest)
 
     add_executable(
         CodexUIConversationLayoutTest
