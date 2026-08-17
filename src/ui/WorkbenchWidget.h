@@ -7,6 +7,7 @@
 
 #include <QWidget>
 #include <QString>
+#include <QStringList>
 
 #include <optional>
 
@@ -31,8 +32,10 @@ private:
     enum class PendingAction { None, SendExistingThread, SendNewThread, InterruptTurn };
 
     void refreshLifecycle();
-    void scheduleStateRefresh();
-    void refreshState();
+    void scheduleStateRefresh(const QStringList& affectedThreadIds,
+                              bool allThreadsAffected,
+                              bool inspectorAffected);
+    void refreshState(bool refreshSelectedPresentation = true, bool refreshInspector = true);
     void refreshControls();
     void refreshControllerStatus();
     void selectThread(const QString& threadId);
@@ -90,6 +93,8 @@ private:
     bool requestControllerAcquireInFlight = false;
     bool requestResponseInFlight = false;
     bool stateRefreshPending = false;
+    bool selectedPresentationRefreshPending = false;
+    bool inspectorRefreshPending = false;
 };
 
 } // namespace codexui

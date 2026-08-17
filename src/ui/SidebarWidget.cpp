@@ -33,7 +33,7 @@ QLabel* textLabel(const QString& text, const char* kind = nullptr)
 QLabel* section(const QString& text, bool attention = false)
 {
     auto* result = textLabel(text, attention ? "attentionSection" : "section");
-    result->setFixedHeight(attention ? 26 : 18);
+    result->setMinimumHeight(attention ? 26 : 18);
     return result;
 }
 
@@ -57,7 +57,7 @@ public:
         setObjectName(QStringLiteral("threadRow"));
         setProperty("threadId", this->stableId);
         setCursor(Qt::PointingHandCursor);
-        setFixedHeight(58);
+        setMinimumHeight(58);
         setProperty("selected", false);
 
         auto* row = new QHBoxLayout(this);
@@ -69,7 +69,7 @@ public:
 
         auto* content = new QVBoxLayout;
         content->setContentsMargins(0, 0, 0, 0);
-        content->setSpacing(3);
+        content->setSpacing(4);
         titleLabel = textLabel({}, "title");
         titleLabel->setStyleSheet(QStringLiteral("font-size:13px;font-weight:500;"));
         titleLabel->setTextFormat(Qt::PlainText);
@@ -245,7 +245,7 @@ SidebarWidget::SidebarWidget(QWidget* parent)
     list->setStyleSheet(QStringLiteral("background:transparent;"));
     threadItems = new QVBoxLayout(list);
     threadItems->setContentsMargins(0, 0, 0, 0);
-    threadItems->setSpacing(4);
+    threadItems->setSpacing(5);
     threadItems->setSizeConstraint(QLayout::SetMinAndMaxSize);
     threadItems->addWidget(section(QStringLiteral("THREADS")));
     threadItems->addWidget(textLabel(QStringLiteral("Waiting for synchronized state…"), "muted"));

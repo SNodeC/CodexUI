@@ -10,6 +10,7 @@
 #include <QWidget>
 
 class QVBoxLayout;
+class QLabel;
 
 namespace codexui {
 
@@ -45,6 +46,7 @@ private:
     QByteArray agentsPresentationKey;
     QByteArray changesPresentationKey;
     QByteArray infoPresentationKey;
+    QLabel* infoRevisionValue = nullptr;
 };
 
 } // namespace codexui

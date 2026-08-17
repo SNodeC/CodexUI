@@ -77,7 +77,6 @@ private:
     QTimer* layoutSettleTimer = nullptr;
     QString renderedThreadId;
     // Identity only; conversation content remains owned by immutable AISuite State.
-    QByteArray renderedPresentationKey;
     QByteArray renderedSummaryKey;
     QStringList renderedTurnIds;
     QHash<QString, QWidget*> renderedTurnWidgets;
@@ -93,6 +92,7 @@ private:
     bool followingLatest = false;
     bool pendingFollowLatest = false;
     bool pendingThreadChanged = false;
+    bool resizeLayoutPending = false;
     int pendingPreviousScroll = 0;
     int pendingViewportAnchorY = 0;
     bool renderedNewThreadDraft = false;

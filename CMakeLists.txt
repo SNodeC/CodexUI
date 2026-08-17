@@ -4,6 +4,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(CodexUI LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_AUTOMOC ON)
 
 find_package(AISuite CONFIG REQUIRED)
@@ -40,3 +42,38 @@ target_link_libraries(
         Qt6::Network
         Qt6::Widgets
 )
+
+if(BUILD_TESTING)
+    add_executable(
+        CodexUIPromptLimitTest
+        tests/PromptLimitTest.cpp
+        src/app/FrontendSession.cpp
+        src/app/FrontendSession.h
+    )
+    target_compile_features(CodexUIPromptLimitTest PRIVATE cxx_std_20)
+    target_include_directories(CodexUIPromptLimitTest PRIVATE src)
+    target_link_libraries(
+        CodexUIPromptLimitTest
+        PRIVATE
+            AISuite::OpenAICodexFrontendClient
+            Qt6::Network
+    )
+    add_test(NAME CodexUIPromptLimitTest COMMAND CodexUIPromptLimitTest)
+
+    add_executable(
+        CodexUIConversationLayoutTest
+        tests/ConversationLayoutTest.cpp
+        src/ui/ConversationWidget.cpp
+        src/ui/ConversationWidget.h
+    )
+    target_compile_features(CodexUIConversationLayoutTest PRIVATE cxx_std_20)
+    target_include_directories(CodexUIConversationLayoutTest PRIVATE src)
+    target_link_libraries(
+        CodexUIConversationLayoutTest
+        PRIVATE
+            AISuite::OpenAICodexFrontendClient
+            Qt6::Widgets
+    )
+    add_test(NAME CodexUIConversationLayoutTest COMMAND CodexUIConversationLayoutTest)
+    set_tests_properties(CodexUIConversationLayoutTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
