@@ -157,6 +157,18 @@ std::optional<QString> submissionError(const sdk::Submission& submission, const 
     return operationError(submission.error, fallback);
 }
 
+void eraseFrame(std::string& frame) noexcept
+{
+    try {
+        frame.resize(frame.capacity(), '\0');
+    } catch (...) {
+    }
+    volatile char* bytes = frame.empty() ? nullptr : frame.data();
+    for (std::size_t index = 0; index < frame.size(); ++index)
+        bytes[index] = '\0';
+    frame.clear();
+}
+
 } // namespace
 
 FrontendSession::FrontendSession(QObject* parent)
@@ -208,16 +220,20 @@ FrontendSession::FrontendSession(QObject* parent)
 
     connect(&socket, &QLocalSocket::connected, this, &FrontendSession::socketConnected);
     connect(&socket, &QLocalSocket::readyRead, this, &FrontendSession::socketReadyRead);
+    connect(&socket, &QLocalSocket::bytesWritten, this, &FrontendSession::socketBytesWritten);
     connect(&socket, &QLocalSocket::disconnected, this, &FrontendSession::socketDisconnected);
     connect(&socket, &QLocalSocket::errorOccurred, this, &FrontendSession::socketFailed);
     reconnectTimer.setSingleShot(true);
     connect(&reconnectTimer, &QTimer::timeout, this, &FrontendSession::retryConnection);
+    outboundDrainTimer.setSingleShot(true);
+    connect(&outboundDrainTimer, &QTimer::timeout, this, &FrontendSession::drainSocketWrites);
 }
 
 FrontendSession::~FrontendSession()
 {
     localShutdown = true;
     reconnectTimer.stop();
+    clearOutbound();
     if (connection.isOpen())
         connection.close("CodexUI is closing");
     client->close("CodexUI is closing");
@@ -233,6 +249,7 @@ void FrontendSession::connectToBackend()
 void FrontendSession::reconnectToBackend()
 {
     reconnectTimer.stop();
+    clearOutbound();
     if (connection.isOpen())
         connection.close("User requested reconnect");
     connection = Connection{};
@@ -505,6 +522,7 @@ QString FrontendSession::defaultSocketPath()
 void FrontendSession::socketConnected()
 {
     reconnectTimer.stop();
+    clearOutbound();
     inboundBuffer.clear();
     receiveContinuationScheduled = false;
     if (const auto error = detail::unixPeerCredentialError(socket.socketDescriptor(), ::geteuid())) {
@@ -637,6 +655,7 @@ void FrontendSession::socketDisconnected()
             connection.transportDisconnected(sdk::TransportError{"Unix backend disconnected", true});
     }
     connection = Connection{};
+    clearOutbound();
     inboundBuffer.clear();
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
@@ -654,6 +673,7 @@ void FrontendSession::socketFailed(QLocalSocket::LocalSocketError)
     if (connection.isOpen())
         connection.transportDisconnected(sdk::TransportError{socket.errorString().toStdString(), true});
     connection = Connection{};
+    clearOutbound();
     inboundBuffer.clear();
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
@@ -712,6 +732,7 @@ void FrontendSession::failWithoutReconnect(QString reason)
     // after the underlying incompatibility is corrected.
     automaticReconnectEnabled = false;
     reconnectTimer.stop();
+    clearOutbound();
     setLifecycle(Lifecycle::Failed, std::move(reason));
 }
 
@@ -741,20 +762,176 @@ void FrontendSession::resetReconnectPolicy()
     reconnectDelayMs = initialReconnectDelayMs;
 }
 
-FrontendSession::SendResult FrontendSession::send(OutboundMessage message) noexcept
+FrontendSession::SendResult FrontendSession::send(OutboundMessage&& message)
 {
-    if (socket.state() != QLocalSocket::ConnectedState)
+    SendResult result = sendToTransport(
+        std::move(message),
+        socket.state() == QLocalSocket::ConnectedState,
+        socket.bytesToWrite(),
+        [this](const char* bytes, qint64 size) { return socket.write(bytes, size); });
+    if (result.status == sdk::SendStatus::Failed && result.error && !socket.errorString().isEmpty())
+        result.error->message = socket.errorString().toStdString();
+    return result;
+}
+
+FrontendSession::SendResult FrontendSession::sendToTransport(OutboundMessage&& message,
+                                                              bool transportConnected,
+                                                              qint64 socketBufferedBytes,
+                                                              const OutboundWriter& writer) noexcept
+{
+    if (!transportConnected) {
+        eraseFrame(message.compactJson);
         return {sdk::SendStatus::Closed, sdk::TransportError{"Unix backend socket is closed", true}};
-    QByteArray frame = QByteArray::fromStdString(message.compactJson);
-    frame.append('\n');
-    const qint64 written = socket.write(frame);
-    if (written != frame.size())
-        return {sdk::SendStatus::Failed, sdk::TransportError{socket.errorString().toStdString(), true}};
+    }
+    SendResult result = acceptOutbound(std::move(message), socketBufferedBytes, writer);
+    if (result.status == sdk::SendStatus::Accepted && !pendingWrites.empty())
+        scheduleOutboundDrain();
+    return result;
+}
+
+FrontendSession::SendResult FrontendSession::acceptOutbound(OutboundMessage&& message,
+                                                             qint64 socketBufferedBytes,
+                                                             const OutboundWriter& writer) noexcept
+{
+    if (outboundClearPending) {
+        eraseFrame(message.compactJson);
+        return {sdk::SendStatus::Closed,
+                sdk::TransportError{"Unix backend connection is closing", true}};
+    }
+    std::string frame = std::move(message.compactJson);
+    eraseFrame(message.compactJson);
+    try {
+        frame.push_back('\n');
+    } catch (...) {
+        eraseFrame(frame);
+        return {sdk::SendStatus::Failed,
+                sdk::TransportError{"Unix backend frame allocation failed", true}};
+    }
+
+    const qint64 frameBytes = static_cast<qint64>(frame.size());
+    const qint64 bufferedBytes = std::max<qint64>(0, socketBufferedBytes);
+    const bool lacksCapacity = bufferedBytes > maximumBufferedOutboundBytes
+                               || pendingWriteBytes > maximumBufferedOutboundBytes - bufferedBytes
+                               || frameBytes > maximumBufferedOutboundBytes - bufferedBytes - pendingWriteBytes;
+    if (lacksCapacity) {
+        eraseFrame(frame);
+        return {sdk::SendStatus::Backpressure,
+                sdk::TransportError{"Unix backend output queue is full", true}};
+    }
+
+    const bool wasEmpty = pendingWrites.empty();
+    try {
+        pendingWrites.emplace_back();
+        pendingWrites.back().frame = std::move(frame);
+        eraseFrame(frame);
+    } catch (...) {
+        eraseFrame(frame);
+        return {sdk::SendStatus::Failed,
+                sdk::TransportError{"Unix backend output queue allocation failed", true}};
+    }
+    pendingWriteBytes += frameBytes;
+    if (!wasEmpty)
+        return {sdk::SendStatus::Accepted, std::nullopt};
+
+    const std::uint64_t acceptedEpoch = outboundEpoch;
+    const DrainResult drained = drainOutbound(writer);
+    if (outboundEpoch != acceptedEpoch || drained == DrainResult::Reset)
+        return {sdk::SendStatus::Closed,
+                sdk::TransportError{"Unix backend connection changed during write", true}};
+    if (drained == DrainResult::Failed) {
+        clearOutbound();
+        return {sdk::SendStatus::Failed,
+                sdk::TransportError{"Unix backend socket write failed", true}};
+    }
     return {sdk::SendStatus::Accepted, std::nullopt};
+}
+
+FrontendSession::DrainResult FrontendSession::drainOutbound(const OutboundWriter& writer) noexcept
+{
+    if (drainingOutbound || pendingWrites.empty())
+        return DrainResult::Blocked;
+    drainingOutbound = true;
+    const std::uint64_t drainingEpoch = outboundEpoch;
+    const qint64 offset = pendingWrites.front().offset;
+    const qint64 remaining = static_cast<qint64>(pendingWrites.front().frame.size()) - offset;
+    qint64 written = -1;
+    try {
+        written = writer(pendingWrites.front().frame.data() + offset, remaining);
+    } catch (...) {
+        written = -1;
+    }
+    drainingOutbound = false;
+
+    if (outboundClearPending) {
+        clearOutbound();
+        return DrainResult::Reset;
+    }
+    if (outboundEpoch != drainingEpoch)
+        return DrainResult::Reset;
+    if (written < 0 || written > remaining)
+        return DrainResult::Failed;
+    if (written == 0)
+        return DrainResult::Blocked;
+
+    PendingWrite& pending = pendingWrites.front();
+    pending.offset += written;
+    pendingWriteBytes -= written;
+    if (pending.offset == static_cast<qint64>(pending.frame.size())) {
+        eraseFrame(pending.frame);
+        pendingWrites.pop_front();
+        if (pendingWrites.empty())
+            outboundDrainTimer.stop();
+    }
+    return DrainResult::Progress;
+}
+
+void FrontendSession::socketBytesWritten(qint64)
+{
+    drainSocketWrites();
+}
+
+void FrontendSession::drainSocketWrites()
+{
+    outboundDrainTimer.stop();
+    if (socket.state() != QLocalSocket::ConnectedState || pendingWrites.empty())
+        return;
+    const DrainResult result = drainOutbound(
+        [this](const char* bytes, qint64 size) { return socket.write(bytes, size); });
+    if (result == DrainResult::Failed) {
+        socketFailed(socket.error());
+        if (socket.state() != QLocalSocket::UnconnectedState)
+            socket.abort();
+        return;
+    }
+    if (!pendingWrites.empty())
+        scheduleOutboundDrain();
+}
+
+void FrontendSession::scheduleOutboundDrain()
+{
+    if (!pendingWrites.empty()
+        && !outboundDrainTimer.isActive())
+        outboundDrainTimer.start(outboundDrainRetryMs);
+}
+
+void FrontendSession::clearOutbound() noexcept
+{
+    outboundDrainTimer.stop();
+    ++outboundEpoch;
+    if (drainingOutbound) {
+        outboundClearPending = true;
+        return;
+    }
+    outboundClearPending = false;
+    for (PendingWrite& pending : pendingWrites)
+        eraseFrame(pending.frame);
+    pendingWrites.clear();
+    pendingWriteBytes = 0;
 }
 
 void FrontendSession::closeTransport(QString reason) noexcept
 {
+    clearOutbound();
     if (!reason.isEmpty())
         detail = std::move(reason);
     socket.disconnectFromServer();
