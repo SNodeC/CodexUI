@@ -232,7 +232,7 @@ void FrontendSession::connectToBackend()
 
 void FrontendSession::reconnectToBackend()
 {
-    resetReconnectPolicy();
+    reconnectTimer.stop();
     if (connection.isOpen())
         connection.close("User requested reconnect");
     connection = Connection{};
@@ -241,10 +241,11 @@ void FrontendSession::reconnectToBackend()
     requestedThreadReads.clear();
     if (socket.state() != QLocalSocket::UnconnectedState) {
         socket.abort();
-        reconnectDelayMs = initialReconnectDelayMs;
+        resetReconnectPolicy();
         reconnectTimer.start(0);
         return;
     }
+    resetReconnectPolicy();
     startConnection();
 }
 

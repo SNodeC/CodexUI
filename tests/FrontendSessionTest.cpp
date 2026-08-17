@@ -43,16 +43,25 @@ struct FrontendSessionTestAccess
         session.reconnectTimer.start(60'000);
     }
 
-    static bool reconnectPolicyIsReset(const FrontendSession& session)
+    static void installConnectionWithTerminalClose(FrontendSession& session, bool& closeObserved)
     {
-        return session.automaticReconnectEnabled
-               && session.reconnectDelayMs == FrontendSession::initialReconnectDelayMs
-               && !session.reconnectTimer.isActive();
-    }
-
-    static void resetReconnectPolicy(FrontendSession& session)
-    {
-        session.resetReconnectPolicy();
+        session.connection = session.client->openConnection({
+            [](FrontendSession::OutboundMessage) {
+                return FrontendSession::SendResult{
+                    ai::openai::codex::frontend::client::SendStatus::Accepted,
+                    std::nullopt};
+            },
+            [&session, &closeObserved](std::string) {
+                closeObserved = true;
+                ai::openai::codex::frontend::client::Error terminalError;
+                terminalError.message = "terminal close callback";
+                terminalError.retryable = false;
+                session.handleConnectionStateChange(
+                    {ai::openai::codex::frontend::client::ConnectionState::Connecting,
+                     ai::openai::codex::frontend::client::ConnectionState::Closed,
+                     terminalError});
+            },
+        });
     }
 };
 
@@ -96,6 +105,7 @@ bool testLifecycleAndDiagnostics()
 {
     int lifecycleChanges = 0;
     int statusChanges = 0;
+    bool reconnectCloseObserved = false;
     codexui::FrontendSession session;
     QObject::connect(&session, &codexui::FrontendSession::lifecycleChanged, [&lifecycleChanges] { ++lifecycleChanges; });
     QObject::connect(&session, &codexui::FrontendSession::statusChanged, [&statusChanges] { ++statusChanges; });
@@ -143,9 +153,11 @@ bool testLifecycleAndDiagnostics()
                      "a following physical close must preserve the terminal failure");
 
     codexui::FrontendSessionTestAccess::prepareReconnectReset(session);
-    codexui::FrontendSessionTestAccess::resetReconnectPolicy(session);
-    passed &= expect(codexui::FrontendSessionTestAccess::reconnectPolicyIsReset(session),
-                     "an explicit reconnect must reset backoff and re-enable automatic reconnect");
+    codexui::FrontendSessionTestAccess::installConnectionWithTerminalClose(session, reconnectCloseObserved);
+    session.reconnectToBackend();
+    passed &= expect(reconnectCloseObserved
+                         && codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session),
+                     "the public reconnect path must override a terminal old-transport close callback");
     return passed;
 }
 
