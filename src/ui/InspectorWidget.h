@@ -5,6 +5,7 @@
 
 #include <ai/openai/codex/frontend/client/State.h>
 
+#include <QByteArray>
 #include <QString>
 #include <QWidget>
 
@@ -31,7 +32,7 @@ signals:
 
 private:
     void renderUnavailable(const QString& title, const QString& detail);
-    void refreshLayoutGeometry();
+    void refreshLayoutGeometry(QVBoxLayout* layout);
 
     QVBoxLayout* planContent = nullptr;
     QVBoxLayout* agentsContent = nullptr;
@@ -39,6 +40,11 @@ private:
     QVBoxLayout* infoContent = nullptr;
     QString inspectedThreadId;
     QString selectedAgentItemId;
+    QByteArray unavailablePresentationKey;
+    QByteArray planPresentationKey;
+    QByteArray agentsPresentationKey;
+    QByteArray changesPresentationKey;
+    QByteArray infoPresentationKey;
 };
 
 } // namespace codexui
