@@ -82,8 +82,10 @@ private:
     void socketReadyRead();
     void socketDisconnected();
     void socketFailed(QLocalSocket::LocalSocketError error);
+    void startConnection();
     void scheduleReconnect();
     void retryConnection();
+    void failWithoutReconnect(QString reason);
     [[nodiscard]] SendResult send(OutboundMessage message) noexcept;
     void closeTransport(QString reason) noexcept;
     void setLifecycle(Lifecycle value, QString detail = {});
@@ -97,6 +99,7 @@ private:
     QString detail;
     std::set<std::string> requestedThreadReads;
     int reconnectDelayMs = initialReconnectDelayMs;
+    bool automaticReconnectEnabled = true;
     bool localShutdown = false;
 };
 

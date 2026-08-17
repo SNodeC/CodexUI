@@ -56,6 +56,10 @@ FrontendSession::FrontendSession(QObject* parent)
 
     sdk::ClientCallbacks callbacks;
     callbacks.onConnectionStateChanged = [this](const sdk::ConnectionStateChange& change) {
+        if (change.error && !change.error->retryable) {
+            automaticReconnectEnabled = false;
+            reconnectTimer.stop();
+        }
         switch (change.current) {
             case sdk::ConnectionState::Connecting:
                 setLifecycle(Lifecycle::Connecting);
@@ -87,6 +91,7 @@ FrontendSession::FrontendSession(QObject* parent)
     };
     callbacks.onSynchronized = [this](const sdk::SynchronizationInfo& info) {
         reconnectDelayMs = initialReconnectDelayMs;
+        automaticReconnectEnabled = true;
         currentState = info.state;
         setLifecycle(Lifecycle::Ready);
         emit stateChanged();
@@ -116,6 +121,12 @@ FrontendSession::~FrontendSession()
 }
 
 void FrontendSession::connectToBackend()
+{
+    automaticReconnectEnabled = true;
+    startConnection();
+}
+
+void FrontendSession::startConnection()
 {
     if (socket.state() != QLocalSocket::UnconnectedState || connection.isOpen())
         return;
@@ -358,7 +369,7 @@ void FrontendSession::socketConnected()
         [this](std::string reason) { closeTransport(QString::fromStdString(reason)); },
     });
     if (!connection.isOpen()) {
-        setLifecycle(Lifecycle::Failed, QStringLiteral("Frontend SDK rejected the Unix connection"));
+        failWithoutReconnect(QStringLiteral("Frontend SDK rejected the Unix connection"));
         socket.abort();
         return;
     }
@@ -368,7 +379,7 @@ void FrontendSession::socketConnected()
 void FrontendSession::socketReadyRead()
 {
     const auto rejectOversizedFrame = [this] {
-        setLifecycle(Lifecycle::Failed, QStringLiteral("Backend frame exceeds the SDK input limit"));
+        failWithoutReconnect(QStringLiteral("Backend frame exceeds the SDK input limit"));
         socket.abort();
     };
 
@@ -394,9 +405,12 @@ void FrontendSession::socketReadyRead()
             continue;
         const sdk::ReceiveResult result = connection.receive(std::string_view(frame.constData(), static_cast<std::size_t>(frame.size())));
         if (!result.accepted) {
-            setLifecycle(Lifecycle::Failed,
-                         result.error ? QString::fromStdString(result.error->message)
-                                      : QStringLiteral("Frontend SDK rejected a server message"));
+            const QString reason = result.error ? QString::fromStdString(result.error->message)
+                                                : QStringLiteral("Frontend SDK rejected a server message");
+            if (!result.error || !result.error->retryable)
+                failWithoutReconnect(reason);
+            else
+                setLifecycle(Lifecycle::Failed, reason);
             socket.abort();
             return;
         }
@@ -431,13 +445,24 @@ void FrontendSession::socketFailed(QLocalSocket::LocalSocketError)
         connection.transportDisconnected(sdk::TransportError{socket.errorString().toStdString(), true});
     connection = Connection{};
     requestedThreadReads.clear();
-    setLifecycle(Lifecycle::Failed, socket.errorString());
+    if (automaticReconnectEnabled)
+        setLifecycle(Lifecycle::Failed, socket.errorString());
     scheduleReconnect();
+}
+
+void FrontendSession::failWithoutReconnect(QString reason)
+{
+    // Retrying the same stream after a protocol/state rejection only replays
+    // the offending suffix. A fresh explicit connect (application restart)
+    // remains available after the underlying incompatibility is corrected.
+    automaticReconnectEnabled = false;
+    reconnectTimer.stop();
+    setLifecycle(Lifecycle::Failed, std::move(reason));
 }
 
 void FrontendSession::scheduleReconnect()
 {
-    if (localShutdown || reconnectTimer.isActive())
+    if (localShutdown || !automaticReconnectEnabled || reconnectTimer.isActive())
         return;
     reconnectTimer.start(reconnectDelayMs);
     reconnectDelayMs = std::min(reconnectDelayMs * 2, maximumReconnectDelayMs);
@@ -451,7 +476,7 @@ void FrontendSession::retryConnection()
         scheduleReconnect();
         return;
     }
-    connectToBackend();
+    startConnection();
 }
 
 FrontendSession::SendResult FrontendSession::send(OutboundMessage message) noexcept
