@@ -75,6 +75,33 @@ QString compact(const QString& value, qsizetype maximum = 500)
     return value.left(maximum).trimmed() + QStringLiteral("…");
 }
 
+QString boundedUtf8Preview(std::string_view value, bool& truncated)
+{
+    constexpr qsizetype maximumBytes = 2 * 1024;
+    constexpr qsizetype maximumCharacters = 500;
+    qsizetype prefixBytes = qMin(static_cast<qsizetype>(value.size()), maximumBytes);
+    if (prefixBytes < static_cast<qsizetype>(value.size()))
+    {
+        while (prefixBytes > 0
+               && (static_cast<unsigned char>(value[static_cast<std::size_t>(prefixBytes)]) & 0xc0U) == 0x80U)
+            --prefixBytes;
+        truncated = true;
+    }
+    QString preview = QString::fromUtf8(value.data(), prefixBytes);
+    if (preview.size() > maximumCharacters)
+    {
+        qsizetype prefixCharacters = maximumCharacters;
+        if (preview.at(prefixCharacters - 1).isHighSurrogate()
+            && preview.at(prefixCharacters).isLowSurrogate())
+            --prefixCharacters;
+        preview.truncate(prefixCharacters);
+        truncated = true;
+    }
+    if (truncated)
+        preview = preview.trimmed() + QChar(0x2026);
+    return preview;
+}
+
 QString compactId(const std::string& id)
 {
     const QString value = fromUtf8(id);
@@ -297,8 +324,11 @@ ActivityPresentation activityPresentation(const sdk::State& state, const sdk::It
             result.tail = tail.join(QStringLiteral(" · "));
             if (item.commandOutput && !item.commandOutput->empty())
             {
-                const QString output = QStringLiteral("Output: %1").arg(fromUtf8(*item.commandOutput));
+                bool outputTruncated = false;
+                const QString output = QStringLiteral("Output: %1").arg(
+                    boundedUtf8Preview(*item.commandOutput, outputTruncated));
                 result.detail = result.detail.isEmpty() ? output : result.detail + QStringLiteral(" · ") + output;
+                result.truncated = result.truncated || outputTruncated;
             }
         }
         else if (const auto* changes = std::get_if<sdk::FileChangeSemanticView>(&semantic->details))
@@ -615,90 +645,6 @@ void addPresentationValue(QCryptographicHash& hash, std::string_view value)
 void addPresentationValue(QCryptographicHash& hash, bool value)
 {
     addPresentationValue(hash, value ? QByteArrayLiteral("1") : QByteArrayLiteral("0"));
-}
-
-QByteArray conversationPresentationKey(const sdk::State& state, const QString& threadId, bool newThreadDraft)
-{
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    addPresentationValue(hash, threadId);
-    addPresentationValue(hash, newThreadDraft);
-
-    const auto* thread = threadId.isEmpty() ? nullptr : state.thread(threadId.toStdString());
-    addPresentationValue(hash, thread != nullptr);
-    if (!thread)
-        return hash.result();
-
-    addPresentationValue(hash, thread->id.value);
-    addPresentationValue(hash, thread->title ? std::string_view(*thread->title) : std::string_view{});
-    addPresentationValue(hash, thread->status ? std::string_view(*thread->status) : std::string_view{});
-    addPresentationValue(hash, thread->model ? std::string_view(thread->model->value) : std::string_view{});
-    addPresentationValue(hash, thread->cwd ? std::string_view(thread->cwd->value) : std::string_view{});
-    addPresentationValue(hash, thread->fullyLoaded);
-    addPresentationValue(hash, thread->realtime.has_value());
-    if (thread->realtime)
-    {
-        const auto realtime = sdk::realtimeSemanticView(*thread->realtime);
-        addPresentationValue(hash, realtime.lifecycle);
-        addPresentationValue(hash, QByteArray::number(realtime.itemCount));
-        addPresentationValue(hash, realtime.transcriptTruncated);
-    }
-
-    for (const auto& turnId : thread->orderedTurns)
-    {
-        addPresentationValue(hash, turnId.value);
-        const auto* turn = state.turn(turnId);
-        addPresentationValue(hash, turn != nullptr);
-        if (!turn)
-            continue;
-
-        addPresentationValue(hash, turn->status.value);
-        addPresentationValue(hash, tokenUsageText(*turn));
-        addPresentationValue(hash, failureText(*turn));
-        for (const auto& itemId : turn->orderedItems)
-        {
-            const auto* item = state.item(thread->id, turn->id, itemId);
-            addPresentationValue(hash, item != nullptr);
-            if (!item)
-                continue;
-
-            addPresentationValue(hash, item->kind.identity);
-            addPresentationValue(hash, itemStatus(*item));
-            addPresentationValue(hash, truncationText(*item));
-            if (item->kind.is(frontend::ThreadItemKind::UserMessage))
-            {
-                const auto message = sdk::userMessageSemanticView(*item);
-                addPresentationValue(hash, message.has_value());
-                if (message)
-                {
-                    addPresentationValue(hash, message->text);
-                    addPresentationValue(hash, userMessageTruncationText(*message));
-                }
-            }
-            else if (item->kind.is(frontend::ThreadItemKind::AgentMessage))
-            {
-                const QString content = item->agentText && !item->agentText->empty()
-                                            ? fromUtf8(*item->agentText)
-                                            : (item->summary ? fromUtf8(*item->summary) : QString{});
-                addPresentationValue(hash, content);
-                const auto semantic = sdk::itemSemanticView(*item);
-                const auto* agent = semantic
-                                        ? std::get_if<sdk::AgentMessageSemanticView>(&semantic->details)
-                                        : nullptr;
-                addPresentationValue(hash,
-                                     agent && agent->phase ? std::string_view(*agent->phase) : std::string_view{});
-            }
-            else
-            {
-                const ActivityPresentation presentation = activityPresentation(state, *item);
-                addPresentationValue(hash, presentation.title);
-                addPresentationValue(hash, presentation.detail);
-                addPresentationValue(hash, presentation.status);
-                addPresentationValue(hash, presentation.tail);
-                addPresentationValue(hash, presentation.truncated);
-            }
-        }
-    }
-    return hash.result();
 }
 
 void addEmptyState(QVBoxLayout* timeline, const QString& title, const QString& detail)
@@ -1086,14 +1032,13 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
 
 void ConversationWidget::render(const sdk::State& state, const QString& threadId, bool newThreadDraft)
 {
-    const QByteArray presentationKey = conversationPresentationKey(state, threadId, newThreadDraft);
-    if (presentationKey == renderedPresentationKey)
-        return;
-
     auto* scrollBar = scrollArea->verticalScrollBar();
     const int previousScroll = scrollBar->value();
     const bool wasNearBottom = scrollBar->maximum() - previousScroll <= 72;
     const bool threadChanged = renderedThreadId != threadId || renderedNewThreadDraft != newThreadDraft;
+    const auto* thread = threadId.isEmpty() ? nullptr : state.thread(threadId.toStdString());
+    if (!thread && !threadChanged && threadId.isEmpty())
+        return;
     const bool followLatest = threadChanged || wasNearBottom || followingLatest;
     const std::uint64_t generation = ++renderGeneration;
     if (threadChanged)
@@ -1102,7 +1047,6 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
         captureTimelineAnchor();
     renderedThreadId = threadId;
     renderedNewThreadDraft = newThreadDraft;
-    renderedPresentationKey = presentationKey;
     if (threadChanged)
     {
         followingLatest = false;
@@ -1111,10 +1055,7 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
         scrollArea->viewport()->setUpdatesEnabled(false);
     }
     else
-    {
         scrollAnimation->stop();
-        scrollArea->viewport()->setUpdatesEnabled(false);
-    }
 
     const auto clearTimelineState = [this]
     {
@@ -1128,7 +1069,6 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
         clearLayout(timeline);
     };
 
-    const auto* thread = threadId.isEmpty() ? nullptr : state.thread(threadId.toStdString());
     if (!thread)
     {
         if (timeline->count() > 0)
@@ -1371,10 +1311,12 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
 void ConversationWidget::scheduleTimelineLayout(int previousScroll, bool followLatest, bool threadChanged)
 {
     if (!layoutSettleTimer->isActive())
+    {
         pendingPreviousScroll = previousScroll;
+        layoutSettleTimer->start();
+    }
     pendingFollowLatest = pendingFollowLatest || followLatest;
     pendingThreadChanged = pendingThreadChanged || threadChanged;
-    layoutSettleTimer->start();
 }
 
 void ConversationWidget::captureTimelineAnchor()
@@ -1426,8 +1368,11 @@ void ConversationWidget::settleTimelineLayout()
         bar->setValue(qBound(0, bar->value() + correction, bar->maximum()));
     }
     pendingViewportAnchor.clear();
-    scrollArea->viewport()->setUpdatesEnabled(true);
-    scrollArea->viewport()->update();
+    if (!scrollArea->viewport()->updatesEnabled())
+    {
+        scrollArea->viewport()->setUpdatesEnabled(true);
+        scrollArea->viewport()->update();
+    }
     if (!followLatest)
     {
         scrollAnimation->stop();
@@ -1516,15 +1461,16 @@ void ConversationWidget::synchronizeTimelineHeight(bool allowShrink)
 void ConversationWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    const std::uint64_t generation = renderGeneration;
+    if (resizeLayoutPending)
+        return;
+    resizeLayoutPending = true;
     QTimer::singleShot(0, this,
-                       [this, generation]
+                       [this]
                        {
-                           if (generation != renderGeneration)
-                               return;
                            synchronizeTimelineHeight();
                            scrollArea->widget()->layout()->activate();
                            scrollArea->widget()->adjustSize();
+                           resizeLayoutPending = false;
                        });
 }
 

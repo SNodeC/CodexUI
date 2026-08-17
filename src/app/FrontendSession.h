@@ -3,9 +3,11 @@
 #ifndef CODEXUI_APP_FRONTENDSESSION_H
 #define CODEXUI_APP_FRONTENDSESSION_H
 
+#include <QByteArray>
 #include <QObject>
 #include <QLocalSocket>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 
 #include <ai/openai/codex/frontend/client/Client.h>
@@ -35,6 +37,7 @@ public:
     void connectToBackend();
     [[nodiscard]] Lifecycle lifecycle() const noexcept;
     [[nodiscard]] QString statusText() const;
+    [[nodiscard]] static std::optional<QString> promptValidationError(const QString& prompt);
     [[nodiscard]] const ai::openai::codex::frontend::client::State& state() const noexcept;
     [[nodiscard]] bool ownsController() const noexcept;
     void loadThread(const QString& threadId);
@@ -66,7 +69,9 @@ public:
 
 signals:
     void lifecycleChanged();
-    void stateChanged();
+    void stateChanged(const QStringList& affectedThreadIds,
+                      bool allThreadsAffected,
+                      bool inspectorAffected);
 
 private:
     static constexpr int initialReconnectDelayMs = 250;
@@ -82,6 +87,8 @@ private:
     void socketReadyRead();
     void socketDisconnected();
     void socketFailed(QLocalSocket::LocalSocketError error);
+    void scheduleSocketRead();
+    void reconcileRequestedThreadReads();
     void startConnection();
     void scheduleReconnect();
     void retryConnection();
@@ -92,6 +99,7 @@ private:
 
     QLocalSocket socket;
     QTimer reconnectTimer;
+    QByteArray inboundBuffer;
     std::unique_ptr<Client> client;
     Connection connection;
     ai::openai::codex::frontend::client::State currentState;
@@ -99,6 +107,7 @@ private:
     QString detail;
     std::set<std::string> requestedThreadReads;
     int reconnectDelayMs = initialReconnectDelayMs;
+    bool receiveContinuationScheduled = false;
     bool automaticReconnectEnabled = true;
     bool localShutdown = false;
 };

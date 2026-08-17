@@ -10,12 +10,16 @@
 
 #include <QByteArray>
 #include <QDir>
+#include <QStringList>
+#include <QTimer>
 
 #include <algorithm>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
+#include <variant>
 
 #include <unistd.h>
 
@@ -26,6 +30,98 @@ namespace frontend = ai::openai::codex::frontend;
 namespace {
 
 constexpr qsizetype maximumFrameBytes = 16 * 1024 * 1024;
+constexpr qsizetype maximumPromptBytes = 128 * 1024;
+constexpr qsizetype maximumReceiveBatchBytes = 1024 * 1024;
+constexpr int maximumReceiveBatchFrames = 32;
+
+struct StateUpdateScope
+{
+    QStringList affectedThreadIds;
+    bool allThreadsAffected = false;
+    bool inspectorAffected = false;
+    bool hasPresentationChange = false;
+};
+
+StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
+{
+    StateUpdateScope scope;
+    const auto addThread = [&scope](std::string_view id)
+    {
+        const QString threadId = QString::fromUtf8(id.data(), static_cast<qsizetype>(id.size()));
+        if (!scope.affectedThreadIds.contains(threadId))
+            scope.affectedThreadIds.append(threadId);
+    };
+
+    if (update.changes.empty())
+    {
+        scope.allThreadsAffected = true;
+        scope.inspectorAffected = true;
+        scope.hasPresentationChange = true;
+        return scope;
+    }
+
+    for (const auto& change : update.changes)
+    {
+        std::visit(
+            [&](const auto& value)
+            {
+                using Change = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<Change, sdk::CursorAdvancedChange>)
+                {
+                    // Info shows the immutable State revision. Its label can be
+                    // updated in place without rebuilding the conversation.
+                    scope.inspectorAffected = true;
+                }
+                else if constexpr (std::is_same_v<Change, sdk::StateReplacedChange>)
+                {
+                    scope.allThreadsAffected = true;
+                    scope.inspectorAffected = true;
+                }
+                else if constexpr (std::is_same_v<Change, sdk::ThreadUpsertedChange>
+                                   || std::is_same_v<Change, sdk::ThreadRemovedChange>)
+                {
+                    addThread(value.threadId.value);
+                    // The selected Inspector can show status/model facts from
+                    // a linked subagent thread even when its conversation is
+                    // not selected.
+                    scope.inspectorAffected = true;
+                }
+                else if constexpr (std::is_same_v<Change, sdk::TurnUpsertedChange>)
+                {
+                    if (const auto* turn = update.state.turn(value.turnId))
+                        addThread(turn->threadId.value);
+                    else
+                        scope.allThreadsAffected = true;
+                }
+                else if constexpr (std::is_same_v<Change, sdk::ItemUpsertedChange>
+                                   || std::is_same_v<Change, sdk::ItemContentReplacedChange>)
+                {
+                    const auto* item = update.state.item(value.itemId);
+                    if (item && item->threadId)
+                        addThread(item->threadId->value);
+                    else
+                        scope.allThreadsAffected = true;
+                }
+                else if constexpr (std::is_same_v<Change, sdk::PendingRequestsUpdatedChange>)
+                {
+                    // Pending requests contribute to activity-card status. The
+                    // change has no thread identity, especially on removal.
+                    scope.allThreadsAffected = true;
+                    scope.inspectorAffected = true;
+                }
+                else
+                {
+                    // Controller, pending-request, provider, capacity, and other
+                    // domain projections can affect the Inspector and controls,
+                    // but do not require rebuilding an unchanged conversation.
+                    scope.inspectorAffected = true;
+                }
+                scope.hasPresentationChange = true;
+            },
+            change);
+    }
+    return scope;
+}
 
 QString operationError(const std::optional<sdk::Error>& error, const QString& fallback)
 {
@@ -87,14 +183,22 @@ FrontendSession::FrontendSession(QObject* parent)
     };
     callbacks.onStateUpdated = [this](const sdk::StateUpdate& update) {
         currentState = update.state;
-        emit stateChanged();
+        for (const auto& change : update.changes) {
+            if (const auto* removed = std::get_if<sdk::ThreadRemovedChange>(&change))
+                requestedThreadReads.erase(removed->threadId.value);
+        }
+        reconcileRequestedThreadReads();
+        const StateUpdateScope scope = stateUpdateScope(update);
+        if (scope.hasPresentationChange)
+            emit stateChanged(scope.affectedThreadIds, scope.allThreadsAffected, scope.inspectorAffected);
     };
     callbacks.onSynchronized = [this](const sdk::SynchronizationInfo& info) {
         reconnectDelayMs = initialReconnectDelayMs;
         automaticReconnectEnabled = true;
         currentState = info.state;
+        reconcileRequestedThreadReads();
         setLifecycle(Lifecycle::Ready);
-        emit stateChanged();
+        emit stateChanged({}, true, true);
     };
     callbacks.onDiagnostic = [this](const sdk::Diagnostic& diagnostic) {
         if (diagnostic.severity == sdk::Diagnostic::Severity::Error)
@@ -161,6 +265,13 @@ QString FrontendSession::statusText() const
     return QStringLiteral("Disconnected");
 }
 
+std::optional<QString> FrontendSession::promptValidationError(const QString& prompt)
+{
+    if (prompt.toUtf8().size() <= maximumPromptBytes)
+        return std::nullopt;
+    return QStringLiteral("Prompt exceeds the 128 KiB UTF-8 submission limit");
+}
+
 const sdk::State& FrontendSession::state() const noexcept
 {
     return currentState;
@@ -184,8 +295,14 @@ void FrontendSession::loadThread(const QString& threadId)
     requestedThreadReads.insert(id);
     sdk::Submission submission = client->threads().read(
         {ai::openai::codex::typed::ThreadId{id}, true},
-        [this, id](const sdk::OperationResult<sdk::ThreadReadResult>&) {
-            requestedThreadReads.erase(id);
+        [this, id](const sdk::OperationResult<sdk::ThreadReadResult>& result) {
+            // A successful operation acknowledgement can precede the State
+            // projection. Keep suppressing duplicate reads until that thread is
+            // fully loaded (or a failure/removal/disconnect makes retry valid).
+            if (!result)
+                requestedThreadReads.erase(id);
+            else
+                reconcileRequestedThreadReads();
         });
     if (!submission)
         requestedThreadReads.erase(id);
@@ -262,11 +379,14 @@ std::optional<QString> FrontendSession::startTurn(const QString& threadId,
 {
     if (currentLifecycle != Lifecycle::Ready)
         return QStringLiteral("Backend is not ready");
+    if (const auto error = promptValidationError(prompt))
+        return error;
 
     ai::openai::codex::typed::TurnStartParams parameters;
     parameters.threadId = ai::openai::codex::typed::ThreadId{threadId.toStdString()};
     ai::openai::codex::typed::TextInput input;
-    input.text = prompt.toStdString();
+    const QByteArray promptUtf8 = prompt.toUtf8();
+    input.text.assign(promptUtf8.constData(), static_cast<std::size_t>(promptUtf8.size()));
     parameters.input.emplace_back(std::move(input));
     sdk::Submission submission = client->turns().start(
         std::move(parameters),
@@ -364,6 +484,8 @@ QString FrontendSession::defaultSocketPath()
 void FrontendSession::socketConnected()
 {
     reconnectTimer.stop();
+    inboundBuffer.clear();
+    receiveContinuationScheduled = false;
     connection = client->openConnection({
         [this](OutboundMessage message) { return send(std::move(message)); },
         [this](std::string reason) { closeTransport(QString::fromStdString(reason)); },
@@ -378,32 +500,52 @@ void FrontendSession::socketConnected()
 
 void FrontendSession::socketReadyRead()
 {
+    receiveContinuationScheduled = false;
     const auto rejectOversizedFrame = [this] {
+        inboundBuffer.clear();
         failWithoutReconnect(QStringLiteral("Backend frame exceeds the SDK input limit"));
         socket.abort();
     };
 
-    while (socket.canReadLine()) {
-        const QByteArray prefix = socket.peek(maximumFrameBytes + 2);
-        const qsizetype newline = prefix.indexOf('\n');
-        if (newline < 0) {
-            rejectOversizedFrame();
-            return;
+    qsizetype consumedBytes = 0;
+    qsizetype receivedBytes = 0;
+    int receivedFrames = 0;
+    while (receivedFrames < maximumReceiveBatchFrames && receivedBytes < maximumReceiveBatchBytes)
+    {
+        const qsizetype newline = inboundBuffer.indexOf('\n', consumedBytes);
+        if (newline < 0)
+        {
+            const qsizetype available = socket.bytesAvailable();
+            const qsizetype budget = maximumReceiveBatchBytes - receivedBytes;
+            if (available <= 0 || budget <= 0)
+                break;
+            const QByteArray chunk = socket.read(qMin(available, budget));
+            if (chunk.isEmpty())
+                break;
+            inboundBuffer.append(chunk);
+            receivedBytes += chunk.size();
+            continue;
         }
-        const qsizetype payloadBytes = newline > 0 && prefix.at(newline - 1) == '\r' ? newline - 1 : newline;
+
+        const qsizetype payloadEnd = newline > consumedBytes && inboundBuffer.at(newline - 1) == '\r'
+                                         ? newline - 1
+                                         : newline;
+        const qsizetype payloadBytes = payloadEnd - consumedBytes;
         if (payloadBytes > maximumFrameBytes) {
             rejectOversizedFrame();
             return;
         }
 
-        QByteArray frame = socket.read(newline + 1);
-        if (frame.endsWith('\n'))
-            frame.chop(1);
-        if (frame.endsWith('\r'))
-            frame.chop(1);
-        if (frame.isEmpty())
+        ++receivedFrames;
+        if (payloadBytes == 0)
+        {
+            consumedBytes = newline + 1;
             continue;
-        const sdk::ReceiveResult result = connection.receive(std::string_view(frame.constData(), static_cast<std::size_t>(frame.size())));
+        }
+        const sdk::ReceiveResult result = connection.receive(
+            std::string_view(inboundBuffer.constData() + consumedBytes,
+                             static_cast<std::size_t>(payloadBytes)));
+        consumedBytes = newline + 1;
         if (!result.accepted) {
             const QString reason = result.error ? QString::fromStdString(result.error->message)
                                                 : QStringLiteral("Frontend SDK rejected a server message");
@@ -414,9 +556,49 @@ void FrontendSession::socketReadyRead()
             socket.abort();
             return;
         }
+        if (!connection.isOpen())
+            break;
     }
-    if (socket.bytesAvailable() > maximumFrameBytes) {
+
+    if (consumedBytes > 0)
+        inboundBuffer.remove(0, consumedBytes);
+    if (inboundBuffer.indexOf('\n') < 0 && inboundBuffer.size() > maximumFrameBytes + 1) {
         rejectOversizedFrame();
+        return;
+    }
+    if (connection.isOpen()
+        && (socket.bytesAvailable() > 0 || inboundBuffer.indexOf('\n') >= 0))
+        scheduleSocketRead();
+}
+
+void FrontendSession::scheduleSocketRead()
+{
+    if (receiveContinuationScheduled || localShutdown)
+        return;
+    receiveContinuationScheduled = true;
+    QTimer::singleShot(0, this,
+                       [this]
+                       {
+                           if (!receiveContinuationScheduled)
+                               return;
+                           receiveContinuationScheduled = false;
+                           if (connection.isOpen()
+                               && (socket.bytesAvailable() > 0 || inboundBuffer.indexOf('\n') >= 0))
+                               socketReadyRead();
+                       });
+}
+
+void FrontendSession::reconcileRequestedThreadReads()
+{
+    const bool threadListComplete = currentState.threadList().value
+                                    && currentState.threadList().value->complete;
+    for (auto iterator = requestedThreadReads.begin(); iterator != requestedThreadReads.end();)
+    {
+        const auto* thread = currentState.thread(*iterator);
+        if ((thread && thread->fullyLoaded) || (!thread && threadListComplete))
+            iterator = requestedThreadReads.erase(iterator);
+        else
+            ++iterator;
     }
 }
 
@@ -429,6 +611,8 @@ void FrontendSession::socketDisconnected()
             connection.transportDisconnected(sdk::TransportError{"Unix backend disconnected", true});
     }
     connection = Connection{};
+    inboundBuffer.clear();
+    receiveContinuationScheduled = false;
     requestedThreadReads.clear();
     if (!localShutdown) {
         if (currentLifecycle != Lifecycle::Failed)
@@ -444,6 +628,8 @@ void FrontendSession::socketFailed(QLocalSocket::LocalSocketError)
     if (connection.isOpen())
         connection.transportDisconnected(sdk::TransportError{socket.errorString().toStdString(), true});
     connection = Connection{};
+    inboundBuffer.clear();
+    receiveContinuationScheduled = false;
     requestedThreadReads.clear();
     if (automaticReconnectEnabled)
         setLifecycle(Lifecycle::Failed, socket.errorString());

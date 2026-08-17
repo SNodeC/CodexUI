@@ -192,11 +192,11 @@ QFrame* detailCard()
     return card;
 }
 
-void addFact(QGridLayout* grid, int& row, const QString& name, const QString& value,
-             const QString& color = QStringLiteral("#e8edf2"))
+QLabel* addFact(QGridLayout* grid, int& row, const QString& name, const QString& value,
+                const QString& color = QStringLiteral("#e8edf2"))
 {
     if (value.isEmpty())
-        return;
+        return nullptr;
     grid->addWidget(textLabel(name, "meta"), row, 0, Qt::AlignTop);
     auto* copy = textLabel(value);
     copy->setWordWrap(true);
@@ -204,6 +204,7 @@ void addFact(QGridLayout* grid, int& row, const QString& name, const QString& va
     copy->setStyleSheet(QStringLiteral("color:%1;font-size:11px;font-weight:500;").arg(color));
     grid->addWidget(copy, row, 1);
     ++row;
+    return copy;
 }
 
 QString freshnessText(sdk::StateFreshness freshness)
@@ -477,6 +478,7 @@ void InspectorWidget::renderUnavailable(const QString& title, const QString& det
     agentsPresentationKey.clear();
     changesPresentationKey.clear();
     infoPresentationKey.clear();
+    infoRevisionValue = nullptr;
     for (QVBoxLayout* layout : {planContent, agentsContent, changesContent, infoContent})
     {
         clearLayout(layout);
@@ -526,6 +528,7 @@ void InspectorWidget::render(const sdk::State& state,
         agentsPresentationKey.clear();
         changesPresentationKey.clear();
         infoPresentationKey.clear();
+        infoRevisionValue = nullptr;
     }
 
     const auto* turn = latestTurn(state, *thread);
@@ -943,13 +946,91 @@ void InspectorWidget::render(const sdk::State& state,
 
     // Info: a compact product view over typed thread, turn, provider, usage,
     // failure, synchronization, and projection state.
+    const auto& provider = state.provider();
+    const auto& controller = state.controller();
+    const auto& truncation = state.truncation();
+    const auto& threadList = state.threadList();
+    const auto& projection = state.projectionMetadata();
+    std::size_t pendingForThread = 0;
+    if (state.hasPendingRequestProjection()) {
+        for (const auto& request : state.pendingRequests())
+            pendingForThread += request.threadId && request.threadId->value == thread->id.value;
+    }
+
     QCryptographicHash infoHash(QCryptographicHash::Sha256);
-    addPresentationValue(infoHash, QByteArray::number(state.revision()));
     addPresentationValue(infoHash, threadId);
+    addPresentationValue(infoHash,
+                         thread->title ? std::string_view(*thread->title) : std::string_view{});
+    addPresentationValue(infoHash, thread->id.value);
+    addPresentationValue(infoHash,
+                         thread->cwd ? std::string_view(thread->cwd->value) : std::string_view{});
+    addPresentationValue(infoHash,
+                         thread->status ? std::string_view(*thread->status) : std::string_view{});
+    addPresentationValue(infoHash,
+                         thread->model ? std::string_view(thread->model->value) : std::string_view{});
+    addPresentationValue(infoHash,
+                         thread->modelProvider ? std::string_view(*thread->modelProvider) : std::string_view{});
+    addPresentationValue(infoHash, thread->fullyLoaded);
+    addPresentationValue(infoHash, turn != nullptr);
+    if (turn) {
+        addPresentationValue(infoHash, turn->id.value);
+        addPresentationValue(infoHash, turn->status.value);
+        addPresentationValue(infoHash, turn->active);
+        addPresentationValue(infoHash, turn->terminal);
+        addPresentationValue(infoHash, tokenUsageText(*turn));
+        addPresentationValue(infoHash, failureText(*turn));
+    }
+    addPresentationValue(infoHash, freshnessText(state.freshness()));
+    addPresentationValue(infoHash, representationText(state.representationMode()));
+    addPresentationValue(infoHash, provider.value.has_value());
+    if (provider.value) {
+        addPresentationValue(infoHash, providerLifecycleText(provider.value->lifecycle));
+        addPresentationValue(infoHash, provider.value->ready);
+        addPresentationValue(
+            infoHash,
+            provider.value->lastError && provider.value->lastError->message
+                ? std::string_view(*provider.value->lastError->message)
+                : std::string_view{});
+    }
+    addPresentationValue(infoHash, controller.value.has_value());
+    if (controller.value) {
+        addPresentationValue(infoHash, controller.value->present);
+        addPresentationValue(infoHash, controller.value->ownedByThisClient);
+    }
+    addPresentationValue(infoHash, state.hasPendingRequestProjection());
+    addPresentationValue(infoHash, QByteArray::number(pendingForThread));
+    addPresentationValue(infoHash, truncation.truncated);
+    addPresentationValue(infoHash, truncation.value.has_value());
+    if (truncation.value) {
+        addPresentationValue(infoHash, truncation.value->truncated);
+        addPresentationValue(infoHash,
+                             truncation.value->omittedEntries
+                                 ? QByteArray::number(*truncation.value->omittedEntries)
+                                 : QByteArray{});
+    }
+    addPresentationValue(infoHash, threadList.value.has_value());
+    if (threadList.value)
+        addPresentationValue(infoHash, threadList.value->complete);
+    addPresentationValue(infoHash, QByteArray::number(projection.omittedFields.size()));
+    addPresentationValue(infoHash, QByteArray::number(projection.redactedFields.size()));
+    addPresentationValue(infoHash, thread->realtime.has_value());
+    if (thread->realtime) {
+        const auto realtime = sdk::realtimeSemanticView(*thread->realtime);
+        addPresentationValue(infoHash, realtime.lifecycle);
+        addPresentationValue(infoHash, QByteArray::number(realtime.itemCount));
+        addPresentationValue(infoHash, realtime.transcriptTruncated);
+        addPresentationValue(infoHash,
+                             realtime.lastError ? std::string_view(*realtime.lastError)
+                                                : std::string_view{});
+    }
     const QByteArray nextInfoKey = infoHash.result();
     const bool infoChanged = nextInfoKey != infoPresentationKey;
+    const QString revisionText = QString::number(state.revision());
+    if (!infoChanged && infoRevisionValue && infoRevisionValue->text() != revisionText)
+        infoRevisionValue->setText(revisionText);
     if (infoChanged) {
     infoPresentationKey = nextInfoKey;
+    infoRevisionValue = nullptr;
     clearLayout(infoContent);
     infoContent->addWidget(textLabel(QStringLiteral("THREAD"), "section"));
     infoContent->addSpacing(8);
@@ -1010,9 +1091,8 @@ void InspectorWidget::render(const sdk::State& state,
     addFact(stateFacts, stateRow, QStringLiteral("State"), freshness,
             freshness == QStringLiteral("Current") ? QStringLiteral("#40c27d")
                                                    : QStringLiteral("#f5a83b"));
-    addFact(stateFacts, stateRow, QStringLiteral("Revision"), QString::number(state.revision()));
+    infoRevisionValue = addFact(stateFacts, stateRow, QStringLiteral("Revision"), revisionText);
     addFact(stateFacts, stateRow, QStringLiteral("Representation"), representationText(state.representationMode()));
-    const auto& provider = state.provider();
     if (provider.value) {
         addFact(stateFacts, stateRow, QStringLiteral("Provider"), providerLifecycleText(provider.value->lifecycle),
                 provider.value->ready ? QStringLiteral("#40c27d") : statusColor(providerLifecycleText(provider.value->lifecycle)));
@@ -1020,7 +1100,6 @@ void InspectorWidget::render(const sdk::State& state,
             addFact(stateFacts, stateRow, QStringLiteral("Provider error"),
                     fromUtf8(*provider.value->lastError->message), QStringLiteral("#ed6a6a"));
     }
-    const auto& controller = state.controller();
     if (controller.value) {
         addFact(stateFacts, stateRow, QStringLiteral("Controller"),
                 controller.value->ownedByThisClient
@@ -1028,28 +1107,22 @@ void InspectorWidget::render(const sdk::State& state,
                     : controller.value->present ? QStringLiteral("Owned by another frontend")
                                                 : QStringLiteral("Unowned"));
     }
-    std::size_t pendingForThread = 0;
     if (state.hasPendingRequestProjection()) {
-        for (const auto& request : state.pendingRequests())
-            pendingForThread += request.threadId && request.threadId->value == thread->id.value;
         addFact(stateFacts, stateRow, QStringLiteral("Attention"),
                 QStringLiteral("%1 pending request%2").arg(pendingForThread)
                     .arg(pendingForThread == 1 ? QString{} : QStringLiteral("s")),
                 pendingForThread > 0 ? QStringLiteral("#f5a83b") : QStringLiteral("#949ead"));
     }
-    const auto& truncation = state.truncation();
     if (truncation.truncated || (truncation.value && truncation.value->truncated)) {
         QString detail = QStringLiteral("State projection truncated");
         if (truncation.value && truncation.value->omittedEntries)
             detail += QStringLiteral(" · %1 entries omitted").arg(*truncation.value->omittedEntries);
         addFact(stateFacts, stateRow, QStringLiteral("Truncation"), detail, QStringLiteral("#f5a83b"));
     }
-    const auto& threadList = state.threadList();
     if (threadList.value)
         addFact(stateFacts, stateRow, QStringLiteral("Thread list"),
                 threadList.value->complete ? QStringLiteral("Complete") : QStringLiteral("Partial"),
                 threadList.value->complete ? QStringLiteral("#40c27d") : QStringLiteral("#f5a83b"));
-    const auto& projection = state.projectionMetadata();
     if (!projection.omittedFields.empty() || !projection.redactedFields.empty()) {
         QStringList detail;
         if (!projection.omittedFields.empty())

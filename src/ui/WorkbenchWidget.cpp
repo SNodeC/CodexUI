@@ -211,7 +211,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     connect(attentionButton, &QPushButton::clicked, interactiveRequestDialog, &InteractiveRequestDialog::present);
     connect(sidebar, &SidebarWidget::newThreadRequested, this, &WorkbenchWidget::beginNewThread);
     connect(sidebar, &SidebarWidget::threadSelected, this, &WorkbenchWidget::selectThread);
-    connect(inspector, &InspectorWidget::selectionChanged, this, &WorkbenchWidget::refreshState);
+    connect(inspector, &InspectorWidget::selectionChanged, this, [this] { refreshState(); });
     connect(inspector, &InspectorWidget::threadOpenRequested, this, &WorkbenchWidget::selectProjectedAgentThread);
     connect(conversation, &ConversationWidget::sendRequested, this, &WorkbenchWidget::sendPrompt);
     connect(conversation, &ConversationWidget::stopRequested, this, &WorkbenchWidget::stopActiveTurn);
@@ -222,16 +222,30 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     refreshState();
 }
 
-void WorkbenchWidget::scheduleStateRefresh()
+void WorkbenchWidget::scheduleStateRefresh(const QStringList& affectedThreadIds,
+                                           bool allThreadsAffected,
+                                           bool inspectorAffected)
 {
+    const bool selectedAffected = allThreadsAffected
+                                  || affectedThreadIds.contains(selectedThreadId)
+                                  || (!newThreadIdAwaitingState.isEmpty()
+                                      && affectedThreadIds.contains(newThreadIdAwaitingState));
+    selectedPresentationRefreshPending = selectedPresentationRefreshPending || selectedAffected;
+    inspectorRefreshPending = inspectorRefreshPending || inspectorAffected || selectedAffected;
     if (stateRefreshPending)
         return;
     stateRefreshPending = true;
-    QTimer::singleShot(0, this, [this] {
+    // Let adjacent bounded socket batches collapse into one presentation pass
+    // while still updating live output at approximately one frame cadence.
+    QTimer::singleShot(16, this, [this] {
         if (!stateRefreshPending)
             return;
         stateRefreshPending = false;
-        refreshState();
+        const bool refreshSelectedPresentation = selectedPresentationRefreshPending;
+        const bool refreshInspector = inspectorRefreshPending;
+        selectedPresentationRefreshPending = false;
+        inspectorRefreshPending = false;
+        refreshState(refreshSelectedPresentation, refreshInspector);
     });
 }
 
@@ -291,13 +305,17 @@ void WorkbenchWidget::refreshLifecycle()
     refreshControls();
 }
 
-void WorkbenchWidget::refreshState()
+void WorkbenchWidget::refreshState(bool refreshSelectedPresentation, bool refreshInspector)
 {
     stateRefreshPending = false;
+    selectedPresentationRefreshPending = false;
+    inspectorRefreshPending = false;
     const auto& state = frontendSession.state();
     const auto threads = state.threads();
     const bool ready = frontendSession.lifecycle() == FrontendSession::Lifecycle::Ready;
     const bool threadListComplete = state.threadList().value && state.threadList().value->complete;
+    const QString previousThreadId = selectedThreadId;
+    const bool previousNewThreadDraft = newThreadDraft;
 
     if (!newThreadIdAwaitingState.isEmpty()
         && state.thread(newThreadIdAwaitingState.toStdString()) != nullptr) {
@@ -310,55 +328,65 @@ void WorkbenchWidget::refreshState()
         selectedThreadId.clear();
     if (!newThreadDraft && selectedThreadId.isEmpty() && !threads.empty())
         selectedThreadId = QString::fromStdString(threads.front().id.value);
+    const bool selectionChanged = previousThreadId != selectedThreadId
+                                  || previousNewThreadDraft != newThreadDraft;
+    refreshSelectedPresentation = refreshSelectedPresentation || selectionChanged;
+    refreshInspector = refreshInspector || refreshSelectedPresentation;
 
     sidebar->setThreads(state, selectedThreadId);
 
     // ConversationWidget resolves the stable selection against this exact
     // immutable State and never retains backend object addresses.
-    conversation->render(state, selectedThreadId, newThreadDraft);
+    if (refreshSelectedPresentation)
+        conversation->render(state, selectedThreadId, newThreadDraft);
 
-    inspector->render(state, newThreadDraft ? QString{} : selectedThreadId,
-                      ready, frontendSession.statusText());
+    if (refreshInspector)
+        inspector->render(state, newThreadDraft ? QString{} : selectedThreadId,
+                          ready, frontendSession.statusText());
 
     const auto* selected = !newThreadDraft && !selectedThreadId.isEmpty()
                                ? state.thread(selectedThreadId.toStdString())
                                : nullptr;
-    QStringList modelDetails;
-    if (ready && selected && selected->model)
-        modelDetails.append(QString::fromStdString(selected->model->value));
-    if (ready && selected && selected->modelProvider)
-        modelDetails.append(QString::fromStdString(*selected->modelProvider));
-    modelStatus->setText(modelDetails.isEmpty() ? QStringLiteral("Model unavailable")
-                                                : modelDetails.join(QStringLiteral(" · ")));
-    modelStatus->setToolTip(modelStatus->text());
+    if (refreshSelectedPresentation) {
+        QStringList modelDetails;
+        if (ready && selected && selected->model)
+            modelDetails.append(QString::fromStdString(selected->model->value));
+        if (ready && selected && selected->modelProvider)
+            modelDetails.append(QString::fromStdString(*selected->modelProvider));
+        modelStatus->setText(modelDetails.isEmpty() ? QStringLiteral("Model unavailable")
+                                                    : modelDetails.join(QStringLiteral(" · ")));
+        modelStatus->setToolTip(modelStatus->text());
 
-    const QString context = ready && selected && selected->cwd
-                                ? QString::fromStdString(selected->cwd->value)
-                                : QStringLiteral("No thread context");
-    threadContextStatus->setText(context.size() > 44 ? context.left(20) + QChar(0x2026) + context.right(20) : context);
-    threadContextStatus->setToolTip(ready && selected && selected->cwd ? context : QString{});
+        const QString context = ready && selected && selected->cwd
+                                    ? QString::fromStdString(selected->cwd->value)
+                                    : QStringLiteral("No thread context");
+        threadContextStatus->setText(context.size() > 44
+                                         ? context.left(20) + QChar(0x2026) + context.right(20)
+                                         : context);
+        threadContextStatus->setToolTip(ready && selected && selected->cwd ? context : QString{});
 
-    std::size_t agentActivities = 0;
-    if (const auto* turn = ready ? latestTurn(state, selected) : nullptr) {
-        for (const auto& itemId : turn->orderedItems) {
-            const auto* item = state.item(selected->id, turn->id, itemId);
-            if (!item)
-                continue;
-            const auto semantic = ai::openai::codex::frontend::client::itemSemanticView(*item);
-            if (semantic
-                && (std::holds_alternative<
-                        ai::openai::codex::frontend::client::SubAgentActivitySemanticView>(semantic->details)
-                    || std::holds_alternative<
-                        ai::openai::codex::frontend::client::CollabAgentToolCallSemanticView>(semantic->details)))
-                ++agentActivities;
+        std::size_t agentActivities = 0;
+        if (const auto* turn = ready ? latestTurn(state, selected) : nullptr) {
+            for (const auto& itemId : turn->orderedItems) {
+                const auto* item = state.item(selected->id, turn->id, itemId);
+                if (!item)
+                    continue;
+                const auto semantic = ai::openai::codex::frontend::client::itemSemanticView(*item);
+                if (semantic
+                    && (std::holds_alternative<
+                            ai::openai::codex::frontend::client::SubAgentActivitySemanticView>(semantic->details)
+                        || std::holds_alternative<
+                            ai::openai::codex::frontend::client::CollabAgentToolCallSemanticView>(semantic->details)))
+                    ++agentActivities;
+            }
         }
+        agentActivityStatus->setText(agentActivities == 0
+                                         ? QStringLiteral("No agent activity")
+                                         : QStringLiteral("%1 agent activit%2")
+                                               .arg(agentActivities)
+                                               .arg(agentActivities == 1 ? QStringLiteral("y")
+                                                                        : QStringLiteral("ies")));
     }
-    agentActivityStatus->setText(agentActivities == 0
-                                     ? QStringLiteral("No agent activity")
-                                     : QStringLiteral("%1 agent activit%2")
-                                           .arg(agentActivities)
-                                           .arg(agentActivities == 1 ? QStringLiteral("y")
-                                                                    : QStringLiteral("ies")));
 
     const std::size_t attentionCount = state.hasPendingRequestProjection() ? state.pendingRequests().size() : 0;
     const QString attentionText = QStringLiteral("%1 request%2")
@@ -613,6 +641,10 @@ void WorkbenchWidget::sendPrompt(const QString& prompt)
         || threadStartInFlight || threadResumeInFlight || turnStartInFlight || controllerAcquireInFlight
         || pendingAction != PendingAction::None)
         return;
+    if (const auto error = FrontendSession::promptValidationError(prompt)) {
+        showWriteError(*error);
+        return;
+    }
 
     const auto& state = frontendSession.state();
     const auto* selected = selectedThreadId.isEmpty() ? nullptr : state.thread(selectedThreadId.toStdString());
