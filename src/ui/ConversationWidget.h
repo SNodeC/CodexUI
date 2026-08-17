@@ -7,6 +7,7 @@
 
 #include <QByteArray>
 #include <QHash>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 
@@ -19,6 +20,7 @@ class QPropertyAnimation;
 class QPushButton;
 class QResizeEvent;
 class QScrollArea;
+class QTimer;
 class QVBoxLayout;
 
 namespace ai::openai::codex::frontend::client {
@@ -50,7 +52,11 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
-    void synchronizeTimelineHeight();
+    void scheduleTimelineLayout(int previousScroll, bool followLatest, bool threadChanged);
+    void captureTimelineAnchor();
+    void settleTimelineLayout();
+    void settleThreadSwitchLayout(std::uint64_t generation, int remainingPasses);
+    void synchronizeTimelineHeight(bool allowShrink = true);
     void updateSendEnabled();
 
     QFrame* composer = nullptr;
@@ -68,6 +74,7 @@ private:
     QWidget* timelineHost = nullptr;
     QVBoxLayout* timeline = nullptr;
     QPropertyAnimation* scrollAnimation = nullptr;
+    QTimer* layoutSettleTimer = nullptr;
     QString renderedThreadId;
     // Identity only; conversation content remains owned by immutable AISuite State.
     QByteArray renderedPresentationKey;
@@ -79,10 +86,15 @@ private:
     QHash<QString, QStringList> renderedSegmentIds;
     QHash<QString, QByteArray> renderedSegmentKeys;
     QHash<QString, QWidget*> renderedSegmentWidgets;
+    QPointer<QWidget> pendingViewportAnchor;
     std::uint64_t renderGeneration = 0;
     std::uint64_t pinLatestGeneration = 0;
     bool pinLatestDuringLayout = false;
     bool followingLatest = false;
+    bool pendingFollowLatest = false;
+    bool pendingThreadChanged = false;
+    int pendingPreviousScroll = 0;
+    int pendingViewportAnchorY = 0;
     bool renderedNewThreadDraft = false;
     bool sendContextAllowed = false;
 };

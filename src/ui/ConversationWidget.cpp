@@ -961,6 +961,9 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     turnSummaryLayout = new QVBoxLayout(turnSummary);
     turnSummaryLayout->setContentsMargins(14, 7, 14, 7);
     turnSummaryLayout->setSpacing(3);
+    // Reserve the normal two-row summary height while a new turn has no token
+    // usage yet, so prompt reflection cannot resize the conversation viewport.
+    turnSummary->setMinimumHeight(53);
     turnSummary->hide();
     root->addWidget(turnSummary);
     turnFailure = textLabel({}, "meta");
@@ -978,6 +981,10 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     auto* conversationScroll = scrollArea->verticalScrollBar();
     scrollAnimation = new QPropertyAnimation(conversationScroll, "value", this);
     scrollAnimation->setEasingCurve(QEasingCurve::OutCubic);
+    layoutSettleTimer = new QTimer(this);
+    layoutSettleTimer->setSingleShot(true);
+    layoutSettleTimer->setInterval(16);
+    connect(layoutSettleTimer, &QTimer::timeout, this, &ConversationWidget::settleTimelineLayout);
     connect(scrollAnimation, &QPropertyAnimation::finished, this,
             [this] { followingLatest = false; });
     connect(conversationScroll, &QScrollBar::rangeChanged, this,
@@ -987,16 +994,22 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
                     conversationScroll->setValue(maximum);
             });
     connect(conversationScroll, &QScrollBar::actionTriggered, this,
-            [this](int)
+            [this, conversationScroll](int)
             {
                 scrollAnimation->stop();
                 followingLatest = false;
+                pendingFollowLatest = false;
+                pendingPreviousScroll = conversationScroll->value();
+                pendingViewportAnchor.clear();
             });
     connect(conversationScroll, &QScrollBar::sliderPressed, this,
-            [this]
+            [this, conversationScroll]
             {
                 scrollAnimation->stop();
                 followingLatest = false;
+                pendingFollowLatest = false;
+                pendingPreviousScroll = conversationScroll->value();
+                pendingViewportAnchor.clear();
             });
     auto* content = new QWidget;
     content->setStyleSheet(QStringLiteral("background:transparent;"));
@@ -1083,6 +1096,10 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
     const bool threadChanged = renderedThreadId != threadId || renderedNewThreadDraft != newThreadDraft;
     const bool followLatest = threadChanged || wasNearBottom || followingLatest;
     const std::uint64_t generation = ++renderGeneration;
+    if (threadChanged)
+        pendingViewportAnchor.clear();
+    else if (!layoutSettleTimer->isActive())
+        captureTimelineAnchor();
     renderedThreadId = threadId;
     renderedNewThreadDraft = newThreadDraft;
     renderedPresentationKey = presentationKey;
@@ -1091,18 +1108,12 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
         followingLatest = false;
         pinLatestDuringLayout = true;
         pinLatestGeneration = generation;
-        QTimer::singleShot(250, this,
-                           [this, generation]
-                           {
-                               if (generation != pinLatestGeneration)
-                                   return;
-                               synchronizeTimelineHeight();
-                               scrollArea->widget()->layout()->activate();
-                               scrollArea->widget()->adjustSize();
-                               auto* latestBar = scrollArea->verticalScrollBar();
-                               latestBar->setValue(latestBar->maximum());
-                               pinLatestDuringLayout = false;
-                           });
+        scrollArea->viewport()->setUpdatesEnabled(false);
+    }
+    else
+    {
+        scrollAnimation->stop();
+        scrollArea->viewport()->setUpdatesEnabled(false);
     }
 
     const auto clearTimelineState = [this]
@@ -1223,9 +1234,9 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
                 summaryRow->addStretch();
                 turnSummaryLayout->addLayout(summaryRow);
                 const QString usage = tokenUsageText(*currentTurn);
-                if (!usage.isEmpty())
                 {
-                    auto* tokens = wrappingLabel(usage, "small");
+                    auto* tokens = textLabel(usage.isEmpty() ? QStringLiteral(" ") : usage, "small");
+                    tokens->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
                     tokens->setToolTip(usage);
                     turnSummaryLayout->addWidget(tokens);
                 }
@@ -1280,7 +1291,7 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
                 if (!renderedTurnWidgets.contains(turnId))
                 {
                     auto* turnWidget = timelineTurnWidget(*turn, index + 1, itemLayout, statusLabel);
-                    timeline->addWidget(turnWidget);
+                    timeline->addWidget(turnWidget, 0, Qt::AlignTop);
                     renderedTurnWidgets.insert(turnId, turnWidget);
                     renderedTurnItemLayouts.insert(turnId, itemLayout);
                     renderedTurnStatusLabels.insert(turnId, statusLabel);
@@ -1339,11 +1350,11 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
                         itemLayout->removeWidget(oldWidget);
                         oldWidget->hide();
                         oldWidget->deleteLater();
-                        itemLayout->insertWidget(position, newWidget);
+                        itemLayout->insertWidget(position, newWidget, 0, Qt::AlignTop);
                     }
                     else
                     {
-                        itemLayout->addWidget(newWidget);
+                        itemLayout->addWidget(newWidget, 0, Qt::AlignTop);
                     }
                     renderedSegmentWidgets.insert(storage, newWidget);
                     renderedSegmentKeys.insert(storage, segmentKey);
@@ -1354,63 +1365,152 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
         }
     }
 
+    scheduleTimelineLayout(previousScroll, followLatest, threadChanged);
+}
+
+void ConversationWidget::scheduleTimelineLayout(int previousScroll, bool followLatest, bool threadChanged)
+{
+    if (!layoutSettleTimer->isActive())
+        pendingPreviousScroll = previousScroll;
+    pendingFollowLatest = pendingFollowLatest || followLatest;
+    pendingThreadChanged = pendingThreadChanged || threadChanged;
+    layoutSettleTimer->start();
+}
+
+void ConversationWidget::captureTimelineAnchor()
+{
+    pendingViewportAnchor.clear();
+    auto* viewport = scrollArea->viewport();
+    for (const QString& turnId : renderedTurnIds)
+    {
+        QWidget* turn = renderedTurnWidgets.value(turnId);
+        if (!turn)
+            continue;
+        const int y = viewport->mapFromGlobal(turn->mapToGlobal(QPoint{})).y();
+        if (y < viewport->height() && y + turn->height() > 0)
+        {
+            pendingViewportAnchor = turn;
+            pendingViewportAnchorY = y;
+            return;
+        }
+    }
+}
+
+void ConversationWidget::settleTimelineLayout()
+{
+    const int previousScroll = pendingPreviousScroll;
+    const bool followLatest = pendingFollowLatest;
+    const bool threadChanged = pendingThreadChanged;
+    pendingFollowLatest = false;
+    pendingThreadChanged = false;
+
+    if (threadChanged || pinLatestDuringLayout)
+    {
+        scrollAnimation->stop();
+        followingLatest = false;
+        settleThreadSwitchLayout(pinLatestGeneration, 2);
+        return;
+    }
+
+    synchronizeTimelineHeight(false);
+    scrollArea->widget()->layout()->activate();
+    scrollArea->widget()->adjustSize();
+
+    auto* bar = scrollArea->verticalScrollBar();
+    bar->setValue(qMin(previousScroll, bar->maximum()));
+    if (pendingViewportAnchor)
+    {
+        auto* viewport = scrollArea->viewport();
+        const int settledY = viewport->mapFromGlobal(pendingViewportAnchor->mapToGlobal(QPoint{})).y();
+        const int correction = settledY - pendingViewportAnchorY;
+        bar->setValue(qBound(0, bar->value() + correction, bar->maximum()));
+    }
+    pendingViewportAnchor.clear();
+    scrollArea->viewport()->setUpdatesEnabled(true);
+    scrollArea->viewport()->update();
+    if (!followLatest)
+    {
+        scrollAnimation->stop();
+        followingLatest = false;
+        return;
+    }
+
+    scrollAnimation->stop();
+    const int distance = bar->maximum() - bar->value();
+    if (distance <= 0 || renderedThreadId.isEmpty())
+    {
+        followingLatest = false;
+        bar->setValue(bar->maximum());
+        return;
+    }
+    followingLatest = true;
+    scrollAnimation->setDuration(qBound(90, distance, 220));
+    scrollAnimation->setStartValue(bar->value());
+    scrollAnimation->setEndValue(bar->maximum());
+    scrollAnimation->start();
+}
+
+void ConversationWidget::settleThreadSwitchLayout(std::uint64_t generation, int remainingPasses)
+{
+    if (generation != pinLatestGeneration || !pinLatestDuringLayout)
+        return;
     synchronizeTimelineHeight();
     scrollArea->widget()->layout()->activate();
     scrollArea->widget()->adjustSize();
-    QTimer::singleShot(0, this,
-                       [this, previousScroll, followLatest, threadChanged, generation]
+    if (remainingPasses > 0)
+    {
+        QTimer::singleShot(0, this,
+                           [this, generation, remainingPasses]
+                           {
+                               settleThreadSwitchLayout(generation, remainingPasses - 1);
+                           });
+        return;
+    }
+
+    auto* bar = scrollArea->verticalScrollBar();
+    bar->setValue(bar->maximum());
+    QTimer::singleShot(100, this,
+                       [this, generation]
                        {
-                           if (generation != renderGeneration)
+                           if (generation != pinLatestGeneration || !pinLatestDuringLayout)
                                return;
                            synchronizeTimelineHeight();
                            scrollArea->widget()->layout()->activate();
                            scrollArea->widget()->adjustSize();
-                           QTimer::singleShot(0, this,
-                                              [this, previousScroll, followLatest, threadChanged, generation]
+                           auto* settledBar = scrollArea->verticalScrollBar();
+                           settledBar->setValue(settledBar->maximum());
+                           scrollArea->viewport()->setUpdatesEnabled(true);
+                           scrollArea->viewport()->update();
+                           QTimer::singleShot(100, this,
+                                              [this, generation]
                                               {
-                                                  if (generation != renderGeneration)
+                                                  if (generation != pinLatestGeneration
+                                                      || !pinLatestDuringLayout)
                                                       return;
                                                   synchronizeTimelineHeight();
                                                   scrollArea->widget()->layout()->activate();
                                                   scrollArea->widget()->adjustSize();
-                                                  auto* bar = scrollArea->verticalScrollBar();
-                                                  if (threadChanged)
-                                                  {
-                                                      scrollAnimation->stop();
-                                                      bar->setValue(bar->maximum());
-                                                  }
-                                                  else if (followLatest)
-                                                  {
-                                                      scrollAnimation->stop();
-                                                      const int distance = bar->maximum() - bar->value();
-                                                      if (distance <= 0 || renderedThreadId.isEmpty())
-                                                      {
-                                                          followingLatest = false;
-                                                          bar->setValue(bar->maximum());
-                                                      }
-                                                      else
-                                                      {
-                                                          followingLatest = true;
-                                                          scrollAnimation->setDuration(qBound(90, distance, 220));
-                                                          scrollAnimation->setStartValue(bar->value());
-                                                          scrollAnimation->setEndValue(bar->maximum());
-                                                          scrollAnimation->start();
-                                                      }
-                                                  }
-                                                  else
-                                                  {
-                                                      followingLatest = false;
-                                                      bar->setValue(qMin(previousScroll, bar->maximum()));
-                                                  }
+                                                  auto* finalBar = scrollArea->verticalScrollBar();
+                                                  finalBar->setValue(finalBar->maximum());
+                                                  pinLatestDuringLayout = false;
+                                                  pendingViewportAnchor.clear();
                                               });
                        });
 }
 
-void ConversationWidget::synchronizeTimelineHeight()
+void ConversationWidget::synchronizeTimelineHeight(bool allowShrink)
 {
+    if (allowShrink)
+    {
+        timelineHost->setMinimumHeight(0);
+        timelineHost->setMaximumHeight(QWIDGETSIZE_MAX);
+    }
     timeline->invalidate();
+    timeline->activate();
     const int height = timeline->minimumSize().height();
-    timelineHost->setFixedHeight(qMax(0, height));
+    const int target = qMax(0, height);
+    if (allowShrink || target > timelineHost->height())
+        timelineHost->setFixedHeight(target);
 }
 
 void ConversationWidget::resizeEvent(QResizeEvent* event)
