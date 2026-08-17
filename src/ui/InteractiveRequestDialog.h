@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <variant>
@@ -31,6 +32,22 @@ class State;
 
 namespace codexui {
 
+struct InteractiveRequestSource {
+    ai::openai::codex::frontend::client::PendingRequestState request;
+    std::optional<ai::openai::codex::frontend::client::ItemSemanticView> linkedItem;
+
+    bool operator==(const InteractiveRequestSource&) const = default;
+};
+
+namespace detail {
+
+[[nodiscard]] std::optional<InteractiveRequestSource>
+interactiveRequestSource(const ai::openai::codex::frontend::client::State& state,
+                         const ai::openai::codex::frontend::client::PendingRequestId& requestId);
+[[nodiscard]] bool interactiveRequestCanRespond(const InteractiveRequestSource& source);
+
+} // namespace detail
+
 struct InteractiveRequestResponse {
     using Value = std::variant<ai::openai::codex::typed::ApprovalDecision,
                                ai::openai::codex::typed::ApplyPatchApprovalResponse,
@@ -39,6 +56,7 @@ struct InteractiveRequestResponse {
 
     ai::openai::codex::frontend::client::PendingRequestId requestId;
     ai::openai::codex::frontend::PendingRequestKind kind;
+    InteractiveRequestSource source;
     Value value;
 };
 
@@ -57,6 +75,8 @@ public:
     void responseFailed(const std::string& requestId, const QString& error);
 
 private:
+    friend struct InteractiveRequestDialogTestAccess;
+
     struct QuestionDraft {
         std::set<std::string> selectedOptions;
         QString freeText;
@@ -91,9 +111,11 @@ private:
     std::vector<std::string> orderedRequestIds;
     std::map<std::string, RequestDraft> drafts;
     std::set<std::string> submittedRequestIds;
+    std::optional<InteractiveRequestSource> presentedSource;
     std::string currentRequestId;
     std::string submittingRequestId;
     std::size_t previousCount = 0;
+    bool currentRequestRespondable = false;
 };
 
 } // namespace codexui

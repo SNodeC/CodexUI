@@ -32,6 +32,22 @@ void setStyleSheetIfChanged(QWidget* widget, const QString& styleSheet)
         widget->setStyleSheet(styleSheet);
 }
 
+std::optional<QString> interactiveResponseValidationError(
+    const ai::openai::codex::frontend::client::State& state,
+    const InteractiveRequestResponse& response)
+{
+    const auto source = detail::interactiveRequestSource(state, response.requestId);
+    if (!source)
+        return QStringLiteral("This request is no longer pending");
+    if (source->request.kind != response.kind)
+        return QStringLiteral("This request changed; review it and retry");
+    if (!detail::interactiveRequestCanRespond(*source))
+        return QStringLiteral("This request is incomplete and cannot be safely answered");
+    if (*source != response.source)
+        return QStringLiteral("This request changed; review it and retry");
+    return std::nullopt;
+}
+
 QLabel* label(const QString& text, const char* kind = nullptr)
 {
     auto* result = new QLabel(text);
@@ -498,13 +514,8 @@ void WorkbenchWidget::refreshControllerStatus()
 void WorkbenchWidget::submitInteractiveResponse(InteractiveRequestResponse response)
 {
     const std::string id = response.requestId.value;
-    const auto* current = frontendSession.state().pendingRequest(response.requestId);
-    if (!current) {
-        interactiveRequestDialog->responseFailed(id, QStringLiteral("This request is no longer pending"));
-        return;
-    }
-    if (current->kind != response.kind) {
-        interactiveRequestDialog->responseFailed(id, QStringLiteral("This request changed; review it and retry"));
+    if (const auto error = interactiveResponseValidationError(frontendSession.state(), response)) {
+        interactiveRequestDialog->responseFailed(id, *error);
         return;
     }
     if (requestControllerAcquireInFlight || requestResponseInFlight || pendingInteractiveResponse) {
@@ -574,15 +585,9 @@ void WorkbenchWidget::performInteractiveResponse()
     InteractiveRequestResponse response = std::move(*pendingInteractiveResponse);
     pendingInteractiveResponse.reset();
     const std::string requestId = response.requestId.value;
-    const auto* current = frontendSession.state().pendingRequest(response.requestId);
-    if (!current) {
+    if (const auto error = interactiveResponseValidationError(frontendSession.state(), response)) {
         activeInteractiveRequestId.clear();
-        interactiveRequestDialog->responseFailed(requestId, QStringLiteral("This request is no longer pending"));
-        return;
-    }
-    if (current->kind != response.kind) {
-        activeInteractiveRequestId.clear();
-        interactiveRequestDialog->responseFailed(requestId, QStringLiteral("This request changed; review it and retry"));
+        interactiveRequestDialog->responseFailed(requestId, *error);
         return;
     }
 
@@ -754,7 +759,7 @@ void WorkbenchWidget::executePendingAction()
         {
             const auto* thread = frontendSession.state().thread(threadId.toStdString());
             // Resuming an already attached thread can replay its existing item projection.
-            if (thread && thread->status && *thread->status == "idle")
+            if (thread && ai::openai::codex::frontend::client::threadIsIdle(*thread))
                 startTurn(threadId, prompt);
             else
                 resumeThread(threadId, prompt);
