@@ -694,7 +694,7 @@ void InspectorWidget::render(const sdk::State& state,
                     details.append(QStringLiteral("%1 activities").arg(agent.itemIds.size()));
                 auto* row = new QPushButton(QStringLiteral("%1\n%2").arg(name, details.join(QStringLiteral(" · "))));
                 row->setCursor(Qt::PointingHandCursor);
-                row->setFixedHeight(details.isEmpty() ? 38 : 52);
+                row->setMinimumHeight(details.isEmpty() ? 38 : 52);
                 row->setStyleSheet(QStringLiteral(
                     "QPushButton{background:%1;color:#e8edf2;border-radius:8px;text-align:left;padding:6px 10px;"
                     "font-size:11px;font-weight:500;}QPushButton:hover{background:#20252c;}")

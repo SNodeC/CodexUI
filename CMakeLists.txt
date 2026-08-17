@@ -59,4 +59,21 @@ if(BUILD_TESTING)
             Qt6::Network
     )
     add_test(NAME CodexUIPromptLimitTest COMMAND CodexUIPromptLimitTest)
+
+    add_executable(
+        CodexUIConversationLayoutTest
+        tests/ConversationLayoutTest.cpp
+        src/ui/ConversationWidget.cpp
+        src/ui/ConversationWidget.h
+    )
+    target_compile_features(CodexUIConversationLayoutTest PRIVATE cxx_std_20)
+    target_include_directories(CodexUIConversationLayoutTest PRIVATE src)
+    target_link_libraries(
+        CodexUIConversationLayoutTest
+        PRIVATE
+            AISuite::OpenAICodexFrontendClient
+            Qt6::Widgets
+    )
+    add_test(NAME CodexUIConversationLayoutTest COMMAND CodexUIConversationLayoutTest)
+    set_tests_properties(CodexUIConversationLayoutTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()

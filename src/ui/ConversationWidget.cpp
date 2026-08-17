@@ -123,7 +123,9 @@ public:
     {
         setTextFormat(Qt::PlainText);
         setWordWrap(true);
-        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        QSizePolicy policy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        policy.setHeightForWidth(true);
+        setSizePolicy(policy);
     }
 
     int heightForWidth(int width) const override
@@ -437,7 +439,7 @@ void addActivityRow(QVBoxLayout* rows, const ActivityPresentation& item)
     auto* copy = new QWidget;
     auto* copyLayout = new QVBoxLayout(copy);
     copyLayout->setContentsMargins(0, 0, 0, 0);
-    copyLayout->setSpacing(2);
+    copyLayout->setSpacing(4);
     auto* title = wrappingLabel(item.title);
     title->setStyleSheet(QStringLiteral("font-size:12px;font-weight:500;"));
     copyLayout->addWidget(title);
@@ -487,8 +489,12 @@ QFrame* activityCard(const sdk::State& state, const std::vector<const sdk::ItemS
     layout->addSpacing(9);
     layout->addWidget(divider());
     layout->addSpacing(3);
+    auto* rows = new QVBoxLayout;
+    rows->setContentsMargins(0, 0, 0, 0);
+    rows->setSpacing(4);
     for (const auto* item : items)
-        addActivityRow(layout, activityPresentation(state, *item));
+        addActivityRow(rows, activityPresentation(state, *item));
+    layout->addLayout(rows);
     return card;
 }
 
@@ -896,6 +902,7 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     root->addSpacing(2);
     threadTitle = textLabel(QStringLiteral("No synchronized thread"), "heading");
     root->addWidget(threadTitle);
+    root->addSpacing(2);
     threadDetail = textLabel(QStringLiteral("Select a synchronized thread to view its conversation"), "meta");
     root->addWidget(threadDetail);
     root->addSpacing(7);
@@ -965,6 +972,7 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     conversation->setAlignment(Qt::AlignTop);
 
     timelineHost = new QWidget;
+    timelineHost->setObjectName(QStringLiteral("conversationTimeline"));
     timeline = new QVBoxLayout(timelineHost);
     timeline->setContentsMargins(0, 0, 0, 0);
     timeline->setSpacing(0);
@@ -1452,8 +1460,11 @@ void ConversationWidget::synchronizeTimelineHeight(bool allowShrink)
     }
     timeline->invalidate();
     timeline->activate();
-    const int height = timeline->minimumSize().height();
-    const int target = qMax(0, height);
+    const int width = timelineHost->contentsRect().width();
+    const int preferredHeight = width > 0 && timeline->hasHeightForWidth()
+                                    ? timeline->heightForWidth(width)
+                                    : timeline->sizeHint().height();
+    const int target = qMax(0, qMax(timeline->minimumSize().height(), preferredHeight));
     if (allowShrink || target > timelineHost->height())
         timelineHost->setFixedHeight(target);
 }
@@ -1470,7 +1481,14 @@ void ConversationWidget::resizeEvent(QResizeEvent* event)
                            synchronizeTimelineHeight();
                            scrollArea->widget()->layout()->activate();
                            scrollArea->widget()->adjustSize();
-                           resizeLayoutPending = false;
+                           QTimer::singleShot(0, this,
+                                              [this]
+                                              {
+                                                  synchronizeTimelineHeight();
+                                                  scrollArea->widget()->layout()->activate();
+                                                  scrollArea->widget()->adjustSize();
+                                                  resizeLayoutPending = false;
+                                              });
                        });
 }
 
