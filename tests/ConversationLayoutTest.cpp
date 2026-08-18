@@ -34,6 +34,9 @@ struct MessageFixture
     std::string id;
     frontend::ThreadItemKind kind = frontend::ThreadItemKind::AgentMessage;
     std::string text;
+    std::string status = "completed";
+    bool contentTruncated = false;
+    bool textTruncated = false;
 };
 
 struct TurnFixture
@@ -86,26 +89,27 @@ frontend::Json messageJson(const std::string& threadId,
     frontend::Json data = frontend::Json::object();
     if (fixture.kind == frontend::ThreadItemKind::UserMessage) {
         data = frontend::Json{{"clientId", nullptr},
-                              {"contentTruncated", false},
+                              {"contentTruncated", fixture.contentTruncated},
                               {"text", fixture.text},
-                              {"textTruncated", false},
-                              {"originalContentBytes", fixture.text.size()},
+                              {"textTruncated", fixture.textTruncated},
+                              {"originalContentBytes",
+                               fixture.text.size() + (fixture.contentTruncated ? 1U : 0U)},
                               {"retainedContentBytes", fixture.text.size()},
-                              {"originalContentItems", 1},
+                              {"originalContentItems", fixture.contentTruncated ? 2 : 1},
                               {"retainedContentItems", 1}};
     }
     return frontend::Json{{"id", fixture.id},
                           {"type", frontend::toString(fixture.kind)},
                           {"threadId", threadId},
                           {"turnId", turnId},
-                          {"status", "completed"},
+                          {"status", fixture.status},
                           {"summary", fixture.text},
                           {"agentText", fixture.kind == frontend::ThreadItemKind::AgentMessage ? fixture.text : ""},
                           {"reasoningText", ""},
                           {"reasoningSummary", ""},
                           {"commandOutput", ""},
                           {"droppedContentBytes", 0},
-                          {"contentTruncated", false},
+                          {"contentTruncated", fixture.contentTruncated},
                           {"data", std::move(data)},
                           {"extensions", frontend::Json::object()}};
 }
@@ -236,6 +240,22 @@ QWidget* segment(codexui::ConversationWidget& conversation, const QString& id)
             return candidate;
     }
     return nullptr;
+}
+
+QLabel* messageLabel(QWidget* messageSegment, const QString& objectName)
+{
+    return messageSegment ? messageSegment->findChild<QLabel*>(objectName) : nullptr;
+}
+
+bool segmentHasLabel(QWidget* messageSegment, const QString& text)
+{
+    if (!messageSegment)
+        return false;
+    for (QLabel* label : messageSegment->findChildren<QLabel*>()) {
+        if (label->text() == text)
+            return true;
+    }
+    return false;
 }
 
 bool hasLabel(codexui::ConversationWidget& conversation, const QString& text)
@@ -478,6 +498,112 @@ bool testPointerPreservingAppend()
     return passed;
 }
 
+bool testInPlaceMessageReplacement()
+{
+    ThreadFixture agentFixture{"in-place-agent",
+                               {{"turn-in-place-agent",
+                                 {{"item-in-place-agent",
+                                   frontend::ThreadItemKind::AgentMessage,
+                                   "streamed prefix",
+                                   "in_progress"}}}}};
+    codexui::ConversationWidget agentConversation;
+    agentConversation.resize(900, 700);
+    agentConversation.show();
+    agentConversation.render(makeState({agentFixture}), QStringLiteral("in-place-agent"));
+    settleTimeline();
+
+    QPointer<QWidget> agentSegment =
+        segment(agentConversation, QStringLiteral("message:item-in-place-agent"));
+    QPointer<QLabel> agentContent =
+        messageLabel(agentSegment, QStringLiteral("conversationMessageContent"));
+    QPointer<QLabel> agentStatus =
+        messageLabel(agentSegment, QStringLiteral("conversationMessageStatus"));
+    QPointer<QLabel> agentTruncation =
+        messageLabel(agentSegment, QStringLiteral("conversationMessageTruncation"));
+    QWidget* const agentSegmentAddress = agentSegment.data();
+    QLabel* const agentContentAddress = agentContent.data();
+    QLabel* const agentStatusAddress = agentStatus.data();
+    QLabel* const agentTruncationAddress = agentTruncation.data();
+
+    agentFixture.turns.front().messages.front().text =
+        "streamed prefix and canonical continuation";
+    agentFixture.turns.front().messages.front().status = "completed";
+    agentFixture.turns.front().messages.front().contentTruncated = true;
+    agentConversation.render(makeState({agentFixture}), QStringLiteral("in-place-agent"));
+    settleTimeline();
+
+    bool passed = true;
+    passed &= expect(agentSegment && agentSegment.data() == agentSegmentAddress
+                         && agentSegment.data()
+                                == segment(agentConversation,
+                                           QStringLiteral("message:item-in-place-agent"))
+                         && agentContent && agentContent.data() == agentContentAddress
+                         && agentStatus && agentStatus.data() == agentStatusAddress
+                         && agentTruncation && agentTruncation.data() == agentTruncationAddress,
+                     "canonical agent-message replacement must preserve the segment and message labels");
+    passed &= expect(agentContent
+                         && agentContent->text()
+                                == QStringLiteral("streamed prefix and canonical continuation")
+                         && agentStatus && agentStatus->text() == QStringLiteral("Completed")
+                         && agentTruncation && agentTruncation->isVisible()
+                         && agentTruncation->text().contains(QStringLiteral("truncated"),
+                                                             Qt::CaseInsensitive)
+                         && segmentHasLabel(agentSegment, QStringLiteral("CODEX")),
+                     "the preserved agent-message widget must reflect canonical content, status and truncation");
+
+    agentFixture.turns.front().messages.front().text = "short canonical replacement";
+    agentFixture.turns.front().messages.front().status = "failed";
+    agentFixture.turns.front().messages.front().contentTruncated = false;
+    agentConversation.render(makeState({agentFixture}), QStringLiteral("in-place-agent"));
+    settleTimeline();
+    passed &= expect(agentSegment && agentSegment.data() == agentSegmentAddress
+                         && agentContent && agentContent.data() == agentContentAddress
+                         && agentContent->text() == QStringLiteral("short canonical replacement")
+                         && agentStatus && agentStatus->text() == QStringLiteral("Failed")
+                         && agentTruncation && !agentTruncation->isVisible(),
+                     "a shorter canonical replacement must update the same agent-message widget and hide its marker");
+
+    ThreadFixture userFixture{"in-place-user",
+                              {{"turn-in-place-user",
+                                {{"item-in-place-user",
+                                  frontend::ThreadItemKind::UserMessage,
+                                  "draft prompt"}}}}};
+    codexui::ConversationWidget userConversation;
+    userConversation.resize(900, 700);
+    userConversation.show();
+    userConversation.render(makeState({userFixture}), QStringLiteral("in-place-user"));
+    settleTimeline();
+
+    QPointer<QWidget> userSegment =
+        segment(userConversation, QStringLiteral("message:item-in-place-user"));
+    QPointer<QLabel> userContent =
+        messageLabel(userSegment, QStringLiteral("conversationMessageContent"));
+    QPointer<QLabel> userTruncation =
+        messageLabel(userSegment, QStringLiteral("conversationMessageTruncation"));
+    QWidget* const userSegmentAddress = userSegment.data();
+    QLabel* const userContentAddress = userContent.data();
+    QLabel* const userTruncationAddress = userTruncation.data();
+
+    userFixture.turns.front().messages.front().text = "final prompt\n\nwith multipart text";
+    userFixture.turns.front().messages.front().contentTruncated = true;
+    userFixture.turns.front().messages.front().textTruncated = true;
+    userConversation.render(makeState({userFixture}), QStringLiteral("in-place-user"));
+    settleTimeline();
+    passed &= expect(userSegment && userSegment.data() == userSegmentAddress
+                         && userContent && userContent.data() == userContentAddress
+                         && userTruncation && userTruncation.data() == userTruncationAddress,
+                     "canonical user-message replacement must preserve the segment and message labels");
+    passed &= expect(userContent
+                         && userContent->text()
+                                == QStringLiteral("final prompt\n\nwith multipart text"),
+                     "the preserved user-message label must show exact canonical multipart text");
+    passed &= expect(userTruncation && userTruncation->isVisible(),
+                     "the preserved user-message truncation marker must reflect canonical semantics");
+    passed &= expect(segmentHasLabel(userSegment, QStringLiteral("YOU")),
+                     "the preserved user-message segment must retain its intended visual role");
+    return passed;
+}
+
 bool testSegmentReplacementShrink()
 {
     ThreadFixture fixture = singleTurn("replacement", 1);
@@ -599,6 +725,7 @@ int main(int argc, char** argv)
     passed &= testSameThreadPrefixExpansion();
     passed &= testHotTurnWindow();
     passed &= testPointerPreservingAppend();
+    passed &= testInPlaceMessageReplacement();
     passed &= testSegmentReplacementShrink();
     passed &= testThreadSwitchWindow();
 

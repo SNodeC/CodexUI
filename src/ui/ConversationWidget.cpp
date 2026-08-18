@@ -19,6 +19,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSizePolicy>
+#include <QStyle>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QEasingCurve>
@@ -130,6 +131,15 @@ public:
         QSizePolicy policy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         policy.setHeightForWidth(true);
         setSizePolicy(policy);
+    }
+
+    void setContent(const QString& text)
+    {
+        if (text == QLabel::text())
+            return;
+        heightCache.clear();
+        QLabel::setText(text);
+        updateGeometry();
     }
 
     int heightForWidth(int width) const override
@@ -289,6 +299,92 @@ QString userMessageTruncationText(const sdk::UserMessageSemanticView& message)
     if (message.textTruncated) details.append(QStringLiteral("Retained text is truncated"));
     if (message.contentTruncated) details.append(QStringLiteral("Some original user content is not shown"));
     return details.join(QStringLiteral(" · "));
+}
+
+struct MessagePresentation
+{
+    QString status;
+    QString statusColor;
+    QString content;
+    QString truncation;
+    bool missing = false;
+};
+
+MessagePresentation messagePresentation(const sdk::ItemState& item, bool user)
+{
+    MessagePresentation result;
+    const QString itemStatusText = itemStatus(item);
+    result.status = itemStatusText;
+    result.statusColor = statusColor(itemStatusText);
+
+    if (!user)
+    {
+        const auto semantic = sdk::itemSemanticView(item);
+        const auto* agent = semantic ? std::get_if<sdk::AgentMessageSemanticView>(&semantic->details) : nullptr;
+        if (agent && agent->phase)
+            result.status += QStringLiteral(" · ") + humanize(fromUtf8(*agent->phase));
+    }
+
+    const auto userMessage = user ? sdk::userMessageSemanticView(item) : std::nullopt;
+    if (user)
+    {
+        if (!userMessage)
+        {
+            result.content = QStringLiteral("User message is unavailable");
+            result.missing = true;
+        }
+        else if (userMessage->text.empty())
+        {
+            result.content = QStringLiteral("User message contains no retained text");
+            result.missing = true;
+        }
+        else
+        {
+            result.content = fromUtf8(userMessage->text);
+        }
+    }
+    else
+    {
+        result.content = item.agentText && !item.agentText->empty()
+                             ? fromUtf8(*item.agentText)
+                             : (item.summary ? fromUtf8(*item.summary) : QString{});
+        if (result.content.isEmpty())
+        {
+            result.content = QStringLiteral("No retained message content");
+            result.missing = true;
+        }
+    }
+
+    result.truncation = userMessage ? userMessageTruncationText(*userMessage) : QString{};
+    if (result.truncation.isEmpty())
+        result.truncation = truncationText(item);
+    return result;
+}
+
+void applyMessagePresentation(QLabel* status,
+                              WrappingLabel* content,
+                              QLabel* truncation,
+                              const MessagePresentation& presentation)
+{
+    if (status->text() != presentation.status)
+        status->setText(presentation.status);
+    const QString statusStyle =
+        QStringLiteral("color:%1;font-size:9px;").arg(presentation.statusColor);
+    if (status->styleSheet() != statusStyle)
+        status->setStyleSheet(statusStyle);
+
+    const QString kind = presentation.missing ? QStringLiteral("meta") : QStringLiteral("body");
+    if (content->property("kind").toString() != kind)
+    {
+        content->setProperty("kind", kind);
+        content->style()->unpolish(content);
+        content->style()->polish(content);
+    }
+    content->setContent(presentation.content);
+
+    if (truncation->text() != presentation.truncation)
+        truncation->setText(presentation.truncation);
+    truncation->setVisible(!presentation.truncation.isEmpty());
 }
 
 QString pendingRequestDetail(const sdk::State& state, const sdk::ItemState& item)
@@ -507,53 +603,15 @@ QFrame* activityCard(const sdk::State& state, const std::vector<const sdk::ItemS
 
 void addMessage(QVBoxLayout* timeline, const sdk::ItemState& item, bool user)
 {
+    const MessagePresentation presentation = messagePresentation(item, user);
     auto* header = new QHBoxLayout;
     header->addWidget(textLabel(user ? QStringLiteral("YOU") : QStringLiteral("CODEX"), "section"));
     header->addStretch();
-    QString statusText = itemStatus(item);
-    if (!user)
-    {
-        const auto semantic = sdk::itemSemanticView(item);
-        const auto* agent = semantic ? std::get_if<sdk::AgentMessageSemanticView>(&semantic->details) : nullptr;
-        if (agent && agent->phase) statusText += QStringLiteral(" · ") + humanize(fromUtf8(*agent->phase));
-    }
-    auto* status = textLabel(statusText, "small");
-    status->setStyleSheet(QStringLiteral("color:%1;font-size:9px;").arg(statusColor(itemStatus(item))));
+    auto* status = textLabel({}, "small");
+    status->setObjectName(QStringLiteral("conversationMessageStatus"));
     header->addWidget(status);
     timeline->addLayout(header);
     timeline->addSpacing(3);
-
-    const auto userMessage = user ? sdk::userMessageSemanticView(item) : std::nullopt;
-    QString content;
-    bool missing = false;
-    if (user)
-    {
-        if (!userMessage)
-        {
-            content = QStringLiteral("User message is unavailable");
-            missing = true;
-        }
-        else if (userMessage->text.empty())
-        {
-            content = QStringLiteral("User message contains no retained text");
-            missing = true;
-        }
-        else
-        {
-            content = fromUtf8(userMessage->text);
-        }
-    }
-    else
-    {
-        content = item.agentText && !item.agentText->empty()
-                      ? fromUtf8(*item.agentText)
-                      : (item.summary ? fromUtf8(*item.summary) : QString{});
-        if (content.isEmpty())
-        {
-            content = QStringLiteral("No retained message content");
-            missing = true;
-        }
-    }
 
     QWidget* container = nullptr;
     QVBoxLayout* layout = nullptr;
@@ -574,17 +632,15 @@ void addMessage(QVBoxLayout* timeline, const sdk::ItemState& item, bool user)
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(5);
     }
-    auto* copy = wrappingLabel(content, missing ? "meta" : "body");
+    auto* copy = static_cast<WrappingLabel*>(wrappingLabel({}, "body"));
+    copy->setObjectName(QStringLiteral("conversationMessageContent"));
     copy->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(copy);
-    QString truncation = userMessage ? userMessageTruncationText(*userMessage) : QString{};
-    if (truncation.isEmpty()) truncation = truncationText(item);
-    if (!truncation.isEmpty())
-    {
-        auto* marker = textLabel(truncation, "small");
-        marker->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
-        layout->addWidget(marker);
-    }
+    auto* marker = textLabel({}, "small");
+    marker->setObjectName(QStringLiteral("conversationMessageTruncation"));
+    marker->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
+    layout->addWidget(marker);
+    applyMessagePresentation(status, copy, marker, presentation);
     timeline->addWidget(container);
     timeline->addSpacing(16);
 }
@@ -897,7 +953,9 @@ QWidget* timelineSegmentWidget(const sdk::State& state, const TimelineSegment& s
                  || segment.items.front()->kind.is(frontend::ThreadItemKind::AgentMessage)))
     {
         const auto* item = segment.items.front();
-        addMessage(layout, *item, item->kind.is(frontend::ThreadItemKind::UserMessage));
+        const bool user = item->kind.is(frontend::ThreadItemKind::UserMessage);
+        host->setProperty("messageUser", user);
+        addMessage(layout, *item, user);
     }
     else
     {
@@ -905,6 +963,34 @@ QWidget* timelineSegmentWidget(const sdk::State& state, const TimelineSegment& s
         layout->addSpacing(16);
     }
     return host;
+}
+
+bool updateTimelineMessageSegment(QWidget* host, const TimelineSegment& segment)
+{
+    if (!host || segment.missing || segment.items.size() != 1)
+        return false;
+    const auto* item = segment.items.front();
+    if (!item)
+        return false;
+    const bool user = item->kind.is(frontend::ThreadItemKind::UserMessage);
+    if (!user && !item->kind.is(frontend::ThreadItemKind::AgentMessage))
+        return false;
+    if (!host->property("messageUser").isValid()
+        || host->property("messageUser").toBool() != user)
+        return false;
+
+    auto* status = host->findChild<QLabel*>(QStringLiteral("conversationMessageStatus"));
+    auto* contentLabel = host->findChild<QLabel*>(QStringLiteral("conversationMessageContent"));
+    auto* truncation = host->findChild<QLabel*>(QStringLiteral("conversationMessageTruncation"));
+    auto* content = dynamic_cast<WrappingLabel*>(contentLabel);
+    if (!status || !content || !truncation)
+        return false;
+
+    applyMessagePresentation(status,
+                             content,
+                             truncation,
+                             messagePresentation(*item, user));
+    return true;
 }
 
 QWidget* timelineTurnWidget(const sdk::TurnState& turn,
@@ -1558,6 +1644,16 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
                     QWidget* oldWidget = renderedSegmentWidgets.value(storage);
                     if (oldWidget && renderedSegmentKeys.value(storage) == segmentKey)
                         continue;
+
+                    if (oldWidget && updateTimelineMessageSegment(oldWidget, *segment))
+                    {
+                        renderedSegmentKeys.insert(storage, segmentKey);
+                        // Canonical replacement may shorten wrapped content or hide
+                        // the truncation marker; allow the existing timeline to settle
+                        // to its new natural height without replacing its widget tree.
+                        timelineShrank = true;
+                        continue;
+                    }
 
                     QWidget* newWidget = timelineSegmentWidget(state, *segment);
                     newWidget->setProperty("turnId", turnId);
