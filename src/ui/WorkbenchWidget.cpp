@@ -266,6 +266,8 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
                                            || (!newThreadIdAwaitingState.isEmpty()
                                                && scope.affectedInspectorThreadIds.contains(
                                                    newThreadIdAwaitingState));
+    if (!selectedAffected && !selectedInspectorAffected && !scope.sidebarAffected)
+        return;
     if (selectedAffected)
     {
         selectedPresentationRefreshPending = true;
@@ -320,6 +322,10 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
         selectedContentRefreshPending.clear();
         inspectorRefreshPending = false;
         sidebarRefreshPending = false;
+        if (exactContentOnly && !refreshInspector && !refreshSidebar
+            && conversation->updateExactMessageContent(
+                frontendSession.state(), selectedThreadId, exactContentChanges))
+            return;
         refreshState(refreshSelectedPresentation,
                      refreshInspector,
                      refreshSidebar,

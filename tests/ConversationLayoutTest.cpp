@@ -615,6 +615,10 @@ bool testExactContentInvalidation()
                              {"item-exact-second",
                               frontend::ThreadItemKind::AgentMessage,
                               "second stable",
+                              "completed"},
+                             {"item-exact-activity",
+                              frontend::ThreadItemKind::CommandExecution,
+                              "activity output",
                               "completed"}}}}};
     codexui::ConversationWidget conversation;
     conversation.resize(900, 700);
@@ -635,21 +639,27 @@ bool testExactContentInvalidation()
     const QHash<QString, QStringList> exactChanges{
         {QStringLiteral("turn-exact-content"),
          QStringList{QStringLiteral("item-exact-first")}}};
-    conversation.render(makeState({fixture}),
-                        QStringLiteral("exact-content"),
-                        false,
-                        &exactChanges);
+    const auto updatedState = makeState({fixture});
+    const bool exactApplied = conversation.updateExactMessageContent(
+        updatedState, QStringLiteral("exact-content"), exactChanges);
     settleTimeline();
 
     bool passed = true;
-    passed &= expect(first && first.data() == firstAddress && firstContent
+    passed &= expect(exactApplied && first && first.data() == firstAddress && firstContent
                          && firstContent->text() == QStringLiteral("first canonical continuation"),
-                     "an exact content update must mutate its canonical message in place");
+                     "an exact content update must mutate its canonical message directly in place");
     passed &= expect(second && second.data() == secondAddress && secondContent
                          && secondContent->text() == QStringLiteral("second stable"),
                      "an exact content update must preserve unaffected segment widgets");
 
-    fixture.turns.front().messages.back().text = "second structural fallback";
+    const QHash<QString, QStringList> activityChanges{
+        {QStringLiteral("turn-exact-content"),
+         QStringList{QStringLiteral("item-exact-activity")}}};
+    passed &= expect(!conversation.updateExactMessageContent(
+                         updatedState, QStringLiteral("exact-content"), activityChanges),
+                     "a non-message content update must retain the full activity-card reconciliation fallback");
+
+    fixture.turns.front().messages.at(1).text = "second structural fallback";
     conversation.render(makeState({fixture}), QStringLiteral("exact-content"));
     settleTimeline();
     passed &= expect(second && second.data() == secondAddress && secondContent

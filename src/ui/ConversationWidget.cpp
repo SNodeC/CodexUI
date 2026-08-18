@@ -965,7 +965,9 @@ QWidget* timelineSegmentWidget(const sdk::State& state, const TimelineSegment& s
     return host;
 }
 
-bool updateTimelineMessageSegment(QWidget* host, const TimelineSegment& segment)
+bool updateTimelineMessageSegment(QWidget* host,
+                                  const TimelineSegment& segment,
+                                  bool* mayShrink = nullptr)
 {
     if (!host || segment.missing || segment.items.size() != 1)
         return false;
@@ -986,10 +988,24 @@ bool updateTimelineMessageSegment(QWidget* host, const TimelineSegment& segment)
     if (!status || !content || !truncation)
         return false;
 
+    const QString previousContent = content->text();
+    const QString previousTruncation = truncation->text();
+    const bool previousTruncationVisible = truncation->isVisible();
+    const QString previousKind = content->property("kind").toString();
+    const MessagePresentation presentation = messagePresentation(*item, user);
+    if (mayShrink)
+    {
+        const QString nextKind = presentation.missing ? QStringLiteral("meta")
+                                                      : QStringLiteral("body");
+        *mayShrink = !presentation.content.startsWith(previousContent)
+                     || previousKind != nextKind
+                     || (previousTruncationVisible
+                         && !presentation.truncation.startsWith(previousTruncation));
+    }
     applyMessagePresentation(status,
                              content,
                              truncation,
-                             messagePresentation(*item, user));
+                             presentation);
     return true;
 }
 
@@ -1668,13 +1684,11 @@ void ConversationWidget::render(const sdk::State& state,
                     if (oldWidget && renderedSegmentKeys.value(storage) == segmentKey)
                         continue;
 
-                    if (oldWidget && updateTimelineMessageSegment(oldWidget, *segment))
+                    bool messageMayShrink = false;
+                    if (oldWidget && updateTimelineMessageSegment(oldWidget, *segment, &messageMayShrink))
                     {
                         renderedSegmentKeys.insert(storage, segmentKey);
-                        // Canonical replacement may shorten wrapped content or hide
-                        // the truncation marker; allow the existing timeline to settle
-                        // to its new natural height without replacing its widget tree.
-                        timelineShrank = true;
+                        timelineShrank = timelineShrank || messageMayShrink;
                         continue;
                     }
 
@@ -1708,6 +1722,89 @@ void ConversationWidget::render(const sdk::State& state,
     }
 
     scheduleTimelineLayout(previousScroll, followLatest, threadChanged, timelineShrank);
+}
+
+bool ConversationWidget::updateExactMessageContent(
+    const sdk::State& state,
+    const QString& threadId,
+    const QHash<QString, QStringList>& exactContentChanges)
+{
+    if (threadId.isEmpty() || renderedThreadId != threadId || renderedNewThreadDraft
+        || exactContentChanges.isEmpty())
+        return false;
+    const auto* thread = state.thread(threadId.toStdString());
+    if (!thread)
+        return false;
+
+    struct PendingMessageUpdate
+    {
+        QString storage;
+        QWidget* widget = nullptr;
+        TimelineSegment segment;
+        QByteArray presentationKey;
+    };
+    std::vector<PendingMessageUpdate> updates;
+    for (auto turnIterator = exactContentChanges.cbegin();
+         turnIterator != exactContentChanges.cend();
+         ++turnIterator)
+    {
+        const ai::openai::codex::typed::TurnId turnIdentity{turnIterator.key().toStdString()};
+        const auto* turn = state.turn(turnIdentity);
+        if (!turn || turn->threadId != thread->id)
+            return false;
+        const bool turnVisible = renderedTurnIds.contains(turnIterator.key());
+        for (const QString& itemId : turnIterator.value())
+        {
+            const ai::openai::codex::typed::ItemId itemIdentity{itemId.toStdString()};
+            const auto* item = state.item(thread->id, turn->id, itemIdentity);
+            if (!item)
+                return false;
+            const bool user = item->kind.is(frontend::ThreadItemKind::UserMessage);
+            const bool agent = item->kind.is(frontend::ThreadItemKind::AgentMessage);
+            if (!user && !agent)
+            {
+                if (turnVisible)
+                    return false;
+                continue;
+            }
+            if (!turnVisible)
+                continue;
+
+            const QString segmentId = QStringLiteral("message:") + itemId;
+            if (!renderedSegmentIds.value(turnIterator.key()).contains(segmentId))
+                continue;
+            const QString storage = segmentStorageKey(turnIterator.key(), segmentId);
+            QWidget* widget = renderedSegmentWidgets.value(storage);
+            if (!widget || !widget->property("messageUser").isValid()
+                || widget->property("messageUser").toBool() != user)
+                return false;
+            TimelineSegment segment{segmentId, {item}, false};
+            updates.push_back(
+                {storage, widget, segment, segmentPresentationKey(state, segment)});
+        }
+    }
+
+    if (updates.empty())
+        return true;
+    auto* scrollBar = scrollArea->verticalScrollBar();
+    const int previousScroll = scrollBar->value();
+    const bool followLatest = scrollBar->maximum() - previousScroll <= 72
+                              || followingLatest;
+    if (!layoutSettleTimer->isActive())
+        captureTimelineAnchor();
+    scrollAnimation->stop();
+
+    bool timelineShrank = false;
+    for (PendingMessageUpdate& update : updates)
+    {
+        bool messageMayShrink = false;
+        if (!updateTimelineMessageSegment(update.widget, update.segment, &messageMayShrink))
+            return false;
+        renderedSegmentKeys.insert(update.storage, update.presentationKey);
+        timelineShrank = timelineShrank || messageMayShrink;
+    }
+    scheduleTimelineLayout(previousScroll, followLatest, false, timelineShrank);
+    return true;
 }
 
 void ConversationWidget::scheduleTimelineLayout(int previousScroll,
