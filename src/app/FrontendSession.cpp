@@ -45,23 +45,6 @@ std::optional<QString> unixPeerCredentialError(qintptr socketDescriptor, uid_t e
     return std::nullopt;
 }
 
-} // namespace detail
-
-namespace {
-
-constexpr qsizetype maximumFrameBytes = 16 * 1024 * 1024;
-constexpr qsizetype maximumPromptBytes = 128 * 1024;
-constexpr qsizetype maximumReceiveBatchBytes = 1024 * 1024;
-constexpr int maximumReceiveBatchFrames = 32;
-
-struct StateUpdateScope
-{
-    QStringList affectedThreadIds;
-    bool allThreadsAffected = false;
-    bool inspectorAffected = false;
-    bool hasPresentationChange = false;
-};
-
 StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
 {
     StateUpdateScope scope;
@@ -116,9 +99,14 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                 else if constexpr (std::is_same_v<Change, sdk::ItemUpsertedChange>
                                    || std::is_same_v<Change, sdk::ItemContentReplacedChange>)
                 {
-                    const auto* item = update.state.item(value.itemId);
-                    if (item && item->threadId)
-                        addThread(item->threadId->value);
+                    if (value.threadId)
+                        addThread(value.threadId->value);
+                    else if (value.turnId) {
+                        if (const auto* turn = update.state.turn(*value.turnId))
+                            addThread(turn->threadId.value);
+                        else
+                            scope.allThreadsAffected = true;
+                    }
                     else
                         scope.allThreadsAffected = true;
                 }
@@ -142,6 +130,15 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
     }
     return scope;
 }
+
+} // namespace detail
+
+namespace {
+
+constexpr qsizetype maximumFrameBytes = 16 * 1024 * 1024;
+constexpr qsizetype maximumPromptBytes = 128 * 1024;
+constexpr qsizetype maximumReceiveBatchBytes = 1024 * 1024;
+constexpr int maximumReceiveBatchFrames = 32;
 
 QString operationError(const std::optional<sdk::Error>& error, const QString& fallback)
 {
@@ -193,7 +190,7 @@ FrontendSession::FrontendSession(QObject* parent)
                 requestedThreadReads.erase(removed->threadId.value);
         }
         reconcileRequestedThreadReads();
-        const StateUpdateScope scope = stateUpdateScope(update);
+        const detail::StateUpdateScope scope = detail::stateUpdateScope(update);
         if (scope.hasPresentationChange)
             emit stateChanged(scope.affectedThreadIds, scope.allThreadsAffected, scope.inspectorAffected);
     };

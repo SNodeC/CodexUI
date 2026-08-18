@@ -27,6 +27,16 @@ namespace codexui::detail {
 
 [[nodiscard]] std::optional<QString> unixPeerCredentialError(qintptr socketDescriptor, uid_t expectedUserId) noexcept;
 
+struct StateUpdateScope {
+    QStringList affectedThreadIds;
+    bool allThreadsAffected = false;
+    bool inspectorAffected = false;
+    bool hasPresentationChange = false;
+};
+
+[[nodiscard]] StateUpdateScope
+stateUpdateScope(const ai::openai::codex::frontend::client::StateUpdate& update);
+
 } // namespace codexui::detail
 
 namespace codexui {

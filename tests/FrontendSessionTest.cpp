@@ -193,6 +193,32 @@ bool testPeerCredentials()
     return passed;
 }
 
+bool testScopedItemPresentationChanges()
+{
+    sdk::StateUpdate scopedUpdate;
+    scopedUpdate.changes.push_back(sdk::ItemUpsertedChange{
+        ai::openai::codex::typed::ItemId{"duplicate-item"},
+        ai::openai::codex::typed::ThreadId{"target-thread"},
+        ai::openai::codex::typed::TurnId{"target-turn"}});
+    const auto scoped = codexui::detail::stateUpdateScope(scopedUpdate);
+
+    sdk::StateUpdate unscopedUpdate;
+    unscopedUpdate.changes.push_back(
+        sdk::ItemContentReplacedChange{ai::openai::codex::typed::ItemId{"duplicate-item"},
+                                       sdk::ItemContentChannel::AgentText,
+                                       std::nullopt,
+                                       std::nullopt});
+    const auto unscoped = codexui::detail::stateUpdateScope(unscopedUpdate);
+
+    bool passed = expect(scoped.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
+                             && !scoped.allThreadsAffected && scoped.hasPresentationChange,
+                         "a scoped item change must refresh its canonical thread without bare-ID lookup");
+    passed &= expect(unscoped.affectedThreadIds.empty() && unscoped.allThreadsAffected
+                         && unscoped.hasPresentationChange,
+                     "an unscoped item change must conservatively refresh all threads");
+    return passed;
+}
+
 bool testLifecycleAndDiagnostics()
 {
     int lifecycleChanges = 0;
@@ -480,5 +506,8 @@ bool testOutboundQueue()
 int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
-    return testPeerCredentials() && testLifecycleAndDiagnostics() && testOutboundQueue() ? 0 : 1;
+    return testPeerCredentials() && testScopedItemPresentationChanges() && testLifecycleAndDiagnostics()
+               && testOutboundQueue()
+           ? 0
+           : 1;
 }
