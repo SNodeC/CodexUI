@@ -7,7 +7,6 @@
 
 #include <QWidget>
 #include <QString>
-#include <QStringList>
 
 #include <optional>
 
@@ -18,6 +17,10 @@ class QPushButton;
 class QSplitter;
 
 namespace codexui {
+
+namespace detail {
+struct StateUpdateScope;
+}
 
 class ConversationWidget;
 class FrontendSession;
@@ -33,10 +36,10 @@ private:
     enum class PendingAction { None, SendExistingThread, SendNewThread, InterruptTurn };
 
     void refreshLifecycle();
-    void scheduleStateRefresh(const QStringList& affectedThreadIds,
-                              bool allThreadsAffected,
-                              bool inspectorAffected);
-    void refreshState(bool refreshSelectedPresentation = true, bool refreshInspector = true);
+    void scheduleStateRefresh(const detail::StateUpdateScope& scope);
+    void refreshState(bool refreshSelectedPresentation = true,
+                      bool refreshInspector = true,
+                      bool refreshSidebar = true);
     void refreshControls();
     void refreshControllerStatus();
     void selectThread(const QString& threadId);
@@ -97,6 +100,7 @@ private:
     bool stateRefreshPending = false;
     bool selectedPresentationRefreshPending = false;
     bool inspectorRefreshPending = false;
+    bool sidebarRefreshPending = false;
 };
 
 } // namespace codexui

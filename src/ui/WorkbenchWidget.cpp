@@ -254,16 +254,20 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     refreshState();
 }
 
-void WorkbenchWidget::scheduleStateRefresh(const QStringList& affectedThreadIds,
-                                           bool allThreadsAffected,
-                                           bool inspectorAffected)
+void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope)
 {
-    const bool selectedAffected = allThreadsAffected
-                                  || affectedThreadIds.contains(selectedThreadId)
+    const bool selectedAffected = scope.allThreadsAffected
+                                  || scope.affectedThreadIds.contains(selectedThreadId)
                                   || (!newThreadIdAwaitingState.isEmpty()
-                                      && affectedThreadIds.contains(newThreadIdAwaitingState));
+                                      && scope.affectedThreadIds.contains(newThreadIdAwaitingState));
+    const bool selectedInspectorAffected = scope.allInspectorsAffected
+                                           || scope.affectedInspectorThreadIds.contains(selectedThreadId)
+                                           || (!newThreadIdAwaitingState.isEmpty()
+                                               && scope.affectedInspectorThreadIds.contains(
+                                                   newThreadIdAwaitingState));
     selectedPresentationRefreshPending = selectedPresentationRefreshPending || selectedAffected;
-    inspectorRefreshPending = inspectorRefreshPending || inspectorAffected || selectedAffected;
+    inspectorRefreshPending = inspectorRefreshPending || selectedInspectorAffected;
+    sidebarRefreshPending = sidebarRefreshPending || scope.sidebarAffected;
     if (stateRefreshPending)
         return;
     stateRefreshPending = true;
@@ -275,9 +279,11 @@ void WorkbenchWidget::scheduleStateRefresh(const QStringList& affectedThreadIds,
         stateRefreshPending = false;
         const bool refreshSelectedPresentation = selectedPresentationRefreshPending;
         const bool refreshInspector = inspectorRefreshPending;
+        const bool refreshSidebar = sidebarRefreshPending;
         selectedPresentationRefreshPending = false;
         inspectorRefreshPending = false;
-        refreshState(refreshSelectedPresentation, refreshInspector);
+        sidebarRefreshPending = false;
+        refreshState(refreshSelectedPresentation, refreshInspector, refreshSidebar);
     });
 }
 
@@ -340,11 +346,14 @@ void WorkbenchWidget::refreshLifecycle()
     refreshControls();
 }
 
-void WorkbenchWidget::refreshState(bool refreshSelectedPresentation, bool refreshInspector)
+void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
+                                   bool refreshInspector,
+                                   bool refreshSidebar)
 {
     stateRefreshPending = false;
     selectedPresentationRefreshPending = false;
     inspectorRefreshPending = false;
+    sidebarRefreshPending = false;
     const auto& state = frontendSession.state();
     const auto threads = state.threads();
     const bool ready = frontendSession.lifecycle() == FrontendSession::Lifecycle::Ready;
@@ -366,9 +375,11 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation, bool refres
     const bool selectionChanged = previousThreadId != selectedThreadId
                                   || previousNewThreadDraft != newThreadDraft;
     refreshSelectedPresentation = refreshSelectedPresentation || selectionChanged;
-    refreshInspector = refreshInspector || refreshSelectedPresentation;
+    refreshInspector = refreshInspector || selectionChanged;
+    refreshSidebar = refreshSidebar || selectionChanged;
 
-    sidebar->setThreads(state, selectedThreadId);
+    if (refreshSidebar)
+        sidebar->setThreads(state, selectedThreadId);
 
     // ConversationWidget resolves the stable selection against this exact
     // immutable State and never retains backend object addresses.

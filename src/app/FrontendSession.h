@@ -29,8 +29,10 @@ namespace codexui::detail {
 
 struct StateUpdateScope {
     QStringList affectedThreadIds;
+    QStringList affectedInspectorThreadIds;
     bool allThreadsAffected = false;
-    bool inspectorAffected = false;
+    bool allInspectorsAffected = false;
+    bool sidebarAffected = false;
     bool hasPresentationChange = false;
 };
 
@@ -93,9 +95,7 @@ public:
 signals:
     void lifecycleChanged();
     void statusChanged();
-    void stateChanged(const QStringList& affectedThreadIds,
-                      bool allThreadsAffected,
-                      bool inspectorAffected);
+    void stateChanged(const codexui::detail::StateUpdateScope& scope);
 
 private:
     friend struct FrontendSessionTestAccess;

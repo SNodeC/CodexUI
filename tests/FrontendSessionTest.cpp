@@ -202,6 +202,16 @@ bool testScopedItemPresentationChanges()
         ai::openai::codex::typed::TurnId{"target-turn"}});
     const auto scoped = codexui::detail::stateUpdateScope(scopedUpdate);
 
+    sdk::StateUpdate streamedUpdate;
+    streamedUpdate.changes.push_back(
+        sdk::ItemContentReplacedChange{ai::openai::codex::typed::ItemId{"streamed-item"},
+                                       sdk::ItemContentChannel::AgentText,
+                                       ai::openai::codex::typed::ThreadId{"target-thread"},
+                                       ai::openai::codex::typed::TurnId{"target-turn"}});
+    streamedUpdate.changes.push_back(
+        sdk::CursorAdvancedChange{ai::openai::codex::frontend::SequenceNumber{42}});
+    const auto streamed = codexui::detail::stateUpdateScope(streamedUpdate);
+
     sdk::StateUpdate unscopedUpdate;
     unscopedUpdate.changes.push_back(
         sdk::ItemContentReplacedChange{ai::openai::codex::typed::ItemId{"duplicate-item"},
@@ -210,12 +220,37 @@ bool testScopedItemPresentationChanges()
                                        std::nullopt});
     const auto unscoped = codexui::detail::stateUpdateScope(unscopedUpdate);
 
+    sdk::StateUpdate replacementUpdate;
+    replacementUpdate.changes.push_back(sdk::StateReplacedChange{});
+    const auto replacement = codexui::detail::stateUpdateScope(replacementUpdate);
+
+    sdk::StateUpdate cursorUpdate;
+    cursorUpdate.changes.push_back(
+        sdk::CursorAdvancedChange{ai::openai::codex::frontend::SequenceNumber{43}});
+    const auto cursor = codexui::detail::stateUpdateScope(cursorUpdate);
+
     bool passed = expect(scoped.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
-                             && !scoped.allThreadsAffected && scoped.hasPresentationChange,
-                         "a scoped item change must refresh its canonical thread without bare-ID lookup");
+                             && scoped.affectedInspectorThreadIds
+                                    == QStringList{QStringLiteral("target-thread")}
+                             && !scoped.allThreadsAffected && !scoped.allInspectorsAffected
+                             && !scoped.sidebarAffected && scoped.hasPresentationChange,
+                         "a scoped item upsert must refresh its canonical conversation and Inspector");
+    passed &= expect(streamed.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
+                         && streamed.affectedInspectorThreadIds.empty()
+                         && !streamed.allThreadsAffected && !streamed.allInspectorsAffected
+                         && !streamed.sidebarAffected && streamed.hasPresentationChange,
+                     "streamed item content must refresh only its canonical conversation");
     passed &= expect(unscoped.affectedThreadIds.empty() && unscoped.allThreadsAffected
+                         && unscoped.affectedInspectorThreadIds.empty()
+                         && unscoped.allInspectorsAffected && !unscoped.sidebarAffected
                          && unscoped.hasPresentationChange,
-                     "an unscoped item change must conservatively refresh all threads");
+                     "an unscoped item change must conservatively refresh all thread-bound presentations");
+    passed &= expect(replacement.allThreadsAffected && replacement.allInspectorsAffected
+                         && replacement.sidebarAffected && replacement.hasPresentationChange,
+                     "a State replacement must conservatively refresh every presentation");
+    passed &= expect(!cursor.allThreadsAffected && !cursor.allInspectorsAffected
+                         && !cursor.sidebarAffected && !cursor.hasPresentationChange,
+                     "a cursor-only update must not trigger broad presentation work");
     return passed;
 }
 

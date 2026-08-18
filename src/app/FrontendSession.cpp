@@ -48,17 +48,28 @@ std::optional<QString> unixPeerCredentialError(qintptr socketDescriptor, uid_t e
 StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
 {
     StateUpdateScope scope;
-    const auto addThread = [&scope](std::string_view id)
+    const auto addUnique = [](QStringList& ids, std::string_view id)
     {
         const QString threadId = QString::fromUtf8(id.data(), static_cast<qsizetype>(id.size()));
-        if (!scope.affectedThreadIds.contains(threadId))
-            scope.affectedThreadIds.append(threadId);
+        if (!ids.contains(threadId))
+            ids.append(threadId);
+    };
+    const auto addThread = [&scope, &addUnique](std::string_view id) {
+        addUnique(scope.affectedThreadIds, id);
+    };
+    const auto addInspectorThread = [&scope, &addUnique](std::string_view id) {
+        addUnique(scope.affectedInspectorThreadIds, id);
+    };
+    const auto markThreadAndInspector = [&addThread, &addInspectorThread](std::string_view id) {
+        addThread(id);
+        addInspectorThread(id);
     };
 
     if (update.changes.empty())
     {
         scope.allThreadsAffected = true;
-        scope.inspectorAffected = true;
+        scope.allInspectorsAffected = true;
+        scope.sidebarAffected = true;
         scope.hasPresentationChange = true;
         return scope;
     }
@@ -71,60 +82,96 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                 using Change = std::decay_t<decltype(value)>;
                 if constexpr (std::is_same_v<Change, sdk::CursorAdvancedChange>)
                 {
-                    // Info shows the immutable State revision. Its label can be
-                    // updated in place without rebuilding the conversation.
-                    scope.inspectorAffected = true;
+                    // A cursor-only update changes no retained presentation.
+                    // The Inspector revision is refreshed with the next
+                    // Inspector-relevant change or explicit selection.
                 }
                 else if constexpr (std::is_same_v<Change, sdk::StateReplacedChange>)
                 {
                     scope.allThreadsAffected = true;
-                    scope.inspectorAffected = true;
+                    scope.allInspectorsAffected = true;
+                    scope.sidebarAffected = true;
                 }
                 else if constexpr (std::is_same_v<Change, sdk::ThreadUpsertedChange>
                                    || std::is_same_v<Change, sdk::ThreadRemovedChange>)
                 {
                     addThread(value.threadId.value);
+                    scope.sidebarAffected = true;
                     // The selected Inspector can show status/model facts from
                     // a linked subagent thread even when its conversation is
                     // not selected.
-                    scope.inspectorAffected = true;
+                    scope.allInspectorsAffected = true;
                 }
                 else if constexpr (std::is_same_v<Change, sdk::TurnUpsertedChange>)
                 {
                     if (const auto* turn = update.state.turn(value.turnId))
-                        addThread(turn->threadId.value);
-                    else
+                        markThreadAndInspector(turn->threadId.value);
+                    else {
                         scope.allThreadsAffected = true;
+                        scope.allInspectorsAffected = true;
+                    }
                 }
-                else if constexpr (std::is_same_v<Change, sdk::ItemUpsertedChange>
-                                   || std::is_same_v<Change, sdk::ItemContentReplacedChange>)
+                else if constexpr (std::is_same_v<Change, sdk::ItemUpsertedChange>)
                 {
+                    if (value.threadId)
+                        markThreadAndInspector(value.threadId->value);
+                    else if (value.turnId) {
+                        if (const auto* turn = update.state.turn(*value.turnId))
+                            markThreadAndInspector(turn->threadId.value);
+                        else {
+                            scope.allThreadsAffected = true;
+                            scope.allInspectorsAffected = true;
+                        }
+                    }
+                    else {
+                        scope.allThreadsAffected = true;
+                        scope.allInspectorsAffected = true;
+                    }
+                }
+                else if constexpr (std::is_same_v<Change, sdk::ItemContentReplacedChange>)
+                {
+                    // Streaming text/output changes affect the conversation,
+                    // not Sidebar thread facts or Inspector semantics. The SDK
+                    // exposes both replacement and negotiated append wire
+                    // updates through this canonical public change.
                     if (value.threadId)
                         addThread(value.threadId->value);
                     else if (value.turnId) {
                         if (const auto* turn = update.state.turn(*value.turnId))
                             addThread(turn->threadId.value);
-                        else
+                        else {
                             scope.allThreadsAffected = true;
+                            scope.allInspectorsAffected = true;
+                        }
                     }
-                    else
+                    else {
                         scope.allThreadsAffected = true;
+                        scope.allInspectorsAffected = true;
+                    }
                 }
                 else if constexpr (std::is_same_v<Change, sdk::PendingRequestsUpdatedChange>)
                 {
                     // Pending requests contribute to activity-card status. The
                     // change has no thread identity, especially on removal.
                     scope.allThreadsAffected = true;
-                    scope.inspectorAffected = true;
+                    scope.allInspectorsAffected = true;
+                }
+                else if constexpr (std::is_same_v<Change, sdk::ThreadListUpdatedChange>)
+                {
+                    // A list replacement has no per-thread removal identity.
+                    scope.allThreadsAffected = true;
+                    scope.allInspectorsAffected = true;
+                    scope.sidebarAffected = true;
                 }
                 else
                 {
                     // Controller, pending-request, provider, capacity, and other
                     // domain projections can affect the Inspector and controls,
                     // but do not require rebuilding an unchanged conversation.
-                    scope.inspectorAffected = true;
+                    scope.allInspectorsAffected = true;
                 }
-                scope.hasPresentationChange = true;
+                if constexpr (!std::is_same_v<Change, sdk::CursorAdvancedChange>)
+                    scope.hasPresentationChange = true;
             },
             change);
     }
@@ -192,7 +239,7 @@ FrontendSession::FrontendSession(QObject* parent)
         reconcileRequestedThreadReads();
         const detail::StateUpdateScope scope = detail::stateUpdateScope(update);
         if (scope.hasPresentationChange)
-            emit stateChanged(scope.affectedThreadIds, scope.allThreadsAffected, scope.inspectorAffected);
+            emit stateChanged(scope);
     };
     callbacks.onSynchronized = [this](const sdk::SynchronizationInfo& info) {
         reconnectDelayMs = initialReconnectDelayMs;
@@ -207,7 +254,12 @@ FrontendSession::FrontendSession(QObject* parent)
         setLifecycle(Lifecycle::Ready);
         if (clearReadyDiagnostic)
             emit statusChanged();
-        emit stateChanged({}, true, true);
+        detail::StateUpdateScope scope;
+        scope.allThreadsAffected = true;
+        scope.allInspectorsAffected = true;
+        scope.sidebarAffected = true;
+        scope.hasPresentationChange = true;
+        emit stateChanged(scope);
     };
     callbacks.onDiagnostic = [this](const sdk::Diagnostic& diagnostic) {
         if (diagnostic.severity == sdk::Diagnostic::Severity::Error)
