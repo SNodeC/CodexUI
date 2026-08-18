@@ -13,6 +13,7 @@
 #include <QCoreApplication>
 #include <QEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPointer>
 #include <QPushButton>
 #include <QRadioButton>
@@ -54,6 +55,20 @@ struct InteractiveRequestDialogTestAccess {
         dialog.body->layout()->addItem(nested);
         return label;
     }
+
+    static QLineEdit* freeTextEditor(InteractiveRequestDialog& dialog)
+    {
+        return dialog.questionEditors.empty() ? nullptr : dialog.questionEditors.front().freeText;
+    }
+
+    static QString draftFreeText(const InteractiveRequestDialog& dialog)
+    {
+        const auto draft = dialog.drafts.find(dialog.currentRequestId);
+        if (draft == dialog.drafts.end())
+            return {};
+        const auto question = draft->second.questions.find("question-1");
+        return question == draft->second.questions.end() ? QString{} : question->second.freeText;
+    }
 };
 
 } // namespace codexui
@@ -76,6 +91,8 @@ struct RequestFixture {
     frontend::PendingRequestKind kind = frontend::PendingRequestKind::UserInput;
     bool requestScopePresent = true;
     bool duplicateItemId = false;
+    bool allowsFreeText = false;
+    bool secret = false;
 };
 
 bool expect(bool condition, const char* message)
@@ -144,8 +161,8 @@ client::State makeState(const RequestFixture& fixture)
             {"question-1",
              fixture.header,
              fixture.prompt,
-             false,
-             false,
+             fixture.allowsFreeText,
+             fixture.secret,
              {{fixture.option, fixture.description, frontend::Json::object()}},
              frontend::Json::object()},
         };
@@ -511,6 +528,71 @@ bool testNestedLayoutRebuildDeletesOnce()
     return expect(nested.isNull(), "rebuilding must clear a directly nested layout without a double delete");
 }
 
+bool testSecretFreeTextIsNotDraftedAndClearsAfterCapture()
+{
+    RequestFixture secretFixture{"summary", "header", "prompt", {}, {}, "command", "/cwd"};
+    secretFixture.allowsFreeText = true;
+    secretFixture.secret = true;
+    client::State currentState = makeState(secretFixture);
+    std::optional<codexui::InteractiveRequestResponse> response;
+    codexui::InteractiveRequestDialog dialog(
+        [&currentState]() -> const client::State& { return currentState; },
+        [&response](codexui::InteractiveRequestResponse value) { response = std::move(value); });
+    dialog.synchronize(currentState);
+
+    QLineEdit* editor = codexui::InteractiveRequestDialogTestAccess::freeTextEditor(dialog);
+    bool passed = expect(editor && editor->echoMode() == QLineEdit::Password,
+                         "a secret question must use a password editor");
+    if (!editor)
+        return false;
+    editor->setText(QStringLiteral("first secret"));
+    dialog.synchronize(currentState);
+    passed &= expect(editor->text() == QStringLiteral("first secret"),
+                     "an unchanged state refresh must not erase the live secret editor");
+    passed &= expect(codexui::InteractiveRequestDialogTestAccess::draftFreeText(dialog).isEmpty(),
+                     "secret free text must never be copied into the persistent request draft");
+
+    QPointer<QLineEdit> previousEditor = editor;
+    dialog.present();
+    editor = codexui::InteractiveRequestDialogTestAccess::freeTextEditor(dialog);
+    passed &= expect(previousEditor && previousEditor->text().isEmpty(),
+                     "rebuilding must clear the previous secret editor before disposal");
+    passed &= expect(editor && editor->text().isEmpty(),
+                     "a rebuilt secret editor must not restore secret free text from a draft");
+    if (!editor)
+        return false;
+
+    editor->setText(QStringLiteral("submitted secret"));
+    codexui::InteractiveRequestDialogTestAccess::submit(dialog);
+    passed &= expect(editor->text().isEmpty(),
+                     "successful response capture must immediately clear the live secret editor");
+    passed &= expect(codexui::InteractiveRequestDialogTestAccess::draftFreeText(dialog).isEmpty(),
+                     "successful response capture must leave no secret draft text");
+    const auto* answers = response
+                              ? std::get_if<std::vector<ai::openai::codex::typed::UserInputAnswer>>(&response->value)
+                              : nullptr;
+    passed &= expect(answers && answers->size() == 1 && answers->front().answers.size() == 1
+                         && answers->front().answers.front() == "submitted secret",
+                     "the typed response must still receive the captured secret answer");
+
+    RequestFixture ordinaryFixture = secretFixture;
+    ordinaryFixture.secret = false;
+    currentState = makeState(ordinaryFixture);
+    codexui::InteractiveRequestDialog ordinaryDialog(
+        [&currentState]() -> const client::State& { return currentState; },
+        [](codexui::InteractiveRequestResponse) {});
+    ordinaryDialog.synchronize(currentState);
+    editor = codexui::InteractiveRequestDialogTestAccess::freeTextEditor(ordinaryDialog);
+    if (!expect(editor != nullptr, "a non-secret free-text question must create an editor"))
+        return false;
+    editor->setText(QStringLiteral("ordinary answer"));
+    ordinaryDialog.present();
+    editor = codexui::InteractiveRequestDialogTestAccess::freeTextEditor(ordinaryDialog);
+    passed &= expect(editor && editor->text() == QStringLiteral("ordinary answer"),
+                     "non-secret free text must retain the existing draft behavior");
+    return passed;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -523,5 +605,6 @@ int main(int argc, char** argv)
     passed &= testIncompleteUserInputIsDisabled();
     passed &= testIncompleteApprovalAllowsOnlyNegativeResponses();
     passed &= testNestedLayoutRebuildDeletesOnce();
+    passed &= testSecretFreeTextIsNotDraftedAndClearsAfterCapture();
     return passed ? 0 : 1;
 }

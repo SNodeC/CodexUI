@@ -18,6 +18,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSplitter>
+#include <QTextDocument>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -54,9 +55,15 @@ std::optional<QString> interactiveResponseValidationError(
 QLabel* label(const QString& text, const char* kind = nullptr)
 {
     auto* result = new QLabel(text);
+    result->setTextFormat(Qt::PlainText);
     if (kind)
         result->setProperty("kind", kind);
     return result;
+}
+
+QString plainTooltip(const QString& text)
+{
+    return Qt::convertFromPlainText(text, Qt::WhiteSpaceNormal);
 }
 
 QFrame* dot(const QString& color, int size = 7)
@@ -104,7 +111,7 @@ QWidget* makeTopBar(QPushButton*& restoreLeft,
     });
     row->addWidget(commands);
 
-    modelStatus = new QLabel(QStringLiteral("Model unavailable"));
+    modelStatus = label(QStringLiteral("Model unavailable"));
     modelStatus->setAlignment(Qt::AlignCenter);
     modelStatus->setStyleSheet(QStringLiteral("background:#181c21;border-radius:8px;font-size:12px;font-weight:500;"));
     modelStatus->setFixedSize(210, 32);
@@ -307,7 +314,7 @@ void WorkbenchWidget::refreshLifecycle()
     sidebar->setConnectionStatus(title, detail, color);
     setStyleSheetIfChanged(codexStatusDot, QStringLiteral("background:%1;border-radius:3px;").arg(color));
     synchronizationStatus->setText(frontendSession.statusText());
-    synchronizationStatus->setToolTip(frontendSession.statusText());
+    synchronizationStatus->setToolTip(plainTooltip(frontendSession.statusText()));
     setStyleSheetIfChanged(synchronizationStatus,
                            QStringLiteral("color:%1;font-size:10px;font-weight:600;").arg(color));
     if (frontendSession.lifecycle() != Lifecycle::Ready) {
@@ -383,7 +390,7 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation, bool refres
             modelDetails.append(QString::fromStdString(*selected->modelProvider));
         modelStatus->setText(modelDetails.isEmpty() ? QStringLiteral("Model unavailable")
                                                     : modelDetails.join(QStringLiteral(" · ")));
-        modelStatus->setToolTip(modelStatus->text());
+        modelStatus->setToolTip(plainTooltip(modelStatus->text()));
 
         const QString context = ready && selected && selected->cwd
                                     ? QString::fromStdString(selected->cwd->value)
@@ -391,7 +398,7 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation, bool refres
         threadContextStatus->setText(context.size() > 44
                                          ? context.left(20) + QChar(0x2026) + context.right(20)
                                          : context);
-        threadContextStatus->setToolTip(ready && selected && selected->cwd ? context : QString{});
+        threadContextStatus->setToolTip(ready && selected && selected->cwd ? plainTooltip(context) : QString{});
 
         std::size_t agentActivities = 0;
         if (const auto* turn = ready ? latestTurn(state, selected) : nullptr) {
@@ -509,7 +516,7 @@ void WorkbenchWidget::refreshControllerStatus()
             tooltip = QStringLiteral("Another frontend currently owns controller");
     }
     controllerStatus->setText(text);
-    controllerStatus->setToolTip(tooltip);
+    controllerStatus->setToolTip(plainTooltip(tooltip));
     setStyleSheetIfChanged(controllerStatus,
                            QStringLiteral("color:%1;font-size:10px;font-weight:600;").arg(color));
 }

@@ -12,6 +12,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QTextDocument>
 #include <QVBoxLayout>
 
@@ -250,6 +251,7 @@ void InteractiveRequestDialog::synchronize(const sdk::State& state)
     const bool newlyNeedsAttention = previousCount == 0 && !orderedRequestIds.empty();
     previousCount = orderedRequestIds.size();
     if (orderedRequestIds.empty()) {
+        clearSecretEditors();
         currentRequestId.clear();
         submittingRequestId.clear();
         presentedSource.reset();
@@ -330,8 +332,27 @@ void InteractiveRequestDialog::saveCurrentDraft()
             if (checkbox->isChecked())
                 question.selectedOptions.insert(label);
         }
-        if (editor.freeText)
-            question.freeText = editor.freeText->text();
+        if (editor.freeText) {
+            if (editor.secret)
+                question.freeText.clear();
+            else
+                question.freeText = editor.freeText->text();
+        }
+    }
+}
+
+void InteractiveRequestDialog::clearSecretEditors()
+{
+    for (const QuestionEditor& editor : questionEditors) {
+        if (!editor.secret || !editor.freeText)
+            continue;
+        const QSignalBlocker blocker(editor.freeText);
+        editor.freeText->clear();
+        if (const auto draft = drafts.find(currentRequestId); draft != drafts.end()) {
+            if (const auto question = draft->second.questions.find(editor.id);
+                question != draft->second.questions.end())
+                question->second.freeText.clear();
+        }
     }
 }
 
@@ -339,6 +360,7 @@ void InteractiveRequestDialog::rebuild(const sdk::State& state)
 {
     const auto source = detail::interactiveRequestSource(state, sdk::PendingRequestId{currentRequestId});
     if (!source) {
+        clearSecretEditors();
         presentedSource.reset();
         currentResponseSafety = InteractiveRequestResponseSafety::Disabled;
         hide();
@@ -346,6 +368,7 @@ void InteractiveRequestDialog::rebuild(const sdk::State& state)
     }
     const sdk::PendingRequestState& request = source->request;
 
+    clearSecretEditors();
     approvalChoices.clear();
     questionEditors.clear();
     clearLayout(body->layout());
@@ -458,11 +481,13 @@ void InteractiveRequestDialog::rebuild(const sdk::State& state)
             }
             if (question.allowsFreeText) {
                 editor.freeText = new QLineEdit;
+                editor.secret = question.isSecret;
                 editor.freeText->setPlaceholderText(question.options.empty() ? QStringLiteral("Type your answer")
                                                                             : QStringLiteral("Other answer"));
-                editor.freeText->setText(questionDraft.freeText);
-                if (question.isSecret)
+                if (editor.secret)
                     editor.freeText->setEchoMode(QLineEdit::Password);
+                else
+                    editor.freeText->setText(questionDraft.freeText);
                 connect(editor.freeText, &QLineEdit::textChanged, this, [this](const QString&) { updateSubmitEnabled(); });
                 sectionLayout->addWidget(editor.freeText);
             }
@@ -567,8 +592,18 @@ void InteractiveRequestDialog::submitCurrent()
         for (const auto& question : *request.questions) {
             const QuestionDraft& questionDraft = draft.questions.at(question.id);
             std::vector<std::string> values(questionDraft.selectedOptions.begin(), questionDraft.selectedOptions.end());
-            if (!questionDraft.freeText.trimmed().isEmpty())
+            const auto editor = std::find_if(questionEditors.begin(), questionEditors.end(), [&question](const auto& value) {
+                return value.id == question.id;
+            });
+            if (question.isSecret) {
+                if (editor != questionEditors.end() && editor->freeText) {
+                    const QString freeText = editor->freeText->text();
+                    if (!freeText.trimmed().isEmpty())
+                        values.push_back(freeText.toStdString());
+                }
+            } else if (!questionDraft.freeText.trimmed().isEmpty()) {
                 values.push_back(questionDraft.freeText.toStdString());
+            }
             if (values.empty()) {
                 setStatus(QStringLiteral("Answer every question before submitting"), true);
                 return;
@@ -581,6 +616,7 @@ void InteractiveRequestDialog::submitCurrent()
         return;
     }
 
+    clearSecretEditors();
     setSubmitting(currentRequestId, QStringLiteral("Preparing response…"));
     responseHandler(std::move(response));
 }
