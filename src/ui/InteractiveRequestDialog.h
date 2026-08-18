@@ -98,9 +98,11 @@ private:
         std::string id;
         std::vector<std::pair<std::string, QCheckBox*>> options;
         QLineEdit* freeText = nullptr;
+        bool secret = false;
     };
 
     void saveCurrentDraft();
+    void clearSecretEditors();
     void rebuild(const ai::openai::codex::frontend::client::State& state);
     void showNext();
     void submitCurrent();

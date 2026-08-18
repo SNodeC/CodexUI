@@ -12,6 +12,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QTextDocument>
 #include <QVBoxLayout>
 
 #include <functional>
@@ -25,9 +26,15 @@ namespace {
 QLabel* textLabel(const QString& text, const char* kind = nullptr)
 {
     auto* result = new QLabel(text);
+    result->setTextFormat(Qt::PlainText);
     if (kind)
         result->setProperty("kind", kind);
     return result;
+}
+
+QString plainTooltip(const QString& text)
+{
+    return Qt::convertFromPlainText(text, Qt::WhiteSpaceNormal);
 }
 
 QLabel* section(const QString& text, bool attention = false)
@@ -91,12 +98,12 @@ public:
         }
         if (fullTitle != title) {
             fullTitle = std::move(title);
-            titleLabel->setToolTip(fullTitle);
+            titleLabel->setToolTip(plainTooltip(fullTitle));
             lastAvailableWidth = -1;
         }
         if (fullDetails != details) {
             fullDetails = std::move(details);
-            detailsLabel->setToolTip(fullDetails);
+            detailsLabel->setToolTip(plainTooltip(fullDetails));
             detailsLabel->setVisible(!fullDetails.isEmpty());
             lastAvailableWidth = -1;
         }
