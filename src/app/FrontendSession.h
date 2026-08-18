@@ -139,6 +139,9 @@ private:
     void handleConnectionStateChange(const ai::openai::codex::frontend::client::ConnectionStateChange& change);
     void reportDiagnostic(QString message);
     void scheduleSocketRead();
+    void clearInbound() noexcept;
+    [[nodiscard]] bool hasCompleteInboundFrame() const noexcept;
+    void compactInbound() noexcept;
     void reconcileRequestedThreadReads();
     void startConnection();
     void scheduleReconnect();
@@ -164,6 +167,7 @@ private:
     QTimer reconnectTimer;
     QTimer outboundDrainTimer;
     QByteArray inboundBuffer;
+    qsizetype inboundOffset = 0;
     std::unique_ptr<Client> client;
     Connection connection;
     ai::openai::codex::frontend::client::State currentState;

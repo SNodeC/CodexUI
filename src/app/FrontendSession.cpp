@@ -10,6 +10,7 @@
 
 #include <QByteArray>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QStringList>
 #include <QTimer>
 
@@ -205,7 +206,10 @@ namespace {
 constexpr qsizetype maximumFrameBytes = 16 * 1024 * 1024;
 constexpr qsizetype maximumPromptBytes = 128 * 1024;
 constexpr qsizetype maximumReceiveBatchBytes = 1024 * 1024;
-constexpr int maximumReceiveBatchFrames = 32;
+constexpr qsizetype inboundCompactionThreshold = 256 * 1024;
+constexpr int minimumReceiveBatchFrames = 32;
+constexpr int maximumReceiveBatchFrames = 256;
+constexpr qint64 maximumReceiveBatchTimeMs = 4;
 
 QString operationError(const std::optional<sdk::Error>& error, const QString& fallback)
 {
@@ -322,7 +326,7 @@ void FrontendSession::reconnectToBackend()
     if (connection.isOpen())
         connection.close("User requested reconnect");
     connection = Connection{};
-    inboundBuffer.clear();
+    clearInbound();
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
     if (socket.state() != QLocalSocket::UnconnectedState) {
@@ -592,7 +596,7 @@ void FrontendSession::socketConnected()
 {
     reconnectTimer.stop();
     clearOutbound();
-    inboundBuffer.clear();
+    clearInbound();
     receiveContinuationScheduled = false;
     if (const auto error = detail::unixPeerCredentialError(socket.socketDescriptor(), ::geteuid())) {
         failWithoutReconnect(*error);
@@ -615,15 +619,20 @@ void FrontendSession::socketReadyRead()
 {
     receiveContinuationScheduled = false;
     const auto rejectOversizedFrame = [this] {
-        inboundBuffer.clear();
+        clearInbound();
         failWithoutReconnect(QStringLiteral("Backend frame exceeds the SDK input limit"));
         socket.abort();
     };
 
-    qsizetype consumedBytes = 0;
+    QElapsedTimer processingTime;
+    processingTime.start();
+    qsizetype consumedBytes = inboundOffset;
     qsizetype receivedBytes = 0;
     int receivedFrames = 0;
-    while (receivedFrames < maximumReceiveBatchFrames && receivedBytes < maximumReceiveBatchBytes)
+    while (receivedFrames < maximumReceiveBatchFrames
+           && receivedBytes < maximumReceiveBatchBytes
+           && (receivedFrames < minimumReceiveBatchFrames
+               || processingTime.elapsed() < maximumReceiveBatchTimeMs))
     {
         const qsizetype newline = inboundBuffer.indexOf('\n', consumedBytes);
         if (newline < 0)
@@ -673,15 +682,42 @@ void FrontendSession::socketReadyRead()
             break;
     }
 
-    if (consumedBytes > 0)
-        inboundBuffer.remove(0, consumedBytes);
-    if (inboundBuffer.indexOf('\n') < 0 && inboundBuffer.size() > maximumFrameBytes + 1) {
+    inboundOffset = consumedBytes;
+    compactInbound();
+    if (!hasCompleteInboundFrame()
+        && inboundBuffer.size() - inboundOffset > maximumFrameBytes + 1) {
         rejectOversizedFrame();
         return;
     }
     if (connection.isOpen()
-        && (socket.bytesAvailable() > 0 || inboundBuffer.indexOf('\n') >= 0))
+        && (socket.bytesAvailable() > 0 || hasCompleteInboundFrame()))
         scheduleSocketRead();
+}
+
+void FrontendSession::clearInbound() noexcept
+{
+    inboundBuffer.clear();
+    inboundOffset = 0;
+}
+
+bool FrontendSession::hasCompleteInboundFrame() const noexcept
+{
+    return inboundBuffer.indexOf('\n', inboundOffset) >= 0;
+}
+
+void FrontendSession::compactInbound() noexcept
+{
+    if (inboundOffset <= 0)
+        return;
+    if (inboundOffset >= inboundBuffer.size()) {
+        clearInbound();
+        return;
+    }
+    if (inboundOffset < inboundCompactionThreshold
+        || inboundOffset < inboundBuffer.size() / 2)
+        return;
+    inboundBuffer.remove(0, inboundOffset);
+    inboundOffset = 0;
 }
 
 void FrontendSession::scheduleSocketRead()
@@ -696,7 +732,7 @@ void FrontendSession::scheduleSocketRead()
                                return;
                            receiveContinuationScheduled = false;
                            if (connection.isOpen()
-                               && (socket.bytesAvailable() > 0 || inboundBuffer.indexOf('\n') >= 0))
+                               && (socket.bytesAvailable() > 0 || hasCompleteInboundFrame()))
                                socketReadyRead();
                        });
 }
@@ -725,7 +761,7 @@ void FrontendSession::socketDisconnected()
     }
     connection = Connection{};
     clearOutbound();
-    inboundBuffer.clear();
+    clearInbound();
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
     if (!localShutdown) {
@@ -743,7 +779,7 @@ void FrontendSession::socketFailed(QLocalSocket::LocalSocketError)
         connection.transportDisconnected(sdk::TransportError{socket.errorString().toStdString(), true});
     connection = Connection{};
     clearOutbound();
-    inboundBuffer.clear();
+    clearInbound();
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
     if (automaticReconnectEnabled && currentLifecycle != Lifecycle::Failed)

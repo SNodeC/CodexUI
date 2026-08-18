@@ -37,6 +37,32 @@ struct FrontendSessionTestAccess
         return session.automaticReconnectEnabled;
     }
 
+    static void setInbound(FrontendSession& session, QByteArray bytes, qsizetype offset)
+    {
+        session.inboundBuffer = std::move(bytes);
+        session.inboundOffset = offset;
+    }
+
+    static void compactInbound(FrontendSession& session)
+    {
+        session.compactInbound();
+    }
+
+    static QByteArray inboundBytes(const FrontendSession& session)
+    {
+        return session.inboundBuffer;
+    }
+
+    static qsizetype inboundOffset(const FrontendSession& session)
+    {
+        return session.inboundOffset;
+    }
+
+    static bool hasCompleteInboundFrame(const FrontendSession& session)
+    {
+        return session.hasCompleteInboundFrame();
+    }
+
     static void prepareReconnectReset(FrontendSession& session)
     {
         session.automaticReconnectEnabled = false;
@@ -578,13 +604,50 @@ bool testOutboundQueue()
     return passed;
 }
 
+bool testInboundBufferCompaction()
+{
+    codexui::FrontendSession session;
+    const QByteArray prefix(300 * 1024, 'p');
+    const QByteArray tail(300 * 1024, 't');
+    const QByteArray backlog = prefix + tail;
+
+    codexui::FrontendSessionTestAccess::setInbound(session, backlog, 64 * 1024);
+    codexui::FrontendSessionTestAccess::compactInbound(session);
+    bool passed = expect(
+        codexui::FrontendSessionTestAccess::inboundBytes(session) == backlog
+            && codexui::FrontendSessionTestAccess::inboundOffset(session) == 64 * 1024,
+        "small consumed prefixes must remain as an offset instead of moving a large replay tail");
+
+    codexui::FrontendSessionTestAccess::setInbound(session, backlog, prefix.size());
+    codexui::FrontendSessionTestAccess::compactInbound(session);
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::inboundBytes(session) == tail
+            && codexui::FrontendSessionTestAccess::inboundOffset(session) == 0,
+        "a large consumed prefix must compact once it reaches both the threshold and half the buffer");
+
+    const QByteArray completeAndPartial("done\npartial");
+    codexui::FrontendSessionTestAccess::setInbound(session, completeAndPartial, 0);
+    const bool completeAtStart = codexui::FrontendSessionTestAccess::hasCompleteInboundFrame(session);
+    codexui::FrontendSessionTestAccess::setInbound(session, completeAndPartial, 5);
+    passed &= expect(completeAtStart
+                         && !codexui::FrontendSessionTestAccess::hasCompleteInboundFrame(session),
+                     "frame detection must ignore newlines in the consumed prefix");
+
+    codexui::FrontendSessionTestAccess::setInbound(session, tail, tail.size());
+    codexui::FrontendSessionTestAccess::compactInbound(session);
+    passed &= expect(codexui::FrontendSessionTestAccess::inboundBytes(session).isEmpty()
+                         && codexui::FrontendSessionTestAccess::inboundOffset(session) == 0,
+                     "a fully consumed inbound buffer must reset without retaining capacity state");
+    return passed;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
     return testPeerCredentials() && testScopedItemPresentationChanges() && testLifecycleAndDiagnostics()
-               && testOutboundQueue()
+               && testOutboundQueue() && testInboundBufferCompaction()
            ? 0
            : 1;
 }
