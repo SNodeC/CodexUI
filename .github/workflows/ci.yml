@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codexui-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  AISUITE_REVISION: 29c18725d27ca5044efde4820cdf9b14e35232aa
+  SNODEC_REVISION: bc43179dbee2b5a0286420a61d8f1ceaef01530d
+  CMAKE_BUILD_PARALLEL_LEVEL: 2
+  CTEST_PARALLEL_LEVEL: 2
+  LD_LIBRARY_PATH: ${{ github.workspace }}/_stage/aisuite/lib:${{ github.workspace }}/_stage/snodec/lib
+  LDFLAGS: -Wl,-rpath-link,${{ github.workspace }}/_stage/aisuite/lib -Wl,-rpath-link,${{ github.workspace }}/_stage/snodec/lib
+
+jobs:
+  gcc-15-debug:
+    runs-on: ubuntu-24.04
+    container: gcc:15.3.0-trixie
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out exact CodexUI head
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: >-
+            ${{ github.event_name == 'pull_request' &&
+                github.event.pull_request.head.sha || github.sha }}
+
+      - name: Check out accepted SNode.C 2.0.0
+        uses: actions/checkout@v5
+        with:
+          repository: SNodeC/snode.c
+          ref: ${{ env.SNODEC_REVISION }}
+          path: _deps/snodec
+
+      - name: Check out required AISuite 0.1.1
+        uses: actions/checkout@v5
+        with:
+          repository: SNodeC/AISuite
+          ref: ${{ env.AISUITE_REVISION }}
+          path: _deps/aisuite
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            cmake \
+            libbluetooth-dev \
+            libmagic-dev \
+            libssl-dev \
+            ninja-build \
+            nlohmann-json3-dev \
+            pkg-config \
+            qt6-base-dev
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/_deps/snodec"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/_deps/aisuite"
+
+      - name: Verify exact source revisions
+        shell: bash
+        env:
+          CODEXUI_EXPECTED_HEAD: >-
+            ${{ github.event_name == 'pull_request' &&
+                github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CODEXUI_EXPECTED_HEAD"
+          test "$(git -C _deps/snodec rev-parse HEAD)" = "$SNODEC_REVISION"
+          test "$(git -C _deps/aisuite rev-parse HEAD)" = "$AISUITE_REVISION"
+
+      - name: Build and install SNode.C
+        run: |
+          cmake -S _deps/snodec -B _build/snodec -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/_stage/snodec" \
+            -DSNODEC_BUILD_TESTS=OFF \
+            -DSNODEC_BUILD_APPS=OFF
+          cmake --build _build/snodec --target all
+          cmake --install _build/snodec
+
+      - name: Build and install AISuite 0.1.1
+        run: |
+          cmake -S _deps/aisuite -B _build/aisuite -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/_stage/aisuite" \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/snodec" \
+            -DAISUITE_BUILD_TESTS=OFF \
+            -DAISUITE_BUILD_APPS=OFF \
+            -DAISUITE_BUILD_CODEX_FRONTEND_CLIENT=ON \
+            -DAISUITE_ENABLE_CODEX_FRONTEND_TLS=OFF \
+            -DAISUITE_ENABLE_CODEX_FRONTEND_WEBSOCKET=OFF \
+            -DAISUITE_ENABLE_CODEX_FRONTEND_RFCOMM=OFF
+          cmake --build _build/aisuite --target all
+          cmake --install _build/aisuite
+          grep -F 'set(PACKAGE_VERSION "0.1.1")' \
+            _stage/aisuite/lib/cmake/AISuite/AISuiteConfigVersion.cmake
+
+      - name: Configure CodexUI
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/aisuite;$GITHUB_WORKSPACE/_stage/snodec" \
+            -DBUILD_TESTING=ON
+
+      - name: Build CodexUI
+        run: cmake --build build --target all
+
+      - name: Run CodexUI tests headlessly
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Check changed lines
+        shell: bash
+        env:
+          CODEXUI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]
+          then
+            git diff --check "$CODEXUI_BASE_SHA...HEAD"
+          else
+            git diff --check HEAD^ HEAD
+          fi
