@@ -39,12 +39,15 @@ struct InteractiveRequestSource {
     bool operator==(const InteractiveRequestSource&) const = default;
 };
 
+enum class InteractiveRequestResponseSafety { Disabled, NegativeOnly, Complete };
+
 namespace detail {
 
 [[nodiscard]] std::optional<InteractiveRequestSource>
 interactiveRequestSource(const ai::openai::codex::frontend::client::State& state,
                          const ai::openai::codex::frontend::client::PendingRequestId& requestId);
-[[nodiscard]] bool interactiveRequestCanRespond(const InteractiveRequestSource& source);
+[[nodiscard]] InteractiveRequestResponseSafety
+interactiveRequestResponseSafety(const InteractiveRequestSource& source);
 
 } // namespace detail
 
@@ -59,6 +62,12 @@ struct InteractiveRequestResponse {
     InteractiveRequestSource source;
     Value value;
 };
+
+namespace detail {
+
+[[nodiscard]] bool interactiveResponseIsNegative(const InteractiveRequestResponse& response);
+
+} // namespace detail
 
 class InteractiveRequestDialog final : public QDialog
 {
@@ -115,7 +124,7 @@ private:
     std::string currentRequestId;
     std::string submittingRequestId;
     std::size_t previousCount = 0;
-    bool currentRequestRespondable = false;
+    InteractiveRequestResponseSafety currentResponseSafety = InteractiveRequestResponseSafety::Disabled;
 };
 
 } // namespace codexui

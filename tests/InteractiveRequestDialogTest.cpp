@@ -13,7 +13,10 @@
 #include <QCoreApplication>
 #include <QEvent>
 #include <QLabel>
+#include <QPointer>
 #include <QPushButton>
+#include <QRadioButton>
+#include <QVBoxLayout>
 
 #include <iostream>
 #include <optional>
@@ -31,6 +34,25 @@ struct InteractiveRequestDialogTestAccess {
     static void submit(InteractiveRequestDialog& dialog)
     {
         dialog.submitCurrent();
+    }
+
+    static QRadioButton* approvalChoice(InteractiveRequestDialog& dialog, std::size_t index)
+    {
+        return index < dialog.approvalChoices.size() ? dialog.approvalChoices[index] : nullptr;
+    }
+
+    static void setApprovalIndex(InteractiveRequestDialog& dialog, int index)
+    {
+        dialog.drafts[dialog.currentRequestId].approvalIndex = index;
+    }
+
+    static QLabel* addNestedLayout(InteractiveRequestDialog& dialog)
+    {
+        auto* nested = new QVBoxLayout;
+        auto* label = new QLabel(QStringLiteral("nested fixture"));
+        nested->addWidget(label);
+        dialog.body->layout()->addItem(nested);
+        return label;
     }
 };
 
@@ -51,6 +73,9 @@ struct RequestFixture {
     bool connectionInvalidated = false;
     bool itemTruncated = false;
     bool itemPresent = true;
+    frontend::PendingRequestKind kind = frontend::PendingRequestKind::UserInput;
+    bool requestScopePresent = true;
+    bool duplicateItemId = false;
 };
 
 bool expect(bool condition, const char* message)
@@ -106,19 +131,25 @@ client::State makeState(const RequestFixture& fixture)
 
     frontend::ExpandedPendingRequest request;
     request.pendingRequestId = "7";
-    request.kind = frontend::PendingRequestKind::UserInput;
+    request.kind = fixture.kind;
+    if (fixture.requestScopePresent) {
+        request.threadId = "target-thread";
+        request.turnId = "target-turn";
+    }
     request.itemId = "item-1";
     request.summary = fixture.summary;
     request.details = frontend::Json{{"paramsTruncated", fixture.paramsTruncated}};
-    request.questions = std::vector<frontend::ExpandedPendingRequestQuestion>{
-        {"question-1",
-         fixture.header,
-         fixture.prompt,
-         false,
-         false,
-         {{fixture.option, fixture.description, frontend::Json::object()}},
-         frontend::Json::object()},
-    };
+    if (fixture.kind == frontend::PendingRequestKind::UserInput) {
+        request.questions = std::vector<frontend::ExpandedPendingRequestQuestion>{
+            {"question-1",
+             fixture.header,
+             fixture.prompt,
+             false,
+             false,
+             {{fixture.option, fixture.description, frontend::Json::object()}},
+             frontend::Json::object()},
+        };
+    }
     request.truncated = fixture.requestTruncated;
     if (fixture.connectionInvalidated)
         request.extensions["connectionInvalidated"] = true;
@@ -126,6 +157,8 @@ client::State makeState(const RequestFixture& fixture)
     frontend::ExpandedThreadItem item;
     item.id = "item-1";
     item.type = frontend::ThreadItemKind::CommandExecution;
+    item.threadId = "target-thread";
+    item.turnId = "target-turn";
     item.data = frontend::Json{{"command", fixture.command},
                                {"cwd", fixture.cwd},
                                {"status", "completed"},
@@ -151,8 +184,20 @@ client::State makeState(const RequestFixture& fixture)
                                       {"complete", true},
                                       {"pagesLoaded", 1},
                                       {"stamp", frontend::Json{{"freshness", "current"}, {"generation", 1}}}};
+    std::vector<frontend::ExpandedThreadItem> items;
+    if (fixture.duplicateItemId) {
+        frontend::ExpandedThreadItem wrongItem = item;
+        wrongItem.threadId = "other-thread";
+        wrongItem.turnId = "other-turn";
+        wrongItem.data = frontend::Json{{"command", "wrong duplicate command"},
+                                        {"cwd", "/wrong"},
+                                        {"status", "completed"}};
+        items.push_back(std::move(wrongItem));
+    }
     if (fixture.itemPresent)
-        state.items = std::vector<frontend::ExpandedThreadItem>{std::move(item)};
+        items.push_back(std::move(item));
+    if (!items.empty())
+        state.items = std::move(items);
     state.pendingRequests = std::vector<frontend::ExpandedPendingRequest>{std::move(request)};
     state.capacity = frontend::Json{{"accumulatedContentBytes", 0},
                                     {"accumulatedProcessOutputBytes", 0},
@@ -168,7 +213,7 @@ client::State makeState(const RequestFixture& fixture)
                                     {"retainedActivityRecords", 0},
                                     {"retainedFilesystemWatches", 0},
                                     {"retainedFuzzySearchSessions", 0},
-                                    {"retainedItems", fixture.itemPresent ? 1 : 0},
+                                    {"retainedItems", (fixture.itemPresent ? 1 : 0) + (fixture.duplicateItemId ? 1 : 0)},
                                     {"retainedNotices", 0},
                                     {"retainedProcesses", 0},
                                     {"retainedThreads", 0},
@@ -310,7 +355,32 @@ bool testSubmitTimeRevalidation()
     return passed;
 }
 
-bool testIncompleteSemanticsAreNonActionable()
+bool testCompositeApprovalLookup()
+{
+    RequestFixture fixture{"summary", "header", "prompt", "choice", "description", "target command", "/target"};
+    fixture.kind = frontend::PendingRequestKind::CommandExecutionApproval;
+    fixture.duplicateItemId = true;
+    const client::State scopedState = makeState(fixture);
+    const auto source = codexui::detail::interactiveRequestSource(scopedState, client::PendingRequestId{"7"});
+    bool passed = expect(source && source->linkedItem.has_value(),
+                         "a scoped approval must resolve its linked item despite duplicate bare IDs");
+    if (source && source->linkedItem) {
+        const auto* command = std::get_if<client::CommandExecutionSemanticView>(&source->linkedItem->details);
+        passed &= expect(command && command->command == std::optional<std::string>{"target command"}
+                             && command->cwd && command->cwd->value == "/target",
+                         "approval lookup must use the request thread, turn, and item identity");
+    }
+
+    fixture.requestScopePresent = false;
+    const auto unscoped = codexui::detail::interactiveRequestSource(makeState(fixture), client::PendingRequestId{"7"});
+    passed &= expect(unscoped && !unscoped->linkedItem
+                         && codexui::detail::interactiveRequestResponseSafety(*unscoped)
+                                == codexui::InteractiveRequestResponseSafety::NegativeOnly,
+                     "an approval with incomplete item identity must not resolve a bare-ID item");
+    return passed;
+}
+
+bool testIncompleteUserInputIsDisabled()
 {
     const RequestFixture truncated{"summary", "header", "prompt", "choice", "description", "command", "/cwd", true};
     const RequestFixture paramsTruncated{
@@ -329,21 +399,32 @@ bool testIncompleteSemanticsAreNonActionable()
     const auto linkedSource = codexui::detail::interactiveRequestSource(makeState(linkedTruncated), client::PendingRequestId{"7"});
     const auto missingSource = codexui::detail::interactiveRequestSource(makeState(linkedMissing), client::PendingRequestId{"7"});
     bool passed = true;
-    passed &= expect(truncatedSource && !codexui::detail::interactiveRequestCanRespond(*truncatedSource),
+    passed &= expect(truncatedSource
+                         && codexui::detail::interactiveRequestResponseSafety(*truncatedSource)
+                                == codexui::InteractiveRequestResponseSafety::Disabled,
                      "a truncated request must be non-actionable");
-    passed &= expect(paramsSource && !codexui::detail::interactiveRequestCanRespond(*paramsSource),
+    passed &= expect(paramsSource
+                         && codexui::detail::interactiveRequestResponseSafety(*paramsSource)
+                                == codexui::InteractiveRequestResponseSafety::Disabled,
                      "truncated typed request parameters must be non-actionable");
-    passed &= expect(invalidatedSource && !codexui::detail::interactiveRequestCanRespond(*invalidatedSource),
+    passed &= expect(invalidatedSource
+                         && codexui::detail::interactiveRequestResponseSafety(*invalidatedSource)
+                                == codexui::InteractiveRequestResponseSafety::Disabled,
                      "a connection-invalidated request must be non-actionable");
-    passed &= expect(linkedSource && !codexui::detail::interactiveRequestCanRespond(*linkedSource),
+    passed &= expect(linkedSource
+                         && codexui::detail::interactiveRequestResponseSafety(*linkedSource)
+                                == codexui::InteractiveRequestResponseSafety::Disabled,
                      "a request with truncated linked semantics must be non-actionable");
-    passed &= expect(missingSource && !codexui::detail::interactiveRequestCanRespond(*missingSource),
+    passed &= expect(missingSource
+                         && codexui::detail::interactiveRequestResponseSafety(*missingSource)
+                                == codexui::InteractiveRequestResponseSafety::Disabled,
                      "a request with unavailable linked semantics must be non-actionable");
     if (truncatedSource) {
         codexui::InteractiveRequestSource omitted = *truncatedSource;
         omitted.request.truncated = false;
         omitted.request.omittedFields = {"/questions"};
-        passed &= expect(!codexui::detail::interactiveRequestCanRespond(omitted),
+        passed &= expect(codexui::detail::interactiveRequestResponseSafety(omitted)
+                             == codexui::InteractiveRequestResponseSafety::Disabled,
                          "a request with omitted semantic fields must be non-actionable");
     }
 
@@ -360,6 +441,76 @@ bool testIncompleteSemanticsAreNonActionable()
     return passed;
 }
 
+bool testIncompleteApprovalAllowsOnlyNegativeResponses()
+{
+    RequestFixture incomplete{"summary", "header", "prompt", "choice", "description", "command", "/cwd"};
+    incomplete.kind = frontend::PendingRequestKind::CommandExecutionApproval;
+    incomplete.itemTruncated = true;
+    client::State currentState = makeState(incomplete);
+    std::optional<codexui::InteractiveRequestResponse> response;
+    codexui::InteractiveRequestDialog dialog(
+        [&currentState]() -> const client::State& { return currentState; },
+        [&response](codexui::InteractiveRequestResponse value) { response = std::move(value); });
+    dialog.synchronize(currentState);
+
+    auto* approve = codexui::InteractiveRequestDialogTestAccess::approvalChoice(dialog, 0);
+    auto* approveForSession = codexui::InteractiveRequestDialogTestAccess::approvalChoice(dialog, 1);
+    auto* decline = codexui::InteractiveRequestDialogTestAccess::approvalChoice(dialog, 2);
+    auto* cancel = codexui::InteractiveRequestDialogTestAccess::approvalChoice(dialog, 3);
+    auto* submit = dialog.findChild<QPushButton*>(QStringLiteral("interactiveRequestSubmit"));
+    bool passed = expect(approve && approveForSession && decline && cancel && submit,
+                         "an approval request must expose all four typed decisions");
+    if (!approve || !approveForSession || !decline || !cancel || !submit)
+        return false;
+    passed &= expect(!approve->isEnabled() && !approveForSession->isEnabled()
+                         && decline->isEnabled() && cancel->isEnabled(),
+                     "incomplete approval semantics must disable positive decisions only");
+    decline->setChecked(true);
+    passed &= expect(submit->isEnabled(), "a decline must remain submit-enabled for an incomplete approval");
+    codexui::InteractiveRequestDialogTestAccess::submit(dialog);
+    passed &= expect(response && codexui::detail::interactiveResponseIsNegative(*response),
+                     "an incomplete approval must submit its safe negative response");
+
+    response.reset();
+    codexui::InteractiveRequestDialog forcedDialog(
+        [&currentState]() -> const client::State& { return currentState; },
+        [&response](codexui::InteractiveRequestResponse value) { response = std::move(value); });
+    forcedDialog.synchronize(currentState);
+    codexui::InteractiveRequestDialogTestAccess::setApprovalIndex(forcedDialog, 1);
+    codexui::InteractiveRequestDialogTestAccess::submit(forcedDialog);
+    passed &= expect(!response, "a forced positive response must still fail closed for incomplete approval semantics");
+
+    incomplete.connectionInvalidated = true;
+    currentState = makeState(incomplete);
+    codexui::InteractiveRequestDialog invalidatedDialog(
+        [&currentState]() -> const client::State& { return currentState; },
+        [&response](codexui::InteractiveRequestResponse value) { response = std::move(value); });
+    invalidatedDialog.synchronize(currentState);
+    decline = codexui::InteractiveRequestDialogTestAccess::approvalChoice(invalidatedDialog, 2);
+    passed &= expect(decline && !decline->isEnabled(),
+                     "a connection-invalidated approval must disable negative decisions too");
+    codexui::InteractiveRequestDialogTestAccess::setApprovalIndex(invalidatedDialog, 3);
+    codexui::InteractiveRequestDialogTestAccess::submit(invalidatedDialog);
+    passed &= expect(!response, "a connection-invalidated approval must reject a forced negative response");
+    return passed;
+}
+
+bool testNestedLayoutRebuildDeletesOnce()
+{
+    const RequestFixture first{"first", "header", "prompt", "choice", "description", "command", "/cwd"};
+    const RequestFixture second{"second", "header", "prompt", "choice", "description", "command", "/cwd"};
+    client::State currentState = makeState(first);
+    codexui::InteractiveRequestDialog dialog(
+        [&currentState]() -> const client::State& { return currentState; },
+        [](codexui::InteractiveRequestResponse) {});
+    dialog.synchronize(currentState);
+    QPointer<QLabel> nested = codexui::InteractiveRequestDialogTestAccess::addNestedLayout(dialog);
+    currentState = makeState(second);
+    dialog.synchronize(currentState);
+    settleDeferredDeletes();
+    return expect(nested.isNull(), "rebuilding must clear a directly nested layout without a double delete");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -368,6 +519,9 @@ int main(int argc, char** argv)
     bool passed = true;
     passed &= testCanonicalRefreshAndPlainText();
     passed &= testSubmitTimeRevalidation();
-    passed &= testIncompleteSemanticsAreNonActionable();
+    passed &= testCompositeApprovalLookup();
+    passed &= testIncompleteUserInputIsDisabled();
+    passed &= testIncompleteApprovalAllowsOnlyNegativeResponses();
+    passed &= testNestedLayoutRebuildDeletesOnce();
     return passed ? 0 : 1;
 }

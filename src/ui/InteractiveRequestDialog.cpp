@@ -100,12 +100,10 @@ void addDetail(QVBoxLayout* layout, const QString& value)
 void clearLayout(QLayout* layout)
 {
     while (QLayoutItem* item = layout->takeAt(0)) {
-        if (QWidget* widget = item->widget())
-            widget->deleteLater();
-        if (QLayout* child = item->layout()) {
+        if (QLayout* child = item->layout())
             clearLayout(child);
-            delete child;
-        }
+        else if (QWidget* widget = item->widget())
+            widget->deleteLater();
         delete item;
     }
 }
@@ -122,8 +120,8 @@ std::optional<InteractiveRequestSource> interactiveRequestSource(const sdk::Stat
         return std::nullopt;
 
     InteractiveRequestSource result{*request, std::nullopt};
-    if (request->itemId) {
-        if (const auto* item = state.item(*request->itemId)) {
+    if (request->itemId && request->threadId && request->turnId) {
+        if (const auto* item = state.item(*request->threadId, *request->turnId, *request->itemId)) {
             result.linkedItem = sdk::itemSemanticView(*item);
             if (result.linkedItem)
                 result.linkedItem->stamp.reset();
@@ -132,16 +130,43 @@ std::optional<InteractiveRequestSource> interactiveRequestSource(const sdk::Stat
     return result;
 }
 
-bool interactiveRequestCanRespond(const InteractiveRequestSource& source)
+InteractiveRequestResponseSafety interactiveRequestResponseSafety(const InteractiveRequestSource& source)
 {
     const auto view = sdk::pendingRequestPresentation(source.request);
-    if (source.request.connectionInvalidated || view.truncated || !view.omittedFields.empty())
-        return false;
-    if (source.request.itemId && !source.linkedItem)
-        return false;
-    return !source.linkedItem
-           || (!source.linkedItem->connectionInvalidated && !source.linkedItem->truncated
-               && source.linkedItem->omittedFields.empty());
+    if (source.request.connectionInvalidated)
+        return InteractiveRequestResponseSafety::Disabled;
+
+    const bool requestComplete = !view.truncated && view.omittedFields.empty();
+    const bool linkedItemComplete = !source.request.itemId
+                                    || (source.request.threadId && source.request.turnId && source.linkedItem
+                                        && !source.linkedItem->connectionInvalidated
+                                        && !source.linkedItem->truncated
+                                        && source.linkedItem->omittedFields.empty());
+    if (requestComplete && linkedItemComplete)
+        return InteractiveRequestResponseSafety::Complete;
+    if (isSimpleApproval(source.request.kind) || isReviewApproval(source.request.kind))
+        return InteractiveRequestResponseSafety::NegativeOnly;
+    return InteractiveRequestResponseSafety::Disabled;
+}
+
+} // namespace detail
+
+namespace detail {
+
+bool interactiveResponseIsNegative(const InteractiveRequestResponse& response)
+{
+    if (const auto* approval = std::get_if<typed::ApprovalDecision>(&response.value))
+        return approval->value == "decline" || approval->value == "cancel";
+
+    const typed::ReviewDecision* decision = nullptr;
+    if (const auto* patch = std::get_if<typed::ApplyPatchApprovalResponse>(&response.value))
+        decision = &patch->decision;
+    else if (const auto* command = std::get_if<typed::ExecCommandApprovalResponse>(&response.value))
+        decision = &command->decision;
+    return decision
+           && (std::holds_alternative<typed::DeniedReviewDecision>(*decision)
+               || std::holds_alternative<typed::TimedOutReviewDecision>(*decision)
+               || std::holds_alternative<typed::AbortReviewDecision>(*decision));
 }
 
 } // namespace detail
@@ -228,7 +253,7 @@ void InteractiveRequestDialog::synchronize(const sdk::State& state)
         currentRequestId.clear();
         submittingRequestId.clear();
         presentedSource.reset();
-        currentRequestRespondable = false;
+        currentResponseSafety = InteractiveRequestResponseSafety::Disabled;
         hide();
         return;
     }
@@ -315,7 +340,7 @@ void InteractiveRequestDialog::rebuild(const sdk::State& state)
     const auto source = detail::interactiveRequestSource(state, sdk::PendingRequestId{currentRequestId});
     if (!source) {
         presentedSource.reset();
-        currentRequestRespondable = false;
+        currentResponseSafety = InteractiveRequestResponseSafety::Disabled;
         hide();
         return;
     }
@@ -326,7 +351,7 @@ void InteractiveRequestDialog::rebuild(const sdk::State& state)
     clearLayout(body->layout());
     auto* content = static_cast<QVBoxLayout*>(body->layout());
     const auto view = sdk::pendingRequestPresentation(request);
-    currentRequestRespondable = detail::interactiveRequestCanRespond(*source);
+    currentResponseSafety = detail::interactiveRequestResponseSafety(*source);
 
     auto* heading = wrappedLabel(kindTitle(request.kind), "heading");
     heading->setToolTip(plainTooltip(QStringLiteral("Request ID: %1").arg(text(request.id.value))));
@@ -377,9 +402,13 @@ void InteractiveRequestDialog::rebuild(const sdk::State& state)
         && (source->linkedItem->connectionInvalidated || source->linkedItem->truncated
             || !source->linkedItem->omittedFields.empty()))
         addDetail(content, QStringLiteral("Linked request details are incomplete and cannot be safely approved"));
+    if (currentResponseSafety == InteractiveRequestResponseSafety::NegativeOnly)
+        addDetail(content, QStringLiteral("Incomplete approval details may only be declined or cancelled"));
 
     RequestDraft& draft = drafts[currentRequestId];
     if (isSimpleApproval(request.kind) || isReviewApproval(request.kind)) {
+        if (currentResponseSafety != InteractiveRequestResponseSafety::Complete && draft.approvalIndex < 3)
+            draft.approvalIndex = 0;
         auto* prompt = wrappedLabel(QStringLiteral("Choose how Codex should continue:"), "body");
         content->addWidget(prompt);
         const QStringList decisions{
@@ -391,6 +420,9 @@ void InteractiveRequestDialog::rebuild(const sdk::State& state)
         for (int index = 0; index < decisions.size(); ++index) {
             auto* choice = new QRadioButton(decisions[index]);
             choice->setChecked(draft.approvalIndex == index + 1);
+            choice->setEnabled(currentResponseSafety == InteractiveRequestResponseSafety::Complete
+                               || (currentResponseSafety == InteractiveRequestResponseSafety::NegativeOnly
+                                   && index >= 2));
             connect(choice, &QRadioButton::toggled, this, [this](bool) { updateSubmitEnabled(); });
             approvalChoices.push_back(choice);
             content->addWidget(choice);
@@ -487,17 +519,22 @@ void InteractiveRequestDialog::submitCurrent()
         setStatus(QStringLiteral("This request changed; review it and retry"), true);
         return;
     }
-    if (!detail::interactiveRequestCanRespond(*source)) {
-        setStatus(QStringLiteral("This request is incomplete and cannot be safely answered"), true);
-        updateSubmitEnabled();
-        return;
-    }
     const sdk::PendingRequestState& request = source->request;
     if (submittingRequestId == currentRequestId || submittedRequestIds.contains(currentRequestId))
         return;
 
-    InteractiveRequestResponse response{request.id, request.kind, *source, typed::ApprovalDecision::cancel()};
     const RequestDraft& draft = drafts[currentRequestId];
+    const auto safety = detail::interactiveRequestResponseSafety(*source);
+    const bool negativeApproval = (isSimpleApproval(request.kind) || isReviewApproval(request.kind))
+                                  && (draft.approvalIndex == 3 || draft.approvalIndex == 4);
+    if (safety == InteractiveRequestResponseSafety::Disabled
+        || (safety == InteractiveRequestResponseSafety::NegativeOnly && !negativeApproval)) {
+        setStatus(QStringLiteral("This request is incomplete and cannot be safely answered"), true);
+        updateSubmitEnabled();
+        return;
+    }
+
+    InteractiveRequestResponse response{request.id, request.kind, *source, typed::ApprovalDecision::cancel()};
     if (isSimpleApproval(request.kind)) {
         switch (draft.approvalIndex) {
             case 1: response.value = typed::ApprovalDecision::accept(); break;
@@ -559,10 +596,15 @@ void InteractiveRequestDialog::setStatus(const QString& value, bool error)
 void InteractiveRequestDialog::updateSubmitEnabled()
 {
     const bool supported = !approvalChoices.empty() || !questionEditors.empty();
-    const bool decisionChosen = approvalChoices.empty()
-                                || std::ranges::any_of(approvalChoices, [](const auto* choice) { return choice->isChecked(); });
+    const auto selectedApproval = std::find_if(
+        approvalChoices.begin(), approvalChoices.end(), [](const auto* choice) { return choice->isChecked(); });
+    const bool decisionChosen = approvalChoices.empty() || selectedApproval != approvalChoices.end();
+    const bool responseAllowed = currentResponseSafety == InteractiveRequestResponseSafety::Complete
+                                 || (currentResponseSafety == InteractiveRequestResponseSafety::NegativeOnly
+                                     && selectedApproval != approvalChoices.end()
+                                     && std::distance(approvalChoices.begin(), selectedApproval) >= 2);
     const bool busy = !submittingRequestId.empty() || submittedRequestIds.contains(currentRequestId);
-    submitButton->setEnabled(currentRequestRespondable && supported && decisionChosen && !busy);
+    submitButton->setEnabled(responseAllowed && supported && decisionChosen && !busy);
 }
 
 } // namespace codexui

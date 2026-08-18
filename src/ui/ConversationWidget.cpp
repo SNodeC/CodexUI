@@ -295,7 +295,10 @@ QString pendingRequestDetail(const sdk::State& state, const sdk::ItemState& item
 {
     for (const auto& request : state.pendingRequests())
     {
-        if (!request.itemId || *request.itemId != item.id) continue;
+        if (!request.threadId || !request.turnId || !request.itemId || !item.threadId || !item.turnId
+            || *request.threadId != *item.threadId || *request.turnId != *item.turnId
+            || *request.itemId != item.id)
+            continue;
         const auto view = sdk::pendingRequestPresentation(request);
         QString result = QStringLiteral("Awaiting %1").arg(humanize(fromUtf8(frontend::toString(view.kind))));
         if (view.fileChangeCount)

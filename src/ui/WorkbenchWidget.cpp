@@ -41,10 +41,13 @@ std::optional<QString> interactiveResponseValidationError(
         return QStringLiteral("This request is no longer pending");
     if (source->request.kind != response.kind)
         return QStringLiteral("This request changed; review it and retry");
-    if (!detail::interactiveRequestCanRespond(*source))
-        return QStringLiteral("This request is incomplete and cannot be safely answered");
     if (*source != response.source)
         return QStringLiteral("This request changed; review it and retry");
+    const auto safety = detail::interactiveRequestResponseSafety(*source);
+    if (safety == InteractiveRequestResponseSafety::Disabled
+        || (safety == InteractiveRequestResponseSafety::NegativeOnly
+            && !detail::interactiveResponseIsNegative(response)))
+        return QStringLiteral("This request is incomplete and cannot be safely answered");
     return std::nullopt;
 }
 
