@@ -28,8 +28,18 @@ namespace codexui::detail {
 [[nodiscard]] std::optional<QString> unixPeerCredentialError(qintptr socketDescriptor, uid_t expectedUserId) noexcept;
 
 struct StateUpdateScope {
+    struct ItemContentIdentity {
+        QString threadId;
+        QString turnId;
+        QString itemId;
+
+        bool operator==(const ItemContentIdentity&) const = default;
+    };
+
     QStringList affectedThreadIds;
+    QStringList fullyAffectedThreadIds;
     QStringList affectedInspectorThreadIds;
+    std::vector<ItemContentIdentity> affectedItemContents;
     bool allThreadsAffected = false;
     bool allInspectorsAffected = false;
     bool sidebarAffected = false;

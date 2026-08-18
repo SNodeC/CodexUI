@@ -209,8 +209,28 @@ bool testScopedItemPresentationChanges()
                                        ai::openai::codex::typed::ThreadId{"target-thread"},
                                        ai::openai::codex::typed::TurnId{"target-turn"}});
     streamedUpdate.changes.push_back(
+        sdk::ItemContentReplacedChange{ai::openai::codex::typed::ItemId{"streamed-item"},
+                                       sdk::ItemContentChannel::AgentText,
+                                       ai::openai::codex::typed::ThreadId{"target-thread"},
+                                       ai::openai::codex::typed::TurnId{"target-turn"}});
+    streamedUpdate.changes.push_back(
         sdk::CursorAdvancedChange{ai::openai::codex::frontend::SequenceNumber{42}});
     const auto streamed = codexui::detail::stateUpdateScope(streamedUpdate);
+
+    sdk::StateUpdate partiallyScopedUpdate;
+    partiallyScopedUpdate.changes.push_back(
+        sdk::ItemContentReplacedChange{ai::openai::codex::typed::ItemId{"partial-item"},
+                                       sdk::ItemContentChannel::AgentText,
+                                       ai::openai::codex::typed::ThreadId{"target-thread"},
+                                       std::nullopt});
+    const auto partiallyScoped = codexui::detail::stateUpdateScope(partiallyScopedUpdate);
+
+    sdk::StateUpdate mixedUpdate = streamedUpdate;
+    mixedUpdate.changes.push_back(sdk::ItemUpsertedChange{
+        ai::openai::codex::typed::ItemId{"structural-item"},
+        ai::openai::codex::typed::ThreadId{"target-thread"},
+        ai::openai::codex::typed::TurnId{"target-turn"}});
+    const auto mixed = codexui::detail::stateUpdateScope(mixedUpdate);
 
     sdk::StateUpdate unscopedUpdate;
     unscopedUpdate.changes.push_back(
@@ -230,17 +250,39 @@ bool testScopedItemPresentationChanges()
     const auto cursor = codexui::detail::stateUpdateScope(cursorUpdate);
 
     bool passed = expect(scoped.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
+                             && scoped.fullyAffectedThreadIds
+                                    == QStringList{QStringLiteral("target-thread")}
                              && scoped.affectedInspectorThreadIds
                                     == QStringList{QStringLiteral("target-thread")}
                              && !scoped.allThreadsAffected && !scoped.allInspectorsAffected
                              && !scoped.sidebarAffected && scoped.hasPresentationChange,
                          "a scoped item upsert must refresh its canonical conversation and Inspector");
     passed &= expect(streamed.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
+                         && streamed.fullyAffectedThreadIds.empty()
                          && streamed.affectedInspectorThreadIds.empty()
+                         && streamed.affectedItemContents
+                                == std::vector<codexui::detail::StateUpdateScope::ItemContentIdentity>{
+                                    {QStringLiteral("target-thread"),
+                                     QStringLiteral("target-turn"),
+                                     QStringLiteral("streamed-item")}}
                          && !streamed.allThreadsAffected && !streamed.allInspectorsAffected
                          && !streamed.sidebarAffected && streamed.hasPresentationChange,
-                     "streamed item content must refresh only its canonical conversation");
+                     "streamed item content must carry its exact composite identity");
+    passed &= expect(partiallyScoped.affectedThreadIds
+                             == QStringList{QStringLiteral("target-thread")}
+                         && partiallyScoped.fullyAffectedThreadIds
+                                == QStringList{QStringLiteral("target-thread")}
+                         && partiallyScoped.affectedItemContents.empty()
+                         && !partiallyScoped.allThreadsAffected,
+                     "partially scoped item content must require bounded full thread reconciliation");
+    passed &= expect(mixed.fullyAffectedThreadIds
+                             == QStringList{QStringLiteral("target-thread")}
+                         && mixed.affectedItemContents.size() == 1
+                         && !mixed.allThreadsAffected,
+                     "a structural change mixed with exact content must require full thread reconciliation");
     passed &= expect(unscoped.affectedThreadIds.empty() && unscoped.allThreadsAffected
+                         && unscoped.fullyAffectedThreadIds.empty()
+                         && unscoped.affectedItemContents.empty()
                          && unscoped.affectedInspectorThreadIds.empty()
                          && unscoped.allInspectorsAffected && !unscoped.sidebarAffected
                          && unscoped.hasPresentationChange,

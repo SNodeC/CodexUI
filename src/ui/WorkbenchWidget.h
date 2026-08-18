@@ -6,7 +6,9 @@
 #include "ui/InteractiveRequestDialog.h"
 
 #include <QWidget>
+#include <QHash>
 #include <QString>
+#include <QStringList>
 
 #include <optional>
 
@@ -39,7 +41,8 @@ private:
     void scheduleStateRefresh(const detail::StateUpdateScope& scope);
     void refreshState(bool refreshSelectedPresentation = true,
                       bool refreshInspector = true,
-                      bool refreshSidebar = true);
+                      bool refreshSidebar = true,
+                      const QHash<QString, QStringList>* exactContentChanges = nullptr);
     void refreshControls();
     void refreshControllerStatus();
     void selectThread(const QString& threadId);
@@ -99,6 +102,8 @@ private:
     bool requestResponseInFlight = false;
     bool stateRefreshPending = false;
     bool selectedPresentationRefreshPending = false;
+    bool selectedPresentationFullRefreshPending = false;
+    QHash<QString, QStringList> selectedContentRefreshPending;
     bool inspectorRefreshPending = false;
     bool sidebarRefreshPending = false;
 };

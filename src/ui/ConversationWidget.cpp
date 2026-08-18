@@ -1230,7 +1230,10 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
                   QStringLiteral("Choose a synchronized thread from the sidebar."));
 }
 
-void ConversationWidget::render(const sdk::State& state, const QString& threadId, bool newThreadDraft)
+void ConversationWidget::render(const sdk::State& state,
+                                const QString& threadId,
+                                bool newThreadDraft,
+                                const QHash<QString, QStringList>* exactContentChanges)
 {
     auto* scrollBar = scrollArea->verticalScrollBar();
     const int previousScroll = scrollBar->value();
@@ -1240,6 +1243,8 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
     if (!thread && !threadChanged && threadId.isEmpty())
         return;
     const bool followLatest = threadChanged || wasNearBottom || followingLatest;
+    const bool exactContentOnly = exactContentChanges && !threadChanged && thread && !newThreadDraft
+                                  && !renderedSummaryKey.isEmpty();
     const std::uint64_t generation = ++renderGeneration;
     bool timelineShrank = false;
     if (threadChanged)
@@ -1338,8 +1343,10 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
             }
         }
 
-        const QByteArray summaryKey = turnSummaryPresentationKey(state, *thread, currentTurn, currentIndex);
-        if (summaryKey != renderedSummaryKey)
+        const QByteArray summaryKey = exactContentOnly
+                                          ? renderedSummaryKey
+                                          : turnSummaryPresentationKey(state, *thread, currentTurn, currentIndex);
+        if (!exactContentOnly && summaryKey != renderedSummaryKey)
         {
             renderedSummaryKey = summaryKey;
             clearLayout(turnSummaryLayout);
@@ -1640,8 +1647,24 @@ void ConversationWidget::render(const sdk::State& state, const QString& threadId
                 for (const TimelineSegment* segment : visibleTurn.segments)
                 {
                     const QString storage = segmentStorageKey(turnId, segment->id);
-                    const QByteArray segmentKey = segmentPresentationKey(state, *segment);
                     QWidget* oldWidget = renderedSegmentWidgets.value(storage);
+                    if (oldWidget && exactContentOnly)
+                    {
+                        const auto changedItems = exactContentChanges->constFind(turnId);
+                        const bool affected = changedItems != exactContentChanges->cend()
+                                              && std::any_of(
+                                                  segment->items.cbegin(),
+                                                  segment->items.cend(),
+                                                  [&changedItems](const sdk::ItemState* item)
+                                                  {
+                                                      return item
+                                                             && changedItems->contains(
+                                                                 fromUtf8(item->id.value));
+                                                  });
+                        if (!affected)
+                            continue;
+                    }
+                    const QByteArray segmentKey = segmentPresentationKey(state, *segment);
                     if (oldWidget && renderedSegmentKeys.value(storage) == segmentKey)
                         continue;
 

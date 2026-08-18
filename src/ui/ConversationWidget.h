@@ -37,7 +37,8 @@ public:
     explicit ConversationWidget(QWidget* parent = nullptr);
     void render(const ai::openai::codex::frontend::client::State& state,
                 const QString& threadId,
-                bool newThreadDraft = false);
+                bool newThreadDraft = false,
+                const QHash<QString, QStringList>* exactContentChanges = nullptr);
     void clearPrompt();
     void focusComposer();
     void setActionState(bool sendAllowed, bool stopAllowed, bool editorAllowed);

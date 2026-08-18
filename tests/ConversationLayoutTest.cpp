@@ -604,6 +604,60 @@ bool testInPlaceMessageReplacement()
     return passed;
 }
 
+bool testExactContentInvalidation()
+{
+    ThreadFixture fixture{"exact-content",
+                          {{"turn-exact-content",
+                            {{"item-exact-first",
+                              frontend::ThreadItemKind::AgentMessage,
+                              "first prefix",
+                              "in_progress"},
+                             {"item-exact-second",
+                              frontend::ThreadItemKind::AgentMessage,
+                              "second stable",
+                              "completed"}}}}};
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(makeState({fixture}), QStringLiteral("exact-content"));
+    settleTimeline();
+
+    QPointer<QWidget> first = segment(conversation, QStringLiteral("message:item-exact-first"));
+    QPointer<QWidget> second = segment(conversation, QStringLiteral("message:item-exact-second"));
+    QPointer<QLabel> firstContent =
+        messageLabel(first, QStringLiteral("conversationMessageContent"));
+    QPointer<QLabel> secondContent =
+        messageLabel(second, QStringLiteral("conversationMessageContent"));
+    QWidget* const firstAddress = first.data();
+    QWidget* const secondAddress = second.data();
+
+    fixture.turns.front().messages.front().text = "first canonical continuation";
+    const QHash<QString, QStringList> exactChanges{
+        {QStringLiteral("turn-exact-content"),
+         QStringList{QStringLiteral("item-exact-first")}}};
+    conversation.render(makeState({fixture}),
+                        QStringLiteral("exact-content"),
+                        false,
+                        &exactChanges);
+    settleTimeline();
+
+    bool passed = true;
+    passed &= expect(first && first.data() == firstAddress && firstContent
+                         && firstContent->text() == QStringLiteral("first canonical continuation"),
+                     "an exact content update must mutate its canonical message in place");
+    passed &= expect(second && second.data() == secondAddress && secondContent
+                         && secondContent->text() == QStringLiteral("second stable"),
+                     "an exact content update must preserve unaffected segment widgets");
+
+    fixture.turns.front().messages.back().text = "second structural fallback";
+    conversation.render(makeState({fixture}), QStringLiteral("exact-content"));
+    settleTimeline();
+    passed &= expect(second && second.data() == secondAddress && secondContent
+                         && secondContent->text() == QStringLiteral("second structural fallback"),
+                     "a full reconciliation fallback must still refresh every changed canonical segment");
+    return passed;
+}
+
 bool testSegmentReplacementShrink()
 {
     ThreadFixture fixture = singleTurn("replacement", 1);
@@ -726,6 +780,7 @@ int main(int argc, char** argv)
     passed &= testHotTurnWindow();
     passed &= testPointerPreservingAppend();
     passed &= testInPlaceMessageReplacement();
+    passed &= testExactContentInvalidation();
     passed &= testSegmentReplacementShrink();
     passed &= testThreadSwitchWindow();
 

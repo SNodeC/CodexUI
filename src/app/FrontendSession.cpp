@@ -57,12 +57,30 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
     const auto addThread = [&scope, &addUnique](std::string_view id) {
         addUnique(scope.affectedThreadIds, id);
     };
+    const auto addFullyAffectedThread = [&scope, &addThread, &addUnique](std::string_view id) {
+        addThread(id);
+        addUnique(scope.fullyAffectedThreadIds, id);
+    };
     const auto addInspectorThread = [&scope, &addUnique](std::string_view id) {
         addUnique(scope.affectedInspectorThreadIds, id);
     };
-    const auto markThreadAndInspector = [&addThread, &addInspectorThread](std::string_view id) {
-        addThread(id);
+    const auto markThreadAndInspector = [&addFullyAffectedThread, &addInspectorThread](std::string_view id) {
+        addFullyAffectedThread(id);
         addInspectorThread(id);
+    };
+    const auto addItemContent = [&scope, &addThread](const sdk::ItemContentReplacedChange& value) {
+        const auto asQString = [](std::string_view id) {
+            return QString::fromUtf8(id.data(), static_cast<qsizetype>(id.size()));
+        };
+        const QString threadId = asQString(value.threadId->value);
+        const QString turnId = asQString(value.turnId->value);
+        const QString itemId = asQString(value.itemId.value);
+        addThread(value.threadId->value);
+        const StateUpdateScope::ItemContentIdentity identity{threadId, turnId, itemId};
+        if (std::find(scope.affectedItemContents.cbegin(),
+                      scope.affectedItemContents.cend(),
+                      identity) == scope.affectedItemContents.cend())
+            scope.affectedItemContents.push_back(identity);
     };
 
     if (update.changes.empty())
@@ -95,7 +113,7 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                 else if constexpr (std::is_same_v<Change, sdk::ThreadUpsertedChange>
                                    || std::is_same_v<Change, sdk::ThreadRemovedChange>)
                 {
-                    addThread(value.threadId.value);
+                    addFullyAffectedThread(value.threadId.value);
                     scope.sidebarAffected = true;
                     // The selected Inspector can show status/model facts from
                     // a linked subagent thread even when its conversation is
@@ -134,11 +152,13 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                     // not Sidebar thread facts or Inspector semantics. The SDK
                     // exposes both replacement and negotiated append wire
                     // updates through this canonical public change.
-                    if (value.threadId)
-                        addThread(value.threadId->value);
+                    if (value.threadId && value.turnId)
+                        addItemContent(value);
+                    else if (value.threadId)
+                        addFullyAffectedThread(value.threadId->value);
                     else if (value.turnId) {
                         if (const auto* turn = update.state.turn(*value.turnId))
-                            addThread(turn->threadId.value);
+                            addFullyAffectedThread(turn->threadId.value);
                         else {
                             scope.allThreadsAffected = true;
                             scope.allInspectorsAffected = true;
