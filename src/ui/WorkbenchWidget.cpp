@@ -254,16 +254,57 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     refreshState();
 }
 
-void WorkbenchWidget::scheduleStateRefresh(const QStringList& affectedThreadIds,
-                                           bool allThreadsAffected,
-                                           bool inspectorAffected)
+void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope)
 {
-    const bool selectedAffected = allThreadsAffected
-                                  || affectedThreadIds.contains(selectedThreadId)
-                                  || (!newThreadIdAwaitingState.isEmpty()
-                                      && affectedThreadIds.contains(newThreadIdAwaitingState));
-    selectedPresentationRefreshPending = selectedPresentationRefreshPending || selectedAffected;
-    inspectorRefreshPending = inspectorRefreshPending || inspectorAffected || selectedAffected;
+    const bool currentSelectionAffected = scope.affectedThreadIds.contains(selectedThreadId);
+    const bool awaitedSelectionAffected = !newThreadIdAwaitingState.isEmpty()
+                                          && scope.affectedThreadIds.contains(newThreadIdAwaitingState);
+    const bool selectedAffected = scope.allThreadsAffected || currentSelectionAffected
+                                  || awaitedSelectionAffected;
+    const bool selectedInspectorAffected = scope.allInspectorsAffected
+                                           || scope.affectedInspectorThreadIds.contains(selectedThreadId)
+                                           || (!newThreadIdAwaitingState.isEmpty()
+                                               && scope.affectedInspectorThreadIds.contains(
+                                                   newThreadIdAwaitingState));
+    // Keep the factual State revision current without invoking the expensive
+    // Inspector projections when none of their selected semantics changed.
+    if (!selectedInspectorAffected)
+        inspector->updateStateRevision(frontendSession.state().revision());
+    if (!selectedAffected && !selectedInspectorAffected && !scope.sidebarAffected)
+        return;
+    if (selectedAffected)
+    {
+        selectedPresentationRefreshPending = true;
+        const bool requiresFullRefresh = scope.allThreadsAffected || awaitedSelectionAffected
+                                         || scope.fullyAffectedThreadIds.contains(selectedThreadId);
+        if (requiresFullRefresh)
+        {
+            selectedPresentationFullRefreshPending = true;
+            selectedContentRefreshPending.clear();
+        }
+        else if (!selectedPresentationFullRefreshPending)
+        {
+            bool foundExactContent = false;
+            for (const auto& identity : scope.affectedItemContents)
+            {
+                if (identity.threadId != selectedThreadId)
+                    continue;
+                foundExactContent = true;
+                QStringList& itemIds = selectedContentRefreshPending[identity.turnId];
+                if (!itemIds.contains(identity.itemId))
+                    itemIds.append(identity.itemId);
+            }
+            // A conversation-affecting update without an exact item identity
+            // must retain the existing bounded full reconciliation.
+            if (!foundExactContent)
+            {
+                selectedPresentationFullRefreshPending = true;
+                selectedContentRefreshPending.clear();
+            }
+        }
+    }
+    inspectorRefreshPending = inspectorRefreshPending || selectedInspectorAffected;
+    sidebarRefreshPending = sidebarRefreshPending || scope.sidebarAffected;
     if (stateRefreshPending)
         return;
     stateRefreshPending = true;
@@ -275,9 +316,24 @@ void WorkbenchWidget::scheduleStateRefresh(const QStringList& affectedThreadIds,
         stateRefreshPending = false;
         const bool refreshSelectedPresentation = selectedPresentationRefreshPending;
         const bool refreshInspector = inspectorRefreshPending;
+        const bool refreshSidebar = sidebarRefreshPending;
+        const bool exactContentOnly = refreshSelectedPresentation
+                                      && !selectedPresentationFullRefreshPending
+                                      && !selectedContentRefreshPending.isEmpty();
+        QHash<QString, QStringList> exactContentChanges = std::move(selectedContentRefreshPending);
         selectedPresentationRefreshPending = false;
+        selectedPresentationFullRefreshPending = false;
+        selectedContentRefreshPending.clear();
         inspectorRefreshPending = false;
-        refreshState(refreshSelectedPresentation, refreshInspector);
+        sidebarRefreshPending = false;
+        if (exactContentOnly && !refreshInspector && !refreshSidebar
+            && conversation->updateExactMessageContent(
+                frontendSession.state(), selectedThreadId, exactContentChanges))
+            return;
+        refreshState(refreshSelectedPresentation,
+                     refreshInspector,
+                     refreshSidebar,
+                     exactContentOnly ? &exactContentChanges : nullptr);
     });
 }
 
@@ -340,11 +396,17 @@ void WorkbenchWidget::refreshLifecycle()
     refreshControls();
 }
 
-void WorkbenchWidget::refreshState(bool refreshSelectedPresentation, bool refreshInspector)
+void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
+                                   bool refreshInspector,
+                                   bool refreshSidebar,
+                                   const QHash<QString, QStringList>* exactContentChanges)
 {
     stateRefreshPending = false;
     selectedPresentationRefreshPending = false;
+    selectedPresentationFullRefreshPending = false;
+    selectedContentRefreshPending.clear();
     inspectorRefreshPending = false;
+    sidebarRefreshPending = false;
     const auto& state = frontendSession.state();
     const auto threads = state.threads();
     const bool ready = frontendSession.lifecycle() == FrontendSession::Lifecycle::Ready;
@@ -366,14 +428,19 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation, bool refres
     const bool selectionChanged = previousThreadId != selectedThreadId
                                   || previousNewThreadDraft != newThreadDraft;
     refreshSelectedPresentation = refreshSelectedPresentation || selectionChanged;
-    refreshInspector = refreshInspector || refreshSelectedPresentation;
+    refreshInspector = refreshInspector || selectionChanged;
+    refreshSidebar = refreshSidebar || selectionChanged;
 
-    sidebar->setThreads(state, selectedThreadId);
+    if (refreshSidebar)
+        sidebar->setThreads(state, selectedThreadId);
 
     // ConversationWidget resolves the stable selection against this exact
     // immutable State and never retains backend object addresses.
     if (refreshSelectedPresentation)
-        conversation->render(state, selectedThreadId, newThreadDraft);
+        conversation->render(state,
+                             selectedThreadId,
+                             newThreadDraft,
+                             selectionChanged ? nullptr : exactContentChanges);
 
     if (refreshInspector)
         inspector->render(state, newThreadDraft ? QString{} : selectedThreadId,

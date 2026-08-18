@@ -28,9 +28,21 @@ namespace codexui::detail {
 [[nodiscard]] std::optional<QString> unixPeerCredentialError(qintptr socketDescriptor, uid_t expectedUserId) noexcept;
 
 struct StateUpdateScope {
+    struct ItemContentIdentity {
+        QString threadId;
+        QString turnId;
+        QString itemId;
+
+        bool operator==(const ItemContentIdentity&) const = default;
+    };
+
     QStringList affectedThreadIds;
+    QStringList fullyAffectedThreadIds;
+    QStringList affectedInspectorThreadIds;
+    std::vector<ItemContentIdentity> affectedItemContents;
     bool allThreadsAffected = false;
-    bool inspectorAffected = false;
+    bool allInspectorsAffected = false;
+    bool sidebarAffected = false;
     bool hasPresentationChange = false;
 };
 
@@ -93,9 +105,7 @@ public:
 signals:
     void lifecycleChanged();
     void statusChanged();
-    void stateChanged(const QStringList& affectedThreadIds,
-                      bool allThreadsAffected,
-                      bool inspectorAffected);
+    void stateChanged(const codexui::detail::StateUpdateScope& scope);
 
 private:
     friend struct FrontendSessionTestAccess;
@@ -129,6 +139,9 @@ private:
     void handleConnectionStateChange(const ai::openai::codex::frontend::client::ConnectionStateChange& change);
     void reportDiagnostic(QString message);
     void scheduleSocketRead();
+    void clearInbound() noexcept;
+    [[nodiscard]] bool hasCompleteInboundFrame() const noexcept;
+    void compactInbound() noexcept;
     void reconcileRequestedThreadReads();
     void startConnection();
     void scheduleReconnect();
@@ -154,6 +167,7 @@ private:
     QTimer reconnectTimer;
     QTimer outboundDrainTimer;
     QByteArray inboundBuffer;
+    qsizetype inboundOffset = 0;
     std::unique_ptr<Client> client;
     Connection connection;
     ai::openai::codex::frontend::client::State currentState;

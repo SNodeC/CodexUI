@@ -37,6 +37,32 @@ struct FrontendSessionTestAccess
         return session.automaticReconnectEnabled;
     }
 
+    static void setInbound(FrontendSession& session, QByteArray bytes, qsizetype offset)
+    {
+        session.inboundBuffer = std::move(bytes);
+        session.inboundOffset = offset;
+    }
+
+    static void compactInbound(FrontendSession& session)
+    {
+        session.compactInbound();
+    }
+
+    static QByteArray inboundBytes(const FrontendSession& session)
+    {
+        return session.inboundBuffer;
+    }
+
+    static qsizetype inboundOffset(const FrontendSession& session)
+    {
+        return session.inboundOffset;
+    }
+
+    static bool hasCompleteInboundFrame(const FrontendSession& session)
+    {
+        return session.hasCompleteInboundFrame();
+    }
+
     static void prepareReconnectReset(FrontendSession& session)
     {
         session.automaticReconnectEnabled = false;
@@ -202,6 +228,36 @@ bool testScopedItemPresentationChanges()
         ai::openai::codex::typed::TurnId{"target-turn"}});
     const auto scoped = codexui::detail::stateUpdateScope(scopedUpdate);
 
+    sdk::StateUpdate streamedUpdate;
+    streamedUpdate.changes.push_back(
+        sdk::ItemContentReplacedChange{ai::openai::codex::typed::ItemId{"streamed-item"},
+                                       sdk::ItemContentChannel::AgentText,
+                                       ai::openai::codex::typed::ThreadId{"target-thread"},
+                                       ai::openai::codex::typed::TurnId{"target-turn"}});
+    streamedUpdate.changes.push_back(
+        sdk::ItemContentReplacedChange{ai::openai::codex::typed::ItemId{"streamed-item"},
+                                       sdk::ItemContentChannel::AgentText,
+                                       ai::openai::codex::typed::ThreadId{"target-thread"},
+                                       ai::openai::codex::typed::TurnId{"target-turn"}});
+    streamedUpdate.changes.push_back(
+        sdk::CursorAdvancedChange{ai::openai::codex::frontend::SequenceNumber{42}});
+    const auto streamed = codexui::detail::stateUpdateScope(streamedUpdate);
+
+    sdk::StateUpdate partiallyScopedUpdate;
+    partiallyScopedUpdate.changes.push_back(
+        sdk::ItemContentReplacedChange{ai::openai::codex::typed::ItemId{"partial-item"},
+                                       sdk::ItemContentChannel::AgentText,
+                                       ai::openai::codex::typed::ThreadId{"target-thread"},
+                                       std::nullopt});
+    const auto partiallyScoped = codexui::detail::stateUpdateScope(partiallyScopedUpdate);
+
+    sdk::StateUpdate mixedUpdate = streamedUpdate;
+    mixedUpdate.changes.push_back(sdk::ItemUpsertedChange{
+        ai::openai::codex::typed::ItemId{"structural-item"},
+        ai::openai::codex::typed::ThreadId{"target-thread"},
+        ai::openai::codex::typed::TurnId{"target-turn"}});
+    const auto mixed = codexui::detail::stateUpdateScope(mixedUpdate);
+
     sdk::StateUpdate unscopedUpdate;
     unscopedUpdate.changes.push_back(
         sdk::ItemContentReplacedChange{ai::openai::codex::typed::ItemId{"duplicate-item"},
@@ -210,12 +266,59 @@ bool testScopedItemPresentationChanges()
                                        std::nullopt});
     const auto unscoped = codexui::detail::stateUpdateScope(unscopedUpdate);
 
+    sdk::StateUpdate replacementUpdate;
+    replacementUpdate.changes.push_back(sdk::StateReplacedChange{});
+    const auto replacement = codexui::detail::stateUpdateScope(replacementUpdate);
+
+    sdk::StateUpdate cursorUpdate;
+    cursorUpdate.changes.push_back(
+        sdk::CursorAdvancedChange{ai::openai::codex::frontend::SequenceNumber{43}});
+    const auto cursor = codexui::detail::stateUpdateScope(cursorUpdate);
+
     bool passed = expect(scoped.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
-                             && !scoped.allThreadsAffected && scoped.hasPresentationChange,
-                         "a scoped item change must refresh its canonical thread without bare-ID lookup");
+                             && scoped.fullyAffectedThreadIds
+                                    == QStringList{QStringLiteral("target-thread")}
+                             && scoped.affectedInspectorThreadIds
+                                    == QStringList{QStringLiteral("target-thread")}
+                             && !scoped.allThreadsAffected && !scoped.allInspectorsAffected
+                             && !scoped.sidebarAffected && scoped.hasPresentationChange,
+                         "a scoped item upsert must refresh its canonical conversation and Inspector");
+    passed &= expect(streamed.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
+                         && streamed.fullyAffectedThreadIds.empty()
+                         && streamed.affectedInspectorThreadIds.empty()
+                         && streamed.affectedItemContents
+                                == std::vector<codexui::detail::StateUpdateScope::ItemContentIdentity>{
+                                    {QStringLiteral("target-thread"),
+                                     QStringLiteral("target-turn"),
+                                     QStringLiteral("streamed-item")}}
+                         && !streamed.allThreadsAffected && !streamed.allInspectorsAffected
+                         && !streamed.sidebarAffected && streamed.hasPresentationChange,
+                     "streamed item content must carry its exact composite identity");
+    passed &= expect(partiallyScoped.affectedThreadIds
+                             == QStringList{QStringLiteral("target-thread")}
+                         && partiallyScoped.fullyAffectedThreadIds
+                                == QStringList{QStringLiteral("target-thread")}
+                         && partiallyScoped.affectedItemContents.empty()
+                         && !partiallyScoped.allThreadsAffected,
+                     "partially scoped item content must require bounded full thread reconciliation");
+    passed &= expect(mixed.fullyAffectedThreadIds
+                             == QStringList{QStringLiteral("target-thread")}
+                         && mixed.affectedItemContents.size() == 1
+                         && !mixed.allThreadsAffected,
+                     "a structural change mixed with exact content must require full thread reconciliation");
     passed &= expect(unscoped.affectedThreadIds.empty() && unscoped.allThreadsAffected
+                         && unscoped.fullyAffectedThreadIds.empty()
+                         && unscoped.affectedItemContents.empty()
+                         && unscoped.affectedInspectorThreadIds.empty()
+                         && unscoped.allInspectorsAffected && !unscoped.sidebarAffected
                          && unscoped.hasPresentationChange,
-                     "an unscoped item change must conservatively refresh all threads");
+                     "an unscoped item change must conservatively refresh all thread-bound presentations");
+    passed &= expect(replacement.allThreadsAffected && replacement.allInspectorsAffected
+                         && replacement.sidebarAffected && replacement.hasPresentationChange,
+                     "a State replacement must conservatively refresh every presentation");
+    passed &= expect(!cursor.allThreadsAffected && !cursor.allInspectorsAffected
+                         && !cursor.sidebarAffected && cursor.hasPresentationChange,
+                     "a cursor-only update must dispatch its revision without dirtying broad presentation");
     return passed;
 }
 
@@ -501,13 +604,50 @@ bool testOutboundQueue()
     return passed;
 }
 
+bool testInboundBufferCompaction()
+{
+    codexui::FrontendSession session;
+    const QByteArray prefix(300 * 1024, 'p');
+    const QByteArray tail(300 * 1024, 't');
+    const QByteArray backlog = prefix + tail;
+
+    codexui::FrontendSessionTestAccess::setInbound(session, backlog, 64 * 1024);
+    codexui::FrontendSessionTestAccess::compactInbound(session);
+    bool passed = expect(
+        codexui::FrontendSessionTestAccess::inboundBytes(session) == backlog
+            && codexui::FrontendSessionTestAccess::inboundOffset(session) == 64 * 1024,
+        "small consumed prefixes must remain as an offset instead of moving a large replay tail");
+
+    codexui::FrontendSessionTestAccess::setInbound(session, backlog, prefix.size());
+    codexui::FrontendSessionTestAccess::compactInbound(session);
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::inboundBytes(session) == tail
+            && codexui::FrontendSessionTestAccess::inboundOffset(session) == 0,
+        "a large consumed prefix must compact once it reaches both the threshold and half the buffer");
+
+    const QByteArray completeAndPartial("done\npartial");
+    codexui::FrontendSessionTestAccess::setInbound(session, completeAndPartial, 0);
+    const bool completeAtStart = codexui::FrontendSessionTestAccess::hasCompleteInboundFrame(session);
+    codexui::FrontendSessionTestAccess::setInbound(session, completeAndPartial, 5);
+    passed &= expect(completeAtStart
+                         && !codexui::FrontendSessionTestAccess::hasCompleteInboundFrame(session),
+                     "frame detection must ignore newlines in the consumed prefix");
+
+    codexui::FrontendSessionTestAccess::setInbound(session, tail, tail.size());
+    codexui::FrontendSessionTestAccess::compactInbound(session);
+    passed &= expect(codexui::FrontendSessionTestAccess::inboundBytes(session).isEmpty()
+                         && codexui::FrontendSessionTestAccess::inboundOffset(session) == 0,
+                     "a fully consumed inbound buffer must reset without retaining capacity state");
+    return passed;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
     return testPeerCredentials() && testScopedItemPresentationChanges() && testLifecycleAndDiagnostics()
-               && testOutboundQueue()
+               && testOutboundQueue() && testInboundBufferCompaction()
            ? 0
            : 1;
 }

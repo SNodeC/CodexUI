@@ -81,6 +81,8 @@ if(BUILD_TESTING)
         tests/ConversationLayoutTest.cpp
         src/ui/ConversationWidget.cpp
         src/ui/ConversationWidget.h
+        src/ui/InspectorWidget.cpp
+        src/ui/InspectorWidget.h
     )
     target_compile_features(CodexUIConversationLayoutTest PRIVATE cxx_std_20)
     target_include_directories(CodexUIConversationLayoutTest PRIVATE src)

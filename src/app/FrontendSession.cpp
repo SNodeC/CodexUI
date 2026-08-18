@@ -10,6 +10,7 @@
 
 #include <QByteArray>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QStringList>
 #include <QTimer>
 
@@ -48,17 +49,46 @@ std::optional<QString> unixPeerCredentialError(qintptr socketDescriptor, uid_t e
 StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
 {
     StateUpdateScope scope;
-    const auto addThread = [&scope](std::string_view id)
+    const auto addUnique = [](QStringList& ids, std::string_view id)
     {
         const QString threadId = QString::fromUtf8(id.data(), static_cast<qsizetype>(id.size()));
-        if (!scope.affectedThreadIds.contains(threadId))
-            scope.affectedThreadIds.append(threadId);
+        if (!ids.contains(threadId))
+            ids.append(threadId);
+    };
+    const auto addThread = [&scope, &addUnique](std::string_view id) {
+        addUnique(scope.affectedThreadIds, id);
+    };
+    const auto addFullyAffectedThread = [&scope, &addThread, &addUnique](std::string_view id) {
+        addThread(id);
+        addUnique(scope.fullyAffectedThreadIds, id);
+    };
+    const auto addInspectorThread = [&scope, &addUnique](std::string_view id) {
+        addUnique(scope.affectedInspectorThreadIds, id);
+    };
+    const auto markThreadAndInspector = [&addFullyAffectedThread, &addInspectorThread](std::string_view id) {
+        addFullyAffectedThread(id);
+        addInspectorThread(id);
+    };
+    const auto addItemContent = [&scope, &addThread](const sdk::ItemContentReplacedChange& value) {
+        const auto asQString = [](std::string_view id) {
+            return QString::fromUtf8(id.data(), static_cast<qsizetype>(id.size()));
+        };
+        const QString threadId = asQString(value.threadId->value);
+        const QString turnId = asQString(value.turnId->value);
+        const QString itemId = asQString(value.itemId.value);
+        addThread(value.threadId->value);
+        const StateUpdateScope::ItemContentIdentity identity{threadId, turnId, itemId};
+        if (std::find(scope.affectedItemContents.cbegin(),
+                      scope.affectedItemContents.cend(),
+                      identity) == scope.affectedItemContents.cend())
+            scope.affectedItemContents.push_back(identity);
     };
 
     if (update.changes.empty())
     {
         scope.allThreadsAffected = true;
-        scope.inspectorAffected = true;
+        scope.allInspectorsAffected = true;
+        scope.sidebarAffected = true;
         scope.hasPresentationChange = true;
         return scope;
     }
@@ -71,58 +101,94 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                 using Change = std::decay_t<decltype(value)>;
                 if constexpr (std::is_same_v<Change, sdk::CursorAdvancedChange>)
                 {
-                    // Info shows the immutable State revision. Its label can be
-                    // updated in place without rebuilding the conversation.
-                    scope.inspectorAffected = true;
+                    // A cursor-only update changes only the Inspector's cheap
+                    // revision value; it must not dirty any expensive pane.
                 }
                 else if constexpr (std::is_same_v<Change, sdk::StateReplacedChange>)
                 {
                     scope.allThreadsAffected = true;
-                    scope.inspectorAffected = true;
+                    scope.allInspectorsAffected = true;
+                    scope.sidebarAffected = true;
                 }
                 else if constexpr (std::is_same_v<Change, sdk::ThreadUpsertedChange>
                                    || std::is_same_v<Change, sdk::ThreadRemovedChange>)
                 {
-                    addThread(value.threadId.value);
+                    addFullyAffectedThread(value.threadId.value);
+                    scope.sidebarAffected = true;
                     // The selected Inspector can show status/model facts from
                     // a linked subagent thread even when its conversation is
                     // not selected.
-                    scope.inspectorAffected = true;
+                    scope.allInspectorsAffected = true;
                 }
                 else if constexpr (std::is_same_v<Change, sdk::TurnUpsertedChange>)
                 {
                     if (const auto* turn = update.state.turn(value.turnId))
-                        addThread(turn->threadId.value);
-                    else
+                        markThreadAndInspector(turn->threadId.value);
+                    else {
                         scope.allThreadsAffected = true;
+                        scope.allInspectorsAffected = true;
+                    }
                 }
-                else if constexpr (std::is_same_v<Change, sdk::ItemUpsertedChange>
-                                   || std::is_same_v<Change, sdk::ItemContentReplacedChange>)
+                else if constexpr (std::is_same_v<Change, sdk::ItemUpsertedChange>)
                 {
                     if (value.threadId)
-                        addThread(value.threadId->value);
+                        markThreadAndInspector(value.threadId->value);
                     else if (value.turnId) {
                         if (const auto* turn = update.state.turn(*value.turnId))
-                            addThread(turn->threadId.value);
-                        else
+                            markThreadAndInspector(turn->threadId.value);
+                        else {
                             scope.allThreadsAffected = true;
+                            scope.allInspectorsAffected = true;
+                        }
                     }
-                    else
+                    else {
                         scope.allThreadsAffected = true;
+                        scope.allInspectorsAffected = true;
+                    }
+                }
+                else if constexpr (std::is_same_v<Change, sdk::ItemContentReplacedChange>)
+                {
+                    // Streaming text/output changes affect the conversation,
+                    // not Sidebar thread facts or Inspector semantics. The SDK
+                    // exposes both replacement and negotiated append wire
+                    // updates through this canonical public change.
+                    if (value.threadId && value.turnId)
+                        addItemContent(value);
+                    else if (value.threadId)
+                        addFullyAffectedThread(value.threadId->value);
+                    else if (value.turnId) {
+                        if (const auto* turn = update.state.turn(*value.turnId))
+                            addFullyAffectedThread(turn->threadId.value);
+                        else {
+                            scope.allThreadsAffected = true;
+                            scope.allInspectorsAffected = true;
+                        }
+                    }
+                    else {
+                        scope.allThreadsAffected = true;
+                        scope.allInspectorsAffected = true;
+                    }
                 }
                 else if constexpr (std::is_same_v<Change, sdk::PendingRequestsUpdatedChange>)
                 {
                     // Pending requests contribute to activity-card status. The
                     // change has no thread identity, especially on removal.
                     scope.allThreadsAffected = true;
-                    scope.inspectorAffected = true;
+                    scope.allInspectorsAffected = true;
+                }
+                else if constexpr (std::is_same_v<Change, sdk::ThreadListUpdatedChange>)
+                {
+                    // A list replacement has no per-thread removal identity.
+                    scope.allThreadsAffected = true;
+                    scope.allInspectorsAffected = true;
+                    scope.sidebarAffected = true;
                 }
                 else
                 {
                     // Controller, pending-request, provider, capacity, and other
                     // domain projections can affect the Inspector and controls,
                     // but do not require rebuilding an unchanged conversation.
-                    scope.inspectorAffected = true;
+                    scope.allInspectorsAffected = true;
                 }
                 scope.hasPresentationChange = true;
             },
@@ -138,7 +204,10 @@ namespace {
 constexpr qsizetype maximumFrameBytes = 16 * 1024 * 1024;
 constexpr qsizetype maximumPromptBytes = 128 * 1024;
 constexpr qsizetype maximumReceiveBatchBytes = 1024 * 1024;
-constexpr int maximumReceiveBatchFrames = 32;
+constexpr qsizetype inboundCompactionThreshold = 256 * 1024;
+constexpr int minimumReceiveBatchFrames = 1;
+constexpr int maximumReceiveBatchFrames = 256;
+constexpr qint64 maximumReceiveBatchTimeMs = 4;
 
 QString operationError(const std::optional<sdk::Error>& error, const QString& fallback)
 {
@@ -192,7 +261,7 @@ FrontendSession::FrontendSession(QObject* parent)
         reconcileRequestedThreadReads();
         const detail::StateUpdateScope scope = detail::stateUpdateScope(update);
         if (scope.hasPresentationChange)
-            emit stateChanged(scope.affectedThreadIds, scope.allThreadsAffected, scope.inspectorAffected);
+            emit stateChanged(scope);
     };
     callbacks.onSynchronized = [this](const sdk::SynchronizationInfo& info) {
         reconnectDelayMs = initialReconnectDelayMs;
@@ -207,7 +276,12 @@ FrontendSession::FrontendSession(QObject* parent)
         setLifecycle(Lifecycle::Ready);
         if (clearReadyDiagnostic)
             emit statusChanged();
-        emit stateChanged({}, true, true);
+        detail::StateUpdateScope scope;
+        scope.allThreadsAffected = true;
+        scope.allInspectorsAffected = true;
+        scope.sidebarAffected = true;
+        scope.hasPresentationChange = true;
+        emit stateChanged(scope);
     };
     callbacks.onDiagnostic = [this](const sdk::Diagnostic& diagnostic) {
         if (diagnostic.severity == sdk::Diagnostic::Severity::Error)
@@ -250,7 +324,7 @@ void FrontendSession::reconnectToBackend()
     if (connection.isOpen())
         connection.close("User requested reconnect");
     connection = Connection{};
-    inboundBuffer.clear();
+    clearInbound();
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
     if (socket.state() != QLocalSocket::UnconnectedState) {
@@ -520,7 +594,7 @@ void FrontendSession::socketConnected()
 {
     reconnectTimer.stop();
     clearOutbound();
-    inboundBuffer.clear();
+    clearInbound();
     receiveContinuationScheduled = false;
     if (const auto error = detail::unixPeerCredentialError(socket.socketDescriptor(), ::geteuid())) {
         failWithoutReconnect(*error);
@@ -543,15 +617,20 @@ void FrontendSession::socketReadyRead()
 {
     receiveContinuationScheduled = false;
     const auto rejectOversizedFrame = [this] {
-        inboundBuffer.clear();
+        clearInbound();
         failWithoutReconnect(QStringLiteral("Backend frame exceeds the SDK input limit"));
         socket.abort();
     };
 
-    qsizetype consumedBytes = 0;
+    QElapsedTimer processingTime;
+    processingTime.start();
+    qsizetype consumedBytes = inboundOffset;
     qsizetype receivedBytes = 0;
     int receivedFrames = 0;
-    while (receivedFrames < maximumReceiveBatchFrames && receivedBytes < maximumReceiveBatchBytes)
+    while (receivedFrames < maximumReceiveBatchFrames
+           && receivedBytes < maximumReceiveBatchBytes
+           && (receivedFrames < minimumReceiveBatchFrames
+               || processingTime.elapsed() < maximumReceiveBatchTimeMs))
     {
         const qsizetype newline = inboundBuffer.indexOf('\n', consumedBytes);
         if (newline < 0)
@@ -601,15 +680,42 @@ void FrontendSession::socketReadyRead()
             break;
     }
 
-    if (consumedBytes > 0)
-        inboundBuffer.remove(0, consumedBytes);
-    if (inboundBuffer.indexOf('\n') < 0 && inboundBuffer.size() > maximumFrameBytes + 1) {
+    inboundOffset = consumedBytes;
+    compactInbound();
+    if (!hasCompleteInboundFrame()
+        && inboundBuffer.size() - inboundOffset > maximumFrameBytes + 1) {
         rejectOversizedFrame();
         return;
     }
     if (connection.isOpen()
-        && (socket.bytesAvailable() > 0 || inboundBuffer.indexOf('\n') >= 0))
+        && (socket.bytesAvailable() > 0 || hasCompleteInboundFrame()))
         scheduleSocketRead();
+}
+
+void FrontendSession::clearInbound() noexcept
+{
+    inboundBuffer.clear();
+    inboundOffset = 0;
+}
+
+bool FrontendSession::hasCompleteInboundFrame() const noexcept
+{
+    return inboundBuffer.indexOf('\n', inboundOffset) >= 0;
+}
+
+void FrontendSession::compactInbound() noexcept
+{
+    if (inboundOffset <= 0)
+        return;
+    if (inboundOffset >= inboundBuffer.size()) {
+        clearInbound();
+        return;
+    }
+    if (inboundOffset < inboundCompactionThreshold
+        || inboundOffset < inboundBuffer.size() / 2)
+        return;
+    inboundBuffer.remove(0, inboundOffset);
+    inboundOffset = 0;
 }
 
 void FrontendSession::scheduleSocketRead()
@@ -624,7 +730,7 @@ void FrontendSession::scheduleSocketRead()
                                return;
                            receiveContinuationScheduled = false;
                            if (connection.isOpen()
-                               && (socket.bytesAvailable() > 0 || inboundBuffer.indexOf('\n') >= 0))
+                               && (socket.bytesAvailable() > 0 || hasCompleteInboundFrame()))
                                socketReadyRead();
                        });
 }
@@ -653,7 +759,7 @@ void FrontendSession::socketDisconnected()
     }
     connection = Connection{};
     clearOutbound();
-    inboundBuffer.clear();
+    clearInbound();
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
     if (!localShutdown) {
@@ -671,7 +777,7 @@ void FrontendSession::socketFailed(QLocalSocket::LocalSocketError)
         connection.transportDisconnected(sdk::TransportError{socket.errorString().toStdString(), true});
     connection = Connection{};
     clearOutbound();
-    inboundBuffer.clear();
+    clearInbound();
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
     if (automaticReconnectEnabled && currentLifecycle != Lifecycle::Failed)
