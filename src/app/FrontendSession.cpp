@@ -207,7 +207,7 @@ constexpr qsizetype maximumFrameBytes = 16 * 1024 * 1024;
 constexpr qsizetype maximumPromptBytes = 128 * 1024;
 constexpr qsizetype maximumReceiveBatchBytes = 1024 * 1024;
 constexpr qsizetype inboundCompactionThreshold = 256 * 1024;
-constexpr int minimumReceiveBatchFrames = 32;
+constexpr int minimumReceiveBatchFrames = 1;
 constexpr int maximumReceiveBatchFrames = 256;
 constexpr qint64 maximumReceiveBatchTimeMs = 4;
 
