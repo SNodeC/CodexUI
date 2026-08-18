@@ -317,8 +317,8 @@ bool testScopedItemPresentationChanges()
                          && replacement.sidebarAffected && replacement.hasPresentationChange,
                      "a State replacement must conservatively refresh every presentation");
     passed &= expect(!cursor.allThreadsAffected && !cursor.allInspectorsAffected
-                         && !cursor.sidebarAffected && !cursor.hasPresentationChange,
-                     "a cursor-only update must not trigger broad presentation work");
+                         && !cursor.sidebarAffected && cursor.hasPresentationChange,
+                     "a cursor-only update must dispatch its revision without dirtying broad presentation");
     return passed;
 }
 

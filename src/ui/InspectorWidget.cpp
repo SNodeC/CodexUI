@@ -498,6 +498,15 @@ void InspectorWidget::refreshLayoutGeometry(QVBoxLayout* layout)
     }
 }
 
+void InspectorWidget::updateStateRevision(std::uint64_t revision)
+{
+    if (!infoRevisionValue)
+        return;
+    const QString revisionText = QString::number(revision);
+    if (infoRevisionValue->text() != revisionText)
+        infoRevisionValue->setText(revisionText);
+}
+
 void InspectorWidget::render(const sdk::State& state,
                              const QString& threadId,
                              bool backendReady,
@@ -1026,8 +1035,8 @@ void InspectorWidget::render(const sdk::State& state,
     const QByteArray nextInfoKey = infoHash.result();
     const bool infoChanged = nextInfoKey != infoPresentationKey;
     const QString revisionText = QString::number(state.revision());
-    if (!infoChanged && infoRevisionValue && infoRevisionValue->text() != revisionText)
-        infoRevisionValue->setText(revisionText);
+    if (!infoChanged)
+        updateStateRevision(state.revision());
     if (infoChanged) {
     infoPresentationKey = nextInfoKey;
     infoRevisionValue = nullptr;
@@ -1092,6 +1101,8 @@ void InspectorWidget::render(const sdk::State& state,
             freshness == QStringLiteral("Current") ? QStringLiteral("#40c27d")
                                                    : QStringLiteral("#f5a83b"));
     infoRevisionValue = addFact(stateFacts, stateRow, QStringLiteral("Revision"), revisionText);
+    if (infoRevisionValue)
+        infoRevisionValue->setObjectName(QStringLiteral("inspectorStateRevision"));
     addFact(stateFacts, stateRow, QStringLiteral("Representation"), representationText(state.representationMode()));
     if (provider.value) {
         addFact(stateFacts, stateRow, QStringLiteral("Provider"), providerLifecycleText(provider.value->lifecycle),

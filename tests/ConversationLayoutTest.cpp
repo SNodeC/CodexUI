@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "ui/ConversationWidget.h"
+#include "ui/InspectorWidget.h"
 
 #include <ai/openai/codex/frontend/Messages.h>
 #include <ai/openai/codex/frontend/client/Client.h>
@@ -729,6 +730,32 @@ bool testThreadSwitchWindow()
     return passed;
 }
 
+bool testInspectorRevisionOnlyUpdate()
+{
+    const client::State state = makeState({singleTurn("inspector-revision", 1)});
+    codexui::InspectorWidget inspector;
+    inspector.resize(420, 700);
+    inspector.show();
+    inspector.render(state, QStringLiteral("inspector-revision"), true,
+                     QStringLiteral("State synced"));
+    settleEvents();
+
+    auto* revision = inspector.findChild<QLabel*>(QStringLiteral("inspectorStateRevision"));
+    const auto expensivePaneWidgets = inspector.findChildren<QWidget*>();
+    const std::uint64_t nextRevision = state.revision() + 7;
+    inspector.updateStateRevision(nextRevision);
+    QCoreApplication::processEvents();
+
+    return expect(revision && revision->text() == QString::number(nextRevision),
+                  "a revision-only update must refresh the Inspector's factual State revision")
+           && expect(revision
+                         && revision
+                                == inspector.findChild<QLabel*>(
+                                    QStringLiteral("inspectorStateRevision"))
+                         && expensivePaneWidgets == inspector.findChildren<QWidget*>(),
+                     "a revision-only update must preserve every existing Inspector pane widget");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -793,6 +820,7 @@ int main(int argc, char** argv)
     passed &= testExactContentInvalidation();
     passed &= testSegmentReplacementShrink();
     passed &= testThreadSwitchWindow();
+    passed &= testInspectorRevisionOnlyUpdate();
 
     return passed ? 0 : 1;
 }

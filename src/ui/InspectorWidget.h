@@ -9,6 +9,8 @@
 #include <QString>
 #include <QWidget>
 
+#include <cstdint>
+
 class QVBoxLayout;
 class QLabel;
 
@@ -25,6 +27,7 @@ public:
                 const QString& threadId,
                 bool backendReady,
                 const QString& backendStatus);
+    void updateStateRevision(std::uint64_t revision);
 
 signals:
     void hideRequested();

@@ -266,6 +266,10 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
                                            || (!newThreadIdAwaitingState.isEmpty()
                                                && scope.affectedInspectorThreadIds.contains(
                                                    newThreadIdAwaitingState));
+    // Keep the factual State revision current without invoking the expensive
+    // Inspector projections when none of their selected semantics changed.
+    if (!selectedInspectorAffected)
+        inspector->updateStateRevision(frontendSession.state().revision());
     if (!selectedAffected && !selectedInspectorAffected && !scope.sidebarAffected)
         return;
     if (selectedAffected)

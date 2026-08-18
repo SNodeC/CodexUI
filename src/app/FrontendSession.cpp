@@ -101,9 +101,8 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                 using Change = std::decay_t<decltype(value)>;
                 if constexpr (std::is_same_v<Change, sdk::CursorAdvancedChange>)
                 {
-                    // A cursor-only update changes no retained presentation.
-                    // The Inspector revision is refreshed with the next
-                    // Inspector-relevant change or explicit selection.
+                    // A cursor-only update changes only the Inspector's cheap
+                    // revision value; it must not dirty any expensive pane.
                 }
                 else if constexpr (std::is_same_v<Change, sdk::StateReplacedChange>)
                 {
@@ -191,8 +190,7 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                     // but do not require rebuilding an unchanged conversation.
                     scope.allInspectorsAffected = true;
                 }
-                if constexpr (!std::is_same_v<Change, sdk::CursorAdvancedChange>)
-                    scope.hasPresentationChange = true;
+                scope.hasPresentationChange = true;
             },
             change);
     }
