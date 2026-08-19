@@ -1,6 +1,42 @@
-# CodexUI UX Design — Threads, Turns, and Configuration
+# CodexUI UX Design — Roadmap and Phase 1: Threads, Turns, and Configuration
 
-This document records the agreed semantic and behavioral requirements for the CodexUI thread/turn experience. It is intended as design input for the later Figma phase.
+This document is the starting point for the CodexUI UI/UX redesign. It records the agreed roadmap and the semantic and behavioral requirements that will later be used as design input for Figma.
+
+The redesign is intentionally developed **semantics first**: decide how CodexUI should behave and what the user should understand, record those decisions here, then let Figma determine the best visual and interaction design. The approved Figma design will subsequently be implemented in the Qt application.
+
+## UI/UX redesign roadmap
+
+The redesign is divided into the following phases, in priority order:
+
+1. **Thread/Turn Configuration & Lifecycle** — thread creation, foundational instructions, mutable execution settings, first and subsequent turns, historical effective settings, fork/resume behavior, and thread lifecycle actions. **This is the first implementation target because it is required to make CodexUI productively usable as a Codex client.**
+2. **Thread Navigation & Multi-thread Work** — active/running/attention states, navigation and orientation across multiple threads, concurrent work, archived-thread access, filtering/search/grouping, and related thread-list behavior. *(To be designed.)*
+3. **Conversation & Turn Presentation** — user/Codex messages, reasoning, tool activity, commands, file changes, progress, active/completed turns, and historical turn presentation. *(To be designed.)*
+4. **Composer & Productivity** — prompt editing, attachments, turn-local inputs, keyboard behavior, send/interrupt workflow, and efficient composition. Persistent execution configuration itself is defined in Phase 1. *(To be designed.)*
+5. **Agents & Collaboration** — parent/sub-agent hierarchy, delegation, live agent activity, completed agents, collaboration state, and navigation into agent work. *(To be designed.)*
+6. **Approvals & User Input** — approval requests, user-input requests, attention behavior, multiple pending requests, and security-sensitive interaction. *(To be designed.)*
+7. **Inspector** — role and information architecture of Info, Plan, Agents, Changes, and any information that should move elsewhere. *(To be designed.)*
+8. **Status & Attention System** — working, waiting for user, approval required, completed, failed, disconnected, unread changes, and cross-UI attention semantics. *(To be designed.)*
+9. **Keyboard Workflow** — shortcuts, focus movement, thread switching, search, command-oriented operation, and other keyboard-first productivity behavior. *(To be designed.)*
+10. **Responsive Layout & Visual System** — panel resizing/collapse, narrow and large windows, saved layout preferences, density, typography, colors, spacing, hierarchy, and final component language. *(To be designed.)*
+
+Only Phase 1 is specified below. Phases 2–10 intentionally remain open until they are discussed and agreed.
+
+---
+
+# Phase 1 — Thread/Turn Configuration & Lifecycle
+
+## Purpose and priority
+
+Thread/Turn Configuration & Lifecycle is the minimum UX feature set required to turn CodexUI from a viewer/controller into a productively usable Codex client.
+
+The user must be able to understand and control:
+
+- how a thread is created and identified;
+- the foundational instructions under which it operates;
+- how Codex will execute the upcoming turn;
+- which execution settings persist into subsequent turns;
+- what settings a historical turn actually used;
+- how existing threads are opened, resumed, forked, interrupted, archived, renamed, and deleted.
 
 These requirements deliberately avoid prescribing detailed visual layout. Figma should be free to determine hierarchy, compactness, controls, icons, progressive disclosure, dialogs, and other presentation details while preserving the semantics defined here.
 
@@ -412,7 +448,7 @@ Thread management is conceptually independent:
           └── Delete
 ```
 
-## 19. Design principle for Figma
+## 19. Phase 1 design principle for Figma
 
 These are **semantic and behavioral requirements, not a prescribed visual layout**.
 
