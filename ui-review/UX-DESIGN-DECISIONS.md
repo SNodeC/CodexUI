@@ -158,7 +158,44 @@ The complete upcoming-turn block—execution settings plus composer—is anchore
 
 Incoming messages, streaming output, tool activity, and other conversation growth must **never move the upcoming-turn block vertically**. In particular, the composer must not be laid out as the last child of the message history, because that causes streaming content to push it downward and subsequent scrolling/layout correction to move it back upward. The turn controls should remain spatially stable while the conversation changes above them.
 
-The exact height behavior of the upcoming-turn block, including expansion for multiline input or progressive settings, may be refined by Figma, but its bottom anchoring and separation from conversation scrolling are invariant requirements.
+### Compact and expanding prompt editor
+
+The prompt editor should occupy as little vertical space as practical when idle or when the prompt is short:
+
+- the editor starts with **one visible text line**;
+- attachments, send/stop actions, and keyboard hints should be arranged compactly around that one-line state rather than forcing a permanently tall text box;
+- as the prompt becomes multiline, the editor grows automatically **upward**;
+- growth must overlay the lower portion of the conversation viewport rather than resize, shrink, or vertically shift the conversation region;
+- the bottom edge and primary actions of the upcoming-turn block remain spatially stable while the editor expands;
+- the editor grows only to a sensible maximum height; Figma may determine the exact maximum, but it should provide comfortable editing of a substantial multiline prompt without consuming the entire center pane;
+- after that maximum is reached, the prompt editor becomes internally vertically scrollable instead of growing further;
+- collapsing back to fewer lines should reduce the overlay again without causing the conversation viewport itself to jump.
+
+Conceptually:
+
+```text
+Short prompt
+┌────────────────────────────────────┐
+│ Conversation / messages            │
+│                                    │
+├────────────────────────────────────┤
+│ Settings                           │
+│ Ask Codex…                 Send    │  ← one-line compact state
+└────────────────────────────────────┘
+
+Longer prompt
+┌────────────────────────────────────┐
+│ Conversation / messages            │
+│                         ┌──────────┐│
+│ lower content may be    │ prompt   ││
+│ visually covered by     │ grows    ││
+│ composer expansion      │ upward   ││
+├─────────────────────────┴──────────┤
+│ Settings                  Send     │  ← bottom remains anchored
+└────────────────────────────────────┘
+```
+
+This prevents long-prompt editing from stealing permanent vertical space while preserving a stable message viewport during streaming and normal reading.
 
 ## 6. Persistent mutable execution settings
 
@@ -465,3 +502,53 @@ The exact control and explanatory wording are left to Figma.
                      │
              optionally modify
                      │
+                    Send
+                     ▼
+                  TURN 2
+                     │
+                     ▼
+                    ...
+```
+
+Thread management is conceptually independent:
+
+```text
+                         THREAD
+                           │
+          ┌────────────────┼────────────────┐
+          │                │                │
+         Open             Fork           Interrupt
+          │                │             if running
+    auto resume      NEW THREAD
+                           │
+                    foundational
+                    instructions
+                    editable again
+
+          │
+          ├── Resume with options
+          │      foundational instructions editable
+          │
+          ├── Rename
+          ├── Archive / Unarchive
+          └── Delete
+```
+
+## 19. Phase 1 design principle for Figma
+
+These are **semantic and behavioral requirements, not a prescribed visual layout**.
+
+Figma has freedom over:
+
+- layout and hierarchy;
+- compactness and density;
+- icons and labels;
+- progressive disclosure;
+- dialog organization;
+- whether execution settings appear as chips, selectors, a toolbar, expandable configuration area, or another appropriate interaction pattern.
+
+That freedom exists within the global requirements above: **the redesign is light-theme-first**, all interaction-state surfaces—especially hover backgrounds, menus, popovers, dialogs, and temporary frames—must maintain clear visual hierarchy and state distinction, and the center-pane conversation/composer split plus compact upward-expanding prompt behavior are invariant.
+
+The invariant mental model is:
+
+> **Thread creation establishes identity, lifetime, and foundational context. The upcoming-turn workflow exposes the one editable set of current execution settings. Changes apply to the upcoming and subsequent turns. Historical turns show their effective settings read-only. Thread management is provided through a state-aware context menu. The conversation scrolls independently above a spatially stable bottom turn/composer surface whose prompt editor starts compact and expands upward only when needed.**
