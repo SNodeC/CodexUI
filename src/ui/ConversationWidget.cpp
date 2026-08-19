@@ -6,6 +6,7 @@
 #include <ai/openai/codex/frontend/client/State.h>
 
 #include <QCryptographicHash>
+#include <QByteArrayView>
 #include <QEvent>
 #include <QFrame>
 #include <QHash>
@@ -38,6 +39,8 @@ namespace frontend = ai::openai::codex::frontend;
 constexpr qsizetype maximumRenderedTimelineTurns = 32;
 constexpr qsizetype maximumRenderedTimelineItems = 256;
 constexpr std::size_t maximumActivityItemsPerSegment = 16;
+constexpr qsizetype largeMessageEditorThreshold = 64 * 1024;
+constexpr int largeMessageEditorHeight = 240;
 
 struct ActivityPresentation
 {
@@ -171,6 +174,59 @@ QLabel* wrappingLabel(const QString& text, const char* kind = nullptr)
     return result;
 }
 
+QWidget* messageContentWidget(const QString& text)
+{
+    if (text.size() <= largeMessageEditorThreshold)
+    {
+        auto* result = static_cast<WrappingLabel*>(wrappingLabel(text, "body"));
+        result->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        return result;
+    }
+
+    auto* result = new QPlainTextEdit;
+    result->setProperty("kind", "body");
+    result->setReadOnly(true);
+    result->setUndoRedoEnabled(false);
+    result->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    result->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    result->setFixedHeight(largeMessageEditorHeight);
+    result->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    result->setPlainText(text);
+    return result;
+}
+
+QString messageContentText(const QWidget* content)
+{
+    if (const auto* label = qobject_cast<const QLabel*>(content))
+        return label->text();
+    if (const auto* editor = qobject_cast<const QPlainTextEdit*>(content))
+        return editor->toPlainText();
+    return {};
+}
+
+void setMessageContentText(QWidget* content, const QString& text)
+{
+    if (auto* label = dynamic_cast<WrappingLabel*>(content))
+        label->setContent(text);
+    else if (auto* editor = qobject_cast<QPlainTextEdit*>(content); editor && editor->toPlainText() != text)
+        editor->setPlainText(text);
+}
+
+QWidget* ensureMessageContentWidget(QVBoxLayout* layout, QWidget* content, const QString& text)
+{
+    const bool needsEditor = text.size() > largeMessageEditorThreshold;
+    const bool hasEditor = qobject_cast<QPlainTextEdit*>(content) != nullptr;
+    if (needsEditor == hasEditor)
+        return content;
+
+    QWidget* replacement = messageContentWidget(text);
+    replacement->setObjectName(QStringLiteral("conversationMessageContent"));
+    delete layout->replaceWidget(content, replacement);
+    content->hide();
+    content->deleteLater();
+    return replacement;
+}
+
 QFrame* divider()
 {
     auto* line = new QFrame;
@@ -295,10 +351,10 @@ QString truncationText(const sdk::ItemState& item)
 
 QString userMessageTruncationText(const sdk::UserMessageSemanticView& message)
 {
-    QStringList details;
-    if (message.textTruncated) details.append(QStringLiteral("Retained text is truncated"));
-    if (message.contentTruncated) details.append(QStringLiteral("Some original user content is not shown"));
-    return details.join(QStringLiteral(" · "));
+    // Non-text user-input details are intentionally outside this text-only
+    // presentation. Their omission must not label complete retained prompt
+    // text as truncated.
+    return message.textTruncated ? QStringLiteral("Retained text is truncated") : QString{};
 }
 
 struct MessagePresentation
@@ -355,14 +411,16 @@ MessagePresentation messagePresentation(const sdk::ItemState& item, bool user)
         }
     }
 
-    result.truncation = userMessage ? userMessageTruncationText(*userMessage) : QString{};
-    if (result.truncation.isEmpty())
-        result.truncation = truncationText(item);
+    // A valid typed user-message view is the authoritative statement about
+    // retained text. Generic item-detail bounds may describe unrelated
+    // metadata and must not turn a complete prompt into a truncation warning.
+    result.truncation = userMessage ? userMessageTruncationText(*userMessage)
+                                    : truncationText(item);
     return result;
 }
 
 void applyMessagePresentation(QLabel* status,
-                              WrappingLabel* content,
+                              QWidget* content,
                               QLabel* truncation,
                               const MessagePresentation& presentation)
 {
@@ -380,7 +438,7 @@ void applyMessagePresentation(QLabel* status,
         content->style()->unpolish(content);
         content->style()->polish(content);
     }
-    content->setContent(presentation.content);
+    setMessageContentText(content, presentation.content);
 
     if (truncation->text() != presentation.truncation)
         truncation->setText(presentation.truncation);
@@ -632,9 +690,8 @@ void addMessage(QVBoxLayout* timeline, const sdk::ItemState& item, bool user)
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(5);
     }
-    auto* copy = static_cast<WrappingLabel*>(wrappingLabel({}, "body"));
+    auto* copy = messageContentWidget(presentation.content);
     copy->setObjectName(QStringLiteral("conversationMessageContent"));
-    copy->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(copy);
     auto* marker = textLabel({}, "small");
     marker->setObjectName(QStringLiteral("conversationMessageTruncation"));
@@ -708,7 +765,9 @@ void addPresentationValue(QCryptographicHash& hash, const QString& value)
 
 void addPresentationValue(QCryptographicHash& hash, std::string_view value)
 {
-    addPresentationValue(hash, QByteArray(value.data(), static_cast<qsizetype>(value.size())));
+    hash.addData(QByteArray::number(value.size()));
+    hash.addData(QByteArrayLiteral(":"));
+    hash.addData(QByteArrayView(value.data(), static_cast<qsizetype>(value.size())));
 }
 
 void addPresentationValue(QCryptographicHash& hash, bool value)
@@ -982,16 +1041,15 @@ bool updateTimelineMessageSegment(QWidget* host,
         return false;
 
     auto* status = host->findChild<QLabel*>(QStringLiteral("conversationMessageStatus"));
-    auto* contentLabel = host->findChild<QLabel*>(QStringLiteral("conversationMessageContent"));
+    auto* contentWidget = host->findChild<QWidget*>(QStringLiteral("conversationMessageContent"));
     auto* truncation = host->findChild<QLabel*>(QStringLiteral("conversationMessageTruncation"));
-    auto* content = dynamic_cast<WrappingLabel*>(contentLabel);
-    if (!status || !content || !truncation)
+    if (!status || !contentWidget || !truncation)
         return false;
 
-    const QString previousContent = content->text();
+    const QString previousContent = messageContentText(contentWidget);
     const QString previousTruncation = truncation->text();
     const bool previousTruncationVisible = truncation->isVisible();
-    const QString previousKind = content->property("kind").toString();
+    const QString previousKind = contentWidget->property("kind").toString();
     const MessagePresentation presentation = messagePresentation(*item, user);
     if (mayShrink)
     {
@@ -1002,8 +1060,12 @@ bool updateTimelineMessageSegment(QWidget* host,
                      || (previousTruncationVisible
                          && !presentation.truncation.startsWith(previousTruncation));
     }
+    auto* contentLayout = qobject_cast<QVBoxLayout*>(contentWidget->parentWidget()->layout());
+    if (!contentLayout)
+        return false;
+    contentWidget = ensureMessageContentWidget(contentLayout, contentWidget, presentation.content);
     applyMessagePresentation(status,
-                             content,
+                             contentWidget,
                              truncation,
                              presentation);
     return true;
