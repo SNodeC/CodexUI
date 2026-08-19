@@ -4,6 +4,18 @@ This document is the starting point for the CodexUI UI/UX redesign. It records t
 
 The redesign is intentionally developed **semantics first**: decide how CodexUI should behave and what the user should understand, record those decisions here, then let Figma determine the best visual and interaction design. The approved Figma design will subsequently be implemented in the Qt application.
 
+## Global visual constraints
+
+The following visual requirements apply to the complete redesign and are not optional stylistic suggestions:
+
+- **CodexUI is to be designed as a light-theme application.** A dark theme is not the target visual direction for the redesign.
+- Figma should use a bright, neutral application surface with sufficient contrast and restrained accent colors suitable for long productive desktop sessions.
+- Hover, selection, focus, pressed, active, disabled, warning, error, and attention states must remain visually distinct without relying on dark surfaces.
+- **Particular care is required for temporary surfaces and frames shown on interaction**, including thread-row hover backgrounds, context menus, popovers, dropdowns, tooltips, dialogs, inline configuration panels, and similar overlays. Their background colors must remain clearly distinguishable from both the underlying application surface and the selected/active state.
+- Hover feedback must be subtle enough not to visually overpower the thread list, but strong enough that the currently interactive row or control is unambiguous.
+- Selection and hover must not collapse into the same visual state. A selected thread must remain recognizable while hovered, focused, or while its context menu is open.
+- Figma may refine the existing visual language, but existing dark prototype screens are **reference material for structure and interaction only**, not a requirement to preserve the dark palette.
+
 ## UI/UX redesign roadmap
 
 The redesign is divided into the following phases, in priority order:
@@ -38,7 +50,7 @@ The user must be able to understand and control:
 - what settings a historical turn actually used;
 - how existing threads are opened, resumed, forked, interrupted, archived, renamed, and deleted.
 
-These requirements deliberately avoid prescribing detailed visual layout. Figma should be free to determine hierarchy, compactness, controls, icons, progressive disclosure, dialogs, and other presentation details while preserving the semantics defined here.
+These requirements deliberately avoid prescribing detailed visual layout. Figma should be free to determine hierarchy, compactness, controls, icons, progressive disclosure, dialogs, and other presentation details while preserving the semantics defined here and the global visual constraints above.
 
 ## 1. Core model
 
@@ -84,11 +96,12 @@ The creation dialog should not ask for normal mutable execution settings such as
 
 - Model;
 - Reasoning;
+- Answer style / Personality;
 - Workspace / cwd;
 - Sandbox / access;
 - Approval policy;
 - Service tier;
-- Personality;
+- Reasoning summary;
 - Collaboration mode.
 
 The new thread initially receives the appropriate Codex/app-server defaults. These settings become relevant when the user is about to start actual work.
@@ -102,9 +115,11 @@ The first-turn workflow conceptually contains:
 - prompt / user input;
 - the effective execution configuration that the upcoming turn will use.
 
-Important execution settings include Model, Reasoning, Workspace, Access / Sandbox, Approval, and other supported mutable execution settings.
+Important execution settings include Model, Reasoning, Answer style / Personality, Workspace, Access / Sandbox, Approval, Service tier, Reasoning summary, Collaboration mode, and other supported mutable execution settings.
 
 The values initially reflect the app-server/current-thread defaults. The user may leave them unchanged and simply start working.
+
+Figma may decide which settings are immediately visible and which use progressive disclosure, but all supported settings remain part of the functional design.
 
 ## 5. Subsequent turns use the same UX
 
@@ -128,17 +143,17 @@ Settings such as the following are conceptually the thread's current execution c
 
 - Model;
 - Reasoning effort;
+- Answer style / Personality;
 - Workspace / cwd;
 - Sandbox / access;
 - Approval policy / reviewer;
 - Service tier;
 - Reasoning summary;
-- Personality;
 - Collaboration mode.
 
 They should nevertheless be presented in connection with the upcoming turn because this is where their operational meaning is clearest to the user.
 
-Figma should determine the best compact presentation and which settings deserve immediate visibility versus progressive disclosure.
+Figma should determine the best compact presentation and which settings deserve immediate visibility versus progressive disclosure. Progressive disclosure changes prominence, not functionality.
 
 ## 7. Changing an execution setting
 
@@ -191,7 +206,7 @@ Turn Reasoning: XHigh ▾
 
 That suggests two independent values when there is actually one persistent setting.
 
-Instead there is one editable Reasoning control associated with the upcoming-turn workflow. The same rule applies to Model, Workspace, Access, Approval, and other persistent execution settings.
+Instead there is one editable Reasoning control associated with the upcoming-turn workflow. The same rule applies to Model, Answer style / Personality, Workspace, Access, Approval, Service tier, Reasoning summary, Collaboration mode, and other persistent execution settings.
 
 ## 9. True turn-specific data
 
@@ -215,11 +230,12 @@ For example:
 ```text
 Turn details
 
-Model       GPT-5.x Codex
-Reasoning   XHigh
-Workspace   ~/AISuite
-Access      Workspace Write
-Approval    On Request
+Model         GPT-5.x Codex
+Reasoning     XHigh
+Answer style  Pragmatic
+Workspace     ~/AISuite
+Access        Workspace Write
+Approval      On Request
 ```
 
 These values are read-only historical information. They are not another place to modify thread configuration.
@@ -332,6 +348,8 @@ More
 
 Figma should determine grouping, separators, icons, wording refinements, and exact state-dependent presentation.
 
+The thread-list interaction design must explicitly define **normal, hover, selected, selected+hover, focus, context-menu-open, running, attention-required, archived, and disabled states**. Background changes for hovered rows and temporary surfaces must preserve clear state distinction in the light theme.
+
 ### Open
 
 The normal operation. If necessary, CodexUI automatically resumes the thread using its existing context and settings.
@@ -389,9 +407,13 @@ The exact control and explanatory wording are left to Figma.
           current execution values
           Model
           Reasoning
+          Answer style
           Workspace
           Access
           Approval
+          Service tier
+          Reasoning summary
+          Collaboration mode
           ...
                      │
                     Start
@@ -409,9 +431,13 @@ The exact control and explanatory wording are left to Figma.
           inherited current values
           Model
           Reasoning
+          Answer style
           Workspace
           Access
           Approval
+          Service tier
+          Reasoning summary
+          Collaboration mode
           ...
                      │
              optionally modify
@@ -460,6 +486,8 @@ Figma has freedom over:
 - progressive disclosure;
 - dialog organization;
 - whether execution settings appear as chips, selectors, a toolbar, expandable configuration area, or another appropriate interaction pattern.
+
+That freedom exists within the global requirements above: **the redesign is light-theme-first**, and all interaction-state surfaces—especially hover backgrounds, menus, popovers, dialogs, and temporary frames—must maintain clear visual hierarchy and state distinction.
 
 The invariant mental model is:
 
