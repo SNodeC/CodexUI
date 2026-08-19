@@ -137,6 +137,29 @@ current inherited configuration
 
 The composer presents the execution configuration that the next turn will actually use.
 
+### Stable center-pane layout
+
+The upcoming-turn workflow is **not part of the scrollable conversation/message container**. The center pane is vertically divided into two sibling regions:
+
+```text
+CENTER PANE
+┌────────────────────────────────────┐
+│                                    │
+│ Conversation / messages            │
+│ independently scrollable           │
+│                                    │
+├────────────────────────────────────┤
+│ Upcoming-turn execution settings   │
+│ Prompt / attachments / Send        │
+└────────────────────────────────────┘
+```
+
+The complete upcoming-turn block—execution settings plus composer—is anchored to the bottom of the center pane. The conversation region occupies the remaining space and scrolls independently.
+
+Incoming messages, streaming output, tool activity, and other conversation growth must **never move the upcoming-turn block vertically**. In particular, the composer must not be laid out as the last child of the message history, because that causes streaming content to push it downward and subsequent scrolling/layout correction to move it back upward. The turn controls should remain spatially stable while the conversation changes above them.
+
+The exact height behavior of the upcoming-turn block, including expansion for multiline input or progressive settings, may be refined by Figma, but its bottom anchoring and separation from conversation scrolling are invariant requirements.
+
 ## 6. Persistent mutable execution settings
 
 Settings such as the following are conceptually the thread's current execution configuration:
@@ -442,53 +465,3 @@ The exact control and explanatory wording are left to Figma.
                      │
              optionally modify
                      │
-                    Send
-                     ▼
-                  TURN 2
-                     │
-                     ▼
-                    ...
-```
-
-Thread management is conceptually independent:
-
-```text
-                         THREAD
-                           │
-          ┌────────────────┼────────────────┐
-          │                │                │
-         Open             Fork           Interrupt
-          │                │             if running
-    auto resume      NEW THREAD
-                           │
-                    foundational
-                    instructions
-                    editable again
-
-          │
-          ├── Resume with options
-          │      foundational instructions editable
-          │
-          ├── Rename
-          ├── Archive / Unarchive
-          └── Delete
-```
-
-## 19. Phase 1 design principle for Figma
-
-These are **semantic and behavioral requirements, not a prescribed visual layout**.
-
-Figma has freedom over:
-
-- layout and hierarchy;
-- compactness and density;
-- icons and labels;
-- progressive disclosure;
-- dialog organization;
-- whether execution settings appear as chips, selectors, a toolbar, expandable configuration area, or another appropriate interaction pattern.
-
-That freedom exists within the global requirements above: **the redesign is light-theme-first**, and all interaction-state surfaces—especially hover backgrounds, menus, popovers, dialogs, and temporary frames—must maintain clear visual hierarchy and state distinction.
-
-The invariant mental model is:
-
-> **Thread creation establishes identity, lifetime, and foundational context. The upcoming-turn workflow exposes the one editable set of current execution settings. Changes apply to the upcoming and subsequent turns. Historical turns show their effective settings read-only. Thread management is provided through a state-aware context menu.**
