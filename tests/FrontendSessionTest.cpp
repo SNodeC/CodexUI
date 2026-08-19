@@ -427,6 +427,46 @@ bool testOutboundQueue()
                          && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) == 0,
                      "draining a short write must produce the original frame exactly once");
 
+    const std::size_t maximumFrameSize =
+        ai::openai::codex::frontend::DefaultFrontendMaximumInboundMessageBytes;
+    const std::string maximumFrame(maximumFrameSize, 'x');
+    qint64 maximumWireWritten = 0;
+    bool maximumWireValid = true;
+    result = codexui::FrontendSessionTestAccess::sendToTransport(
+        session,
+        maximumFrame,
+        true,
+        0,
+        [&maximumWireWritten, &maximumWireValid](const char* bytes, qint64 size) {
+            const qint64 accepted = std::min<qint64>(4093, size);
+            for (qint64 index = 0; index < accepted; ++index)
+                maximumWireValid = maximumWireValid && bytes[index] == 'x';
+            maximumWireWritten += accepted;
+            return accepted;
+        });
+    passed &= expect(result.status == sdk::SendStatus::Accepted
+                         && maximumWireValid
+                         && codexui::FrontendSessionTestAccess::pendingWriteBytes(session)
+                                == static_cast<qint64>(maximumFrameSize + 1U) - maximumWireWritten,
+                     "a maximum-size SDK frame must retain its exact suffix after a partial socket write");
+    passed &= expect(codexui::FrontendSessionTestAccess::drainOutbound(
+                         session,
+                         [&maximumWireWritten, &maximumWireValid, maximumFrameSize](
+                             const char* bytes, qint64 size) {
+                             for (qint64 index = 0; index < size; ++index) {
+                                 const auto wireIndex = static_cast<std::size_t>(
+                                     maximumWireWritten + index);
+                                 const char expected = wireIndex == maximumFrameSize ? '\n' : 'x';
+                                 maximumWireValid = maximumWireValid && bytes[index] == expected;
+                             }
+                             maximumWireWritten += size;
+                             return size;
+                         })
+                         && maximumWireValid
+                         && maximumWireWritten == static_cast<qint64>(maximumFrameSize + 1U)
+                         && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) == 0,
+                     "a partially written maximum-size SDK frame must drain once in exact wire order");
+
     written.clear();
     writeCalls = 0;
     const std::string secondFrame = R"({"second":2})";

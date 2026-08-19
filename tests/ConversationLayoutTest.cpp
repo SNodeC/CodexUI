@@ -14,6 +14,7 @@
 #include <QFrame>
 #include <QLabel>
 #include <QLayout>
+#include <QPlainTextEdit>
 #include <QPointer>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -38,6 +39,7 @@ struct MessageFixture
     std::string status = "completed";
     bool contentTruncated = false;
     bool textTruncated = false;
+    bool genericItemTruncatedOnly = false;
 };
 
 struct TurnFixture
@@ -104,13 +106,17 @@ frontend::Json messageJson(const std::string& threadId,
                           {"threadId", threadId},
                           {"turnId", turnId},
                           {"status", fixture.status},
-                          {"summary", fixture.text},
+                          {"summary",
+                           fixture.kind == frontend::ThreadItemKind::UserMessage
+                               ? std::string{}
+                               : fixture.text},
                           {"agentText", fixture.kind == frontend::ThreadItemKind::AgentMessage ? fixture.text : ""},
                           {"reasoningText", ""},
                           {"reasoningSummary", ""},
                           {"commandOutput", ""},
                           {"droppedContentBytes", 0},
-                          {"contentTruncated", fixture.contentTruncated},
+                          {"contentTruncated",
+                           fixture.contentTruncated || fixture.genericItemTruncatedOnly},
                           {"data", std::move(data)},
                           {"extensions", frontend::Json::object()}};
 }
@@ -605,6 +611,79 @@ bool testInPlaceMessageReplacement()
     return passed;
 }
 
+bool testCompleteAndLargeUserMessagePresentation()
+{
+    ThreadFixture completeFixture{
+        "complete-user-message",
+        {{"turn-complete-user-message",
+          {{"item-complete-user-message",
+            frontend::ThreadItemKind::UserMessage,
+            "complete canonical prompt",
+            "completed",
+            true,
+            false,
+            true}}}}};
+    codexui::ConversationWidget completeConversation;
+    completeConversation.resize(900, 700);
+    completeConversation.show();
+    completeConversation.render(makeState({completeFixture}),
+                                QStringLiteral("complete-user-message"));
+    settleTimeline();
+
+    QWidget* completeSegment =
+        segment(completeConversation, QStringLiteral("message:item-complete-user-message"));
+    QLabel* completeContent =
+        messageLabel(completeSegment, QStringLiteral("conversationMessageContent"));
+    QLabel* completeMarker =
+        messageLabel(completeSegment, QStringLiteral("conversationMessageTruncation"));
+    bool passed = expect(completeContent
+                             && completeContent->text()
+                                    == QStringLiteral("complete canonical prompt"),
+                         "a valid typed user-message view must render its complete canonical text");
+    passed &= expect(completeMarker && !completeMarker->isVisible(),
+                     "non-text omissions and generic item bounds must not mark complete typed user text as truncated");
+
+    std::string largeText(70U * 1024U, 'a');
+    largeText.replace(16U, 2U, "\n\n");
+    ThreadFixture largeFixture{
+        "large-user-message",
+        {{"turn-large-user-message",
+          {{"item-large-user-message",
+            frontend::ThreadItemKind::UserMessage,
+            largeText}}}}};
+    codexui::ConversationWidget largeConversation;
+    largeConversation.resize(900, 700);
+    largeConversation.show();
+    largeConversation.render(makeState({largeFixture}), QStringLiteral("large-user-message"));
+    settleTimeline();
+
+    QPointer<QWidget> largeSegment =
+        segment(largeConversation, QStringLiteral("message:item-large-user-message"));
+    QPointer<QPlainTextEdit> largeContent = largeSegment
+                                                ? largeSegment->findChild<QPlainTextEdit*>(
+                                                      QStringLiteral("conversationMessageContent"))
+                                                : nullptr;
+    QPlainTextEdit* const largeContentAddress = largeContent.data();
+    const QString expectedLargeText = QString::fromStdString(largeText);
+    passed &= expect(largeContent && largeContent->isReadOnly()
+                         && largeContent->toPlainText() == expectedLargeText
+                         && largeContent->height() == 240,
+                     "large retained user text must remain complete in a bounded read-only editor");
+
+    largeText.replace(0U, 5U, "omega");
+    largeFixture.turns.front().messages.front().text = largeText;
+    largeConversation.render(makeState({largeFixture}), QStringLiteral("large-user-message"));
+    settleTimeline();
+    passed &= expect(largeSegment
+                         && largeSegment.data()
+                                == segment(largeConversation,
+                                           QStringLiteral("message:item-large-user-message"))
+                         && largeContent && largeContent.data() == largeContentAddress
+                         && largeContent->toPlainText() == QString::fromStdString(largeText),
+                     "large canonical user-text replacement must update the existing editor in place");
+    return passed;
+}
+
 bool testExactContentInvalidation()
 {
     ThreadFixture fixture{"exact-content",
@@ -817,6 +896,7 @@ int main(int argc, char** argv)
     passed &= testHotTurnWindow();
     passed &= testPointerPreservingAppend();
     passed &= testInPlaceMessageReplacement();
+    passed &= testCompleteAndLargeUserMessagePresentation();
     passed &= testExactContentInvalidation();
     passed &= testSegmentReplacementShrink();
     passed &= testThreadSwitchWindow();

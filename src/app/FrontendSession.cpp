@@ -7,6 +7,7 @@
 #include <ai/openai/codex/frontend/client/Requests.h>
 #include <ai/openai/codex/frontend/client/Threads.h>
 #include <ai/openai/codex/frontend/client/Turns.h>
+#include <ai/openai/codex/typed/Conversation.h>
 
 #include <QByteArray>
 #include <QDir>
@@ -202,7 +203,6 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
 namespace {
 
 constexpr qsizetype maximumFrameBytes = 16 * 1024 * 1024;
-constexpr qsizetype maximumPromptBytes = 128 * 1024;
 constexpr qsizetype maximumReceiveBatchBytes = 1024 * 1024;
 constexpr qsizetype inboundCompactionThreshold = 256 * 1024;
 constexpr int minimumReceiveBatchFrames = 1;
@@ -376,9 +376,20 @@ QString FrontendSession::statusText() const
 
 std::optional<QString> FrontendSession::promptValidationError(const QString& prompt)
 {
-    if (prompt.toUtf8().size() <= maximumPromptBytes)
-        return std::nullopt;
-    return QStringLiteral("Prompt exceeds the 128 KiB UTF-8 submission limit");
+    std::size_t scalarCount = 0;
+    for (qsizetype index = 0; index < prompt.size(); ++index)
+    {
+        const QChar current = prompt.at(index);
+        if (current.isHighSurrogate() && index + 1 < prompt.size()
+            && prompt.at(index + 1).isLowSurrogate())
+            ++index;
+        ++scalarCount;
+        if (scalarCount > ai::openai::codex::typed::MaximumTurnInputTextUnicodeScalars)
+            return QStringLiteral("Prompt exceeds Codex's %1 Unicode-scalar text input limit")
+                .arg(static_cast<qulonglong>(
+                    ai::openai::codex::typed::MaximumTurnInputTextUnicodeScalars));
+    }
+    return std::nullopt;
 }
 
 const sdk::State& FrontendSession::state() const noexcept
