@@ -21,6 +21,7 @@
 #include <QScrollBar>
 #include <QTimer>
 #include <QTabBar>
+#include <QToolButton>
 
 #include <algorithm>
 #include <iostream>
@@ -43,12 +44,14 @@ struct MessageFixture
     bool contentTruncated = false;
     bool textTruncated = false;
     bool genericItemTruncatedOnly = false;
+    std::string command;
 };
 
 struct TurnFixture
 {
     std::string id;
     std::vector<MessageFixture> messages;
+    std::optional<frontend::Json> plan;
 };
 
 struct ThreadFixture
@@ -92,6 +95,7 @@ frontend::Json messageJson(const std::string& threadId,
                            const std::string& turnId,
                            const MessageFixture& fixture)
 {
+    constexpr std::size_t initialCommandOutputBytes = 12U * 1024U;
     frontend::Json data = frontend::Json::object();
     if (fixture.kind == frontend::ThreadItemKind::UserMessage) {
         data = frontend::Json{{"clientId", nullptr},
@@ -103,20 +107,36 @@ frontend::Json messageJson(const std::string& threadId,
                               {"retainedContentBytes", fixture.text.size()},
                               {"originalContentItems", fixture.contentTruncated ? 2 : 1},
                               {"retainedContentItems", 1}};
+    } else if (fixture.kind == frontend::ThreadItemKind::CommandExecution) {
+        data = frontend::Json{{"command", fixture.command.empty() ? "bash -lc test-command" : fixture.command},
+                              {"cwd", "/workspace/test"},
+                              {"status", fixture.status},
+                              {"durationMs", 42}};
+        if (fixture.status == "completed")
+            data["exitCode"] = 0;
     }
+    const bool carriesCommandOutput = fixture.kind == frontend::ThreadItemKind::CommandExecution
+                                      || fixture.kind == frontend::ThreadItemKind::FileChange;
+    const std::string summary = fixture.kind == frontend::ThreadItemKind::UserMessage
+                                    ? std::string{}
+                                : carriesCommandOutput
+                                    ? fixture.text.substr(0, std::min<std::size_t>(fixture.text.size(), 500))
+                                    : fixture.text;
+    const std::string initialCommandOutput = carriesCommandOutput
+                                                 ? fixture.text.substr(
+                                                       0,
+                                                       std::min(fixture.text.size(), initialCommandOutputBytes))
+                                                 : std::string{};
     return frontend::Json{{"id", fixture.id},
                           {"type", frontend::toString(fixture.kind)},
                           {"threadId", threadId},
                           {"turnId", turnId},
                           {"status", fixture.status},
-                          {"summary",
-                           fixture.kind == frontend::ThreadItemKind::UserMessage
-                               ? std::string{}
-                               : fixture.text},
+                          {"summary", summary},
                           {"agentText", fixture.kind == frontend::ThreadItemKind::AgentMessage ? fixture.text : ""},
                           {"reasoningText", ""},
                           {"reasoningSummary", ""},
-                          {"commandOutput", ""},
+                          {"commandOutput", initialCommandOutput},
                           {"droppedContentBytes", 0},
                           {"contentTruncated",
                            fixture.contentTruncated || fixture.genericItemTruncatedOnly},
@@ -127,7 +147,7 @@ frontend::Json messageJson(const std::string& threadId,
 client::State makeState(const std::vector<ThreadFixture>& fixtures)
 {
     client::ClientOptions options;
-    options.requestedCapabilities.clear();
+    options.requestedCapabilities = {frontend::FrontendCapability::CompleteThreadItems};
     options.credentialProvider = [] {
         return client::AuthenticationContext{frontend::NoCredential{}, std::string{"conversation-layout-test"}};
     };
@@ -139,12 +159,20 @@ client::State makeState(const std::vector<ThreadFixture>& fixtures)
         [](std::string) {},
     });
     connection.transportConnected();
+    const frontend::CapabilityAdvertisement capabilities{
+        {frontend::FrontendCapability::CompleteThreadItems},
+        {frontend::FrontendCapability::CompleteThreadItems},
+        {frontend::FrontendCapability::CompleteThreadItems},
+        frontend::Json::object()};
     if (!connection
              .receive(frontend::ServerMessage{frontend::Welcome{
                  "fixture-session",
                  frontend::SessionRole::Observer,
                  frontend::SequenceNumber{0},
-                 frontend::SyncMode::Snapshot}})
+                 frontend::SyncMode::Snapshot,
+                 frontend::Json{{"projection",
+                                 frontend::Json{{"itemContentUpdateMode", "append-v2"}}}},
+                 capabilities}})
              .accepted)
         return {};
 
@@ -170,15 +198,18 @@ client::State makeState(const std::vector<ThreadFixture>& fixtures)
             frontend::Json items = frontend::Json::array();
             for (const MessageFixture& message : turnFixture.messages)
                 items.push_back(messageJson(threadFixture.id, turnFixture.id, message));
-            turns.push_back(frontend::Json{{"id", turnFixture.id},
-                                           {"threadId", threadFixture.id},
-                                           {"status", "completed"},
-                                           {"active", false},
-                                           {"terminal", true},
-                                           {"effectiveExecutionConfiguration", executionConfiguration},
-                                           {"effectiveExecutionConfigurationProvenance", "turn_start_accepted"},
-                                           {"items", std::move(items)},
-                                           {"extensions", frontend::Json::object()}});
+            frontend::Json turn{{"id", turnFixture.id},
+                                {"threadId", threadFixture.id},
+                                {"status", "completed"},
+                                {"active", false},
+                                {"terminal", true},
+                                {"effectiveExecutionConfiguration", executionConfiguration},
+                                {"effectiveExecutionConfigurationProvenance", "turn_start_accepted"},
+                                {"items", std::move(items)},
+                                {"extensions", frontend::Json::object()}};
+            if (turnFixture.plan)
+                turn["plan"] = *turnFixture.plan;
+            turns.push_back(std::move(turn));
         }
         threads.push_back(frontend::Json{{"id", threadFixture.id},
                                          {"title", threadFixture.id},
@@ -207,6 +238,46 @@ client::State makeState(const std::vector<ThreadFixture>& fixtures)
         return {};
     if (!connection.receive(frontend::ServerMessage{frontend::SyncComplete{frontend::SequenceNumber{0}}}).accepted)
         return {};
+
+    // Exercise the public negotiated append-v2 path instead of putting an
+    // over-capacity scalar into a synthetic Snapshot. This mirrors how the
+    // real backend restores complete retained command output incrementally.
+    constexpr std::size_t initialCommandOutputBytes = 12U * 1024U;
+    constexpr std::size_t commandOutputDeltaBytes = 12U * 1024U;
+    std::uint64_t sequence = 0;
+    for (const ThreadFixture& thread : fixtures) {
+        for (const TurnFixture& turn : thread.turns) {
+            for (const MessageFixture& item : turn.messages) {
+                if (item.kind != frontend::ThreadItemKind::CommandExecution
+                    && item.kind != frontend::ThreadItemKind::FileChange)
+                    continue;
+                std::size_t retained = std::min(item.text.size(), initialCommandOutputBytes);
+                while (retained < item.text.size()) {
+                    const std::size_t deltaBytes =
+                        std::min(commandOutputDeltaBytes, item.text.size() - retained);
+                    frontend::FrontendEvent event{
+                        frontend::SequenceNumber{++sequence},
+                        "item.content.updated",
+                        frontend::Json{{"threadId", thread.id},
+                                       {"turnId", turn.id},
+                                       {"itemId", item.id},
+                                       {"channel", "commandOutput"},
+                                       {"content", ""},
+                                       {"contentDelta", item.text.substr(retained, deltaBytes)},
+                                       {"baseContentBytes", retained},
+                                       {"contentTruncated", false},
+                                       {"droppedContentBytes", 0}},
+                        frontend::Json::object()};
+                    if (!connection
+                             .receive(frontend::ServerMessage{frontend::EventBatch{
+                                 event.sequence, event.sequence, {std::move(event)}}})
+                             .accepted)
+                        return {};
+                    retained += deltaBytes;
+                }
+            }
+        }
+    }
     return sdk.state();
 }
 
@@ -465,6 +536,218 @@ bool testHotTurnWindow()
                                     && !card->styleSheet().contains(QStringLiteral("QFrame{"));
                             }),
                      "activity-card borders must be scoped to the card and never leak to child labels");
+    return passed;
+}
+
+bool testActivityDisclosureAndFullOutput()
+{
+    std::string output = "initial command output beginning\n"
+                         + std::string(70 * 1024, 'i')
+                         + "\ninitial command output final sentinel";
+    ThreadFixture fixture{"activity-detail",
+                          {{"turn-activity-detail",
+                            {{"command-activity-detail",
+                              frontend::ThreadItemKind::CommandExecution,
+                              output,
+                              "in_progress"}},
+                            frontend::Json{{"explanation", "Use the canonical typed plan."},
+                                           {"steps", {"Inspect", "Verify"}},
+                                           {"statuses", {"completed", "inProgress"}},
+                                           {"totalSteps", 2},
+                                           {"truncated", false}}}}};
+    const std::string fullCommand = "bash -lc '" + std::string(400, 'x') + " --final-command-sentinel'";
+    fixture.turns.front().messages.front().command = fullCommand;
+
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(makeState({fixture}), QStringLiteral("activity-detail"));
+    settleTimeline();
+
+    auto* card = conversation.findChild<QFrame*>(QStringLiteral("conversationActivityCard"));
+    auto* body = card ? card->findChild<QWidget*>(QStringLiteral("conversationActivityBody")) : nullptr;
+    auto* row = card ? card->findChild<QWidget*>(QStringLiteral("conversationActivityRow")) : nullptr;
+    auto* details = row ? row->findChild<QWidget*>(QStringLiteral("conversationActivityDetails")) : nullptr;
+    auto* detailDisclosure = row ? row->findChild<QToolButton*>(QStringLiteral("activityDisclosure")) : nullptr;
+    auto* planAvailable = card
+                              ? card->findChild<QLabel*>(QStringLiteral("conversationActivityPlanAvailable"))
+                              : nullptr;
+    QPointer<QPlainTextEdit> outputView;
+    QToolButton* groupDisclosure = nullptr;
+    if (card && body) {
+        for (auto* candidate : card->findChildren<QToolButton*>(QStringLiteral("activityDisclosure"))) {
+            if (!body->isAncestorOf(candidate)) {
+                groupDisclosure = candidate;
+                break;
+            }
+        }
+    }
+
+    bool passed = true;
+    passed &= expect(card && body && !body->isHidden() && row && details && details->isHidden(),
+                     "an activity group must start expanded while each activity starts collapsed");
+    passed &= expect(detailDisclosure && detailDisclosure->isCheckable()
+                         && !row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput")),
+                     "a collapsed activity must not materialize a potentially large output document");
+    passed &= expect(detailDisclosure
+                         && detailDisclosure->accessibleName().contains(QStringLiteral("bash -lc")),
+                     "each activity disclosure must identify its activity in its accessible name");
+    passed &= expect(planAvailable && planAvailable->isVisible(),
+                     "an activity card must advertise an authoritative typed turn plan on initial render");
+
+    QWidget* const rowAddress = row;
+    fixture.turns.front().plan.reset();
+    conversation.render(makeState({fixture}), QStringLiteral("activity-detail"));
+    settleTimeline();
+    passed &= expect(row == rowAddress && planAvailable && !planAvailable->isVisible(),
+                     "removing a typed turn plan must update the existing activity-card indicator");
+    fixture.turns.front().plan = frontend::Json{
+        {"explanation", "The canonical typed plan returned."},
+        {"steps", {"Inspect", "Verify"}},
+        {"statuses", {"completed", "inProgress"}},
+        {"totalSteps", 2},
+        {"truncated", false}};
+    conversation.render(makeState({fixture}), QStringLiteral("activity-detail"));
+    settleTimeline();
+    passed &= expect(row == rowAddress && planAvailable && planAvailable->isVisible(),
+                     "adding a typed turn plan must update the existing activity-card indicator");
+
+    output = "canonical collapsed-update beginning\n"
+             + std::string(72 * 1024, 'c')
+             + "\ncanonical collapsed-update final sentinel";
+    fixture.turns.front().messages.front().text = output;
+    const QHash<QString, QStringList> exactOutputChange{
+        {QStringLiteral("turn-activity-detail"),
+         QStringList{QStringLiteral("command-activity-detail")}}};
+    conversation.render(
+        makeState({fixture}), QStringLiteral("activity-detail"), false, &exactOutputChange);
+    settleTimeline();
+    passed &= expect(row == rowAddress && details && details->isHidden()
+                         && !row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput")),
+                     "a canonical output update must keep a collapsed activity lazy until expansion");
+    const int collapsedActivityHeight = timeline(conversation)
+                                            ? timeline(conversation)->height()
+                                            : 0;
+    if (detailDisclosure)
+        detailDisclosure->click();
+    settleTimeline();
+    outputView = row ? row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput")) : nullptr;
+    auto* detailView = row ? row->findChild<QLabel*>(QStringLiteral("conversationActivityDetail")) : nullptr;
+    auto* outputHeading = row
+                              ? row->findChild<QLabel*>(QStringLiteral("conversationActivityOutputHeading"))
+                              : nullptr;
+    passed &= expect(details && !details->isHidden() && outputView && outputView->isVisible(),
+                     "an individual activity disclosure must materialize and reveal its complete output");
+    passed &= expect(detailDisclosure && detailDisclosure->isChecked() && outputHeading
+                         && outputHeading->text() == QStringLiteral("Output"),
+                     "expanded activity details must expose accessible checked state and label their output");
+    const QString renderedOutput = outputView ? outputView->toPlainText() : QString{};
+    passed &= expect(
+        output.size() > 64 * 1024
+            && renderedOutput == QString::fromStdString(output)
+            && renderedOutput.startsWith(QStringLiteral("canonical collapsed-update beginning"))
+            && renderedOutput.endsWith(QStringLiteral("canonical collapsed-update final sentinel")),
+        "expanding after a collapsed update must reveal the complete >64 KiB canonical output, including its beginning and end");
+    passed &= expect(detailView && detailView->text().contains(QString::fromStdString(fullCommand)),
+                     "expanded command details must preserve commands longer than the collapsed summary");
+    passed &= expect(timeline(conversation)
+                         && timeline(conversation)->height() > collapsedActivityHeight,
+                     "expanding an activity must grow the fixed timeline host and its scroll range");
+
+    QPlainTextEdit* const outputAddress = outputView.data();
+    output += "\nstreamed continuation";
+    fixture.turns.front().messages.front().text = output;
+    fixture.turns.front().messages.front().status = "completed";
+    conversation.render(
+        makeState({fixture}), QStringLiteral("activity-detail"), false, &exactOutputChange);
+    settleTimeline();
+    auto* statusSymbol = row ? row->findChild<QLabel*>(QStringLiteral("conversationActivitySymbol")) : nullptr;
+    passed &= expect(row && row == rowAddress && outputView && outputView.data() == outputAddress
+                         && outputView->toPlainText() == QString::fromStdString(output)
+                         && details && !details->isHidden() && statusSymbol
+                         && statusSymbol->text() == QStringLiteral("✓"),
+                     "streaming command output and completion status must update the expanded activity in place");
+
+    const int longActivityHeight = timeline(conversation) ? timeline(conversation)->height() : 0;
+    fixture.turns.front().messages.front().command = "true";
+    conversation.render(makeState({fixture}), QStringLiteral("activity-detail"));
+    settleTimeline();
+    passed &= expect(timeline(conversation)
+                         && timeline(conversation)->height() < longActivityHeight,
+                     "shortening expanded activity detail must shrink the fixed timeline host without blank space");
+
+    fixture.turns.front().plan.reset();
+    fixture.turns.front().messages.push_back({"command-activity-appended",
+                                              frontend::ThreadItemKind::Plan,
+                                              "verify the focused implementation",
+                                              "completed"});
+    conversation.render(makeState({fixture}), QStringLiteral("activity-detail"));
+    settleTimeline();
+    const auto appendedRows = card
+                                  ? card->findChildren<QWidget*>(QStringLiteral("conversationActivityRow"))
+                                  : QList<QWidget*>{};
+    passed &= expect(card == conversation.findChild<QFrame*>(QStringLiteral("conversationActivityCard"))
+                         && appendedRows.size() == 2 && appendedRows.front() == rowAddress
+                         && outputView && outputView.data() == outputAddress && !details->isHidden()
+                         && planAvailable && planAvailable->isVisible(),
+                     "appending a plan activity must preserve expanded output and update the card indicator");
+
+    const std::string fileOutput = "file-change output beginning\n"
+                                   + std::string(4'096, 'f')
+                                   + "\nfile-change output sentinel";
+    fixture.turns.front().messages.push_back({"file-change-output",
+                                              frontend::ThreadItemKind::FileChange,
+                                              fileOutput,
+                                              "in_progress"});
+    conversation.render(makeState({fixture}), QStringLiteral("activity-detail"));
+    settleTimeline();
+    QWidget* fileRow = nullptr;
+    if (card) {
+        for (auto* candidate : card->findChildren<QWidget*>(QStringLiteral("conversationActivityRow"))) {
+            if (candidate->property("itemId").toString() == QStringLiteral("file-change-output")) {
+                fileRow = candidate;
+                break;
+            }
+        }
+    }
+    auto* fileDisclosure = fileRow
+                               ? fileRow->findChild<QToolButton*>(QStringLiteral("activityDisclosure"))
+                               : nullptr;
+    if (fileDisclosure)
+        fileDisclosure->click();
+    settleEvents();
+    auto* fileOutputView = fileRow
+                               ? fileRow->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput"))
+                               : nullptr;
+    passed &= expect(fileOutputView
+                         && fileOutputView->toPlainText() == QString::fromStdString(fileOutput),
+                     "any typed activity carrying canonical command output must disclose its complete text");
+
+    const int expandedGroupHeight = timeline(conversation) ? timeline(conversation)->height() : 0;
+    if (groupDisclosure)
+        groupDisclosure->click();
+    settleTimeline();
+    passed &= expect(groupDisclosure && groupDisclosure->isCheckable()
+                         && !groupDisclosure->isChecked() && body && body->isHidden(),
+                     "the activity group disclosure must collapse the complete activity region");
+    passed &= expect(timeline(conversation)
+                         && timeline(conversation)->height() < expandedGroupHeight,
+                     "collapsing an activity group must shrink the fixed timeline host and its scroll range");
+    fixture.turns.front().messages.back().status = "completed";
+    fixture.turns.front().messages.back().text += "\npost-collapse update";
+    conversation.render(makeState({fixture}), QStringLiteral("activity-detail"));
+    settleTimeline();
+    passed &= expect(card == conversation.findChild<QFrame*>(QStringLiteral("conversationActivityCard"))
+                         && body->isHidden() && groupDisclosure && !groupDisclosure->isChecked(),
+                     "a canonical activity update must preserve a collapsed group without rebuilding it");
+    if (groupDisclosure)
+        groupDisclosure->click();
+    settleTimeline();
+    passed &= expect(body && !body->isHidden() && details && !details->isHidden(),
+                     "reopening a group must preserve individual activity expansion state");
+    passed &= expect(timeline(conversation)
+                         && timeline(conversation)->height() > collapsedActivityHeight,
+                     "reopening an activity group must restore the fixed timeline host geometry");
     return passed;
 }
 
@@ -876,6 +1159,69 @@ bool testInspectorRevisionOnlyUpdate()
                      "a revision-only update must preserve every existing Inspector pane widget");
 }
 
+bool testStructuredPlanPresentation()
+{
+    ThreadFixture fixture{"structured-plan",
+                          {{"turn-structured-plan",
+                            {{"message-structured-plan",
+                              frontend::ThreadItemKind::AgentMessage,
+                              "Working through the plan"}},
+                            frontend::Json{{"explanation", "Keep the implementation focused."},
+                                           {"steps",
+                                            {"Inspect canonical state",
+                                             "Render typed plan",
+                                             "Validate behavior"}},
+                                           {"statuses", {"completed", "inProgress", "pending"}},
+                                           {"totalSteps", 3},
+                                           {"truncated", false}}}}};
+    const client::State state = makeState({fixture});
+    codexui::InspectorWidget inspector;
+    inspector.resize(420, 700);
+    inspector.show();
+    inspector.render(state,
+                     QStringLiteral("structured-plan"),
+                     true,
+                     QStringLiteral("State synced"));
+    settleEvents();
+
+    auto steps = inspector.findChildren<QLabel*>(QStringLiteral("inspectorPlanStepText"));
+    const auto hasStep = [&steps](const QString& text) {
+        return std::ranges::any_of(steps, [&text](const QLabel* label) { return label->text() == text; });
+    };
+    bool passed = expect(state.thread("structured-plan") != nullptr && steps.size() == 3
+                             && hasStep(QStringLiteral("Inspect canonical state"))
+                             && hasStep(QStringLiteral("Render typed plan"))
+                             && hasStep(QStringLiteral("Validate behavior")),
+                         "the Plan tab must render the authoritative ordered typed turn plan");
+
+    fixture.turns.front().plan = frontend::Json{
+        {"explanation", "The plan changed."},
+        {"steps",
+         {"Inspect canonical state", "Render typed plan", "Validate behavior", "Publish result"}},
+        {"statuses", {"completed", "completed", "inProgress", "pending"}},
+        {"totalSteps", 5},
+        {"truncated", true}};
+    inspector.render(makeState({fixture}),
+                     QStringLiteral("structured-plan"),
+                     true,
+                     QStringLiteral("State synced"));
+    settleEvents();
+    steps = inspector.findChildren<QLabel*>(QStringLiteral("inspectorPlanStepText"));
+    auto* truncation = inspector.findChild<QLabel*>(QStringLiteral("inspectorPlanTruncation"));
+    passed &= expect(steps.size() == 4 && truncation && truncation->text().contains(QStringLiteral("4 of 5")),
+                     "incremental plan replacement must refresh ordered steps and truthful truncation state");
+
+    fixture.turns.front().plan.reset();
+    inspector.render(makeState({fixture}),
+                     QStringLiteral("structured-plan"),
+                     true,
+                     QStringLiteral("State synced"));
+    settleEvents();
+    passed &= expect(inspector.findChildren<QLabel*>(QStringLiteral("inspectorPlanStepText")).isEmpty(),
+                     "removing the canonical plan must clear stale structured Plan rows");
+    return passed;
+}
+
 bool testHistoricalTurnDetailsMode()
 {
     const client::State state = makeState({sequentialTurns("turn-details", 2)});
@@ -994,6 +1340,7 @@ int main(int argc, char** argv)
     passed &= testTurnWindow();
     passed &= testSameThreadPrefixExpansion();
     passed &= testHotTurnWindow();
+    passed &= testActivityDisclosureAndFullOutput();
     passed &= testPointerPreservingAppend();
     passed &= testInPlaceMessageReplacement();
     passed &= testCompleteAndLargeUserMessagePresentation();
@@ -1001,6 +1348,7 @@ int main(int argc, char** argv)
     passed &= testSegmentReplacementShrink();
     passed &= testThreadSwitchWindow();
     passed &= testInspectorRevisionOnlyUpdate();
+    passed &= testStructuredPlanPresentation();
     passed &= testHistoricalTurnDetailsMode();
 
     return passed ? 0 : 1;

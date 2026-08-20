@@ -19,12 +19,16 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSet>
 #include <QSizePolicy>
 #include <QStyle>
+#include <QTextCursor>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QEasingCurve>
 
+#include <algorithm>
 #include <optional>
 #include <functional>
 #include <variant>
@@ -47,6 +51,7 @@ struct ActivityPresentation
 {
     QString title;
     QString detail;
+    QString output;
     QString status;
     QString tail;
     bool truncated = false;
@@ -84,31 +89,16 @@ QString compact(const QString& value, qsizetype maximum = 500)
     return value.left(maximum).trimmed() + QStringLiteral("…");
 }
 
-QString boundedUtf8Preview(std::string_view value, bool& truncated)
+QString plainTooltip(const QString& value)
 {
-    constexpr qsizetype maximumBytes = 2 * 1024;
-    constexpr qsizetype maximumCharacters = 500;
-    qsizetype prefixBytes = qMin(static_cast<qsizetype>(value.size()), maximumBytes);
-    if (prefixBytes < static_cast<qsizetype>(value.size()))
-    {
-        while (prefixBytes > 0
-               && (static_cast<unsigned char>(value[static_cast<std::size_t>(prefixBytes)]) & 0xc0U) == 0x80U)
-            --prefixBytes;
-        truncated = true;
-    }
-    QString preview = QString::fromUtf8(value.data(), prefixBytes);
-    if (preview.size() > maximumCharacters)
-    {
-        qsizetype prefixCharacters = maximumCharacters;
-        if (preview.at(prefixCharacters - 1).isHighSurrogate()
-            && preview.at(prefixCharacters).isLowSurrogate())
-            --prefixCharacters;
-        preview.truncate(prefixCharacters);
-        truncated = true;
-    }
-    if (truncated)
-        preview = preview.trimmed() + QChar(0x2026);
-    return preview;
+    return Qt::convertFromPlainText(value, Qt::WhiteSpaceNormal);
+}
+
+QString singleLinePreview(QString value, qsizetype maximum = 180)
+{
+    value.replace(QLatin1Char('\n'), QLatin1Char(' '));
+    value.replace(QLatin1Char('\r'), QLatin1Char(' '));
+    return compact(value.simplified(), maximum);
 }
 
 QString compactId(const std::string& id)
@@ -466,7 +456,9 @@ QString pendingRequestDetail(const sdk::State& state, const sdk::ItemState& item
     return {};
 }
 
-ActivityPresentation activityPresentation(const sdk::State& state, const sdk::ItemState& item)
+ActivityPresentation activityPresentation(const sdk::State& state,
+                                          const sdk::ItemState& item,
+                                          bool includeOutput = true)
 {
     ActivityPresentation result;
     result.title = item.kind.known ? knownKindTitle(*item.kind.known) : QStringLiteral("Unknown item");
@@ -479,21 +471,24 @@ ActivityPresentation activityPresentation(const sdk::State& state, const sdk::It
     {
         if (const auto* command = std::get_if<sdk::CommandExecutionSemanticView>(&semantic->details))
         {
-            if (command->command) result.title = compact(fromUtf8(*command->command), 240);
-            if (command->cwd) result.detail = fromUtf8(command->cwd->value);
+            if (command->command)
+            {
+                const QString fullCommand = fromUtf8(*command->command);
+                result.title = singleLinePreview(fullCommand, 240);
+                result.detail = QStringLiteral("Command:\n%1").arg(fullCommand);
+            }
+            if (command->cwd)
+            {
+                const QString cwd = QStringLiteral("Working directory:\n%1")
+                                        .arg(fromUtf8(command->cwd->value));
+                result.detail = result.detail.isEmpty() ? cwd
+                                                        : result.detail + QStringLiteral("\n\n") + cwd;
+            }
             if (command->status) result.status = humanize(fromUtf8(*command->status));
             QStringList tail;
             if (command->durationMs) tail.append(QStringLiteral("%1 ms").arg(*command->durationMs));
             if (command->exitCode) tail.append(QStringLiteral("exit %1").arg(*command->exitCode));
             result.tail = tail.join(QStringLiteral(" · "));
-            if (item.commandOutput && !item.commandOutput->empty())
-            {
-                bool outputTruncated = false;
-                const QString output = QStringLiteral("Output: %1").arg(
-                    boundedUtf8Preview(*item.commandOutput, outputTruncated));
-                result.detail = result.detail.isEmpty() ? output : result.detail + QStringLiteral(" · ") + output;
-                result.truncated = result.truncated || outputTruncated;
-            }
         }
         else if (const auto* changes = std::get_if<sdk::FileChangeSemanticView>(&semantic->details))
         {
@@ -560,6 +555,11 @@ ActivityPresentation activityPresentation(const sdk::State& state, const sdk::It
         result.truncated = result.truncated || semantic->truncated || !semantic->omittedFields.empty();
     }
 
+    // Command execution is the common source, but file-change and future typed
+    // activities may also carry the canonical command-output channel.
+    if (includeOutput && item.commandOutput && !item.commandOutput->empty())
+        result.output = fromUtf8(*item.commandOutput);
+
     if (item.kind.is(frontend::ThreadItemKind::Reasoning))
     {
         if (item.reasoningSummary && !item.reasoningSummary->empty())
@@ -583,50 +583,276 @@ ActivityPresentation activityPresentation(const sdk::State& state, const sdk::It
     return result;
 }
 
-void addActivityRow(QVBoxLayout* rows, const ActivityPresentation& item)
+QToolButton* disclosureButton(bool expanded, const QString& accessibleName)
+{
+    auto* button = new QToolButton;
+    button->setObjectName(QStringLiteral("activityDisclosure"));
+    button->setAutoRaise(true);
+    button->setCheckable(true);
+    button->setChecked(expanded);
+    button->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+    button->setToolTip(expanded ? QStringLiteral("Collapse") : QStringLiteral("Expand"));
+    button->setAccessibleName(accessibleName);
+    button->setFixedSize(20, 20);
+    return button;
+}
+
+void setDisclosureState(QToolButton* disclosure, QWidget* details, bool expanded)
+{
+    disclosure->setChecked(expanded);
+    disclosure->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+    disclosure->setToolTip(expanded ? QStringLiteral("Collapse") : QStringLiteral("Expand"));
+    details->setVisible(expanded);
+}
+
+QPlainTextEdit* activityOutputWidget(const QString& text)
+{
+    auto* output = new QPlainTextEdit;
+    output->setObjectName(QStringLiteral("conversationActivityOutput"));
+    output->setReadOnly(true);
+    output->setUndoRedoEnabled(false);
+    output->setLineWrapMode(QPlainTextEdit::NoWrap);
+    output->setMinimumHeight(96);
+    output->setMaximumHeight(240);
+    output->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    output->setStyleSheet(QStringLiteral("font-family:monospace;font-size:11px;"));
+    output->setPlainText(text);
+    output->setProperty("activityOutputText", text);
+    return output;
+}
+
+void updateActivityOutput(QPlainTextEdit* output, const QString& text)
+{
+    if (!output)
+        return;
+    const bool followsEnd = output->verticalScrollBar()->maximum()
+                            - output->verticalScrollBar()->value() <= 2;
+    const int previousScroll = output->verticalScrollBar()->value();
+    const QString previous = output->property("activityOutputText").toString();
+    if (previous != text)
+    {
+        if (!previous.isEmpty() && text.startsWith(previous))
+        {
+            QTextCursor cursor = output->textCursor();
+            cursor.movePosition(QTextCursor::End);
+            cursor.insertText(text.mid(previous.size()));
+        }
+        else
+        {
+            output->setPlainText(text);
+        }
+    }
+    output->setProperty("activityOutputText", text);
+    output->setVisible(!text.isEmpty());
+    output->verticalScrollBar()->setValue(
+        followsEnd ? output->verticalScrollBar()->maximum()
+                   : qMin(previousScroll, output->verticalScrollBar()->maximum()));
+}
+
+QPlainTextEdit* ensureActivityOutput(QWidget* details, QVBoxLayout* layout)
+{
+    if (!details || !layout)
+        return nullptr;
+    auto* output = details->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput"));
+    const QString text = details->property("activityOutputText").toString();
+    if (!output && !text.isEmpty())
+    {
+        auto* heading = details->findChild<QLabel*>(
+            QStringLiteral("conversationActivityOutputHeading"));
+        if (!heading)
+        {
+            heading = textLabel(QStringLiteral("Output"), "small");
+            heading->setObjectName(QStringLiteral("conversationActivityOutputHeading"));
+            heading->setStyleSheet(QStringLiteral("font-size:10px;font-weight:600;color:#475467;"));
+            const auto* incomplete = details->findChild<QLabel*>(
+                QStringLiteral("conversationActivityIncomplete"));
+            const int headingPosition = incomplete ? layout->indexOf(incomplete) : layout->count();
+            layout->insertWidget(headingPosition, heading);
+        }
+        output = activityOutputWidget(text);
+        const auto* incomplete = details->findChild<QLabel*>(QStringLiteral("conversationActivityIncomplete"));
+        const int position = incomplete ? layout->indexOf(incomplete) : layout->count();
+        layout->insertWidget(position, output);
+    }
+    return output;
+}
+
+void addActivityRow(QVBoxLayout* rows,
+                    const QString& itemId,
+                    const ActivityPresentation& item,
+                    bool expanded,
+                    const std::function<void()>& layoutChanged = {})
 {
     auto* line = new QWidget;
+    line->setObjectName(QStringLiteral("conversationActivityRow"));
+    line->setProperty("itemId", itemId);
     line->setMinimumHeight(38);
-    auto* layout = new QHBoxLayout(line);
-    layout->setContentsMargins(2, 5, 4, 5);
+    auto* lineLayout = new QVBoxLayout(line);
+    lineLayout->setContentsMargins(2, 5, 4, 5);
+    lineLayout->setSpacing(5);
+
+    auto* summary = new QWidget;
+    auto* layout = new QHBoxLayout(summary);
+    layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(8);
+
+    const bool hasDetails = !item.detail.isEmpty() || !item.output.isEmpty() || item.truncated;
+    auto* disclosure = disclosureButton(
+        expanded,
+        QStringLiteral("Activity details: %1").arg(item.title));
+    disclosure->setEnabled(hasDetails);
+    disclosure->setVisible(hasDetails);
+    layout->addWidget(disclosure, 0, Qt::AlignTop);
 
     const QString color = statusColor(item.status);
     auto* symbol = textLabel(statusGlyph(item.status));
+    symbol->setObjectName(QStringLiteral("conversationActivitySymbol"));
     symbol->setFixedWidth(14);
     symbol->setAlignment(Qt::AlignTop);
     symbol->setStyleSheet(QStringLiteral("color:%1;font-size:12px;font-weight:600;").arg(color));
     layout->addWidget(symbol);
 
-    auto* copy = new QWidget;
-    auto* copyLayout = new QVBoxLayout(copy);
-    copyLayout->setContentsMargins(0, 0, 0, 0);
-    copyLayout->setSpacing(4);
     auto* title = wrappingLabel(item.title);
+    title->setObjectName(QStringLiteral("conversationActivityTitle"));
+    title->setToolTip(plainTooltip(item.title));
     title->setStyleSheet(QStringLiteral("font-size:12px;font-weight:500;"));
-    copyLayout->addWidget(title);
+    layout->addWidget(title, 1);
+
+    auto* tail = textLabel(item.tail, "meta");
+    tail->setObjectName(QStringLiteral("conversationActivityTail"));
+    tail->setVisible(!item.tail.isEmpty());
+    layout->addWidget(tail, 0, Qt::AlignTop);
+    auto* state = textLabel(item.status);
+    state->setObjectName(QStringLiteral("conversationActivityStatus"));
+    state->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;").arg(color));
+    layout->addWidget(state, 0, Qt::AlignTop);
+    lineLayout->addWidget(summary);
+
+    auto* details = new QWidget;
+    details->setObjectName(QStringLiteral("conversationActivityDetails"));
+    auto* detailsLayout = new QVBoxLayout(details);
+    detailsLayout->setContentsMargins(42, 0, 4, 4);
+    detailsLayout->setSpacing(6);
     if (!item.detail.isEmpty())
     {
-        auto* detail = wrappingLabel(compact(item.detail), "meta");
-        detail->setToolTip(item.detail);
-        copyLayout->addWidget(detail);
+        auto* detail = wrappingLabel(item.detail, "meta");
+        detail->setObjectName(QStringLiteral("conversationActivityDetail"));
+        detail->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        detailsLayout->addWidget(detail);
+    }
+    if (!item.output.isEmpty())
+    {
+        details->setProperty("activityOutputText", item.output);
+        if (expanded)
+        {
+            auto* heading = textLabel(QStringLiteral("Output"), "small");
+            heading->setObjectName(QStringLiteral("conversationActivityOutputHeading"));
+            heading->setStyleSheet(QStringLiteral("font-size:10px;font-weight:600;color:#475467;"));
+            detailsLayout->addWidget(heading);
+            detailsLayout->addWidget(activityOutputWidget(item.output));
+        }
     }
     if (item.truncated)
     {
-        auto* omitted = textLabel(QStringLiteral("Projected detail is truncated or omitted"), "small");
+        auto* omitted = textLabel(QStringLiteral("Canonical activity detail is incomplete"), "small");
+        omitted->setObjectName(QStringLiteral("conversationActivityIncomplete"));
         omitted->setStyleSheet(QStringLiteral("color:#a76812;font-size:9px;"));
-        copyLayout->addWidget(omitted);
+        detailsLayout->addWidget(omitted);
     }
-    layout->addWidget(copy, 1);
-
-    if (!item.tail.isEmpty()) layout->addWidget(textLabel(item.tail, "meta"), 0, Qt::AlignTop);
-    auto* state = textLabel(item.status);
-    state->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;").arg(color));
-    layout->addWidget(state, 0, Qt::AlignTop);
+    setDisclosureState(disclosure, details, expanded && hasDetails);
+    lineLayout->addWidget(details);
+    QObject::connect(disclosure, &QToolButton::clicked, line,
+                     [disclosure, details, detailsLayout, layoutChanged](bool)
+                     {
+                         const bool next = !details->isVisible();
+                         if (next)
+                             ensureActivityOutput(details, detailsLayout);
+                         setDisclosureState(disclosure, details, next);
+                         if (layoutChanged)
+                             layoutChanged();
+                     });
     rows->addWidget(line);
 }
 
-QFrame* activityCard(const sdk::State& state, const std::vector<const sdk::ItemState*>& items)
+bool updateActivityRow(QWidget* row, const ActivityPresentation& item)
+{
+    if (!row)
+        return false;
+    auto* title = dynamic_cast<WrappingLabel*>(
+        row->findChild<QLabel*>(QStringLiteral("conversationActivityTitle")));
+    auto* symbol = row->findChild<QLabel*>(QStringLiteral("conversationActivitySymbol"));
+    auto* tail = row->findChild<QLabel*>(QStringLiteral("conversationActivityTail"));
+    auto* status = row->findChild<QLabel*>(QStringLiteral("conversationActivityStatus"));
+    auto* details = row->findChild<QWidget*>(QStringLiteral("conversationActivityDetails"));
+    auto* disclosure = row->findChild<QToolButton*>(QStringLiteral("activityDisclosure"));
+    if (!title || !symbol || !tail || !status || !details || !disclosure)
+        return false;
+    auto* detailsLayout = qobject_cast<QVBoxLayout*>(details->layout());
+    if (!detailsLayout)
+        return false;
+
+    title->setContent(item.title);
+    title->setToolTip(plainTooltip(item.title));
+    disclosure->setAccessibleName(QStringLiteral("Activity details: %1").arg(item.title));
+    symbol->setText(statusGlyph(item.status));
+    symbol->setStyleSheet(
+        QStringLiteral("color:%1;font-size:12px;font-weight:600;").arg(statusColor(item.status)));
+    tail->setText(item.tail);
+    tail->setVisible(!item.tail.isEmpty());
+    status->setText(item.status);
+    status->setStyleSheet(
+        QStringLiteral("color:%1;font-size:9px;font-weight:600;").arg(statusColor(item.status)));
+
+    auto* detail = dynamic_cast<WrappingLabel*>(
+        details->findChild<QLabel*>(QStringLiteral("conversationActivityDetail")));
+    if (!detail && !item.detail.isEmpty())
+    {
+        detail = static_cast<WrappingLabel*>(wrappingLabel({}, "meta"));
+        detail->setObjectName(QStringLiteral("conversationActivityDetail"));
+        detail->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        detailsLayout->insertWidget(0, detail);
+    }
+    if (detail)
+    {
+        detail->setContent(item.detail);
+        detail->setVisible(!item.detail.isEmpty());
+    }
+
+    details->setProperty("activityOutputText", item.output);
+    auto* output = details->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput"));
+    if (!output && !details->isHidden() && !item.output.isEmpty())
+        output = ensureActivityOutput(details, detailsLayout);
+    if (output)
+        updateActivityOutput(output, item.output);
+    if (auto* outputHeading = details->findChild<QLabel*>(
+            QStringLiteral("conversationActivityOutputHeading")))
+        outputHeading->setVisible(!item.output.isEmpty());
+
+    auto* incomplete = details->findChild<QLabel*>(QStringLiteral("conversationActivityIncomplete"));
+    if (!incomplete && item.truncated)
+    {
+        incomplete = textLabel(QStringLiteral("Canonical activity detail is incomplete"), "small");
+        incomplete->setObjectName(QStringLiteral("conversationActivityIncomplete"));
+        incomplete->setStyleSheet(QStringLiteral("color:#a76812;font-size:9px;"));
+        detailsLayout->addWidget(incomplete);
+    }
+    if (incomplete)
+        incomplete->setVisible(item.truncated);
+
+    const bool hasDetails = !item.detail.isEmpty() || !item.output.isEmpty() || item.truncated;
+    disclosure->setEnabled(hasDetails);
+    disclosure->setVisible(hasDetails);
+    if (!hasDetails)
+        setDisclosureState(disclosure, details, false);
+    return true;
+}
+
+QFrame* activityCard(const sdk::State& state,
+                     const std::vector<const sdk::ItemState*>& items,
+                     bool typedPlanAvailable,
+                     bool expanded,
+                     const QSet<QString>& expandedItems,
+                     const std::function<void()>& layoutChanged)
 {
     auto* card = new QFrame;
     card->setObjectName(QStringLiteral("conversationActivityCard"));
@@ -638,27 +864,56 @@ QFrame* activityCard(const sdk::State& state, const std::vector<const sdk::ItemS
     layout->setSpacing(0);
 
     auto* header = new QHBoxLayout;
+    auto* disclosure = disclosureButton(expanded, QStringLiteral("Activity group"));
+    header->addWidget(disclosure);
     auto* title = textLabel(QStringLiteral("Activity"));
     title->setStyleSheet(QStringLiteral("font-size:12px;font-weight:600;"));
     header->addWidget(title);
     header->addStretch();
-    qsizetype plans = 0;
-    for (const auto* item : items)
-        plans += item->kind.is(frontend::ThreadItemKind::Plan) ? 1 : 0;
-    if (plans) header->addWidget(textLabel(QStringLiteral("Plan available"), "small"));
+    const bool legacyPlanAvailable = std::ranges::any_of(items, [](const sdk::ItemState* item) {
+        return item && item->kind.is(frontend::ThreadItemKind::Plan);
+    });
+    auto* planAvailable = textLabel(QStringLiteral("Plan available"), "small");
+    planAvailable->setObjectName(QStringLiteral("conversationActivityPlanAvailable"));
+    planAvailable->setVisible(typedPlanAvailable || legacyPlanAvailable);
+    header->addWidget(planAvailable);
     header->addSpacing(8);
-    header->addWidget(
-        textLabel(QStringLiteral("%1 activit%2").arg(items.size()).arg(items.size() == 1 ? "y" : "ies"), "small"));
+    auto* count = textLabel(
+        QStringLiteral("%1 activit%2").arg(items.size()).arg(items.size() == 1 ? "y" : "ies"),
+        "small");
+    count->setObjectName(QStringLiteral("conversationActivityCount"));
+    header->addWidget(count);
     layout->addLayout(header);
-    layout->addSpacing(9);
-    layout->addWidget(divider());
-    layout->addSpacing(3);
+    auto* body = new QWidget;
+    body->setObjectName(QStringLiteral("conversationActivityBody"));
+    auto* bodyLayout = new QVBoxLayout(body);
+    bodyLayout->setContentsMargins(0, 9, 0, 0);
+    bodyLayout->setSpacing(3);
+    bodyLayout->addWidget(divider());
     auto* rows = new QVBoxLayout;
+    rows->setObjectName(QStringLiteral("conversationActivityRows"));
     rows->setContentsMargins(0, 0, 0, 0);
     rows->setSpacing(4);
     for (const auto* item : items)
-        addActivityRow(rows, activityPresentation(state, *item));
-    layout->addLayout(rows);
+    {
+        const QString itemId = fromUtf8(item->id.value);
+        addActivityRow(rows,
+                       itemId,
+                       activityPresentation(state, *item),
+                       expandedItems.contains(itemId),
+                       layoutChanged);
+    }
+    bodyLayout->addLayout(rows);
+    setDisclosureState(disclosure, body, expanded);
+    layout->addWidget(body);
+    QObject::connect(disclosure, &QToolButton::clicked, card,
+                     [disclosure, body, layoutChanged](bool)
+                     {
+                         const bool next = !body->isVisible();
+                         setDisclosureState(disclosure, body, next);
+                         if (layoutChanged)
+                             layoutChanged();
+                     });
     return card;
 }
 
@@ -807,6 +1062,28 @@ struct TimelineSegment
     bool missing = false;
 };
 
+struct ActivityExpansionState
+{
+    bool groupExpanded = true;
+    QSet<QString> expandedItems;
+};
+
+ActivityExpansionState activityExpansionState(const QWidget* segment)
+{
+    ActivityExpansionState result;
+    if (!segment)
+        return result;
+    if (const auto* body = segment->findChild<QWidget*>(QStringLiteral("conversationActivityBody")))
+        result.groupExpanded = !body->isHidden();
+    for (const auto* row : segment->findChildren<QWidget*>(QStringLiteral("conversationActivityRow")))
+    {
+        const auto* details = row->findChild<QWidget*>(QStringLiteral("conversationActivityDetails"));
+        if (details && !details->isHidden())
+            result.expandedItems.insert(row->property("itemId").toString());
+    }
+    return result;
+}
+
 struct TimelineEntry
 {
     const sdk::TurnState* turn = nullptr;
@@ -935,11 +1212,14 @@ TimelineWindow latestTimelineWindow(const sdk::State& state, const sdk::ThreadSt
     return result;
 }
 
-QByteArray segmentPresentationKey(const sdk::State& state, const TimelineSegment& segment)
+QByteArray segmentPresentationKey(const sdk::State& state,
+                                  const TimelineSegment& segment,
+                                  bool typedPlanAvailable)
 {
     QCryptographicHash hash(QCryptographicHash::Sha256);
     addPresentationValue(hash, segment.id);
     addPresentationValue(hash, segment.missing);
+    addPresentationValue(hash, typedPlanAvailable);
     for (const auto* item : segment.items)
     {
         addPresentationValue(hash, item != nullptr);
@@ -972,9 +1252,25 @@ QByteArray segmentPresentationKey(const sdk::State& state, const TimelineSegment
         }
         else
         {
-            const ActivityPresentation presentation = activityPresentation(state, *item);
+            // A command-output channel may be several MiB. Do not convert and
+            // hash its complete text merely to discover that an immutable item
+            // revision changed; exact content updates explicitly bypass an
+            // equal key during reconciliation below.
+            const ActivityPresentation presentation = activityPresentation(state, *item, false);
             addPresentationValue(hash, presentation.title);
             addPresentationValue(hash, presentation.detail);
+            addPresentationValue(
+                hash,
+                QByteArray::number(static_cast<qulonglong>(
+                    item->commandOutput ? item->commandOutput->size() : 0)));
+            if (item->stamp)
+                addPresentationValue(
+                    hash,
+                    QByteArray::number(static_cast<qulonglong>(item->stamp->generation)));
+            else if (item->commandOutput)
+                // Compatibility states without a source stamp cannot provide
+                // a cheaper authoritative revision identity.
+                addPresentationValue(hash, std::string_view(*item->commandOutput));
             addPresentationValue(hash, presentation.status);
             addPresentationValue(hash, presentation.tail);
             addPresentationValue(hash, presentation.truncated);
@@ -983,7 +1279,11 @@ QByteArray segmentPresentationKey(const sdk::State& state, const TimelineSegment
     return hash.result();
 }
 
-QWidget* timelineSegmentWidget(const sdk::State& state, const TimelineSegment& segment)
+QWidget* timelineSegmentWidget(const sdk::State& state,
+                               const TimelineSegment& segment,
+                               bool typedPlanAvailable,
+                               const ActivityExpansionState& activityExpansion,
+                               const std::function<void()>& layoutChanged)
 {
     auto* host = new QWidget;
     host->setObjectName(QStringLiteral("conversationSegment"));
@@ -999,6 +1299,7 @@ QWidget* timelineSegmentWidget(const sdk::State& state, const TimelineSegment& s
         ActivityPresentation omitted{
             QStringLiteral("Unavailable item"),
             QStringLiteral("The ordered item shell is not retained in current State"),
+            {},
             QStringLiteral("Omitted"),
             {},
             true};
@@ -1006,7 +1307,7 @@ QWidget* timelineSegmentWidget(const sdk::State& state, const TimelineSegment& s
         card->setProperty("kind", "panel");
         auto* rows = new QVBoxLayout(card);
         rows->setContentsMargins(16, 8, 16, 8);
-        addActivityRow(rows, omitted);
+        addActivityRow(rows, QString{}, omitted, false, layoutChanged);
         layout->addWidget(card);
         layout->addSpacing(16);
     }
@@ -1026,10 +1327,80 @@ QWidget* timelineSegmentWidget(const sdk::State& state, const TimelineSegment& s
     }
     else
     {
-        layout->addWidget(activityCard(state, segment.items));
+        layout->addWidget(activityCard(state,
+                                       segment.items,
+                                       typedPlanAvailable,
+                                       activityExpansion.groupExpanded,
+                                       activityExpansion.expandedItems,
+                                       layoutChanged));
         layout->addSpacing(16);
     }
     return host;
+}
+
+bool updateTimelineActivitySegment(QWidget* host,
+                                   const sdk::State& state,
+                                   const TimelineSegment& segment,
+                                   bool typedPlanAvailable,
+                                   const QStringList* exactChangedItemIds,
+                                   const std::function<void()>& layoutChanged)
+{
+    if (!host || segment.missing || segment.items.empty())
+        return false;
+    if (segment.items.size() == 1
+        && (segment.items.front()->kind.is(frontend::ThreadItemKind::UserMessage)
+            || segment.items.front()->kind.is(frontend::ThreadItemKind::AgentMessage)))
+        return false;
+
+    auto* rowsLayout = host->findChild<QVBoxLayout*>(QStringLiteral("conversationActivityRows"));
+    auto* count = host->findChild<QLabel*>(QStringLiteral("conversationActivityCount"));
+    auto* planAvailable = host->findChild<QLabel*>(QStringLiteral("conversationActivityPlanAvailable"));
+    if (!rowsLayout || !count || !planAvailable
+        || static_cast<std::size_t>(rowsLayout->count()) > segment.items.size())
+        return false;
+    std::vector<QWidget*> rows;
+    rows.reserve(static_cast<std::size_t>(rowsLayout->count()));
+    for (int index = 0; index < rowsLayout->count(); ++index)
+    {
+        QWidget* row = rowsLayout->itemAt(index)->widget();
+        if (!row || row->objectName() != QStringLiteral("conversationActivityRow"))
+            return false;
+        rows.push_back(row);
+    }
+    for (std::size_t index = 0; index < rows.size(); ++index)
+    {
+        const auto* item = segment.items.at(index);
+        if (!item || rows.at(index)->property("itemId").toString() != fromUtf8(item->id.value))
+            return false;
+    }
+    for (std::size_t index = 0; index < rows.size(); ++index)
+    {
+        const auto* item = segment.items.at(index);
+        if (exactChangedItemIds
+            && !exactChangedItemIds->contains(fromUtf8(item->id.value)))
+            continue;
+        if (!updateActivityRow(rows.at(index), activityPresentation(state, *item)))
+            return false;
+    }
+    for (std::size_t index = rows.size(); index < segment.items.size(); ++index)
+    {
+        const auto* item = segment.items.at(index);
+        if (!item)
+            return false;
+        addActivityRow(rowsLayout,
+                       fromUtf8(item->id.value),
+                       activityPresentation(state, *item),
+                       false,
+                       layoutChanged);
+    }
+    count->setText(QStringLiteral("%1 activit%2")
+                       .arg(segment.items.size())
+                       .arg(segment.items.size() == 1 ? "y" : "ies"));
+    planAvailable->setVisible(typedPlanAvailable
+                              || std::ranges::any_of(segment.items, [](const sdk::ItemState* item) {
+                                     return item && item->kind.is(frontend::ThreadItemKind::Plan);
+                                 }));
+    return true;
 }
 
 bool updateTimelineMessageSegment(QWidget* host,
@@ -1652,24 +2023,30 @@ void ConversationWidget::render(const sdk::State& state,
                 {
                     const QString storage = segmentStorageKey(turnId, segment->id);
                     QWidget* oldWidget = renderedSegmentWidgets.value(storage);
+                    const QStringList* exactChangedItemIds = nullptr;
+                    bool explicitlyAffected = false;
                     if (oldWidget && exactContentOnly)
                     {
                         const auto changedItems = exactContentChanges->constFind(turnId);
-                        const bool affected = changedItems != exactContentChanges->cend()
-                                              && std::any_of(
-                                                  segment->items.cbegin(),
-                                                  segment->items.cend(),
-                                                  [&changedItems](const sdk::ItemState* item)
-                                                  {
-                                                      return item
-                                                             && changedItems->contains(
-                                                                 fromUtf8(item->id.value));
-                                                  });
-                        if (!affected)
+                        explicitlyAffected = changedItems != exactContentChanges->cend()
+                                             && std::any_of(
+                                                 segment->items.cbegin(),
+                                                 segment->items.cend(),
+                                                 [&changedItems](const sdk::ItemState* item)
+                                                 {
+                                                     return item
+                                                            && changedItems->contains(
+                                                                fromUtf8(item->id.value));
+                                                 });
+                        if (!explicitlyAffected)
                             continue;
+                        exactChangedItemIds = &changedItems.value();
                     }
-                    const QByteArray segmentKey = segmentPresentationKey(state, *segment);
-                    if (oldWidget && renderedSegmentKeys.value(storage) == segmentKey)
+                    const bool typedPlanAvailable = turn->plan.has_value();
+                    const QByteArray segmentKey = segmentPresentationKey(
+                        state, *segment, typedPlanAvailable);
+                    if (oldWidget && !explicitlyAffected
+                        && renderedSegmentKeys.value(storage) == segmentKey)
                         continue;
 
                     bool messageMayShrink = false;
@@ -1680,7 +2057,27 @@ void ConversationWidget::render(const sdk::State& state,
                         continue;
                     }
 
-                    QWidget* newWidget = timelineSegmentWidget(state, *segment);
+                    if (oldWidget
+                        && updateTimelineActivitySegment(
+                            oldWidget,
+                            state,
+                            *segment,
+                            typedPlanAvailable,
+                            exactChangedItemIds,
+                            [this] { activityLayoutChanged(); }))
+                    {
+                        renderedSegmentKeys.insert(storage, segmentKey);
+                        timelineShrank = true;
+                        continue;
+                    }
+
+                    const ActivityExpansionState expansion = activityExpansionState(oldWidget);
+                    QWidget* newWidget = timelineSegmentWidget(
+                        state,
+                        *segment,
+                        typedPlanAvailable,
+                        expansion,
+                        [this] { activityLayoutChanged(); });
                     newWidget->setProperty("turnId", turnId);
                     if (oldWidget)
                     {
@@ -1768,7 +2165,10 @@ bool ConversationWidget::updateExactMessageContent(
                 return false;
             TimelineSegment segment{segmentId, {item}, false};
             updates.push_back(
-                {storage, widget, segment, segmentPresentationKey(state, segment)});
+                {storage,
+                 widget,
+                 segment,
+                 segmentPresentationKey(state, segment, turn->plan.has_value())});
         }
     }
 
@@ -1808,6 +2208,18 @@ void ConversationWidget::scheduleTimelineLayout(int previousScroll,
     pendingFollowLatest = pendingFollowLatest || followLatest;
     pendingThreadChanged = pendingThreadChanged || threadChanged;
     pendingTimelineShrink = pendingTimelineShrink || timelineShrank;
+}
+
+void ConversationWidget::activityLayoutChanged()
+{
+    auto* bar = scrollArea->verticalScrollBar();
+    const int previousScroll = bar->value();
+    const bool followLatest = bar->maximum() - previousScroll <= 72
+                              || followingLatest;
+    if (!layoutSettleTimer->isActive())
+        captureTimelineAnchor();
+    scrollAnimation->stop();
+    scheduleTimelineLayout(previousScroll, followLatest, false, true);
 }
 
 void ConversationWidget::captureTimelineAnchor()
@@ -1991,6 +2403,11 @@ void ConversationWidget::clearPrompt()
     upcomingTurnDock->clearPrompt();
 }
 
+void ConversationWidget::clearPromptIfUnchanged(const QString& submittedPrompt)
+{
+    upcomingTurnDock->clearPromptIfUnchanged(submittedPrompt);
+}
+
 void ConversationWidget::focusComposer()
 {
     upcomingTurnDock->focusPrompt();
@@ -2011,12 +2428,24 @@ void ConversationWidget::acknowledgeSubmittedSettings(const UpcomingTurnDraft& s
     upcomingTurnDock->acknowledgeSubmittedSettings(submitted);
 }
 
-void ConversationWidget::setActionState(bool sendAllowed,
+void ConversationWidget::setActionState(bool primaryAllowed,
                                         bool stopAllowed,
                                         bool editorAllowed,
-                                        bool stopVisible)
+                                        bool settingsAllowed,
+                                        bool stopVisible,
+                                        bool steerMode,
+                                        const QString& actionThreadIdentity,
+                                        const QString& activeTurnIdentity)
 {
-    upcomingTurnDock->setActionState(sendAllowed, stopAllowed, editorAllowed, stopVisible);
+    upcomingTurnDock->setActionState(
+        primaryAllowed,
+        stopAllowed,
+        editorAllowed,
+        settingsAllowed,
+        stopVisible,
+        steerMode,
+        actionThreadIdentity,
+        activeTurnIdentity);
 }
 
 void ConversationWidget::setWriteStatus(const QString& text, bool error)

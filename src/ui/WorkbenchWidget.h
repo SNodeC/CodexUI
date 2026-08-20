@@ -43,6 +43,7 @@ private:
         None,
         OpenThread,
         SendExistingThread,
+        SteerActiveTurn,
         InterruptTurn,
         CreateThread,
         RenameThread,
@@ -76,7 +77,7 @@ private:
     void showForkThreadDialog(const QString& threadId);
     void showResumeWithOptionsDialog(const QString& threadId);
     void showDeleteThreadConfirmation(const QString& threadId);
-    void sendPrompt(const QString& prompt);
+    void sendPrompt(const QString& prompt, bool steerRequested);
     void stopActiveTurn();
     void maybeResumeSelectedThread();
     void reconcileAutomaticResumeState();
@@ -93,6 +94,7 @@ private:
     void resumeThread(const QString& threadId, const QString& prompt, const UpcomingTurnDraft& settings);
     void resumeThreadForOpen(const QString& threadId, std::uint64_t expectedSelectionGeneration);
     void startTurn(const QString& threadId, const QString& prompt, const UpcomingTurnDraft& settings);
+    void steerTurn(const QString& threadId, const QString& turnId, const QString& prompt);
     void reconcileSubmittedTurnSettings();
     void interruptTurn(const QString& threadId, const QString& turnId);
     void showWriteError(const QString& error);
@@ -145,6 +147,7 @@ private:
     bool threadStartInFlight = false;
     bool threadResumeInFlight = false;
     bool turnStartInFlight = false;
+    bool turnSteerInFlight = false;
     bool interruptInFlight = false;
     bool threadMutationInFlight = false;
     bool controllerUnavailable = false;

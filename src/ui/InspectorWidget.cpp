@@ -180,6 +180,16 @@ QString statusColor(const QString& status)
     return QStringLiteral("#667085");
 }
 
+QString planStatusGlyph(const QString& status)
+{
+    const QString normalized = status.toLower();
+    if (normalized.contains(QStringLiteral("complete")))
+        return QStringLiteral("✓");
+    if (normalized.contains(QStringLiteral("progress")))
+        return QStringLiteral("●");
+    return QStringLiteral("○");
+}
+
 QString itemStatus(const sdk::ItemState& item)
 {
     return item.status && !item.status->empty() ? humanize(fromUtf8(*item.status)) : QString{};
@@ -780,11 +790,12 @@ void InspectorWidget::render(const sdk::State& state,
     const ExecutionConfigurationPresentation executionConfiguration =
         executionConfigurationPresentation(configurationTurn, configurationUnavailableDetail);
 
-    // Plan: the installed public SDK projects current plan text, but not typed
-    // step records. No progress value is derived from the text.
+    // Prefer the authoritative structured turn plan. Plan items remain a
+    // compatibility fallback for app-server versions that only emit the item.
+    const sdk::TurnPlanState* structuredPlan = turn && turn->plan ? &*turn->plan : nullptr;
     const sdk::ItemState* planItem = nullptr;
     std::optional<sdk::PlanSemanticView> planView;
-    if (turn) {
+    if (turn && !structuredPlan) {
         for (auto iterator = turn->orderedItems.rbegin(); iterator != turn->orderedItems.rend(); ++iterator) {
             const auto* item = state.item(thread->id, turn->id, *iterator);
             if (!item)
@@ -801,8 +812,19 @@ void InspectorWidget::render(const sdk::State& state,
     QCryptographicHash planHash(QCryptographicHash::Sha256);
     addPresentationValue(planHash, turn != nullptr);
     addPresentationValue(planHash, thread->fullyLoaded);
-    addPresentationValue(planHash, planItem != nullptr && planView.has_value());
-    if (planItem && planView) {
+    addPresentationValue(planHash, structuredPlan != nullptr);
+    if (structuredPlan) {
+        addPresentationValue(planHash,
+                             structuredPlan->explanation
+                                 ? std::string_view(*structuredPlan->explanation)
+                                 : std::string_view{});
+        addPresentationValue(planHash, QByteArray::number(structuredPlan->totalSteps));
+        addPresentationValue(planHash, structuredPlan->truncated);
+        for (const auto& step : structuredPlan->steps) {
+            addPresentationValue(planHash, step.step);
+            addPresentationValue(planHash, step.status.value);
+        }
+    } else if (planItem && planView) {
         addPresentationValue(planHash, planItem->id.value);
         addPresentationValue(planHash, itemStatus(*planItem));
         addPresentationValue(planHash, planView->text ? std::string_view(*planView->text) : std::string_view{});
@@ -816,7 +838,7 @@ void InspectorWidget::render(const sdk::State& state,
         clearLayout(planContent);
         if (!turn) {
             addEmpty(planContent, QStringLiteral("No plan"), QStringLiteral("This thread has no retained turns."));
-        } else if (!planItem || !planView) {
+        } else if (!structuredPlan && (!planItem || !planView)) {
             addEmpty(planContent, QStringLiteral("No plan"),
                      thread->fullyLoaded ? QStringLiteral("No plan is projected for the latest turn.")
                                          : QStringLiteral("No plan is retained in this partial thread projection."));
@@ -832,7 +854,8 @@ void InspectorWidget::render(const sdk::State& state,
             title->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
             header->addWidget(title);
             header->addStretch();
-            const QString status = itemStatus(*planItem);
+            const QString status = structuredPlan ? QStringLiteral("Current")
+                                                  : itemStatus(*planItem);
             if (!status.isEmpty()) {
                 auto* statusLabel = textLabel(status, "small");
                 statusLabel->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;")
@@ -840,7 +863,56 @@ void InspectorWidget::render(const sdk::State& state,
                 header->addWidget(statusLabel);
             }
             layout->addLayout(header);
-            if (planView->text && !planView->text->empty()) {
+            if (structuredPlan) {
+                if (structuredPlan->explanation && !structuredPlan->explanation->empty()) {
+                    auto* explanation = textLabel(fromUtf8(*structuredPlan->explanation));
+                    explanation->setWordWrap(true);
+                    explanation->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                    explanation->setStyleSheet(QStringLiteral("font-size:12px;color:#475467;"));
+                    layout->addWidget(explanation);
+                }
+                for (const auto& step : structuredPlan->steps) {
+                    auto* stepRow = new QWidget;
+                    stepRow->setObjectName(QStringLiteral("inspectorPlanStep"));
+                    auto* stepLayout = new QHBoxLayout(stepRow);
+                    stepLayout->setContentsMargins(0, 3, 0, 3);
+                    stepLayout->setSpacing(7);
+                    const QString stepStatus = humanize(fromUtf8(step.status.value));
+                    auto* marker = textLabel(planStatusGlyph(stepStatus));
+                    marker->setFixedWidth(14);
+                    marker->setStyleSheet(
+                        QStringLiteral("color:%1;font-size:11px;font-weight:600;")
+                            .arg(statusColor(stepStatus)));
+                    stepLayout->addWidget(marker, 0, Qt::AlignTop);
+                    auto* stepText = textLabel(fromUtf8(step.step));
+                    stepText->setObjectName(QStringLiteral("inspectorPlanStepText"));
+                    stepText->setWordWrap(true);
+                    stepText->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                    stepText->setStyleSheet(QStringLiteral("font-size:12px;"));
+                    stepLayout->addWidget(stepText, 1);
+                    auto* stepState = textLabel(stepStatus, "small");
+                    stepState->setStyleSheet(
+                        QStringLiteral("color:%1;font-size:9px;font-weight:600;")
+                            .arg(statusColor(stepStatus)));
+                    stepLayout->addWidget(stepState, 0, Qt::AlignTop);
+                    layout->addWidget(stepRow);
+                }
+                if (structuredPlan->steps.empty()) {
+                    auto* absent = textLabel(QStringLiteral("The current plan contains no steps."), "muted");
+                    absent->setWordWrap(true);
+                    layout->addWidget(absent);
+                }
+                if (structuredPlan->truncated) {
+                    auto* truncated = textLabel(
+                        QStringLiteral("Showing %1 of %2 plan steps")
+                            .arg(structuredPlan->steps.size())
+                            .arg(structuredPlan->totalSteps),
+                        "small");
+                    truncated->setObjectName(QStringLiteral("inspectorPlanTruncation"));
+                    truncated->setStyleSheet(QStringLiteral("color:#a76812;font-size:9px;"));
+                    layout->addWidget(truncated);
+                }
+            } else if (planView->text && !planView->text->empty()) {
                 auto* text = textLabel(fromUtf8(*planView->text));
                 text->setWordWrap(true);
                 text->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -851,7 +923,8 @@ void InspectorWidget::render(const sdk::State& state,
                 absent->setWordWrap(true);
                 layout->addWidget(absent);
             }
-            if (planView->textTruncated || planItem->truncated || !planItem->omittedFields.empty()) {
+            if (!structuredPlan
+                && (planView->textTruncated || planItem->truncated || !planItem->omittedFields.empty())) {
                 auto* truncated = textLabel(QStringLiteral("Plan projection is truncated or partially omitted"), "small");
                 truncated->setStyleSheet(QStringLiteral("color:#a76812;font-size:9px;"));
                 layout->addWidget(truncated);

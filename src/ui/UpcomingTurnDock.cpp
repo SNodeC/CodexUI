@@ -561,18 +561,22 @@ UpcomingTurnDock::UpcomingTurnDock(QWidget* parent)
     connect(cwd, &QLineEdit::textEdited, this, [this] { markTextChange(Field::Cwd, cwd); });
 
     connect(editor, &QPlainTextEdit::textChanged, this, [this] {
+        if (editor->toPlainText().trimmed().isEmpty())
+            draftPromptTarget.reset();
+        else
+            draftPromptTarget = currentPromptTarget;
         updatePromptHeight();
         updateSendEnabled();
     });
     connect(send, &QPushButton::clicked, this, [this] {
         const QString value = editor->toPlainText();
         if (send->isEnabled() && !value.trimmed().isEmpty())
-            emit sendRequested(value);
+            emit sendRequested(value, steeringMode);
     });
     connect(stop, &QPushButton::clicked, this, &UpcomingTurnDock::stopRequested);
 
     refreshControls(true);
-    setActionState(false, false, false, false);
+    setActionState(false, false, false, false, false, false);
     root->activate();
     compactBaseHeight = std::max(1, root->sizeHint().height());
     setFixedHeight(compactBaseHeight);
@@ -801,35 +805,58 @@ void UpcomingTurnDock::clearPrompt()
     editor->clear();
 }
 
+void UpcomingTurnDock::clearPromptIfUnchanged(const QString& submittedPrompt)
+{
+    if (editor->toPlainText() == submittedPrompt)
+        editor->clear();
+}
+
 void UpcomingTurnDock::focusPrompt()
 {
     editor->setFocus(Qt::OtherFocusReason);
 }
 
-void UpcomingTurnDock::setActionState(bool sendAllowed,
+void UpcomingTurnDock::setActionState(bool primaryAllowed,
                                       bool stopAllowed,
                                       bool editorAllowed,
-                                      bool stopVisible)
+                                      bool settingsAllowed,
+                                      bool stopVisible,
+                                      bool steerMode,
+                                      const QString& actionThreadIdentity,
+                                      const QString& activeTurnIdentity)
 {
-    sendContextAllowed = sendAllowed;
-    controlsContextAllowed = editorAllowed;
+    const bool actionChanged = steeringMode != steerMode;
+    sendContextAllowed = primaryAllowed;
+    controlsContextAllowed = settingsAllowed;
+    steeringMode = steerMode;
+    currentPromptTarget = {actionThreadIdentity,
+                           steerMode ? activeTurnIdentity : QString{},
+                           steerMode};
     editor->setEnabled(editorAllowed);
-    settingsSurface->setEnabled(editorAllowed);
-    more->setEnabled(editorAllowed);
-    const bool cwdAvailable = editorAllowed;
+    settingsSurface->setEnabled(settingsAllowed);
+    more->setEnabled(settingsAllowed);
+    const bool cwdAvailable = settingsAllowed;
     fieldSurfaces[static_cast<std::size_t>(Field::Cwd)]->setEnabled(cwdAvailable);
     stop->setEnabled(stopAllowed);
-    showingStopAction = stopVisible;
-    send->setVisible(!showingStopAction);
-    stop->setVisible(showingStopAction);
+    send->setText(steeringMode ? QStringLiteral("Steer") : QStringLiteral("Send"));
+    send->setVisible(true);
+    stop->setVisible(stopVisible);
+    if (actionChanged
+        && (status->text() == QStringLiteral("Ctrl+Enter to send")
+            || status->text() == QStringLiteral("Ctrl+Enter to steer"))) {
+        status->setText(steeringMode ? QStringLiteral("Ctrl+Enter to steer")
+                                     : QStringLiteral("Ctrl+Enter to send"));
+    }
     updateSendEnabled();
 }
 
 void UpcomingTurnDock::setStatus(const QString& text, bool error)
 {
+    status->setProperty("draftTargetMismatch", false);
     if (text.isEmpty())
     {
-        status->setText(QStringLiteral("Ctrl+Enter to send"));
+        status->setText(steeringMode ? QStringLiteral("Ctrl+Enter to steer")
+                                     : QStringLiteral("Ctrl+Enter to send"));
         status->setToolTip({});
         status->setStyleSheet(QStringLiteral("color:#667085;font-size:10px;"));
         return;
@@ -876,7 +903,7 @@ bool UpcomingTurnDock::eventFilter(QObject* watched, QEvent* event)
                 && !key->isAutoRepeat())
             {
                 if (send->isEnabled())
-                    emit sendRequested(editor->toPlainText());
+                    emit sendRequested(editor->toPlainText(), steeringMode);
                 return true;
             }
         }
@@ -1278,7 +1305,25 @@ void UpcomingTurnDock::updatePromptHeight()
 
 void UpcomingTurnDock::updateSendEnabled()
 {
-    send->setEnabled(sendContextAllowed && editor->isEnabled() && !editor->toPlainText().trimmed().isEmpty());
+    const bool hasPrompt = !editor->toPlainText().trimmed().isEmpty();
+    const bool actionMatchesDraft = !draftPromptTarget || *draftPromptTarget == currentPromptTarget;
+    send->setEnabled(sendContextAllowed && editor->isEnabled() && hasPrompt
+                     && actionMatchesDraft);
+    const QString mismatch = actionMatchesDraft
+                                 ? QString{}
+                                 : QStringLiteral(
+                                       "The turn state changed while this draft was open. Edit the draft to confirm its new action.");
+    send->setToolTip(mismatch);
+    editor->setToolTip(mismatch);
+    if (!actionMatchesDraft) {
+        const QString retained = QStringLiteral("Draft retained for a previous active turn; edit it to retarget");
+        status->setProperty("draftTargetMismatch", true);
+        status->setText(retained);
+        status->setToolTip(Qt::convertFromPlainText(retained, Qt::WhiteSpaceNormal));
+        status->setStyleSheet(QStringLiteral("color:#667085;font-size:10px;"));
+    } else if (status->property("draftTargetMismatch").toBool()) {
+        setStatus({});
+    }
 }
 
 void UpcomingTurnDock::updateChangedPresentation()
