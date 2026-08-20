@@ -407,7 +407,7 @@ bool threadMayBeRunning(const ai::openai::codex::frontend::client::State& state,
                         const ai::openai::codex::frontend::client::ThreadState& thread)
 {
     for (const auto& turnId : thread.orderedTurns) {
-        const auto* turn = state.turn(turnId);
+        const auto* turn = state.turn(thread.id, turnId);
         if (turn && turn->active && !turn->terminal)
             return true;
     }
@@ -425,7 +425,7 @@ threadActionAvailability(const ai::openai::codex::frontend::client::State& state
     const bool running = threadMayBeRunning(state, thread);
     bool hasInterruptibleTurn = false;
     for (const auto& turnId : thread.orderedTurns) {
-        const auto* turn = state.turn(turnId);
+        const auto* turn = state.turn(thread.id, turnId);
         hasInterruptibleTurn = hasInterruptibleTurn || (turn && turn->active && !turn->terminal);
     }
 

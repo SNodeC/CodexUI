@@ -210,7 +210,7 @@ QString durationText(const sdk::ItemState& item)
 const sdk::TurnState* latestTurn(const sdk::State& state, const sdk::ThreadState& thread)
 {
     for (auto iterator = thread.orderedTurns.rbegin(); iterator != thread.orderedTurns.rend(); ++iterator) {
-        if (const auto* turn = state.turn(*iterator))
+        if (const auto* turn = state.turn(thread.id, *iterator))
             return turn;
     }
     return nullptr;
@@ -766,8 +766,8 @@ void InspectorWidget::render(const sdk::State& state,
     const sdk::TurnState* configurationTurn = turn;
     bool requestedConfigurationTurnUnavailable = false;
     if (hasSelectedConfigurationTurn) {
-        configurationTurn = state.turn(selectedTurnId.toStdString());
-        if (!configurationTurn || configurationTurn->threadId != thread->id) {
+        configurationTurn = state.turn(thread->id, typed::TurnId{selectedTurnId.toStdString()});
+        if (!configurationTurn) {
             configurationTurn = nullptr;
             requestedConfigurationTurnUnavailable = true;
         }

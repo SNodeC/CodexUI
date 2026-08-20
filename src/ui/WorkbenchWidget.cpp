@@ -187,7 +187,7 @@ activeTurn(const ai::openai::codex::frontend::client::State& state,
     if (!thread)
         return nullptr;
     for (auto iterator = thread->orderedTurns.rbegin(); iterator != thread->orderedTurns.rend(); ++iterator) {
-        const auto* turn = state.turn(*iterator);
+        const auto* turn = state.turn(thread->id, *iterator);
         if (turn && turn->active && !turn->terminal)
             return turn;
     }
@@ -201,7 +201,7 @@ latestTurn(const ai::openai::codex::frontend::client::State& state,
     if (!thread)
         return nullptr;
     for (auto iterator = thread->orderedTurns.rbegin(); iterator != thread->orderedTurns.rend(); ++iterator) {
-        if (const auto* turn = state.turn(*iterator))
+        if (const auto* turn = state.turn(thread->id, *iterator))
             return turn;
     }
     return nullptr;
@@ -1542,9 +1542,8 @@ void WorkbenchWidget::reconcileSubmittedTurnSettings()
                     return QString::fromStdString(id.value) == turnIdAwaitingState;
                 });
             if (acceptedTurn != awaitingThread->orderedTurns.end()) {
-                const auto* turn = state.turn(*acceptedTurn);
-                if (turn
-                    && QString::fromStdString(turn->threadId.value) == turnThreadIdAwaitingState) {
+                const auto* turn = state.turn(awaitingThread->id, *acceptedTurn);
+                if (turn) {
                     const QString completedThreadId = turnThreadIdAwaitingState;
                     turnStartInFlight = false;
                     turnThreadIdAwaitingState.clear();
@@ -1568,7 +1567,7 @@ void WorkbenchWidget::reconcileSubmittedTurnSettings()
         });
     if (acceptedTurn == thread->orderedTurns.end())
         return;
-    const auto* turn = state.turn(*acceptedTurn);
+    const auto* turn = state.turn(thread->id, *acceptedTurn);
     if (!turn
         || !thread->executionConfiguration || !turn->effectiveExecutionConfiguration
         || *thread->executionConfiguration != *turn->effectiveExecutionConfiguration)

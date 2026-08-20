@@ -1199,7 +1199,7 @@ TimelineWindow latestTimelineWindow(const sdk::State& state, const sdk::ThreadSt
     // to the selected tail below.
     for (const auto& turnId : thread.orderedTurns)
     {
-        const auto* turn = state.turn(turnId);
+        const auto* turn = state.turn(thread.id, turnId);
         if (turn)
             result.totalItems += qMax<qsizetype>(1, static_cast<qsizetype>(turn->orderedItems.size()));
     }
@@ -1210,7 +1210,7 @@ TimelineWindow latestTimelineWindow(const sdk::State& state, const sdk::ThreadSt
          && static_cast<qsizetype>(result.turns.size()) < maximumRenderedTimelineTurns;
          --index)
     {
-        const auto* turn = state.turn(thread.orderedTurns.at(index - 1));
+        const auto* turn = state.turn(thread.id, thread.orderedTurns.at(index - 1));
         if (!turn)
             continue;
         const qsizetype itemCount = qMax<qsizetype>(1, static_cast<qsizetype>(turn->orderedItems.size()));
@@ -1770,7 +1770,7 @@ void ConversationWidget::render(const sdk::State& state,
         qsizetype currentIndex = -1;
         for (qsizetype index = 0; index < static_cast<qsizetype>(thread->orderedTurns.size()); ++index)
         {
-            if (const auto* turn = state.turn(thread->orderedTurns.at(index)))
+            if (const auto* turn = state.turn(thread->id, thread->orderedTurns.at(index)))
             {
                 currentTurn = turn;
                 currentIndex = index;
@@ -2155,8 +2155,8 @@ bool ConversationWidget::updateExactMessageContent(
          ++turnIterator)
     {
         const ai::openai::codex::typed::TurnId turnIdentity{turnIterator.key().toStdString()};
-        const auto* turn = state.turn(turnIdentity);
-        if (!turn || turn->threadId != thread->id)
+        const auto* turn = state.turn(thread->id, turnIdentity);
+        if (!turn)
             return false;
         const bool turnVisible = renderedTurnIds.contains(turnIterator.key());
         for (const QString& itemId : turnIterator.value())

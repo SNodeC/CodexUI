@@ -328,6 +328,11 @@ bool testPeerCredentials()
 
 bool testScopedItemPresentationChanges()
 {
+    sdk::StateUpdate turnUpdate;
+    turnUpdate.changes.push_back(sdk::TurnUpsertedChange{
+        ai::openai::codex::typed::TurnId{"ambiguous-or-missing-turn"}});
+    const auto unresolvedTurn = codexui::detail::stateUpdateScope(turnUpdate);
+
     sdk::StateUpdate scopedUpdate;
     scopedUpdate.changes.push_back(sdk::ItemUpsertedChange{
         ai::openai::codex::typed::ItemId{"duplicate-item"},
@@ -382,7 +387,15 @@ bool testScopedItemPresentationChanges()
         sdk::CursorAdvancedChange{ai::openai::codex::frontend::SequenceNumber{43}});
     const auto cursor = codexui::detail::stateUpdateScope(cursorUpdate);
 
-    bool passed = expect(scoped.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
+    bool passed = expect(unresolvedTurn.affectedThreadIds.empty()
+                             && unresolvedTurn.fullyAffectedThreadIds.empty()
+                             && unresolvedTurn.affectedInspectorThreadIds.empty()
+                             && unresolvedTurn.allThreadsAffected
+                             && unresolvedTurn.allInspectorsAffected
+                             && !unresolvedTurn.sidebarAffected
+                             && unresolvedTurn.hasPresentationChange,
+                         "a turn upsert without a unique parent lookup must conservatively refresh all threads");
+    passed &= expect(scoped.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
                              && scoped.fullyAffectedThreadIds
                                     == QStringList{QStringLiteral("target-thread")}
                              && scoped.affectedInspectorThreadIds
