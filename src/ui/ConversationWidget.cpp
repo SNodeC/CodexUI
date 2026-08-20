@@ -589,18 +589,29 @@ QToolButton* disclosureButton(bool expanded, const QString& accessibleName)
     button->setObjectName(QStringLiteral("activityDisclosure"));
     button->setAutoRaise(true);
     button->setCheckable(true);
+    button->setArrowType(Qt::NoArrow);
+    button->setIcon(button->style()->standardIcon(expanded ? QStyle::SP_ArrowDown
+                                                           : QStyle::SP_ArrowRight));
+    button->setIconSize(QSize(12, 12));
     button->setChecked(expanded);
-    button->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
     button->setToolTip(expanded ? QStringLiteral("Collapse") : QStringLiteral("Expand"));
     button->setAccessibleName(accessibleName);
-    button->setFixedSize(20, 20);
+    button->setFixedSize(22, 22);
+    button->setStyleSheet(QStringLiteral(
+        "QToolButton#activityDisclosure{background:transparent;border:1px solid transparent;"
+        "border-radius:5px;padding:0;}"
+        "QToolButton#activityDisclosure:hover{background:#f1f5fb;border-color:#d7dee8;}"
+        "QToolButton#activityDisclosure:pressed,QToolButton#activityDisclosure:checked{"
+        "background:#e5eeff;border-color:#bfd3f9;}"
+        "QToolButton#activityDisclosure:focus{border:1px solid #2f6feb;}"));
     return button;
 }
 
 void setDisclosureState(QToolButton* disclosure, QWidget* details, bool expanded)
 {
     disclosure->setChecked(expanded);
-    disclosure->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+    disclosure->setIcon(disclosure->style()->standardIcon(expanded ? QStyle::SP_ArrowDown
+                                                                   : QStyle::SP_ArrowRight));
     disclosure->setToolTip(expanded ? QStringLiteral("Collapse") : QStringLiteral("Expand"));
     details->setVisible(expanded);
 }
