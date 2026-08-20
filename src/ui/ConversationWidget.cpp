@@ -844,6 +844,19 @@ bool updateActivityRow(QWidget* row, const ActivityPresentation& item)
     disclosure->setVisible(hasDetails);
     if (!hasDetails)
         setDisclosureState(disclosure, details, false);
+
+    // A wrapping label can become shorter during an in-place canonical update.
+    // Invalidate the nested layouts synchronously so the fixed timeline host does
+    // not retain their previous height until a platform-specific layout event.
+    detailsLayout->invalidate();
+    detailsLayout->activate();
+    details->updateGeometry();
+    if (QLayout* rowLayout = row->layout())
+    {
+        rowLayout->invalidate();
+        rowLayout->activate();
+    }
+    row->updateGeometry();
     return true;
 }
 
@@ -1400,6 +1413,14 @@ bool updateTimelineActivitySegment(QWidget* host,
                               || std::ranges::any_of(segment.items, [](const sdk::ItemState* item) {
                                      return item && item->kind.is(frontend::ThreadItemKind::Plan);
                                  }));
+    rowsLayout->invalidate();
+    rowsLayout->activate();
+    if (QLayout* hostLayout = host->layout())
+    {
+        hostLayout->invalidate();
+        hostLayout->activate();
+    }
+    host->updateGeometry();
     return true;
 }
 
