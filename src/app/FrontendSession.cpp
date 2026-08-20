@@ -352,6 +352,7 @@ void FrontendSession::startConnection()
         return;
     ++connectionGeneration;
     synchronizedCurrentConnection = false;
+    preReadyFailureRecordedCurrentConnection = false;
     archivedThreadListCursors.clear();
     archivedThreadListInFlight = false;
     archivedThreadListComplete = false;
@@ -1115,9 +1116,8 @@ void FrontendSession::finishModelCatalogRefresh(QString diagnostic)
 
 void FrontendSession::socketDisconnected()
 {
-    const bool disconnectedBeforeReady = !localShutdown && !synchronizedCurrentConnection;
     if (connection.isOpen()) {
-        if (localShutdown)
+        if (localShutdown || !automaticReconnectEnabled)
             connection.transportDisconnected();
         else
             connection.transportDisconnected(sdk::TransportError{"Unix backend disconnected", true});
@@ -1128,15 +1128,8 @@ void FrontendSession::socketDisconnected()
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
     if (!localShutdown) {
-        if (disconnectedBeforeReady) {
-            ++consecutivePreReadyDisconnects;
-            if (consecutivePreReadyDisconnects >= maximumConsecutivePreReadyDisconnects) {
-                failWithoutReconnect(
-                    QStringLiteral("Backend disconnected before synchronization completed on %1 consecutive connections")
-                        .arg(consecutivePreReadyDisconnects));
-                return;
-            }
-        }
+        if (recordPreReadyTransportFailure())
+            return;
         if (currentLifecycle != Lifecycle::Failed)
             setLifecycle(Lifecycle::Disconnected);
         scheduleReconnect();
@@ -1147,13 +1140,19 @@ void FrontendSession::socketFailed(QLocalSocket::LocalSocketError)
 {
     if (localShutdown)
         return;
-    if (connection.isOpen())
-        connection.transportDisconnected(sdk::TransportError{socket.errorString().toStdString(), true});
+    if (connection.isOpen()) {
+        if (!automaticReconnectEnabled)
+            connection.transportDisconnected();
+        else
+            connection.transportDisconnected(sdk::TransportError{socket.errorString().toStdString(), true});
+    }
     connection = Connection{};
     clearOutbound();
     clearInbound();
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
+    if (recordPreReadyTransportFailure())
+        return;
     if (automaticReconnectEnabled && currentLifecycle != Lifecycle::Failed)
         setLifecycle(Lifecycle::Failed, socket.errorString());
     scheduleReconnect();
@@ -1239,6 +1238,27 @@ void FrontendSession::resetReconnectPolicy()
     reconnectDelayMs = initialReconnectDelayMs;
     consecutivePreReadyDisconnects = 0;
     synchronizedCurrentConnection = false;
+    preReadyFailureRecordedCurrentConnection = false;
+}
+
+bool FrontendSession::recordPreReadyTransportFailure()
+{
+    if (localShutdown || synchronizedCurrentConnection)
+        return false;
+    if (!automaticReconnectEnabled)
+        return true;
+    if (preReadyFailureRecordedCurrentConnection)
+        return false;
+
+    preReadyFailureRecordedCurrentConnection = true;
+    ++consecutivePreReadyDisconnects;
+    if (consecutivePreReadyDisconnects < maximumConsecutivePreReadyDisconnects)
+        return false;
+
+    failWithoutReconnect(
+        QStringLiteral("Backend connection failed before synchronization completed on %1 consecutive connections")
+            .arg(consecutivePreReadyDisconnects));
+    return true;
 }
 
 FrontendSession::SendResult FrontendSession::send(OutboundMessage&& message)

@@ -204,7 +204,16 @@ struct FrontendSessionTestAccess
 
     static void disconnectTransport(FrontendSession& session)
     {
+        session.preReadyFailureRecordedCurrentConnection = false;
         session.socketDisconnected();
+        session.reconnectTimer.stop();
+    }
+
+    static void failTransport(FrontendSession& session, bool newConnectionAttempt = true)
+    {
+        if (newConnectionAttempt)
+            session.preReadyFailureRecordedCurrentConnection = false;
+        session.socketFailed(QLocalSocket::ConnectionRefusedError);
         session.reconnectTimer.stop();
     }
 
@@ -532,6 +541,25 @@ bool testPreReadyReconnectBound()
     passed &= expect(codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
                          && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
                      "a disconnect after synchronization does not consume the pre-ready retry budget");
+
+    codexui::FrontendSession failedConnectSession;
+    for (int attempt = 1; attempt < maximum; ++attempt) {
+        codexui::FrontendSessionTestAccess::failTransport(failedConnectSession);
+        passed &= expect(
+            codexui::FrontendSessionTestAccess::automaticReconnectEnabled(failedConnectSession)
+                && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(failedConnectSession) == attempt,
+            "a bounded number of failed pre-synchronization connection attempts remains retryable");
+        codexui::FrontendSessionTestAccess::failTransport(failedConnectSession, false);
+        passed &= expect(
+            codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(failedConnectSession) == attempt,
+            "multiple failure signals for one connection attempt consume the retry budget only once");
+    }
+    codexui::FrontendSessionTestAccess::failTransport(failedConnectSession);
+    passed &= expect(
+        failedConnectSession.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
+            && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(failedConnectSession)
+            && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(failedConnectSession) == maximum,
+        "repeated failed connection attempts stop at the same visible terminal boundary");
     return passed;
 }
 
@@ -563,6 +591,18 @@ bool testReceiveRejectionPreservesPreciseError()
                              QStringLiteral("frontend server message was rejected"),
                              Qt::CaseInsensitive),
                      "socketReadyRead must preserve the precise SDK lifecycle error instead of the generic receive rejection");
+    codexui::FrontendSessionTestAccess::failTransport(session, false);
+    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
+                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+                         && session.statusText() == QStringLiteral("unexpected or duplicate Welcome")
+                         && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
+                     "the socket error following a terminal SDK rejection must preserve its precise reason and retry budget");
+    codexui::FrontendSessionTestAccess::disconnectTransport(session);
+    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
+                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+                         && session.statusText() == QStringLiteral("unexpected or duplicate Welcome")
+                         && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
+                     "the physical disconnect following a terminal SDK rejection must preserve its precise reason and retry budget");
     return passed;
 }
 

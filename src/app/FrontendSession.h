@@ -188,6 +188,7 @@ private:
     void scheduleReconnect();
     void retryConnection();
     void resetReconnectPolicy();
+    [[nodiscard]] bool recordPreReadyTransportFailure();
     void failWithoutReconnect(QString reason);
     [[nodiscard]] SendResult send(OutboundMessage&& message);
     [[nodiscard]] SendResult sendToTransport(OutboundMessage&& message,
@@ -232,6 +233,7 @@ private:
     bool outboundClearPending = false;
     bool automaticReconnectEnabled = true;
     bool synchronizedCurrentConnection = false;
+    bool preReadyFailureRecordedCurrentConnection = false;
     bool archivedThreadListInFlight = false;
     bool archivedThreadListComplete = false;
     bool modelListInFlight = false;
