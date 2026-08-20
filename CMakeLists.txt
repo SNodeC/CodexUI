@@ -28,6 +28,10 @@ qt_add_executable(
     src/ui/MainWindow.h
     src/ui/SidebarWidget.cpp
     src/ui/SidebarWidget.h
+    src/ui/ThreadSetupDialog.cpp
+    src/ui/ThreadSetupDialog.h
+    src/ui/UpcomingTurnDock.cpp
+    src/ui/UpcomingTurnDock.h
     src/ui/UiStyle.cpp
     src/ui/UiStyle.h
     src/ui/WorkbenchWidget.cpp
@@ -83,6 +87,8 @@ if(BUILD_TESTING)
         src/ui/ConversationWidget.h
         src/ui/InspectorWidget.cpp
         src/ui/InspectorWidget.h
+        src/ui/UpcomingTurnDock.cpp
+        src/ui/UpcomingTurnDock.h
     )
     target_compile_features(CodexUIConversationLayoutTest PRIVATE cxx_std_20)
     target_include_directories(CodexUIConversationLayoutTest PRIVATE src)
@@ -94,6 +100,29 @@ if(BUILD_TESTING)
     )
     add_test(NAME CodexUIConversationLayoutTest COMMAND CodexUIConversationLayoutTest)
     set_tests_properties(CodexUIConversationLayoutTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(
+        CodexUIPhase1ThreadTurnUxTest
+        tests/Phase1ThreadTurnUxTest.cpp
+        src/ui/SidebarWidget.cpp
+        src/ui/SidebarWidget.h
+        src/ui/ThreadSetupDialog.cpp
+        src/ui/ThreadSetupDialog.h
+        src/ui/UpcomingTurnDock.cpp
+        src/ui/UpcomingTurnDock.h
+        src/ui/UiStyle.cpp
+        src/ui/UiStyle.h
+    )
+    target_compile_features(CodexUIPhase1ThreadTurnUxTest PRIVATE cxx_std_20)
+    target_include_directories(CodexUIPhase1ThreadTurnUxTest PRIVATE src)
+    target_link_libraries(
+        CodexUIPhase1ThreadTurnUxTest
+        PRIVATE
+            AISuite::OpenAICodexFrontendClient
+            Qt6::Widgets
+    )
+    add_test(NAME CodexUIPhase1ThreadTurnUxTest COMMAND CodexUIPhase1ThreadTurnUxTest)
+    set_tests_properties(CodexUIPhase1ThreadTurnUxTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(
         CodexUIInteractiveRequestDialogTest

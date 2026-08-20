@@ -11,16 +11,19 @@
 #include <QScrollArea>
 #include <QStackedWidget>
 #include <QTabBar>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <optional>
+#include <utility>
 #include <variant>
 #include <vector>
 
 namespace codexui {
 namespace {
 namespace sdk = ai::openai::codex::frontend::client;
+namespace typed = ai::openai::codex::typed;
 
 struct AgentPresentation
 {
@@ -39,6 +42,25 @@ struct CollaborationPresentation
     QString status;
     QString detail;
     bool truncated = false;
+};
+
+struct ExecutionConfigurationPresentation
+{
+    bool recorded = false;
+    QString turnId;
+    QString unavailableDetail;
+    QString model;
+    QString effort;
+    QString personality;
+    QString workspace;
+    QString sandbox;
+    QString approvalPolicy;
+    QString approvalsReviewer;
+    QString serviceTier;
+    QString summary;
+    QString collaborationMode;
+    QString activePermissionProfile;
+    QString provenance;
 };
 
 QString fromUtf8(std::string_view value)
@@ -91,7 +113,7 @@ QFrame* divider()
 {
     auto* line = new QFrame;
     line->setFixedHeight(1);
-    line->setStyleSheet(QStringLiteral("background:#2b3038;"));
+    line->setStyleSheet(QStringLiteral("background:#d7dee8;"));
     return line;
 }
 
@@ -146,16 +168,16 @@ QString statusColor(const QString& status)
 {
     const QString normalized = status.toLower();
     if (normalized.contains(QStringLiteral("fail")) || normalized.contains(QStringLiteral("error")))
-        return QStringLiteral("#ed6a6a");
+        return QStringLiteral("#b83a3a");
     if (normalized.contains(QStringLiteral("complete")) || normalized.contains(QStringLiteral("success"))
         || normalized == QStringLiteral("done"))
-        return QStringLiteral("#40c27d");
+        return QStringLiteral("#23845a");
     if (normalized.contains(QStringLiteral("progress")) || normalized.contains(QStringLiteral("running"))
         || normalized.contains(QStringLiteral("active")) || normalized.contains(QStringLiteral("stream")))
-        return QStringLiteral("#4f94f5");
+        return QStringLiteral("#2f6feb");
     if (normalized.contains(QStringLiteral("interrupt")) || normalized.contains(QStringLiteral("cancel")))
-        return QStringLiteral("#f5a83b");
-    return QStringLiteral("#949ead");
+        return QStringLiteral("#a76812");
+    return QStringLiteral("#667085");
 }
 
 QString itemStatus(const sdk::ItemState& item)
@@ -187,13 +209,24 @@ const sdk::TurnState* latestTurn(const sdk::State& state, const sdk::ThreadState
 QFrame* detailCard()
 {
     auto* card = new QFrame;
+    card->setObjectName(QStringLiteral("inspectorDetailCard"));
     card->setProperty("kind", "raised");
-    card->setStyleSheet(QStringLiteral("background:#181c21;border-radius:8px;"));
+    card->setStyleSheet(QStringLiteral(
+        "QFrame#inspectorDetailCard{background:#ffffff;border:1px solid #d7dee8;border-radius:8px;}"));
+    return card;
+}
+
+QFrame* executionConfigurationCard()
+{
+    auto* card = new QFrame;
+    card->setObjectName(QStringLiteral("turnExecutionConfigurationCard"));
+    card->setStyleSheet(QStringLiteral(
+        "QFrame#turnExecutionConfigurationCard{background:#f8fafc;border:1px solid #d7dee8;border-radius:8px;}"));
     return card;
 }
 
 QLabel* addFact(QGridLayout* grid, int& row, const QString& name, const QString& value,
-                const QString& color = QStringLiteral("#e8edf2"))
+                const QString& color = QStringLiteral("#1d2633"))
 {
     if (value.isEmpty())
         return nullptr;
@@ -205,6 +238,139 @@ QLabel* addFact(QGridLayout* grid, int& row, const QString& name, const QString&
     grid->addWidget(copy, row, 1);
     ++row;
     return copy;
+}
+
+void addExecutionConfigurationFact(QGridLayout* grid, int& row, const QString& name, const QString& value)
+{
+    if (value.isEmpty())
+        return;
+    auto* label = textLabel(name);
+    label->setStyleSheet(QStringLiteral("color:#667085;font-size:10px;font-weight:600;"));
+    grid->addWidget(label, row, 0, Qt::AlignTop);
+    auto* copy = textLabel(value);
+    copy->setWordWrap(true);
+    copy->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    copy->setStyleSheet(QStringLiteral("color:#1d2633;font-size:11px;font-weight:500;"));
+    grid->addWidget(copy, row, 1);
+    ++row;
+}
+
+template<typename T>
+QString optionalOpenValueText(const typed::OptionalNullable<T>& value)
+{
+    if (value.isOmitted())
+        return {};
+    if (value.isNull())
+        return QStringLiteral("Default");
+    return humanize(fromUtf8(value->value));
+}
+
+QString optionalStringText(const typed::OptionalNullable<std::string>& value)
+{
+    if (value.isOmitted())
+        return {};
+    if (value.isNull())
+        return QStringLiteral("Default");
+    return fromUtf8(*value);
+}
+
+QString approvalPolicyText(const typed::AskForApproval& policy)
+{
+    if (const auto* scalar = std::get_if<typed::ApprovalPolicy>(&policy))
+        return humanize(fromUtf8(scalar->value));
+    if (const auto* granular = std::get_if<typed::GranularAskForApproval>(&policy)) {
+        QStringList enabled;
+        if (granular->granular.mcpElicitations)
+            enabled.append(QStringLiteral("MCP elicitations"));
+        if (granular->granular.requestPermissionsOrDefault())
+            enabled.append(QStringLiteral("permission requests"));
+        if (granular->granular.rules)
+            enabled.append(QStringLiteral("rules"));
+        if (granular->granular.sandboxApproval)
+            enabled.append(QStringLiteral("sandbox escalation"));
+        if (granular->granular.skillApprovalOrDefault())
+            enabled.append(QStringLiteral("skill approval"));
+        return enabled.isEmpty() ? QStringLiteral("Granular · No categories enabled")
+                                 : QStringLiteral("Granular · %1").arg(enabled.join(QStringLiteral(", ")));
+    }
+    const auto* unknown = std::get_if<typed::UnknownAskForApproval>(&policy);
+    return unknown && unknown->discriminator
+             ? QStringLiteral("Unrecognized · %1").arg(humanize(fromUtf8(*unknown->discriminator)))
+             : QStringLiteral("Unrecognized policy");
+}
+
+QString sandboxPolicyText(const typed::SandboxPolicy& policy)
+{
+    if (std::holds_alternative<typed::DangerFullAccessSandboxPolicy>(policy))
+        return QStringLiteral("Danger full access");
+    if (const auto* readOnly = std::get_if<typed::ReadOnlySandboxPolicy>(&policy))
+        return readOnly->networkAccessOrDefault() ? QStringLiteral("Read only · Network enabled")
+                                                  : QStringLiteral("Read only · Network restricted");
+    if (const auto* external = std::get_if<typed::ExternalSandboxPolicy>(&policy))
+        return QStringLiteral("External · Network %1")
+            .arg(humanize(fromUtf8(external->networkAccessOrDefault().value)).toLower());
+    if (const auto* workspace = std::get_if<typed::WorkspaceWriteSandboxPolicy>(&policy))
+        return workspace->networkAccessOrDefault() ? QStringLiteral("Workspace write · Network enabled")
+                                                   : QStringLiteral("Workspace write · Network restricted");
+    const auto* unknown = std::get_if<typed::UnknownSandboxPolicy>(&policy);
+    return unknown && unknown->type
+             ? QStringLiteral("Unrecognized · %1").arg(humanize(fromUtf8(*unknown->type)))
+             : QStringLiteral("Unrecognized sandbox policy");
+}
+
+QString activePermissionProfileText(const typed::OptionalNullable<typed::ActivePermissionProfile>& profile)
+{
+    if (profile.isOmitted())
+        return {};
+    if (profile.isNull())
+        return QStringLiteral("None");
+    QString result = fromUtf8(profile->id);
+    if (profile->extends.hasValue())
+        result += QStringLiteral(" · Extends %1").arg(fromUtf8(*profile->extends));
+    return result;
+}
+
+QString executionConfigurationProvenanceText(
+    std::optional<sdk::EffectiveExecutionConfigurationProvenance> provenance)
+{
+    if (!provenance)
+        return QStringLiteral("Authoritative turn state");
+    switch (*provenance) {
+        case sdk::EffectiveExecutionConfigurationProvenance::TurnStartAccepted:
+            return QStringLiteral("Recorded when turn start was accepted");
+        case sdk::EffectiveExecutionConfigurationProvenance::ThreadSettingsUpdated:
+            return QStringLiteral("Confirmed by thread settings update");
+    }
+    return QStringLiteral("Authoritative turn state");
+}
+
+ExecutionConfigurationPresentation executionConfigurationPresentation(const sdk::TurnState* turn,
+                                                                       QString unavailableDetail)
+{
+    ExecutionConfigurationPresentation result;
+    result.unavailableDetail = std::move(unavailableDetail);
+    if (!turn)
+        return result;
+    result.turnId = fromUtf8(turn->id.value);
+    if (!turn->effectiveExecutionConfiguration)
+        return result;
+
+    const auto& configuration = *turn->effectiveExecutionConfiguration;
+    result.recorded = true;
+    result.model = fromUtf8(configuration.model.value);
+    result.effort = optionalOpenValueText(configuration.effort);
+    result.personality = optionalOpenValueText(configuration.personality);
+    result.workspace = configuration.cwd ? fromUtf8(configuration.cwd->value) : QString{};
+    result.sandbox = sandboxPolicyText(configuration.sandboxPolicy);
+    result.approvalPolicy = approvalPolicyText(configuration.approvalPolicy);
+    result.approvalsReviewer = humanize(fromUtf8(configuration.approvalsReviewer.value));
+    result.serviceTier = optionalStringText(configuration.serviceTier);
+    result.summary = optionalOpenValueText(configuration.summary);
+    result.collaborationMode = humanize(fromUtf8(configuration.collaborationMode.mode.value));
+    result.activePermissionProfile = activePermissionProfileText(configuration.activePermissionProfile);
+    result.provenance = executionConfigurationProvenanceText(
+        turn->effectiveExecutionConfigurationProvenance);
+    return result;
 }
 
 QString freshnessText(sdk::StateFreshness freshness)
@@ -420,7 +586,7 @@ InspectorWidget::InspectorWidget(QWidget* parent)
     : QWidget(parent)
 {
     setObjectName(QStringLiteral("inspector"));
-    setStyleSheet(QStringLiteral("QWidget#inspector{background:#13161a;}"));
+    setStyleSheet(QStringLiteral("QWidget#inspector{background:#fbfcfe;}"));
     setMinimumWidth(300);
     setMaximumWidth(520);
 
@@ -429,8 +595,16 @@ InspectorWidget::InspectorWidget(QWidget* parent)
     root->setSpacing(0);
 
     auto* header = new QHBoxLayout;
-    header->addWidget(textLabel(QStringLiteral("INSPECTOR"), "section"));
+    inspectorHeading = textLabel(QStringLiteral("INSPECTOR"), "section");
+    inspectorHeading->setObjectName(QStringLiteral("inspectorHeading"));
+    header->addWidget(inspectorHeading);
     header->addStretch();
+    historicalBack = new QPushButton(QStringLiteral("Back"));
+    historicalBack->setObjectName(QStringLiteral("historicalTurnBack"));
+    historicalBack->setProperty("kind", "subtle");
+    historicalBack->setFixedSize(58, 24);
+    historicalBack->hide();
+    header->addWidget(historicalBack);
     auto* hide = new QPushButton(QStringLiteral("Hide"));
     hide->setProperty("kind", "subtle");
     hide->setFixedSize(58, 24);
@@ -438,7 +612,8 @@ InspectorWidget::InspectorWidget(QWidget* parent)
     root->addLayout(header);
     root->addSpacing(7);
 
-    auto* tabs = new QTabBar;
+    tabs = new QTabBar;
+    tabs->setObjectName(QStringLiteral("inspectorTabs"));
     tabs->setExpanding(false);
     tabs->addTab(QStringLiteral("Plan"));
     tabs->addTab(QStringLiteral("Agents"));
@@ -453,18 +628,26 @@ InspectorWidget::InspectorWidget(QWidget* parent)
     pages->addWidget(scrollPage(planContent));
     pages->addWidget(scrollPage(agentsContent));
     pages->addWidget(scrollPage(changesContent));
-    pages->addWidget(scrollPage(infoContent));
+    infoScroll = qobject_cast<QScrollArea*>(scrollPage(infoContent));
+    pages->addWidget(infoScroll);
     pages->setCurrentIndex(1);
     root->addWidget(pages, 1);
 
     connect(tabs, &QTabBar::currentChanged, pages, &QStackedWidget::setCurrentIndex);
+    connect(tabs, &QTabBar::currentChanged, this, [this](int index) {
+        if (!historicalTurnMode)
+            normalTabIndex = index;
+    });
     connect(hide, &QPushButton::clicked, this, &InspectorWidget::hideRequested);
+    connect(historicalBack, &QPushButton::clicked,
+            this, &InspectorWidget::historicalTurnCloseRequested);
     renderUnavailable(QStringLiteral("Select a thread"),
                       QStringLiteral("Choose a synchronized thread to inspect its current state."));
 }
 
 void InspectorWidget::renderUnavailable(const QString& title, const QString& detail)
 {
+    setHistoricalTurnMode(false);
     QCryptographicHash hash(QCryptographicHash::Sha256);
     addPresentationValue(hash, title);
     addPresentationValue(hash, detail);
@@ -487,6 +670,20 @@ void InspectorWidget::renderUnavailable(const QString& title, const QString& det
     }
 }
 
+void InspectorWidget::setHistoricalTurnMode(bool enabled)
+{
+    if (historicalTurnMode == enabled)
+        return;
+    if (enabled)
+        normalTabIndex = tabs->currentIndex();
+    historicalTurnMode = enabled;
+    inspectorHeading->setText(enabled ? QStringLiteral("TURN DETAILS")
+                                      : QStringLiteral("INSPECTOR"));
+    historicalBack->setVisible(enabled);
+    tabs->setVisible(!enabled);
+    tabs->setCurrentIndex(enabled ? 3 : normalTabIndex);
+}
+
 void InspectorWidget::refreshLayoutGeometry(QVBoxLayout* layout)
 {
     layout->invalidate();
@@ -507,10 +704,23 @@ void InspectorWidget::updateStateRevision(std::uint64_t revision)
         infoRevisionValue->setText(revisionText);
 }
 
+void InspectorWidget::showInfo()
+{
+    tabs->setCurrentIndex(3);
+    QTimer::singleShot(0, this, [this] {
+        if (!infoScroll)
+            return;
+        if (auto* configuration = infoScroll->findChild<QFrame*>(
+                QStringLiteral("turnExecutionConfigurationCard")))
+            infoScroll->ensureWidgetVisible(configuration, 0, 12);
+    });
+}
+
 void InspectorWidget::render(const sdk::State& state,
                              const QString& threadId,
                              bool backendReady,
-                             const QString& backendStatus)
+                             const QString& backendStatus,
+                             const QString& selectedTurnId)
 {
     if (!backendReady) {
         renderUnavailable(QStringLiteral("Inspector unavailable"),
@@ -541,6 +751,34 @@ void InspectorWidget::render(const sdk::State& state,
     }
 
     const auto* turn = latestTurn(state, *thread);
+    const bool hasSelectedConfigurationTurn = !selectedTurnId.isEmpty();
+    setHistoricalTurnMode(hasSelectedConfigurationTurn);
+    const sdk::TurnState* configurationTurn = turn;
+    bool requestedConfigurationTurnUnavailable = false;
+    if (hasSelectedConfigurationTurn) {
+        configurationTurn = state.turn(selectedTurnId.toStdString());
+        if (!configurationTurn || configurationTurn->threadId != thread->id) {
+            configurationTurn = nullptr;
+            requestedConfigurationTurnUnavailable = true;
+        }
+    }
+    qsizetype configurationTurnNumber = -1;
+    if (hasSelectedConfigurationTurn && configurationTurn) {
+        const auto iterator = std::find(thread->orderedTurns.begin(),
+                                        thread->orderedTurns.end(),
+                                        configurationTurn->id);
+        if (iterator != thread->orderedTurns.end())
+            configurationTurnNumber = static_cast<qsizetype>(
+                std::distance(thread->orderedTurns.begin(), iterator)) + 1;
+    }
+    const QString configurationUnavailableDetail = requestedConfigurationTurnUnavailable
+      ? QStringLiteral("The requested turn is not retained for this thread. Current thread settings are not substituted.")
+      : configurationTurn
+          ? QStringLiteral("AISuite has no authoritative effective execution configuration recorded for this turn. "
+                           "Current thread settings are not substituted.")
+          : QStringLiteral("No retained turn is available. Current thread settings are not substituted.");
+    const ExecutionConfigurationPresentation executionConfiguration =
+        executionConfigurationPresentation(configurationTurn, configurationUnavailableDetail);
 
     // Plan: the installed public SDK projects current plan text, but not typed
     // step records. No progress value is derived from the text.
@@ -615,7 +853,7 @@ void InspectorWidget::render(const sdk::State& state,
             }
             if (planView->textTruncated || planItem->truncated || !planItem->omittedFields.empty()) {
                 auto* truncated = textLabel(QStringLiteral("Plan projection is truncated or partially omitted"), "small");
-                truncated->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
+                truncated->setStyleSheet(QStringLiteral("color:#a76812;font-size:9px;"));
                 layout->addWidget(truncated);
             }
             planContent->addWidget(card);
@@ -705,9 +943,10 @@ void InspectorWidget::render(const sdk::State& state,
                 row->setCursor(Qt::PointingHandCursor);
                 row->setMinimumHeight(details.isEmpty() ? 38 : 52);
                 row->setStyleSheet(QStringLiteral(
-                    "QPushButton{background:%1;color:#e8edf2;border-radius:8px;text-align:left;padding:6px 10px;"
-                    "font-size:11px;font-weight:500;}QPushButton:hover{background:#20252c;}")
-                                       .arg(active ? QStringLiteral("#1a2940") : QStringLiteral("transparent")));
+                    "QPushButton{background:%1;color:#1d2633;border:1px solid %2;border-radius:8px;text-align:left;padding:6px 10px;"
+                    "font-size:11px;font-weight:500;}QPushButton:hover{background:#f1f5fb;}")
+                                       .arg(active ? QStringLiteral("#e5eeff") : QStringLiteral("transparent"),
+                                            active ? QStringLiteral("#bfd3f9") : QStringLiteral("transparent")));
                 row->setToolTip(name);
                 connect(row, &QPushButton::clicked, this, [this, primaryId] {
                     selectedAgentItemId = primaryId;
@@ -747,7 +986,7 @@ void InspectorWidget::render(const sdk::State& state,
                 }
                 if (collaboration.truncated) {
                     auto* truncated = textLabel(QStringLiteral("Projected detail is truncated or omitted"), "small");
-                    truncated->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
+                    truncated->setStyleSheet(QStringLiteral("color:#a76812;font-size:9px;"));
                     layout->addWidget(truncated);
                 }
                 agentsContent->addWidget(card);
@@ -810,7 +1049,7 @@ void InspectorWidget::render(const sdk::State& state,
                 addFact(facts, row, QStringLiteral("Attention"),
                         QStringLiteral("%1 pending request%2").arg(pending)
                             .arg(pending == 1 ? QString{} : QStringLiteral("s")),
-                        QStringLiteral("#f5a83b"));
+                        QStringLiteral("#a76812"));
             agentsContent->addLayout(facts);
 
             if (agentThread) {
@@ -943,7 +1182,7 @@ void InspectorWidget::render(const sdk::State& state,
                 }
                 if (view.changesTruncated || item->truncated || !item->omittedFields.empty()) {
                     auto* truncated = textLabel(QStringLiteral("Change projection is truncated or partially omitted"), "small");
-                    truncated->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
+                    truncated->setStyleSheet(QStringLiteral("color:#a76812;font-size:9px;"));
                     layout->addWidget(truncated);
                 }
                 changesContent->addWidget(card);
@@ -979,6 +1218,10 @@ void InspectorWidget::render(const sdk::State& state,
                          thread->model ? std::string_view(thread->model->value) : std::string_view{});
     addPresentationValue(infoHash,
                          thread->modelProvider ? std::string_view(*thread->modelProvider) : std::string_view{});
+    addPresentationValue(infoHash, thread->ephemeral.has_value());
+    addPresentationValue(infoHash, thread->ephemeral.value_or(false));
+    addPresentationValue(infoHash, thread->archived.has_value());
+    addPresentationValue(infoHash, thread->archived.value_or(false));
     addPresentationValue(infoHash, thread->fullyLoaded);
     addPresentationValue(infoHash, turn != nullptr);
     if (turn) {
@@ -989,6 +1232,23 @@ void InspectorWidget::render(const sdk::State& state,
         addPresentationValue(infoHash, tokenUsageText(*turn));
         addPresentationValue(infoHash, failureText(*turn));
     }
+    addPresentationValue(infoHash, hasSelectedConfigurationTurn);
+    addPresentationValue(infoHash, QByteArray::number(configurationTurnNumber));
+    addPresentationValue(infoHash, executionConfiguration.recorded);
+    addPresentationValue(infoHash, executionConfiguration.turnId);
+    addPresentationValue(infoHash, executionConfiguration.unavailableDetail);
+    addPresentationValue(infoHash, executionConfiguration.model);
+    addPresentationValue(infoHash, executionConfiguration.effort);
+    addPresentationValue(infoHash, executionConfiguration.personality);
+    addPresentationValue(infoHash, executionConfiguration.workspace);
+    addPresentationValue(infoHash, executionConfiguration.sandbox);
+    addPresentationValue(infoHash, executionConfiguration.approvalPolicy);
+    addPresentationValue(infoHash, executionConfiguration.approvalsReviewer);
+    addPresentationValue(infoHash, executionConfiguration.serviceTier);
+    addPresentationValue(infoHash, executionConfiguration.summary);
+    addPresentationValue(infoHash, executionConfiguration.collaborationMode);
+    addPresentationValue(infoHash, executionConfiguration.activePermissionProfile);
+    addPresentationValue(infoHash, executionConfiguration.provenance);
     addPresentationValue(infoHash, freshnessText(state.freshness()));
     addPresentationValue(infoHash, representationText(state.representationMode()));
     addPresentationValue(infoHash, provider.value.has_value());
@@ -1041,6 +1301,21 @@ void InspectorWidget::render(const sdk::State& state,
     infoPresentationKey = nextInfoKey;
     infoRevisionValue = nullptr;
     clearLayout(infoContent);
+    if (hasSelectedConfigurationTurn) {
+        auto* title = textLabel(configurationTurnNumber > 0
+                                    ? QStringLiteral("Effective configuration · Turn %1")
+                                          .arg(configurationTurnNumber)
+                                    : QStringLiteral("Effective configuration"));
+        title->setObjectName(QStringLiteral("historicalTurnConfigurationTitle"));
+        title->setStyleSheet(QStringLiteral("color:#1d2633;font-size:16px;font-weight:600;"));
+        infoContent->addWidget(title);
+        infoContent->addSpacing(5);
+        auto* readOnly = textLabel(QStringLiteral("Read-only historical record"));
+        readOnly->setStyleSheet(QStringLiteral("color:#667085;font-size:11px;"));
+        infoContent->addWidget(readOnly);
+        infoContent->addSpacing(12);
+        infoContent->addWidget(divider());
+    } else {
     infoContent->addWidget(textLabel(QStringLiteral("THREAD"), "section"));
     infoContent->addSpacing(8);
     auto* threadCard = detailCard();
@@ -1059,9 +1334,15 @@ void InspectorWidget::render(const sdk::State& state,
     addFact(threadFacts, threadRow, QStringLiteral("Model"), thread->model ? fromUtf8(thread->model->value) : QString{});
     addFact(threadFacts, threadRow, QStringLiteral("Provider"),
             thread->modelProvider ? fromUtf8(*thread->modelProvider) : QString{});
+    if (thread->ephemeral)
+        addFact(threadFacts, threadRow, QStringLiteral("Lifetime"),
+                *thread->ephemeral ? QStringLiteral("Temporary") : QStringLiteral("Persistent"));
+    if (thread->archived)
+        addFact(threadFacts, threadRow, QStringLiteral("Archive"),
+                *thread->archived ? QStringLiteral("Archived") : QStringLiteral("Active"));
     addFact(threadFacts, threadRow, QStringLiteral("Projection"),
             thread->fullyLoaded ? QStringLiteral("Fully loaded") : QStringLiteral("Partial"),
-            thread->fullyLoaded ? QStringLiteral("#40c27d") : QStringLiteral("#f5a83b"));
+            thread->fullyLoaded ? QStringLiteral("#23845a") : QStringLiteral("#a76812"));
     infoContent->addWidget(threadCard);
 
     if (turn) {
@@ -1082,10 +1363,83 @@ void InspectorWidget::render(const sdk::State& state,
                 turn->active ? QStringLiteral("Active")
                              : turn->terminal ? QStringLiteral("Terminal") : QStringLiteral("Retained"));
         addFact(turnFacts, turnRow, QStringLiteral("Token usage"), tokenUsageText(*turn));
-        addFact(turnFacts, turnRow, QStringLiteral("Failure"), failureText(*turn), QStringLiteral("#ed6a6a"));
+        addFact(turnFacts, turnRow, QStringLiteral("Failure"), failureText(*turn), QStringLiteral("#b83a3a"));
         infoContent->addWidget(turnCard);
     }
 
+    }
+
+    infoContent->addSpacing(16);
+    if (!hasSelectedConfigurationTurn)
+        infoContent->addWidget(textLabel(QStringLiteral("LATEST TURN CONFIGURATION"), "section"));
+    infoContent->addSpacing(8);
+    auto* configurationCard = executionConfigurationCard();
+    auto* configurationLayout = new QVBoxLayout(configurationCard);
+    configurationLayout->setContentsMargins(13, 12, 13, 12);
+    configurationLayout->setSpacing(7);
+    if (!executionConfiguration.recorded) {
+        auto* heading = textLabel(requestedConfigurationTurnUnavailable || !configurationTurn
+                                    ? QStringLiteral("Unavailable")
+                                    : QStringLiteral("Not recorded"));
+        heading->setStyleSheet(QStringLiteral("color:#1d2633;font-size:13px;font-weight:600;"));
+        configurationLayout->addWidget(heading);
+        auto* detail = textLabel(executionConfiguration.unavailableDetail);
+        detail->setWordWrap(true);
+        detail->setStyleSheet(QStringLiteral("color:#667085;font-size:11px;"));
+        configurationLayout->addWidget(detail);
+    } else {
+        auto* header = new QHBoxLayout;
+        auto* heading = textLabel(QStringLiteral("Effective settings"));
+        heading->setStyleSheet(QStringLiteral("color:#1d2633;font-size:13px;font-weight:600;"));
+        header->addWidget(heading);
+        header->addStretch();
+        auto* identity = textLabel(compactId(executionConfiguration.turnId.toStdString()));
+        identity->setStyleSheet(QStringLiteral("color:#2f6feb;font-size:9px;font-weight:600;"));
+        identity->setToolTip(executionConfiguration.turnId);
+        header->addWidget(identity, 0, Qt::AlignTop);
+        configurationLayout->addLayout(header);
+
+        auto* provenance = textLabel(executionConfiguration.provenance);
+        provenance->setWordWrap(true);
+        provenance->setStyleSheet(QStringLiteral("color:#667085;font-size:10px;"));
+        configurationLayout->addWidget(provenance);
+        configurationLayout->addSpacing(2);
+
+        auto* facts = new QGridLayout;
+        facts->setContentsMargins(0, 0, 0, 0);
+        facts->setHorizontalSpacing(16);
+        facts->setVerticalSpacing(7);
+        facts->setColumnMinimumWidth(0, 100);
+        int row = 0;
+        addExecutionConfigurationFact(facts, row, QStringLiteral("Model"), executionConfiguration.model);
+        addExecutionConfigurationFact(facts, row, QStringLiteral("Reasoning effort"), executionConfiguration.effort);
+        addExecutionConfigurationFact(facts, row, QStringLiteral("Style"), executionConfiguration.personality);
+        addExecutionConfigurationFact(facts, row, QStringLiteral("Workspace"), executionConfiguration.workspace);
+        addExecutionConfigurationFact(facts, row, QStringLiteral("Sandbox / access"), executionConfiguration.sandbox);
+        addExecutionConfigurationFact(facts, row, QStringLiteral("Approval policy"), executionConfiguration.approvalPolicy);
+        addExecutionConfigurationFact(facts, row, QStringLiteral("Reviewer"), executionConfiguration.approvalsReviewer);
+        addExecutionConfigurationFact(facts, row, QStringLiteral("Service tier"), executionConfiguration.serviceTier);
+        addExecutionConfigurationFact(facts, row, QStringLiteral("Reasoning summary"), executionConfiguration.summary);
+        addExecutionConfigurationFact(facts, row, QStringLiteral("Collaboration mode"),
+                                      executionConfiguration.collaborationMode);
+        addExecutionConfigurationFact(facts, row, QStringLiteral("Permission profile"),
+                                      executionConfiguration.activePermissionProfile);
+        configurationLayout->addLayout(facts);
+    }
+    infoContent->addWidget(configurationCard);
+
+    if (hasSelectedConfigurationTurn) {
+        infoContent->addSpacing(18);
+        infoContent->addWidget(divider());
+        infoContent->addSpacing(10);
+        auto* provenance = textLabel(
+            QStringLiteral("Loaded from authoritative AISuite turn state — never inferred from current thread settings."));
+        provenance->setWordWrap(true);
+        provenance->setStyleSheet(QStringLiteral("color:#667085;font-size:10px;"));
+        infoContent->addWidget(provenance);
+    }
+
+    if (!hasSelectedConfigurationTurn) {
     infoContent->addSpacing(16);
     infoContent->addWidget(textLabel(QStringLiteral("SYNCHRONIZATION"), "section"));
     infoContent->addSpacing(8);
@@ -1098,18 +1452,18 @@ void InspectorWidget::render(const sdk::State& state,
     int stateRow = 0;
     const QString freshness = freshnessText(state.freshness());
     addFact(stateFacts, stateRow, QStringLiteral("State"), freshness,
-            freshness == QStringLiteral("Current") ? QStringLiteral("#40c27d")
-                                                   : QStringLiteral("#f5a83b"));
+            freshness == QStringLiteral("Current") ? QStringLiteral("#23845a")
+                                                   : QStringLiteral("#a76812"));
     infoRevisionValue = addFact(stateFacts, stateRow, QStringLiteral("Revision"), revisionText);
     if (infoRevisionValue)
         infoRevisionValue->setObjectName(QStringLiteral("inspectorStateRevision"));
     addFact(stateFacts, stateRow, QStringLiteral("Representation"), representationText(state.representationMode()));
     if (provider.value) {
         addFact(stateFacts, stateRow, QStringLiteral("Provider"), providerLifecycleText(provider.value->lifecycle),
-                provider.value->ready ? QStringLiteral("#40c27d") : statusColor(providerLifecycleText(provider.value->lifecycle)));
+                provider.value->ready ? QStringLiteral("#23845a") : statusColor(providerLifecycleText(provider.value->lifecycle)));
         if (provider.value->lastError && provider.value->lastError->message)
             addFact(stateFacts, stateRow, QStringLiteral("Provider error"),
-                    fromUtf8(*provider.value->lastError->message), QStringLiteral("#ed6a6a"));
+                    fromUtf8(*provider.value->lastError->message), QStringLiteral("#b83a3a"));
     }
     if (controller.value) {
         addFact(stateFacts, stateRow, QStringLiteral("Controller"),
@@ -1122,18 +1476,18 @@ void InspectorWidget::render(const sdk::State& state,
         addFact(stateFacts, stateRow, QStringLiteral("Attention"),
                 QStringLiteral("%1 pending request%2").arg(pendingForThread)
                     .arg(pendingForThread == 1 ? QString{} : QStringLiteral("s")),
-                pendingForThread > 0 ? QStringLiteral("#f5a83b") : QStringLiteral("#949ead"));
+                pendingForThread > 0 ? QStringLiteral("#a76812") : QStringLiteral("#667085"));
     }
     if (truncation.truncated || (truncation.value && truncation.value->truncated)) {
         QString detail = QStringLiteral("State projection truncated");
         if (truncation.value && truncation.value->omittedEntries)
             detail += QStringLiteral(" · %1 entries omitted").arg(*truncation.value->omittedEntries);
-        addFact(stateFacts, stateRow, QStringLiteral("Truncation"), detail, QStringLiteral("#f5a83b"));
+        addFact(stateFacts, stateRow, QStringLiteral("Truncation"), detail, QStringLiteral("#a76812"));
     }
     if (threadList.value)
         addFact(stateFacts, stateRow, QStringLiteral("Thread list"),
                 threadList.value->complete ? QStringLiteral("Complete") : QStringLiteral("Partial"),
-                threadList.value->complete ? QStringLiteral("#40c27d") : QStringLiteral("#f5a83b"));
+                threadList.value->complete ? QStringLiteral("#23845a") : QStringLiteral("#a76812"));
     if (!projection.omittedFields.empty() || !projection.redactedFields.empty()) {
         QStringList detail;
         if (!projection.omittedFields.empty())
@@ -1141,7 +1495,7 @@ void InspectorWidget::render(const sdk::State& state,
         if (!projection.redactedFields.empty())
             detail.append(QStringLiteral("%1 fields redacted").arg(projection.redactedFields.size()));
         addFact(stateFacts, stateRow, QStringLiteral("Scope"), detail.join(QStringLiteral(" · ")),
-                QStringLiteral("#f5a83b"));
+                QStringLiteral("#a76812"));
     }
     if (thread->realtime) {
         const auto realtime = sdk::realtimeSemanticView(*thread->realtime);
@@ -1153,6 +1507,7 @@ void InspectorWidget::render(const sdk::State& state,
         addFact(stateFacts, stateRow, QStringLiteral("Realtime"), detail.join(QStringLiteral(" · ")));
     }
     infoContent->addWidget(stateCard);
+    }
     infoContent->addStretch();
     }
 

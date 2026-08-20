@@ -7,14 +7,22 @@
 #include "ui/InspectorWidget.h"
 #include "ui/InteractiveRequestDialog.h"
 #include "ui/SidebarWidget.h"
+#include "ui/ThreadSetupDialog.h"
+#include "ui/UpcomingTurnDock.h"
 
 #include <ai/openai/codex/frontend/client/State.h>
 
-#include <QAction>
+#include <QAbstractButton>
+#include <QApplication>
+#include <QByteArray>
+#include <QClipboard>
 #include <QFrame>
+#include <QFileInfo>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
 #include <QMenu>
+#include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
 #include <QSplitter>
@@ -22,6 +30,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <variant>
 
 namespace codexui {
@@ -66,6 +75,12 @@ QString plainTooltip(const QString& text)
     return Qt::convertFromPlainText(text, Qt::WhiteSpaceNormal);
 }
 
+std::string toUtf8(const QString& value)
+{
+    const QByteArray encoded = value.toUtf8();
+    return std::string(encoded.constData(), static_cast<std::size_t>(encoded.size()));
+}
+
 QFrame* dot(const QString& color, int size = 7)
 {
     auto* result = new QFrame;
@@ -76,13 +91,14 @@ QFrame* dot(const QString& color, int size = 7)
 
 QWidget* makeTopBar(QPushButton*& restoreLeft,
                     QPushButton*& restoreRight,
+                    QLabel*& workspace,
                     QPushButton*& attention,
-                    QLabel*& modelStatus,
-                    QAction*& reconnectAction)
+                    QPushButton*& reconnect)
 {
     auto* bar = new QFrame;
     bar->setObjectName(QStringLiteral("topBar"));
-    bar->setStyleSheet(QStringLiteral("QFrame#topBar{background:#13161a;}"));
+    bar->setStyleSheet(QStringLiteral(
+        "QFrame#topBar{background:#ffffff;border-bottom:1px solid #d7dee8;}"));
     bar->setFixedHeight(56);
     auto* row = new QHBoxLayout(bar);
     row->setContentsMargins(20, 0, 18, 0);
@@ -98,24 +114,19 @@ QWidget* makeTopBar(QPushButton*& restoreLeft,
     restoreLeft->hide();
     row->addSpacing(12);
     row->addWidget(restoreLeft);
+    row->addSpacing(18);
+
+    workspace = label(QStringLiteral("No workspace"), "muted");
+    workspace->setObjectName(QStringLiteral("workspaceBreadcrumb"));
+    workspace->setStyleSheet(QStringLiteral("color:#667085;font-size:12px;font-weight:500;"));
+    row->addWidget(workspace);
     row->addStretch();
 
-    auto* commands = new QPushButton(QStringLiteral("Commands"));
-    commands->setFixedSize(132, 32);
-    auto* menu = new QMenu(commands);
-    reconnectAction = menu->addAction(QStringLiteral("Reconnect to app server"));
-    menu->addSeparator();
-    menu->addAction(QStringLiteral("Command palette is not implemented"));
-    QObject::connect(commands, &QPushButton::clicked, commands, [commands, menu] {
-        menu->popup(commands->mapToGlobal(QPoint(0, commands->height() + 4)));
-    });
-    row->addWidget(commands);
-
-    modelStatus = label(QStringLiteral("Model unavailable"));
-    modelStatus->setAlignment(Qt::AlignCenter);
-    modelStatus->setStyleSheet(QStringLiteral("background:#181c21;border-radius:8px;font-size:12px;font-weight:500;"));
-    modelStatus->setFixedSize(210, 32);
-    row->addWidget(modelStatus);
+    reconnect = new QPushButton(QStringLiteral("Reconnect"));
+    reconnect->setProperty("kind", "subtle");
+    reconnect->setFixedHeight(32);
+    reconnect->hide();
+    row->addWidget(reconnect);
 
     attention = new QPushButton(QStringLiteral("0 requests"));
     attention->setFixedSize(106, 32);
@@ -126,11 +137,6 @@ QWidget* makeTopBar(QPushButton*& restoreLeft,
     restoreRight->setFixedHeight(32);
     restoreRight->hide();
     row->addWidget(restoreRight);
-    row->addSpacing(70);
-    auto* account = label(QStringLiteral("CodexUI"), "muted");
-    account->setStyleSheet(QStringLiteral("font-size:12px;font-weight:500;"));
-    row->addWidget(account);
-    row->addSpacing(35);
     return bar;
 }
 
@@ -143,13 +149,14 @@ QWidget* makeStatusBar(QFrame*& codexStatusDot,
 {
     auto* bar = new QFrame;
     bar->setObjectName(QStringLiteral("customStatusBar"));
-    bar->setStyleSheet(QStringLiteral("QFrame#customStatusBar{background:#181c21;}"));
+    bar->setStyleSheet(QStringLiteral(
+        "QFrame#customStatusBar{background:#f8fafc;border-top:1px solid #d7dee8;}"));
     bar->setFixedHeight(40);
     auto* row = new QHBoxLayout(bar);
     row->setContentsMargins(18, 0, 80, 0);
     row->setSpacing(8);
 
-    codexStatusDot = dot(QStringLiteral("#949ead"));
+    codexStatusDot = dot(QStringLiteral("#98a2b3"));
     row->addWidget(codexStatusDot);
     row->addWidget(label(QStringLiteral("Codex"), "meta"));
     row->addSpacing(48);
@@ -160,15 +167,15 @@ QWidget* makeStatusBar(QFrame*& codexStatusDot,
     row->addWidget(agentActivityStatus);
     row->addSpacing(24);
     synchronizationStatus = label(QStringLiteral("Disconnected"), "meta");
-    synchronizationStatus->setStyleSheet(QStringLiteral("color:#949ead;font-size:10px;font-weight:600;"));
+    synchronizationStatus->setStyleSheet(QStringLiteral("color:#667085;font-size:10px;font-weight:600;"));
     row->addWidget(synchronizationStatus);
     row->addSpacing(18);
     controllerStatus = label(QStringLiteral("Observer"), "meta");
-    controllerStatus->setStyleSheet(QStringLiteral("color:#949ead;font-size:10px;font-weight:600;"));
+    controllerStatus->setStyleSheet(QStringLiteral("color:#667085;font-size:10px;font-weight:600;"));
     row->addWidget(controllerStatus);
     row->addStretch();
     attentionStatus = label(QStringLiteral("0 requests"), "meta");
-    attentionStatus->setStyleSheet(QStringLiteral("color:#949ead;font-size:10px;font-weight:600;"));
+    attentionStatus->setStyleSheet(QStringLiteral("color:#667085;font-size:10px;font-weight:600;"));
     row->addWidget(attentionStatus);
     return bar;
 }
@@ -210,7 +217,11 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    layout->addWidget(makeTopBar(restoreSidebar, restoreInspector, attentionButton, modelStatus, reconnectAction));
+    layout->addWidget(makeTopBar(restoreSidebar,
+                                 restoreInspector,
+                                 workspaceBreadcrumb,
+                                 attentionButton,
+                                 reconnectButton));
 
     splitter = new QSplitter(Qt::Horizontal);
     splitter->setChildrenCollapsible(false);
@@ -236,20 +247,43 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
 
     connect(sidebar, &SidebarWidget::hideRequested, this, [this] { setSidebarVisible(false); });
     connect(inspector, &InspectorWidget::hideRequested, this, [this] { setInspectorVisible(false); });
+    connect(inspector, &InspectorWidget::historicalTurnCloseRequested, this, [this] {
+        selectedInspectorTurnId.clear();
+        inspector->render(frontendSession.state(),
+                          selectedThreadId,
+                          frontendSession.lifecycle() == FrontendSession::Lifecycle::Ready,
+                          frontendSession.statusText());
+    });
     connect(restoreSidebar, &QPushButton::clicked, this, [this] { setSidebarVisible(true); });
     connect(restoreInspector, &QPushButton::clicked, this, [this] { setInspectorVisible(true); });
     connect(attentionButton, &QPushButton::clicked, interactiveRequestDialog, &InteractiveRequestDialog::present);
-    connect(reconnectAction, &QAction::triggered, &frontendSession, &FrontendSession::reconnectToBackend);
+    connect(reconnectButton, &QPushButton::clicked, &frontendSession, &FrontendSession::reconnectToBackend);
     connect(sidebar, &SidebarWidget::newThreadRequested, this, &WorkbenchWidget::beginNewThread);
     connect(sidebar, &SidebarWidget::threadSelected, this, &WorkbenchWidget::selectThread);
+    connect(sidebar, &SidebarWidget::threadActionRequested,
+            this, &WorkbenchWidget::handleThreadAction);
     connect(inspector, &InspectorWidget::selectionChanged, this, [this] { refreshState(); });
     connect(inspector, &InspectorWidget::threadOpenRequested, this, &WorkbenchWidget::selectProjectedAgentThread);
     connect(conversation, &ConversationWidget::sendRequested, this, &WorkbenchWidget::sendPrompt);
     connect(conversation, &ConversationWidget::stopRequested, this, &WorkbenchWidget::stopActiveTurn);
+    connect(conversation, &ConversationWidget::turnDetailsRequested, this,
+            [this](const QString& turnId) {
+                selectedInspectorTurnId = turnId;
+                inspector->render(frontendSession.state(),
+                                  selectedThreadId,
+                                  frontendSession.lifecycle() == FrontendSession::Lifecycle::Ready,
+                                  frontendSession.statusText(),
+                                  selectedInspectorTurnId);
+                inspector->showInfo();
+            });
     connect(&frontendSession, &FrontendSession::lifecycleChanged, this, &WorkbenchWidget::refreshLifecycle);
     connect(&frontendSession, &FrontendSession::statusChanged, this, &WorkbenchWidget::refreshLifecycle);
     connect(&frontendSession, &FrontendSession::stateChanged, this, &WorkbenchWidget::scheduleStateRefresh);
+    connect(&frontendSession, &FrontendSession::modelCatalogChanged, this, [this] {
+        conversation->setModelCatalog(frontendSession.modelCatalog());
+    });
 
+    conversation->setModelCatalog(frontendSession.modelCatalog());
     refreshLifecycle();
     refreshState();
 }
@@ -261,6 +295,14 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
                                           && scope.affectedThreadIds.contains(newThreadIdAwaitingState);
     const bool selectedAffected = scope.allThreadsAffected || currentSelectionAffected
                                   || awaitedSelectionAffected;
+    const bool submittedTurnAffected = !turnThreadIdAwaitingState.isEmpty()
+                                       && (scope.allThreadsAffected
+                                           || scope.affectedThreadIds.contains(
+                                               turnThreadIdAwaitingState));
+    const bool automaticResumeAffected = !automaticResumeThreadId.isEmpty()
+                                         && (scope.allThreadsAffected
+                                             || scope.affectedThreadIds.contains(
+                                                 automaticResumeThreadId));
     const bool selectedInspectorAffected = scope.allInspectorsAffected
                                            || scope.affectedInspectorThreadIds.contains(selectedThreadId)
                                            || (!newThreadIdAwaitingState.isEmpty()
@@ -270,7 +312,8 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
     // Inspector projections when none of their selected semantics changed.
     if (!selectedInspectorAffected)
         inspector->updateStateRevision(frontendSession.state().revision());
-    if (!selectedAffected && !selectedInspectorAffected && !scope.sidebarAffected)
+    if (!selectedAffected && !selectedInspectorAffected && !scope.sidebarAffected
+        && !submittedTurnAffected && !automaticResumeAffected)
         return;
     if (selectedAffected)
     {
@@ -327,6 +370,7 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
         inspectorRefreshPending = false;
         sidebarRefreshPending = false;
         if (exactContentOnly && !refreshInspector && !refreshSidebar
+            && turnThreadIdAwaitingState.isEmpty() && automaticResumeThreadId.isEmpty()
             && conversation->updateExactMessageContent(
                 frontendSession.state(), selectedThreadId, exactContentChanges))
             return;
@@ -340,7 +384,7 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
 void WorkbenchWidget::refreshLifecycle()
 {
     using Lifecycle = FrontendSession::Lifecycle;
-    QString color = QStringLiteral("#949ead");
+    QString color = QStringLiteral("#667085");
     QString title = QStringLiteral("App server disconnected");
     QString detail = frontendSession.statusText();
 
@@ -348,24 +392,26 @@ void WorkbenchWidget::refreshLifecycle()
         case Lifecycle::Connecting:
         case Lifecycle::Authenticating:
         case Lifecycle::Synchronizing:
-            color = QStringLiteral("#4f94f5");
+            color = QStringLiteral("#2f6feb");
             title = QStringLiteral("Connecting to app server");
             break;
         case Lifecycle::Ready:
-            color = QStringLiteral("#40c27d");
+            color = QStringLiteral("#23845a");
             title = QStringLiteral("App server connected");
             detail = QStringLiteral("Local · Unix · synchronized");
             break;
         case Lifecycle::Failed:
-            color = QStringLiteral("#f5a83b");
+            color = QStringLiteral("#a76812");
             title = QStringLiteral("App server unavailable");
             break;
         case Lifecycle::Disconnected:
             break;
     }
 
-    reconnectAction->setEnabled(frontendSession.lifecycle() == Lifecycle::Disconnected
-                                || frontendSession.lifecycle() == Lifecycle::Failed);
+    const bool reconnectAvailable = frontendSession.lifecycle() == Lifecycle::Disconnected
+                                    || frontendSession.lifecycle() == Lifecycle::Failed;
+    reconnectButton->setVisible(reconnectAvailable);
+    reconnectButton->setEnabled(reconnectAvailable);
 
     sidebar->setConnectionStatus(title, detail, color);
     setStyleSheetIfChanged(codexStatusDot, QStringLiteral("background:%1;border-radius:3px;").arg(color));
@@ -374,8 +420,6 @@ void WorkbenchWidget::refreshLifecycle()
     setStyleSheetIfChanged(synchronizationStatus,
                            QStringLiteral("color:%1;font-size:10px;font-weight:600;").arg(color));
     if (frontendSession.lifecycle() != Lifecycle::Ready) {
-        modelStatus->setText(QStringLiteral("Model unavailable"));
-        modelStatus->setToolTip({});
         threadContextStatus->setText(QStringLiteral("No thread context"));
         threadContextStatus->setToolTip({});
         agentActivityStatus->setText(QStringLiteral("No agent activity"));
@@ -385,7 +429,7 @@ void WorkbenchWidget::refreshLifecycle()
     if (frontendSession.lifecycle() != Lifecycle::Ready) {
         const bool writeWasPending = pendingAction != PendingAction::None || controllerAcquireInFlight
                                      || threadStartInFlight || threadResumeInFlight || turnStartInFlight
-                                     || interruptInFlight;
+                                     || interruptInFlight || threadMutationInFlight;
         clearWriteTransients();
         if (writeWasPending)
             showWriteError(QStringLiteral("Backend disconnected before the write completed"));
@@ -411,22 +455,29 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
     const auto threads = state.threads();
     const bool ready = frontendSession.lifecycle() == FrontendSession::Lifecycle::Ready;
     const bool threadListComplete = state.threadList().value && state.threadList().value->complete;
+    const bool threadDiscoveryComplete = threadListComplete
+                                         && frontendSession.archivedThreadDiscoveryComplete();
     const QString previousThreadId = selectedThreadId;
-    const bool previousNewThreadDraft = newThreadDraft;
 
     if (!newThreadIdAwaitingState.isEmpty()
         && state.thread(newThreadIdAwaitingState.toStdString()) != nullptr) {
         selectedThreadId = newThreadIdAwaitingState;
+        selectedInspectorTurnId.clear();
         newThreadIdAwaitingState.clear();
-        newThreadDraft = false;
     }
+    const bool awaitingSelectedThread = !newThreadIdAwaitingState.isEmpty()
+        && selectedThreadId == newThreadIdAwaitingState;
     if (!selectedThreadId.isEmpty()
-        && state.thread(selectedThreadId.toStdString()) == nullptr && ready && threadListComplete)
+        && state.thread(selectedThreadId.toStdString()) == nullptr && ready && threadDiscoveryComplete
+        && !awaitingSelectedThread)
         selectedThreadId.clear();
-    if (!newThreadDraft && selectedThreadId.isEmpty() && !threads.empty())
+    if (selectedThreadId.isEmpty() && !threads.empty() && newThreadIdAwaitingState.isEmpty())
         selectedThreadId = QString::fromStdString(threads.front().id.value);
-    const bool selectionChanged = previousThreadId != selectedThreadId
-                                  || previousNewThreadDraft != newThreadDraft;
+    const bool selectionChanged = previousThreadId != selectedThreadId;
+    if (selectionChanged) {
+        selectedInspectorTurnId.clear();
+        conversation->clearPrompt();
+    }
     refreshSelectedPresentation = refreshSelectedPresentation || selectionChanged;
     refreshInspector = refreshInspector || selectionChanged;
     refreshSidebar = refreshSidebar || selectionChanged;
@@ -436,32 +487,32 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
 
     // ConversationWidget resolves the stable selection against this exact
     // immutable State and never retains backend object addresses.
-    if (refreshSelectedPresentation)
+    if (refreshSelectedPresentation) {
         conversation->render(state,
                              selectedThreadId,
-                             newThreadDraft,
+                             false,
                              selectionChanged ? nullptr : exactContentChanges);
+    }
+    reconcileSubmittedTurnSettings();
 
     if (refreshInspector)
-        inspector->render(state, newThreadDraft ? QString{} : selectedThreadId,
-                          ready, frontendSession.statusText());
+        inspector->render(state, selectedThreadId,
+                          ready, frontendSession.statusText(), selectedInspectorTurnId);
 
-    const auto* selected = !newThreadDraft && !selectedThreadId.isEmpty()
+    const auto* selected = !selectedThreadId.isEmpty()
                                ? state.thread(selectedThreadId.toStdString())
                                : nullptr;
     if (refreshSelectedPresentation) {
-        QStringList modelDetails;
-        if (ready && selected && selected->model)
-            modelDetails.append(QString::fromStdString(selected->model->value));
-        if (ready && selected && selected->modelProvider)
-            modelDetails.append(QString::fromStdString(*selected->modelProvider));
-        modelStatus->setText(modelDetails.isEmpty() ? QStringLiteral("Model unavailable")
-                                                    : modelDetails.join(QStringLiteral(" · ")));
-        modelStatus->setToolTip(plainTooltip(modelStatus->text()));
-
         const QString context = ready && selected && selected->cwd
                                     ? QString::fromStdString(selected->cwd->value)
                                     : QStringLiteral("No thread context");
+        const QString workspaceName = ready && selected && selected->cwd
+            ? QFileInfo(context).fileName()
+            : QString{};
+        workspaceBreadcrumb->setText(workspaceName.isEmpty()
+                                         ? QStringLiteral("No workspace")
+                                         : QStringLiteral("Workspace / %1").arg(workspaceName));
+        workspaceBreadcrumb->setToolTip(workspaceName.isEmpty() ? QString{} : plainTooltip(context));
         threadContextStatus->setText(context.size() > 44
                                          ? context.left(20) + QChar(0x2026) + context.right(20)
                                          : context);
@@ -491,21 +542,23 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
     }
 
     const std::size_t attentionCount = state.hasPendingRequestProjection() ? state.pendingRequests().size() : 0;
-    const QString attentionText = QStringLiteral("%1 request%2")
-                                      .arg(attentionCount)
-                                      .arg(attentionCount == 1 ? QString{} : QStringLiteral("s"));
+    const QString attentionText = attentionCount == 0
+        ? QStringLiteral("No attention")
+        : QStringLiteral("%1 request%2")
+              .arg(attentionCount)
+              .arg(attentionCount == 1 ? QString{} : QStringLiteral("s"));
     attentionButton->setText(attentionText);
     attentionStatus->setText(attentionText);
     const bool needsAttention = attentionCount > 0;
     setStyleSheetIfChanged(
         attentionButton,
         needsAttention
-            ? QStringLiteral("background:#3d2912;color:#f5a83b;border-radius:8px;font-size:11px;font-weight:600;")
-            : QStringLiteral("background:#181c21;color:#949ead;border-radius:8px;font-size:11px;font-weight:600;"));
+            ? QStringLiteral("background:#fff6df;color:#a76812;border:1px solid #e5c77d;border-radius:8px;font-size:11px;font-weight:600;")
+            : QStringLiteral("background:#f1f5fb;color:#667085;border:1px solid #d7dee8;border-radius:8px;font-size:11px;font-weight:600;"));
     setStyleSheetIfChanged(
         attentionStatus,
         QStringLiteral("color:%1;font-size:10px;font-weight:600;")
-            .arg(needsAttention ? QStringLiteral("#f5a83b") : QStringLiteral("#949ead")));
+            .arg(needsAttention ? QStringLiteral("#a76812") : QStringLiteral("#667085")));
     attentionButton->setToolTip(needsAttention ? QStringLiteral("Open pending Codex requests")
                                                : QStringLiteral("Codex has no pending requests"));
     interactiveRequestDialog->synchronize(state);
@@ -513,8 +566,10 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
     if (selected && !selected->fullyLoaded && projectedAgentThreadId != selectedThreadId)
         frontendSession.loadThread(selectedThreadId);
 
+    reconcileAutomaticResumeState();
     controllerUnavailable = controllerUnavailable && !frontendSession.ownsController();
     refreshControllerStatus();
+    maybeResumeSelectedThread();
     if (pendingAction != PendingAction::None && frontendSession.ownsController())
         executePendingAction();
     if (pendingInteractiveResponse && !requestControllerAcquireInFlight && !requestResponseInFlight
@@ -525,18 +580,34 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
 
 void WorkbenchWidget::selectThread(const QString& threadId)
 {
+    ++selectionGeneration;
+    if (automaticResumeThreadId != threadId)
+        automaticResumeAttemptedThreadIds.remove(threadId);
+    if (!newThreadIdAwaitingState.isEmpty() && threadId != newThreadIdAwaitingState)
+        newThreadIdAwaitingState.clear();
+    if (selectedThreadId != threadId)
+        conversation->clearPrompt();
+    if (selectedThreadId != threadId)
+        selectedInspectorTurnId.clear();
     selectedThreadId = threadId;
     projectedAgentThreadId.clear();
-    newThreadDraft = false;
     conversation->setWriteStatus({});
     refreshState();
 }
 
 void WorkbenchWidget::selectProjectedAgentThread(const QString& threadId)
 {
+    ++selectionGeneration;
+    if (automaticResumeThreadId != threadId)
+        automaticResumeAttemptedThreadIds.remove(threadId);
+    if (!newThreadIdAwaitingState.isEmpty() && threadId != newThreadIdAwaitingState)
+        newThreadIdAwaitingState.clear();
+    if (selectedThreadId != threadId)
+        conversation->clearPrompt();
+    if (selectedThreadId != threadId)
+        selectedInspectorTurnId.clear();
     selectedThreadId = threadId;
     projectedAgentThreadId = threadId;
-    newThreadDraft = false;
     conversation->setWriteStatus({});
     refreshState();
 }
@@ -545,37 +616,50 @@ void WorkbenchWidget::refreshControls()
 {
     const bool ready = frontendSession.lifecycle() == FrontendSession::Lifecycle::Ready;
     const auto& state = frontendSession.state();
-    const auto* selected = !newThreadDraft && !selectedThreadId.isEmpty()
+    const auto* selected = !selectedThreadId.isEmpty()
                                ? state.thread(selectedThreadId.toStdString())
                                : nullptr;
     const auto* active = activeTurn(state, selected);
     const bool pendingControllerWrite = controllerAcquireInFlight || pendingAction != PendingAction::None
-                                        || requestControllerAcquireInFlight || requestResponseInFlight;
+                                        || requestControllerAcquireInFlight || requestResponseInFlight
+                                        || threadMutationInFlight;
     const bool promptSubmissionInFlight = threadStartInFlight || threadResumeInFlight || turnStartInFlight;
+    const bool selectedWritable = selected && selected->fullyLoaded
+                                  && !selected->archived.value_or(false);
 
     sidebar->setNewThreadEnabled(ready && !promptSubmissionInFlight && !pendingControllerWrite);
-    conversation->setActionState(ready && (newThreadDraft || (selected != nullptr && selected->fullyLoaded))
-                                     && active == nullptr
-                                     && !promptSubmissionInFlight && !pendingControllerWrite,
-                                 ready && selected != nullptr && active != nullptr && !interruptInFlight
-                                     && !pendingControllerWrite,
-                                 ready && !promptSubmissionInFlight && !controllerAcquireInFlight);
+    sidebar->setThreadInteractionEnabled(ready);
+    const bool composerAvailable = ready && selectedWritable && active == nullptr
+                                   && !promptSubmissionInFlight && !pendingControllerWrite;
+    conversation->setActionState(
+        composerAvailable,
+        ready && active != nullptr && !interruptInFlight && !pendingControllerWrite,
+        composerAvailable,
+        ready && active != nullptr);
+}
+
+bool WorkbenchWidget::writeOperationBusy() const noexcept
+{
+    return pendingAction != PendingAction::None || controllerAcquireInFlight
+        || threadStartInFlight || threadResumeInFlight || turnStartInFlight
+        || interruptInFlight || threadMutationInFlight
+        || requestControllerAcquireInFlight || requestResponseInFlight;
 }
 
 void WorkbenchWidget::refreshControllerStatus()
 {
     QString text = QStringLiteral("Observer");
-    QString color = QStringLiteral("#949ead");
+    QString color = QStringLiteral("#667085");
     QString tooltip = QStringLiteral("Writes acquire controller ownership when needed");
     if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready) {
         tooltip = QStringLiteral("Controller state is unavailable while disconnected");
     } else if (frontendSession.ownsController()) {
         text = QStringLiteral("Controller");
-        color = QStringLiteral("#40c27d");
+        color = QStringLiteral("#23845a");
         tooltip = QStringLiteral("This frontend owns controller");
     } else if (controllerUnavailable) {
         text = QStringLiteral("Controller unavailable");
-        color = QStringLiteral("#f5a83b");
+        color = QStringLiteral("#a76812");
         tooltip = QStringLiteral("The last controller acquisition was rejected");
     } else {
         const auto& projection = frontendSession.state().controller();
@@ -715,22 +799,230 @@ void WorkbenchWidget::clearInteractiveTransients(const QString& error)
 
 void WorkbenchWidget::beginNewThread()
 {
-    if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready || threadStartInFlight)
+    if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready || writeOperationBusy())
         return;
-    selectedThreadId.clear();
-    projectedAgentThreadId.clear();
-    newThreadDraft = true;
-    newThreadIdAwaitingState.clear();
-    conversation->setWriteStatus({});
-    refreshState();
-    conversation->focusComposer();
+
+    auto* dialog = new ThreadSetupDialog(ThreadSetupDialog::Mode::NewThread, this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    const QPointer<ThreadSetupDialog> guarded(dialog);
+    connect(dialog, &QDialog::accepted, this, [this, guarded] {
+        if (!guarded)
+            return;
+        if (writeOperationBusy()) {
+            showWriteError(QStringLiteral("Another write operation is already in progress"));
+            return;
+        }
+        const auto result = guarded->result();
+        const auto* setup = std::get_if<NewThreadSetup>(&result);
+        if (!setup)
+            return;
+        pendingNewThreadSetup = *setup;
+        pendingAction = PendingAction::CreateThread;
+        pendingSelectionGeneration = selectionGeneration;
+        pendingThreadId.clear();
+        conversation->setWriteStatus(QStringLiteral("Preparing new thread…"));
+        ensureController();
+    });
+    dialog->open();
+}
+
+void WorkbenchWidget::handleThreadAction(const QString& threadId, ThreadAction action)
+{
+    const auto& state = frontendSession.state();
+    const auto* thread = state.thread(threadId.toStdString());
+    if (!thread) {
+        showWriteError(QStringLiteral("The selected thread is no longer available"));
+        return;
+    }
+    const ThreadActionAvailability available = detail::threadActionAvailability(state, *thread);
+    switch (action) {
+        case ThreadAction::Open:
+            if (available.open)
+                selectThread(threadId);
+            return;
+        case ThreadAction::CopyId:
+            QApplication::clipboard()->setText(threadId);
+            return;
+        case ThreadAction::Rename:
+            if (writeOperationBusy())
+                return;
+            if (available.rename)
+                showRenameThreadDialog(threadId);
+            return;
+        case ThreadAction::Fork:
+            if (writeOperationBusy())
+                return;
+            if (available.fork)
+                showForkThreadDialog(threadId);
+            return;
+        case ThreadAction::ResumeWithOptions:
+            if (writeOperationBusy())
+                return;
+            if (available.resumeWithOptions)
+                showResumeWithOptionsDialog(threadId);
+            return;
+        case ThreadAction::Delete:
+            if (writeOperationBusy())
+                return;
+            if (available.remove)
+                showDeleteThreadConfirmation(threadId);
+            return;
+        case ThreadAction::Interrupt:
+        {
+            if (writeOperationBusy())
+                return;
+            if (!available.interrupt)
+                return;
+            const auto* turn = activeTurn(state, thread);
+            if (!turn)
+                return;
+            pendingAction = PendingAction::InterruptTurn;
+            pendingThreadId = threadId;
+            pendingTurnId = QString::fromStdString(turn->id.value);
+            conversation->setWriteStatus(QStringLiteral("Preparing interrupt…"));
+            ensureController();
+            return;
+        }
+        case ThreadAction::Archive:
+        case ThreadAction::Unarchive:
+        {
+            if (writeOperationBusy())
+                return;
+            const bool allowed = action == ThreadAction::Archive ? available.archive : available.unarchive;
+            if (!allowed)
+                return;
+            pendingAction = action == ThreadAction::Archive ? PendingAction::ArchiveThread
+                                                            : PendingAction::UnarchiveThread;
+            pendingThreadId = threadId;
+            conversation->setWriteStatus(action == ThreadAction::Archive
+                                             ? QStringLiteral("Preparing archive…")
+                                             : QStringLiteral("Preparing unarchive…"));
+            ensureController();
+            return;
+        }
+    }
+}
+
+void WorkbenchWidget::showRenameThreadDialog(const QString& threadId)
+{
+    const auto* thread = frontendSession.state().thread(threadId.toStdString());
+    if (!thread)
+        return;
+    auto* dialog = new QInputDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QStringLiteral("Rename thread"));
+    dialog->setLabelText(QStringLiteral("Thread name"));
+    dialog->setTextValue(thread->title ? QString::fromStdString(*thread->title) : QString{});
+    dialog->setOkButtonText(QStringLiteral("Rename"));
+    const QPointer<QInputDialog> guarded(dialog);
+    connect(dialog, &QDialog::accepted, this, [this, guarded, threadId] {
+        if (!guarded || guarded->textValue().trimmed().isEmpty())
+            return;
+        if (writeOperationBusy()) {
+            showWriteError(QStringLiteral("Another write operation is already in progress"));
+            return;
+        }
+        pendingAction = PendingAction::RenameThread;
+        pendingThreadId = threadId;
+        pendingThreadValue = guarded->textValue().trimmed();
+        conversation->setWriteStatus(QStringLiteral("Preparing rename…"));
+        ensureController();
+    });
+    dialog->open();
+}
+
+void WorkbenchWidget::showForkThreadDialog(const QString& threadId)
+{
+    const auto* thread = frontendSession.state().thread(threadId.toStdString());
+    if (!thread)
+        return;
+    auto* dialog = new ThreadSetupDialog(ThreadSetupDialog::Mode::ForkThread, this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    if (thread->title)
+        dialog->setSuggestedThreadName(QStringLiteral("%1 (fork)").arg(QString::fromStdString(*thread->title)));
+    const QPointer<ThreadSetupDialog> guarded(dialog);
+    connect(dialog, &QDialog::accepted, this, [this, guarded, threadId] {
+        if (!guarded)
+            return;
+        if (writeOperationBusy()) {
+            showWriteError(QStringLiteral("Another write operation is already in progress"));
+            return;
+        }
+        const auto result = guarded->result();
+        const auto* setup = std::get_if<ForkThreadSetup>(&result);
+        if (!setup)
+            return;
+        pendingForkThreadSetup = *setup;
+        pendingAction = PendingAction::ForkThread;
+        pendingSelectionGeneration = selectionGeneration;
+        pendingThreadId = threadId;
+        conversation->setWriteStatus(QStringLiteral("Preparing fork…"));
+        ensureController();
+    });
+    dialog->open();
+}
+
+void WorkbenchWidget::showResumeWithOptionsDialog(const QString& threadId)
+{
+    auto* dialog = new ThreadSetupDialog(ThreadSetupDialog::Mode::ResumeWithOptions, this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    const QPointer<ThreadSetupDialog> guarded(dialog);
+    connect(dialog, &QDialog::accepted, this, [this, guarded, threadId] {
+        if (!guarded)
+            return;
+        if (writeOperationBusy()) {
+            showWriteError(QStringLiteral("Another write operation is already in progress"));
+            return;
+        }
+        const auto result = guarded->result();
+        const auto* setup = std::get_if<ResumeWithOptionsSetup>(&result);
+        if (!setup)
+            return;
+        pendingResumeSetup = *setup;
+        pendingAction = PendingAction::ResumeWithOptions;
+        pendingSelectionGeneration = selectionGeneration;
+        pendingThreadId = threadId;
+        conversation->setWriteStatus(QStringLiteral("Preparing resume…"));
+        ensureController();
+    });
+    dialog->open();
+}
+
+void WorkbenchWidget::showDeleteThreadConfirmation(const QString& threadId)
+{
+    const auto* thread = frontendSession.state().thread(threadId.toStdString());
+    if (!thread)
+        return;
+    const QString name = thread->title && !thread->title->empty()
+                             ? QString::fromStdString(*thread->title)
+                             : threadId;
+    auto* dialog = new QMessageBox(QMessageBox::Warning,
+                                   QStringLiteral("Delete thread"),
+                                   QStringLiteral("Delete “%1”? This cannot be undone.").arg(name),
+                                   QMessageBox::Cancel | QMessageBox::Ok,
+                                   this);
+    dialog->setTextFormat(Qt::PlainText);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->button(QMessageBox::Ok)->setText(QStringLiteral("Delete"));
+    connect(dialog, &QMessageBox::finished, this, [this, threadId](int result) {
+        if (result != QMessageBox::Ok)
+            return;
+        if (writeOperationBusy()) {
+            showWriteError(QStringLiteral("Another write operation is already in progress"));
+            return;
+        }
+        pendingAction = PendingAction::DeleteThread;
+        pendingThreadId = threadId;
+        conversation->setWriteStatus(QStringLiteral("Preparing delete…"));
+        ensureController();
+    });
+    dialog->open();
 }
 
 void WorkbenchWidget::sendPrompt(const QString& prompt)
 {
     if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready || prompt.trimmed().isEmpty()
-        || threadStartInFlight || threadResumeInFlight || turnStartInFlight || controllerAcquireInFlight
-        || pendingAction != PendingAction::None)
+        || writeOperationBusy())
         return;
     if (const auto error = FrontendSession::promptValidationError(prompt)) {
         showWriteError(*error);
@@ -739,21 +1031,29 @@ void WorkbenchWidget::sendPrompt(const QString& prompt)
 
     const auto& state = frontendSession.state();
     const auto* selected = selectedThreadId.isEmpty() ? nullptr : state.thread(selectedThreadId.toStdString());
-    if (!newThreadDraft && (!selected || !selected->fullyLoaded || activeTurn(state, selected)))
+    if (!selected || !selected->fullyLoaded || activeTurn(state, selected)
+        || selected->archived.value_or(false))
         return;
 
-    pendingAction = newThreadDraft ? PendingAction::SendNewThread : PendingAction::SendExistingThread;
+    const UpcomingTurnDraft settings = conversation->upcomingTurnDraft();
+    if (settings.threadIdentity != selectedThreadId) {
+        showWriteError(QStringLiteral("Upcoming-turn settings no longer match the selected thread"));
+        return;
+    }
+
+    pendingAction = PendingAction::SendExistingThread;
     pendingPrompt = prompt;
-    pendingThreadId = newThreadDraft ? QString{} : selectedThreadId;
+    pendingThreadId = selectedThreadId;
     pendingTurnId.clear();
+    pendingTurnDraft = settings;
     conversation->setWriteStatus(QStringLiteral("Preparing write…"));
     ensureController();
 }
 
 void WorkbenchWidget::stopActiveTurn()
 {
-    if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready || interruptInFlight
-        || controllerAcquireInFlight || pendingAction != PendingAction::None || selectedThreadId.isEmpty())
+    if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready || writeOperationBusy()
+        || selectedThreadId.isEmpty())
         return;
     const auto& state = frontendSession.state();
     const auto* selected = state.thread(selectedThreadId.toStdString());
@@ -767,6 +1067,58 @@ void WorkbenchWidget::stopActiveTurn()
     pendingPrompt.clear();
     conversation->setWriteStatus(QStringLiteral("Preparing interrupt…"));
     ensureController();
+}
+
+void WorkbenchWidget::maybeResumeSelectedThread()
+{
+    if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready
+        || selectedThreadId.isEmpty() || writeOperationBusy()
+        || automaticResumeAttemptedThreadIds.contains(selectedThreadId))
+        return;
+
+    const auto& state = frontendSession.state();
+    const auto* thread = state.thread(selectedThreadId.toStdString());
+    if (!thread || !thread->fullyLoaded || thread->archived.value_or(false)
+        || activeTurn(state, thread)
+        || ai::openai::codex::frontend::client::threadIsIdle(*thread))
+        return;
+
+    automaticResumeAttemptedThreadIds.insert(selectedThreadId);
+    pendingAction = PendingAction::OpenThread;
+    pendingThreadId = selectedThreadId;
+    pendingSelectionGeneration = selectionGeneration;
+    conversation->setWriteStatus(QStringLiteral("Resuming thread…"));
+    ensureController();
+}
+
+void WorkbenchWidget::reconcileAutomaticResumeState()
+{
+    if (automaticResumeThreadId.isEmpty())
+        return;
+
+    const auto& state = frontendSession.state();
+    const auto* thread = state.thread(automaticResumeThreadId.toStdString());
+    const bool threadDiscoveryComplete = state.threadList().value
+                                         && state.threadList().value->complete
+                                         && frontendSession.archivedThreadDiscoveryComplete();
+    const bool canonicalResumeObserved = thread
+        && (thread->archived.value_or(false) || activeTurn(state, thread)
+            || ai::openai::codex::frontend::client::threadIsIdle(*thread));
+    if (!canonicalResumeObserved && (thread || !threadDiscoveryComplete))
+        return;
+
+    const QString completedThreadId = automaticResumeThreadId;
+    automaticResumeThreadId.clear();
+    automaticResumeAttemptedThreadIds.remove(completedThreadId);
+    threadResumeInFlight = false;
+    const bool composerReady = thread && !thread->archived.value_or(false)
+                               && !activeTurn(state, thread)
+                               && ai::openai::codex::frontend::client::threadIsIdle(*thread);
+    if (selectedThreadId == completedThreadId) {
+        conversation->setWriteStatus({});
+        if (composerReady)
+            conversation->focusComposer();
+    }
 }
 
 void WorkbenchWidget::ensureController()
@@ -796,6 +1148,12 @@ void WorkbenchWidget::ensureController()
             self->pendingPrompt.clear();
             self->pendingThreadId.clear();
             self->pendingTurnId.clear();
+            self->pendingThreadValue.clear();
+            self->pendingNewThreadSetup.reset();
+            self->pendingForkThreadSetup.reset();
+            self->pendingResumeSetup.reset();
+            self->pendingTurnDraft = {};
+            self->pendingSelectionGeneration = 0;
             self->controllerUnavailable = true;
             self->showWriteError(error);
         } else {
@@ -810,6 +1168,12 @@ void WorkbenchWidget::ensureController()
         pendingPrompt.clear();
         pendingThreadId.clear();
         pendingTurnId.clear();
+        pendingThreadValue.clear();
+        pendingNewThreadSetup.reset();
+        pendingForkThreadSetup.reset();
+        pendingResumeSetup.reset();
+        pendingTurnDraft = {};
+        pendingSelectionGeneration = 0;
         controllerUnavailable = true;
         showWriteError(*immediateError);
         refreshControllerStatus();
@@ -826,41 +1190,136 @@ void WorkbenchWidget::executePendingAction()
     const QString prompt = pendingPrompt;
     const QString threadId = pendingThreadId;
     const QString turnId = pendingTurnId;
+    const QString value = pendingThreadValue;
+    const auto newThreadSetup = pendingNewThreadSetup;
+    const auto forkSetup = pendingForkThreadSetup;
+    const auto resumeSetup = pendingResumeSetup;
+    const UpcomingTurnDraft turnSettings = pendingTurnDraft;
+    const std::uint64_t expectedSelectionGeneration = pendingSelectionGeneration;
     pendingAction = PendingAction::None;
     pendingPrompt.clear();
     pendingThreadId.clear();
     pendingTurnId.clear();
+    pendingThreadValue.clear();
+    pendingNewThreadSetup.reset();
+    pendingForkThreadSetup.reset();
+    pendingResumeSetup.reset();
+    pendingTurnDraft = {};
+    pendingSelectionGeneration = 0;
 
     switch (action) {
-        case PendingAction::SendExistingThread:
+        case PendingAction::OpenThread:
         {
-            const auto* thread = frontendSession.state().thread(threadId.toStdString());
-            // Resuming an already attached thread can replay its existing item projection.
-            if (thread && ai::openai::codex::frontend::client::threadIsIdle(*thread))
-                startTurn(threadId, prompt);
-            else
-                resumeThread(threadId, prompt);
+            const auto& state = frontendSession.state();
+            const auto* thread = state.thread(threadId.toStdString());
+            if (selectionGeneration != expectedSelectionGeneration
+                || selectedThreadId != threadId) {
+                automaticResumeAttemptedThreadIds.remove(threadId);
+                refreshState();
+                break;
+            }
+            if (!thread || !thread->fullyLoaded || thread->archived.value_or(false)
+                || activeTurn(state, thread)) {
+                automaticResumeAttemptedThreadIds.remove(threadId);
+                showWriteError(QStringLiteral("The selected thread changed before it could be resumed"));
+                refreshControls();
+                break;
+            }
+            if (ai::openai::codex::frontend::client::threadIsIdle(*thread)) {
+                conversation->setWriteStatus({});
+                refreshControls();
+                break;
+            }
+            resumeThreadForOpen(threadId, expectedSelectionGeneration);
             break;
         }
-        case PendingAction::SendNewThread:
-            startNewThread(prompt);
+        case PendingAction::SendExistingThread:
+        {
+            const auto& state = frontendSession.state();
+            const auto* thread = state.thread(threadId.toStdString());
+            if (!thread || !thread->fullyLoaded || thread->archived.value_or(false)
+                || activeTurn(state, thread) || turnSettings.threadIdentity != threadId) {
+                showWriteError(QStringLiteral("The target thread changed before the prompt could be sent"));
+                refreshControls();
+                break;
+            }
+            // Resuming an already attached thread can replay its existing item projection.
+            if (ai::openai::codex::frontend::client::threadIsIdle(*thread))
+                startTurn(threadId, prompt, turnSettings);
+            else
+                resumeThread(threadId, prompt, turnSettings);
             break;
+        }
         case PendingAction::InterruptTurn:
+        {
+            const auto& state = frontendSession.state();
+            const auto* thread = state.thread(threadId.toStdString());
+            const auto* turn = activeTurn(state, thread);
+            if (!thread || !turn || QString::fromStdString(turn->id.value) != turnId
+                || !detail::threadActionAvailability(state, *thread).interrupt) {
+                showWriteError(QStringLiteral("The target turn is no longer interruptible"));
+                refreshControls();
+                break;
+            }
             interruptTurn(threadId, turnId);
+            break;
+        }
+        case PendingAction::CreateThread:
+            if (newThreadSetup)
+                startNewThread(*newThreadSetup, expectedSelectionGeneration);
+            break;
+        case PendingAction::RenameThread:
+        case PendingAction::ArchiveThread:
+        case PendingAction::UnarchiveThread:
+        case PendingAction::DeleteThread:
+            mutateThread(action, threadId, value);
+            break;
+        case PendingAction::ForkThread:
+            if (forkSetup) {
+                const auto& state = frontendSession.state();
+                const auto* thread = state.thread(threadId.toStdString());
+                if (!thread || !detail::threadActionAvailability(state, *thread).fork) {
+                    showWriteError(QStringLiteral("The target thread can no longer be forked"));
+                    refreshControls();
+                    break;
+                }
+                forkThread(threadId, *forkSetup, expectedSelectionGeneration);
+            }
+            break;
+        case PendingAction::ResumeWithOptions:
+            if (resumeSetup) {
+                const auto& state = frontendSession.state();
+                const auto* thread = state.thread(threadId.toStdString());
+                if (!thread || !detail::threadActionAvailability(state, *thread).resumeWithOptions) {
+                    showWriteError(QStringLiteral("The target thread can no longer be resumed with options"));
+                    refreshControls();
+                    break;
+                }
+                resumeThreadWithOptions(threadId, *resumeSetup, expectedSelectionGeneration);
+            }
             break;
         case PendingAction::None:
             break;
     }
 }
 
-void WorkbenchWidget::startNewThread(const QString& prompt)
+void WorkbenchWidget::startNewThread(const NewThreadSetup& setup,
+                                     std::uint64_t expectedSelectionGeneration)
 {
     threadStartInFlight = true;
     conversation->setWriteStatus(QStringLiteral("Creating thread…"));
     refreshControls();
+    ai::openai::codex::typed::ThreadStartParams parameters;
+    if (!setup.instructions.baseInstructions.isEmpty())
+        parameters.baseInstructions = toUtf8(setup.instructions.baseInstructions);
+    if (!setup.instructions.developerInstructions.isEmpty())
+        parameters.developerInstructions = toUtf8(setup.instructions.developerInstructions);
+    parameters.ephemeral = setup.temporary;
     const QPointer<WorkbenchWidget> self(this);
     const auto immediateError = frontendSession.startThread(
-        [self, prompt](const QString& threadId, const QString& error) {
+        std::move(parameters),
+        [self, name = setup.name.trimmed(), expectedSelectionGeneration](const QString& threadId,
+                                                                         const QString& error) {
             if (!self)
                 return;
             self->threadStartInFlight = false;
@@ -869,9 +1328,41 @@ void WorkbenchWidget::startNewThread(const QString& prompt)
                 self->refreshControls();
                 return;
             }
-            self->newThreadIdAwaitingState = threadId;
-            self->startTurn(threadId, prompt);
+            const bool keepAutomaticSelection = self->selectionGeneration == expectedSelectionGeneration;
+            if (keepAutomaticSelection) {
+                self->newThreadIdAwaitingState = threadId;
+                self->selectedThreadId = threadId;
+                self->projectedAgentThreadId.clear();
+                self->conversation->clearPrompt();
+                self->conversation->clearUpcomingTurnSettings();
+                self->conversation->setWriteStatus(QStringLiteral("Thread created"));
+            }
+            if (!name.isEmpty()) {
+                self->threadMutationInFlight = true;
+                self->refreshControls();
+                const auto renameError = self->frontendSession.renameThread(
+                    threadId,
+                    name,
+                    [self, threadId](const QString& renameFailure) {
+                        if (!self)
+                            return;
+                        self->threadMutationInFlight = false;
+                        if (!renameFailure.isEmpty())
+                            self->showWriteError(renameFailure);
+                        else if (self->selectedThreadId == threadId)
+                            self->conversation->setWriteStatus({});
+                        self->refreshState();
+                    });
+                if (renameError) {
+                    self->threadMutationInFlight = false;
+                    self->showWriteError(*renameError);
+                }
+            } else if (keepAutomaticSelection) {
+                self->conversation->setWriteStatus({});
+            }
             self->refreshState();
+            if (keepAutomaticSelection)
+                self->conversation->focusComposer();
         });
     if (immediateError) {
         threadStartInFlight = false;
@@ -880,56 +1371,370 @@ void WorkbenchWidget::startNewThread(const QString& prompt)
     }
 }
 
-void WorkbenchWidget::startTurn(const QString& threadId, const QString& prompt)
+void WorkbenchWidget::startTurn(const QString& threadId,
+                                const QString& prompt,
+                                const UpcomingTurnDraft& settings)
 {
+    if (settings.threadIdentity != threadId) {
+        showWriteError(QStringLiteral("Upcoming-turn settings no longer match the target thread"));
+        return;
+    }
     turnStartInFlight = true;
-    conversation->setWriteStatus(QStringLiteral("Starting turn…"));
+    turnThreadIdAwaitingState.clear();
+    turnIdAwaitingState.clear();
+    submittedTurnSettings.reset();
+    if (selectedThreadId == threadId)
+        conversation->setWriteStatus(QStringLiteral("Starting turn…"));
     refreshControls();
+    ai::openai::codex::typed::TurnStartParams parameters;
+    parameters.threadId = ai::openai::codex::typed::ThreadId{threadId.toStdString()};
+    parameters.model = settings.model;
+    parameters.effort = settings.effort;
+    parameters.personality = settings.personality;
+    parameters.sandboxPolicy = settings.sandboxPolicy;
+    parameters.approvalPolicy = settings.approvalPolicy;
+    parameters.approvalsReviewer = settings.approvalsReviewer;
+    parameters.cwd = settings.cwd;
+    parameters.serviceTier = settings.serviceTier;
+    parameters.summary = settings.summary;
+    parameters.collaborationMode = settings.collaborationMode;
     const QPointer<WorkbenchWidget> self(this);
-    const auto immediateError = frontendSession.startTurn(threadId, prompt, [self](const QString& error) {
-        if (!self)
-            return;
-        self->turnStartInFlight = false;
-        if (!error.isEmpty()) {
-            self->showWriteError(error);
-        } else {
-            self->conversation->clearPrompt();
-            self->conversation->setWriteStatus({});
-        }
-        self->refreshState();
-    });
+    const auto immediateError = frontendSession.startTurn(
+        std::move(parameters),
+        prompt,
+        [self,
+         targetThreadId = threadId,
+         submittedSettings = settings](const QString& acceptedTurnId, const QString& error) {
+            if (!self)
+                return;
+            if (!error.isEmpty() || acceptedTurnId.isEmpty()) {
+                self->turnStartInFlight = false;
+                self->turnThreadIdAwaitingState.clear();
+                self->turnIdAwaitingState.clear();
+                const QString failure = !error.isEmpty()
+                    ? error
+                    : QStringLiteral("The backend accepted the turn without returning its identity");
+                if (self->selectedThreadId == targetThreadId)
+                    self->showWriteError(failure);
+                else
+                    self->showWriteError(
+                        QStringLiteral("Turn in %1 failed: %2").arg(targetThreadId, failure));
+            } else {
+                self->turnThreadIdAwaitingState = targetThreadId;
+                self->turnIdAwaitingState = acceptedTurnId;
+                self->submittedTurnSettings = SubmittedTurnSettings{
+                    targetThreadId, acceptedTurnId, submittedSettings};
+                if (self->selectedThreadId == targetThreadId) {
+                    self->conversation->clearPrompt();
+                    self->conversation->setWriteStatus(QStringLiteral("Waiting for canonical turn state…"));
+                }
+            }
+            self->refreshState();
+        });
     if (immediateError) {
         turnStartInFlight = false;
+        turnThreadIdAwaitingState.clear();
+        turnIdAwaitingState.clear();
         showWriteError(*immediateError);
         refreshState();
         return;
     }
 
-    conversation->setWriteStatus(QStringLiteral("Prompt submitted"));
+    if (selectedThreadId == threadId)
+        conversation->setWriteStatus(QStringLiteral("Prompt submitted"));
     refreshControls();
 }
 
-void WorkbenchWidget::resumeThread(const QString& threadId, const QString& prompt)
+void WorkbenchWidget::reconcileSubmittedTurnSettings()
+{
+    const auto& state = frontendSession.state();
+    if (!turnThreadIdAwaitingState.isEmpty() && !turnIdAwaitingState.isEmpty()) {
+        const auto* awaitingThread = state.thread(turnThreadIdAwaitingState.toStdString());
+        if (awaitingThread) {
+            const auto acceptedTurn = std::ranges::find_if(
+                awaitingThread->orderedTurns,
+                [this](const auto& id) {
+                    return QString::fromStdString(id.value) == turnIdAwaitingState;
+                });
+            if (acceptedTurn != awaitingThread->orderedTurns.end()) {
+                const auto* turn = state.turn(*acceptedTurn);
+                if (turn
+                    && QString::fromStdString(turn->threadId.value) == turnThreadIdAwaitingState) {
+                    const QString completedThreadId = turnThreadIdAwaitingState;
+                    turnStartInFlight = false;
+                    turnThreadIdAwaitingState.clear();
+                    turnIdAwaitingState.clear();
+                    if (selectedThreadId == completedThreadId)
+                        conversation->setWriteStatus({});
+                }
+            }
+        }
+    }
+
+    if (!submittedTurnSettings)
+        return;
+    const auto* thread = state.thread(submittedTurnSettings->threadId.toStdString());
+    if (!thread)
+        return;
+    const auto acceptedTurn = std::ranges::find_if(
+        thread->orderedTurns,
+        [this](const auto& id) {
+            return QString::fromStdString(id.value) == submittedTurnSettings->turnId;
+        });
+    if (acceptedTurn == thread->orderedTurns.end())
+        return;
+    const auto* turn = state.turn(*acceptedTurn);
+    if (!turn
+        || !thread->executionConfiguration || !turn->effectiveExecutionConfiguration
+        || *thread->executionConfiguration != *turn->effectiveExecutionConfiguration)
+        return;
+
+    conversation->acknowledgeSubmittedSettings(submittedTurnSettings->draft);
+    submittedTurnSettings.reset();
+}
+
+void WorkbenchWidget::resumeThread(const QString& threadId,
+                                   const QString& prompt,
+                                   const UpcomingTurnDraft& settings)
 {
     threadResumeInFlight = true;
-    conversation->setWriteStatus(QStringLiteral("Attaching thread…"));
+    if (selectedThreadId == threadId)
+        conversation->setWriteStatus(QStringLiteral("Attaching thread…"));
     refreshControls();
     const QPointer<WorkbenchWidget> self(this);
     const auto immediateError = frontendSession.resumeThread(
         threadId,
-        [self, prompt](const QString& resumedThreadId, const QString& error) {
+        [self, prompt, settings, targetThreadId = threadId](const QString& resumedThreadId,
+                                                            const QString& error) {
             if (!self)
                 return;
             self->threadResumeInFlight = false;
+            if (!error.isEmpty()) {
+                if (self->selectedThreadId == targetThreadId)
+                    self->showWriteError(error);
+                else
+                    self->showWriteError(
+                        QStringLiteral("Thread %1 could not be resumed: %2")
+                            .arg(targetThreadId, error));
+                self->refreshControls();
+                return;
+            }
+            self->startTurn(resumedThreadId, prompt, settings);
+        });
+    if (immediateError) {
+        threadResumeInFlight = false;
+        showWriteError(*immediateError);
+        refreshControls();
+    }
+}
+
+void WorkbenchWidget::resumeThreadForOpen(const QString& threadId,
+                                          std::uint64_t expectedSelectionGeneration)
+{
+    threadResumeInFlight = true;
+    automaticResumeThreadId = threadId;
+    if (selectedThreadId == threadId)
+        conversation->setWriteStatus(QStringLiteral("Resuming thread…"));
+    refreshControls();
+    const QPointer<WorkbenchWidget> self(this);
+    const auto immediateError = frontendSession.resumeThread(
+        threadId,
+        [self, targetThreadId = threadId, expectedSelectionGeneration](const QString&,
+                                                                       const QString& error) {
+            if (!self)
+                return;
+            // State projection may reach the coalesced UI before the operation
+            // completion. In that case canonical reconciliation already
+            // finished this resume and the late completion must be a no-op.
+            if (self->automaticResumeThreadId != targetThreadId) {
+                self->refreshState();
+                return;
+            }
+            if (!error.isEmpty()) {
+                self->threadResumeInFlight = false;
+                self->automaticResumeThreadId.clear();
+                if (self->selectedThreadId == targetThreadId
+                    && self->selectionGeneration == expectedSelectionGeneration)
+                    self->showWriteError(error);
+                else
+                    self->showWriteError(
+                        QStringLiteral("Thread %1 could not be resumed: %2")
+                            .arg(targetThreadId, error));
+            } else if (self->selectedThreadId == targetThreadId
+                       && self->selectionGeneration == expectedSelectionGeneration) {
+                self->conversation->setWriteStatus(
+                    QStringLiteral("Waiting for canonical thread state…"));
+            }
+            self->refreshState();
+        });
+    if (immediateError) {
+        threadResumeInFlight = false;
+        automaticResumeThreadId.clear();
+        showWriteError(*immediateError);
+        refreshControls();
+    }
+}
+
+void WorkbenchWidget::forkThread(const QString& threadId,
+                                 const ForkThreadSetup& setup,
+                                 std::uint64_t expectedSelectionGeneration)
+{
+    threadMutationInFlight = true;
+    conversation->setWriteStatus(QStringLiteral("Forking thread…"));
+    refreshControls();
+    ai::openai::codex::typed::ThreadForkParams parameters;
+    parameters.threadId = ai::openai::codex::typed::ThreadId{threadId.toStdString()};
+    if (!setup.instructions.baseInstructions.isEmpty())
+        parameters.baseInstructions = toUtf8(setup.instructions.baseInstructions);
+    if (!setup.instructions.developerInstructions.isEmpty())
+        parameters.developerInstructions = toUtf8(setup.instructions.developerInstructions);
+    parameters.ephemeral = setup.temporary;
+    const QPointer<WorkbenchWidget> self(this);
+    const auto immediateError = frontendSession.forkThread(
+        std::move(parameters),
+        [self, name = setup.name.trimmed(), expectedSelectionGeneration](const QString& forkedThreadId,
+                                                                         const QString& error) {
+            if (!self)
+                return;
+            self->threadMutationInFlight = false;
             if (!error.isEmpty()) {
                 self->showWriteError(error);
                 self->refreshControls();
                 return;
             }
-            self->startTurn(resumedThreadId, prompt);
+            const bool keepAutomaticSelection = self->selectionGeneration == expectedSelectionGeneration;
+            if (keepAutomaticSelection) {
+                self->newThreadIdAwaitingState = forkedThreadId;
+                self->selectedThreadId = forkedThreadId;
+                self->projectedAgentThreadId.clear();
+                self->conversation->clearPrompt();
+                self->conversation->setWriteStatus(QStringLiteral("Thread forked"));
+            }
+            if (!name.isEmpty()) {
+                self->threadMutationInFlight = true;
+                self->refreshControls();
+                const auto renameError = self->frontendSession.renameThread(
+                    forkedThreadId,
+                    name,
+                    [self, forkedThreadId](const QString& renameFailure) {
+                        if (!self)
+                            return;
+                        self->threadMutationInFlight = false;
+                        if (!renameFailure.isEmpty())
+                            self->showWriteError(renameFailure);
+                        else if (self->selectedThreadId == forkedThreadId)
+                            self->conversation->setWriteStatus({});
+                        self->refreshState();
+                    });
+                if (renameError) {
+                    self->threadMutationInFlight = false;
+                    self->showWriteError(*renameError);
+                }
+            } else if (keepAutomaticSelection) {
+                self->conversation->setWriteStatus({});
+            }
+            self->refreshState();
         });
     if (immediateError) {
-        threadResumeInFlight = false;
+        threadMutationInFlight = false;
+        showWriteError(*immediateError);
+        refreshControls();
+    }
+}
+
+void WorkbenchWidget::resumeThreadWithOptions(const QString& threadId,
+                                              const ResumeWithOptionsSetup& setup,
+                                              std::uint64_t expectedSelectionGeneration)
+{
+    threadMutationInFlight = true;
+    conversation->setWriteStatus(QStringLiteral("Resuming thread…"));
+    refreshControls();
+    ai::openai::codex::typed::ThreadResumeParams parameters;
+    parameters.threadId = ai::openai::codex::typed::ThreadId{threadId.toStdString()};
+    if (!setup.instructions.baseInstructions.isEmpty())
+        parameters.baseInstructions = toUtf8(setup.instructions.baseInstructions);
+    if (!setup.instructions.developerInstructions.isEmpty())
+        parameters.developerInstructions = toUtf8(setup.instructions.developerInstructions);
+    const QPointer<WorkbenchWidget> self(this);
+    const auto immediateError = frontendSession.resumeThread(
+        std::move(parameters),
+        [self, expectedSelectionGeneration](const QString& resumedThreadId, const QString& error) {
+            if (!self)
+                return;
+            self->threadMutationInFlight = false;
+            if (!error.isEmpty()) {
+                self->showWriteError(error);
+            } else if (self->selectionGeneration == expectedSelectionGeneration) {
+                self->selectedThreadId = resumedThreadId;
+                self->projectedAgentThreadId.clear();
+                self->conversation->setWriteStatus({});
+                self->conversation->focusComposer();
+            } else {
+                self->conversation->setWriteStatus({});
+            }
+            self->refreshState();
+        });
+    if (immediateError) {
+        threadMutationInFlight = false;
+        showWriteError(*immediateError);
+        refreshControls();
+    }
+}
+
+void WorkbenchWidget::mutateThread(PendingAction action,
+                                   const QString& threadId,
+                                   const QString& value)
+{
+    const auto& state = frontendSession.state();
+    const auto* thread = state.thread(threadId.toStdString());
+    if (!thread) {
+        showWriteError(QStringLiteral("The selected thread is no longer available"));
+        return;
+    }
+    const ThreadActionAvailability available = detail::threadActionAvailability(state, *thread);
+    if ((action == PendingAction::ArchiveThread && !available.archive)
+        || (action == PendingAction::UnarchiveThread && !available.unarchive)
+        || (action == PendingAction::DeleteThread && !available.remove)
+        || (action == PendingAction::RenameThread && !available.rename)) {
+        showWriteError(QStringLiteral("That thread action is no longer available"));
+        return;
+    }
+
+    threadMutationInFlight = true;
+    refreshControls();
+    const QPointer<WorkbenchWidget> self(this);
+    const auto completion = [self, action, threadId](const QString& error) {
+        if (!self)
+            return;
+        self->threadMutationInFlight = false;
+        if (!error.isEmpty()) {
+            self->showWriteError(error);
+        } else {
+            self->conversation->setWriteStatus({});
+        }
+        self->refreshState();
+    };
+
+    std::optional<QString> immediateError;
+    switch (action) {
+        case PendingAction::RenameThread:
+            immediateError = frontendSession.renameThread(threadId, value, completion);
+            break;
+        case PendingAction::ArchiveThread:
+            immediateError = frontendSession.archiveThread(threadId, completion);
+            break;
+        case PendingAction::UnarchiveThread:
+            immediateError = frontendSession.unarchiveThread(threadId, completion);
+            break;
+        case PendingAction::DeleteThread:
+            immediateError = frontendSession.deleteThread(threadId, completion);
+            break;
+        default:
+            threadMutationInFlight = false;
+            return;
+    }
+    if (immediateError) {
+        threadMutationInFlight = false;
         showWriteError(*immediateError);
         refreshControls();
     }
@@ -969,12 +1774,24 @@ void WorkbenchWidget::clearWriteTransients()
     pendingPrompt.clear();
     pendingThreadId.clear();
     pendingTurnId.clear();
+    pendingThreadValue.clear();
+    pendingNewThreadSetup.reset();
+    pendingForkThreadSetup.reset();
+    pendingResumeSetup.reset();
+    pendingTurnDraft = {};
+    submittedTurnSettings.reset();
+    turnThreadIdAwaitingState.clear();
+    turnIdAwaitingState.clear();
+    automaticResumeThreadId.clear();
+    automaticResumeAttemptedThreadIds.clear();
+    pendingSelectionGeneration = 0;
     newThreadIdAwaitingState.clear();
     controllerAcquireInFlight = false;
     threadStartInFlight = false;
     threadResumeInFlight = false;
     turnStartInFlight = false;
     interruptInFlight = false;
+    threadMutationInFlight = false;
     controllerUnavailable = false;
 }
 

@@ -2,6 +2,8 @@
 
 #include "ui/ConversationWidget.h"
 
+#include "ui/UpcomingTurnDock.h"
+
 #include <ai/openai/codex/frontend/Messages.h>
 #include <ai/openai/codex/frontend/client/State.h>
 
@@ -11,8 +13,6 @@
 #include <QFrame>
 #include <QHash>
 #include <QHBoxLayout>
-#include <QKeyEvent>
-#include <QKeySequence>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPropertyAnimation>
@@ -26,6 +26,7 @@
 #include <QEasingCurve>
 
 #include <optional>
+#include <functional>
 #include <variant>
 #include <vector>
 
@@ -231,7 +232,7 @@ QFrame* divider()
 {
     auto* line = new QFrame;
     line->setFixedHeight(1);
-    line->setStyleSheet(QStringLiteral("background:#2b3038;"));
+    line->setStyleSheet(QStringLiteral("background:#d7dee8;"));
     return line;
 }
 
@@ -266,16 +267,16 @@ QString statusColor(const QString& status)
 {
     const QString normalized = status.toLower();
     if (normalized.contains(QStringLiteral("fail")) || normalized.contains(QStringLiteral("error")))
-        return QStringLiteral("#ed6a6a");
+        return QStringLiteral("#b83a3a");
     if (normalized.contains(QStringLiteral("complete")) || normalized.contains(QStringLiteral("success")) ||
         normalized == QStringLiteral("done"))
-        return QStringLiteral("#40c27d");
+        return QStringLiteral("#23845a");
     if (normalized.contains(QStringLiteral("progress")) || normalized.contains(QStringLiteral("running")) ||
         normalized.contains(QStringLiteral("active")) || normalized.contains(QStringLiteral("stream")))
-        return QStringLiteral("#4f94f5");
+        return QStringLiteral("#2f6feb");
     if (normalized.contains(QStringLiteral("interrupt")) || normalized.contains(QStringLiteral("cancel")))
-        return QStringLiteral("#f5a83b");
-    return QStringLiteral("#949ead");
+        return QStringLiteral("#a76812");
+    return QStringLiteral("#667085");
 }
 
 QString statusGlyph(const QString& status)
@@ -613,7 +614,7 @@ void addActivityRow(QVBoxLayout* rows, const ActivityPresentation& item)
     if (item.truncated)
     {
         auto* omitted = textLabel(QStringLiteral("Projected detail is truncated or omitted"), "small");
-        omitted->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
+        omitted->setStyleSheet(QStringLiteral("color:#a76812;font-size:9px;"));
         copyLayout->addWidget(omitted);
     }
     layout->addWidget(copy, 1);
@@ -628,8 +629,10 @@ void addActivityRow(QVBoxLayout* rows, const ActivityPresentation& item)
 QFrame* activityCard(const sdk::State& state, const std::vector<const sdk::ItemState*>& items)
 {
     auto* card = new QFrame;
+    card->setObjectName(QStringLiteral("conversationActivityCard"));
     card->setProperty("kind", "panel");
-    card->setStyleSheet(QStringLiteral("QFrame{background:#13161a;border-radius:10px;}"));
+    card->setStyleSheet(QStringLiteral(
+        "QFrame#conversationActivityCard{background:#ffffff;border:1px solid #d7dee8;border-radius:10px;}"));
     auto* layout = new QVBoxLayout(card);
     layout->setContentsMargins(16, 16, 16, 12);
     layout->setSpacing(0);
@@ -676,8 +679,11 @@ void addMessage(QVBoxLayout* timeline, const sdk::ItemState& item, bool user)
     if (user)
     {
         auto* card = new QFrame;
+        card->setObjectName(QStringLiteral("conversationUserMessageCard"));
         card->setProperty("kind", "raised");
-        card->setStyleSheet(QStringLiteral("background:#181c21;border-radius:10px;"));
+        card->setStyleSheet(QStringLiteral(
+            "QFrame#conversationUserMessageCard{background:#f8fafc;"
+            "border:1px solid #d7dee8;border-radius:10px;}"));
         layout = new QVBoxLayout(card);
         layout->setContentsMargins(16, 12, 16, 12);
         layout->setSpacing(5);
@@ -695,7 +701,7 @@ void addMessage(QVBoxLayout* timeline, const sdk::ItemState& item, bool user)
     layout->addWidget(copy);
     auto* marker = textLabel({}, "small");
     marker->setObjectName(QStringLiteral("conversationMessageTruncation"));
-    marker->setStyleSheet(QStringLiteral("color:#f5a83b;font-size:9px;"));
+    marker->setStyleSheet(QStringLiteral("color:#a76812;font-size:9px;"));
     layout->addWidget(marker);
     applyMessagePresentation(status, copy, marker, presentation);
     timeline->addWidget(container);
@@ -778,8 +784,10 @@ void addPresentationValue(QCryptographicHash& hash, bool value)
 void addEmptyState(QVBoxLayout* timeline, const QString& title, const QString& detail)
 {
     auto* empty = new QFrame;
+    empty->setObjectName(QStringLiteral("conversationEmptyState"));
     empty->setProperty("kind", "panel");
-    empty->setStyleSheet(QStringLiteral("background:#13161a;border-radius:10px;"));
+    empty->setStyleSheet(QStringLiteral(
+        "QFrame#conversationEmptyState{background:#ffffff;border:1px solid #d7dee8;border-radius:10px;}"));
     auto* layout = new QVBoxLayout(empty);
     layout->setContentsMargins(20, 24, 20, 24);
     layout->setSpacing(5);
@@ -1075,7 +1083,8 @@ QWidget* timelineTurnWidget(const sdk::TurnState& turn,
                             qsizetype visibleTurn,
                             QVBoxLayout*& itemLayout,
                             QLabel*& turnLabel,
-                            QLabel*& statusLabel)
+                            QLabel*& statusLabel,
+                            std::function<void()> detailsRequested)
 {
     auto* host = new QWidget;
     host->setObjectName(QStringLiteral("conversationTurn"));
@@ -1092,11 +1101,17 @@ QWidget* timelineTurnWidget(const sdk::TurnState& turn,
     }
 
     auto* turnHeader = new QHBoxLayout;
-    turnLabel = textLabel(
-        QStringLiteral("TURN %1 · %2").arg(visibleTurn).arg(compactId(turn.id.value)), "section");
+    turnLabel = textLabel(QStringLiteral("TURN %1").arg(visibleTurn), "section");
     turnLabel->setToolTip(fromUtf8(turn.id.value));
     turnHeader->addWidget(turnLabel);
     turnHeader->addStretch();
+    auto* details = new QPushButton(QStringLiteral("Details"));
+    details->setObjectName(QStringLiteral("conversationTurnDetails"));
+    details->setProperty("kind", "subtle");
+    details->setFixedSize(58, 24);
+    QObject::connect(details, &QPushButton::clicked, details,
+                     [detailsRequested = std::move(detailsRequested)] { detailsRequested(); });
+    turnHeader->addWidget(details);
     const QString status = humanize(fromUtf8(turn.status.value));
     statusLabel = textLabel(status, "small");
     statusLabel->setStyleSheet(
@@ -1114,9 +1129,7 @@ QWidget* timelineTurnWidget(const sdk::TurnState& turn,
     return host;
 }
 
-QByteArray turnSummaryPresentationKey(const sdk::State& state,
-                                      const sdk::ThreadState& thread,
-                                      const sdk::TurnState* turn,
+QByteArray turnSummaryPresentationKey(const sdk::TurnState* turn,
                                       qsizetype index)
 {
     QCryptographicHash hash(QCryptographicHash::Sha256);
@@ -1126,13 +1139,7 @@ QByteArray turnSummaryPresentationKey(const sdk::State& state,
     addPresentationValue(hash, turn->id.value);
     addPresentationValue(hash, QByteArray::number(index));
     addPresentationValue(hash, turn->status.value);
-    addPresentationValue(hash, tokenUsageText(*turn));
     addPresentationValue(hash, failureText(*turn));
-    for (const auto& itemId : turn->orderedItems)
-    {
-        const auto* item = state.item(thread.id, turn->id, itemId);
-        addPresentationValue(hash, item ? item->kind.identity : std::string_view{});
-    }
     return hash.result();
 }
 
@@ -1141,7 +1148,7 @@ QByteArray turnSummaryPresentationKey(const sdk::State& state,
 ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
 {
     setObjectName(QStringLiteral("conversation"));
-    setStyleSheet(QStringLiteral("QWidget#conversation{background:#0e1013;}"));
+    setStyleSheet(QStringLiteral("QWidget#conversation{background:#f6f8fb;}"));
     setMinimumWidth(480);
 
     auto* root = new QVBoxLayout(this);
@@ -1150,10 +1157,11 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
 
     auto* context = new QHBoxLayout;
     context->setSpacing(10);
-    context->addWidget(badge(QStringLiteral("THREAD"), QStringLiteral("#181c21"), QStringLiteral("#949ead"), 54, 18));
+    context->addWidget(badge(QStringLiteral("THREAD"), QStringLiteral("#e5eeff"), QStringLiteral("#2f6feb"), 54, 18));
     contextPath = textLabel(QStringLiteral("No thread selected"), "small");
-    contextPath->setStyleSheet(QStringLiteral("color:#949ead;font-size:9px;font-weight:500;"));
+    contextPath->setStyleSheet(QStringLiteral("color:#667085;font-size:9px;font-weight:500;"));
     context->addWidget(contextPath);
+    contextPath->hide();
     context->addStretch();
     root->addLayout(context);
     root->addSpacing(2);
@@ -1166,20 +1174,11 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     root->addWidget(divider());
     root->addSpacing(7);
 
-    turnSummary = new QFrame;
-    turnSummary->setProperty("kind", "summary");
-    turnSummaryLayout = new QVBoxLayout(turnSummary);
-    turnSummaryLayout->setContentsMargins(14, 7, 14, 7);
-    turnSummaryLayout->setSpacing(3);
-    // Reserve the normal two-row summary height while a new turn has no token
-    // usage yet, so prompt reflection cannot resize the conversation viewport.
-    turnSummary->setMinimumHeight(53);
-    turnSummary->hide();
-    root->addWidget(turnSummary);
     turnFailure = textLabel({}, "meta");
     turnFailure->setWordWrap(true);
-    turnFailure->setStyleSheet(QStringLiteral("background:#32191b;color:#ffb3b3;border-radius:6px;"
-                                              "padding:7px 10px;font-size:10px;"));
+    turnFailure->setStyleSheet(QStringLiteral(
+        "background:#fff1f1;color:#b83a3a;border:1px solid #efc4c4;border-radius:6px;"
+        "padding:7px 10px;font-size:10px;"));
     turnFailure->hide();
     root->addSpacing(3);
     root->addWidget(turnFailure);
@@ -1231,7 +1230,7 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     timelineWindowNotice = new QFrame;
     timelineWindowNotice->setObjectName(QStringLiteral("conversationWindowNotice"));
     timelineWindowNotice->setStyleSheet(
-        QStringLiteral("background:#151a20;border-radius:7px;"));
+        QStringLiteral("QFrame#conversationWindowNotice{background:#f8fafc;border:1px solid #d7dee8;border-radius:7px;}"));
     auto* timelineWindowLayout = new QVBoxLayout(timelineWindowNotice);
     timelineWindowLayout->setContentsMargins(12, 8, 12, 8);
     timelineWindowDetail = wrappingLabel({}, "meta");
@@ -1249,63 +1248,29 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     timeline->setAlignment(Qt::AlignTop);
     conversation->addWidget(timelineHost);
 
-    composer = new QFrame;
-    composer->setProperty("kind", "composer");
-    composer->setProperty("focused", false);
-    composer->setStyleSheet(QStringLiteral("background:#13161a;border:2px solid transparent;border-radius:10px;"));
-    composer->setFixedHeight(100);
-    auto* composerLayout = new QVBoxLayout(composer);
-    composerLayout->setContentsMargins(16, 12, 12, 10);
-    composerLayout->setSpacing(4);
-    editor = new QPlainTextEdit;
-    editor->setPlaceholderText(QStringLiteral("Message Codex"));
-    editor->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    editor->installEventFilter(this);
-    composerLayout->addWidget(editor, 1);
-    auto* actions = new QHBoxLayout;
-    actions->setSpacing(10);
-    auto* attach = new QPushButton(QStringLiteral("Attach"));
-    attach->setProperty("kind", "subtle");
-    attach->setStyleSheet(QStringLiteral("text-align:left;padding:0;"));
-    attach->setFixedSize(54, 24);
-    attach->setEnabled(false);
-    attach->setToolTip(QStringLiteral("File attachments are outside the Q4 interactive core"));
-    actions->addWidget(attach);
-    actions->addStretch();
-    composerStatus = textLabel(
-        QStringLiteral("%1 to send")
-            .arg(QKeySequence(Qt::CTRL | Qt::Key_Enter).toString(QKeySequence::NativeText)),
-        "meta");
-    actions->addWidget(composerStatus);
-    send = new QPushButton(QStringLiteral("Send"));
-    send->setProperty("kind", "primary");
-    send->setFixedSize(66, 32);
-    send->setEnabled(false);
-    actions->addWidget(send);
-    stop = new QPushButton(QStringLiteral("Stop"));
-    stop->setProperty("kind", "stop");
-    stop->setFixedSize(66, 32);
-    stop->setEnabled(false);
-    actions->addWidget(stop);
-    composerLayout->addLayout(actions);
-    conversation->addWidget(composer);
-
-    connect(editor, &QPlainTextEdit::textChanged, this, &ConversationWidget::updateSendEnabled);
-    connect(send, &QPushButton::clicked, this, [this] {
-        if (send->isEnabled())
-            emit sendRequested(editor->toPlainText());
-    });
-    connect(stop, &QPushButton::clicked, this, [this] {
-        if (stop->isEnabled())
-            emit stopRequested();
-    });
-
-    editor->setFocus(Qt::OtherFocusReason);
     scrollArea->setWidget(content);
-    root->addWidget(scrollArea, 1);
+
+    anchoredSurface = new AnchoredTurnSurface;
+    upcomingTurnDock = new UpcomingTurnDock;
+    anchoredSurface->setConversationWidget(scrollArea);
+    anchoredSurface->setUpcomingTurnDock(upcomingTurnDock);
+    root->addWidget(anchoredSurface, 1);
+
+    connect(upcomingTurnDock, &UpcomingTurnDock::sendRequested,
+            this, &ConversationWidget::sendRequested);
+    connect(upcomingTurnDock, &UpcomingTurnDock::stopRequested,
+            this, &ConversationWidget::stopRequested);
+    connect(upcomingTurnDock, &UpcomingTurnDock::settingsChanged,
+            this, &ConversationWidget::upcomingTurnSettingsChanged);
 
     addEmptyState(timeline, QStringLiteral("No thread selected"),
                   QStringLiteral("Choose a synchronized thread from the sidebar."));
+}
+
+void ConversationWidget::setModelCatalog(
+    const std::vector<ai::openai::codex::typed::Model>& catalog)
+{
+    upcomingTurnDock->setModelCatalog(catalog);
 }
 
 void ConversationWidget::render(const sdk::State& state,
@@ -1318,6 +1283,11 @@ void ConversationWidget::render(const sdk::State& state,
     const bool wasNearBottom = scrollBar->maximum() - previousScroll <= 72;
     const bool threadChanged = renderedThreadId != threadId || renderedNewThreadDraft != newThreadDraft;
     const auto* thread = threadId.isEmpty() ? nullptr : state.thread(threadId.toStdString());
+    upcomingTurnDock->setCanonicalConfiguration(
+        thread ? thread->executionConfiguration
+               : std::optional<sdk::ExecutionConfiguration>{},
+        thread ? threadId : QString{},
+        newThreadDraft);
     if (!thread && !threadChanged && threadId.isEmpty())
         return;
     const bool followLatest = threadChanged || wasNearBottom || followingLatest;
@@ -1359,11 +1329,9 @@ void ConversationWidget::render(const sdk::State& state,
     {
         if (timeline->count() > 0)
             clearTimelineState();
-        if (!renderedSummaryKey.isEmpty() || turnSummary->isVisible() || turnFailure->isVisible())
+        if (!renderedSummaryKey.isEmpty() || turnFailure->isVisible())
         {
-            clearLayout(turnSummaryLayout);
             renderedSummaryKey.clear();
-            turnSummary->hide();
             turnFailure->hide();
         }
         contextPath->setText(newThreadDraft ? QStringLiteral("New thread draft")
@@ -1389,24 +1357,20 @@ void ConversationWidget::render(const sdk::State& state,
     {
         const QString id = fromUtf8(thread->id.value);
         const QString title = thread->title && !thread->title->empty() ? fromUtf8(*thread->title) : id;
-        contextPath->setText(id);
-        contextPath->setToolTip(id);
         threadTitle->setText(title);
         threadTitle->setToolTip(title);
         QStringList metadata;
-        if (thread->status && !thread->status->empty()) metadata.append(humanize(fromUtf8(*thread->status)));
-        if (thread->model) metadata.append(fromUtf8(thread->model->value));
-        if (thread->cwd) metadata.append(fromUtf8(thread->cwd->value));
-        if (thread->realtime)
-        {
-            const auto realtime = sdk::realtimeSemanticView(*thread->realtime);
-            metadata.append(QStringLiteral("Realtime %1 · %2 items")
-                                .arg(humanize(fromUtf8(realtime.lifecycle)))
-                                .arg(realtime.itemCount));
-            if (realtime.transcriptTruncated) metadata.append(QStringLiteral("realtime transcript truncated"));
-        }
-        metadata.append(thread->fullyLoaded ? QStringLiteral("Conversation synchronized")
-                                            : QStringLiteral("Conversation projection is partial"));
+        if (thread->archived.value_or(false))
+            metadata.append(QStringLiteral("Archived"));
+        else if (thread->status && !thread->status->empty())
+            metadata.append(humanize(fromUtf8(*thread->status)));
+        if (thread->ephemeral.value_or(false))
+            metadata.append(QStringLiteral("Temporary"));
+        metadata.append(QStringLiteral("%1 turn%2")
+                            .arg(thread->orderedTurns.size())
+                            .arg(thread->orderedTurns.size() == 1 ? QString{} : QStringLiteral("s")));
+        if (!thread->fullyLoaded)
+            metadata.append(QStringLiteral("Loading conversation…"));
         threadDetail->setText(metadata.join(QStringLiteral(" · ")));
         threadDetail->setToolTip(threadDetail->text());
 
@@ -1423,54 +1387,13 @@ void ConversationWidget::render(const sdk::State& state,
 
         const QByteArray summaryKey = exactContentOnly
                                           ? renderedSummaryKey
-                                          : turnSummaryPresentationKey(state, *thread, currentTurn, currentIndex);
+                                          : turnSummaryPresentationKey(currentTurn, currentIndex);
         if (!exactContentOnly && summaryKey != renderedSummaryKey)
         {
             renderedSummaryKey = summaryKey;
-            clearLayout(turnSummaryLayout);
-            turnSummary->hide();
             turnFailure->hide();
             if (currentTurn)
             {
-                turnSummary->show();
-                auto* summaryRow = new QHBoxLayout;
-                summaryRow->setContentsMargins(0, 0, 0, 0);
-                summaryRow->setSpacing(14);
-                auto* identity = textLabel(
-                    QStringLiteral("TURN %1 · %2").arg(currentIndex + 1).arg(compactId(currentTurn->id.value)), "small");
-                identity->setToolTip(fromUtf8(currentTurn->id.value));
-                summaryRow->addWidget(identity);
-                const QString turnStatus = humanize(fromUtf8(currentTurn->status.value));
-                summaryRow->addWidget(badge(turnStatus.toUpper(), QStringLiteral("#181c21"), statusColor(turnStatus)));
-                summaryRow->addSpacing(4);
-
-                qsizetype commands = 0;
-                qsizetype changes = 0;
-                qsizetype subagents = 0;
-                for (const auto& itemId : currentTurn->orderedItems)
-                {
-                    const auto* item = state.item(thread->id, currentTurn->id, itemId);
-                    if (!item) continue;
-                    commands += item->kind.is(frontend::ThreadItemKind::CommandExecution) ? 1 : 0;
-                    changes += item->kind.is(frontend::ThreadItemKind::FileChange) ? 1 : 0;
-                    subagents += item->kind.is(frontend::ThreadItemKind::SubAgentActivity) ? 1 : 0;
-                }
-                summaryRow->addWidget(
-                    textLabel(QStringLiteral("%1 items").arg(currentTurn->orderedItems.size()), "small"));
-                if (commands) summaryRow->addWidget(textLabel(QStringLiteral("%1 commands").arg(commands), "small"));
-                if (changes)
-                    summaryRow->addWidget(textLabel(QStringLiteral("%1 file-change items").arg(changes), "small"));
-                if (subagents)
-                    summaryRow->addWidget(textLabel(QStringLiteral("%1 subagent items").arg(subagents), "small"));
-                summaryRow->addStretch();
-                turnSummaryLayout->addLayout(summaryRow);
-                const QString usage = tokenUsageText(*currentTurn);
-                {
-                    auto* tokens = textLabel(usage.isEmpty() ? QStringLiteral(" ") : usage, "small");
-                    tokens->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-                    tokens->setToolTip(usage);
-                    turnSummaryLayout->addWidget(tokens);
-                }
                 const QString failure = failureText(*currentTurn);
                 if (!failure.isEmpty())
                 {
@@ -1489,9 +1412,9 @@ void ConversationWidget::render(const sdk::State& state,
             if (threadChanged || !renderedTurnIds.isEmpty() || timeline->count() == 0)
             {
                 clearTimelineState();
-                addEmptyState(timeline, QStringLiteral("No conversation loaded"),
+                addEmptyState(timeline, QStringLiteral("Ready for the first turn"),
                               thread->fullyLoaded
-                                  ? QStringLiteral("This synchronized thread does not contain any turns.")
+                                  ? QStringLiteral("Use the upcoming-turn dock below to start this thread.")
                                   : QStringLiteral("No turn projection is currently retained for this thread."));
             }
         }
@@ -1614,7 +1537,12 @@ void ConversationWidget::render(const sdk::State& state,
                 if (!renderedTurnWidgets.contains(turnId))
                 {
                     auto* turnWidget = timelineTurnWidget(
-                        *turn, visibleTurn.turnNumber, itemLayout, turnLabel, statusLabel);
+                        *turn,
+                        visibleTurn.turnNumber,
+                        itemLayout,
+                        turnLabel,
+                        statusLabel,
+                        [this, turnId] { emit turnDetailsRequested(turnId); });
                     timeline->addWidget(turnWidget, 0, Qt::AlignTop);
                     renderedTurnWidgets.insert(turnId, turnWidget);
                     renderedTurnLabels.insert(turnId, turnLabel);
@@ -1623,9 +1551,7 @@ void ConversationWidget::render(const sdk::State& state,
                 }
                 else
                 {
-                    const QString heading = QStringLiteral("TURN %1 · %2")
-                                                .arg(visibleTurn.turnNumber)
-                                                .arg(compactId(turn->id.value));
+                    const QString heading = QStringLiteral("TURN %1").arg(visibleTurn.turnNumber);
                     if (turnLabel && turnLabel->text() != heading)
                         turnLabel->setText(heading);
                     const QString status = humanize(fromUtf8(turn->status.value));
@@ -2062,65 +1988,40 @@ void ConversationWidget::resizeEvent(QResizeEvent* event)
 
 void ConversationWidget::clearPrompt()
 {
-    editor->clear();
+    upcomingTurnDock->clearPrompt();
 }
 
 void ConversationWidget::focusComposer()
 {
-    editor->setFocus(Qt::OtherFocusReason);
+    upcomingTurnDock->focusPrompt();
 }
 
-void ConversationWidget::setActionState(bool sendAllowed, bool stopAllowed, bool editorAllowed)
+UpcomingTurnDraft ConversationWidget::upcomingTurnDraft() const
 {
-    sendContextAllowed = sendAllowed;
-    editor->setEnabled(editorAllowed);
-    stop->setEnabled(stopAllowed);
-    updateSendEnabled();
+    return upcomingTurnDock->draft();
+}
+
+void ConversationWidget::clearUpcomingTurnSettings()
+{
+    upcomingTurnDock->clearTouchedSettings();
+}
+
+void ConversationWidget::acknowledgeSubmittedSettings(const UpcomingTurnDraft& submitted)
+{
+    upcomingTurnDock->acknowledgeSubmittedSettings(submitted);
+}
+
+void ConversationWidget::setActionState(bool sendAllowed,
+                                        bool stopAllowed,
+                                        bool editorAllowed,
+                                        bool stopVisible)
+{
+    upcomingTurnDock->setActionState(sendAllowed, stopAllowed, editorAllowed, stopVisible);
 }
 
 void ConversationWidget::setWriteStatus(const QString& text, bool error)
 {
-    if (text.isEmpty()) {
-        composerStatus->setText(
-            QStringLiteral("%1 to send")
-                .arg(QKeySequence(Qt::CTRL | Qt::Key_Enter).toString(QKeySequence::NativeText)));
-        composerStatus->setToolTip({});
-        composerStatus->setStyleSheet({});
-        return;
-    }
-    composerStatus->setText(compact(text, 100));
-    composerStatus->setToolTip(text);
-    composerStatus->setStyleSheet(error ? QStringLiteral("color:#ed6a6a;font-size:10px;")
-                                        : QStringLiteral("color:#949ead;font-size:10px;"));
-}
-
-void ConversationWidget::updateSendEnabled()
-{
-    send->setEnabled(sendContextAllowed && editor->isEnabled() && !editor->toPlainText().trimmed().isEmpty());
-}
-
-bool ConversationWidget::eventFilter(QObject* watched, QEvent* event)
-{
-    if (watched == editor && event->type() == QEvent::KeyPress)
-    {
-        auto* key = static_cast<QKeyEvent*>(event);
-        const bool enter = key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter;
-        const auto modifiers = key->modifiers() & ~Qt::KeypadModifier;
-        if (enter && modifiers == Qt::ControlModifier)
-        {
-            if (!key->isAutoRepeat() && send->isEnabled())
-                emit sendRequested(editor->toPlainText());
-            return true;
-        }
-    }
-    if (watched == editor && (event->type() == QEvent::FocusIn || event->type() == QEvent::FocusOut))
-    {
-        const auto border =
-            event->type() == QEvent::FocusIn ? QStringLiteral("#4f94f5") : QStringLiteral("transparent");
-        composer->setStyleSheet(
-            QStringLiteral("background:#13161a;border:2px solid %1;border-radius:10px;").arg(border));
-    }
-    return QWidget::eventFilter(watched, event);
+    upcomingTurnDock->setStatus(text, error);
 }
 
 } // namespace codexui

@@ -16,10 +16,13 @@
 #include <QLayout>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QTimer>
+#include <QTabBar>
 
+#include <algorithm>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -145,6 +148,21 @@ client::State makeState(const std::vector<ThreadFixture>& fixtures)
              .accepted)
         return {};
 
+    const frontend::Json executionConfiguration{
+        {"approvalPolicy", "on-request"},
+        {"approvalsReviewer", "user"},
+        {"collaborationMode",
+         {{"mode", "plan"},
+          {"settings", {{"model", "gpt-test"}, {"reasoningEffort", "high"}}}}},
+        {"cwd", "/workspace/test"},
+        {"effort", "high"},
+        {"model", "gpt-test"},
+        {"modelProvider", "openai"},
+        {"personality", "pragmatic"},
+        {"sandboxPolicy", {{"type", "workspaceWrite"}, {"networkAccess", false}}},
+        {"serviceTier", "flex"},
+        {"summary", "detailed"},
+    };
     frontend::Json threads = frontend::Json::array();
     for (const ThreadFixture& threadFixture : fixtures) {
         frontend::Json turns = frontend::Json::array();
@@ -157,6 +175,8 @@ client::State makeState(const std::vector<ThreadFixture>& fixtures)
                                            {"status", "completed"},
                                            {"active", false},
                                            {"terminal", true},
+                                           {"effectiveExecutionConfiguration", executionConfiguration},
+                                           {"effectiveExecutionConfigurationProvenance", "turn_start_accepted"},
                                            {"items", std::move(items)},
                                            {"extensions", frontend::Json::object()}});
         }
@@ -164,6 +184,7 @@ client::State makeState(const std::vector<ThreadFixture>& fixtures)
                                          {"title", threadFixture.id},
                                          {"status", "idle"},
                                          {"fullyLoaded", true},
+                                         {"executionConfiguration", executionConfiguration},
                                          {"turns", std::move(turns)},
                                          {"extensions", frontend::Json::object()}});
     }
@@ -378,8 +399,8 @@ bool testSameThreadPrefixExpansion()
     return expect(firstTailTurn && firstTailTurn.data() == preservedAddress
                       && firstTailTurn.data()
                              == renderedTurn(conversation, QStringLiteral("turn-prefix-8"))
-                      && initialHeading.startsWith(QStringLiteral("TURN 1 ·"))
-                      && turnHeading(firstTailTurn).startsWith(QStringLiteral("TURN 9 ·")),
+                      && initialHeading == QStringLiteral("TURN 1")
+                      && turnHeading(firstTailTurn) == QStringLiteral("TURN 9"),
                   "same-thread history expansion must preserve tail widgets and refresh canonical turn ordinals");
 }
 
@@ -409,6 +430,10 @@ bool testHotTurnWindow()
                      "the oversized turn must retain its exact newest message");
     passed &= expect(windowNotice(conversation) && windowNotice(conversation)->isVisible(),
                      "the oversized turn must show the presentation-window notice");
+    passed &= expect(windowNotice(conversation)
+                         && windowNotice(conversation)->styleSheet().contains(
+                             QStringLiteral("QFrame#conversationWindowNotice")),
+                     "the presentation-window border must be scoped and never leak to its text");
 
     const client::State activityState = makeState({activityTurn("activity", 300)});
     codexui::ConversationWidget activityConversation;
@@ -431,6 +456,15 @@ bool testHotTurnWindow()
                      "a contiguous activity run must be chunked and remain within the same global item budget");
     passed &= expect(hasLabel(activityConversation, QStringLiteral("activity activity 299")),
                      "the bounded activity window must retain its newest exact detail");
+    const auto activityCards = activityConversation.findChildren<QFrame*>(
+        QStringLiteral("conversationActivityCard"));
+    passed &= expect(!activityCards.isEmpty()
+                         && std::ranges::all_of(activityCards, [](const QFrame* card) {
+                                return card->styleSheet().contains(
+                                           QStringLiteral("QFrame#conversationActivityCard"))
+                                    && !card->styleSheet().contains(QStringLiteral("QFrame{"));
+                            }),
+                     "activity-card borders must be scoped to the card and never leak to child labels");
     return passed;
 }
 
@@ -820,12 +854,19 @@ bool testInspectorRevisionOnlyUpdate()
     settleEvents();
 
     auto* revision = inspector.findChild<QLabel*>(QStringLiteral("inspectorStateRevision"));
+    const auto detailCards = inspector.findChildren<QFrame*>(QStringLiteral("inspectorDetailCard"));
     const auto expensivePaneWidgets = inspector.findChildren<QWidget*>();
     const std::uint64_t nextRevision = state.revision() + 7;
     inspector.updateStateRevision(nextRevision);
     QCoreApplication::processEvents();
 
-    return expect(revision && revision->text() == QString::number(nextRevision),
+    return expect(!detailCards.isEmpty()
+                      && std::ranges::all_of(detailCards, [](const QFrame* card) {
+                             return card->styleSheet().contains(
+                                        QStringLiteral("QFrame#inspectorDetailCard"));
+                         }),
+                  "Inspector card borders must be scoped and never leak to child labels")
+           && expect(revision && revision->text() == QString::number(nextRevision),
                   "a revision-only update must refresh the Inspector's factual State revision")
            && expect(revision
                          && revision
@@ -833,6 +874,60 @@ bool testInspectorRevisionOnlyUpdate()
                                     QStringLiteral("inspectorStateRevision"))
                          && expensivePaneWidgets == inspector.findChildren<QWidget*>(),
                      "a revision-only update must preserve every existing Inspector pane widget");
+}
+
+bool testHistoricalTurnDetailsMode()
+{
+    const client::State state = makeState({sequentialTurns("turn-details", 2)});
+    codexui::InspectorWidget inspector;
+    inspector.resize(420, 700);
+    inspector.show();
+    inspector.render(state,
+                     QStringLiteral("turn-details"),
+                     true,
+                     QStringLiteral("State synced"),
+                     QStringLiteral("turn-turn-details-1"));
+    settleEvents();
+
+    auto* heading = inspector.findChild<QLabel*>(QStringLiteral("inspectorHeading"));
+    auto* tabs = inspector.findChild<QTabBar*>(QStringLiteral("inspectorTabs"));
+    auto* back = inspector.findChild<QPushButton*>(QStringLiteral("historicalTurnBack"));
+    auto* title = inspector.findChild<QLabel*>(QStringLiteral("historicalTurnConfigurationTitle"));
+    const auto hasText = [&inspector](const QString& text) {
+        return std::ranges::any_of(inspector.findChildren<QLabel*>(),
+                                   [&text](const QLabel* label) {
+                                       return label->text() == text;
+                                   });
+    };
+    bool passed = expect(heading && heading->text() == QStringLiteral("TURN DETAILS")
+                             && tabs && !tabs->isVisible() && tabs->currentIndex() == 3
+                             && back && back->isVisible(),
+                         "selecting a historical turn must enter the dedicated Turn Details mode");
+    passed &= expect(title && title->text() == QStringLiteral("Effective configuration · Turn 2")
+                         && hasText(QStringLiteral("Read-only historical record"))
+                         && hasText(QStringLiteral("gpt-test"))
+                         && hasText(QStringLiteral("/workspace/test")),
+                     "Turn Details must show the selected turn's authoritative effective configuration");
+    passed &= expect(!inspector.findChild<QLabel*>(QStringLiteral("inspectorStateRevision")),
+                     "Turn Details must not mix generic synchronization diagnostics into the historical record");
+
+    bool closeRequested = false;
+    QObject::connect(&inspector, &codexui::InspectorWidget::historicalTurnCloseRequested,
+                     &inspector, [&closeRequested] { closeRequested = true; });
+    back->click();
+    passed &= expect(closeRequested,
+                     "Turn Details must expose an explicit route back to the normal Inspector");
+
+    inspector.render(state,
+                     QStringLiteral("turn-details"),
+                     true,
+                     QStringLiteral("State synced"));
+    settleEvents();
+    passed &= expect(heading && heading->text() == QStringLiteral("INSPECTOR")
+                         && tabs && tabs->isVisible() && back && !back->isVisible()
+                         && inspector.findChild<QLabel*>(QStringLiteral("inspectorStateRevision")),
+                     "leaving a historical selection must restore the normal Inspector mode");
+    return passed;
 }
 
 } // namespace
@@ -844,10 +939,15 @@ int main(int argc, char** argv)
 
     QWidget* timeline = conversation.findChild<QWidget*>(QStringLiteral("conversationTimeline"));
     QLabel* detail = emptyStateDetail(conversation);
+    QFrame* emptyCard = conversation.findChild<QFrame*>(QStringLiteral("conversationEmptyState"));
     bool passed = true;
     passed &= expect(timeline != nullptr, "the conversation timeline must be discoverable");
     passed &= expect(detail != nullptr, "the wrapped empty-state detail must be discoverable");
-    if (!timeline || !detail)
+    passed &= expect(emptyCard
+                         && emptyCard->styleSheet().contains(
+                             QStringLiteral("QFrame#conversationEmptyState")),
+                     "the empty-state border must be scoped and never leak to child labels");
+    if (!timeline || !detail || !emptyCard)
         return 1;
 
     QString longDetail;
@@ -901,6 +1001,7 @@ int main(int argc, char** argv)
     passed &= testSegmentReplacementShrink();
     passed &= testThreadSwitchWindow();
     passed &= testInspectorRevisionOnlyUpdate();
+    passed &= testHistoricalTurnDetailsMode();
 
     return passed ? 0 : 1;
 }
