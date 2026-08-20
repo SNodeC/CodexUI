@@ -203,7 +203,6 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
 
 namespace {
 
-constexpr qsizetype maximumFrameBytes = 16 * 1024 * 1024;
 constexpr qsizetype maximumReceiveBatchBytes = 1024 * 1024;
 constexpr qsizetype inboundCompactionThreshold = 256 * 1024;
 constexpr int minimumReceiveBatchFrames = 1;
@@ -246,6 +245,7 @@ FrontendSession::FrontendSession(QObject* parent)
     : QObject(parent)
 {
     sdk::ClientOptions options;
+    maximumFrameBytes = options.maximumInboundMessageBytes;
     options.credentialProvider = [] {
         return sdk::AuthenticationContext{
             frontend::NoCredential{},
@@ -270,6 +270,8 @@ FrontendSession::FrontendSession(QObject* parent)
     };
     callbacks.onSynchronized = [this](const sdk::SynchronizationInfo& info) {
         reconnectDelayMs = initialReconnectDelayMs;
+        consecutivePreReadyDisconnects = 0;
+        synchronizedCurrentConnection = true;
         automaticReconnectEnabled = true;
         currentState = info.state;
         reconcileRequestedThreadReads();
@@ -349,6 +351,8 @@ void FrontendSession::startConnection()
     if (socket.state() != QLocalSocket::UnconnectedState || connection.isOpen())
         return;
     ++connectionGeneration;
+    synchronizedCurrentConnection = false;
+    preReadyFailureRecordedCurrentConnection = false;
     archivedThreadListCursors.clear();
     archivedThreadListInFlight = false;
     archivedThreadListComplete = false;
@@ -859,7 +863,7 @@ void FrontendSession::socketReadyRead()
                                          ? newline - 1
                                          : newline;
         const qsizetype payloadBytes = payloadEnd - consumedBytes;
-        if (payloadBytes > maximumFrameBytes) {
+        if (static_cast<std::size_t>(payloadBytes) > maximumFrameBytes) {
             rejectOversizedFrame();
             return;
         }
@@ -875,8 +879,10 @@ void FrontendSession::socketReadyRead()
                              static_cast<std::size_t>(payloadBytes)));
         consumedBytes = newline + 1;
         if (!result.accepted) {
-            const QString reason = result.error ? QString::fromStdString(result.error->message)
-                                                : QStringLiteral("Frontend SDK rejected a server message");
+            const QString reason = currentLifecycle == Lifecycle::Failed && !detail.isEmpty()
+                                       ? detail
+                                       : result.error ? QString::fromStdString(result.error->message)
+                                                      : QStringLiteral("Frontend SDK rejected a server message");
             if (!result.error || !result.error->retryable)
                 failWithoutReconnect(reason);
             else
@@ -890,8 +896,9 @@ void FrontendSession::socketReadyRead()
 
     inboundOffset = consumedBytes;
     compactInbound();
-    if (!hasCompleteInboundFrame()
-        && inboundBuffer.size() - inboundOffset > maximumFrameBytes + 1) {
+    const qsizetype bufferedBytes = inboundBuffer.size() - inboundOffset;
+    if (!hasCompleteInboundFrame() && bufferedBytes > 0
+        && static_cast<std::size_t>(bufferedBytes - 1) > maximumFrameBytes) {
         rejectOversizedFrame();
         return;
     }
@@ -1110,7 +1117,7 @@ void FrontendSession::finishModelCatalogRefresh(QString diagnostic)
 void FrontendSession::socketDisconnected()
 {
     if (connection.isOpen()) {
-        if (localShutdown)
+        if (localShutdown || !automaticReconnectEnabled)
             connection.transportDisconnected();
         else
             connection.transportDisconnected(sdk::TransportError{"Unix backend disconnected", true});
@@ -1121,6 +1128,8 @@ void FrontendSession::socketDisconnected()
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
     if (!localShutdown) {
+        if (recordPreReadyTransportFailure())
+            return;
         if (currentLifecycle != Lifecycle::Failed)
             setLifecycle(Lifecycle::Disconnected);
         scheduleReconnect();
@@ -1131,13 +1140,19 @@ void FrontendSession::socketFailed(QLocalSocket::LocalSocketError)
 {
     if (localShutdown)
         return;
-    if (connection.isOpen())
-        connection.transportDisconnected(sdk::TransportError{socket.errorString().toStdString(), true});
+    if (connection.isOpen()) {
+        if (!automaticReconnectEnabled)
+            connection.transportDisconnected();
+        else
+            connection.transportDisconnected(sdk::TransportError{socket.errorString().toStdString(), true});
+    }
     connection = Connection{};
     clearOutbound();
     clearInbound();
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
+    if (recordPreReadyTransportFailure())
+        return;
     if (automaticReconnectEnabled && currentLifecycle != Lifecycle::Failed)
         setLifecycle(Lifecycle::Failed, socket.errorString());
     scheduleReconnect();
@@ -1221,6 +1236,29 @@ void FrontendSession::resetReconnectPolicy()
     automaticReconnectEnabled = true;
     reconnectTimer.stop();
     reconnectDelayMs = initialReconnectDelayMs;
+    consecutivePreReadyDisconnects = 0;
+    synchronizedCurrentConnection = false;
+    preReadyFailureRecordedCurrentConnection = false;
+}
+
+bool FrontendSession::recordPreReadyTransportFailure()
+{
+    if (localShutdown || synchronizedCurrentConnection)
+        return false;
+    if (!automaticReconnectEnabled)
+        return true;
+    if (preReadyFailureRecordedCurrentConnection)
+        return false;
+
+    preReadyFailureRecordedCurrentConnection = true;
+    ++consecutivePreReadyDisconnects;
+    if (consecutivePreReadyDisconnects < maximumConsecutivePreReadyDisconnects)
+        return false;
+
+    failWithoutReconnect(
+        QStringLiteral("Backend connection failed before synchronization completed on %1 consecutive connections")
+            .arg(consecutivePreReadyDisconnects));
+    return true;
 }
 
 FrontendSession::SendResult FrontendSession::send(OutboundMessage&& message)

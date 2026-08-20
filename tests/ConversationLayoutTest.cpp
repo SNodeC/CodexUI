@@ -1276,6 +1276,68 @@ bool testHistoricalTurnDetailsMode()
     return passed;
 }
 
+bool testScopedDuplicateTurnIdentity()
+{
+    ThreadFixture original{"duplicate-turn-original",
+                           {{"shared-turn",
+                             {{"original-item",
+                               frontend::ThreadItemKind::UserMessage,
+                               "original scoped message"}}}}};
+    ThreadFixture fork{"duplicate-turn-fork",
+                       {{"shared-turn",
+                         {{"fork-item",
+                           frontend::ThreadItemKind::AgentMessage,
+                           "fork scoped message"}}}}};
+    const client::State state = makeState({original, fork});
+    const auto* originalTurn = state.turn(
+        ai::openai::codex::typed::ThreadId{"duplicate-turn-original"},
+        ai::openai::codex::typed::TurnId{"shared-turn"});
+    const auto* forkTurn = state.turn(
+        ai::openai::codex::typed::ThreadId{"duplicate-turn-fork"},
+        ai::openai::codex::typed::TurnId{"shared-turn"});
+
+    bool passed = expect(originalTurn && forkTurn && originalTurn != forkTurn
+                             && state.turn("shared-turn") == nullptr,
+                         "the fixture must retain both scoped turns and reject ambiguous bare lookup");
+
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(state, QStringLiteral("duplicate-turn-original"));
+    settleTimeline();
+    passed &= expect(hasLabel(conversation, QStringLiteral("original scoped message"))
+                         && !hasLabel(conversation, QStringLiteral("fork scoped message")),
+                     "conversation rendering must resolve a shared turn ID under the selected original thread");
+
+    conversation.render(state, QStringLiteral("duplicate-turn-fork"));
+    settleTimeline();
+    passed &= expect(hasLabel(conversation, QStringLiteral("fork scoped message"))
+                         && !hasLabel(conversation, QStringLiteral("original scoped message")),
+                     "conversation rendering must resolve a shared turn ID under the selected fork thread");
+
+    codexui::InspectorWidget inspector;
+    inspector.resize(420, 700);
+    inspector.show();
+    inspector.render(state,
+                     QStringLiteral("duplicate-turn-fork"),
+                     true,
+                     QStringLiteral("State synced"),
+                     QStringLiteral("shared-turn"));
+    settleEvents();
+    const auto hasInspectorText = [&inspector](const QString& text) {
+        return std::ranges::any_of(inspector.findChildren<QLabel*>(),
+                                   [&text](const QLabel* label) {
+                                       return label->text() == text;
+                                   });
+    };
+    auto* title = inspector.findChild<QLabel*>(QStringLiteral("historicalTurnConfigurationTitle"));
+    passed &= expect(title && title->text() == QStringLiteral("Effective configuration · Turn 1")
+                         && hasInspectorText(QStringLiteral("Effective settings"))
+                         && !hasInspectorText(QStringLiteral("Unavailable")),
+                     "historical details must resolve a shared turn ID under the inspected thread");
+    return passed;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1350,6 +1412,7 @@ int main(int argc, char** argv)
     passed &= testInspectorRevisionOnlyUpdate();
     passed &= testStructuredPlanPresentation();
     passed &= testHistoricalTurnDetailsMode();
+    passed &= testScopedDuplicateTurnIdentity();
 
     return passed ? 0 : 1;
 }

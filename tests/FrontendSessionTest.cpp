@@ -2,6 +2,7 @@
 
 #include "app/FrontendSession.h"
 
+#include <ai/openai/codex/frontend/Codec.h>
 #include <ai/openai/codex/frontend/Messages.h>
 
 #include <QCoreApplication>
@@ -40,6 +41,26 @@ struct FrontendSessionTestAccess
     static bool automaticReconnectEnabled(const FrontendSession& session)
     {
         return session.automaticReconnectEnabled;
+    }
+
+    static int consecutivePreReadyDisconnects(const FrontendSession& session)
+    {
+        return session.consecutivePreReadyDisconnects;
+    }
+
+    static int maximumConsecutivePreReadyDisconnects()
+    {
+        return FrontendSession::maximumConsecutivePreReadyDisconnects;
+    }
+
+    static std::size_t maximumFrameBytes(const FrontendSession& session)
+    {
+        return session.maximumFrameBytes;
+    }
+
+    static void resetReconnectPolicy(FrontendSession& session)
+    {
+        session.resetReconnectPolicy();
     }
 
     static void setInbound(FrontendSession& session, QByteArray bytes, qsizetype offset)
@@ -183,7 +204,16 @@ struct FrontendSessionTestAccess
 
     static void disconnectTransport(FrontendSession& session)
     {
+        session.preReadyFailureRecordedCurrentConnection = false;
         session.socketDisconnected();
+        session.reconnectTimer.stop();
+    }
+
+    static void failTransport(FrontendSession& session, bool newConnectionAttempt = true)
+    {
+        if (newConnectionAttempt)
+            session.preReadyFailureRecordedCurrentConnection = false;
+        session.socketFailed(QLocalSocket::ConnectionRefusedError);
         session.reconnectTimer.stop();
     }
 
@@ -245,6 +275,13 @@ struct FrontendSessionTestAccess
         return session.connection.receive(std::move(message)).accepted;
     }
 
+    static void receiveWire(FrontendSession& session, QByteArray wire)
+    {
+        session.inboundBuffer = std::move(wire);
+        session.inboundOffset = 0;
+        session.socketReadyRead();
+    }
+
     static void beginArchivedThreadRefresh(FrontendSession& session)
     {
         session.beginArchivedThreadRefresh();
@@ -300,6 +337,11 @@ bool testPeerCredentials()
 
 bool testScopedItemPresentationChanges()
 {
+    sdk::StateUpdate turnUpdate;
+    turnUpdate.changes.push_back(sdk::TurnUpsertedChange{
+        ai::openai::codex::typed::TurnId{"ambiguous-or-missing-turn"}});
+    const auto unresolvedTurn = codexui::detail::stateUpdateScope(turnUpdate);
+
     sdk::StateUpdate scopedUpdate;
     scopedUpdate.changes.push_back(sdk::ItemUpsertedChange{
         ai::openai::codex::typed::ItemId{"duplicate-item"},
@@ -354,7 +396,15 @@ bool testScopedItemPresentationChanges()
         sdk::CursorAdvancedChange{ai::openai::codex::frontend::SequenceNumber{43}});
     const auto cursor = codexui::detail::stateUpdateScope(cursorUpdate);
 
-    bool passed = expect(scoped.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
+    bool passed = expect(unresolvedTurn.affectedThreadIds.empty()
+                             && unresolvedTurn.fullyAffectedThreadIds.empty()
+                             && unresolvedTurn.affectedInspectorThreadIds.empty()
+                             && unresolvedTurn.allThreadsAffected
+                             && unresolvedTurn.allInspectorsAffected
+                             && !unresolvedTurn.sidebarAffected
+                             && unresolvedTurn.hasPresentationChange,
+                         "a turn upsert without a unique parent lookup must conservatively refresh all threads");
+    passed &= expect(scoped.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
                              && scoped.fullyAffectedThreadIds
                                     == QStringList{QStringLiteral("target-thread")}
                              && scoped.affectedInspectorThreadIds
@@ -459,6 +509,111 @@ bool testLifecycleAndDiagnostics()
                          && codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session),
                      "the public reconnect path must override a terminal old-transport close callback");
     return passed;
+}
+
+bool testPreReadyReconnectBound()
+{
+    codexui::FrontendSession session;
+    const int maximum = codexui::FrontendSessionTestAccess::maximumConsecutivePreReadyDisconnects();
+    bool passed = true;
+    for (int attempt = 1; attempt < maximum; ++attempt) {
+        codexui::FrontendSessionTestAccess::disconnectTransport(session);
+        passed &= expect(codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+                             && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == attempt,
+                         "a bounded number of pre-synchronization disconnects remains retryable");
+    }
+
+    codexui::FrontendSessionTestAccess::disconnectTransport(session);
+    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
+                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+                         && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == maximum
+                         && session.statusText().contains(QStringLiteral("before synchronization completed")),
+                     "repeated pre-synchronization disconnects stop at a visible terminal boundary");
+
+    codexui::FrontendSessionTestAccess::resetReconnectPolicy(session);
+    std::vector<sdk::OutboundMessage> messages;
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, messages)
+            && session.lifecycle() == codexui::FrontendSession::Lifecycle::Ready
+            && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
+        "the real SDK synchronization callback must reset the pre-ready retry budget");
+    codexui::FrontendSessionTestAccess::disconnectTransport(session);
+    passed &= expect(codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+                         && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
+                     "a disconnect after synchronization does not consume the pre-ready retry budget");
+
+    codexui::FrontendSession failedConnectSession;
+    for (int attempt = 1; attempt < maximum; ++attempt) {
+        codexui::FrontendSessionTestAccess::failTransport(failedConnectSession);
+        passed &= expect(
+            codexui::FrontendSessionTestAccess::automaticReconnectEnabled(failedConnectSession)
+                && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(failedConnectSession) == attempt,
+            "a bounded number of failed pre-synchronization connection attempts remains retryable");
+        codexui::FrontendSessionTestAccess::failTransport(failedConnectSession, false);
+        passed &= expect(
+            codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(failedConnectSession) == attempt,
+            "multiple failure signals for one connection attempt consume the retry budget only once");
+    }
+    codexui::FrontendSessionTestAccess::failTransport(failedConnectSession);
+    passed &= expect(
+        failedConnectSession.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
+            && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(failedConnectSession)
+            && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(failedConnectSession) == maximum,
+        "repeated failed connection attempts stop at the same visible terminal boundary");
+    return passed;
+}
+
+bool testReceiveRejectionPreservesPreciseError()
+{
+    codexui::FrontendSession session;
+    std::vector<sdk::OutboundMessage> messages;
+    bool passed = expect(
+        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, messages),
+        "the receive-rejection fixture must reach synchronized State");
+
+    const auto duplicateWelcome = frontend::Codec::serializeServer(
+        frontend::ServerMessage{frontend::Welcome{
+            "duplicate-session",
+            frontend::SessionRole::Observer,
+            frontend::SequenceNumber{0},
+            frontend::SyncMode::Snapshot}});
+    passed &= expect(duplicateWelcome.hasValue(),
+                     "the duplicate-Welcome rejection fixture must encode");
+    if (!duplicateWelcome)
+        return false;
+
+    codexui::FrontendSessionTestAccess::receiveWire(
+        session, QByteArray::fromStdString(duplicateWelcome.value() + '\n'));
+    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
+                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+                         && session.statusText() == QStringLiteral("unexpected or duplicate Welcome")
+                         && !session.statusText().contains(
+                             QStringLiteral("frontend server message was rejected"),
+                             Qt::CaseInsensitive),
+                     "socketReadyRead must preserve the precise SDK lifecycle error instead of the generic receive rejection");
+    codexui::FrontendSessionTestAccess::failTransport(session, false);
+    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
+                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+                         && session.statusText() == QStringLiteral("unexpected or duplicate Welcome")
+                         && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
+                     "the socket error following a terminal SDK rejection must preserve its precise reason and retry budget");
+    codexui::FrontendSessionTestAccess::disconnectTransport(session);
+    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
+                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+                         && session.statusText() == QStringLiteral("unexpected or duplicate Welcome")
+                         && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
+                     "the physical disconnect following a terminal SDK rejection must preserve its precise reason and retry budget");
+    return passed;
+}
+
+bool testInboundFrameCapacityTracksSdk()
+{
+    codexui::FrontendSession session;
+    const sdk::ClientOptions defaults;
+    return expect(
+        codexui::FrontendSessionTestAccess::maximumFrameBytes(session) == defaults.maximumInboundMessageBytes
+            && codexui::FrontendSessionTestAccess::maximumFrameBytes(session) > 16U * 1024U * 1024U,
+        "the Qt JSONL receiver must accept the SDK's complete provider-derived server-message range");
 }
 
 std::vector<frontend::Json>
@@ -1078,6 +1233,8 @@ int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
     return testPeerCredentials() && testScopedItemPresentationChanges() && testLifecycleAndDiagnostics()
+               && testPreReadyReconnectBound() && testReceiveRejectionPreservesPreciseError()
+               && testInboundFrameCapacityTracksSdk()
                && testModelCatalogRefresh() && testModelCatalogRefreshFailureIsDiagnosed()
                && testArchivedThreadRefresh()
                && testArchivedThreadRefreshFailureRemainsIncomplete()

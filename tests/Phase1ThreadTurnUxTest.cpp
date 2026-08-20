@@ -89,7 +89,9 @@ sdk::ExecutionConfiguration configuration(std::string model,
     return result;
 }
 
-sdk::State threadDiscoveryState(const std::vector<std::pair<std::string, bool>>& threadFixtures)
+sdk::State threadDiscoveryState(
+    const std::vector<std::pair<std::string, bool>>& threadFixtures,
+    const std::optional<std::string>& activeSharedTurnThread = std::nullopt)
 {
     sdk::ClientOptions options;
     options.requestedCapabilities.clear();
@@ -116,12 +118,23 @@ sdk::State threadDiscoveryState(const std::vector<std::pair<std::string, bool>>&
 
     frontend::Json threads = frontend::Json::array();
     for (const auto& [id, archived] : threadFixtures) {
+        frontend::Json turns = frontend::Json::array();
+        if (activeSharedTurnThread) {
+            const bool active = id == *activeSharedTurnThread;
+            turns.push_back(frontend::Json{{"id", "shared-turn"},
+                                           {"threadId", id},
+                                           {"status", active ? "inProgress" : "completed"},
+                                           {"active", active},
+                                           {"terminal", !active},
+                                           {"items", frontend::Json::array()},
+                                           {"extensions", frontend::Json::object()}});
+        }
         threads.push_back(frontend::Json{{"id", id},
                                          {"title", id},
                                          {"status", "idle"},
                                          {"fullyLoaded", true},
                                          {"archived", archived},
-                                         {"turns", frontend::Json::array()},
+                                         {"turns", std::move(turns)},
                                          {"extensions", frontend::Json::object()}});
     }
     frontend::Json state{{"backendRevision", 1},
@@ -818,6 +831,29 @@ bool testThreadActionGating()
     return passed;
 }
 
+bool testScopedDuplicateTurnActionGating()
+{
+    const sdk::State state = threadDiscoveryState(
+        {{"completed-thread", false}, {"running-thread", false}},
+        std::string{"running-thread"});
+    const auto* completed = state.thread("completed-thread");
+    const auto* running = state.thread("running-thread");
+    bool passed = expect(completed && running,
+                         "the duplicate-turn action fixture must retain both parent threads");
+    if (!completed || !running)
+        return false;
+
+    const auto completedActions = codexui::detail::threadActionAvailability(state, *completed);
+    const auto runningActions = codexui::detail::threadActionAvailability(state, *running);
+    passed &= expect(!completedActions.interrupt && completedActions.archive
+                         && completedActions.remove,
+                     "a completed scoped turn must not inherit the sibling thread's running state");
+    passed &= expect(runningActions.interrupt && !runningActions.archive
+                         && !runningActions.remove,
+                     "an active scoped turn must enable only its own thread's interrupt action");
+    return passed;
+}
+
 bool testThreadOrganizationPersistenceAndSafeMoves()
 {
     QTemporaryDir temporaryDirectory;
@@ -1105,6 +1141,7 @@ int main(int argc, char** argv)
     passed &= testUnavailableCanonicalSettingsRemainEditable();
     passed &= testThreadSetupResults();
     passed &= testThreadActionGating();
+    passed &= testScopedDuplicateTurnActionGating();
     passed &= testThreadOrganizationPersistenceAndSafeMoves();
     passed &= testArchivedThreadAssignmentPruningWaitsForCompleteDiscovery();
     return passed ? 0 : 1;
