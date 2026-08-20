@@ -203,7 +203,6 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
 
 namespace {
 
-constexpr qsizetype maximumFrameBytes = 16 * 1024 * 1024;
 constexpr qsizetype maximumReceiveBatchBytes = 1024 * 1024;
 constexpr qsizetype inboundCompactionThreshold = 256 * 1024;
 constexpr int minimumReceiveBatchFrames = 1;
@@ -246,6 +245,7 @@ FrontendSession::FrontendSession(QObject* parent)
     : QObject(parent)
 {
     sdk::ClientOptions options;
+    maximumFrameBytes = options.maximumInboundMessageBytes;
     options.credentialProvider = [] {
         return sdk::AuthenticationContext{
             frontend::NoCredential{},
@@ -862,7 +862,7 @@ void FrontendSession::socketReadyRead()
                                          ? newline - 1
                                          : newline;
         const qsizetype payloadBytes = payloadEnd - consumedBytes;
-        if (payloadBytes > maximumFrameBytes) {
+        if (static_cast<std::size_t>(payloadBytes) > maximumFrameBytes) {
             rejectOversizedFrame();
             return;
         }
@@ -895,8 +895,9 @@ void FrontendSession::socketReadyRead()
 
     inboundOffset = consumedBytes;
     compactInbound();
-    if (!hasCompleteInboundFrame()
-        && inboundBuffer.size() - inboundOffset > maximumFrameBytes + 1) {
+    const qsizetype bufferedBytes = inboundBuffer.size() - inboundOffset;
+    if (!hasCompleteInboundFrame() && bufferedBytes > 0
+        && static_cast<std::size_t>(bufferedBytes - 1) > maximumFrameBytes) {
         rejectOversizedFrame();
         return;
     }

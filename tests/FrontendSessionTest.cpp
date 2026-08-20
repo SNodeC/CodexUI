@@ -2,6 +2,7 @@
 
 #include "app/FrontendSession.h"
 
+#include <ai/openai/codex/frontend/Codec.h>
 #include <ai/openai/codex/frontend/Messages.h>
 
 #include <QCoreApplication>
@@ -52,9 +53,9 @@ struct FrontendSessionTestAccess
         return FrontendSession::maximumConsecutivePreReadyDisconnects;
     }
 
-    static void setSynchronizedCurrentConnection(FrontendSession& session, bool synchronized)
+    static std::size_t maximumFrameBytes(const FrontendSession& session)
     {
-        session.synchronizedCurrentConnection = synchronized;
+        return session.maximumFrameBytes;
     }
 
     static void resetReconnectPolicy(FrontendSession& session)
@@ -263,6 +264,13 @@ struct FrontendSessionTestAccess
                         ai::openai::codex::frontend::ServerMessage message)
     {
         return session.connection.receive(std::move(message)).accepted;
+    }
+
+    static void receiveWire(FrontendSession& session, QByteArray wire)
+    {
+        session.inboundBuffer = std::move(wire);
+        session.inboundOffset = 0;
+        session.socketReadyRead();
     }
 
     static void beginArchivedThreadRefresh(FrontendSession& session)
@@ -501,12 +509,58 @@ bool testPreReadyReconnectBound()
                      "repeated pre-synchronization disconnects stop at a visible terminal boundary");
 
     codexui::FrontendSessionTestAccess::resetReconnectPolicy(session);
-    codexui::FrontendSessionTestAccess::setSynchronizedCurrentConnection(session, true);
+    std::vector<sdk::OutboundMessage> messages;
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, messages)
+            && session.lifecycle() == codexui::FrontendSession::Lifecycle::Ready
+            && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
+        "the real SDK synchronization callback must reset the pre-ready retry budget");
     codexui::FrontendSessionTestAccess::disconnectTransport(session);
     passed &= expect(codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
                          && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
                      "a disconnect after synchronization does not consume the pre-ready retry budget");
     return passed;
+}
+
+bool testReceiveRejectionPreservesPreciseError()
+{
+    codexui::FrontendSession session;
+    std::vector<sdk::OutboundMessage> messages;
+    bool passed = expect(
+        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, messages),
+        "the receive-rejection fixture must reach synchronized State");
+
+    const auto duplicateWelcome = frontend::Codec::serializeServer(
+        frontend::ServerMessage{frontend::Welcome{
+            "duplicate-session",
+            frontend::SessionRole::Observer,
+            frontend::SequenceNumber{0},
+            frontend::SyncMode::Snapshot}});
+    passed &= expect(duplicateWelcome.hasValue(),
+                     "the duplicate-Welcome rejection fixture must encode");
+    if (!duplicateWelcome)
+        return false;
+
+    codexui::FrontendSessionTestAccess::receiveWire(
+        session, QByteArray::fromStdString(duplicateWelcome.value() + '\n'));
+    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
+                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+                         && session.statusText() == QStringLiteral("unexpected or duplicate Welcome")
+                         && !session.statusText().contains(
+                             QStringLiteral("frontend server message was rejected"),
+                             Qt::CaseInsensitive),
+                     "socketReadyRead must preserve the precise SDK lifecycle error instead of the generic receive rejection");
+    return passed;
+}
+
+bool testInboundFrameCapacityTracksSdk()
+{
+    codexui::FrontendSession session;
+    const sdk::ClientOptions defaults;
+    return expect(
+        codexui::FrontendSessionTestAccess::maximumFrameBytes(session) == defaults.maximumInboundMessageBytes
+            && codexui::FrontendSessionTestAccess::maximumFrameBytes(session) > 16U * 1024U * 1024U,
+        "the Qt JSONL receiver must accept the SDK's complete provider-derived server-message range");
 }
 
 std::vector<frontend::Json>
@@ -1126,7 +1180,8 @@ int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
     return testPeerCredentials() && testScopedItemPresentationChanges() && testLifecycleAndDiagnostics()
-               && testPreReadyReconnectBound()
+               && testPreReadyReconnectBound() && testReceiveRejectionPreservesPreciseError()
+               && testInboundFrameCapacityTracksSdk()
                && testModelCatalogRefresh() && testModelCatalogRefreshFailureIsDiagnosed()
                && testArchivedThreadRefresh()
                && testArchivedThreadRefreshFailureRemainsIncomplete()

@@ -14,6 +14,7 @@
 #include <ai/openai/codex/frontend/Protocol.h>
 #include <ai/openai/codex/typed/Models.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -208,6 +209,7 @@ private:
     QTimer outboundDrainTimer;
     QByteArray inboundBuffer;
     qsizetype inboundOffset = 0;
+    std::size_t maximumFrameBytes = 0;
     std::unique_ptr<Client> client;
     Connection connection;
     ai::openai::codex::frontend::client::State currentState;
