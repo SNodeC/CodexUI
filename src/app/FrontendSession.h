@@ -143,6 +143,7 @@ private:
 
     static constexpr int initialReconnectDelayMs = 250;
     static constexpr int maximumReconnectDelayMs = 5'000;
+    static constexpr int maximumConsecutivePreReadyDisconnects = 5;
     static constexpr int outboundDrainRetryMs = 10;
     static constexpr qint64 maximumBufferedOutboundBytes = static_cast<qint64>(
         4U * (ai::openai::codex::frontend::DefaultFrontendMaximumInboundMessageBytes + 1U));
@@ -223,10 +224,12 @@ private:
     std::uint64_t outboundEpoch = 0;
     std::uint64_t connectionGeneration = 0;
     int reconnectDelayMs = initialReconnectDelayMs;
+    int consecutivePreReadyDisconnects = 0;
     bool receiveContinuationScheduled = false;
     bool drainingOutbound = false;
     bool outboundClearPending = false;
     bool automaticReconnectEnabled = true;
+    bool synchronizedCurrentConnection = false;
     bool archivedThreadListInFlight = false;
     bool archivedThreadListComplete = false;
     bool modelListInFlight = false;

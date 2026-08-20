@@ -270,6 +270,8 @@ FrontendSession::FrontendSession(QObject* parent)
     };
     callbacks.onSynchronized = [this](const sdk::SynchronizationInfo& info) {
         reconnectDelayMs = initialReconnectDelayMs;
+        consecutivePreReadyDisconnects = 0;
+        synchronizedCurrentConnection = true;
         automaticReconnectEnabled = true;
         currentState = info.state;
         reconcileRequestedThreadReads();
@@ -349,6 +351,7 @@ void FrontendSession::startConnection()
     if (socket.state() != QLocalSocket::UnconnectedState || connection.isOpen())
         return;
     ++connectionGeneration;
+    synchronizedCurrentConnection = false;
     archivedThreadListCursors.clear();
     archivedThreadListInFlight = false;
     archivedThreadListComplete = false;
@@ -875,8 +878,10 @@ void FrontendSession::socketReadyRead()
                              static_cast<std::size_t>(payloadBytes)));
         consumedBytes = newline + 1;
         if (!result.accepted) {
-            const QString reason = result.error ? QString::fromStdString(result.error->message)
-                                                : QStringLiteral("Frontend SDK rejected a server message");
+            const QString reason = currentLifecycle == Lifecycle::Failed && !detail.isEmpty()
+                                       ? detail
+                                       : result.error ? QString::fromStdString(result.error->message)
+                                                      : QStringLiteral("Frontend SDK rejected a server message");
             if (!result.error || !result.error->retryable)
                 failWithoutReconnect(reason);
             else
@@ -1109,6 +1114,7 @@ void FrontendSession::finishModelCatalogRefresh(QString diagnostic)
 
 void FrontendSession::socketDisconnected()
 {
+    const bool disconnectedBeforeReady = !localShutdown && !synchronizedCurrentConnection;
     if (connection.isOpen()) {
         if (localShutdown)
             connection.transportDisconnected();
@@ -1121,6 +1127,15 @@ void FrontendSession::socketDisconnected()
     receiveContinuationScheduled = false;
     requestedThreadReads.clear();
     if (!localShutdown) {
+        if (disconnectedBeforeReady) {
+            ++consecutivePreReadyDisconnects;
+            if (consecutivePreReadyDisconnects >= maximumConsecutivePreReadyDisconnects) {
+                failWithoutReconnect(
+                    QStringLiteral("Backend disconnected before synchronization completed on %1 consecutive connections")
+                        .arg(consecutivePreReadyDisconnects));
+                return;
+            }
+        }
         if (currentLifecycle != Lifecycle::Failed)
             setLifecycle(Lifecycle::Disconnected);
         scheduleReconnect();
@@ -1221,6 +1236,8 @@ void FrontendSession::resetReconnectPolicy()
     automaticReconnectEnabled = true;
     reconnectTimer.stop();
     reconnectDelayMs = initialReconnectDelayMs;
+    consecutivePreReadyDisconnects = 0;
+    synchronizedCurrentConnection = false;
 }
 
 FrontendSession::SendResult FrontendSession::send(OutboundMessage&& message)

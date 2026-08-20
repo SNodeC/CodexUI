@@ -42,6 +42,26 @@ struct FrontendSessionTestAccess
         return session.automaticReconnectEnabled;
     }
 
+    static int consecutivePreReadyDisconnects(const FrontendSession& session)
+    {
+        return session.consecutivePreReadyDisconnects;
+    }
+
+    static int maximumConsecutivePreReadyDisconnects()
+    {
+        return FrontendSession::maximumConsecutivePreReadyDisconnects;
+    }
+
+    static void setSynchronizedCurrentConnection(FrontendSession& session, bool synchronized)
+    {
+        session.synchronizedCurrentConnection = synchronized;
+    }
+
+    static void resetReconnectPolicy(FrontendSession& session)
+    {
+        session.resetReconnectPolicy();
+    }
+
     static void setInbound(FrontendSession& session, QByteArray bytes, qsizetype offset)
     {
         session.inboundBuffer = std::move(bytes);
@@ -458,6 +478,34 @@ bool testLifecycleAndDiagnostics()
     passed &= expect(reconnectCloseObserved
                          && codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session),
                      "the public reconnect path must override a terminal old-transport close callback");
+    return passed;
+}
+
+bool testPreReadyReconnectBound()
+{
+    codexui::FrontendSession session;
+    const int maximum = codexui::FrontendSessionTestAccess::maximumConsecutivePreReadyDisconnects();
+    bool passed = true;
+    for (int attempt = 1; attempt < maximum; ++attempt) {
+        codexui::FrontendSessionTestAccess::disconnectTransport(session);
+        passed &= expect(codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+                             && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == attempt,
+                         "a bounded number of pre-synchronization disconnects remains retryable");
+    }
+
+    codexui::FrontendSessionTestAccess::disconnectTransport(session);
+    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
+                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+                         && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == maximum
+                         && session.statusText().contains(QStringLiteral("before synchronization completed")),
+                     "repeated pre-synchronization disconnects stop at a visible terminal boundary");
+
+    codexui::FrontendSessionTestAccess::resetReconnectPolicy(session);
+    codexui::FrontendSessionTestAccess::setSynchronizedCurrentConnection(session, true);
+    codexui::FrontendSessionTestAccess::disconnectTransport(session);
+    passed &= expect(codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+                         && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
+                     "a disconnect after synchronization does not consume the pre-ready retry budget");
     return passed;
 }
 
@@ -1078,6 +1126,7 @@ int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
     return testPeerCredentials() && testScopedItemPresentationChanges() && testLifecycleAndDiagnostics()
+               && testPreReadyReconnectBound()
                && testModelCatalogRefresh() && testModelCatalogRefreshFailureIsDiagnosed()
                && testArchivedThreadRefresh()
                && testArchivedThreadRefreshFailureRemainsIncomplete()
