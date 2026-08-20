@@ -13,6 +13,9 @@
 
 class QVBoxLayout;
 class QLabel;
+class QScrollArea;
+class QTabBar;
+class QPushButton;
 
 namespace codexui {
 
@@ -26,17 +29,21 @@ public:
     void render(const ai::openai::codex::frontend::client::State& state,
                 const QString& threadId,
                 bool backendReady,
-                const QString& backendStatus);
+                const QString& backendStatus,
+                const QString& selectedTurnId = {});
     void updateStateRevision(std::uint64_t revision);
+    void showInfo();
 
 signals:
     void hideRequested();
+    void historicalTurnCloseRequested();
     void selectionChanged();
     void threadOpenRequested(const QString& threadId);
 
 private:
     void renderUnavailable(const QString& title, const QString& detail);
     void refreshLayoutGeometry(QVBoxLayout* layout);
+    void setHistoricalTurnMode(bool enabled);
 
     QVBoxLayout* planContent = nullptr;
     QVBoxLayout* agentsContent = nullptr;
@@ -50,6 +57,12 @@ private:
     QByteArray changesPresentationKey;
     QByteArray infoPresentationKey;
     QLabel* infoRevisionValue = nullptr;
+    QLabel* inspectorHeading = nullptr;
+    QPushButton* historicalBack = nullptr;
+    QScrollArea* infoScroll = nullptr;
+    QTabBar* tabs = nullptr;
+    bool historicalTurnMode = false;
+    int normalTabIndex = 1;
 };
 
 } // namespace codexui

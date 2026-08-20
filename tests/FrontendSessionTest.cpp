@@ -2,12 +2,17 @@
 
 #include "app/FrontendSession.h"
 
+#include <ai/openai/codex/frontend/Messages.h>
+
 #include <QCoreApplication>
 
 #include <algorithm>
 #include <iostream>
 #include <limits>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -181,12 +186,86 @@ struct FrontendSessionTestAccess
         session.socketDisconnected();
         session.reconnectTimer.stop();
     }
+
+    static bool synchronizeWithCapturedTransport(
+        FrontendSession& session,
+        std::vector<ai::openai::codex::frontend::client::OutboundMessage>& messages)
+    {
+        namespace frontend = ai::openai::codex::frontend;
+        namespace sdk = frontend::client;
+
+        session.connection = session.client->openConnection({
+            [&messages](FrontendSession::OutboundMessage message) {
+                messages.push_back(std::move(message));
+                return FrontendSession::SendResult{sdk::SendStatus::Accepted, std::nullopt};
+            },
+            [](std::string) {},
+        });
+        session.connection.transportConnected();
+
+        const frontend::Json state{
+            {"backendRevision", std::uint64_t{1}},
+            {"lifecycle", "ready"},
+            {"diagnostics",
+             {{"received", std::uint64_t{0}}, {"recent", frontend::Json::array()}}},
+            {"sessions", frontend::Json::array()},
+            {"threadList",
+             {{"hasLoadedPage", true},
+              {"complete", true},
+              {"pagesLoaded", std::uint64_t{1}}}},
+            {"threads", frontend::Json::array()},
+            {"pendingRequests", frontend::Json::array()},
+            {"codexExtensions", frontend::Json::array()},
+            {"omittedCodexExtensions", std::uint64_t{0}},
+            {"journal",
+             {{"oldestReplayableAfter", std::uint64_t{0}},
+              {"currentSequence", std::uint64_t{0}}}},
+            {"sequenceExhausted", false},
+        };
+        return session.connection
+                   .receive(frontend::ServerMessage{frontend::Welcome{
+                       "archived-refresh-test",
+                       frontend::SessionRole::Observer,
+                       frontend::SequenceNumber{0},
+                       frontend::SyncMode::Snapshot}})
+                   .accepted
+            && session.connection
+                   .receive(frontend::ServerMessage{
+                       frontend::Snapshot{frontend::SequenceNumber{0}, state}})
+                   .accepted
+            && session.connection
+                   .receive(frontend::ServerMessage{
+                       frontend::SyncComplete{frontend::SequenceNumber{0}}})
+                   .accepted;
+    }
+
+    static bool receive(FrontendSession& session,
+                        ai::openai::codex::frontend::ServerMessage message)
+    {
+        return session.connection.receive(std::move(message)).accepted;
+    }
+
+    static void beginArchivedThreadRefresh(FrontendSession& session)
+    {
+        session.beginArchivedThreadRefresh();
+    }
+
+    static bool archivedThreadListInFlight(const FrontendSession& session)
+    {
+        return session.archivedThreadListInFlight;
+    }
+
+    static std::size_t archivedThreadCursorCount(const FrontendSession& session)
+    {
+        return session.archivedThreadListCursors.size();
+    }
 };
 
 } // namespace codexui
 
 namespace {
 
+namespace frontend = ai::openai::codex::frontend;
 namespace sdk = ai::openai::codex::frontend::client;
 
 bool expect(bool condition, const char* message)
@@ -379,6 +458,267 @@ bool testLifecycleAndDiagnostics()
     passed &= expect(reconnectCloseObserved
                          && codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session),
                      "the public reconnect path must override a terminal old-transport close callback");
+    return passed;
+}
+
+std::vector<frontend::Json>
+capturedCommands(const std::vector<sdk::OutboundMessage>& messages,
+                 std::string_view method = {})
+{
+    std::vector<frontend::Json> result;
+    for (const sdk::OutboundMessage& message : messages) {
+        if (message.kind != sdk::OutboundKind::Command)
+            continue;
+        frontend::Json wire = frontend::Json::parse(message.compactJson, nullptr, false);
+        if (!wire.is_discarded()
+            && (method.empty() || wire.value("method", std::string{}) == method))
+            result.push_back(std::move(wire));
+    }
+    return result;
+}
+
+frontend::Json modelListEntry(std::string id,
+                              std::string model,
+                              std::string displayName,
+                              bool hidden = false)
+{
+    return frontend::Json{
+        {"defaultReasoningEffort", "medium"},
+        {"description", "FrontendSession model catalogue fixture"},
+        {"displayName", std::move(displayName)},
+        {"hidden", hidden},
+        {"id", std::move(id)},
+        {"isDefault", false},
+        {"model", std::move(model)},
+        {"supportedReasoningEfforts",
+         frontend::Json::array(
+             {{{"description", "Balanced"}, {"reasoningEffort", "medium"}}})},
+    };
+}
+
+bool testModelCatalogRefresh()
+{
+    codexui::FrontendSession session;
+    std::vector<sdk::OutboundMessage> outbound;
+    int catalogueSignals = 0;
+    QObject::connect(&session, &codexui::FrontendSession::modelCatalogChanged,
+                     [&catalogueSignals] { ++catalogueSignals; });
+
+    bool passed = expect(
+        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, outbound),
+        "the model-catalogue fixture must reach a synchronized SDK connection");
+    std::vector<frontend::Json> commands = capturedCommands(outbound, "model.list");
+    passed &= expect(commands.size() == 1
+                         && commands.front().value("params", frontend::Json::object())
+                                == frontend::Json{{"includeHidden", false}, {"limit", 100}},
+                     "synchronization must request the first bounded visible-model page");
+    if (commands.size() != 1 || !commands.front().contains("requestId"))
+        return false;
+
+    const std::string firstRequestId = commands.front()["requestId"].get<std::string>();
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::success(
+                firstRequestId,
+                frontend::Json{{"data",
+                                frontend::Json::array({modelListEntry(
+                                    "preset-alpha", "model-alpha", "Alpha")})},
+                               {"nextCursor", "model-page-2"}})}),
+        "the first model catalogue page must be accepted");
+    commands = capturedCommands(outbound, "model.list");
+    passed &= expect(commands.size() == 2 && session.modelCatalog().empty()
+                         && catalogueSignals == 0
+                         && commands.back().value("params", frontend::Json::object())
+                                == frontend::Json{{"cursor", "model-page-2"},
+                                                  {"includeHidden", false},
+                                                  {"limit", 100}},
+                     "a continuation page must not publish a partial catalogue");
+    if (commands.size() != 2 || !commands.back().contains("requestId"))
+        return false;
+
+    const std::string secondRequestId = commands.back()["requestId"].get<std::string>();
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::success(
+                secondRequestId,
+                frontend::Json{{"data",
+                                frontend::Json::array(
+                                    {modelListEntry("preset-hidden", "model-hidden", "Hidden", true),
+                                     modelListEntry("preset-alpha-duplicate", "model-alpha", "Duplicate"),
+                                     modelListEntry("preset-beta", "model-beta", "Beta")})}})}),
+        "the terminal model catalogue page must be accepted");
+    const auto& catalogue = session.modelCatalog();
+    passed &= expect(catalogue.size() == 2 && catalogue[0].model.value == "model-alpha"
+                         && catalogue[0].displayName == "Alpha"
+                         && catalogue[1].model.value == "model-beta"
+                         && catalogue[1].displayName == "Beta" && catalogueSignals == 0,
+                     "terminal publication must retain first-seen visible slugs in exact page order");
+    QCoreApplication::processEvents();
+    passed &= expect(catalogueSignals == 1,
+                     "terminal model catalogue publication must emit exactly one queued change signal");
+    return passed;
+}
+
+bool testModelCatalogRefreshFailureIsDiagnosed()
+{
+    codexui::FrontendSession session;
+    std::vector<sdk::OutboundMessage> outbound;
+    int catalogueSignals = 0;
+    QObject::connect(&session, &codexui::FrontendSession::modelCatalogChanged,
+                     [&catalogueSignals] { ++catalogueSignals; });
+
+    bool passed = expect(
+        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, outbound),
+        "the model-catalogue failure fixture must reach a synchronized SDK connection");
+    const std::vector<frontend::Json> commands = capturedCommands(outbound, "model.list");
+    if (!expect(commands.size() == 1 && commands.front().contains("requestId"),
+                "the failure fixture must capture one model-list request"))
+        return false;
+
+    const std::string requestId = commands.front()["requestId"].get<std::string>();
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::failure(
+                requestId,
+                frontend::CommandError{frontend::ErrorCode::InternalError,
+                                       "model listing failed"})}),
+        "the model-catalogue failure response must be accepted");
+    QCoreApplication::processEvents();
+    passed &= expect(session.modelCatalog().empty() && catalogueSignals == 0,
+                     "a failed model listing must not publish a partial or synthetic catalogue");
+    passed &= expect(session.statusText().contains(QStringLiteral("model listing failed")),
+                     "a failed model listing must surface its diagnostic");
+    return passed;
+}
+
+bool testArchivedThreadRefresh()
+{
+    codexui::FrontendSession session;
+    std::vector<sdk::OutboundMessage> outbound;
+    int discoverySignals = 0;
+    std::optional<codexui::detail::StateUpdateScope> discoveryScope;
+    QObject::connect(
+        &session,
+        &codexui::FrontendSession::stateChanged,
+        [&session, &discoverySignals, &discoveryScope](
+            const codexui::detail::StateUpdateScope& scope) {
+            if (!session.archivedThreadDiscoveryComplete())
+                return;
+            ++discoverySignals;
+            discoveryScope = scope;
+        });
+
+    bool passed = expect(
+        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, outbound),
+        "the archived-thread fixture must reach a synchronized SDK connection");
+    std::vector<frontend::Json> commands = capturedCommands(outbound, "thread.list");
+    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Ready
+                         && !session.archivedThreadDiscoveryComplete()
+                         && codexui::FrontendSessionTestAccess::archivedThreadListInFlight(session)
+                         && commands.size() == 1,
+                     "synchronization must start exactly one incomplete archived-thread discovery request");
+    if (commands.size() != 1)
+        return false;
+
+    const frontend::Json& first = commands.front();
+    passed &= expect(first.value("method", std::string{}) == "thread.list"
+                         && first.contains("requestId") && first["requestId"].is_string()
+                         && first.value("params", frontend::Json::object())
+                                == frontend::Json{{"archived", true}, {"limit", 100}},
+                     "the first discovery page must request archived threads with the bounded page size and no cursor");
+    if (!first.contains("requestId") || !first["requestId"].is_string())
+        return false;
+
+    const std::string firstRequestId = first["requestId"].get<std::string>();
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::success(
+                firstRequestId,
+                frontend::Json{{"threads", frontend::Json::array()},
+                               {"nextCursor", "archived-page-2"}})}),
+        "the first archived-thread page response must be accepted");
+    commands = capturedCommands(outbound, "thread.list");
+    passed &= expect(!session.archivedThreadDiscoveryComplete()
+                         && codexui::FrontendSessionTestAccess::archivedThreadListInFlight(session)
+                         && discoverySignals == 0 && commands.size() == 2,
+                     "a continuation cursor must keep discovery incomplete and submit exactly one next page");
+    if (commands.size() != 2)
+        return false;
+
+    const frontend::Json& second = commands.back();
+    passed &= expect(second.value("method", std::string{}) == "thread.list"
+                         && second.contains("requestId") && second["requestId"].is_string()
+                         && second.value("params", frontend::Json::object())
+                                == frontend::Json{{"archived", true},
+                                                  {"cursor", "archived-page-2"},
+                                                  {"limit", 100}},
+                     "the second discovery page must preserve the archived filter and exact opaque cursor");
+    if (!second.contains("requestId") || !second["requestId"].is_string())
+        return false;
+
+    const std::string secondRequestId = second["requestId"].get<std::string>();
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::success(
+                secondRequestId,
+                frontend::Json{{"threads", frontend::Json::array()}})}),
+        "the terminal archived-thread page response must be accepted");
+    passed &= expect(session.archivedThreadDiscoveryComplete()
+                         && !codexui::FrontendSessionTestAccess::archivedThreadListInFlight(session)
+                         && codexui::FrontendSessionTestAccess::archivedThreadCursorCount(session) == 2
+                         && discoverySignals == 1 && discoveryScope
+                         && discoveryScope->allThreadsAffected
+                         && discoveryScope->allInspectorsAffected
+                         && discoveryScope->sidebarAffected
+                         && discoveryScope->hasPresentationChange,
+                     "the terminal page must publish completion and one conservative presentation refresh");
+
+    const std::size_t outboundAtCompletion = outbound.size();
+    codexui::FrontendSessionTestAccess::beginArchivedThreadRefresh(session);
+    passed &= expect(outbound.size() == outboundAtCompletion && discoverySignals == 1,
+                     "completed archived-thread discovery must not restart or emit duplicate completion refreshes");
+    return passed;
+}
+
+bool testArchivedThreadRefreshFailureRemainsIncomplete()
+{
+    codexui::FrontendSession session;
+    std::vector<sdk::OutboundMessage> outbound;
+
+    bool passed = expect(
+        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, outbound),
+        "the archived-thread failure fixture must reach a synchronized SDK connection");
+    const std::vector<frontend::Json> commands = capturedCommands(outbound, "thread.list");
+    if (!expect(commands.size() == 1 && commands.front().contains("requestId"),
+                "the failure fixture must capture one archived-thread request"))
+        return false;
+
+    int stateSignals = 0;
+    QObject::connect(&session, &codexui::FrontendSession::stateChanged,
+                     [&stateSignals](const codexui::detail::StateUpdateScope&) {
+                         ++stateSignals;
+                     });
+    const std::string requestId = commands.front()["requestId"].get<std::string>();
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::failure(
+                requestId,
+                frontend::CommandError{frontend::ErrorCode::InternalError,
+                                       "archived listing failed"})}),
+        "the archived-thread failure response must be accepted");
+    passed &= expect(!session.archivedThreadDiscoveryComplete()
+                         && !codexui::FrontendSessionTestAccess::archivedThreadListInFlight(session),
+                     "a failed archived-thread request must stop in-flight work without claiming discovery completed");
+    passed &= expect(stateSignals == 0,
+                     "a failed archived-thread request must not emit the completion refresh that can clear selection");
+    passed &= expect(session.statusText().contains(QStringLiteral("archived listing failed")),
+                     "a failed archived-thread request must still surface its diagnostic");
     return passed;
 }
 
@@ -687,6 +1027,9 @@ int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
     return testPeerCredentials() && testScopedItemPresentationChanges() && testLifecycleAndDiagnostics()
+               && testModelCatalogRefresh() && testModelCatalogRefreshFailureIsDiagnosed()
+               && testArchivedThreadRefresh()
+               && testArchivedThreadRefreshFailureRemainsIncomplete()
                && testOutboundQueue() && testInboundBufferCompaction()
            ? 0
            : 1;

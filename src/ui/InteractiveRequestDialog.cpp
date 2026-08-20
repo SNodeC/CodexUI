@@ -626,7 +626,7 @@ void InteractiveRequestDialog::setStatus(const QString& value, bool error)
     statusLabel->setText(value);
     statusLabel->setVisible(!value.isEmpty());
     statusLabel->setStyleSheet(QStringLiteral("color:%1;font-size:10px;font-weight:600;")
-                                   .arg(error ? QStringLiteral("#f08a8a") : QStringLiteral("#949ead")));
+                                   .arg(error ? QStringLiteral("#b83a3a") : QStringLiteral("#667085")));
 }
 
 void InteractiveRequestDialog::updateSubmitEnabled()

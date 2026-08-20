@@ -4,6 +4,7 @@
 
 #include <ai/openai/codex/frontend/Security.h>
 #include <ai/openai/codex/frontend/client/Controller.h>
+#include <ai/openai/codex/frontend/client/Models.h>
 #include <ai/openai/codex/frontend/client/Requests.h>
 #include <ai/openai/codex/frontend/client/Threads.h>
 #include <ai/openai/codex/frontend/client/Turns.h>
@@ -208,6 +209,10 @@ constexpr qsizetype inboundCompactionThreshold = 256 * 1024;
 constexpr int minimumReceiveBatchFrames = 1;
 constexpr int maximumReceiveBatchFrames = 256;
 constexpr qint64 maximumReceiveBatchTimeMs = 4;
+constexpr std::uint32_t archivedThreadListPageSize = 100;
+constexpr std::size_t maximumArchivedThreadListPages = 64;
+constexpr std::uint32_t modelListPageSize = 100;
+constexpr std::size_t maximumModelListPages = 64;
 
 QString operationError(const std::optional<sdk::Error>& error, const QString& fallback)
 {
@@ -282,6 +287,8 @@ FrontendSession::FrontendSession(QObject* parent)
         scope.sidebarAffected = true;
         scope.hasPresentationChange = true;
         emit stateChanged(scope);
+        beginArchivedThreadRefresh();
+        beginModelCatalogRefresh();
     };
     callbacks.onDiagnostic = [this](const sdk::Diagnostic& diagnostic) {
         if (diagnostic.severity == sdk::Diagnostic::Severity::Error)
@@ -341,6 +348,18 @@ void FrontendSession::startConnection()
 {
     if (socket.state() != QLocalSocket::UnconnectedState || connection.isOpen())
         return;
+    ++connectionGeneration;
+    archivedThreadListCursors.clear();
+    archivedThreadListInFlight = false;
+    archivedThreadListComplete = false;
+    modelListCursors.clear();
+    pendingModelCatalog.clear();
+    modelListInFlight = false;
+    modelListComplete = false;
+    if (!availableModelCatalog.empty()) {
+        availableModelCatalog.clear();
+        emit modelCatalogChanged();
+    }
     localShutdown = false;
     setLifecycle(Lifecycle::Connecting);
     socket.connectToServer(defaultSocketPath(), QIODevice::ReadWrite);
@@ -397,6 +416,16 @@ const sdk::State& FrontendSession::state() const noexcept
     return currentState;
 }
 
+const std::vector<ai::openai::codex::typed::Model>& FrontendSession::modelCatalog() const noexcept
+{
+    return availableModelCatalog;
+}
+
+bool FrontendSession::archivedThreadDiscoveryComplete() const noexcept
+{
+    return archivedThreadListComplete;
+}
+
 bool FrontendSession::ownsController() const noexcept
 {
     const auto& projection = currentState.controller();
@@ -450,11 +479,18 @@ std::optional<QString> FrontendSession::acquireController(OperationCompletion co
 
 std::optional<QString> FrontendSession::startThread(ThreadStartCompletion completion)
 {
+    return startThread(ai::openai::codex::typed::ThreadStartParams{}, std::move(completion));
+}
+
+std::optional<QString>
+FrontendSession::startThread(ai::openai::codex::typed::ThreadStartParams parameters,
+                             ThreadStartCompletion completion)
+{
     if (currentLifecycle != Lifecycle::Ready)
         return QStringLiteral("Backend is not ready");
 
     sdk::Submission submission = client->threads().start(
-        ai::openai::codex::typed::ThreadStartParams{},
+        std::move(parameters),
         [completion = std::move(completion)](const sdk::OperationResult<sdk::ThreadStartResult>& result) {
             if (!result) {
                 completion({}, operationError(result.error, QStringLiteral("New thread could not be created")));
@@ -471,12 +507,19 @@ std::optional<QString> FrontendSession::startThread(ThreadStartCompletion comple
 
 std::optional<QString> FrontendSession::resumeThread(const QString& threadId, ThreadStartCompletion completion)
 {
+    ai::openai::codex::typed::ThreadResumeParams parameters;
+    parameters.threadId = ai::openai::codex::typed::ThreadId{threadId.toStdString()};
+    return resumeThread(std::move(parameters), std::move(completion));
+}
+
+std::optional<QString>
+FrontendSession::resumeThread(ai::openai::codex::typed::ThreadResumeParams parameters,
+                              ThreadStartCompletion completion)
+{
     if (currentLifecycle != Lifecycle::Ready)
         return QStringLiteral("Backend is not ready");
 
-    const std::string requestedId = threadId.toStdString();
-    ai::openai::codex::typed::ThreadResumeParams parameters;
-    parameters.threadId = ai::openai::codex::typed::ThreadId{requestedId};
+    const std::string requestedId = parameters.threadId.value;
     sdk::Submission submission = client->threads().resume(
         std::move(parameters),
         [completion = std::move(completion), requestedId](const sdk::OperationResult<sdk::ThreadResumeResult>& result) {
@@ -497,13 +540,28 @@ std::optional<QString> FrontendSession::startTurn(const QString& threadId,
                                                   const QString& prompt,
                                                   OperationCompletion completion)
 {
+    ai::openai::codex::typed::TurnStartParams parameters;
+    parameters.threadId = ai::openai::codex::typed::ThreadId{threadId.toStdString()};
+    return startTurn(
+        std::move(parameters),
+        prompt,
+        [completion = std::move(completion)](const QString&, const QString& error) {
+            completion(error);
+        });
+}
+
+std::optional<QString>
+FrontendSession::startTurn(ai::openai::codex::typed::TurnStartParams parameters,
+                           const QString& prompt,
+                           TurnStartCompletion completion)
+{
     if (currentLifecycle != Lifecycle::Ready)
         return QStringLiteral("Backend is not ready");
     if (const auto error = promptValidationError(prompt))
         return error;
 
-    ai::openai::codex::typed::TurnStartParams parameters;
-    parameters.threadId = ai::openai::codex::typed::ThreadId{threadId.toStdString()};
+    if (parameters.threadId.value.empty())
+        return QStringLiteral("Turn submission requires a thread ID");
     ai::openai::codex::typed::TextInput input;
     const QByteArray promptUtf8 = prompt.toUtf8();
     input.text.assign(promptUtf8.constData(), static_cast<std::size_t>(promptUtf8.size()));
@@ -511,9 +569,110 @@ std::optional<QString> FrontendSession::startTurn(const QString& threadId,
     sdk::Submission submission = client->turns().start(
         std::move(parameters),
         [completion = std::move(completion)](const sdk::OperationResult<sdk::TurnStartResult>& result) {
-            completion(result ? QString{} : operationError(result.error, QStringLiteral("Turn could not be started")));
+            if (!result) {
+                completion({}, operationError(result.error, QStringLiteral("Turn could not be started")));
+                return;
+            }
+            completion(QString::fromStdString(result.value->turnId.value), {});
         });
     return submissionError(submission, QStringLiteral("Turn submission was not accepted"));
+}
+
+std::optional<QString>
+FrontendSession::forkThread(ai::openai::codex::typed::ThreadForkParams parameters,
+                            ThreadStartCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+    if (parameters.threadId.value.empty())
+        return QStringLiteral("Fork requires a source thread ID");
+
+    sdk::Submission submission = client->threads().fork(
+        std::move(parameters),
+        [completion = std::move(completion)](
+            const sdk::OperationResult<ai::openai::codex::typed::ThreadForkResponse>& result)
+        {
+            if (!result)
+            {
+                completion({}, operationError(result.error, QStringLiteral("Thread could not be forked")));
+                return;
+            }
+            if (result.value->thread.id.value.empty())
+            {
+                completion({}, QStringLiteral("Fork response did not contain a stable thread ID"));
+                return;
+            }
+            completion(QString::fromStdString(result.value->thread.id.value), {});
+        });
+    return submissionError(submission, QStringLiteral("Fork submission was not accepted"));
+}
+
+std::optional<QString> FrontendSession::renameThread(const QString& threadId,
+                                                     const QString& name,
+                                                     OperationCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+    if (threadId.isEmpty() || name.trimmed().isEmpty())
+        return QStringLiteral("Rename requires a thread ID and non-empty name");
+
+    sdk::Submission submission = client->threads().setName(
+        {ai::openai::codex::typed::ThreadId{threadId.toStdString()}, name.trimmed().toStdString()},
+        [completion = std::move(completion)](
+            const sdk::OperationResult<ai::openai::codex::typed::Unit>& result)
+        {
+            completion(result ? QString{}
+                              : operationError(result.error, QStringLiteral("Thread could not be renamed")));
+        });
+    return submissionError(submission, QStringLiteral("Rename submission was not accepted"));
+}
+
+std::optional<QString> FrontendSession::archiveThread(const QString& threadId,
+                                                      OperationCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+    sdk::Submission submission = client->threads().archive(
+        {ai::openai::codex::typed::ThreadId{threadId.toStdString()}},
+        [completion = std::move(completion)](
+            const sdk::OperationResult<ai::openai::codex::typed::Unit>& result)
+        {
+            completion(result ? QString{}
+                              : operationError(result.error, QStringLiteral("Thread could not be archived")));
+        });
+    return submissionError(submission, QStringLiteral("Archive submission was not accepted"));
+}
+
+std::optional<QString> FrontendSession::unarchiveThread(const QString& threadId,
+                                                        OperationCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+    sdk::Submission submission = client->threads().unarchive(
+        {ai::openai::codex::typed::ThreadId{threadId.toStdString()}},
+        [completion = std::move(completion)](
+            const sdk::OperationResult<ai::openai::codex::typed::ThreadUnarchiveResponse>& result)
+        {
+            completion(result ? QString{}
+                              : operationError(result.error, QStringLiteral("Thread could not be unarchived")));
+        });
+    return submissionError(submission, QStringLiteral("Unarchive submission was not accepted"));
+}
+
+std::optional<QString> FrontendSession::deleteThread(const QString& threadId,
+                                                     OperationCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+    sdk::Submission submission = client->threads().remove(
+        {ai::openai::codex::typed::ThreadId{threadId.toStdString()}},
+        [completion = std::move(completion)](
+            const sdk::OperationResult<ai::openai::codex::typed::Unit>& result)
+        {
+            completion(result ? QString{}
+                              : operationError(result.error, QStringLiteral("Thread could not be deleted")));
+        });
+    return submissionError(submission, QStringLiteral("Delete submission was not accepted"));
 }
 
 std::optional<QString> FrontendSession::interruptTurn(const QString& threadId,
@@ -758,6 +917,156 @@ void FrontendSession::reconcileRequestedThreadReads()
         else
             ++iterator;
     }
+}
+
+void FrontendSession::beginArchivedThreadRefresh()
+{
+    if (currentLifecycle != Lifecycle::Ready || archivedThreadListInFlight
+        || archivedThreadListComplete)
+        return;
+    requestArchivedThreadPage(connectionGeneration, std::nullopt);
+}
+
+void FrontendSession::requestArchivedThreadPage(std::uint64_t generation,
+                                                std::optional<std::string> cursor)
+{
+    if (generation != connectionGeneration || currentLifecycle != Lifecycle::Ready
+        || archivedThreadListComplete || archivedThreadListInFlight)
+        return;
+    const std::string cursorIdentity = cursor.value_or(std::string{});
+    if (archivedThreadListCursors.size() >= maximumArchivedThreadListPages
+        || !archivedThreadListCursors.insert(cursorIdentity).second) {
+        finishArchivedThreadRefresh(
+            QStringLiteral("Archived thread listing stopped at an invalid pagination boundary"));
+        return;
+    }
+
+    ai::openai::codex::typed::ThreadListParams parameters;
+    parameters.archived = true;
+    parameters.limit = archivedThreadListPageSize;
+    if (cursor)
+        parameters.cursor = std::move(*cursor);
+
+    archivedThreadListInFlight = true;
+    const auto submission = client->threads().list(
+        std::move(parameters),
+        [this, generation](const sdk::OperationResult<sdk::ThreadListResult>& result) {
+            if (generation != connectionGeneration || currentLifecycle != Lifecycle::Ready)
+                return;
+            archivedThreadListInFlight = false;
+            if (!result || !result.value) {
+                finishArchivedThreadRefresh(operationError(
+                    result.error, QStringLiteral("Archived threads could not be restored")));
+                return;
+            }
+            if (result.value->nextCursor) {
+                requestArchivedThreadPage(generation, result.value->nextCursor);
+                return;
+            }
+            finishArchivedThreadRefresh();
+        });
+    if (const auto error = submissionError(submission,
+                                           QStringLiteral("Archived thread listing could not be submitted"))) {
+        archivedThreadListInFlight = false;
+        finishArchivedThreadRefresh(*error);
+    }
+}
+
+void FrontendSession::finishArchivedThreadRefresh(QString diagnostic)
+{
+    archivedThreadListInFlight = false;
+    if (!diagnostic.isEmpty()) {
+        reportDiagnostic(std::move(diagnostic));
+        return;
+    }
+
+    archivedThreadListComplete = true;
+
+    detail::StateUpdateScope scope;
+    scope.allThreadsAffected = true;
+    scope.allInspectorsAffected = true;
+    scope.sidebarAffected = true;
+    scope.hasPresentationChange = true;
+    emit stateChanged(scope);
+}
+
+void FrontendSession::beginModelCatalogRefresh()
+{
+    if (currentLifecycle != Lifecycle::Ready || modelListInFlight || modelListComplete)
+        return;
+    requestModelCatalogPage(connectionGeneration, std::nullopt);
+}
+
+void FrontendSession::requestModelCatalogPage(std::uint64_t generation,
+                                              std::optional<std::string> cursor)
+{
+    if (generation != connectionGeneration || currentLifecycle != Lifecycle::Ready
+        || modelListInFlight || modelListComplete)
+        return;
+    const std::string cursorIdentity = cursor.value_or(std::string{});
+    if (modelListCursors.size() >= maximumModelListPages
+        || !modelListCursors.insert(cursorIdentity).second) {
+        finishModelCatalogRefresh(
+            QStringLiteral("Model listing stopped at an invalid pagination boundary"));
+        return;
+    }
+
+    ai::openai::codex::typed::ModelListParams parameters;
+    parameters.includeHidden = false;
+    parameters.limit = modelListPageSize;
+    if (cursor)
+        parameters.cursor = std::move(*cursor);
+
+    modelListInFlight = true;
+    const auto submission = client->models().list(
+        std::move(parameters),
+        [this, generation](
+            const sdk::OperationResult<ai::openai::codex::typed::ModelListResponse>& result) {
+            if (generation != connectionGeneration || currentLifecycle != Lifecycle::Ready)
+                return;
+            modelListInFlight = false;
+            if (!result || !result.value) {
+                finishModelCatalogRefresh(operationError(
+                    result.error, QStringLiteral("Available models could not be loaded")));
+                return;
+            }
+            for (const auto& model : result.value->data) {
+                if (model.hidden || model.model.value.empty())
+                    continue;
+                const bool duplicate = std::ranges::any_of(
+                    pendingModelCatalog,
+                    [&model](const auto& existing) {
+                        return existing.model.value == model.model.value;
+                    });
+                if (!duplicate)
+                    pendingModelCatalog.push_back(model);
+            }
+            if (result.value->nextCursor.hasValue()) {
+                requestModelCatalogPage(generation, *result.value->nextCursor);
+                return;
+            }
+            finishModelCatalogRefresh();
+        });
+    if (const auto error = submissionError(
+            submission, QStringLiteral("Available-model listing could not be submitted"))) {
+        modelListInFlight = false;
+        finishModelCatalogRefresh(*error);
+    }
+}
+
+void FrontendSession::finishModelCatalogRefresh(QString diagnostic)
+{
+    modelListInFlight = false;
+    modelListComplete = true;
+    if (!diagnostic.isEmpty()) {
+        pendingModelCatalog.clear();
+        reportDiagnostic(std::move(diagnostic));
+        return;
+    }
+    if (availableModelCatalog == pendingModelCatalog)
+        return;
+    availableModelCatalog = std::move(pendingModelCatalog);
+    QTimer::singleShot(0, this, [this] { emit modelCatalogChanged(); });
 }
 
 void FrontendSession::socketDisconnected()

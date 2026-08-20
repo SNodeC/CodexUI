@@ -12,12 +12,11 @@
 #include <QStringList>
 
 #include <cstdint>
+#include <vector>
 
 class QFrame;
 class QLabel;
-class QPlainTextEdit;
 class QPropertyAnimation;
-class QPushButton;
 class QResizeEvent;
 class QScrollArea;
 class QTimer;
@@ -26,8 +25,15 @@ class QVBoxLayout;
 namespace ai::openai::codex::frontend::client {
 class State;
 }
+namespace ai::openai::codex::typed {
+struct Model;
+}
 
 namespace codexui {
+
+class AnchoredTurnSurface;
+class UpcomingTurnDock;
+struct UpcomingTurnDraft;
 
 class ConversationWidget : public QWidget
 {
@@ -39,21 +45,29 @@ public:
                 const QString& threadId,
                 bool newThreadDraft = false,
                 const QHash<QString, QStringList>* exactContentChanges = nullptr);
+    void setModelCatalog(const std::vector<ai::openai::codex::typed::Model>& catalog);
     [[nodiscard]] bool updateExactMessageContent(
         const ai::openai::codex::frontend::client::State& state,
         const QString& threadId,
         const QHash<QString, QStringList>& exactContentChanges);
     void clearPrompt();
     void focusComposer();
-    void setActionState(bool sendAllowed, bool stopAllowed, bool editorAllowed);
+    [[nodiscard]] UpcomingTurnDraft upcomingTurnDraft() const;
+    void clearUpcomingTurnSettings();
+    void acknowledgeSubmittedSettings(const UpcomingTurnDraft& submitted);
+    void setActionState(bool sendAllowed,
+                        bool stopAllowed,
+                        bool editorAllowed,
+                        bool stopVisible);
     void setWriteStatus(const QString& text, bool error = false);
 
 signals:
     void sendRequested(const QString& prompt);
     void stopRequested();
+    void upcomingTurnSettingsChanged();
+    void turnDetailsRequested(const QString& turnId);
 
 protected:
-    bool eventFilter(QObject* watched, QEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
 
 private:
@@ -65,18 +79,11 @@ private:
     void settleTimelineLayout();
     void settleThreadSwitchLayout(std::uint64_t generation, int remainingPasses);
     void synchronizeTimelineHeight(bool allowShrink = true);
-    void updateSendEnabled();
-
-    QFrame* composer = nullptr;
-    QPlainTextEdit* editor = nullptr;
-    QLabel* composerStatus = nullptr;
-    QPushButton* send = nullptr;
-    QPushButton* stop = nullptr;
+    AnchoredTurnSurface* anchoredSurface = nullptr;
+    UpcomingTurnDock* upcomingTurnDock = nullptr;
     QLabel* contextPath = nullptr;
     QLabel* threadTitle = nullptr;
     QLabel* threadDetail = nullptr;
-    QFrame* turnSummary = nullptr;
-    QVBoxLayout* turnSummaryLayout = nullptr;
     QLabel* turnFailure = nullptr;
     QScrollArea* scrollArea = nullptr;
     QFrame* timelineWindowNotice = nullptr;
@@ -108,7 +115,6 @@ private:
     int pendingPreviousScroll = 0;
     int pendingViewportAnchorY = 0;
     bool renderedNewThreadDraft = false;
-    bool sendContextAllowed = false;
 };
 
 } // namespace codexui

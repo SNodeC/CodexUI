@@ -12,6 +12,7 @@
 
 #include <ai/openai/codex/frontend/client/Client.h>
 #include <ai/openai/codex/frontend/Protocol.h>
+#include <ai/openai/codex/typed/Models.h>
 
 #include <cstdint>
 #include <deque>
@@ -64,6 +65,7 @@ public:
 
     using OperationCompletion = std::function<void(const QString& error)>;
     using ThreadStartCompletion = std::function<void(const QString& threadId, const QString& error)>;
+    using TurnStartCompletion = std::function<void(const QString& turnId, const QString& error)>;
 
     explicit FrontendSession(QObject* parent = nullptr);
     ~FrontendSession() override;
@@ -74,14 +76,38 @@ public:
     [[nodiscard]] QString statusText() const;
     [[nodiscard]] static std::optional<QString> promptValidationError(const QString& prompt);
     [[nodiscard]] const ai::openai::codex::frontend::client::State& state() const noexcept;
+    [[nodiscard]] const std::vector<ai::openai::codex::typed::Model>& modelCatalog() const noexcept;
+    [[nodiscard]] bool archivedThreadDiscoveryComplete() const noexcept;
     [[nodiscard]] bool ownsController() const noexcept;
     void loadThread(const QString& threadId);
     [[nodiscard]] std::optional<QString> acquireController(OperationCompletion completion);
     [[nodiscard]] std::optional<QString> startThread(ThreadStartCompletion completion);
+    [[nodiscard]] std::optional<QString>
+    startThread(ai::openai::codex::typed::ThreadStartParams parameters,
+                ThreadStartCompletion completion);
     [[nodiscard]] std::optional<QString> resumeThread(const QString& threadId, ThreadStartCompletion completion);
+    [[nodiscard]] std::optional<QString>
+    resumeThread(ai::openai::codex::typed::ThreadResumeParams parameters,
+                 ThreadStartCompletion completion);
     [[nodiscard]] std::optional<QString> startTurn(const QString& threadId,
                                                    const QString& prompt,
                                                    OperationCompletion completion);
+    [[nodiscard]] std::optional<QString>
+    startTurn(ai::openai::codex::typed::TurnStartParams parameters,
+              const QString& prompt,
+              TurnStartCompletion completion);
+    [[nodiscard]] std::optional<QString>
+    forkThread(ai::openai::codex::typed::ThreadForkParams parameters,
+               ThreadStartCompletion completion);
+    [[nodiscard]] std::optional<QString> renameThread(const QString& threadId,
+                                                      const QString& name,
+                                                      OperationCompletion completion);
+    [[nodiscard]] std::optional<QString> archiveThread(const QString& threadId,
+                                                       OperationCompletion completion);
+    [[nodiscard]] std::optional<QString> unarchiveThread(const QString& threadId,
+                                                         OperationCompletion completion);
+    [[nodiscard]] std::optional<QString> deleteThread(const QString& threadId,
+                                                      OperationCompletion completion);
     [[nodiscard]] std::optional<QString> interruptTurn(const QString& threadId,
                                                        const QString& turnId,
                                                        OperationCompletion completion);
@@ -106,6 +132,7 @@ signals:
     void lifecycleChanged();
     void statusChanged();
     void stateChanged(const codexui::detail::StateUpdateScope& scope);
+    void modelCatalogChanged();
 
 private:
     friend struct FrontendSessionTestAccess;
@@ -143,6 +170,14 @@ private:
     [[nodiscard]] bool hasCompleteInboundFrame() const noexcept;
     void compactInbound() noexcept;
     void reconcileRequestedThreadReads();
+    void beginArchivedThreadRefresh();
+    void requestArchivedThreadPage(std::uint64_t generation,
+                                   std::optional<std::string> cursor);
+    void finishArchivedThreadRefresh(QString diagnostic = {});
+    void beginModelCatalogRefresh();
+    void requestModelCatalogPage(std::uint64_t generation,
+                                 std::optional<std::string> cursor);
+    void finishModelCatalogRefresh(QString diagnostic = {});
     void startConnection();
     void scheduleReconnect();
     void retryConnection();
@@ -175,14 +210,23 @@ private:
     QString detail;
     QString diagnosticDetail;
     std::set<std::string> requestedThreadReads;
+    std::set<std::string> archivedThreadListCursors;
+    std::set<std::string> modelListCursors;
+    std::vector<ai::openai::codex::typed::Model> pendingModelCatalog;
+    std::vector<ai::openai::codex::typed::Model> availableModelCatalog;
     std::deque<PendingWrite> pendingWrites;
     qint64 pendingWriteBytes = 0;
     std::uint64_t outboundEpoch = 0;
+    std::uint64_t connectionGeneration = 0;
     int reconnectDelayMs = initialReconnectDelayMs;
     bool receiveContinuationScheduled = false;
     bool drainingOutbound = false;
     bool outboundClearPending = false;
     bool automaticReconnectEnabled = true;
+    bool archivedThreadListInFlight = false;
+    bool archivedThreadListComplete = false;
+    bool modelListInFlight = false;
+    bool modelListComplete = false;
     bool localShutdown = false;
 };
 
