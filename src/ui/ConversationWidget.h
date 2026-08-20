@@ -51,18 +51,23 @@ public:
         const QString& threadId,
         const QHash<QString, QStringList>& exactContentChanges);
     void clearPrompt();
+    void clearPromptIfUnchanged(const QString& submittedPrompt);
     void focusComposer();
     [[nodiscard]] UpcomingTurnDraft upcomingTurnDraft() const;
     void clearUpcomingTurnSettings();
     void acknowledgeSubmittedSettings(const UpcomingTurnDraft& submitted);
-    void setActionState(bool sendAllowed,
+    void setActionState(bool primaryAllowed,
                         bool stopAllowed,
                         bool editorAllowed,
-                        bool stopVisible);
+                        bool settingsAllowed,
+                        bool stopVisible,
+                        bool steerMode,
+                        const QString& actionThreadIdentity,
+                        const QString& activeTurnIdentity);
     void setWriteStatus(const QString& text, bool error = false);
 
 signals:
-    void sendRequested(const QString& prompt);
+    void sendRequested(const QString& prompt, bool steerRequested);
     void stopRequested();
     void upcomingTurnSettingsChanged();
     void turnDetailsRequested(const QString& turnId);
@@ -79,6 +84,7 @@ private:
     void settleTimelineLayout();
     void settleThreadSwitchLayout(std::uint64_t generation, int remainingPasses);
     void synchronizeTimelineHeight(bool allowShrink = true);
+    void activityLayoutChanged();
     AnchoredTurnSurface* anchoredSurface = nullptr;
     UpcomingTurnDock* upcomingTurnDock = nullptr;
     QLabel* contextPath = nullptr;

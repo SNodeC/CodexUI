@@ -578,6 +578,44 @@ FrontendSession::startTurn(ai::openai::codex::typed::TurnStartParams parameters,
     return submissionError(submission, QStringLiteral("Turn submission was not accepted"));
 }
 
+std::optional<QString> FrontendSession::steerTurn(const QString& threadId,
+                                                  const QString& expectedTurnId,
+                                                  const QString& prompt,
+                                                  OperationCompletion completion)
+{
+    if (currentLifecycle != Lifecycle::Ready)
+        return QStringLiteral("Backend is not ready");
+    if (const auto error = promptValidationError(prompt))
+        return error;
+    if (threadId.isEmpty() || expectedTurnId.isEmpty())
+        return QStringLiteral("Steering requires the active thread and turn identities");
+
+    ai::openai::codex::typed::TurnSteerParams parameters;
+    parameters.threadId = ai::openai::codex::typed::ThreadId{threadId.toStdString()};
+    parameters.expectedTurnId = ai::openai::codex::typed::TurnId{expectedTurnId.toStdString()};
+    ai::openai::codex::typed::TextInput input;
+    const QByteArray promptUtf8 = prompt.toUtf8();
+    input.text.assign(promptUtf8.constData(), static_cast<std::size_t>(promptUtf8.size()));
+    parameters.input.emplace_back(std::move(input));
+
+    const std::string expectedId = parameters.expectedTurnId.value;
+    sdk::Submission submission = client->turns().steer(
+        std::move(parameters),
+        [completion = std::move(completion), expectedId](
+            const sdk::OperationResult<ai::openai::codex::typed::TurnSteerResponse>& result) {
+            if (!result) {
+                completion(operationError(result.error, QStringLiteral("Turn could not be steered")));
+                return;
+            }
+            if (result.value->turnId.value != expectedId) {
+                completion(QStringLiteral("Turn steering returned an unexpected turn ID"));
+                return;
+            }
+            completion({});
+        });
+    return submissionError(submission, QStringLiteral("Turn steering was not accepted"));
+}
+
 std::optional<QString>
 FrontendSession::forkThread(ai::openai::codex::typed::ThreadForkParams parameters,
                             ThreadStartCompletion completion)

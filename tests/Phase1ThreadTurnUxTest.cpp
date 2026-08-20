@@ -5,6 +5,8 @@
 #include "ui/UpcomingTurnDock.h"
 #include "ui/UiStyle.h"
 
+#include <ai/openai/codex/frontend/Messages.h>
+#include <ai/openai/codex/frontend/client/Client.h>
 #include <ai/openai/codex/frontend/client/State.h>
 #include <ai/openai/codex/frontend/client/StateTypes.h>
 #include <ai/openai/codex/typed/Conversation.h>
@@ -21,20 +23,30 @@
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QScrollBar>
+#include <QSet>
+#include <QSettings>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QStyle>
 #include <QStyleOptionComboBox>
+#include <QTreeWidget>
 
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace
 {
 
+namespace frontend = ai::openai::codex::frontend;
 namespace sdk = ai::openai::codex::frontend::client;
 namespace typed = ai::openai::codex::typed;
 
@@ -77,12 +89,74 @@ sdk::ExecutionConfiguration configuration(std::string model,
     return result;
 }
 
+sdk::State threadDiscoveryState(const std::vector<std::pair<std::string, bool>>& threadFixtures)
+{
+    sdk::ClientOptions options;
+    options.requestedCapabilities.clear();
+    options.credentialProvider = [] {
+        return sdk::AuthenticationContext{frontend::NoCredential{},
+                                          std::string{"thread-discovery-test"}};
+    };
+    sdk::Client client(std::move(options));
+    auto connection = client.openConnection({
+        [](sdk::OutboundMessage) {
+            return sdk::SendResult{sdk::SendStatus::Accepted, std::nullopt};
+        },
+        [](std::string) {},
+    });
+    connection.transportConnected();
+    if (!connection
+             .receive(frontend::ServerMessage{frontend::Welcome{
+                 "fixture-session",
+                 frontend::SessionRole::Observer,
+                 frontend::SequenceNumber{0},
+                 frontend::SyncMode::Snapshot}})
+             .accepted)
+        return {};
+
+    frontend::Json threads = frontend::Json::array();
+    for (const auto& [id, archived] : threadFixtures) {
+        threads.push_back(frontend::Json{{"id", id},
+                                         {"title", id},
+                                         {"status", "idle"},
+                                         {"fullyLoaded", true},
+                                         {"archived", archived},
+                                         {"turns", frontend::Json::array()},
+                                         {"extensions", frontend::Json::object()}});
+    }
+    frontend::Json state{{"backendRevision", 1},
+                         {"lifecycle", "ready"},
+                         {"diagnostics",
+                          {{"received", 0}, {"recent", frontend::Json::array()}}},
+                         {"sessions", frontend::Json::array()},
+                         {"threadList",
+                          {{"hasLoadedPage", true}, {"complete", true}, {"pagesLoaded", 1}}},
+                         {"threads", std::move(threads)},
+                         {"pendingRequests", frontend::Json::array()},
+                         {"codexExtensions", frontend::Json::array()},
+                         {"omittedCodexExtensions", 0},
+                         {"journal",
+                          {{"oldestReplayableAfter", 0}, {"currentSequence", 0}}},
+                         {"sequenceExhausted", false}};
+    if (!connection
+             .receive(frontend::ServerMessage{
+                 frontend::Snapshot{frontend::SequenceNumber{0}, std::move(state)}})
+             .accepted)
+        return {};
+    if (!connection
+             .receive(frontend::ServerMessage{
+                 frontend::SyncComplete{frontend::SequenceNumber{0}}})
+             .accepted)
+        return {};
+    return client.state();
+}
+
 bool testUpcomingTurnCanonicalRebase()
 {
     codexui::UpcomingTurnDock dock;
     dock.resize(960, dock.baseHeight());
     dock.show();
-    dock.setActionState(true, false, true, false);
+    dock.setActionState(true, false, true, true, false, false);
 
     const sdk::ExecutionConfiguration first =
         configuration("gpt-5.6", typed::ReasoningEffort::high(), "/workspace/first");
@@ -206,7 +280,7 @@ bool testAnchoredGrowingComposer()
     surface.setUpcomingTurnDock(dock);
     surface.resize(960, 760);
     surface.show();
-    dock->setActionState(true, false, true, false);
+    dock->setActionState(true, false, true, true, false, false);
     settleEvents();
 
     auto* editor = dock->findChild<QPlainTextEdit*>(QStringLiteral("upcomingPromptEditor"));
@@ -290,7 +364,7 @@ bool testNarrowUpcomingTurnLayout()
     dock.setCanonicalConfiguration(
         configuration("gpt-test", typed::ReasoningEffort::high(), "/workspace"),
         QStringLiteral("thread-narrow"));
-    dock.setActionState(true, false, true, false);
+    dock.setActionState(true, false, true, true, false, false);
     dock.resize(520, dock.baseHeight());
     dock.show();
     settleEvents();
@@ -339,7 +413,7 @@ bool testNarrowUpcomingTurnLayout()
 bool testTypedModelCatalog()
 {
     codexui::UpcomingTurnDock dock;
-    dock.setActionState(true, false, true, false);
+    dock.setActionState(true, false, true, true, false, false);
     dock.setCanonicalConfiguration(
         configuration("retired-model", typed::ReasoningEffort::high(), "/workspace"),
         QStringLiteral("thread-models"));
@@ -429,27 +503,82 @@ bool testUpcomingTurnActionStates()
     if (!editor || !send || !stop || !sandbox || !approval)
         return false;
 
-    dock.setActionState(false, true, false, true);
-    passed &= expect(!stop->isHidden() && stop->isEnabled() && !editor->isEnabled(),
-                     "a running turn must show an enabled Stop action and lock the composer");
-    dock.setActionState(false, false, false, true);
-    passed &= expect(!stop->isHidden() && !stop->isEnabled() && !editor->isEnabled(),
-                     "an interrupt in flight must keep Stop visible but disabled");
-    dock.setActionState(false, false, false, false);
+    dock.setActionState(true,
+                        true,
+                        true,
+                        false,
+                        true,
+                        true,
+                        QStringLiteral("thread-actions"),
+                        QStringLiteral("turn-a"));
+    editor->setPlainText(QStringLiteral("redirect the active turn"));
+    passed &= expect(!send->isHidden() && send->text() == QStringLiteral("Steer")
+                         && send->isEnabled() && !stop->isHidden() && stop->isEnabled()
+                         && editor->isEnabled() && !sandbox->isEnabled() && !approval->isEnabled(),
+                     "a running turn must permit steering and stopping while locking execution settings");
+    dock.setActionState(false,
+                        false,
+                        false,
+                        false,
+                        true,
+                        true,
+                        QStringLiteral("thread-actions"),
+                        QStringLiteral("turn-a"));
+    passed &= expect(!send->isHidden() && send->text() == QStringLiteral("Steer")
+                         && !send->isEnabled() && !stop->isHidden() && !stop->isEnabled()
+                         && !editor->isEnabled(),
+                     "a running write in flight must retain disabled Steer and Stop actions");
+    dock.setActionState(true,
+                        true,
+                        true,
+                        false,
+                        true,
+                        true,
+                        QStringLiteral("thread-actions"),
+                        QStringLiteral("turn-b"));
+    auto* status = dock.findChild<QLabel*>(QStringLiteral("upcomingTurnStatus"));
+    passed &= expect(editor->toPlainText() == QStringLiteral("redirect the active turn")
+                         && !send->isEnabled() && !send->toolTip().isEmpty()
+                         && status && status->text().contains(QStringLiteral("previous active turn")),
+                     "a steering draft must stay bound to its exact active turn and remain blocked after turn rollover");
+    editor->insertPlainText(QStringLiteral(" "));
+    passed &= expect(send->isEnabled() && send->toolTip().isEmpty()
+                         && status && status->text() == QStringLiteral("Ctrl+Enter to steer"),
+                     "editing a retained steering draft must explicitly bind it to the new active turn");
+
+    dock.setActionState(false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        QStringLiteral("thread-actions"));
     passed &= expect(stop->isHidden() && !send->isHidden()
+                         && send->text() == QStringLiteral("Send")
                          && !send->isEnabled() && !editor->isEnabled(),
                      "a non-writable thread must restore the disabled Send action without a stale Stop");
-    dock.setActionState(true, false, true, false);
+    dock.setActionState(true, false, true, true, false, false);
     passed &= expect(!send->isHidden() && editor->isEnabled()
+                         && !send->isEnabled() && !send->toolTip().isEmpty()
                          && sandbox->isEnabled() && approval->isEnabled(),
-                     "an idle writable thread must re-enable its composer and known policy controls");
+                     "an idle thread must not silently reinterpret a steer draft as a new turn");
+    editor->insertPlainText(QStringLiteral(" "));
+    passed &= expect(send->isEnabled() && send->toolTip().isEmpty(),
+                     "editing a preserved draft must explicitly bind it to the current Send action");
+    editor->setPlainText(QStringLiteral("newer draft"));
+    dock.clearPromptIfUnchanged(QStringLiteral("accepted steer"));
+    passed &= expect(editor->toPlainText() == QStringLiteral("newer draft"),
+                     "an accepted steer must not clear a newer prompt draft");
+    dock.clearPromptIfUnchanged(QStringLiteral("newer draft"));
+    passed &= expect(editor->toPlainText().isEmpty(),
+                     "an accepted steer may clear only the exact submitted prompt");
     return passed;
 }
 
 bool testUnsupportedCanonicalSettingsFailSoft()
 {
     codexui::UpcomingTurnDock dock;
-    dock.setActionState(true, false, true, false);
+    dock.setActionState(true, false, true, true, false, false);
     sdk::ExecutionConfiguration unsupported =
         configuration("gpt-test", typed::ReasoningEffort::high(), "/workspace");
     typed::UnknownSandboxPolicy unknownSandbox;
@@ -491,7 +620,7 @@ bool testUnavailableCanonicalSettingsRemainEditable()
     advertisedDefault.defaultReasoningEffort = typed::ReasoningEffort::high();
     advertisedDefault.isDefault = true;
     dock.setModelCatalog({advertisedDefault});
-    dock.setActionState(true, false, true, false);
+    dock.setActionState(true, false, true, true, false, false);
 
     auto* model = dock.findChild<QComboBox*>(QStringLiteral("upcomingModel"));
     auto* effort = dock.findChild<QComboBox*>(QStringLiteral("upcomingReasoning"));
@@ -689,6 +818,274 @@ bool testThreadActionGating()
     return passed;
 }
 
+bool testThreadOrganizationPersistenceAndSafeMoves()
+{
+    QTemporaryDir temporaryDirectory;
+    if (!expect(temporaryDirectory.isValid(), "the thread-organization test needs a temporary settings directory"))
+        return false;
+    const QString settingsPath = temporaryDirectory.filePath(QStringLiteral("organization.ini"));
+    QSettings settings(settingsPath, QSettings::IniFormat);
+
+    codexui::detail::ThreadOrganization organization;
+    organization.load(settings);
+    const QString project = organization.createFolder(QStringLiteral("Project"));
+    const QString subproject = organization.createFolder(QStringLiteral("Subproject"), project);
+    const QString leaf = organization.createFolder(QStringLiteral("Deep work"), subproject);
+    const QString sibling = organization.createFolder(QStringLiteral("Sibling"), project);
+    const QString promotionCollision = organization.createFolder(QStringLiteral("Deep work"), project);
+
+    bool passed = expect(!project.isEmpty() && !subproject.isEmpty() && !leaf.isEmpty()
+                             && !sibling.isEmpty() && !promotionCollision.isEmpty(),
+                         "nested thread folders must be creatable");
+    passed &= expect(organization.folderPath(leaf)
+                             == QStringLiteral("Project › Subproject › Deep work"),
+                     "folder paths must preserve the complete user-defined hierarchy");
+    passed &= expect(organization.createFolder(QStringLiteral("sibling"), project).isEmpty(),
+                     "folder names must be unique among siblings without case ambiguity");
+    passed &= expect(organization.createFolder(QStringLiteral("invalid\tname"), project).isEmpty(),
+                     "folder names must reject control characters that change menu presentation");
+    passed &= expect(organization.createFolder(QStringLiteral("invalid\u2028name"), project).isEmpty(),
+                     "folder names must reject Unicode line separators that change menu presentation");
+    const QSet<QString> subprojectDestinations = organization.movableFolderParents(subproject);
+    passed &= expect(subprojectDestinations.contains(QString{})
+                         && subprojectDestinations.contains(project)
+                         && subprojectDestinations.contains(sibling)
+                         && !subprojectDestinations.contains(subproject)
+                         && !subprojectDestinations.contains(leaf),
+                     "folder move destinations must be computed once and exclude the moved subtree");
+    passed &= expect(!organization.moveFolder(project, leaf),
+                     "moving a folder below its own descendant must fail closed");
+    passed &= expect(organization.moveThread(QStringLiteral("thread-direct"), subproject)
+                         && organization.moveThread(QStringLiteral("thread-leaf"), leaf),
+                     "stable thread IDs must be movable into nested folders");
+    passed &= expect(organization.setFolderExpanded(subproject, false),
+                     "folder disclosure state must be retained as local presentation metadata");
+
+    passed &= expect(organization.save(settings),
+                     "valid thread organization must fit its persistence budget");
+    settings.sync();
+    codexui::detail::ThreadOrganization restored;
+    restored.load(settings);
+    passed &= expect(restored.folderPath(leaf)
+                             == QStringLiteral("Project › Subproject › Deep work")
+                         && restored.folderForThread(QStringLiteral("thread-direct")) == subproject
+                         && restored.folderForThread(QStringLiteral("thread-leaf")) == leaf
+                         && restored.folder(subproject) && !restored.folder(subproject)->expanded,
+                     "nested folders, assignments, and disclosure state must survive restart");
+
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temporaryDirectory.path());
+    QCoreApplication::setOrganizationName(QStringLiteral("CodexUITest"));
+    QCoreApplication::setApplicationName(QStringLiteral("ThreadOrganization"));
+    QSettings defaultSettings;
+    passed &= expect(restored.save(defaultSettings),
+                     "restored thread organization must remain persistable");
+    defaultSettings.sync();
+    auto sidebar = std::make_unique<codexui::SidebarWidget>();
+    sidebar->setThreads(sdk::State{}, {}, false);
+    auto* tree = sidebar->findChild<QTreeWidget*>(QStringLiteral("threadTree"));
+    bool sawProjectFolder = false;
+    bool sawNestedFolder = false;
+    if (tree) {
+        QTreeWidgetItemIterator iterator(tree);
+        while (*iterator) {
+            sawProjectFolder = sawProjectFolder || (*iterator)->text(0) == QStringLiteral("Project");
+            sawNestedFolder = sawNestedFolder || (*iterator)->text(0) == QStringLiteral("Subproject");
+            ++iterator;
+        }
+    }
+    passed &= expect(tree && sawProjectFolder && sawNestedFolder,
+                     "the native sidebar tree must render saved nested folders even before threads are synchronized");
+    auto concurrentSidebar = std::make_unique<codexui::SidebarWidget>();
+    auto* firstNewFolder = sidebar->findChild<QPushButton*>(QStringLiteral("newThreadFolderButton"));
+    auto* concurrentNewFolder =
+        concurrentSidebar->findChild<QPushButton*>(QStringLiteral("newThreadFolderButton"));
+    passed &= expect(firstNewFolder && firstNewFolder->isEnabled() && concurrentNewFolder
+                         && !concurrentNewFolder->isEnabled(),
+                     "a second CodexUI window must treat shared folder organization as read-only instead of overwriting it");
+    sidebar.reset();
+    concurrentSidebar->setThreads(sdk::State{}, {}, false);
+    passed &= expect(concurrentNewFolder->isEnabled(),
+                     "a read-only CodexUI window must acquire and reload thread organization after the writer exits");
+
+    passed &= expect(restored.removeFolderAndPromoteContents(subproject),
+                     "a folder must be safely removable without deleting canonical threads");
+    passed &= expect(restored.folderForThread(QStringLiteral("thread-direct")) == project
+                         && restored.folderForThread(QStringLiteral("thread-leaf")) == leaf
+                         && restored.folder(leaf) && restored.folder(leaf)->parentId == project
+                         && restored.folder(leaf)->name == QStringLiteral("Deep work (2)"),
+                     "folder deletion must promote direct threads and subfolders without sibling-name collisions");
+    passed &= expect(restored.moveThread(QStringLiteral("thread-direct"), {})
+                         && restored.folderForThread(QStringLiteral("thread-direct")).isEmpty(),
+                     "threads must be movable back to the unfiled root");
+
+    QSettings malformedSettings(temporaryDirectory.filePath(QStringLiteral("malformed.ini")),
+                                QSettings::IniFormat);
+    QJsonArray malformedFolders{
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("control")},
+                    {QStringLiteral("name"), QStringLiteral("bad\tname")}},
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("duplicate-a")},
+                    {QStringLiteral("name"), QStringLiteral("Same")}},
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("duplicate-b")},
+                    {QStringLiteral("name"), QStringLiteral("same")}}};
+    QString parentId;
+    for (int depth = 0; depth < 40; ++depth) {
+        const QString id = QStringLiteral("depth-%1").arg(depth);
+        malformedFolders.append(QJsonObject{{QStringLiteral("id"), id},
+                                             {QStringLiteral("name"), id},
+                                             {QStringLiteral("parentId"), parentId}});
+        parentId = id;
+    }
+    malformedSettings.setValue(
+        QStringLiteral("sidebar/threadOrganizationV1"),
+        QJsonDocument(QJsonObject{
+                          {QStringLiteral("folders"), malformedFolders},
+                          {QStringLiteral("threadFolders"),
+                           QJsonObject{{QStringLiteral("bad\tthread"), QStringLiteral("duplicate-a")}}}})
+            .toJson(QJsonDocument::Compact));
+    codexui::detail::ThreadOrganization normalized;
+    normalized.load(malformedSettings);
+    passed &= expect(!normalized.folder(QStringLiteral("control"))
+                         && normalized.folder(QStringLiteral("duplicate-a"))
+                         && normalized.folder(QStringLiteral("duplicate-b"))
+                         && normalized.folder(QStringLiteral("duplicate-a"))->name
+                                != normalized.folder(QStringLiteral("duplicate-b"))->name
+                         && normalized.folderForThread(QStringLiteral("bad\tthread")).isEmpty()
+                         && normalized.folder(parentId)
+                         && normalized.folderPath(parentId).count(QChar(0x203a))
+                                < static_cast<qsizetype>(32),
+                     "loaded folder metadata must reject control text, normalize duplicate siblings, and cap hierarchy depth");
+
+    passed &= expect(restored.moveThread(QStringLiteral("thread-obsolete"), project)
+                         && restored.retainThreadAssignments(
+                             QSet<QString>{QStringLiteral("thread-leaf")})
+                         && restored.folderForThread(QStringLiteral("thread-obsolete")).isEmpty()
+                         && restored.folderForThread(QStringLiteral("thread-leaf")) == leaf
+                         && !restored.retainThreadAssignments(
+                             QSet<QString>{QStringLiteral("thread-leaf")}),
+                     "an authoritative thread list must prune only stale local assignments");
+
+    QSettings assignmentLimitSettings(
+        temporaryDirectory.filePath(QStringLiteral("assignment-limit.ini")),
+        QSettings::IniFormat);
+    codexui::detail::ThreadOrganization assignmentLimited;
+    assignmentLimited.load(assignmentLimitSettings);
+    const QString assignmentFolder = assignmentLimited.createFolder(QStringLiteral("Folder"));
+    bool acceptedAssignmentBudget = !assignmentFolder.isEmpty();
+    for (int index = 0; index < 8'192 && acceptedAssignmentBudget; ++index) {
+        acceptedAssignmentBudget = assignmentLimited.moveThread(
+            QStringLiteral("thread-%1").arg(index), assignmentFolder);
+    }
+    passed &= expect(acceptedAssignmentBudget
+                         && !assignmentLimited.moveThread(QStringLiteral("thread-over-limit"),
+                                                          assignmentFolder)
+                         && !assignmentLimited.moveThread(QString(1'025, QLatin1Char('x')),
+                                                          assignmentFolder)
+                         && !assignmentLimited.moveThread(QStringLiteral("bad\tthread"),
+                                                          assignmentFolder),
+                     "runtime thread moves must enforce assignment-count and identifier bounds");
+
+    QSettings storageLimitSettings(
+        temporaryDirectory.filePath(QStringLiteral("storage-limit.ini")),
+        QSettings::IniFormat);
+    codexui::detail::ThreadOrganization storageLimited;
+    storageLimited.load(storageLimitSettings);
+    const QString storageFolder = storageLimited.createFolder(QStringLiteral("Folder"));
+    QString lastAcceptedThread;
+    QString rejectedThread;
+    for (int index = 0; index < 8'192; ++index) {
+        const QString prefix = QStringLiteral("%1:").arg(index);
+        const QString threadId = prefix + QString(1'024 - prefix.size(), QLatin1Char('"'));
+        if (!storageLimited.moveThread(threadId, storageFolder)) {
+            rejectedThread = threadId;
+            break;
+        }
+        lastAcceptedThread = threadId;
+    }
+    const bool storageSaved = storageLimited.save(storageLimitSettings);
+    storageLimitSettings.sync();
+    const QByteArray storedOrganization = storageLimitSettings
+                                              .value(QStringLiteral("sidebar/threadOrganizationV1"))
+                                              .toByteArray();
+    codexui::detail::ThreadOrganization storageRestored;
+    storageRestored.load(storageLimitSettings);
+    passed &= expect(!storageFolder.isEmpty() && !lastAcceptedThread.isEmpty()
+                         && !rejectedThread.isEmpty() && storageSaved
+                         && storedOrganization.size() <= 4 * 1'024 * 1'024
+                         && storageRestored.folderForThread(lastAcceptedThread) == storageFolder
+                         && storageRestored.folderForThread(rejectedThread).isEmpty(),
+                     "runtime moves must never create a thread organization larger than its 4 MiB load limit");
+    return passed;
+}
+
+bool testArchivedThreadAssignmentPruningWaitsForCompleteDiscovery()
+{
+    QTemporaryDir temporaryDirectory;
+    if (!expect(temporaryDirectory.isValid(),
+                "the archived-thread organization test needs temporary settings"))
+        return false;
+
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
+                       temporaryDirectory.path());
+    QCoreApplication::setOrganizationName(QStringLiteral("CodexUITest"));
+    QCoreApplication::setApplicationName(QStringLiteral("ArchivedThreadOrganization"));
+
+    constexpr auto archivedThreadId = "thread-archived";
+    QSettings settings;
+    codexui::detail::ThreadOrganization seed;
+    seed.load(settings);
+    const QString folderId = seed.createFolder(QStringLiteral("Archived work"));
+    bool passed = expect(!folderId.isEmpty()
+                             && seed.moveThread(QString::fromLatin1(archivedThreadId), folderId)
+                             && seed.save(settings),
+                         "the archived thread must start with a persisted folder assignment");
+    settings.sync();
+
+    codexui::SidebarWidget sidebar;
+    sidebar.setThreads(threadDiscoveryState({{"thread-active", false}}), {}, false);
+
+    QSettings afterActiveDiscoverySettings;
+    codexui::detail::ThreadOrganization afterActiveDiscovery;
+    afterActiveDiscovery.load(afterActiveDiscoverySettings);
+    passed &= expect(afterActiveDiscovery.folderForThread(
+                         QString::fromLatin1(archivedThreadId)) == folderId,
+                     "a complete active-thread page must not prune archived assignments before archived discovery completes");
+
+    sidebar.setThreads(
+        threadDiscoveryState({{"thread-active", false}, {archivedThreadId, true}}), {}, true);
+    QSettings afterArchivedDiscoverySettings;
+    codexui::detail::ThreadOrganization afterArchivedDiscovery;
+    afterArchivedDiscovery.load(afterArchivedDiscoverySettings);
+    auto* tree = sidebar.findChild<QTreeWidget*>(QStringLiteral("threadTree"));
+    bool archivedFolderRendered = false;
+    if (tree) {
+        QTreeWidgetItemIterator iterator(tree);
+        while (*iterator) {
+            const QTreeWidgetItem* item = *iterator;
+            if (item->text(0) == QStringLiteral("Archived work") && item->parent()
+                && item->parent()->text(0) == QStringLiteral("ARCHIVED")) {
+                archivedFolderRendered = true;
+                break;
+            }
+            ++iterator;
+        }
+    }
+    passed &= expect(afterArchivedDiscovery.folderForThread(
+                         QString::fromLatin1(archivedThreadId)) == folderId
+                         && archivedFolderRendered,
+                     "the later archived-thread result must retain and render its saved folder assignment");
+
+    sidebar.setThreads(threadDiscoveryState({{"thread-active", false}}), {}, true);
+    QSettings afterCompleteDiscoverySettings;
+    codexui::detail::ThreadOrganization afterCompleteDiscovery;
+    afterCompleteDiscovery.load(afterCompleteDiscoverySettings);
+    passed &= expect(afterCompleteDiscovery.folderForThread(
+                         QString::fromLatin1(archivedThreadId)).isEmpty(),
+                     "an actually absent thread assignment must be pruned after all thread discovery completes");
+    return passed;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -708,5 +1105,7 @@ int main(int argc, char** argv)
     passed &= testUnavailableCanonicalSettingsRemainEditable();
     passed &= testThreadSetupResults();
     passed &= testThreadActionGating();
+    passed &= testThreadOrganizationPersistenceAndSafeMoves();
+    passed &= testArchivedThreadAssignmentPruningWaitsForCompleteDiscovery();
     return passed ? 0 : 1;
 }

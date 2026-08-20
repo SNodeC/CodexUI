@@ -722,6 +722,57 @@ bool testArchivedThreadRefreshFailureRemainsIncomplete()
     return passed;
 }
 
+bool testTurnSteeringSubmission()
+{
+    codexui::FrontendSession session;
+    std::vector<sdk::OutboundMessage> outbound;
+    bool passed = expect(
+        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, outbound),
+        "the turn-steering fixture must reach a synchronized SDK connection");
+
+    QString completionError = QStringLiteral("completion not called");
+    const auto immediateError = session.steerTurn(
+        QStringLiteral("thread-active"),
+        QStringLiteral("turn-active"),
+        QStringLiteral("focus on the narrow fix"),
+        [&completionError](const QString& error) { completionError = error; });
+    const std::vector<frontend::Json> commands = capturedCommands(outbound, "turn.steer");
+    passed &= expect(!immediateError && commands.size() == 1,
+                     "a valid steering prompt must submit exactly one typed turn.steer command");
+    if (commands.size() != 1 || !commands.front().contains("requestId"))
+        return false;
+
+    const frontend::Json expectedParams{
+        {"expectedTurnId", "turn-active"},
+        {"input",
+         frontend::Json::array({{{"text", "focus on the narrow fix"},
+                                 {"text_elements", frontend::Json::array()},
+                                 {"type", "text"}}})},
+        {"threadId", "thread-active"},
+    };
+    const frontend::Json actualParams = commands.front().value("params", frontend::Json::object());
+    passed &= expect(actualParams == expectedParams,
+                     "steering must preserve the canonical thread/turn identities and exact typed text input");
+
+    const std::string requestId = commands.front()["requestId"].get<std::string>();
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::success(
+                requestId, frontend::Json{{"turnId", "turn-active"}})}),
+        "the matching turn.steer response must be accepted");
+    passed &= expect(completionError.isEmpty(),
+                     "a matching accepted turn identity must complete steering successfully");
+
+    const std::size_t outboundBeforeInvalid = outbound.size();
+    const auto missingIdentityError = session.steerTurn(
+        QStringLiteral("thread-active"), {}, QStringLiteral("do not send"), [](const QString&) {});
+    passed &= expect(missingIdentityError.has_value()
+                         && outbound.size() == outboundBeforeInvalid,
+                     "steering without the canonical active turn identity must fail before transport submission");
+    return passed;
+}
+
 bool testOutboundQueue()
 {
     codexui::FrontendSession session;
@@ -1030,6 +1081,7 @@ int main(int argc, char* argv[])
                && testModelCatalogRefresh() && testModelCatalogRefreshFailureIsDiagnosed()
                && testArchivedThreadRefresh()
                && testArchivedThreadRefreshFailureRemainsIncomplete()
+               && testTurnSteeringSubmission()
                && testOutboundQueue() && testInboundBufferCompaction()
            ? 0
            : 1;

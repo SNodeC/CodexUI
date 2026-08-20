@@ -68,16 +68,21 @@ public:
 
     [[nodiscard]] QString prompt() const;
     void clearPrompt();
+    void clearPromptIfUnchanged(const QString& submittedPrompt);
     void focusPrompt();
-    void setActionState(bool sendAllowed,
+    void setActionState(bool primaryAllowed,
                         bool stopAllowed,
                         bool editorAllowed,
-                        bool stopVisible);
+                        bool settingsAllowed,
+                        bool stopVisible,
+                        bool steerMode,
+                        const QString& actionThreadIdentity = {},
+                        const QString& activeTurnIdentity = {});
     void setStatus(const QString& text, bool error = false);
     [[nodiscard]] int baseHeight() const noexcept;
 
 signals:
-    void sendRequested(const QString& prompt);
+    void sendRequested(const QString& prompt, bool steerRequested);
     void stopRequested();
     void settingsChanged();
     void dockHeightChanged(int height);
@@ -87,6 +92,14 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
+    struct PromptDraftTarget {
+        QString threadIdentity;
+        QString turnIdentity;
+        bool steering = false;
+
+        bool operator==(const PromptDraftTarget&) const = default;
+    };
+
     enum class Field : std::size_t {
         Model,
         Effort,
@@ -145,7 +158,9 @@ private:
     QPushButton* stop = nullptr;
     bool sendContextAllowed = false;
     bool controlsContextAllowed = false;
-    bool showingStopAction = false;
+    bool steeringMode = false;
+    PromptDraftTarget currentPromptTarget;
+    std::optional<PromptDraftTarget> draftPromptTarget;
     int currentEditorHeight = 0;
     int compactBaseHeight = 0;
 };

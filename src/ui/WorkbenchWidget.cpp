@@ -429,6 +429,7 @@ void WorkbenchWidget::refreshLifecycle()
     if (frontendSession.lifecycle() != Lifecycle::Ready) {
         const bool writeWasPending = pendingAction != PendingAction::None || controllerAcquireInFlight
                                      || threadStartInFlight || threadResumeInFlight || turnStartInFlight
+                                     || turnSteerInFlight
                                      || interruptInFlight || threadMutationInFlight;
         clearWriteTransients();
         if (writeWasPending)
@@ -483,7 +484,7 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
     refreshSidebar = refreshSidebar || selectionChanged;
 
     if (refreshSidebar)
-        sidebar->setThreads(state, selectedThreadId);
+        sidebar->setThreads(state, selectedThreadId, threadDiscoveryComplete);
 
     // ConversationWidget resolves the stable selection against this exact
     // immutable State and never retains backend object addresses.
@@ -623,25 +624,34 @@ void WorkbenchWidget::refreshControls()
     const bool pendingControllerWrite = controllerAcquireInFlight || pendingAction != PendingAction::None
                                         || requestControllerAcquireInFlight || requestResponseInFlight
                                         || threadMutationInFlight;
-    const bool promptSubmissionInFlight = threadStartInFlight || threadResumeInFlight || turnStartInFlight;
+    const bool promptSubmissionInFlight = threadStartInFlight || threadResumeInFlight
+                                          || turnStartInFlight || turnSteerInFlight;
     const bool selectedWritable = selected && selected->fullyLoaded
                                   && !selected->archived.value_or(false);
 
     sidebar->setNewThreadEnabled(ready && !promptSubmissionInFlight && !pendingControllerWrite);
     sidebar->setThreadInteractionEnabled(ready);
-    const bool composerAvailable = ready && selectedWritable && active == nullptr
-                                   && !promptSubmissionInFlight && !pendingControllerWrite;
+    const bool idleComposerAvailable = ready && selectedWritable && active == nullptr
+                                       && !promptSubmissionInFlight && !pendingControllerWrite;
+    const bool steerComposerAvailable = ready && selectedWritable && active != nullptr
+                                        && !promptSubmissionInFlight && !pendingControllerWrite;
     conversation->setActionState(
-        composerAvailable,
-        ready && active != nullptr && !interruptInFlight && !pendingControllerWrite,
-        composerAvailable,
-        ready && active != nullptr);
+        idleComposerAvailable || steerComposerAvailable,
+        ready && active != nullptr && !interruptInFlight
+            && !promptSubmissionInFlight && !pendingControllerWrite,
+        idleComposerAvailable || steerComposerAvailable,
+        idleComposerAvailable,
+        ready && active != nullptr,
+        active != nullptr,
+        selectedThreadId,
+        active ? QString::fromStdString(active->id.value) : QString{});
 }
 
 bool WorkbenchWidget::writeOperationBusy() const noexcept
 {
     return pendingAction != PendingAction::None || controllerAcquireInFlight
         || threadStartInFlight || threadResumeInFlight || turnStartInFlight
+        || turnSteerInFlight
         || interruptInFlight || threadMutationInFlight
         || requestControllerAcquireInFlight || requestResponseInFlight;
 }
@@ -1019,7 +1029,7 @@ void WorkbenchWidget::showDeleteThreadConfirmation(const QString& threadId)
     dialog->open();
 }
 
-void WorkbenchWidget::sendPrompt(const QString& prompt)
+void WorkbenchWidget::sendPrompt(const QString& prompt, bool steerRequested)
 {
     if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready || prompt.trimmed().isEmpty()
         || writeOperationBusy())
@@ -1031,9 +1041,32 @@ void WorkbenchWidget::sendPrompt(const QString& prompt)
 
     const auto& state = frontendSession.state();
     const auto* selected = selectedThreadId.isEmpty() ? nullptr : state.thread(selectedThreadId.toStdString());
-    if (!selected || !selected->fullyLoaded || activeTurn(state, selected)
-        || selected->archived.value_or(false))
+    if (!selected || !selected->fullyLoaded || selected->archived.value_or(false))
         return;
+
+    if (const auto* active = activeTurn(state, selected)) {
+        if (!steerRequested) {
+            showWriteError(QStringLiteral(
+                "A turn started before this prompt was submitted. Edit the draft to send it as a steer."));
+            refreshControls();
+            return;
+        }
+        pendingAction = PendingAction::SteerActiveTurn;
+        pendingPrompt = prompt;
+        pendingThreadId = selectedThreadId;
+        pendingTurnId = QString::fromStdString(active->id.value);
+        pendingTurnDraft = {};
+        conversation->setWriteStatus(QStringLiteral("Preparing steer…"));
+        ensureController();
+        return;
+    }
+
+    if (steerRequested) {
+        showWriteError(QStringLiteral(
+            "The active turn ended before this steer was submitted. Edit the draft to use it for a new turn."));
+        refreshControls();
+        return;
+    }
 
     const UpcomingTurnDraft settings = conversation->upcomingTurnDraft();
     if (settings.threadIdentity != selectedThreadId) {
@@ -1250,6 +1283,20 @@ void WorkbenchWidget::executePendingAction()
                 resumeThread(threadId, prompt, turnSettings);
             break;
         }
+        case PendingAction::SteerActiveTurn:
+        {
+            const auto& state = frontendSession.state();
+            const auto* thread = state.thread(threadId.toStdString());
+            const auto* turn = activeTurn(state, thread);
+            if (!thread || !thread->fullyLoaded || thread->archived.value_or(false)
+                || !turn || QString::fromStdString(turn->id.value) != turnId) {
+                showWriteError(QStringLiteral("The target turn changed before it could be steered"));
+                refreshControls();
+                break;
+            }
+            steerTurn(threadId, turnId, prompt);
+            break;
+        }
         case PendingAction::InterruptTurn:
         {
             const auto& state = frontendSession.state();
@@ -1443,6 +1490,44 @@ void WorkbenchWidget::startTurn(const QString& threadId,
     if (selectedThreadId == threadId)
         conversation->setWriteStatus(QStringLiteral("Prompt submitted"));
     refreshControls();
+}
+
+void WorkbenchWidget::steerTurn(const QString& threadId,
+                                const QString& turnId,
+                                const QString& prompt)
+{
+    turnSteerInFlight = true;
+    if (selectedThreadId == threadId)
+        conversation->setWriteStatus(QStringLiteral("Steering turn…"));
+    refreshControls();
+
+    const QPointer<WorkbenchWidget> self(this);
+    const auto immediateError = frontendSession.steerTurn(
+        threadId,
+        turnId,
+        prompt,
+        [self, targetThreadId = threadId, submittedPrompt = prompt](const QString& error) {
+            if (!self)
+                return;
+            self->turnSteerInFlight = false;
+            if (!error.isEmpty()) {
+                if (self->selectedThreadId == targetThreadId)
+                    self->showWriteError(error);
+                else
+                    self->showWriteError(
+                        QStringLiteral("Turn in %1 could not be steered: %2")
+                            .arg(targetThreadId, error));
+            } else if (self->selectedThreadId == targetThreadId) {
+                self->conversation->clearPromptIfUnchanged(submittedPrompt);
+                self->conversation->setWriteStatus({});
+            }
+            self->refreshState();
+        });
+    if (immediateError) {
+        turnSteerInFlight = false;
+        showWriteError(*immediateError);
+        refreshControls();
+    }
 }
 
 void WorkbenchWidget::reconcileSubmittedTurnSettings()
@@ -1790,6 +1875,7 @@ void WorkbenchWidget::clearWriteTransients()
     threadStartInFlight = false;
     threadResumeInFlight = false;
     turnStartInFlight = false;
+    turnSteerInFlight = false;
     interruptInFlight = false;
     threadMutationInFlight = false;
     controllerUnavailable = false;
