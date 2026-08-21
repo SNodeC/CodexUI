@@ -876,15 +876,26 @@ void addActivityRow(QVBoxLayout* rows,
     title->setObjectName(QStringLiteral("conversationActivityTitle"));
     title->setToolTip(plainTooltip(item.title));
     title->setStyleSheet(QStringLiteral("font-size:12px;font-weight:500;"));
+    // Align the first wrapped text line with the 22 px status/disclosure
+    // controls.  A top content inset keeps later lines flowing downward
+    // instead of vertically centering the complete multiline label.
+    const int titleTopInset = qMax(0, (disclosure->height() - title->fontMetrics().height()) / 2);
+    title->setContentsMargins(0, titleTopInset, 0, 0);
+    title->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    title->setMinimumHeight(disclosure->height());
     layout->addWidget(title, 1);
 
     auto* tail = textLabel(item.tail, "meta");
     tail->setObjectName(QStringLiteral("conversationActivityTail"));
     tail->setVisible(!item.tail.isEmpty());
+    tail->setFixedHeight(disclosure->height());
+    tail->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     layout->addWidget(tail, 0, Qt::AlignTop);
     auto* state = textLabel(item.status);
     state->setObjectName(QStringLiteral("conversationActivityStatus"));
     state->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;").arg(color));
+    state->setFixedHeight(disclosure->height());
+    state->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     layout->addWidget(state, 0, Qt::AlignTop);
     lineLayout->addWidget(summary);
 
