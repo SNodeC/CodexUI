@@ -6,6 +6,7 @@
 #include "ui/ConversationWidget.h"
 #include "ui/InspectorWidget.h"
 #include "ui/InteractiveRequestDialog.h"
+#include "ui/PresentationRefreshAccumulator.h"
 #include "ui/SidebarWidget.h"
 #include "ui/ThreadSetupDialog.h"
 #include "ui/UpcomingTurnDock.h"
@@ -34,7 +35,6 @@
 #include <QtConcurrentRun>
 
 #include <algorithm>
-#include <limits>
 #include <variant>
 
 namespace codexui {
@@ -352,95 +352,16 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
                 if (identity.threadId != selectedThreadId)
                     continue;
                 foundExactContent = true;
-                auto existing = std::find_if(
-                    selectedContentRefreshPending.begin(),
-                    selectedContentRefreshPending.end(),
-                    [&identity](const ConversationContentUpdate& update)
-                    {
-                        return update.turnId == identity.turnId
-                               && update.itemId == identity.itemId
-                               && update.channel == identity.channel;
-                    });
-                if (existing == selectedContentRefreshPending.end())
+                if (detail::mergeConversationContentUpdate(
+                        selectedContentRefreshPending,
+                        selectedContentRefreshPendingBytes,
+                        identity)
+                    == detail::BoundedMergeResult::CapacityExceeded)
                 {
-                    if (static_cast<qsizetype>(selectedContentRefreshPending.size())
-                        >= detail::maximumCoalescedPresentationIdentities)
-                    {
-                        selectedPresentationFullRefreshPending = true;
-                        selectedContentRefreshPending.clear();
-                        selectedContentRefreshPendingBytes = 0;
-                        break;
-                    }
-                    ConversationContentUpdate next{
-                        identity.turnId,
-                        identity.itemId,
-                        identity.channel,
-                        std::nullopt};
-                    if (identity.append)
-                    {
-                        const std::uint64_t deltaBytes = static_cast<std::uint64_t>(
-                            identity.append->deltaUtf8.size());
-                        if (selectedContentRefreshPendingBytes
-                                > detail::maximumCoalescedContentDeltaBytes
-                            || deltaBytes
-                                   > detail::maximumCoalescedContentDeltaBytes
-                                         - selectedContentRefreshPendingBytes)
-                        {
-                            selectedPresentationFullRefreshPending = true;
-                            selectedContentRefreshPending.clear();
-                            selectedContentRefreshPendingBytes = 0;
-                            break;
-                        }
-                        next.append = ConversationContentAppend{
-                            identity.append->baseContentBytes,
-                            identity.append->discardPrefixBytes,
-                            deltaBytes,
-                            QString::fromUtf8(identity.append->deltaUtf8)};
-                        selectedContentRefreshPendingBytes += deltaBytes;
-                    }
-                    selectedContentRefreshPending.push_back(std::move(next));
-                }
-                else if (existing->append && identity.append
-                         && existing->append->discardPrefixBytes == 0
-                         && identity.append->discardPrefixBytes == 0
-                         && existing->append->baseContentBytes
-                                <= std::numeric_limits<std::uint64_t>::max()
-                                       - existing->append->deltaUtf8Bytes
-                         && existing->append->baseContentBytes
-                                + existing->append->deltaUtf8Bytes
-                                == identity.append->baseContentBytes)
-                {
-                    const std::uint64_t deltaBytes = static_cast<std::uint64_t>(
-                        identity.append->deltaUtf8.size());
-                    if (selectedContentRefreshPendingBytes
-                            > detail::maximumCoalescedContentDeltaBytes
-                        || deltaBytes
-                               > detail::maximumCoalescedContentDeltaBytes
-                                     - selectedContentRefreshPendingBytes)
-                    {
-                        selectedPresentationFullRefreshPending = true;
-                        selectedContentRefreshPending.clear();
-                        selectedContentRefreshPendingBytes = 0;
-                        break;
-                    }
-                    existing->append->delta.append(QString::fromUtf8(identity.append->deltaUtf8));
-                    existing->append->deltaUtf8Bytes += deltaBytes;
-                    selectedContentRefreshPendingBytes += deltaBytes;
-                }
-                else
-                {
-                    // Ambiguous, rolling, or replacement updates retain the
-                    // authoritative State fallback instead of guessing a delta.
-                    if (existing->append)
-                    {
-                        selectedContentRefreshPendingBytes =
-                            existing->append->deltaUtf8Bytes
-                                    <= selectedContentRefreshPendingBytes
-                                ? selectedContentRefreshPendingBytes
-                                      - existing->append->deltaUtf8Bytes
-                                : 0;
-                    }
-                    existing->append.reset();
+                    selectedPresentationFullRefreshPending = true;
+                    selectedContentRefreshPending.clear();
+                    selectedContentRefreshPendingBytes = 0;
+                    break;
                 }
             }
             // A conversation-affecting update without an exact item identity
@@ -462,17 +383,16 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
             sidebarThreadRefreshPendingSet.clear();
         } else if (!sidebarFullRefreshPending) {
             for (const QString& threadId : scope.affectedSidebarThreadIds) {
-                if (sidebarThreadRefreshPendingSet.contains(threadId))
-                    continue;
-                if (sidebarThreadRefreshPending.size()
-                    >= detail::maximumCoalescedPresentationIdentities) {
+                if (detail::appendUniqueSidebarThread(
+                        sidebarThreadRefreshPending,
+                        sidebarThreadRefreshPendingSet,
+                        threadId)
+                    == detail::BoundedMergeResult::CapacityExceeded) {
                     sidebarFullRefreshPending = true;
                     sidebarThreadRefreshPending.clear();
                     sidebarThreadRefreshPendingSet.clear();
                     break;
                 }
-                sidebarThreadRefreshPendingSet.insert(threadId);
-                sidebarThreadRefreshPending.append(threadId);
             }
             if (scope.affectedSidebarThreadIds.isEmpty()) {
                 sidebarFullRefreshPending = true;
