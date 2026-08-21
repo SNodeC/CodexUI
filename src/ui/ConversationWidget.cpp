@@ -708,10 +708,13 @@ ActivityPresentation activityPresentation(const sdk::State& state,
     return result;
 }
 
-QToolButton* disclosureButton(bool expanded, const QString& accessibleName)
+QToolButton* disclosureButton(bool expanded,
+                              const QString& accessibleName,
+                              bool activityRow = false)
 {
     auto* button = new QToolButton;
     button->setObjectName(QStringLiteral("activityDisclosure"));
+    button->setProperty("activityRow", activityRow);
     button->setAutoRaise(true);
     button->setCheckable(true);
     button->setArrowType(Qt::NoArrow);
@@ -725,6 +728,8 @@ QToolButton* disclosureButton(bool expanded, const QString& accessibleName)
     button->setStyleSheet(QStringLiteral(
         "QToolButton#activityDisclosure{background:transparent;border:1px solid transparent;"
         "border-radius:5px;padding:0;}"
+        "QToolButton#activityDisclosure[activityRow=\"true\"]{padding-left:4px;padding-right:0;"
+        "padding-top:0;padding-bottom:0;}"
         "QToolButton#activityDisclosure:hover{background:#f1f5fb;border-color:#d7dee8;}"
         "QToolButton#activityDisclosure:pressed{background:#e9eff7;border-color:#d7dee8;}"
         "QToolButton#activityDisclosure:focus{border:1px solid #2f6feb;}"));
@@ -849,28 +854,26 @@ void addActivityRow(QVBoxLayout* rows,
     const QString color = statusColor(item.status);
     auto* prefix = new QWidget;
     prefix->setObjectName(QStringLiteral("conversationActivityPrefix"));
-    auto* prefixLayout = new QHBoxLayout(prefix);
-    prefixLayout->setContentsMargins(0, 0, 0, 0);
-    prefixLayout->setSpacing(1);
+    prefix->setFixedSize(hasDetails ? 31 : 14, 22);
 
     auto* symbol = textLabel(statusGlyph(item.status));
+    symbol->setParent(prefix);
     symbol->setObjectName(QStringLiteral("conversationActivitySymbol"));
     symbol->setFixedSize(14, 22);
+    symbol->move(0, 0);
     symbol->setAlignment(Qt::AlignCenter);
+    symbol->setAttribute(Qt::WA_TransparentForMouseEvents);
     symbol->setStyleSheet(QStringLiteral("color:%1;font-size:12px;font-weight:600;").arg(color));
-    prefixLayout->addWidget(symbol, 0, Qt::AlignTop);
 
     auto* disclosure = disclosureButton(
         expanded,
-        QStringLiteral("Activity details: %1").arg(item.title));
-    // Keep the row control only as wide as its icon.  The shared 22 px
-    // disclosure button is appropriate for the card header, but here it
-    // indents the chevron relative to non-expandable row titles.
-    disclosure->setFixedWidth(14);
+        QStringLiteral("Activity details: %1").arg(item.title),
+        true);
+    disclosure->setParent(prefix);
+    disclosure->move(9, 0);
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
-    prefixLayout->addWidget(disclosure, 0, Qt::AlignTop);
-    layout->addWidget(prefix, 0, Qt::AlignTop);
+    symbol->raise();
 
     auto* title = wrappingLabel(item.title);
     title->setObjectName(QStringLiteral("conversationActivityTitle"));
@@ -883,7 +886,19 @@ void addActivityRow(QVBoxLayout* rows,
     title->setContentsMargins(0, titleTopInset, 0, 0);
     title->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     title->setMinimumHeight(disclosure->height());
-    layout->addWidget(title, 1);
+
+    // Keep a native 22 px hit target without letting that hit target define
+    // the visible columns.  Its right-pointing chevron begins at the same x as
+    // titles on rows without details, and the following title retains the
+    // header's measured seven-pixel visible gap.
+    auto* leading = new QWidget;
+    auto* leadingLayout = new QHBoxLayout(leading);
+    leadingLayout->setObjectName(QStringLiteral("conversationActivityLeadingLayout"));
+    leadingLayout->setContentsMargins(0, 0, 0, 0);
+    leadingLayout->setSpacing(hasDetails ? 0 : 6);
+    leadingLayout->addWidget(prefix, 0, Qt::AlignTop);
+    leadingLayout->addWidget(title, 1);
+    layout->addWidget(leading, 1);
 
     auto* tail = textLabel(item.tail, "meta");
     tail->setObjectName(QStringLiteral("conversationActivityTail"));
@@ -1011,6 +1026,11 @@ bool updateActivityRow(QWidget* row, const ActivityPresentation& item)
         incomplete->setVisible(item.truncated);
 
     const bool hasDetails = !item.detail.isEmpty() || !item.output.isEmpty() || item.truncated;
+    if (auto* prefix = row->findChild<QWidget*>(QStringLiteral("conversationActivityPrefix")))
+        prefix->setFixedWidth(hasDetails ? 31 : 14);
+    if (auto* leadingLayout = row->findChild<QHBoxLayout*>(
+            QStringLiteral("conversationActivityLeadingLayout")))
+        leadingLayout->setSpacing(hasDetails ? 0 : 6);
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
     if (!hasDetails)
