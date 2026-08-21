@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
+#include "ui/AnchoredTurnSurface.h"
 #include "ui/SidebarWidget.h"
 #include "ui/ThreadSetupDialog.h"
 #include "ui/UpcomingTurnDock.h"
@@ -28,6 +29,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QScrollBar>
 #include <QSet>
 #include <QSettings>
@@ -531,6 +533,18 @@ bool testUpcomingTurnActionStates()
                          && send->isEnabled() && !stop->isHidden() && stop->isEnabled()
                          && editor->isEnabled() && !sandbox->isEnabled() && !approval->isEnabled(),
                      "a running turn must permit steering and stopping while locking execution settings");
+    QString shortcutPrompt;
+    bool shortcutSteering = false;
+    QObject::connect(&dock, &codexui::UpcomingTurnDock::sendRequested,
+                     [&shortcutPrompt, &shortcutSteering](const QString& prompt, bool steering) {
+                         shortcutPrompt = prompt;
+                         shortcutSteering = steering;
+                     });
+    QKeyEvent submitShortcut(QEvent::KeyPress, Qt::Key_Return, Qt::ControlModifier);
+    QCoreApplication::sendEvent(editor, &submitShortcut);
+    passed &= expect(shortcutPrompt == QStringLiteral("redirect the active turn")
+                         && shortcutSteering,
+                     "the extracted prompt editor must preserve Ctrl+Enter submission semantics");
     dock.setActionState(false,
                         false,
                         false,
@@ -931,14 +945,18 @@ bool testScopedDuplicateTurnActionGating()
     if (!completed || !running)
         return false;
 
-    const auto completedActions = codexui::detail::threadActionAvailability(state, *completed);
-    const auto runningActions = codexui::detail::threadActionAvailability(state, *running);
+    const auto completedStatus = codexui::detail::threadUiStatus(state, *completed);
+    const auto runningStatus = codexui::detail::threadUiStatus(state, *running, true);
+    const auto& completedActions = completedStatus.actions;
+    const auto& runningActions = runningStatus.actions;
     passed &= expect(!completedActions.interrupt && completedActions.archive
-                         && completedActions.remove,
-                     "a completed scoped turn must not inherit the sibling thread's running state");
+                         && completedActions.remove && !completedStatus.running
+                         && !completedStatus.awaitingResponse,
+                     "a completed scoped turn must derive one non-running presentation without inheriting sibling state");
     passed &= expect(runningActions.interrupt && !runningActions.archive
-                         && !runningActions.remove,
-                     "an active scoped turn must enable only its own thread's interrupt action");
+                         && !runningActions.remove && runningStatus.running
+                         && runningStatus.awaitingResponse,
+                     "an active scoped turn must derive its running, attention, and action presentation together");
     return passed;
 }
 

@@ -2,6 +2,7 @@
 
 #include "ui/ConversationWidget.h"
 
+#include "ui/AnchoredTurnSurface.h"
 #include "ui/UpcomingTurnDock.h"
 
 #include <ai/openai/codex/frontend/Messages.h>

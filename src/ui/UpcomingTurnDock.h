@@ -21,11 +21,11 @@ class QFrame;
 class QLabel;
 class QLineEdit;
 class QMenu;
-class QPlainTextEdit;
 class QPushButton;
-class QResizeEvent;
 
 namespace codexui {
+
+class ExpandingPromptEditor;
 
 // A non-authoritative, write-only description of the settings that the user
 // changed for the upcoming turn. Untouched fields stay omitted so callers can
@@ -94,10 +94,6 @@ signals:
     void settingsChanged();
     void dockHeightChanged(int height);
 
-protected:
-    bool eventFilter(QObject* watched, QEvent* event) override;
-    void resizeEvent(QResizeEvent* event) override;
-
 private:
     struct PromptDraftTarget {
         QString threadIdentity;
@@ -131,7 +127,7 @@ private:
     void refreshAttachmentPresentation();
     [[nodiscard]] bool selectedModelSupportsImages() const;
     void updateDraftTarget();
-    void updatePromptHeight();
+    void updatePromptHeight(int editorHeight);
     void updateSendEnabled();
     void updateChangedPresentation();
     void markComboChange(Field field, QComboBox* combo);
@@ -164,7 +160,7 @@ private:
     QFrame* composerSurface = nullptr;
     QPushButton* attach = nullptr;
     QPushButton* attachmentSummary = nullptr;
-    QPlainTextEdit* editor = nullptr;
+    ExpandingPromptEditor* editor = nullptr;
     QLabel* settingsHint = nullptr;
     QLabel* status = nullptr;
     QPushButton* send = nullptr;
@@ -175,31 +171,7 @@ private:
     PromptDraftTarget currentPromptTarget;
     std::optional<PromptDraftTarget> draftPromptTarget;
     QList<AttachmentInfo> selectedAttachments;
-    int currentEditorHeight = 0;
     int compactBaseHeight = 0;
-};
-
-// Keeps the conversation viewport at a fixed geometry and anchors the dock to
-// the bottom edge. When the composer grows, only the dock's top edge moves and
-// the additional area overlays the conversation.
-class AnchoredTurnSurface final : public QWidget
-{
-    Q_OBJECT
-
-public:
-    explicit AnchoredTurnSurface(QWidget* parent = nullptr);
-    void setConversationWidget(QWidget* widget);
-    void setUpcomingTurnDock(UpcomingTurnDock* widget);
-
-protected:
-    bool eventFilter(QObject* watched, QEvent* event) override;
-    void resizeEvent(QResizeEvent* event) override;
-
-private:
-    void relayout();
-
-    QWidget* conversation = nullptr;
-    UpcomingTurnDock* dock = nullptr;
 };
 
 } // namespace codexui

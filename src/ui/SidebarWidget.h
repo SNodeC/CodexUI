@@ -51,6 +51,20 @@ struct ThreadActionAvailability {
 };
 
 namespace detail {
+struct ThreadUiStatus {
+    ThreadActionAvailability actions;
+    bool running = false;
+    bool awaitingResponse = false;
+    bool archived = false;
+
+    bool operator==(const ThreadUiStatus&) const = default;
+};
+
+[[nodiscard]] ThreadUiStatus
+threadUiStatus(const ai::openai::codex::frontend::client::State& state,
+               const ai::openai::codex::frontend::client::ThreadState& thread,
+               bool awaitingResponse = false);
+
 [[nodiscard]] ThreadActionAvailability
 threadActionAvailability(const ai::openai::codex::frontend::client::State& state,
                          const ai::openai::codex::frontend::client::ThreadState& thread);

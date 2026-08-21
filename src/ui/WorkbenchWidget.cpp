@@ -458,6 +458,8 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
     const bool threadListComplete = state.threadList().value && state.threadList().value->complete;
     const bool threadDiscoveryComplete = threadListComplete
                                          && frontendSession.archivedThreadDiscoveryComplete();
+    const bool threadDiscoveryTerminal = threadListComplete
+                                         && frontendSession.archivedThreadDiscoveryTerminal();
     const QString previousThreadId = selectedThreadId;
 
     if (!newThreadIdAwaitingState.isEmpty()
@@ -469,7 +471,7 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
     const bool awaitingSelectedThread = !newThreadIdAwaitingState.isEmpty()
         && selectedThreadId == newThreadIdAwaitingState;
     if (!selectedThreadId.isEmpty()
-        && state.thread(selectedThreadId.toStdString()) == nullptr && ready && threadDiscoveryComplete
+        && state.thread(selectedThreadId.toStdString()) == nullptr && ready && threadDiscoveryTerminal
         && !awaitingSelectedThread)
         selectedThreadId.clear();
     if (selectedThreadId.isEmpty() && !threads.empty() && newThreadIdAwaitingState.isEmpty())
@@ -1136,13 +1138,13 @@ void WorkbenchWidget::reconcileAutomaticResumeState()
 
     const auto& state = frontendSession.state();
     const auto* thread = state.thread(automaticResumeThreadId.toStdString());
-    const bool threadDiscoveryComplete = state.threadList().value
+    const bool threadDiscoveryTerminal = state.threadList().value
                                          && state.threadList().value->complete
-                                         && frontendSession.archivedThreadDiscoveryComplete();
+                                         && frontendSession.archivedThreadDiscoveryTerminal();
     const bool canonicalResumeObserved = thread
         && (thread->archived.value_or(false) || activeTurn(state, thread)
             || ai::openai::codex::frontend::client::threadIsIdle(*thread));
-    if (!canonicalResumeObserved && (thread || !threadDiscoveryComplete))
+    if (!canonicalResumeObserved && (thread || !threadDiscoveryTerminal))
         return;
 
     const QString completedThreadId = automaticResumeThreadId;

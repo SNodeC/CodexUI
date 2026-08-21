@@ -2,14 +2,13 @@
 
 #include "ui/UpcomingTurnDock.h"
 
+#include "ui/ExpandingPromptEditor.h"
+
 #include <QComboBox>
-#include <QAbstractTextDocumentLayout>
-#include <QEvent>
 #include <QFileDialog>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
-#include <QKeyEvent>
 #include <QLabel>
 #include <QIcon>
 #include <QImageReader>
@@ -19,22 +18,16 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
-#include <QPlainTextEdit>
 #include <QPushButton>
-#include <QResizeEvent>
 #include <QSet>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStandardItemModel>
 #include <QStyleOptionComboBox>
-#include <QTextDocument>
-#include <QTextBlock>
-#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidgetAction>
 
 #include <algorithm>
-#include <cmath>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -45,9 +38,6 @@ namespace
 {
 namespace sdk = ai::openai::codex::frontend::client;
 namespace typed = ai::openai::codex::typed;
-
-constexpr int oneLineEditorHeight = 30;
-constexpr int maximumEditorHeight = 200;
 
 class CompactComboBox final : public QComboBox
 {
@@ -501,20 +491,7 @@ UpcomingTurnDock::UpcomingTurnDock(QWidget* parent)
     attachmentSummary->hide();
     composerLayout->addWidget(attachmentSummary, 0, Qt::AlignBottom);
 
-    editor = new QPlainTextEdit;
-    editor->setObjectName(QStringLiteral("upcomingPromptEditor"));
-    editor->setPlaceholderText(QStringLiteral("Message Codex"));
-    editor->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-    editor->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    editor->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    editor->setMinimumHeight(oneLineEditorHeight);
-    editor->setMaximumHeight(maximumEditorHeight);
-    editor->setFixedHeight(oneLineEditorHeight);
-    editor->setStyleSheet(QStringLiteral(
-        "QPlainTextEdit{background:transparent;color:#1d2633;border:0;padding:3px 2px;font-size:13px;}"));
-    editor->installEventFilter(this);
-    editor->viewport()->installEventFilter(this);
-    currentEditorHeight = oneLineEditorHeight;
+    editor = new ExpandingPromptEditor;
     composerLayout->addWidget(editor, 1);
 
     status = plainLabel(QStringLiteral("Ctrl+Enter to send"), "upcomingTurnStatus");
@@ -578,10 +555,20 @@ UpcomingTurnDock::UpcomingTurnDock(QWidget* parent)
             [this] { markComboChange(Field::Collaboration, collaboration); });
     connect(cwd, &QLineEdit::textEdited, this, [this] { markTextChange(Field::Cwd, cwd); });
 
-    connect(editor, &QPlainTextEdit::textChanged, this, [this] {
+    connect(editor, &ExpandingPromptEditor::textChanged, this, [this] {
         updateDraftTarget();
-        updatePromptHeight();
         updateSendEnabled();
+    });
+    connect(editor, &ExpandingPromptEditor::editorHeightChanged,
+            this, &UpcomingTurnDock::updatePromptHeight);
+    connect(editor, &ExpandingPromptEditor::focusStateChanged, this, [this](bool focused) {
+        composerSurface->setProperty("focused", focused);
+        composerSurface->style()->unpolish(composerSurface);
+        composerSurface->style()->polish(composerSurface);
+    });
+    connect(editor, &ExpandingPromptEditor::submitRequested, this, [this] {
+        if (send->isEnabled())
+            emit sendRequested(editor->toPlainText(), steeringMode);
     });
     connect(attach, &QPushButton::clicked, this, &UpcomingTurnDock::chooseAttachments);
     connect(send, &QPushButton::clicked, this, [this] {
@@ -960,45 +947,6 @@ int UpcomingTurnDock::baseHeight() const noexcept
     return compactBaseHeight;
 }
 
-bool UpcomingTurnDock::eventFilter(QObject* watched, QEvent* event)
-{
-    if ((watched == editor || watched == editor->viewport())
-        && event->type() == QEvent::Resize) {
-        // Layout may update the editor and its viewport in separate steps.
-        // Re-measure after both geometries have settled so wrapped prompts
-        // follow window-width changes without waiting for another keystroke.
-        QTimer::singleShot(0, this, [this] { updatePromptHeight(); });
-    }
-    if (watched == editor)
-    {
-        if (event->type() == QEvent::FocusIn || event->type() == QEvent::FocusOut)
-        {
-            composerSurface->setProperty("focused", event->type() == QEvent::FocusIn);
-            composerSurface->style()->unpolish(composerSurface);
-            composerSurface->style()->polish(composerSurface);
-        }
-        if (event->type() == QEvent::KeyPress)
-        {
-            const auto* key = static_cast<QKeyEvent*>(event);
-            if ((key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter)
-                && key->modifiers().testFlag(Qt::ControlModifier)
-                && !key->isAutoRepeat())
-            {
-                if (send->isEnabled())
-                    emit sendRequested(editor->toPlainText(), steeringMode);
-                return true;
-            }
-        }
-    }
-    return QWidget::eventFilter(watched, event);
-}
-
-void UpcomingTurnDock::resizeEvent(QResizeEvent* event)
-{
-    QWidget::resizeEvent(event);
-    updatePromptHeight();
-}
-
 void UpcomingTurnDock::refreshControls(bool resetAll)
 {
     const auto shouldRefresh = [this, resetAll](Field field) { return resetAll || !touched(field); };
@@ -1363,24 +1311,12 @@ void UpcomingTurnDock::refreshModelDependentControls(bool modelChangedByUser)
     updateSendEnabled();
 }
 
-void UpcomingTurnDock::updatePromptHeight()
+void UpcomingTurnDock::updatePromptHeight(int editorHeight)
 {
-    if (!editor || editor->viewport()->width() <= 0)
+    const int wantedDockHeight = compactBaseHeight + editorHeight
+        - ExpandingPromptEditor::compactHeight();
+    if (wantedDockHeight == height())
         return;
-
-    editor->document()->setTextWidth(editor->viewport()->width());
-    qreal laidOutHeight = 0;
-    QAbstractTextDocumentLayout* documentLayout = editor->document()->documentLayout();
-    for (QTextBlock block = editor->document()->begin(); block.isValid(); block = block.next())
-        laidOutHeight += documentLayout->blockBoundingRect(block).height();
-    const int documentHeight = static_cast<int>(std::ceil(laidOutHeight)) + 10;
-    const int wanted = std::clamp(documentHeight, oneLineEditorHeight, maximumEditorHeight);
-    editor->setVerticalScrollBarPolicy(wanted >= maximumEditorHeight ? Qt::ScrollBarAsNeeded : Qt::ScrollBarAlwaysOff);
-    if (wanted == currentEditorHeight)
-        return;
-    currentEditorHeight = wanted;
-    editor->setFixedHeight(wanted);
-    const int wantedDockHeight = compactBaseHeight + wanted - oneLineEditorHeight;
     setFixedHeight(wantedDockHeight);
     updateGeometry();
     emit dockHeightChanged(wantedDockHeight);
@@ -1607,76 +1543,6 @@ void UpcomingTurnDock::setTouched(Field field, bool value)
     touchedFields[index] = value;
     updateChangedPresentation();
     emit settingsChanged();
-}
-
-AnchoredTurnSurface::AnchoredTurnSurface(QWidget* parent)
-    : QWidget(parent)
-{
-    setObjectName(QStringLiteral("anchoredTurnSurface"));
-    setAttribute(Qt::WA_StyledBackground, true);
-    setStyleSheet(QStringLiteral("#anchoredTurnSurface{background:#f6f8fb;}"));
-}
-
-void AnchoredTurnSurface::setConversationWidget(QWidget* widget)
-{
-    if (conversation == widget)
-        return;
-    if (conversation)
-        conversation->removeEventFilter(this);
-    conversation = widget;
-    if (conversation)
-    {
-        conversation->setParent(this);
-        conversation->installEventFilter(this);
-        conversation->show();
-        conversation->lower();
-    }
-    relayout();
-}
-
-void AnchoredTurnSurface::setUpcomingTurnDock(UpcomingTurnDock* widget)
-{
-    if (dock == widget)
-        return;
-    if (dock)
-        dock->removeEventFilter(this);
-    dock = widget;
-    if (dock)
-    {
-        dock->setParent(this);
-        dock->installEventFilter(this);
-        dock->show();
-        dock->raise();
-        connect(dock, &UpcomingTurnDock::dockHeightChanged, this, [this] { relayout(); });
-    }
-    relayout();
-}
-
-bool AnchoredTurnSurface::eventFilter(QObject* watched, QEvent* event)
-{
-    if ((watched == dock || watched == conversation)
-        && (event->type() == QEvent::LayoutRequest || event->type() == QEvent::Resize || event->type() == QEvent::Show))
-        relayout();
-    return QWidget::eventFilter(watched, event);
-}
-
-void AnchoredTurnSurface::resizeEvent(QResizeEvent* event)
-{
-    QWidget::resizeEvent(event);
-    relayout();
-}
-
-void AnchoredTurnSurface::relayout()
-{
-    const int base = dock ? dock->baseHeight() : 0;
-    if (conversation)
-        conversation->setGeometry(0, 0, width(), std::max(0, height() - base));
-    if (dock)
-    {
-        const int dockHeight = std::min(height(), std::max(base, dock->height()));
-        dock->setGeometry(0, height() - dockHeight, width(), dockHeight);
-        dock->raise();
-    }
 }
 
 } // namespace codexui
