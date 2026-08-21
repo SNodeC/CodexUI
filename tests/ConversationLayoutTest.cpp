@@ -14,6 +14,7 @@
 #include <QFrame>
 #include <QLabel>
 #include <QLayout>
+#include <QObject>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
@@ -21,6 +22,7 @@
 #include <QScrollBar>
 #include <QTimer>
 #include <QTabBar>
+#include <QTextEdit>
 #include <QToolButton>
 
 #include <algorithm>
@@ -45,6 +47,7 @@ struct MessageFixture
     bool textTruncated = false;
     bool genericItemTruncatedOnly = false;
     std::string command;
+    std::string reasoningSummary;
 };
 
 struct TurnFixture
@@ -52,6 +55,10 @@ struct TurnFixture
     std::string id;
     std::vector<MessageFixture> messages;
     std::optional<frontend::Json> plan;
+    std::string status = "completed";
+    bool active = false;
+    bool terminal = true;
+    bool connectionInvalidated = false;
 };
 
 struct ThreadFixture
@@ -74,6 +81,30 @@ bool expectAtLeast(int actual, int required, const char* message)
     std::cerr << message << " (actual " << actual << ", required " << required << ")\n";
     return false;
 }
+
+class ActivityTopLevelShowMonitor final : public QObject
+{
+public:
+    [[nodiscard]] bool empty() const noexcept
+    {
+        return unexpectedObjectNames.isEmpty();
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() == QEvent::Show) {
+            const auto* widget = qobject_cast<const QWidget*>(watched);
+            if (widget && widget->isWindow()
+                && widget->objectName().startsWith(QStringLiteral("conversationActivity")))
+                unexpectedObjectNames.append(widget->objectName());
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    QStringList unexpectedObjectNames;
+};
 
 void settleEvents(int passes = 3, int delayMs = 25)
 {
@@ -134,8 +165,11 @@ frontend::Json messageJson(const std::string& threadId,
                           {"status", fixture.status},
                           {"summary", summary},
                           {"agentText", fixture.kind == frontend::ThreadItemKind::AgentMessage ? fixture.text : ""},
-                          {"reasoningText", ""},
-                          {"reasoningSummary", ""},
+                          {"reasoningText",
+                           fixture.kind == frontend::ThreadItemKind::Reasoning
+                               ? fixture.text
+                               : std::string{}},
+                          {"reasoningSummary", fixture.reasoningSummary},
                           {"commandOutput", initialCommandOutput},
                           {"droppedContentBytes", 0},
                           {"contentTruncated",
@@ -200,9 +234,10 @@ client::State makeState(const std::vector<ThreadFixture>& fixtures)
                 items.push_back(messageJson(threadFixture.id, turnFixture.id, message));
             frontend::Json turn{{"id", turnFixture.id},
                                 {"threadId", threadFixture.id},
-                                {"status", "completed"},
-                                {"active", false},
-                                {"terminal", true},
+                                {"status", turnFixture.status},
+                                {"active", turnFixture.active},
+                                {"terminal", turnFixture.terminal},
+                                {"connectionInvalidated", turnFixture.connectionInvalidated},
                                 {"effectiveExecutionConfiguration", executionConfiguration},
                                 {"effectiveExecutionConfigurationProvenance", "turn_start_accepted"},
                                 {"items", std::move(items)},
@@ -281,6 +316,33 @@ client::State makeState(const std::vector<ThreadFixture>& fixtures)
     return sdk.state();
 }
 
+codexui::ConversationContentUpdates replacementUpdate(
+    QString turnId,
+    QString itemId,
+    client::ItemContentChannel channel)
+{
+    return {{std::move(turnId), std::move(itemId), channel, std::nullopt}};
+}
+
+codexui::ConversationContentUpdates appendUpdate(
+    QString turnId,
+    QString itemId,
+    client::ItemContentChannel channel,
+    std::uint64_t baseContentBytes,
+    QString delta,
+    std::uint64_t discardPrefixBytes = 0)
+{
+    const std::uint64_t deltaBytes = static_cast<std::uint64_t>(delta.toUtf8().size());
+    return {{std::move(turnId),
+             std::move(itemId),
+             channel,
+             codexui::ConversationContentAppend{
+                 baseContentBytes,
+                 discardPrefixBytes,
+                 deltaBytes,
+                 std::move(delta)}}};
+}
+
 ThreadFixture sequentialTurns(std::string threadId, int turnCount)
 {
     ThreadFixture result{std::move(threadId), {}};
@@ -346,9 +408,26 @@ QLabel* messageLabel(QWidget* messageSegment, const QString& objectName)
     return messageSegment ? messageSegment->findChild<QLabel*>(objectName) : nullptr;
 }
 
+QWidget* messageContent(QWidget* messageSegment)
+{
+    return messageSegment
+               ? messageSegment->findChild<QWidget*>(
+                     QStringLiteral("conversationMessageContent"))
+               : nullptr;
+}
+
 QString messageSourceText(const QLabel* label)
 {
     return label ? label->property("sourceText").toString() : QString{};
+}
+
+QString messageSourceText(const QWidget* widget)
+{
+    if (const auto* label = qobject_cast<const QLabel*>(widget))
+        return messageSourceText(label);
+    if (const auto* editor = qobject_cast<const QTextEdit*>(widget))
+        return editor->toPlainText();
+    return {};
 }
 
 bool segmentHasLabel(QWidget* messageSegment, const QString& text)
@@ -359,6 +438,10 @@ bool segmentHasLabel(QWidget* messageSegment, const QString& text)
         if (label->text() == text || messageSourceText(label) == text)
             return true;
     }
+    for (QTextEdit* editor : messageSegment->findChildren<QTextEdit*>()) {
+        if (editor->toPlainText() == text)
+            return true;
+    }
     return false;
 }
 
@@ -366,6 +449,10 @@ bool hasLabel(codexui::ConversationWidget& conversation, const QString& text)
 {
     for (QLabel* label : conversation.findChildren<QLabel*>()) {
         if (label->text() == text || messageSourceText(label) == text)
+            return true;
+    }
+    for (QTextEdit* editor : conversation.findChildren<QTextEdit*>()) {
+        if (editor->toPlainText() == text)
             return true;
     }
     return false;
@@ -530,8 +617,45 @@ bool testHotTurnWindow()
                          && renderedActivities == activityHost->property("renderedTimelineItems").toLongLong()
                          && activityHost->property("retainedTimelineItems").toLongLong() == 300,
                      "a contiguous activity run must be chunked and remain within the same global item budget");
-    passed &= expect(hasLabel(activityConversation, QStringLiteral("activity activity 299")),
-                     "the bounded activity window must retain its newest exact detail");
+    QWidget* newestActivityRow = nullptr;
+    for (QWidget* row : activityConversation.findChildren<QWidget*>(
+             QStringLiteral("conversationActivityRow")))
+    {
+        if (row->property("itemId").toString() == QStringLiteral("item-activity-299"))
+        {
+            newestActivityRow = row;
+            break;
+        }
+    }
+    auto* newestActivityDetails = newestActivityRow
+                                      ? newestActivityRow->findChild<QWidget*>(
+                                            QStringLiteral("conversationActivityDetails"))
+                                      : nullptr;
+    auto* newestActivityDisclosure = newestActivityRow
+                                         ? newestActivityRow->findChild<QToolButton*>(
+                                               QStringLiteral("activityDisclosure"))
+                                         : nullptr;
+    passed &= expect(newestActivityRow && newestActivityDetails
+                         && newestActivityDetails->isHidden()
+                         && !newestActivityRow->findChild<QTextEdit*>(
+                             QStringLiteral("conversationActivityDetail"))
+                         && newestActivityDetails->property("detailMaterializationCount").toULongLong() == 0
+                         && newestActivityDetails->property("deferredDetailBytes").toULongLong()
+                                == std::string_view("activity activity 299").size(),
+                     "the bounded activity window must retain its newest detail without materializing collapsed text");
+    if (newestActivityDisclosure)
+        newestActivityDisclosure->click();
+    settleTimeline();
+    auto* newestActivityDetail = newestActivityRow
+                                     ? newestActivityRow->findChild<QTextEdit*>(
+                                           QStringLiteral("conversationActivityDetail"))
+                                     : nullptr;
+    passed &= expect(newestActivityDetail
+                         && newestActivityDetail->toPlainText()
+                                == QStringLiteral("activity activity 299")
+                         && newestActivityDetails
+                         && newestActivityDetails->property("detailMaterializationCount").toULongLong() == 1,
+                     "expanding the newest bounded activity must materialize its exact retained detail once");
     const auto activityCards = activityConversation.findChildren<QFrame*>(
         QStringLiteral("conversationActivityCard"));
     passed &= expect(!activityCards.isEmpty()
@@ -566,7 +690,10 @@ bool testActivityDisclosureAndFullOutput()
     codexui::ConversationWidget conversation;
     conversation.resize(900, 700);
     conversation.show();
+    ActivityTopLevelShowMonitor topLevelShowMonitor;
+    qApp->installEventFilter(&topLevelShowMonitor);
     conversation.render(makeState({fixture}), QStringLiteral("activity-detail"));
+    qApp->removeEventFilter(&topLevelShowMonitor);
     settleTimeline();
 
     auto* card = conversation.findChild<QFrame*>(QStringLiteral("conversationActivityCard"));
@@ -589,10 +716,14 @@ bool testActivityDisclosureAndFullOutput()
     }
 
     bool passed = true;
+    passed &= expect(topLevelShowMonitor.empty(),
+                     "rendering activity content must never show temporary top-level widgets");
     passed &= expect(card && body && !body->isHidden() && row && details && details->isHidden(),
                      "an activity group must start expanded while each activity starts collapsed");
-    passed &= expect(detailDisclosure && detailDisclosure->isCheckable()
-                         && !row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput")),
+    passed &= expect(row && details && detailDisclosure && detailDisclosure->isCheckable()
+                         && !row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput"))
+                         && details->property("outputMaterializationCount").toULongLong() == 0
+                         && details->property("deferredOutputBytes").toULongLong() == output.size(),
                      "a collapsed activity must not materialize a potentially large output document");
     passed &= expect(groupDisclosure
                          && !groupDisclosure->styleSheet().contains(
@@ -625,14 +756,17 @@ bool testActivityDisclosureAndFullOutput()
              + std::string(72 * 1024, 'c')
              + "\ncanonical collapsed-update final sentinel";
     fixture.turns.front().messages.front().text = output;
-    const QHash<QString, QStringList> exactOutputChange{
-        {QStringLiteral("turn-activity-detail"),
-         QStringList{QStringLiteral("command-activity-detail")}}};
+    const auto exactOutputChange = replacementUpdate(
+        QStringLiteral("turn-activity-detail"),
+        QStringLiteral("command-activity-detail"),
+        client::ItemContentChannel::CommandOutput);
     conversation.render(
         makeState({fixture}), QStringLiteral("activity-detail"), false, &exactOutputChange);
     settleTimeline();
-    passed &= expect(row == rowAddress && details && details->isHidden()
-                         && !row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput")),
+    passed &= expect(row && row == rowAddress && details && details->isHidden()
+                         && !row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput"))
+                         && details->property("outputMaterializationCount").toULongLong() == 0
+                         && details->property("deferredOutputBytes").toULongLong() == output.size(),
                      "a canonical output update must keep a collapsed activity lazy until expansion");
     const int collapsedActivityHeight = timeline(conversation)
                                             ? timeline(conversation)->height()
@@ -645,7 +779,9 @@ bool testActivityDisclosureAndFullOutput()
     auto* outputHeading = row
                               ? row->findChild<QLabel*>(QStringLiteral("conversationActivityOutputHeading"))
                               : nullptr;
-    passed &= expect(details && !details->isHidden() && outputView && outputView->isVisible(),
+    passed &= expect(details && !details->isHidden() && outputView && outputView->isVisible()
+                         && details->property("outputMaterializationCount").toULongLong() == 1
+                         && details->property("deferredOutputBytes").toULongLong() == output.size(),
                      "an individual activity disclosure must materialize and reveal its complete output");
     passed &= expect(outputView
                          && outputView->styleSheet().contains(
@@ -672,18 +808,34 @@ bool testActivityDisclosureAndFullOutput()
                      "expanding an activity must grow the fixed timeline host and its scroll range");
 
     QPlainTextEdit* const outputAddress = outputView.data();
-    output += "\nstreamed continuation";
+    const std::uint64_t previousOutputBytes = output.size();
+    const QString outputDelta = QStringLiteral("\nstreamed continuation");
+    output += outputDelta.toStdString();
     fixture.turns.front().messages.front().text = output;
-    fixture.turns.front().messages.front().status = "completed";
+    const auto exactOutputAppend = appendUpdate(
+        QStringLiteral("turn-activity-detail"),
+        QStringLiteral("command-activity-detail"),
+        client::ItemContentChannel::CommandOutput,
+        previousOutputBytes,
+        outputDelta);
     conversation.render(
-        makeState({fixture}), QStringLiteral("activity-detail"), false, &exactOutputChange);
+        makeState({fixture}), QStringLiteral("activity-detail"), false, &exactOutputAppend);
     settleTimeline();
-    auto* statusSymbol = row ? row->findChild<QLabel*>(QStringLiteral("conversationActivitySymbol")) : nullptr;
     passed &= expect(row && row == rowAddress && outputView && outputView.data() == outputAddress
                          && outputView->toPlainText() == QString::fromStdString(output)
-                         && details && !details->isHidden() && statusSymbol
-                         && statusSymbol->text() == QStringLiteral("✓"),
-                     "streaming command output and completion status must update the expanded activity in place");
+                         && outputView->property("streamAppendCount").toULongLong() == 1
+                         && details
+                         && details->property("outputMaterializationCount").toULongLong() == 1
+                         && details->property("deferredOutputBytes").toULongLong() == output.size()
+                         && !details->isHidden(),
+                     "streaming command output must update the expanded activity through the cursor append path");
+    fixture.turns.front().messages.front().status = "completed";
+    conversation.render(makeState({fixture}), QStringLiteral("activity-detail"));
+    settleTimeline();
+    auto* statusSymbol = row ? row->findChild<QLabel*>(QStringLiteral("conversationActivitySymbol")) : nullptr;
+    passed &= expect(row == rowAddress && outputView && outputView.data() == outputAddress
+                         && statusSymbol && statusSymbol->text() == QStringLiteral("✓"),
+                     "the terminal item update must reconcile status without replacing streamed output");
 
     const int longActivityHeight = timeline(conversation) ? timeline(conversation)->height() : 0;
     fixture.turns.front().messages.front().command = "true";
@@ -802,14 +954,32 @@ bool testPointerPreservingAppend()
     beforeFixture.turns.front().messages.push_back(
         {"item-append-257", frontend::ThreadItemKind::AgentMessage, "final answer"});
     const client::State after = makeState({beforeFixture});
+    int latestPresentationRequests = 0;
+    QObject::connect(&conversation,
+                     &codexui::ConversationWidget::latestPresentationRequested,
+                     &conversation,
+                     [&latestPresentationRequests] { ++latestPresentationRequests; });
     conversation.render(after, QStringLiteral("append"));
     settleTimeline();
 
     QWidget* host = timeline(conversation);
-    const int anchorYAfter = scroll && readingAnchor
-                                 ? scroll->viewport()->mapFromGlobal(readingAnchor->mapToGlobal(QPoint{})).y()
-                                 : 0;
+    const int frozenAnchorY = scroll && readingAnchor
+                                  ? scroll->viewport()->mapFromGlobal(readingAnchor->mapToGlobal(QPoint{})).y()
+                                  : 0;
     bool passed = true;
+    passed &= expect(readingHistory && evicted && survivor
+                         && survivor.data() == survivorAddress
+                         && qAbs(frozenAnchorY - anchorYBefore) <= 2
+                         && !segment(conversation, QStringLiteral("message:item-append-256")),
+                     "an off-bottom reader must see a completely frozen presentation while canonical state advances");
+    if (scroll)
+        scroll->verticalScrollBar()->setValue(scroll->verticalScrollBar()->maximum());
+    settleEvents();
+    passed &= expect(latestPresentationRequests == 1,
+                     "returning to the tail must request exactly one latest authoritative presentation");
+    conversation.render(after, QStringLiteral("append"));
+    settleTimeline();
+
     passed &= expect(!evicted && survivor && survivor.data() == survivorAddress
                          && survivor.data() == segment(conversation, QStringLiteral("message:item-append-2")),
                      "rolling the bounded head must preserve every overlapping segment widget");
@@ -821,8 +991,6 @@ bool testPointerPreservingAppend()
     passed &= expect(host && host->property("renderedTimelineItems").toLongLong()
                                  <= host->property("maximumRenderedItems").toLongLong(),
                      "appending at the rolling boundary must keep the live-item count bounded");
-    passed &= expect(readingHistory && readingAnchor && qAbs(anchorYAfter - anchorYBefore) <= 2,
-                     "rolling the bounded head must preserve a reader's surviving viewport segment");
 
     codexui::ConversationWidget followingConversation;
     followingConversation.resize(900, 700);
@@ -855,14 +1023,13 @@ bool testInPlaceMessageReplacement()
 
     QPointer<QWidget> agentSegment =
         segment(agentConversation, QStringLiteral("message:item-in-place-agent"));
-    QPointer<QLabel> agentContent =
-        messageLabel(agentSegment, QStringLiteral("conversationMessageContent"));
+    QPointer<QWidget> streamingContent = messageContent(agentSegment);
     QPointer<QLabel> agentStatus =
         messageLabel(agentSegment, QStringLiteral("conversationMessageStatus"));
     QPointer<QLabel> agentTruncation =
         messageLabel(agentSegment, QStringLiteral("conversationMessageTruncation"));
     QWidget* const agentSegmentAddress = agentSegment.data();
-    QLabel* const agentContentAddress = agentContent.data();
+    QWidget* const streamingContentAddress = streamingContent.data();
     QLabel* const agentStatusAddress = agentStatus.data();
     QLabel* const agentTruncationAddress = agentTruncation.data();
 
@@ -878,11 +1045,15 @@ bool testInPlaceMessageReplacement()
                          && agentSegment.data()
                                 == segment(agentConversation,
                                            QStringLiteral("message:item-in-place-agent"))
-                         && agentContent && agentContent.data() == agentContentAddress
+                         && !streamingContent
                          && agentStatus && agentStatus.data() == agentStatusAddress
                          && agentTruncation && agentTruncation.data() == agentTruncationAddress,
-                     "canonical agent-message replacement must preserve the segment and message labels");
-    passed &= expect(agentContent
+                     "a terminal agent-message update must preserve its segment metadata while replacing the streaming view");
+    QPointer<QLabel> agentContent =
+        messageLabel(agentSegment, QStringLiteral("conversationMessageContent"));
+    QLabel* const agentContentAddress = agentContent.data();
+    passed &= expect(streamingContentAddress && agentContent
+                         && agentContent != streamingContentAddress
                          && messageSourceText(agentContent)
                                 == QStringLiteral("streamed prefix and canonical continuation")
                          && agentStatus && agentStatus->text() == QStringLiteral("Completed")
@@ -890,7 +1061,7 @@ bool testInPlaceMessageReplacement()
                          && agentTruncation->text().contains(QStringLiteral("truncated"),
                                                              Qt::CaseInsensitive)
                          && segmentHasLabel(agentSegment, QStringLiteral("CODEX")),
-                     "the preserved agent-message widget must reflect canonical content, status and truncation");
+                     "the terminal agent-message widget must reflect canonical Markdown content, status and truncation");
 
     agentFixture.turns.front().messages.front().text = "short canonical replacement";
     agentFixture.turns.front().messages.front().status = "failed";
@@ -945,7 +1116,7 @@ bool testInPlaceMessageReplacement()
     return passed;
 }
 
-bool testStreamingMarkdownRenderCoalescing()
+bool testStreamingPlainTextAndTerminalMarkdown()
 {
     ThreadFixture fixture{
         "streaming-markdown",
@@ -962,55 +1133,278 @@ bool testStreamingMarkdownRenderCoalescing()
 
     QPointer<QWidget> message =
         segment(conversation, QStringLiteral("message:item-streaming-markdown"));
-    QPointer<QLabel> content =
-        messageLabel(message, QStringLiteral("conversationMessageContent"));
+    QPointer<QWidget> content = messageContent(message);
     QWidget* const messageAddress = message.data();
-    QLabel* const contentAddress = content.data();
-    const QString initialHtml = content ? content->text() : QString{};
-    const QHash<QString, QStringList> exactChange{
-        {QStringLiteral("turn-streaming-markdown"),
-         QStringList{QStringLiteral("item-streaming-markdown")}}};
+    QWidget* const contentAddress = content.data();
 
     const QStringList streamedContent{
         QStringLiteral("**stream** [docs](https://example.com)"),
         QStringLiteral("**stream** [docs](https://example.com)\n\n`code`"),
         QStringLiteral("**stream** [docs](https://example.com)\n\n`code`\n\n![secret](file:///etc/passwd)")};
     bool passed = true;
+    QString previous = QStringLiteral("**stream**");
     for (const QString& update : streamedContent) {
         fixture.turns.front().messages.front().text = update.toStdString();
-        conversation.render(
-            makeState({fixture}), QStringLiteral("streaming-markdown"), false, &exactChange);
+        const QString delta = update.mid(previous.size());
+        const auto exactChange = appendUpdate(
+            QStringLiteral("turn-streaming-markdown"),
+            QStringLiteral("item-streaming-markdown"),
+            client::ItemContentChannel::AgentText,
+            static_cast<std::uint64_t>(previous.toUtf8().size()),
+            delta);
+        // Descriptor lookup verifies the authoritative retained byte boundary
+        // without materializing the canonical item or its lazy content chain.
+        const client::State updatedState = makeState({fixture});
+        passed &= conversation.updateExactMessageContent(
+            updatedState,
+            QStringLiteral("streaming-markdown"),
+            exactChange);
         passed &= expect(message && message.data() == messageAddress
                              && content && content.data() == contentAddress
-                             && messageSourceText(content) == update,
-                         "streaming Markdown updates must preserve the message widget and exact canonical source");
+                             && messageSourceText(content) == update
+                             && content->property("markdownRenderMode").toString()
+                                    == QStringLiteral("streaming-plain"),
+                         "streaming updates must append plain text in place without parsing Markdown");
+        previous = update;
     }
-    passed &= expect(content && content->text() == initialHtml,
-                     "append-only streaming updates must coalesce full Markdown reparsing before the render timer fires");
-
-    settleEvents(2, 100);
-    const QString coalescedHtml = content ? content->text() : QString{};
-    passed &= expect(content && coalescedHtml != initialHtml
-                         && coalescedHtml.contains(QStringLiteral("font-weight"))
-                         && coalescedHtml.contains(QStringLiteral("https://example.com"))
-                         && coalescedHtml.contains(QStringLiteral("code"))
-                         && !coalescedHtml.contains(QStringLiteral("file:///etc/passwd"))
-                         && !coalescedHtml.contains(QStringLiteral("<img")),
-                     "the coalesced Markdown render must preserve formatting and the safe link/image policy");
+    passed &= expect(content
+                         && content->property("streamAppendCount").toULongLong()
+                                == static_cast<qulonglong>(streamedContent.size()),
+                     "each verified streaming delta must use the cursor append path");
 
     const QString finalContent = streamedContent.back()
                                  + QStringLiteral("\n\n_final answer_");
     fixture.turns.front().messages.front().text = finalContent.toStdString();
     fixture.turns.front().messages.front().status = "completed";
-    conversation.render(
-        makeState({fixture}), QStringLiteral("streaming-markdown"), false, &exactChange);
-    passed &= expect(content && messageSourceText(content) == finalContent
-                         && content->text() != coalescedHtml
-                         && content->text().contains(QStringLiteral("final answer"))
-                         && content->text().contains(QStringLiteral("https://example.com"))
-                         && !content->text().contains(QStringLiteral("file:///etc/passwd"))
-                         && !content->text().contains(QStringLiteral("<img")),
-                     "a terminal message update must synchronously render the exact final sanitized Markdown");
+    conversation.render(makeState({fixture}), QStringLiteral("streaming-markdown"));
+    settleTimeline();
+    QPointer<QWidget> finalContentWidget = messageContent(message);
+    auto* finalLabel = qobject_cast<QLabel*>(finalContentWidget);
+    passed &= expect(message && message.data() == messageAddress
+                         && finalContentWidget && finalContentWidget != contentAddress
+                         && finalLabel && messageSourceText(finalLabel) == finalContent
+                         && finalLabel->text().contains(QStringLiteral("final answer"))
+                         && finalLabel->text().contains(QStringLiteral("https://example.com"))
+                         && !finalLabel->text().contains(QStringLiteral("file:///etc/passwd"))
+                         && !finalLabel->text().contains(QStringLiteral("<img")),
+                     "the terminal update must replace the streaming view with one sanitized Markdown render");
+    return passed;
+}
+
+bool testCompletedAgentMessageStreamsBeforeTerminalMarkdown()
+{
+    ThreadFixture fixture{
+        "completed-streaming-markdown",
+        {{"turn-completed-streaming-markdown",
+          {{"item-completed-streaming-markdown",
+            frontend::ThreadItemKind::AgentMessage,
+            "**partial",
+            "completed"}}}}};
+    fixture.turns.front().status = "inProgress";
+    fixture.turns.front().active = true;
+    fixture.turns.front().terminal = false;
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(makeState({fixture}),
+                        QStringLiteral("completed-streaming-markdown"));
+    settleTimeline();
+
+    QPointer<QWidget> message = segment(
+        conversation, QStringLiteral("message:item-completed-streaming-markdown"));
+    QPointer<QWidget> streamingContent = messageContent(message);
+    QWidget* const messageAddress = message.data();
+    QWidget* const streamingContentAddress = streamingContent.data();
+    bool passed = expect(
+        streamingContent
+            && streamingContent->property("markdownRenderMode").toString()
+                   == QStringLiteral("streaming-plain"),
+        "an active turn must keep a completed-looking agent message plain while content can still arrive");
+
+    conversation.render(makeState({fixture}),
+                        QStringLiteral("completed-streaming-markdown"));
+    settleEvents();
+    passed &= expect(
+        messageContent(message) == streamingContentAddress,
+        "an unrelated full refresh during the active turn must preserve the streaming view");
+
+    auto* streamingEditor = qobject_cast<QTextEdit*>(streamingContent.data());
+    const qreal liveDocumentWidth = streamingEditor
+                                        ? streamingEditor->document()->textWidth()
+                                        : 0.0;
+    const int speculativeHeight = streamingContent
+                                      ? streamingContent->heightForWidth(54)
+                                      : 0;
+    passed &= expect(
+        streamingEditor && speculativeHeight > 0
+            && streamingEditor->document()->textWidth() == liveDocumentWidth,
+        "speculative height-for-width measurement must not reflow the visible streaming document");
+
+    const qulonglong geometryInvalidationsBeforeGrowth =
+        streamingContent
+            ? streamingContent->property("geometryInvalidationCount").toULongLong()
+            : 0;
+    const QString fullyReconciledGrowth =
+        QStringLiteral("**partial via full reconciliation");
+    fixture.turns.front().messages.front().text =
+        fullyReconciledGrowth.toStdString();
+    conversation.render(makeState({fixture}),
+                        QStringLiteral("completed-streaming-markdown"));
+    settleEvents();
+    passed &= expect(
+        messageContent(message) == streamingContentAddress
+            && messageSourceText(streamingContent) == fullyReconciledGrowth
+            && streamingContent->property("streamAppendCount").toULongLong() == 1
+            && streamingContent->property("fullReplacementCount").toULongLong() == 0,
+        "a full active-turn reconciliation with grown canonical text must cursor-append in the existing streaming view");
+    passed &= expect(
+        streamingContent
+            && streamingContent->property("geometryInvalidationCount").toULongLong()
+                   == geometryInvalidationsBeforeGrowth,
+        "a same-line streaming append must not invalidate unchanged message geometry");
+
+    const QStringList streamedContent{
+        QStringLiteral("**partial via full reconciliation result"),
+        QStringLiteral("**partial via full reconciliation result**\n\n- one"),
+        QStringLiteral("**partial via full reconciliation result**\n\n- one\n- two")};
+    QString previous = fullyReconciledGrowth;
+    for (const QString& update : streamedContent)
+    {
+        fixture.turns.front().messages.front().text = update.toStdString();
+        const QString delta = update.mid(previous.size());
+        const auto exactChange = appendUpdate(
+            QStringLiteral("turn-completed-streaming-markdown"),
+            QStringLiteral("item-completed-streaming-markdown"),
+            client::ItemContentChannel::AgentText,
+            static_cast<std::uint64_t>(previous.toUtf8().size()),
+            delta);
+        const client::State updatedState = makeState({fixture});
+        const bool handled = conversation.updateExactMessageContent(
+            updatedState,
+            QStringLiteral("completed-streaming-markdown"),
+            exactChange);
+        settleEvents();
+
+        QWidget* const currentContent = messageContent(message);
+        passed &= expect(
+            handled && message && message.data() == messageAddress
+                && currentContent && currentContent == streamingContentAddress
+                && messageSourceText(currentContent) == update
+                && currentContent->property("markdownRenderMode").toString()
+                       == QStringLiteral("streaming-plain"),
+            "append-v2 deltas must keep a completed agent message in one plain streaming view");
+        previous = update;
+    }
+    passed &= expect(
+        streamingContent
+            && streamingContent->property("streamAppendCount").toULongLong()
+                   == static_cast<qulonglong>(streamedContent.size() + 1)
+            && streamingContent->property("fullReplacementCount").toULongLong() == 0,
+        "completed agent-message deltas must use only the cursor append path");
+    auto* conversationScroll = conversation.findChild<QScrollArea*>();
+    passed &= expect(
+        conversationScroll && conversationScroll->viewport()->updatesEnabled()
+            && conversationScroll->verticalScrollBar()->value()
+                   == conversationScroll->verticalScrollBar()->maximum(),
+        "a height-changing stream batch must expose its settled geometry once and remain pinned at the tail");
+
+    fixture.turns.front().status = "completed";
+    fixture.turns.front().active = false;
+    fixture.turns.front().terminal = true;
+    const client::State finalState = makeState({fixture});
+    conversation.render(finalState,
+                        QStringLiteral("completed-streaming-markdown"));
+    settleTimeline();
+
+    QPointer<QWidget> finalContent = messageContent(message);
+    auto* finalLabel = qobject_cast<QLabel*>(finalContent);
+    QWidget* const finalContentAddress = finalContent.data();
+    const QString finalRenderedText = finalLabel ? finalLabel->text() : QString{};
+    passed &= expect(
+        message && message.data() == messageAddress && finalContent
+            && finalContent.data() != streamingContentAddress && finalLabel
+            && messageSourceText(finalLabel) == streamedContent.back()
+            && finalContent->property("markdownRenderMode").toString()
+                   == QStringLiteral("markdown")
+            && finalRenderedText.contains(QStringLiteral("font-weight"))
+            && finalRenderedText.contains(QStringLiteral("two")),
+        "the first non-delta terminal publication must promote the stream to Markdown once");
+
+    conversation.render(finalState,
+                        QStringLiteral("completed-streaming-markdown"));
+    settleEvents();
+    QWidget* const repeatedContent = messageContent(message);
+    passed &= expect(
+        repeatedContent == finalContentAddress
+            && qobject_cast<QLabel*>(repeatedContent)
+            && qobject_cast<QLabel*>(repeatedContent)->text() == finalRenderedText,
+        "an unchanged terminal publication must preserve the final Markdown widget");
+    return passed;
+}
+
+bool testTerminalMarkdownPromotionResettlesFollowedTail()
+{
+    ThreadFixture fixture = sequentialTurns("terminal-markdown-tail", 9);
+    auto& finalTurn = fixture.turns.back();
+    finalTurn.status = "inProgress";
+    finalTurn.active = true;
+    finalTurn.terminal = false;
+    const QString source = QStringLiteral("[compact](https://example.invalid/")
+                           + QString(6000, QLatin1Char('x'))
+                           + QLatin1Char(')');
+    finalTurn.messages.front().text = source.toStdString();
+    finalTurn.messages.front().status = "completed";
+
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 500);
+    conversation.show();
+    conversation.render(makeState({fixture}), QStringLiteral("terminal-markdown-tail"));
+    settleTimeline();
+
+    auto* scroll = conversation.findChild<QScrollArea*>();
+    QWidget* timelineHost = timeline(conversation);
+    QPointer<QWidget> message = segment(
+        conversation, QStringLiteral("message:item-terminal-markdown-tail-8"));
+    QPointer<QWidget> streamingContent = messageContent(message);
+    const int streamingPreferredHeight = streamingContent
+                                             ? streamingContent->heightForWidth(
+                                                   streamingContent->width())
+                                             : 0;
+    const int streamingTimelineHeight = timelineHost ? timelineHost->height() : 0;
+    const int streamingMaximum = scroll ? scroll->verticalScrollBar()->maximum() : 0;
+    bool passed = expect(
+        scroll && timelineHost && streamingContent
+            && streamingContent->property("markdownRenderMode").toString()
+                   == QStringLiteral("streaming-plain")
+            && streamingMaximum > 0
+            && scroll->verticalScrollBar()->value() == streamingMaximum,
+        "the tall streaming source must begin at a genuinely followed tail");
+
+    finalTurn.status = "completed";
+    finalTurn.active = false;
+    finalTurn.terminal = true;
+    conversation.render(makeState({fixture}), QStringLiteral("terminal-markdown-tail"));
+    settleTimeline();
+
+    QPointer<QWidget> finalContent = messageContent(message);
+    auto* finalLabel = qobject_cast<QLabel*>(finalContent.data());
+    const int finalPreferredHeight = finalContent
+                                         ? finalContent->heightForWidth(finalContent->width())
+                                         : 0;
+    const int finalMaximum = scroll ? scroll->verticalScrollBar()->maximum() : 0;
+    passed &= expect(
+        finalLabel && finalContent != streamingContent
+            && finalContent->property("markdownRenderMode").toString()
+                   == QStringLiteral("markdown")
+            && finalPreferredHeight < streamingPreferredHeight,
+        "terminal Markdown must replace the tall source with its compact rendered presentation");
+    passed &= expect(
+        timelineHost && timelineHost->height() < streamingTimelineHeight
+            && finalMaximum > 0 && finalMaximum < streamingMaximum,
+        "terminal renderer replacement must shrink the timeline and its retained scroll range");
+    passed &= expect(
+        scroll && scroll->verticalScrollBar()->value() == finalMaximum,
+        "terminal Markdown promotion must settle at the new true tail");
     return passed;
 }
 
@@ -1118,17 +1512,20 @@ bool testExactContentInvalidation()
 
     QPointer<QWidget> first = segment(conversation, QStringLiteral("message:item-exact-first"));
     QPointer<QWidget> second = segment(conversation, QStringLiteral("message:item-exact-second"));
-    QPointer<QLabel> firstContent =
-        messageLabel(first, QStringLiteral("conversationMessageContent"));
+    QPointer<QWidget> firstContent = messageContent(first);
     QPointer<QLabel> secondContent =
         messageLabel(second, QStringLiteral("conversationMessageContent"));
     QWidget* const firstAddress = first.data();
     QWidget* const secondAddress = second.data();
 
-    fixture.turns.front().messages.front().text = "first canonical continuation";
-    const QHash<QString, QStringList> exactChanges{
-        {QStringLiteral("turn-exact-content"),
-         QStringList{QStringLiteral("item-exact-first")}}};
+    const QString firstDelta = QStringLiteral(" canonical continuation");
+    fixture.turns.front().messages.front().text = "first prefix canonical continuation";
+    const auto exactChanges = appendUpdate(
+        QStringLiteral("turn-exact-content"),
+        QStringLiteral("item-exact-first"),
+        client::ItemContentChannel::AgentText,
+        std::string_view("first prefix").size(),
+        firstDelta);
     const auto updatedState = makeState({fixture});
     const bool exactApplied = conversation.updateExactMessageContent(
         updatedState, QStringLiteral("exact-content"), exactChanges);
@@ -1136,15 +1533,18 @@ bool testExactContentInvalidation()
 
     bool passed = true;
     passed &= expect(exactApplied && first && first.data() == firstAddress && firstContent
-                         && messageSourceText(firstContent) == QStringLiteral("first canonical continuation"),
+                         && messageSourceText(firstContent)
+                                == QStringLiteral("first prefix canonical continuation")
+                         && firstContent->property("streamAppendCount").toULongLong() == 1,
                      "an exact content update must mutate its canonical message directly in place");
     passed &= expect(second && second.data() == secondAddress && secondContent
                          && messageSourceText(secondContent) == QStringLiteral("second stable"),
                      "an exact content update must preserve unaffected segment widgets");
 
-    const QHash<QString, QStringList> activityChanges{
-        {QStringLiteral("turn-exact-content"),
-         QStringList{QStringLiteral("item-exact-activity")}}};
+    const auto activityChanges = replacementUpdate(
+        QStringLiteral("turn-exact-content"),
+        QStringLiteral("item-exact-activity"),
+        client::ItemContentChannel::CommandOutput);
     passed &= expect(!conversation.updateExactMessageContent(
                          updatedState, QStringLiteral("exact-content"), activityChanges),
                      "a non-message content update must retain the full activity-card reconciliation fallback");
@@ -1155,6 +1555,177 @@ bool testExactContentInvalidation()
     passed &= expect(second && second.data() == secondAddress && secondContent
                          && messageSourceText(secondContent) == QStringLiteral("second structural fallback"),
                      "a full reconciliation fallback must still refresh every changed canonical segment");
+    return passed;
+}
+
+bool testExactReasoningChannels()
+{
+    ThreadFixture fixture{
+        "reasoning-channels",
+        {{"turn-reasoning-channels",
+          {{"reasoning-text",
+            frontend::ThreadItemKind::Reasoning,
+            "working",
+            "in_progress"},
+           {"reasoning-summary",
+            frontend::ThreadItemKind::Reasoning,
+            "",
+            "in_progress"}}}}};
+    fixture.turns.front().messages.at(1).reasoningSummary = "summary";
+
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(makeState({fixture}), QStringLiteral("reasoning-channels"));
+    settleTimeline();
+
+    QWidget* textRow = nullptr;
+    QWidget* summaryRow = nullptr;
+    for (QWidget* row : conversation.findChildren<QWidget*>(
+             QStringLiteral("conversationActivityRow")))
+    {
+        if (row->property("itemId").toString() == QStringLiteral("reasoning-text"))
+            textRow = row;
+        else if (row->property("itemId").toString() == QStringLiteral("reasoning-summary"))
+            summaryRow = row;
+    }
+    auto* textDetails = textRow
+                            ? textRow->findChild<QWidget*>(
+                                  QStringLiteral("conversationActivityDetails"))
+                            : nullptr;
+    auto* summaryDetails = summaryRow
+                               ? summaryRow->findChild<QWidget*>(
+                                     QStringLiteral("conversationActivityDetails"))
+                               : nullptr;
+    auto* textDisclosure = textRow
+                               ? textRow->findChild<QToolButton*>(
+                                     QStringLiteral("activityDisclosure"))
+                               : nullptr;
+    auto* summaryDisclosure = summaryRow
+                                  ? summaryRow->findChild<QToolButton*>(
+                                        QStringLiteral("activityDisclosure"))
+                                  : nullptr;
+    const QString textDelta = QStringLiteral(" through evidence");
+    fixture.turns.front().messages.at(0).text += textDelta.toStdString();
+    const auto textChange = appendUpdate(
+        QStringLiteral("turn-reasoning-channels"),
+        QStringLiteral("reasoning-text"),
+        client::ItemContentChannel::ReasoningText,
+        std::string_view("working").size(),
+        textDelta);
+    bool passed = expect(textRow && summaryRow && textDetails && summaryDetails
+                             && textDetails->isHidden() && summaryDetails->isHidden()
+                             && !textRow->findChild<QTextEdit*>(
+                                 QStringLiteral("conversationActivityDetail"))
+                             && !summaryRow->findChild<QTextEdit*>(
+                                 QStringLiteral("conversationActivityDetail"))
+                             && textDetails->property("detailMaterializationCount").toULongLong() == 0
+                             && summaryDetails->property("detailMaterializationCount").toULongLong() == 0
+                             && textDetails->property("deferredDetailBytes").toULongLong()
+                                    == std::string_view("working").size()
+                             && summaryDetails->property("deferredDetailBytes").toULongLong()
+                                    == std::string_view("summary").size(),
+                         "collapsed reasoning channels must retain their source bytes without materializing text documents");
+    passed &= conversation.updateExactMessageContent(
+        makeState({fixture}), QStringLiteral("reasoning-channels"), textChange);
+
+    const QString summaryDelta = QStringLiteral(" complete");
+    fixture.turns.front().messages.at(1).reasoningSummary += summaryDelta.toStdString();
+    const auto summaryChange = appendUpdate(
+        QStringLiteral("turn-reasoning-channels"),
+        QStringLiteral("reasoning-summary"),
+        client::ItemContentChannel::ReasoningSummary,
+        std::string_view("summary").size(),
+        summaryDelta);
+    passed &= conversation.updateExactMessageContent(
+        makeState({fixture}), QStringLiteral("reasoning-channels"), summaryChange);
+    passed &= expect(textDetails && summaryDetails
+                         && textDetails->isHidden() && summaryDetails->isHidden()
+                         && !textRow->findChild<QTextEdit*>(
+                             QStringLiteral("conversationActivityDetail"))
+                         && !summaryRow->findChild<QTextEdit*>(
+                             QStringLiteral("conversationActivityDetail"))
+                         && textDetails->property("detailMaterializationCount").toULongLong() == 0
+                         && summaryDetails->property("detailMaterializationCount").toULongLong() == 0
+                         && textDetails->property("deferredDetailBytes").toULongLong()
+                                == std::string_view("working through evidence").size()
+                         && summaryDetails->property("deferredDetailBytes").toULongLong()
+                                == std::string_view("summary complete").size(),
+                     "exact reasoning updates must advance collapsed deferred sources without creating hidden documents");
+
+    if (textDisclosure)
+        textDisclosure->click();
+    if (summaryDisclosure)
+        summaryDisclosure->click();
+    settleTimeline();
+    QPointer<QTextEdit> textDetail = textRow
+                                         ? textRow->findChild<QTextEdit*>(
+                                               QStringLiteral("conversationActivityDetail"))
+                                         : nullptr;
+    QPointer<QTextEdit> summaryDetail = summaryRow
+                                            ? summaryRow->findChild<QTextEdit*>(
+                                                  QStringLiteral("conversationActivityDetail"))
+                                            : nullptr;
+    passed &= expect(textDetail && summaryDetail && textDetails && summaryDetails
+                         && textDetail->toPlainText()
+                                == QStringLiteral("working through evidence")
+                         && summaryDetail->toPlainText()
+                                == QStringLiteral("summary complete")
+                         && textDetails->property("detailMaterializationCount").toULongLong() == 1
+                         && summaryDetails->property("detailMaterializationCount").toULongLong() == 1
+                         && textDetail->property("streamAppendCount").toULongLong() == 0
+                         && summaryDetail->property("streamAppendCount").toULongLong() == 0,
+                     "expanding reasoning rows must materialize each latest channel exactly once");
+
+    const QString expandedTextDelta = QStringLiteral(" after expansion");
+    const std::uint64_t expandedTextBase =
+        fixture.turns.front().messages.at(0).text.size();
+    fixture.turns.front().messages.at(0).text += expandedTextDelta.toStdString();
+    const auto expandedTextChange = appendUpdate(
+        QStringLiteral("turn-reasoning-channels"),
+        QStringLiteral("reasoning-text"),
+        client::ItemContentChannel::ReasoningText,
+        expandedTextBase,
+        expandedTextDelta);
+    passed &= conversation.updateExactMessageContent(
+        makeState({fixture}), QStringLiteral("reasoning-channels"), expandedTextChange);
+
+    const QString expandedSummaryDelta = QStringLiteral(" after expansion");
+    const std::uint64_t expandedSummaryBase =
+        fixture.turns.front().messages.at(1).reasoningSummary.size();
+    fixture.turns.front().messages.at(1).reasoningSummary +=
+        expandedSummaryDelta.toStdString();
+    const auto expandedSummaryChange = appendUpdate(
+        QStringLiteral("turn-reasoning-channels"),
+        QStringLiteral("reasoning-summary"),
+        client::ItemContentChannel::ReasoningSummary,
+        expandedSummaryBase,
+        expandedSummaryDelta);
+    passed &= conversation.updateExactMessageContent(
+        makeState({fixture}), QStringLiteral("reasoning-channels"), expandedSummaryChange);
+    passed &= expect(textDetail
+                         && textDetail->toPlainText()
+                                == QStringLiteral("working through evidence after expansion")
+                         && textDetail->property("streamAppendCount").toULongLong() == 1,
+                     "an expanded reasoning-text delta must append through the text cursor");
+    passed &= expect(summaryDetail
+                         && summaryDetail->toPlainText()
+                                == QStringLiteral("summary complete after expansion")
+                         && summaryDetail->property("streamAppendCount").toULongLong() == 1,
+                     "an expanded reasoning-summary delta must append independently through its text cursor");
+
+    const auto wrongBase = appendUpdate(
+        QStringLiteral("turn-reasoning-channels"),
+        QStringLiteral("reasoning-text"),
+        client::ItemContentChannel::ReasoningText,
+        1,
+        QStringLiteral("invalid"));
+    passed &= expect(!conversation.updateExactMessageContent(
+                         makeState({fixture}), QStringLiteral("reasoning-channels"), wrongBase)
+                         && textDetail
+                         && textDetail->toPlainText()
+                                == QStringLiteral("working through evidence after expansion"),
+                     "a mismatched reasoning base must decline the exact path without corrupting presentation");
     return passed;
 }
 
@@ -1498,9 +2069,12 @@ int main(int argc, char** argv)
     passed &= testActivityDisclosureAndFullOutput();
     passed &= testPointerPreservingAppend();
     passed &= testInPlaceMessageReplacement();
-    passed &= testStreamingMarkdownRenderCoalescing();
+    passed &= testStreamingPlainTextAndTerminalMarkdown();
+    passed &= testCompletedAgentMessageStreamsBeforeTerminalMarkdown();
+    passed &= testTerminalMarkdownPromotionResettlesFollowedTail();
     passed &= testCompleteAndLargeUserMessagePresentation();
     passed &= testExactContentInvalidation();
+    passed &= testExactReasoningChannels();
     passed &= testSegmentReplacementShrink();
     passed &= testThreadSwitchWindow();
     passed &= testInspectorRevisionOnlyUpdate();

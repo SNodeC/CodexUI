@@ -277,6 +277,8 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
                                   selectedInspectorTurnId);
                 inspector->showInfo();
             });
+    connect(conversation, &ConversationWidget::latestPresentationRequested, this,
+            [this] { refreshState(true, false, false); });
     connect(&frontendSession, &FrontendSession::lifecycleChanged, this, &WorkbenchWidget::refreshLifecycle);
     connect(&frontendSession, &FrontendSession::statusChanged, this, &WorkbenchWidget::refreshLifecycle);
     connect(&frontendSession, &FrontendSession::stateChanged, this, &WorkbenchWidget::scheduleStateRefresh);
@@ -335,9 +337,48 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
                 if (identity.threadId != selectedThreadId)
                     continue;
                 foundExactContent = true;
-                QStringList& itemIds = selectedContentRefreshPending[identity.turnId];
-                if (!itemIds.contains(identity.itemId))
-                    itemIds.append(identity.itemId);
+                auto existing = std::find_if(
+                    selectedContentRefreshPending.begin(),
+                    selectedContentRefreshPending.end(),
+                    [&identity](const ConversationContentUpdate& update)
+                    {
+                        return update.turnId == identity.turnId
+                               && update.itemId == identity.itemId
+                               && update.channel == identity.channel;
+                    });
+                ConversationContentUpdate next{
+                    identity.turnId,
+                    identity.itemId,
+                    identity.channel,
+                    std::nullopt};
+                if (identity.append)
+                {
+                    next.append = ConversationContentAppend{
+                        identity.append->baseContentBytes,
+                        identity.append->discardPrefixBytes,
+                        static_cast<std::uint64_t>(identity.append->deltaUtf8.size()),
+                        QString::fromUtf8(identity.append->deltaUtf8)};
+                }
+                if (existing == selectedContentRefreshPending.end())
+                {
+                    selectedContentRefreshPending.push_back(std::move(next));
+                }
+                else if (existing->append && next.append
+                         && existing->append->discardPrefixBytes == 0
+                         && next.append->discardPrefixBytes == 0
+                         && existing->append->baseContentBytes
+                                + existing->append->deltaUtf8Bytes
+                                == next.append->baseContentBytes)
+                {
+                    existing->append->delta.append(next.append->delta);
+                    existing->append->deltaUtf8Bytes += next.append->deltaUtf8Bytes;
+                }
+                else
+                {
+                    // Ambiguous, rolling, or replacement updates retain the
+                    // authoritative State fallback instead of guessing a delta.
+                    existing->append.reset();
+                }
             }
             // A conversation-affecting update without an exact item identity
             // must retain the existing bounded full reconciliation.
@@ -364,8 +405,8 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
         const bool refreshSidebar = sidebarRefreshPending;
         const bool exactContentOnly = refreshSelectedPresentation
                                       && !selectedPresentationFullRefreshPending
-                                      && !selectedContentRefreshPending.isEmpty();
-        QHash<QString, QStringList> exactContentChanges = std::move(selectedContentRefreshPending);
+                                      && !selectedContentRefreshPending.empty();
+        ConversationContentUpdates exactContentChanges = std::move(selectedContentRefreshPending);
         selectedPresentationRefreshPending = false;
         selectedPresentationFullRefreshPending = false;
         selectedContentRefreshPending.clear();
@@ -446,7 +487,7 @@ void WorkbenchWidget::refreshLifecycle()
 void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
                                    bool refreshInspector,
                                    bool refreshSidebar,
-                                   const QHash<QString, QStringList>* exactContentChanges)
+                                   const ConversationContentUpdates* exactContentChanges)
 {
     stateRefreshPending = false;
     selectedPresentationRefreshPending = false;
