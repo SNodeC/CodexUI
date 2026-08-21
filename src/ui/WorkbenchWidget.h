@@ -4,6 +4,7 @@
 #define CODEXUI_UI_WORKBENCHWIDGET_H
 
 #include "ui/InteractiveRequestDialog.h"
+#include "ui/ConversationWidget.h"
 #include "ui/ThreadSetupDialog.h"
 #include "ui/UpcomingTurnDock.h"
 
@@ -80,7 +81,7 @@ private:
     void refreshState(bool refreshSelectedPresentation = true,
                       bool refreshInspector = true,
                       bool refreshSidebar = true,
-                      const QHash<QString, QStringList>* exactContentChanges = nullptr);
+                      const ConversationContentUpdates* exactContentChanges = nullptr);
     void refreshControls();
     void refreshControllerStatus();
     [[nodiscard]] bool writeOperationBusy() const noexcept;
@@ -197,7 +198,7 @@ private:
     bool stateRefreshPending = false;
     bool selectedPresentationRefreshPending = false;
     bool selectedPresentationFullRefreshPending = false;
-    QHash<QString, QStringList> selectedContentRefreshPending;
+    ConversationContentUpdates selectedContentRefreshPending;
     bool inspectorRefreshPending = false;
     bool sidebarRefreshPending = false;
 };

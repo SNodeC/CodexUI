@@ -5,6 +5,8 @@
 
 #include "app/AttachmentManager.h"
 
+#include <ai/openai/codex/frontend/client/StateTypes.h>
+
 #include <QWidget>
 
 #include <QByteArray>
@@ -14,11 +16,11 @@
 #include <QStringList>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 class QFrame;
 class QLabel;
-class QPropertyAnimation;
 class QResizeEvent;
 class QScrollArea;
 class QTimer;
@@ -37,6 +39,25 @@ class AnchoredTurnSurface;
 class UpcomingTurnDock;
 struct UpcomingTurnDraft;
 
+struct ConversationContentAppend
+{
+    std::uint64_t baseContentBytes = 0;
+    std::uint64_t discardPrefixBytes = 0;
+    std::uint64_t deltaUtf8Bytes = 0;
+    QString delta;
+};
+
+struct ConversationContentUpdate
+{
+    QString turnId;
+    QString itemId;
+    ai::openai::codex::frontend::client::ItemContentChannel channel =
+        ai::openai::codex::frontend::client::ItemContentChannel::AgentText;
+    std::optional<ConversationContentAppend> append;
+};
+
+using ConversationContentUpdates = std::vector<ConversationContentUpdate>;
+
 class ConversationWidget : public QWidget
 {
     Q_OBJECT
@@ -46,12 +67,12 @@ public:
     void render(const ai::openai::codex::frontend::client::State& state,
                 const QString& threadId,
                 bool newThreadDraft = false,
-                const QHash<QString, QStringList>* exactContentChanges = nullptr);
+                const ConversationContentUpdates* exactContentChanges = nullptr);
     void setModelCatalog(const std::vector<ai::openai::codex::typed::Model>& catalog);
     [[nodiscard]] bool updateExactMessageContent(
         const ai::openai::codex::frontend::client::State& state,
         const QString& threadId,
-        const QHash<QString, QStringList>& exactContentChanges);
+        const ConversationContentUpdates& exactContentChanges);
     void clearPrompt();
     void clearPromptIfUnchanged(const QString& submittedPrompt);
     [[nodiscard]] const QList<AttachmentInfo>& attachments() const noexcept;
@@ -76,6 +97,7 @@ signals:
     void stopRequested();
     void upcomingTurnSettingsChanged();
     void turnDetailsRequested(const QString& turnId);
+    void latestPresentationRequested();
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -90,6 +112,10 @@ private:
     void settleThreadSwitchLayout(std::uint64_t generation, int remainingPasses);
     void synchronizeTimelineHeight(bool allowShrink = true);
     void activityLayoutChanged();
+    [[nodiscard]] bool shouldFreezePresentation(const QString& threadId,
+                                                bool newThreadDraft) const;
+    void markPresentationDeferred();
+    void requestDeferredPresentationAtTail();
     AnchoredTurnSurface* anchoredSurface = nullptr;
     UpcomingTurnDock* upcomingTurnDock = nullptr;
     QLabel* contextPath = nullptr;
@@ -101,7 +127,6 @@ private:
     QLabel* timelineWindowDetail = nullptr;
     QWidget* timelineHost = nullptr;
     QVBoxLayout* timeline = nullptr;
-    QPropertyAnimation* scrollAnimation = nullptr;
     QTimer* layoutSettleTimer = nullptr;
     QString renderedThreadId;
     // Identity only; conversation content remains owned by immutable AISuite State.
@@ -123,6 +148,8 @@ private:
     bool pendingThreadChanged = false;
     bool pendingTimelineShrink = false;
     bool resizeLayoutPending = false;
+    bool deferredPresentationPending = false;
+    bool deferredPresentationRequestScheduled = false;
     int pendingPreviousScroll = 0;
     int pendingViewportAnchorY = 0;
     bool renderedNewThreadDraft = false;

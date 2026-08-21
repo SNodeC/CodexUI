@@ -17,8 +17,8 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
-#include <QPropertyAnimation>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSet>
@@ -26,13 +26,14 @@
 #include <QStyle>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <QTextEdit>
 #include <QTextFragment>
 #include <QTextImageFormat>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
-#include <QEasingCurve>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <optional>
@@ -52,7 +53,6 @@ constexpr qsizetype maximumRenderedTimelineItems = 256;
 constexpr std::size_t maximumActivityItemsPerSegment = 16;
 constexpr qsizetype largeMessageEditorThreshold = 64 * 1024;
 constexpr int largeMessageEditorHeight = 240;
-constexpr int streamingMarkdownRenderIntervalMs = 75;
 
 struct ActivityPresentation
 {
@@ -62,6 +62,7 @@ struct ActivityPresentation
     QString status;
     QString tail;
     bool truncated = false;
+    std::optional<sdk::ItemContentChannel> detailChannel;
 };
 
 QString fromUtf8(std::string_view value)
@@ -125,11 +126,8 @@ QLabel* textLabel(const QString& text, const char* kind = nullptr)
 class WrappingLabel final : public QLabel
 {
 public:
-    explicit WrappingLabel(const QString& text,
-                           bool markdown = false,
-                           std::function<void()> deferredRenderCompleted = {})
+    explicit WrappingLabel(const QString& text, bool markdown = false)
         : markdown(markdown)
-        , deferredRenderCompleted(std::move(deferredRenderCompleted))
     {
         setTextFormat(markdown ? Qt::RichText : Qt::PlainText);
         setWordWrap(true);
@@ -145,44 +143,25 @@ public:
                     || url.scheme() == QStringLiteral("http"))
                     (void)QDesktopServices::openUrl(url);
             });
-            markdownRenderTimer.setSingleShot(true);
-            markdownRenderTimer.setInterval(streamingMarkdownRenderIntervalMs);
-            connect(&markdownRenderTimer, &QTimer::timeout, this,
-                    [this] { renderMarkdownNow(true); });
         }
         setContent(text);
     }
 
-    void setContent(const QString& text, bool coalesceMarkdownRender = false)
+    bool setContent(const QString& text)
     {
-        if (text == sourceText) {
-            if (markdown && !coalesceMarkdownRender && markdownRenderTimer.isActive())
-                renderMarkdownNow();
-            return;
-        }
-        const QString previousSource = sourceText;
+        if (text == sourceText)
+            return false;
         sourceText = text;
         setProperty("sourceText", sourceText);
         if (!markdown) {
+            const int previousHeight = preferredHeight();
             heightCache.clear();
             QLabel::setText(text);
             updateGeometry();
-            return;
+            return previousHeight != preferredHeight();
         }
 
-        const bool appendOnly = !previousSource.isEmpty()
-                                && text.size() > previousSource.size()
-                                && text.startsWith(previousSource);
-        if (coalesceMarkdownRender && appendOnly && !renderedSourceText.isEmpty()) {
-            // Streaming deltas update the authoritative source immediately, but
-            // coalesce the expensive full Markdown parse at a bounded cadence.
-            // Do not restart an active timer: this is throttling, not an
-            // indefinitely postponable debounce.
-            if (!markdownRenderTimer.isActive())
-                markdownRenderTimer.start();
-            return;
-        }
-        renderMarkdownNow();
+        return renderMarkdownNow();
     }
 
     [[nodiscard]] const QString& content() const noexcept { return sourceText; }
@@ -208,15 +187,21 @@ protected:
     }
 
 private:
-    void renderMarkdownNow(bool notifyDeferredCompletion = false)
+    [[nodiscard]] int preferredHeight() const
     {
-        markdownRenderTimer.stop();
-        renderedSourceText = sourceText;
+        const int availableWidth = width();
+        return availableWidth > 0 ? heightForWidth(availableWidth) : sizeHint().height();
+    }
+
+    bool renderMarkdownNow()
+    {
+        const int previousHeight = preferredHeight();
         heightCache.clear();
+        setTextFormat(Qt::RichText);
         QLabel::setText(safeMarkdownHtml(sourceText, font()));
         updateGeometry();
-        if (notifyDeferredCompletion && deferredRenderCompleted)
-            deferredRenderCompleted();
+        setProperty("markdownRenderMode", QStringLiteral("markdown"));
+        return previousHeight != preferredHeight();
     }
 
     static QString safeMarkdownHtml(const QString& markdownText, const QFont& renderFont)
@@ -258,9 +243,142 @@ private:
 
     bool markdown = false;
     QString sourceText;
-    QString renderedSourceText;
-    QTimer markdownRenderTimer;
-    std::function<void()> deferredRenderCompleted;
+    mutable QHash<int, int> heightCache;
+};
+
+class StreamingMessageView final : public QTextEdit
+{
+public:
+    explicit StreamingMessageView(const QString& text)
+        : sourceText(text)
+        , sourceUtf8Bytes(static_cast<std::uint64_t>(text.toUtf8().size()))
+    {
+        QSizePolicy policy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        policy.setHeightForWidth(true);
+        setSizePolicy(policy);
+        setReadOnly(true);
+        setUndoRedoEnabled(false);
+        setAcceptRichText(false);
+        setFrameStyle(QFrame::NoFrame);
+        setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setStyleSheet(QStringLiteral("QTextEdit{background:transparent;border:0;padding:0;}"));
+        viewport()->setAutoFillBackground(false);
+        document()->setDocumentMargin(0.0);
+        document()->setDefaultFont(font());
+        document()->setPlainText(text);
+        setProperty("sourceUtf8Bytes", static_cast<qulonglong>(sourceUtf8Bytes));
+        setProperty("streamAppendCount", 0);
+        setProperty("fullReplacementCount", 0);
+        setProperty("markdownRenderMode", QStringLiteral("streaming-plain"));
+    }
+
+    [[nodiscard]] const QString& content() const noexcept { return sourceText; }
+    [[nodiscard]] std::uint64_t utf8Bytes() const noexcept { return sourceUtf8Bytes; }
+
+    bool replaceContent(const QString& text)
+    {
+        if (text == sourceText)
+            return false;
+        const int previousHeight = preferredHeight();
+        sourceText = text;
+        sourceUtf8Bytes = static_cast<std::uint64_t>(text.toUtf8().size());
+        document()->setPlainText(text);
+        heightCache.clear();
+        setProperty("sourceUtf8Bytes", static_cast<qulonglong>(sourceUtf8Bytes));
+        setProperty("fullReplacementCount", property("fullReplacementCount").toULongLong() + 1);
+        updateGeometry();
+        update();
+        return previousHeight != preferredHeight();
+    }
+
+    std::optional<bool> applyAppend(std::uint64_t baseContentBytes,
+                                    std::uint64_t discardPrefixBytes,
+                                    const QString& delta)
+    {
+        if (baseContentBytes != sourceUtf8Bytes || discardPrefixBytes > sourceUtf8Bytes)
+            return std::nullopt;
+
+        const int previousHeight = preferredHeight();
+        const QByteArray deltaUtf8 = delta.toUtf8();
+        if (discardPrefixBytes == 0)
+        {
+            sourceText.append(delta);
+            QTextCursor cursor(document());
+            cursor.movePosition(QTextCursor::End);
+            cursor.insertText(delta);
+        }
+        else
+        {
+            const QByteArray previousUtf8 = sourceText.toUtf8();
+            const QByteArray nextUtf8 = previousUtf8.mid(
+                static_cast<qsizetype>(discardPrefixBytes)) + deltaUtf8;
+            sourceText = QString::fromUtf8(nextUtf8);
+            document()->setPlainText(sourceText);
+        }
+        sourceUtf8Bytes = baseContentBytes - discardPrefixBytes
+                          + static_cast<std::uint64_t>(deltaUtf8.size());
+        heightCache.clear();
+        setProperty("sourceUtf8Bytes", static_cast<qulonglong>(sourceUtf8Bytes));
+        setProperty("streamAppendCount", property("streamAppendCount").toULongLong() + 1);
+        updateGeometry();
+        update();
+        return previousHeight != preferredHeight();
+    }
+
+    bool hasHeightForWidth() const override { return true; }
+
+    int heightForWidth(int width) const override
+    {
+        const auto found = heightCache.constFind(width);
+        if (found != heightCache.cend())
+            return *found;
+        document()->setTextWidth(qMax(1, width));
+        const int height = qCeil(document()->size().height());
+        heightCache.insert(width, height);
+        return height;
+    }
+
+    QSize sizeHint() const override
+    {
+        const int preferredWidth = width() > 0 ? width() : 480;
+        return QSize(preferredWidth, heightForWidth(preferredWidth));
+    }
+
+protected:
+    void wheelEvent(QWheelEvent* event) override
+    {
+        // This view grows with its document; the enclosing conversation owns
+        // vertical navigation.
+        event->ignore();
+    }
+
+    void resizeEvent(QResizeEvent* event) override
+    {
+        QTextEdit::resizeEvent(event);
+        document()->setTextWidth(qMax(1, viewport()->width()));
+    }
+
+    void changeEvent(QEvent* event) override
+    {
+        if (event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange)
+        {
+            document()->setDefaultFont(font());
+            heightCache.clear();
+            updateGeometry();
+        }
+        QTextEdit::changeEvent(event);
+    }
+
+private:
+    [[nodiscard]] int preferredHeight() const
+    {
+        const int availableWidth = width();
+        return availableWidth > 0 ? heightForWidth(availableWidth) : sizeHint().height();
+    }
+
+    QString sourceText;
+    std::uint64_t sourceUtf8Bytes = 0;
     mutable QHash<int, int> heightCache;
 };
 
@@ -271,12 +389,17 @@ QLabel* wrappingLabel(const QString& text, const char* kind = nullptr)
     return result;
 }
 
-QWidget* messageContentWidget(const QString& text,
-                              const std::function<void()>& deferredRenderCompleted = {})
+QWidget* messageContentWidget(const QString& text, bool streaming)
 {
+    if (text.size() <= largeMessageEditorThreshold && streaming)
+    {
+        auto* result = new StreamingMessageView(text);
+        result->setProperty("kind", "body");
+        return result;
+    }
     if (text.size() <= largeMessageEditorThreshold)
     {
-        auto* result = new WrappingLabel(text, true, deferredRenderCompleted);
+        auto* result = new WrappingLabel(text, true);
         result->setProperty("kind", "body");
         return result;
     }
@@ -290,6 +413,10 @@ QWidget* messageContentWidget(const QString& text,
     result->setFixedHeight(largeMessageEditorHeight);
     result->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     result->setPlainText(text);
+    result->setProperty("sourceUtf8Bytes", static_cast<qulonglong>(text.toUtf8().size()));
+    result->setProperty("streamAppendCount", 0);
+    result->setProperty("fullReplacementCount", 0);
+    result->setProperty("markdownRenderMode", QStringLiteral("large-plain"));
     return result;
 }
 
@@ -297,32 +424,83 @@ QString messageContentText(const QWidget* content)
 {
     if (const auto* label = dynamic_cast<const WrappingLabel*>(content))
         return label->content();
+    if (const auto* streaming = dynamic_cast<const StreamingMessageView*>(content))
+        return streaming->content();
     if (const auto* editor = qobject_cast<const QPlainTextEdit*>(content))
         return editor->toPlainText();
     return {};
 }
 
-void setMessageContentText(QWidget* content,
-                           const QString& text,
-                           bool coalesceMarkdownRender = false)
+bool setMessageContentText(QWidget* content,
+                           const QString& text)
 {
     if (auto* label = dynamic_cast<WrappingLabel*>(content))
-        label->setContent(text, coalesceMarkdownRender);
+        return label->setContent(text);
+    if (auto* streamingView = dynamic_cast<StreamingMessageView*>(content))
+        return streamingView->replaceContent(text);
     else if (auto* editor = qobject_cast<QPlainTextEdit*>(content); editor && editor->toPlainText() != text)
+    {
         editor->setPlainText(text);
+        editor->setProperty("sourceUtf8Bytes", static_cast<qulonglong>(text.toUtf8().size()));
+        editor->setProperty("fullReplacementCount", editor->property("fullReplacementCount").toULongLong() + 1);
+        return false;
+    }
+    return false;
+}
+
+std::optional<bool> appendMessageContent(QWidget* content,
+                                         std::uint64_t baseContentBytes,
+                                         std::uint64_t discardPrefixBytes,
+                                         const QString& delta)
+{
+    if (auto* streamingView = dynamic_cast<StreamingMessageView*>(content))
+        return streamingView->applyAppend(baseContentBytes, discardPrefixBytes, delta);
+
+    auto* editor = qobject_cast<QPlainTextEdit*>(content);
+    if (!editor)
+        return std::nullopt;
+    const std::uint64_t currentBytes = editor->property("sourceUtf8Bytes").toULongLong();
+    if (currentBytes != baseContentBytes || discardPrefixBytes > currentBytes)
+        return std::nullopt;
+
+    const QByteArray deltaUtf8 = delta.toUtf8();
+
+    if (discardPrefixBytes == 0)
+    {
+        QTextCursor cursor = editor->textCursor();
+        cursor.movePosition(QTextCursor::End);
+        cursor.insertText(delta);
+    }
+    else
+    {
+        const QByteArray previousUtf8 = editor->toPlainText().toUtf8();
+        editor->setPlainText(
+            QString::fromUtf8(previousUtf8.mid(static_cast<qsizetype>(discardPrefixBytes))
+                              + deltaUtf8));
+    }
+    const std::uint64_t nextBytes = baseContentBytes - discardPrefixBytes
+                                    + static_cast<std::uint64_t>(deltaUtf8.size());
+    editor->setProperty("sourceUtf8Bytes", static_cast<qulonglong>(nextBytes));
+    editor->setProperty("streamAppendCount", editor->property("streamAppendCount").toULongLong() + 1);
+    return false;
 }
 
 QWidget* ensureMessageContentWidget(QVBoxLayout* layout,
                                     QWidget* content,
                                     const QString& text,
-                                    const std::function<void()>& deferredRenderCompleted = {})
+                                    bool streaming)
 {
     const bool needsEditor = text.size() > largeMessageEditorThreshold;
     const bool hasEditor = qobject_cast<QPlainTextEdit*>(content) != nullptr;
-    if (needsEditor == hasEditor)
+    const bool needsStreamingView = !needsEditor && streaming;
+    const bool hasStreamingView = dynamic_cast<StreamingMessageView*>(content) != nullptr;
+    const bool hasMarkdownView = dynamic_cast<WrappingLabel*>(content) != nullptr;
+    if ((needsEditor && hasEditor)
+        || (needsStreamingView && hasStreamingView)
+        || (!needsEditor && !needsStreamingView && hasMarkdownView))
         return content;
 
-    QWidget* replacement = messageContentWidget(text, deferredRenderCompleted);
+    QWidget* replacement = messageContentWidget(text, streaming);
     replacement->setObjectName(QStringLiteral("conversationMessageContent"));
     delete layout->replaceWidget(content, replacement);
     content->hide();
@@ -481,7 +659,7 @@ bool streamingMessageStatus(const QString& status)
            || normalized.contains(QStringLiteral("stream"));
 }
 
-MessagePresentation messagePresentation(const sdk::ItemState& item, bool user)
+MessagePresentation messagePresentationMetadata(const sdk::ItemState& item, bool user)
 {
     MessagePresentation result;
     const QString itemStatusText = itemStatus(item);
@@ -497,6 +675,15 @@ MessagePresentation messagePresentation(const sdk::ItemState& item, bool user)
             result.status += QStringLiteral(" · ") + humanize(fromUtf8(*agent->phase));
     }
 
+    const auto userMessage = user ? sdk::userMessageSemanticView(item) : std::nullopt;
+    result.truncation = userMessage ? userMessageTruncationText(*userMessage)
+                                    : truncationText(item);
+    return result;
+}
+
+MessagePresentation messagePresentation(const sdk::ItemState& item, bool user)
+{
+    MessagePresentation result = messagePresentationMetadata(item, user);
     const auto userMessage = user ? sdk::userMessageSemanticView(item) : std::nullopt;
     if (user)
     {
@@ -527,18 +714,13 @@ MessagePresentation messagePresentation(const sdk::ItemState& item, bool user)
         }
     }
 
-    // A valid typed user-message view is the authoritative statement about
-    // retained text. Generic item-detail bounds may describe unrelated
-    // metadata and must not turn a complete prompt into a truncation warning.
-    result.truncation = userMessage ? userMessageTruncationText(*userMessage)
-                                    : truncationText(item);
     return result;
 }
 
-void applyMessagePresentation(QLabel* status,
-                              QWidget* content,
-                              QLabel* truncation,
-                              const MessagePresentation& presentation)
+bool applyMessageMetadata(QLabel* status,
+                          QWidget* content,
+                          QLabel* truncation,
+                          const MessagePresentation& presentation)
 {
     if (status->text() != presentation.status)
         status->setText(presentation.status);
@@ -554,11 +736,28 @@ void applyMessagePresentation(QLabel* status,
         content->style()->unpolish(content);
         content->style()->polish(content);
     }
-    setMessageContentText(content, presentation.content, presentation.streaming);
 
+    bool geometryChanged = false;
     if (truncation->text() != presentation.truncation)
+    {
         truncation->setText(presentation.truncation);
-    truncation->setVisible(!presentation.truncation.isEmpty());
+        geometryChanged = truncation->isVisible();
+    }
+    const bool truncationVisible = !presentation.truncation.isEmpty();
+    geometryChanged = geometryChanged || truncation->isVisible() != truncationVisible;
+    truncation->setVisible(truncationVisible);
+    return geometryChanged;
+}
+
+bool applyMessagePresentation(QLabel* status,
+                              QWidget* content,
+                              QLabel* truncation,
+                              const MessagePresentation& presentation)
+{
+    const bool metadataGeometryChanged = applyMessageMetadata(
+        status, content, truncation, presentation);
+    return setMessageContentText(content, presentation.content)
+           || metadataGeometryChanged;
 }
 
 QString pendingRequestDetail(const sdk::State& state, const sdk::ItemState& item)
@@ -583,13 +782,16 @@ QString pendingRequestDetail(const sdk::State& state, const sdk::ItemState& item
 
 ActivityPresentation activityPresentation(const sdk::State& state,
                                           const sdk::ItemState& item,
-                                          bool includeOutput = true)
+                                          bool includeOutput = true,
+                                          bool includeReasoningContent = true)
 {
     ActivityPresentation result;
     result.title = item.kind.known ? knownKindTitle(*item.kind.known) : QStringLiteral("Unknown item");
     result.status = itemStatus(item);
     result.truncated = item.truncated || item.contentTruncated || !item.omittedFields.empty();
-    if (item.summary && !item.summary->empty()) result.detail = fromUtf8(*item.summary);
+    if (!item.kind.is(frontend::ThreadItemKind::Reasoning)
+        && item.summary && !item.summary->empty())
+        result.detail = fromUtf8(*item.summary);
 
     const auto semantic = sdk::itemSemanticView(item);
     if (semantic)
@@ -685,12 +887,18 @@ ActivityPresentation activityPresentation(const sdk::State& state,
     if (includeOutput && item.commandOutput && !item.commandOutput->empty())
         result.output = fromUtf8(*item.commandOutput);
 
-    if (item.kind.is(frontend::ThreadItemKind::Reasoning))
+    if (includeReasoningContent && item.kind.is(frontend::ThreadItemKind::Reasoning))
     {
         if (item.reasoningSummary && !item.reasoningSummary->empty())
+        {
             result.detail = fromUtf8(*item.reasoningSummary);
+            result.detailChannel = sdk::ItemContentChannel::ReasoningSummary;
+        }
         else if (item.reasoningText && !item.reasoningText->empty())
+        {
             result.detail = fromUtf8(*item.reasoningText);
+            result.detailChannel = sdk::ItemContentChannel::ReasoningText;
+        }
     }
 
     if (!item.kind.known)
@@ -770,64 +978,228 @@ QPlainTextEdit* activityOutputWidget(const QString& text)
         "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{background:transparent;border:0;width:0;}"
         "QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal{background:transparent;}"));
     output->setPlainText(text);
-    output->setProperty("activityOutputText", text);
+    output->setProperty("sourceUtf8Bytes", static_cast<qulonglong>(text.toUtf8().size()));
+    output->setProperty("streamAppendCount", 0);
+    output->setProperty("fullReplacementCount", 0);
     return output;
 }
 
-void updateActivityOutput(QPlainTextEdit* output, const QString& text)
+class ActivityDetails final : public QWidget
 {
-    if (!output)
-        return;
-    const bool followsEnd = output->verticalScrollBar()->maximum()
-                            - output->verticalScrollBar()->value() <= 2;
-    const int previousScroll = output->verticalScrollBar()->value();
-    const QString previous = output->property("activityOutputText").toString();
-    if (previous != text)
+public:
+    bool replaceOutput(const QString& text)
     {
-        if (!previous.isEmpty() && text.startsWith(previous))
+        const bool previouslyVisible = hasOutput();
+        const std::uint64_t nextBytes = static_cast<std::uint64_t>(text.toUtf8().size());
+        if (!outputEditor)
         {
-            QTextCursor cursor = output->textCursor();
-            cursor.movePosition(QTextCursor::End);
-            cursor.insertText(text.mid(previous.size()));
+            deferredOutput = text;
+            outputBytes = nextBytes;
+            return previouslyVisible != hasOutput();
+        }
+
+        const bool followsEnd = outputEditor->verticalScrollBar()->maximum()
+                                - outputEditor->verticalScrollBar()->value() <= 2;
+        const int previousScroll = outputEditor->verticalScrollBar()->value();
+        setMessageContentText(outputEditor, text);
+        outputBytes = nextBytes;
+        outputEditor->setVisible(!text.isEmpty());
+        if (outputHeading)
+            outputHeading->setVisible(!text.isEmpty());
+        outputEditor->verticalScrollBar()->setValue(
+            followsEnd ? outputEditor->verticalScrollBar()->maximum()
+                       : qMin(previousScroll, outputEditor->verticalScrollBar()->maximum()));
+        return previouslyVisible != hasOutput();
+    }
+
+    std::optional<bool> applyOutputAppend(std::uint64_t baseContentBytes,
+                                          std::uint64_t discardPrefixBytes,
+                                          const QString& delta)
+    {
+        if (baseContentBytes != outputBytes || discardPrefixBytes > outputBytes)
+            return std::nullopt;
+
+        const QByteArray deltaUtf8 = delta.toUtf8();
+        if (!outputEditor)
+        {
+            if (discardPrefixBytes == 0)
+                deferredOutput.append(delta);
+            else
+            {
+                const QByteArray retained = deferredOutput.toUtf8().mid(
+                    static_cast<qsizetype>(discardPrefixBytes));
+                deferredOutput = QString::fromUtf8(retained + deltaUtf8);
+            }
+            outputBytes = baseContentBytes - discardPrefixBytes
+                          + static_cast<std::uint64_t>(deltaUtf8.size());
+            return false;
+        }
+
+        const bool followsEnd = outputEditor->verticalScrollBar()->maximum()
+                                - outputEditor->verticalScrollBar()->value() <= 2;
+        const int previousScroll = outputEditor->verticalScrollBar()->value();
+        const auto applied = appendMessageContent(
+            outputEditor, baseContentBytes, discardPrefixBytes, delta);
+        if (!applied)
+            return std::nullopt;
+        outputBytes = baseContentBytes - discardPrefixBytes
+                      + static_cast<std::uint64_t>(deltaUtf8.size());
+        outputEditor->verticalScrollBar()->setValue(
+            followsEnd ? outputEditor->verticalScrollBar()->maximum()
+                       : qMin(previousScroll, outputEditor->verticalScrollBar()->maximum()));
+        return *applied;
+    }
+
+    QPlainTextEdit* ensureOutput(QVBoxLayout* layout)
+    {
+        if (!layout || deferredOutput.isEmpty())
+            return outputEditor;
+        if (!outputHeading)
+        {
+            outputHeading = textLabel(QStringLiteral("Output"), "small");
+            outputHeading->setObjectName(QStringLiteral("conversationActivityOutputHeading"));
+            outputHeading->setStyleSheet(
+                QStringLiteral("font-size:10px;font-weight:600;color:#475467;"));
+            const auto* incomplete = findChild<QLabel*>(
+                QStringLiteral("conversationActivityIncomplete"));
+            const int headingPosition = incomplete ? layout->indexOf(incomplete) : layout->count();
+            layout->insertWidget(headingPosition, outputHeading);
+        }
+        outputEditor = activityOutputWidget(deferredOutput);
+        deferredOutput.clear();
+        deferredOutput.squeeze();
+        const auto* incomplete = findChild<QLabel*>(QStringLiteral("conversationActivityIncomplete"));
+        const int position = incomplete ? layout->indexOf(incomplete) : layout->count();
+        layout->insertWidget(position, outputEditor);
+        outputHeading->show();
+        outputEditor->show();
+        return outputEditor;
+    }
+
+    [[nodiscard]] bool hasOutput() const noexcept { return outputBytes != 0; }
+    [[nodiscard]] std::uint64_t retainedOutputBytes() const noexcept { return outputBytes; }
+    [[nodiscard]] QPlainTextEdit* output() const noexcept { return outputEditor; }
+    [[nodiscard]] QLabel* heading() const noexcept { return outputHeading; }
+
+private:
+    QString deferredOutput;
+    std::uint64_t outputBytes = 0;
+    QPlainTextEdit* outputEditor = nullptr;
+    QLabel* outputHeading = nullptr;
+};
+
+QWidget* activityDetailWidget(const ActivityPresentation& presentation)
+{
+    QWidget* detail = nullptr;
+    if (presentation.detailChannel)
+    {
+        auto* streaming = new StreamingMessageView(presentation.detail);
+        streaming->setProperty(
+            "activityContentChannel",
+            static_cast<int>(*presentation.detailChannel));
+        detail = streaming;
+    }
+    else
+    {
+        detail = wrappingLabel(presentation.detail, "meta");
+    }
+    detail->setObjectName(QStringLiteral("conversationActivityDetail"));
+    detail->setProperty("kind", "meta");
+    detail->style()->unpolish(detail);
+    detail->style()->polish(detail);
+    return detail;
+}
+
+bool updateActivityDetail(ActivityDetails* details,
+                          QVBoxLayout* layout,
+                          const ActivityPresentation& presentation)
+{
+    if (!details || !layout)
+        return false;
+    QWidget* detail = details->findChild<QWidget*>(
+        QStringLiteral("conversationActivityDetail"));
+    if (presentation.detail.isEmpty())
+    {
+        const bool changed = detail && detail->isVisible();
+        if (detail)
+            detail->hide();
+        return changed;
+    }
+
+    const auto expectedChannel = presentation.detailChannel;
+    const auto* streaming = dynamic_cast<StreamingMessageView*>(detail);
+    const bool compatible = expectedChannel
+                                ? streaming
+                                      && detail->property("activityContentChannel").toInt()
+                                             == static_cast<int>(*expectedChannel)
+                                : detail && !streaming;
+    bool geometryChanged = false;
+    if (!compatible)
+    {
+        QWidget* replacement = activityDetailWidget(presentation);
+        if (detail)
+        {
+            delete layout->replaceWidget(detail, replacement);
+            detail->hide();
+            detail->deleteLater();
         }
         else
         {
-            output->setPlainText(text);
+            layout->insertWidget(0, replacement);
         }
+        detail = replacement;
+        geometryChanged = true;
     }
-    output->setProperty("activityOutputText", text);
-    output->setVisible(!text.isEmpty());
-    output->verticalScrollBar()->setValue(
-        followsEnd ? output->verticalScrollBar()->maximum()
-                   : qMin(previousScroll, output->verticalScrollBar()->maximum()));
+    else if (auto* streamingDetail = dynamic_cast<StreamingMessageView*>(detail))
+    {
+        geometryChanged = streamingDetail->replaceContent(presentation.detail);
+    }
+    else if (auto* label = dynamic_cast<WrappingLabel*>(detail))
+    {
+        geometryChanged = label->setContent(presentation.detail);
+    }
+    if (!detail->isVisible())
+    {
+        detail->show();
+        geometryChanged = true;
+    }
+    return geometryChanged;
 }
 
-QPlainTextEdit* ensureActivityOutput(QWidget* details, QVBoxLayout* layout)
+bool updateActivityDisclosureAvailability(QWidget* row)
 {
-    if (!details || !layout)
-        return nullptr;
-    auto* output = details->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput"));
-    const QString text = details->property("activityOutputText").toString();
-    if (!output && !text.isEmpty())
+    if (!row)
+        return false;
+    auto* details = dynamic_cast<ActivityDetails*>(
+        row->findChild<QWidget*>(QStringLiteral("conversationActivityDetails")));
+    auto* disclosure = row->findChild<QToolButton*>(QStringLiteral("activityDisclosure"));
+    if (!details || !disclosure)
+        return false;
+    const auto* detail = details->findChild<QWidget*>(
+        QStringLiteral("conversationActivityDetail"));
+    const auto* incomplete = details->findChild<QLabel*>(
+        QStringLiteral("conversationActivityIncomplete"));
+    const bool hasDetails = (detail && detail->isVisible())
+                            || details->hasOutput()
+                            || (incomplete && incomplete->isVisible());
+    bool changed = disclosure->isVisible() != hasDetails;
+    if (auto* prefix = row->findChild<QWidget*>(
+            QStringLiteral("conversationActivityPrefix")))
     {
-        auto* heading = details->findChild<QLabel*>(
-            QStringLiteral("conversationActivityOutputHeading"));
-        if (!heading)
-        {
-            heading = textLabel(QStringLiteral("Output"), "small");
-            heading->setObjectName(QStringLiteral("conversationActivityOutputHeading"));
-            heading->setStyleSheet(QStringLiteral("font-size:10px;font-weight:600;color:#475467;"));
-            const auto* incomplete = details->findChild<QLabel*>(
-                QStringLiteral("conversationActivityIncomplete"));
-            const int headingPosition = incomplete ? layout->indexOf(incomplete) : layout->count();
-            layout->insertWidget(headingPosition, heading);
-        }
-        output = activityOutputWidget(text);
-        const auto* incomplete = details->findChild<QLabel*>(QStringLiteral("conversationActivityIncomplete"));
-        const int position = incomplete ? layout->indexOf(incomplete) : layout->count();
-        layout->insertWidget(position, output);
+        changed = changed || prefix->width() != (hasDetails ? 31 : 14);
+        prefix->setFixedWidth(hasDetails ? 31 : 14);
     }
-    return output;
+    if (auto* leadingLayout = row->findChild<QHBoxLayout*>(
+            QStringLiteral("conversationActivityLeadingLayout")))
+    {
+        changed = changed || leadingLayout->spacing() != (hasDetails ? 0 : 6);
+        leadingLayout->setSpacing(hasDetails ? 0 : 6);
+    }
+    disclosure->setEnabled(hasDetails);
+    disclosure->setVisible(hasDetails);
+    if (!hasDetails)
+        setDisclosureState(disclosure, details, false);
+    return changed;
 }
 
 void addActivityRow(QVBoxLayout* rows,
@@ -914,29 +1286,20 @@ void addActivityRow(QVBoxLayout* rows,
     layout->addWidget(state, 0, Qt::AlignTop);
     lineLayout->addWidget(summary);
 
-    auto* details = new QWidget;
+    auto* details = new ActivityDetails;
     details->setObjectName(QStringLiteral("conversationActivityDetails"));
     auto* detailsLayout = new QVBoxLayout(details);
     detailsLayout->setContentsMargins(42, 0, 4, 4);
     detailsLayout->setSpacing(6);
     if (!item.detail.isEmpty())
     {
-        auto* detail = wrappingLabel(item.detail, "meta");
-        detail->setObjectName(QStringLiteral("conversationActivityDetail"));
-        detail->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        detailsLayout->addWidget(detail);
+        detailsLayout->addWidget(activityDetailWidget(item));
     }
     if (!item.output.isEmpty())
     {
-        details->setProperty("activityOutputText", item.output);
+        details->replaceOutput(item.output);
         if (expanded)
-        {
-            auto* heading = textLabel(QStringLiteral("Output"), "small");
-            heading->setObjectName(QStringLiteral("conversationActivityOutputHeading"));
-            heading->setStyleSheet(QStringLiteral("font-size:10px;font-weight:600;color:#475467;"));
-            detailsLayout->addWidget(heading);
-            detailsLayout->addWidget(activityOutputWidget(item.output));
-        }
+            details->ensureOutput(detailsLayout);
     }
     if (item.truncated)
     {
@@ -952,7 +1315,7 @@ void addActivityRow(QVBoxLayout* rows,
                      {
                          const bool next = !details->isVisible();
                          if (next)
-                             ensureActivityOutput(details, detailsLayout);
+                             details->ensureOutput(detailsLayout);
                          setDisclosureState(disclosure, details, next);
                          if (layoutChanged)
                              layoutChanged();
@@ -960,7 +1323,10 @@ void addActivityRow(QVBoxLayout* rows,
     rows->addWidget(line);
 }
 
-bool updateActivityRow(QWidget* row, const ActivityPresentation& item)
+bool updateActivityRowMetadata(QWidget* row,
+                               const ActivityPresentation& item,
+                               bool contentGeometryChanged,
+                               bool* geometryChanged)
 {
     if (!row)
         return false;
@@ -969,7 +1335,8 @@ bool updateActivityRow(QWidget* row, const ActivityPresentation& item)
     auto* symbol = row->findChild<QLabel*>(QStringLiteral("conversationActivitySymbol"));
     auto* tail = row->findChild<QLabel*>(QStringLiteral("conversationActivityTail"));
     auto* status = row->findChild<QLabel*>(QStringLiteral("conversationActivityStatus"));
-    auto* details = row->findChild<QWidget*>(QStringLiteral("conversationActivityDetails"));
+    auto* details = dynamic_cast<ActivityDetails*>(
+        row->findChild<QWidget*>(QStringLiteral("conversationActivityDetails")));
     auto* disclosure = row->findChild<QToolButton*>(QStringLiteral("activityDisclosure"));
     if (!title || !symbol || !tail || !status || !details || !disclosure)
         return false;
@@ -977,42 +1344,20 @@ bool updateActivityRow(QWidget* row, const ActivityPresentation& item)
     if (!detailsLayout)
         return false;
 
-    title->setContent(item.title);
+    bool changed = contentGeometryChanged || title->setContent(item.title);
     title->setToolTip(plainTooltip(item.title));
     disclosure->setAccessibleName(QStringLiteral("Activity details: %1").arg(item.title));
     symbol->setText(statusGlyph(item.status));
     symbol->setStyleSheet(
         QStringLiteral("color:%1;font-size:12px;font-weight:600;").arg(statusColor(item.status)));
-    tail->setText(item.tail);
-    tail->setVisible(!item.tail.isEmpty());
+    if (tail->text() != item.tail)
+        tail->setText(item.tail);
+    const bool tailVisible = !item.tail.isEmpty();
+    changed = changed || tail->isVisible() != tailVisible;
+    tail->setVisible(tailVisible);
     status->setText(item.status);
     status->setStyleSheet(
         QStringLiteral("color:%1;font-size:9px;font-weight:600;").arg(statusColor(item.status)));
-
-    auto* detail = dynamic_cast<WrappingLabel*>(
-        details->findChild<QLabel*>(QStringLiteral("conversationActivityDetail")));
-    if (!detail && !item.detail.isEmpty())
-    {
-        detail = static_cast<WrappingLabel*>(wrappingLabel({}, "meta"));
-        detail->setObjectName(QStringLiteral("conversationActivityDetail"));
-        detail->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        detailsLayout->insertWidget(0, detail);
-    }
-    if (detail)
-    {
-        detail->setContent(item.detail);
-        detail->setVisible(!item.detail.isEmpty());
-    }
-
-    details->setProperty("activityOutputText", item.output);
-    auto* output = details->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput"));
-    if (!output && !details->isHidden() && !item.output.isEmpty())
-        output = ensureActivityOutput(details, detailsLayout);
-    if (output)
-        updateActivityOutput(output, item.output);
-    if (auto* outputHeading = details->findChild<QLabel*>(
-            QStringLiteral("conversationActivityOutputHeading")))
-        outputHeading->setVisible(!item.output.isEmpty());
 
     auto* incomplete = details->findChild<QLabel*>(QStringLiteral("conversationActivityIncomplete"));
     if (!incomplete && item.truncated)
@@ -1021,34 +1366,51 @@ bool updateActivityRow(QWidget* row, const ActivityPresentation& item)
         incomplete->setObjectName(QStringLiteral("conversationActivityIncomplete"));
         incomplete->setStyleSheet(QStringLiteral("color:#a76812;font-size:9px;"));
         detailsLayout->addWidget(incomplete);
+        changed = true;
     }
     if (incomplete)
-        incomplete->setVisible(item.truncated);
-
-    const bool hasDetails = !item.detail.isEmpty() || !item.output.isEmpty() || item.truncated;
-    if (auto* prefix = row->findChild<QWidget*>(QStringLiteral("conversationActivityPrefix")))
-        prefix->setFixedWidth(hasDetails ? 31 : 14);
-    if (auto* leadingLayout = row->findChild<QHBoxLayout*>(
-            QStringLiteral("conversationActivityLeadingLayout")))
-        leadingLayout->setSpacing(hasDetails ? 0 : 6);
-    disclosure->setEnabled(hasDetails);
-    disclosure->setVisible(hasDetails);
-    if (!hasDetails)
-        setDisclosureState(disclosure, details, false);
-
-    // A wrapping label can become shorter during an in-place canonical update.
-    // Invalidate the nested layouts synchronously so the fixed timeline host does
-    // not retain their previous height until a platform-specific layout event.
-    detailsLayout->invalidate();
-    detailsLayout->activate();
-    details->updateGeometry();
-    if (QLayout* rowLayout = row->layout())
     {
-        rowLayout->invalidate();
-        rowLayout->activate();
+        changed = changed || incomplete->isVisible() != item.truncated;
+        incomplete->setVisible(item.truncated);
     }
-    row->updateGeometry();
+
+    changed = updateActivityDisclosureAvailability(row) || changed;
+
+    if (changed)
+    {
+        detailsLayout->invalidate();
+        details->updateGeometry();
+        if (QLayout* rowLayout = row->layout())
+            rowLayout->invalidate();
+        row->updateGeometry();
+    }
+    if (geometryChanged)
+        *geometryChanged = changed;
     return true;
+}
+
+bool updateActivityRow(QWidget* row,
+                       const ActivityPresentation& item,
+                       bool* geometryChanged)
+{
+    auto* details = row
+                        ? dynamic_cast<ActivityDetails*>(row->findChild<QWidget*>(
+                              QStringLiteral("conversationActivityDetails")))
+                        : nullptr;
+    auto* detailsLayout = details ? qobject_cast<QVBoxLayout*>(details->layout()) : nullptr;
+    if (!details || !detailsLayout)
+        return false;
+
+    bool contentGeometryChanged = updateActivityDetail(details, detailsLayout, item);
+    contentGeometryChanged = details->replaceOutput(item.output)
+                             || contentGeometryChanged;
+    if (details->isVisible() && details->hasOutput() && !details->output())
+    {
+        details->ensureOutput(detailsLayout);
+        contentGeometryChanged = true;
+    }
+    return updateActivityRowMetadata(
+        row, item, contentGeometryChanged, geometryChanged);
 }
 
 QFrame* activityCard(const sdk::State& state,
@@ -1123,8 +1485,7 @@ QFrame* activityCard(const sdk::State& state,
 
 void addMessage(QVBoxLayout* timeline,
                 const sdk::ItemState& item,
-                bool user,
-                const std::function<void()>& layoutChanged)
+                bool user)
 {
     const MessagePresentation presentation = messagePresentation(item, user);
     auto* header = new QHBoxLayout;
@@ -1158,7 +1519,7 @@ void addMessage(QVBoxLayout* timeline,
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(5);
     }
-    auto* copy = messageContentWidget(presentation.content, layoutChanged);
+    auto* copy = messageContentWidget(presentation.content, presentation.streaming);
     copy->setObjectName(QStringLiteral("conversationMessageContent"));
     layout->addWidget(copy);
     auto* marker = textLabel({}, "small");
@@ -1442,16 +1803,34 @@ QByteArray segmentPresentationKey(const sdk::State& state,
             addPresentationValue(hash, message.has_value());
             if (message)
             {
-                addPresentationValue(hash, message->text);
+                addPresentationValue(
+                    hash,
+                    QByteArray::number(static_cast<qulonglong>(message->text.size())));
+                if (item->stamp)
+                    addPresentationValue(
+                        hash,
+                        QByteArray::number(static_cast<qulonglong>(item->stamp->generation)));
+                else
+                    addPresentationValue(hash, message->text);
                 addPresentationValue(hash, userMessageTruncationText(*message));
             }
         }
         else if (item->kind.is(frontend::ThreadItemKind::AgentMessage))
         {
-            const QString content = item->agentText && !item->agentText->empty()
-                                        ? fromUtf8(*item->agentText)
-                                        : (item->summary ? fromUtf8(*item->summary) : QString{});
-            addPresentationValue(hash, content);
+            const std::string_view content = item->agentText && !item->agentText->empty()
+                                                 ? std::string_view(*item->agentText)
+                                                 : (item->summary
+                                                        ? std::string_view(*item->summary)
+                                                        : std::string_view{});
+            addPresentationValue(
+                hash,
+                QByteArray::number(static_cast<qulonglong>(content.size())));
+            if (item->stamp)
+                addPresentationValue(
+                    hash,
+                    QByteArray::number(static_cast<qulonglong>(item->stamp->generation)));
+            else
+                addPresentationValue(hash, content);
             const auto semantic = sdk::itemSemanticView(*item);
             const auto* agent = semantic ? std::get_if<sdk::AgentMessageSemanticView>(&semantic->details) : nullptr;
             addPresentationValue(hash,
@@ -1463,7 +1842,9 @@ QByteArray segmentPresentationKey(const sdk::State& state,
             // hash its complete text merely to discover that an immutable item
             // revision changed; exact content updates explicitly bypass an
             // equal key during reconciliation below.
-            const ActivityPresentation presentation = activityPresentation(state, *item, false);
+            const bool reasoning = item->kind.is(frontend::ThreadItemKind::Reasoning);
+            const ActivityPresentation presentation = activityPresentation(
+                state, *item, false, !reasoning);
             addPresentationValue(hash, presentation.title);
             addPresentationValue(hash, presentation.detail);
             addPresentationValue(
@@ -1478,6 +1859,28 @@ QByteArray segmentPresentationKey(const sdk::State& state,
                 // Compatibility states without a source stamp cannot provide
                 // a cheaper authoritative revision identity.
                 addPresentationValue(hash, std::string_view(*item->commandOutput));
+            if (reasoning)
+            {
+                addPresentationValue(
+                    hash,
+                    QByteArray::number(static_cast<qulonglong>(
+                        item->reasoningText ? item->reasoningText->size() : 0)));
+                addPresentationValue(
+                    hash,
+                    QByteArray::number(static_cast<qulonglong>(
+                        item->reasoningSummary ? item->reasoningSummary->size() : 0)));
+                if (item->stamp)
+                    addPresentationValue(
+                        hash,
+                        QByteArray::number(static_cast<qulonglong>(item->stamp->generation)));
+                else
+                {
+                    if (item->reasoningText)
+                        addPresentationValue(hash, std::string_view(*item->reasoningText));
+                    if (item->reasoningSummary)
+                        addPresentationValue(hash, std::string_view(*item->reasoningSummary));
+                }
+            }
             addPresentationValue(hash, presentation.status);
             addPresentationValue(hash, presentation.tail);
             addPresentationValue(hash, presentation.truncated);
@@ -1530,7 +1933,7 @@ QWidget* timelineSegmentWidget(const sdk::State& state,
         const auto* item = segment.items.front();
         const bool user = item->kind.is(frontend::ThreadItemKind::UserMessage);
         host->setProperty("messageUser", user);
-        addMessage(layout, *item, user, layoutChanged);
+        addMessage(layout, *item, user);
     }
     else
     {
@@ -1545,11 +1948,91 @@ QWidget* timelineSegmentWidget(const sdk::State& state,
     return host;
 }
 
+bool applyExactActivityAppend(QWidget* row,
+                              const ConversationContentUpdate& update,
+                              bool* geometryChanged,
+                              bool* mayShrink)
+{
+    if (!row || !update.append)
+        return false;
+    const ConversationContentAppend& append = *update.append;
+    if (append.discardPrefixBytes > append.baseContentBytes)
+        return false;
+    auto* details = dynamic_cast<ActivityDetails*>(
+        row->findChild<QWidget*>(QStringLiteral("conversationActivityDetails")));
+    auto* detailsLayout = details ? qobject_cast<QVBoxLayout*>(details->layout()) : nullptr;
+    if (!details || !detailsLayout)
+        return false;
+
+    bool contentGeometryChanged = false;
+    if (update.channel == sdk::ItemContentChannel::CommandOutput)
+    {
+        const auto applied = details->applyOutputAppend(
+            append.baseContentBytes, append.discardPrefixBytes, append.delta);
+        if (!applied)
+            return false;
+        contentGeometryChanged = *applied;
+        if (details->isVisible() && details->hasOutput() && !details->output())
+        {
+            details->ensureOutput(detailsLayout);
+            contentGeometryChanged = true;
+        }
+    }
+    else if ((update.channel == sdk::ItemContentChannel::ReasoningText
+              || update.channel == sdk::ItemContentChannel::ReasoningSummary))
+    {
+        auto* detail = dynamic_cast<StreamingMessageView*>(
+            details->findChild<QWidget*>(QStringLiteral("conversationActivityDetail")));
+        if (!detail && append.baseContentBytes == 0
+            && append.discardPrefixBytes == 0)
+        {
+            ActivityPresentation initial;
+            initial.detail = append.delta;
+            initial.detailChannel = update.channel;
+            contentGeometryChanged = updateActivityDetail(details, detailsLayout, initial);
+        }
+        else
+        {
+            if (!detail
+                || detail->property("activityContentChannel").toInt()
+                       != static_cast<int>(update.channel))
+                return false;
+            const auto applied = detail->applyAppend(
+                append.baseContentBytes, append.discardPrefixBytes, append.delta);
+            if (!applied)
+                return false;
+            contentGeometryChanged = *applied;
+        }
+    }
+    else
+    {
+        return false;
+    }
+
+    contentGeometryChanged = updateActivityDisclosureAvailability(row)
+                             || contentGeometryChanged;
+    if (contentGeometryChanged)
+    {
+        detailsLayout->invalidate();
+        details->updateGeometry();
+        if (QLayout* rowLayout = row->layout())
+            rowLayout->invalidate();
+        row->updateGeometry();
+    }
+    if (geometryChanged)
+        *geometryChanged = contentGeometryChanged;
+    if (mayShrink)
+        *mayShrink = append.discardPrefixBytes > append.deltaUtf8Bytes;
+    return true;
+}
+
 bool updateTimelineActivitySegment(QWidget* host,
                                    const sdk::State& state,
                                    const TimelineSegment& segment,
                                    bool typedPlanAvailable,
-                                   const QStringList* exactChangedItemIds,
+                                   const ConversationContentUpdates* exactContentChanges,
+                                   bool* geometryChanged,
+                                   bool* mayShrink,
                                    const std::function<void()>& layoutChanged)
 {
     if (!host || segment.missing || segment.items.empty())
@@ -1580,14 +2063,44 @@ bool updateTimelineActivitySegment(QWidget* host,
         if (!item || rows.at(index)->property("itemId").toString() != fromUtf8(item->id.value))
             return false;
     }
+    bool anyGeometryChanged = false;
+    bool anyMayShrink = false;
     for (std::size_t index = 0; index < rows.size(); ++index)
     {
         const auto* item = segment.items.at(index);
-        if (exactChangedItemIds
-            && !exactChangedItemIds->contains(fromUtf8(item->id.value)))
-            continue;
-        if (!updateActivityRow(rows.at(index), activityPresentation(state, *item)))
-            return false;
+        bool rowGeometryChanged = false;
+        bool rowMayShrink = false;
+        bool handledExactly = false;
+        if (exactContentChanges)
+        {
+            for (const ConversationContentUpdate& update : *exactContentChanges)
+            {
+                if (update.itemId != fromUtf8(item->id.value))
+                    continue;
+                handledExactly = applyExactActivityAppend(
+                    rows.at(index), update,
+                    &rowGeometryChanged, &rowMayShrink);
+                if (!handledExactly)
+                    break;
+            }
+            if (std::none_of(
+                    exactContentChanges->cbegin(), exactContentChanges->cend(),
+                    [item](const ConversationContentUpdate& update)
+                    { return update.itemId == fromUtf8(item->id.value); }))
+                continue;
+        }
+        if (!handledExactly)
+        {
+            if (!updateActivityRow(
+                    rows.at(index), activityPresentation(state, *item),
+                    &rowGeometryChanged))
+                return false;
+            // A full authoritative replacement may shorten any wrapping
+            // detail or hide output/truncation UI.
+            rowMayShrink = rowGeometryChanged;
+        }
+        anyGeometryChanged = anyGeometryChanged || rowGeometryChanged;
+        anyMayShrink = anyMayShrink || rowMayShrink;
     }
     for (std::size_t index = rows.size(); index < segment.items.size(); ++index)
     {
@@ -1599,29 +2112,39 @@ bool updateTimelineActivitySegment(QWidget* host,
                        activityPresentation(state, *item),
                        false,
                        layoutChanged);
+        anyGeometryChanged = true;
     }
-    count->setText(QStringLiteral("%1 activit%2")
-                       .arg(segment.items.size())
-                       .arg(segment.items.size() == 1 ? "y" : "ies"));
-    planAvailable->setVisible(typedPlanAvailable
-                              || std::ranges::any_of(segment.items, [](const sdk::ItemState* item) {
-                                     return item && item->kind.is(frontend::ThreadItemKind::Plan);
-                                 }));
-    rowsLayout->invalidate();
-    rowsLayout->activate();
-    if (QLayout* hostLayout = host->layout())
+    const QString countText = QStringLiteral("%1 activit%2")
+                                  .arg(segment.items.size())
+                                  .arg(segment.items.size() == 1 ? "y" : "ies");
+    anyGeometryChanged = anyGeometryChanged || count->text() != countText;
+    count->setText(countText);
+    const bool nextPlanVisible = typedPlanAvailable
+                                 || std::ranges::any_of(
+                                     segment.items, [](const sdk::ItemState* item) {
+                                         return item && item->kind.is(frontend::ThreadItemKind::Plan);
+                                     });
+    anyGeometryChanged = anyGeometryChanged
+                         || planAvailable->isVisible() != nextPlanVisible;
+    planAvailable->setVisible(nextPlanVisible);
+    if (anyGeometryChanged)
     {
-        hostLayout->invalidate();
-        hostLayout->activate();
+        rowsLayout->invalidate();
+        if (QLayout* hostLayout = host->layout())
+            hostLayout->invalidate();
+        host->updateGeometry();
     }
-    host->updateGeometry();
+    if (geometryChanged)
+        *geometryChanged = anyGeometryChanged;
+    if (mayShrink)
+        *mayShrink = anyMayShrink;
     return true;
 }
 
 bool updateTimelineMessageSegment(QWidget* host,
                                   const TimelineSegment& segment,
-                                  bool* mayShrink,
-                                  const std::function<void()>& layoutChanged)
+                                  bool* geometryChanged,
+                                  bool* mayShrink)
 {
     if (!host || segment.missing || segment.items.size() != 1)
         return false;
@@ -1658,12 +2181,14 @@ bool updateTimelineMessageSegment(QWidget* host,
     auto* contentLayout = qobject_cast<QVBoxLayout*>(contentWidget->parentWidget()->layout());
     if (!contentLayout)
         return false;
+    QWidget* previousContentWidget = contentWidget;
     contentWidget = ensureMessageContentWidget(
-        contentLayout, contentWidget, presentation.content, layoutChanged);
-    applyMessagePresentation(status,
-                             contentWidget,
-                             truncation,
-                             presentation);
+        contentLayout, contentWidget, presentation.content, presentation.streaming);
+    const bool presentationGeometryChanged = applyMessagePresentation(
+        status, contentWidget, truncation, presentation);
+    if (geometryChanged)
+        *geometryChanged = previousContentWidget != contentWidget
+                           || presentationGeometryChanged;
     return true;
 }
 
@@ -1776,24 +2301,19 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     scrollArea->setWidgetResizable(true);
     scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     auto* conversationScroll = scrollArea->verticalScrollBar();
-    scrollAnimation = new QPropertyAnimation(conversationScroll, "value", this);
-    scrollAnimation->setEasingCurve(QEasingCurve::OutCubic);
     layoutSettleTimer = new QTimer(this);
     layoutSettleTimer->setSingleShot(true);
     layoutSettleTimer->setInterval(16);
     connect(layoutSettleTimer, &QTimer::timeout, this, &ConversationWidget::settleTimelineLayout);
-    connect(scrollAnimation, &QPropertyAnimation::finished, this,
-            [this] { followingLatest = false; });
     connect(conversationScroll, &QScrollBar::rangeChanged, this,
             [this, conversationScroll](int, int maximum)
             {
-                if (pinLatestDuringLayout)
+                if (pinLatestDuringLayout || followingLatest)
                     conversationScroll->setValue(maximum);
             });
     connect(conversationScroll, &QScrollBar::actionTriggered, this,
             [this, conversationScroll](int)
             {
-                scrollAnimation->stop();
                 followingLatest = false;
                 pendingFollowLatest = false;
                 pendingPreviousScroll = conversationScroll->value();
@@ -1802,11 +2322,17 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
     connect(conversationScroll, &QScrollBar::sliderPressed, this,
             [this, conversationScroll]
             {
-                scrollAnimation->stop();
                 followingLatest = false;
                 pendingFollowLatest = false;
                 pendingPreviousScroll = conversationScroll->value();
                 pendingViewportAnchor.clear();
+            });
+    connect(conversationScroll, &QScrollBar::valueChanged, this,
+            [this, conversationScroll]
+            {
+                if (conversationScroll->maximum() - conversationScroll->value() > 72)
+                    followingLatest = false;
+                requestDeferredPresentationAtTail();
             });
     auto* content = new QWidget;
     content->setStyleSheet(QStringLiteral("background:transparent;"));
@@ -1861,10 +2387,48 @@ void ConversationWidget::setModelCatalog(
     upcomingTurnDock->setModelCatalog(catalog);
 }
 
+bool ConversationWidget::shouldFreezePresentation(const QString& threadId,
+                                                   bool newThreadDraft) const
+{
+    if (threadId.isEmpty() || threadId != renderedThreadId
+        || newThreadDraft != renderedNewThreadDraft || pinLatestDuringLayout)
+        return false;
+    const auto* bar = scrollArea->verticalScrollBar();
+    return bar->maximum() - bar->value() > 72;
+}
+
+void ConversationWidget::markPresentationDeferred()
+{
+    deferredPresentationPending = true;
+}
+
+void ConversationWidget::requestDeferredPresentationAtTail()
+{
+    if (!deferredPresentationPending || deferredPresentationRequestScheduled)
+        return;
+    const auto* bar = scrollArea->verticalScrollBar();
+    if (bar->maximum() - bar->value() > 72)
+        return;
+
+    deferredPresentationRequestScheduled = true;
+    QTimer::singleShot(0, this,
+                       [this]
+                       {
+                           deferredPresentationRequestScheduled = false;
+                           if (!deferredPresentationPending)
+                               return;
+                           const auto* settledBar = scrollArea->verticalScrollBar();
+                           if (settledBar->maximum() - settledBar->value() > 72)
+                               return;
+                           deferredPresentationPending = false;
+                           emit latestPresentationRequested();
+                       });
+}
+
 void ConversationWidget::render(const sdk::State& state,
                                 const QString& threadId,
                                 bool newThreadDraft,
-                                const QHash<QString, QStringList>* exactContentChanges)
+                                const ConversationContentUpdates* exactContentChanges)
 {
     auto* scrollBar = scrollArea->verticalScrollBar();
     const int previousScroll = scrollBar->value();
@@ -1878,11 +2442,25 @@ void ConversationWidget::render(const sdk::State& state,
         newThreadDraft);
     if (!thread && !threadChanged && threadId.isEmpty())
         return;
+    if (!threadChanged && shouldFreezePresentation(threadId, newThreadDraft))
+    {
+        markPresentationDeferred();
+        return;
+    }
+    if (exactContentChanges && !threadChanged && thread && !newThreadDraft
+        && updateExactMessageContent(state, threadId, *exactContentChanges))
+        return;
+    if (threadChanged)
+    {
+        deferredPresentationPending = false;
+        deferredPresentationRequestScheduled = false;
+    }
     const bool followLatest = threadChanged || wasNearBottom || followingLatest;
     const bool exactContentOnly = exactContentChanges && !threadChanged && thread && !newThreadDraft
                                   && !renderedSummaryKey.isEmpty();
     const std::uint64_t generation = ++renderGeneration;
     bool timelineShrank = false;
+    bool timelineGeometryChanged = threadChanged;
     if (threadChanged)
         pendingViewportAnchor.clear();
     else if (!layoutSettleTimer->isActive())
@@ -1896,12 +2474,11 @@ void ConversationWidget::render(const sdk::State& state,
         pinLatestGeneration = generation;
         scrollArea->viewport()->setUpdatesEnabled(false);
     }
-    else
-        scrollAnimation->stop();
 
-    const auto clearTimelineState = [this, &timelineShrank]
+    const auto clearTimelineState = [this, &timelineShrank, &timelineGeometryChanged]
     {
         timelineShrank = timelineShrank || timeline->count() > 0;
+        timelineGeometryChanged = timelineGeometryChanged || timeline->count() > 0;
         renderedTurnIds.clear();
         renderedTurnWidgets.clear();
         renderedTurnLabels.clear();
@@ -1940,6 +2517,7 @@ void ConversationWidget::render(const sdk::State& state,
                                      : QStringLiteral("No thread selected"),
                       newThreadDraft ? QStringLiteral("Type a prompt below. Backend defaults will be used for the new thread.")
                                      : QStringLiteral("Choose a synchronized thread from the sidebar."));
+        timelineGeometryChanged = true;
     }
     else
     {
@@ -2004,6 +2582,7 @@ void ConversationWidget::render(const sdk::State& state,
                               thread->fullyLoaded
                                   ? QStringLiteral("Use the upcoming-turn dock below to start this thread.")
                                   : QStringLiteral("No turn projection is currently retained for this thread."));
+                timelineGeometryChanged = true;
             }
         }
         else
@@ -2052,7 +2631,7 @@ void ConversationWidget::render(const sdk::State& state,
             for (const VisibleTimelineTurn& visibleTurn : visibleTurns)
                 visibleTurnIds.append(fromUtf8(visibleTurn.turn->id.value));
 
-            const auto removeRenderedTurn = [this, &timelineShrank](const QString& turnId)
+            const auto removeRenderedTurn = [this, &timelineShrank, &timelineGeometryChanged](const QString& turnId)
             {
                 for (const QString& segmentId : renderedSegmentIds.take(turnId))
                 {
@@ -2072,6 +2651,7 @@ void ConversationWidget::render(const sdk::State& state,
                     widget->hide();
                     widget->deleteLater();
                     timelineShrank = true;
+                    timelineGeometryChanged = true;
                 }
             };
 
@@ -2136,6 +2716,7 @@ void ConversationWidget::render(const sdk::State& state,
                     renderedTurnLabels.insert(turnId, turnLabel);
                     renderedTurnItemLayouts.insert(turnId, itemLayout);
                     renderedTurnStatusLabels.insert(turnId, statusLabel);
+                    timelineGeometryChanged = true;
                 }
                 else
                 {
@@ -2231,6 +2812,7 @@ void ConversationWidget::render(const sdk::State& state,
                             widget->hide();
                             widget->deleteLater();
                             timelineShrank = true;
+                            timelineGeometryChanged = true;
                         }
                         renderedSegmentKeys.remove(storage);
                     }
@@ -2240,24 +2822,29 @@ void ConversationWidget::render(const sdk::State& state,
                 {
                     const QString storage = segmentStorageKey(turnId, segment->id);
                     QWidget* oldWidget = renderedSegmentWidgets.value(storage);
-                    const QStringList* exactChangedItemIds = nullptr;
+                    const ConversationContentUpdates* segmentContentChanges = nullptr;
+                    ConversationContentUpdates segmentContentStorage;
                     bool explicitlyAffected = false;
                     if (oldWidget && exactContentOnly)
                     {
-                        const auto changedItems = exactContentChanges->constFind(turnId);
-                        explicitlyAffected = changedItems != exactContentChanges->cend()
-                                             && std::any_of(
-                                                 segment->items.cbegin(),
-                                                 segment->items.cend(),
-                                                 [&changedItems](const sdk::ItemState* item)
-                                                 {
-                                                     return item
-                                                            && changedItems->contains(
-                                                                fromUtf8(item->id.value));
-                                                 });
+                        for (const ConversationContentUpdate& update : *exactContentChanges)
+                        {
+                            if (update.turnId != turnId)
+                                continue;
+                            const bool segmentContainsItem = std::any_of(
+                                segment->items.cbegin(),
+                                segment->items.cend(),
+                                [&update](const sdk::ItemState* item)
+                                {
+                                    return item && update.itemId == fromUtf8(item->id.value);
+                                });
+                            if (segmentContainsItem)
+                                segmentContentStorage.push_back(update);
+                        }
+                        explicitlyAffected = !segmentContentStorage.empty();
                         if (!explicitlyAffected)
                             continue;
-                        exactChangedItemIds = &changedItems.value();
+                        segmentContentChanges = &segmentContentStorage;
                     }
                     const bool typedPlanAvailable = turn->plan.has_value();
                     const QByteArray segmentKey = segmentPresentationKey(
@@ -2267,15 +2854,18 @@ void ConversationWidget::render(const sdk::State& state,
                         continue;
 
                     bool messageMayShrink = false;
+                    bool messageGeometryChanged = false;
                     if (oldWidget
                         && updateTimelineMessageSegment(
                             oldWidget,
                             *segment,
-                            &messageMayShrink,
-                            [this] { activityLayoutChanged(); }))
+                            &messageGeometryChanged,
+                            &messageMayShrink))
                     {
                         renderedSegmentKeys.insert(storage, segmentKey);
                         timelineShrank = timelineShrank || messageMayShrink;
+                        timelineGeometryChanged = timelineGeometryChanged
+                                                  || messageGeometryChanged;
                         continue;
                     }
 
@@ -2285,11 +2875,15 @@ void ConversationWidget::render(const sdk::State& state,
                             state,
                             *segment,
                             typedPlanAvailable,
-                            exactChangedItemIds,
+                            segmentContentChanges,
+                            &messageGeometryChanged,
+                            &messageMayShrink,
                             [this] { activityLayoutChanged(); }))
                     {
                         renderedSegmentKeys.insert(storage, segmentKey);
-                        timelineShrank = true;
+                        timelineShrank = timelineShrank || messageMayShrink;
+                        timelineGeometryChanged = timelineGeometryChanged
+                                                  || messageGeometryChanged;
                         continue;
                     }
 
@@ -2314,10 +2908,12 @@ void ConversationWidget::render(const sdk::State& state,
                         if (replacesAnchor)
                             pendingViewportAnchor = newWidget;
                         timelineShrank = true;
+                        timelineGeometryChanged = true;
                     }
                     else
                     {
                         itemLayout->addWidget(newWidget, 0, Qt::AlignTop);
+                        timelineGeometryChanged = true;
                     }
                     renderedSegmentWidgets.insert(storage, newWidget);
                     renderedSegmentKeys.insert(storage, segmentKey);
@@ -2328,96 +2924,105 @@ void ConversationWidget::render(const sdk::State& state,
         }
     }
 
-    scheduleTimelineLayout(previousScroll, followLatest, threadChanged, timelineShrank);
+    if (timelineGeometryChanged)
+        scheduleTimelineLayout(previousScroll, followLatest, threadChanged, timelineShrank);
+    else if (followLatest)
+        scrollBar->setValue(scrollBar->maximum());
 }
 
 bool ConversationWidget::updateExactMessageContent(
     const sdk::State& state,
     const QString& threadId,
-    const QHash<QString, QStringList>& exactContentChanges)
+    const ConversationContentUpdates& exactContentChanges)
 {
     if (threadId.isEmpty() || renderedThreadId != threadId || renderedNewThreadDraft
-        || exactContentChanges.isEmpty())
+        || exactContentChanges.empty())
         return false;
-    const auto* thread = state.thread(threadId.toStdString());
-    if (!thread)
-        return false;
-
-    struct PendingMessageUpdate
+    if (shouldFreezePresentation(threadId, false))
     {
-        QString storage;
-        QWidget* widget = nullptr;
-        TimelineSegment segment;
-        QByteArray presentationKey;
-    };
-    std::vector<PendingMessageUpdate> updates;
-    for (auto turnIterator = exactContentChanges.cbegin();
-         turnIterator != exactContentChanges.cend();
-         ++turnIterator)
-    {
-        const ai::openai::codex::typed::TurnId turnIdentity{turnIterator.key().toStdString()};
-        const auto* turn = state.turn(thread->id, turnIdentity);
-        if (!turn)
-            return false;
-        const bool turnVisible = renderedTurnIds.contains(turnIterator.key());
-        for (const QString& itemId : turnIterator.value())
-        {
-            const ai::openai::codex::typed::ItemId itemIdentity{itemId.toStdString()};
-            const auto* item = state.item(thread->id, turn->id, itemIdentity);
-            if (!item)
-                return false;
-            const bool user = item->kind.is(frontend::ThreadItemKind::UserMessage);
-            const bool agent = item->kind.is(frontend::ThreadItemKind::AgentMessage);
-            if (!user && !agent)
-            {
-                if (turnVisible)
-                    return false;
-                continue;
-            }
-            if (!turnVisible)
-                continue;
-
-            const QString segmentId = QStringLiteral("message:") + itemId;
-            if (!renderedSegmentIds.value(turnIterator.key()).contains(segmentId))
-                continue;
-            const QString storage = segmentStorageKey(turnIterator.key(), segmentId);
-            QWidget* widget = renderedSegmentWidgets.value(storage);
-            if (!widget || !widget->property("messageUser").isValid()
-                || widget->property("messageUser").toBool() != user)
-                return false;
-            TimelineSegment segment{segmentId, {item}, false};
-            updates.push_back(
-                {storage,
-                 widget,
-                 segment,
-                 segmentPresentationKey(state, segment, turn->plan.has_value())});
-        }
-    }
-
-    if (updates.empty())
+        markPresentationDeferred();
         return true;
+    }
+    (void)state;
     auto* scrollBar = scrollArea->verticalScrollBar();
     const int previousScroll = scrollBar->value();
     const bool followLatest = scrollBar->maximum() - previousScroll <= 72
                               || followingLatest;
     if (!layoutSettleTimer->isActive())
         captureTimelineAnchor();
-    scrollAnimation->stop();
 
     bool timelineShrank = false;
-    for (PendingMessageUpdate& update : updates)
+    bool geometryChanged = false;
+    for (const ConversationContentUpdate& update : exactContentChanges)
     {
-        bool messageMayShrink = false;
-        if (!updateTimelineMessageSegment(
-                update.widget,
-                update.segment,
-                &messageMayShrink,
-                [this] { activityLayoutChanged(); }))
+        if (!update.append)
             return false;
-        renderedSegmentKeys.insert(update.storage, update.presentationKey);
-        timelineShrank = timelineShrank || messageMayShrink;
+        if (!renderedTurnIds.contains(update.turnId))
+            continue;
+
+        const QString messageSegmentId = QStringLiteral("message:") + update.itemId;
+        const QString messageStorage = segmentStorageKey(update.turnId, messageSegmentId);
+        QWidget* messageWidget = renderedSegmentWidgets.value(messageStorage);
+        bool contentMayShrink = false;
+        bool contentGeometryChanged = false;
+        QString affectedStorage;
+        if (messageWidget)
+        {
+            if (messageWidget->property("messageUser").toBool()
+                || update.channel != sdk::ItemContentChannel::AgentText)
+                return false;
+            auto* content = messageWidget->findChild<QWidget*>(
+                QStringLiteral("conversationMessageContent"));
+            if (!content)
+                return false;
+            const auto applied = appendMessageContent(
+                content,
+                update.append->baseContentBytes,
+                update.append->discardPrefixBytes,
+                update.append->delta);
+            if (!applied)
+                return false;
+            contentGeometryChanged = *applied;
+            contentMayShrink = update.append->discardPrefixBytes
+                               > update.append->deltaUtf8Bytes;
+            affectedStorage = messageStorage;
+        }
+        else
+        {
+            QWidget* activityRow = nullptr;
+            for (const QString& segmentId : renderedSegmentIds.value(update.turnId))
+            {
+                QWidget* candidate = renderedSegmentWidgets.value(
+                    segmentStorageKey(update.turnId, segmentId));
+                if (!candidate)
+                    continue;
+                const auto rows = candidate->findChildren<QWidget*>(
+                    QStringLiteral("conversationActivityRow"));
+                const auto found = std::find_if(
+                    rows.cbegin(), rows.cend(), [&update](const QWidget* row) {
+                        return row->property("itemId").toString() == update.itemId;
+                    });
+                if (found == rows.cend())
+                    continue;
+                activityRow = *found;
+                affectedStorage = segmentStorageKey(update.turnId, segmentId);
+                break;
+            }
+            if (!activityRow)
+                continue;
+            if (!applyExactActivityAppend(
+                    activityRow, update,
+                    &contentGeometryChanged, &contentMayShrink))
+                return false;
+        }
+        renderedSegmentKeys.remove(affectedStorage);
+        timelineShrank = timelineShrank || contentMayShrink;
+        geometryChanged = geometryChanged || contentGeometryChanged;
     }
-    scheduleTimelineLayout(previousScroll, followLatest, false, timelineShrank);
+    if (geometryChanged)
+        scheduleTimelineLayout(previousScroll, followLatest, false, timelineShrank);
+    else if (followLatest)
+        scrollBar->setValue(scrollBar->maximum());
     return true;
 }
 
@@ -2444,7 +3049,6 @@ void ConversationWidget::activityLayoutChanged()
                               || followingLatest;
     if (!layoutSettleTimer->isActive())
         captureTimelineAnchor();
-    scrollAnimation->stop();
     scheduleTimelineLayout(previousScroll, followLatest, false, true);
 }
 
@@ -2488,9 +3092,7 @@ void ConversationWidget::settleTimelineLayout()
 
     if (threadChanged || pinLatestDuringLayout)
     {
-        scrollAnimation->stop();
-        followingLatest = false;
-        settleThreadSwitchLayout(pinLatestGeneration, 2);
+        settleThreadSwitchLayout(pinLatestGeneration, 1);
         return;
     }
 
@@ -2515,24 +3117,12 @@ void ConversationWidget::settleTimelineLayout()
     }
     if (!followLatest)
     {
-        scrollAnimation->stop();
         followingLatest = false;
         return;
     }
 
-    scrollAnimation->stop();
-    const int distance = bar->maximum() - bar->value();
-    if (distance <= 0 || renderedThreadId.isEmpty())
-    {
-        followingLatest = false;
-        bar->setValue(bar->maximum());
-        return;
-    }
-    followingLatest = true;
-    scrollAnimation->setDuration(qBound(90, distance, 220));
-    scrollAnimation->setStartValue(bar->value());
-    scrollAnimation->setEndValue(bar->maximum());
-    scrollAnimation->start();
+    followingLatest = !renderedThreadId.isEmpty();
+    bar->setValue(bar->maximum());
 }
 
 void ConversationWidget::settleThreadSwitchLayout(std::uint64_t generation, int remainingPasses)
@@ -2554,33 +3144,11 @@ void ConversationWidget::settleThreadSwitchLayout(std::uint64_t generation, int 
 
     auto* bar = scrollArea->verticalScrollBar();
     bar->setValue(bar->maximum());
-    QTimer::singleShot(100, this,
-                       [this, generation]
-                       {
-                           if (generation != pinLatestGeneration || !pinLatestDuringLayout)
-                               return;
-                           synchronizeTimelineHeight(true);
-                           scrollArea->widget()->layout()->activate();
-                           scrollArea->widget()->adjustSize();
-                           auto* settledBar = scrollArea->verticalScrollBar();
-                           settledBar->setValue(settledBar->maximum());
-                           scrollArea->viewport()->setUpdatesEnabled(true);
-                           scrollArea->viewport()->update();
-                           QTimer::singleShot(100, this,
-                                              [this, generation]
-                                              {
-                                                  if (generation != pinLatestGeneration
-                                                      || !pinLatestDuringLayout)
-                                                      return;
-                                                  synchronizeTimelineHeight(true);
-                                                  scrollArea->widget()->layout()->activate();
-                                                  scrollArea->widget()->adjustSize();
-                                                  auto* finalBar = scrollArea->verticalScrollBar();
-                                                  finalBar->setValue(finalBar->maximum());
-                                                  pinLatestDuringLayout = false;
-                                                  pendingViewportAnchor.clear();
-                                              });
-                       });
+    followingLatest = true;
+    pinLatestDuringLayout = false;
+    pendingViewportAnchor.clear();
+    scrollArea->viewport()->setUpdatesEnabled(true);
+    scrollArea->viewport()->update();
 }
 
 void ConversationWidget::synchronizeTimelineHeight(bool allowShrink)
