@@ -708,10 +708,13 @@ ActivityPresentation activityPresentation(const sdk::State& state,
     return result;
 }
 
-QToolButton* disclosureButton(bool expanded, const QString& accessibleName)
+QToolButton* disclosureButton(bool expanded,
+                              const QString& accessibleName,
+                              bool activityRow = false)
 {
     auto* button = new QToolButton;
     button->setObjectName(QStringLiteral("activityDisclosure"));
+    button->setProperty("activityRow", activityRow);
     button->setAutoRaise(true);
     button->setCheckable(true);
     button->setArrowType(Qt::NoArrow);
@@ -725,6 +728,8 @@ QToolButton* disclosureButton(bool expanded, const QString& accessibleName)
     button->setStyleSheet(QStringLiteral(
         "QToolButton#activityDisclosure{background:transparent;border:1px solid transparent;"
         "border-radius:5px;padding:0;}"
+        "QToolButton#activityDisclosure[activityRow=\"true\"]{padding-left:4px;padding-right:0;"
+        "padding-top:0;padding-bottom:0;}"
         "QToolButton#activityDisclosure:hover{background:#f1f5fb;border-color:#d7dee8;}"
         "QToolButton#activityDisclosure:pressed{background:#e9eff7;border-color:#d7dee8;}"
         "QToolButton#activityDisclosure:focus{border:1px solid #2f6feb;}"));
@@ -862,8 +867,8 @@ void addActivityRow(QVBoxLayout* rows,
 
     auto* disclosure = disclosureButton(
         expanded,
-        QStringLiteral("Activity details: %1").arg(item.title));
-    disclosure->setFixedWidth(14);
+        QStringLiteral("Activity details: %1").arg(item.title),
+        true);
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
     prefixLayout->addWidget(disclosure, 0, Qt::AlignTop);
@@ -880,15 +885,16 @@ void addActivityRow(QVBoxLayout* rows,
     title->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     title->setMinimumHeight(disclosure->height());
 
-    // A right-pointing native indicator occupies less horizontal ink than the
-    // header's down-pointing indicator. Keep the same 12 px icon, but reduce
-    // only the nested icon-to-title gap by the measured four pixels. Rows
-    // without a disclosure retain the established status-to-title alignment.
+    // Both disclosure controls use the same 22 px hit target.  The nested
+    // right-pointing indicator is narrower than the header's down indicator,
+    // so shift its native icon two pixels right and use the header's zero
+    // layout gap.  This keeps the visible indicator-to-text gap equal without
+    // shrinking the hover/focus surface.
     auto* leading = new QWidget;
     auto* leadingLayout = new QHBoxLayout(leading);
     leadingLayout->setObjectName(QStringLiteral("conversationActivityLeadingLayout"));
     leadingLayout->setContentsMargins(0, 0, 0, 0);
-    leadingLayout->setSpacing(hasDetails ? 2 : 6);
+    leadingLayout->setSpacing(hasDetails ? 0 : 6);
     leadingLayout->addWidget(prefix, 0, Qt::AlignTop);
     leadingLayout->addWidget(title, 1);
     layout->addWidget(leading, 1);
@@ -1021,7 +1027,7 @@ bool updateActivityRow(QWidget* row, const ActivityPresentation& item)
     const bool hasDetails = !item.detail.isEmpty() || !item.output.isEmpty() || item.truncated;
     if (auto* leadingLayout = row->findChild<QHBoxLayout*>(
             QStringLiteral("conversationActivityLeadingLayout")))
-        leadingLayout->setSpacing(hasDetails ? 2 : 6);
+        leadingLayout->setSpacing(hasDetails ? 0 : 6);
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
     if (!hasDetails)
