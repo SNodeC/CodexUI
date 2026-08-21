@@ -840,7 +840,7 @@ bool testArchivedThreadRefresh()
     return passed;
 }
 
-bool testArchivedThreadRefreshFailureRemainsIncomplete()
+bool testArchivedThreadRefreshFailureIsTerminal()
 {
     codexui::FrontendSession session;
     std::vector<sdk::OutboundMessage> outbound;
@@ -868,12 +868,67 @@ bool testArchivedThreadRefreshFailureRemainsIncomplete()
                                        "archived listing failed"})}),
         "the archived-thread failure response must be accepted");
     passed &= expect(!session.archivedThreadDiscoveryComplete()
+                         && session.archivedThreadDiscoveryTerminal()
+                         && session.archivedThreadDiscoveryStatus()
+                                == codexui::FrontendSession::ArchivedThreadDiscoveryStatus::Failed
                          && !codexui::FrontendSessionTestAccess::archivedThreadListInFlight(session),
-                     "a failed archived-thread request must stop in-flight work without claiming discovery completed");
-    passed &= expect(stateSignals == 0,
-                     "a failed archived-thread request must not emit the completion refresh that can clear selection");
+                     "a failed archived-thread request must stop in-flight work as a terminal failure without claiming a complete result");
+    passed &= expect(stateSignals == 1,
+                     "a terminal archived-thread failure must unblock presentation reconciliation");
     passed &= expect(session.statusText().contains(QStringLiteral("archived listing failed")),
                      "a failed archived-thread request must still surface its diagnostic");
+    return passed;
+}
+
+bool testArchivedThreadPaginationTruncationIsTerminal()
+{
+    codexui::FrontendSession session;
+    std::vector<sdk::OutboundMessage> outbound;
+    bool passed = expect(
+        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, outbound),
+        "the archived-thread truncation fixture must synchronize");
+    std::vector<frontend::Json> commands = capturedCommands(outbound, "thread.list");
+    if (!expect(commands.size() == 1 && commands.front().contains("requestId"),
+                "the truncation fixture must capture the first archived-thread request"))
+        return false;
+
+    const std::string firstRequestId = commands.front()["requestId"].get<std::string>();
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::success(
+                firstRequestId,
+                frontend::Json{{"threads", frontend::Json::array()},
+                               {"nextCursor", "repeated-cursor"}})}),
+        "the first truncated archived-thread page must be accepted");
+    commands = capturedCommands(outbound, "thread.list");
+    if (!expect(commands.size() == 2 && commands.back().contains("requestId"),
+                "the truncation fixture must request the repeated-cursor page once"))
+        return false;
+
+    int stateSignals = 0;
+    QObject::connect(&session, &codexui::FrontendSession::stateChanged,
+                     [&stateSignals](const codexui::detail::StateUpdateScope&) {
+                         ++stateSignals;
+                     });
+    const std::string secondRequestId = commands.back()["requestId"].get<std::string>();
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::success(
+                secondRequestId,
+                frontend::Json{{"threads", frontend::Json::array()},
+                               {"nextCursor", "repeated-cursor"}})}),
+        "the repeated archived-thread cursor response must be accepted");
+    passed &= expect(!session.archivedThreadDiscoveryComplete()
+                         && session.archivedThreadDiscoveryTerminal()
+                         && session.archivedThreadDiscoveryStatus()
+                                == codexui::FrontendSession::ArchivedThreadDiscoveryStatus::CompleteWithTruncation
+                         && !codexui::FrontendSessionTestAccess::archivedThreadListInFlight(session)
+                         && stateSignals == 1,
+                     "a repeated pagination cursor must terminate discovery as a truncated result and unblock reconciliation");
+    passed &= expect(session.statusText().contains(QStringLiteral("invalid pagination boundary")),
+                     "truncated archived-thread discovery must explain its pagination boundary");
     return passed;
 }
 
@@ -1266,7 +1321,8 @@ int main(int argc, char* argv[])
                && testInboundFrameCapacityTracksSdk()
                && testModelCatalogRefresh() && testModelCatalogRefreshFailureIsDiagnosed()
                && testArchivedThreadRefresh()
-               && testArchivedThreadRefreshFailureRemainsIncomplete()
+               && testArchivedThreadRefreshFailureIsTerminal()
+               && testArchivedThreadPaginationTruncationIsTerminal()
                && testTurnSteeringSubmission()
                && testOutboundQueue() && testInboundBufferCompaction()
            ? 0

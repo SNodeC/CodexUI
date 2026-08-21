@@ -63,6 +63,12 @@ class FrontendSession : public QObject
 
 public:
     enum class Lifecycle { Disconnected, Connecting, Authenticating, Synchronizing, Ready, Failed };
+    enum class ArchivedThreadDiscoveryStatus {
+        InProgress,
+        Complete,
+        CompleteWithTruncation,
+        Failed,
+    };
 
     using OperationCompletion = std::function<void(const QString& error)>;
     using ThreadStartCompletion = std::function<void(const QString& threadId, const QString& error)>;
@@ -79,6 +85,8 @@ public:
     [[nodiscard]] const ai::openai::codex::frontend::client::State& state() const noexcept;
     [[nodiscard]] const std::vector<ai::openai::codex::typed::Model>& modelCatalog() const noexcept;
     [[nodiscard]] bool archivedThreadDiscoveryComplete() const noexcept;
+    [[nodiscard]] bool archivedThreadDiscoveryTerminal() const noexcept;
+    [[nodiscard]] ArchivedThreadDiscoveryStatus archivedThreadDiscoveryStatus() const noexcept;
     [[nodiscard]] bool ownsController() const noexcept;
     void loadThread(const QString& threadId);
     [[nodiscard]] std::optional<QString> acquireController(OperationCompletion completion);
@@ -189,7 +197,8 @@ private:
     void beginArchivedThreadRefresh();
     void requestArchivedThreadPage(std::uint64_t generation,
                                    std::optional<std::string> cursor);
-    void finishArchivedThreadRefresh(QString diagnostic = {});
+    void finishArchivedThreadRefresh(ArchivedThreadDiscoveryStatus status,
+                                     QString diagnostic = {});
     void beginModelCatalogRefresh();
     void requestModelCatalogPage(std::uint64_t generation,
                                  std::optional<std::string> cursor);
@@ -245,7 +254,8 @@ private:
     bool synchronizedCurrentConnection = false;
     bool preReadyFailureRecordedCurrentConnection = false;
     bool archivedThreadListInFlight = false;
-    bool archivedThreadListComplete = false;
+    ArchivedThreadDiscoveryStatus archivedThreadListStatus =
+        ArchivedThreadDiscoveryStatus::InProgress;
     bool modelListInFlight = false;
     bool modelListComplete = false;
     bool localShutdown = false;

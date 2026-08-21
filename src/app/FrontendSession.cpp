@@ -355,7 +355,7 @@ void FrontendSession::startConnection()
     preReadyFailureRecordedCurrentConnection = false;
     archivedThreadListCursors.clear();
     archivedThreadListInFlight = false;
-    archivedThreadListComplete = false;
+    archivedThreadListStatus = ArchivedThreadDiscoveryStatus::InProgress;
     modelListCursors.clear();
     pendingModelCatalog.clear();
     modelListInFlight = false;
@@ -427,7 +427,18 @@ const std::vector<ai::openai::codex::typed::Model>& FrontendSession::modelCatalo
 
 bool FrontendSession::archivedThreadDiscoveryComplete() const noexcept
 {
-    return archivedThreadListComplete;
+    return archivedThreadListStatus == ArchivedThreadDiscoveryStatus::Complete;
+}
+
+bool FrontendSession::archivedThreadDiscoveryTerminal() const noexcept
+{
+    return archivedThreadListStatus != ArchivedThreadDiscoveryStatus::InProgress;
+}
+
+FrontendSession::ArchivedThreadDiscoveryStatus
+FrontendSession::archivedThreadDiscoveryStatus() const noexcept
+{
+    return archivedThreadListStatus;
 }
 
 bool FrontendSession::ownsController() const noexcept
@@ -1005,7 +1016,7 @@ void FrontendSession::reconcileRequestedThreadReads()
 void FrontendSession::beginArchivedThreadRefresh()
 {
     if (currentLifecycle != Lifecycle::Ready || archivedThreadListInFlight
-        || archivedThreadListComplete)
+        || archivedThreadDiscoveryTerminal())
         return;
     requestArchivedThreadPage(connectionGeneration, std::nullopt);
 }
@@ -1014,12 +1025,13 @@ void FrontendSession::requestArchivedThreadPage(std::uint64_t generation,
                                                 std::optional<std::string> cursor)
 {
     if (generation != connectionGeneration || currentLifecycle != Lifecycle::Ready
-        || archivedThreadListComplete || archivedThreadListInFlight)
+        || archivedThreadDiscoveryTerminal() || archivedThreadListInFlight)
         return;
     const std::string cursorIdentity = cursor.value_or(std::string{});
     if (archivedThreadListCursors.size() >= maximumArchivedThreadListPages
         || !archivedThreadListCursors.insert(cursorIdentity).second) {
         finishArchivedThreadRefresh(
+            ArchivedThreadDiscoveryStatus::CompleteWithTruncation,
             QStringLiteral("Archived thread listing stopped at an invalid pagination boundary"));
         return;
     }
@@ -1038,32 +1050,32 @@ void FrontendSession::requestArchivedThreadPage(std::uint64_t generation,
                 return;
             archivedThreadListInFlight = false;
             if (!result || !result.value) {
-                finishArchivedThreadRefresh(operationError(
-                    result.error, QStringLiteral("Archived threads could not be restored")));
+                finishArchivedThreadRefresh(
+                    ArchivedThreadDiscoveryStatus::Failed,
+                    operationError(result.error,
+                                   QStringLiteral("Archived threads could not be restored")));
                 return;
             }
             if (result.value->nextCursor) {
                 requestArchivedThreadPage(generation, result.value->nextCursor);
                 return;
             }
-            finishArchivedThreadRefresh();
+            finishArchivedThreadRefresh(ArchivedThreadDiscoveryStatus::Complete);
         });
     if (const auto error = submissionError(submission,
                                            QStringLiteral("Archived thread listing could not be submitted"))) {
         archivedThreadListInFlight = false;
-        finishArchivedThreadRefresh(*error);
+        finishArchivedThreadRefresh(ArchivedThreadDiscoveryStatus::Failed, *error);
     }
 }
 
-void FrontendSession::finishArchivedThreadRefresh(QString diagnostic)
+void FrontendSession::finishArchivedThreadRefresh(ArchivedThreadDiscoveryStatus status,
+                                                  QString diagnostic)
 {
     archivedThreadListInFlight = false;
-    if (!diagnostic.isEmpty()) {
+    archivedThreadListStatus = status;
+    if (!diagnostic.isEmpty())
         reportDiagnostic(std::move(diagnostic));
-        return;
-    }
-
-    archivedThreadListComplete = true;
 
     detail::StateUpdateScope scope;
     scope.allThreadsAffected = true;
