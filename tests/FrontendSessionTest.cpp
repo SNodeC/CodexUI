@@ -70,6 +70,17 @@ struct FrontendSessionWorkerTestAccess
     {
         session.inboundBuffer = std::move(bytes);
         session.inboundOffset = offset;
+        session.inboundScanOffset = offset;
+    }
+
+    static void appendInbound(FrontendSessionWorker& session, const QByteArray& bytes)
+    {
+        session.inboundBuffer.append(bytes);
+    }
+
+    static qsizetype inboundScanOffset(const FrontendSessionWorker& session)
+    {
+        return session.inboundScanOffset;
     }
 
     static void compactInbound(FrontendSessionWorker& session)
@@ -1409,6 +1420,27 @@ bool testInboundBufferCompaction()
     passed &= expect(codexui::FrontendSessionWorkerTestAccess::inboundBytes(session).isEmpty()
                          && codexui::FrontendSessionWorkerTestAccess::inboundOffset(session) == 0,
                      "a fully consumed inbound buffer must reset without retaining capacity state");
+
+    const QByteArray firstPartial(16 * 1024 * 1024, 'a');
+    codexui::FrontendSessionWorkerTestAccess::setInbound(session, firstPartial, 0);
+    passed &= expect(
+        !codexui::FrontendSessionWorkerTestAccess::hasCompleteInboundFrame(session)
+            && codexui::FrontendSessionWorkerTestAccess::inboundScanOffset(session)
+                   == firstPartial.size(),
+        "a large partial frame must remember the exact prefix already scanned for a terminator");
+    const QByteArray secondPartial(1024 * 1024, 'b');
+    codexui::FrontendSessionWorkerTestAccess::appendInbound(session, secondPartial);
+    passed &= expect(
+        !codexui::FrontendSessionWorkerTestAccess::hasCompleteInboundFrame(session)
+            && codexui::FrontendSessionWorkerTestAccess::inboundScanOffset(session)
+                   == firstPartial.size() + secondPartial.size(),
+        "receiving another chunk must scan only the newly appended partial-frame suffix");
+    codexui::FrontendSessionWorkerTestAccess::appendInbound(session, QByteArray("\n"));
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::hasCompleteInboundFrame(session)
+            && codexui::FrontendSessionWorkerTestAccess::inboundScanOffset(session)
+                   == firstPartial.size() + secondPartial.size(),
+        "the incremental scan cursor must still detect the terminator at the first new byte");
     return passed;
 }
 

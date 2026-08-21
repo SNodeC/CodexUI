@@ -208,6 +208,10 @@ private:
     QTimer outboundDrainTimer;
     QByteArray inboundBuffer;
     qsizetype inboundOffset = 0;
+    // Bytes before this cursor were already checked for a line terminator.
+    // Keeping it independent from the consumed-frame offset makes receiving
+    // one large partial JSONL document linear across bounded socket reads.
+    mutable qsizetype inboundScanOffset = 0;
     std::size_t maximumFrameBytes = 0;
     std::unique_ptr<Client> client;
     Connection connection;

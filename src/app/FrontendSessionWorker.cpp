@@ -980,9 +980,11 @@ void FrontendSessionWorker::socketReadyRead()
            && (receivedFrames < minimumReceiveBatchFrames
                || processingTime.elapsed() < maximumReceiveBatchTimeMs))
     {
-        const qsizetype newline = inboundBuffer.indexOf('\n', consumedBytes);
+        const qsizetype scanStart = qMax(consumedBytes, inboundScanOffset);
+        const qsizetype newline = inboundBuffer.indexOf('\n', scanStart);
         if (newline < 0)
         {
+            inboundScanOffset = inboundBuffer.size();
             const qsizetype available = socket.bytesAvailable();
             const qsizetype budget = maximumReceiveBatchBytes - receivedBytes;
             if (available <= 0 || budget <= 0)
@@ -994,6 +996,7 @@ void FrontendSessionWorker::socketReadyRead()
             receivedBytes += chunk.size();
             continue;
         }
+        inboundScanOffset = newline;
 
         const qsizetype payloadEnd = newline > consumedBytes && inboundBuffer.at(newline - 1) == '\r'
                                          ? newline - 1
@@ -1008,12 +1011,14 @@ void FrontendSessionWorker::socketReadyRead()
         if (payloadBytes == 0)
         {
             consumedBytes = newline + 1;
+            inboundScanOffset = consumedBytes;
             continue;
         }
         const sdk::ReceiveResult result = connection.receive(
             std::string_view(inboundBuffer.constData() + consumedBytes,
                              static_cast<std::size_t>(payloadBytes)));
         consumedBytes = newline + 1;
+        inboundScanOffset = consumedBytes;
         if (!result.accepted) {
             const QString reason = currentLifecycle == Lifecycle::Failed && !detail.isEmpty()
                                        ? detail
@@ -1047,11 +1052,15 @@ void FrontendSessionWorker::clearInbound() noexcept
 {
     inboundBuffer.clear();
     inboundOffset = 0;
+    inboundScanOffset = 0;
 }
 
 bool FrontendSessionWorker::hasCompleteInboundFrame() const noexcept
 {
-    return inboundBuffer.indexOf('\n', inboundOffset) >= 0;
+    const qsizetype scanStart = qMax(inboundOffset, inboundScanOffset);
+    const qsizetype newline = inboundBuffer.indexOf('\n', scanStart);
+    inboundScanOffset = newline >= 0 ? newline : inboundBuffer.size();
+    return newline >= 0;
 }
 
 void FrontendSessionWorker::compactInbound() noexcept
@@ -1066,6 +1075,7 @@ void FrontendSessionWorker::compactInbound() noexcept
         || inboundOffset < inboundBuffer.size() / 2)
         return;
     inboundBuffer.remove(0, inboundOffset);
+    inboundScanOffset = qMax(qsizetype{0}, inboundScanOffset - inboundOffset);
     inboundOffset = 0;
 }
 
