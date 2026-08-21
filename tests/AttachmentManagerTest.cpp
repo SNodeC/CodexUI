@@ -38,6 +38,18 @@ codexui::AttachmentInfo inspect(const QString& path)
     return result;
 }
 
+bool hasOnlyOwnerPermissions(const QString& path, bool directory)
+{
+    const QFileDevice::Permissions permissions = QFileInfo(path).permissions();
+    const QFileDevice::Permissions required = QFileDevice::ReadOwner | QFileDevice::WriteOwner
+        | (directory ? QFileDevice::ExeOwner : QFileDevice::Permissions{});
+    const QFileDevice::Permissions forbidden = QFileDevice::ReadGroup | QFileDevice::WriteGroup
+        | QFileDevice::ExeGroup | QFileDevice::ReadOther | QFileDevice::WriteOther
+        | QFileDevice::ExeOther;
+    return (permissions & required) == required
+        && (permissions & forbidden) == QFileDevice::Permissions{};
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -58,6 +70,19 @@ int main(int argc, char** argv)
         QDir(source.path()).filePath(QStringLiteral("two/code.tar.gz")), "second");
     const QString imagePath = writeFile(
         QDir(source.path()).filePath(QStringLiteral("screen.png")), "fake png");
+    const QString preexistingMetadata =
+        QDir(workspace.path()).filePath(QStringLiteral(".codex-ui"));
+    const QString preexistingAttachments =
+        QDir(preexistingMetadata).filePath(QStringLiteral("attachments"));
+    QDir().mkpath(preexistingAttachments);
+    const QString ignorePath = QDir(preexistingAttachments).filePath(QStringLiteral(".gitignore"));
+    writeFile(ignorePath, "# Preserve an existing rule\n!keep-me\n");
+    const QFileDevice::Permissions permissive = QFileDevice::ReadOwner | QFileDevice::WriteOwner
+        | QFileDevice::ExeOwner | QFileDevice::ReadGroup | QFileDevice::WriteGroup
+        | QFileDevice::ExeGroup | QFileDevice::ReadOther | QFileDevice::WriteOther
+        | QFileDevice::ExeOther;
+    (void)QFile::setPermissions(preexistingMetadata, permissive);
+    (void)QFile::setPermissions(preexistingAttachments, permissive);
 
     const codexui::AttachmentInfo archive = inspect(archivePath);
     const codexui::AttachmentInfo duplicate = inspect(duplicatePath);
@@ -84,13 +109,28 @@ int main(int argc, char** argv)
                          && preparation.items.at(0).effectivePath
                                 != preparation.items.at(1).effectivePath,
                      "same-name generic files must receive distinct staged paths");
+    const QString metadataPath = QDir(workspace.path()).filePath(QStringLiteral(".codex-ui"));
+    const QString attachmentsPath = QDir(metadataPath).filePath(QStringLiteral("attachments"));
+    passed &= expect(preparation.stagingLease
+                         && preparation.stagingLease->directory() == preparation.stagingDirectory
+                         && hasOnlyOwnerPermissions(metadataPath, true)
+                         && hasOnlyOwnerPermissions(attachmentsPath, true)
+                         && hasOnlyOwnerPermissions(preparation.stagingDirectory, true),
+                     "attachment metadata, storage, and per-submission directories must be owner-only");
     QFile stagedArchive(preparation.items.at(0).effectivePath);
     passed &= expect(stagedArchive.open(QIODevice::ReadOnly)
                          && stagedArchive.readAll() == archiveBytes,
                      "generic attachment staging must preserve exact bytes");
-    passed &= expect(QFileInfo::exists(
-                         QDir(workspace.path()).filePath(QStringLiteral(".codex-ui/.gitignore"))),
-                     "transient workspace attachments must be ignored by source control");
+    stagedArchive.close();
+    passed &= expect(hasOnlyOwnerPermissions(preparation.items.at(0).effectivePath, false)
+                         && hasOnlyOwnerPermissions(preparation.items.at(1).effectivePath, false),
+                     "staged attachment copies must be readable and writable only by their owner");
+    QFile ignoreFile(ignorePath);
+    passed &= expect(ignoreFile.open(QIODevice::ReadOnly | QIODevice::Text)
+                         && ignoreFile.readAll().endsWith(
+                             "# Transient files staged by CodexUI\n*\n")
+                         && hasOnlyOwnerPermissions(ignorePath, false),
+                     "the dedicated private attachment ignore file must preserve existing rules and ignore all contents");
     const QString composed = codexui::AttachmentManager::composePrompt(
         QStringLiteral("Inspect these."), preparation);
     passed &= expect(composed.startsWith(QStringLiteral("Inspect these."))
@@ -100,6 +140,91 @@ int main(int argc, char** argv)
     passed &= expect(codexui::AttachmentManager::composePrompt(markdownPrompt, {})
                          == markdownPrompt,
                      "prompt composition must preserve the exact user-authored Markdown source");
+
+    const QString leasedDirectory = preparation.stagingDirectory;
+    codexui::AttachmentStagingLeasePtr inFlightLease = preparation.stagingLease;
+    preparation = {};
+    passed &= expect(QFileInfo::exists(leasedDirectory),
+                     "a staged directory must survive while an in-flight turn retains its lease");
+    passed &= expect(inFlightLease->cleanup() && !QFileInfo::exists(leasedDirectory),
+                     "explicit terminal cleanup must remove exact staged files and their empty directory");
+    inFlightLease.reset();
+
+    codexui::AttachmentPreparation localFailure;
+    error.clear();
+    passed &= expect(codexui::AttachmentManager::prepare(
+                         {archive}, workspace.path(), QStringLiteral("thread-local-failure"),
+                         &localFailure, &error),
+                     qPrintable(error));
+    const QString localFailureDirectory = localFailure.stagingDirectory;
+    localFailure = {};
+    passed &= expect(!QFileInfo::exists(localFailureDirectory),
+                     "destroying a prepared-but-unsubmitted lease must clean local failure staging");
+
+    codexui::AttachmentPreparation unresolved;
+    error.clear();
+    passed &= expect(codexui::AttachmentManager::prepare(
+                         {archive}, workspace.path(), QStringLiteral("thread-unresolved"),
+                         &unresolved, &error),
+                     qPrintable(error));
+    const QString unresolvedDirectory = unresolved.stagingDirectory;
+    const QString unresolvedFile = unresolved.items.constFirst().effectivePath;
+    unresolved.stagingLease->markDispatched();
+    unresolved = {};
+    passed &= expect(QFileInfo::exists(unresolvedDirectory) && QFileInfo::exists(unresolvedFile),
+                     "destroying an unresolved lease must not remove files an accepted backend turn may still use");
+    passed &= expect(QFile::remove(unresolvedFile) && QDir().rmdir(unresolvedDirectory),
+                     "the unresolved-lifetime fixture must be removable without recursive deletion");
+
+    codexui::AttachmentPreparation guardedCleanup;
+    error.clear();
+    passed &= expect(codexui::AttachmentManager::prepare(
+                         {archive}, workspace.path(), QStringLiteral("thread-guarded"),
+                         &guardedCleanup, &error),
+                     qPrintable(error));
+    const QString unexpectedPath = writeFile(
+        QDir(guardedCleanup.stagingDirectory).filePath(QStringLiteral("backend-output.txt")),
+        "must survive");
+    const QString guardedStagedFile = guardedCleanup.items.constFirst().effectivePath;
+    passed &= expect(!guardedCleanup.stagingLease->cleanup()
+                         && !QFileInfo::exists(guardedStagedFile)
+                         && QFileInfo::exists(unexpectedPath)
+                         && QFileInfo::exists(guardedCleanup.stagingDirectory),
+                     "cleanup must remove only tracked staged files and leave unexpected directory contents untouched");
+    passed &= expect(QFile::remove(unexpectedPath)
+                         && QDir().rmdir(guardedCleanup.stagingDirectory),
+                     "the guarded-cleanup fixture must remain manually removable");
+    guardedCleanup = {};
+
+    codexui::AttachmentPreparation retryCleanup;
+    error.clear();
+    passed &= expect(codexui::AttachmentManager::prepare(
+                         {archive}, workspace.path(), QStringLiteral("thread-retry"),
+                         &retryCleanup, &error),
+                     qPrintable(error));
+    const QString replacedStagedPath = retryCleanup.items.constFirst().effectivePath;
+    passed &= expect(QFile::remove(replacedStagedPath)
+                         && QDir().mkpath(replacedStagedPath)
+                         && !retryCleanup.stagingLease->cleanup()
+                         && QFileInfo(replacedStagedPath).isDir(),
+                     "cleanup must not recursively remove a directory that replaced a tracked file");
+    passed &= expect(QDir().rmdir(replacedStagedPath)
+                         && retryCleanup.stagingLease->cleanup()
+                         && !QFileInfo::exists(retryCleanup.stagingDirectory),
+                     "failed tracked paths must remain available for a safe cleanup retry");
+    retryCleanup = {};
+
+    codexui::AttachmentInfo missing = archive;
+    missing.sourcePath = QDir(source.path()).filePath(QStringLiteral("removed.tar.gz"));
+    codexui::AttachmentPreparation failedCopy;
+    error.clear();
+    passed &= expect(!codexui::AttachmentManager::prepare(
+                         {archive, missing}, workspace.path(), QStringLiteral("thread-123"),
+                         &failedCopy, &error)
+                         && failedCopy.stagingDirectory.isEmpty()
+                         && QDir(attachmentsPath).entryList(
+                                QDir::NoDotAndDotDot | QDir::Dirs).isEmpty(),
+                     "failed preparation must release its partially created staging directory");
 
     codexui::AttachmentPreparation invalid;
     error.clear();

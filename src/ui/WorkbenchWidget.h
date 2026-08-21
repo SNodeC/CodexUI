@@ -65,6 +65,13 @@ private:
         QString effectivePrompt;
         QStringList imagePaths;
         QList<AttachmentInfo> attachments;
+        AttachmentStagingLeasePtr stagingLease;
+    };
+
+    struct RetainedAttachmentStaging {
+        QString threadId;
+        QString turnId;
+        AttachmentStagingLeasePtr lease;
     };
 
     void refreshLifecycle();
@@ -113,6 +120,11 @@ private:
     void steerTurn(const QString& threadId,
                    const QString& turnId,
                    const PreparedTurnSubmission& submission);
+    void retainAttachmentStaging(const QString& threadId,
+                                 const QString& turnId,
+                                 const AttachmentStagingLeasePtr& lease);
+    void releaseAttachmentStaging(const AttachmentStagingLeasePtr& lease);
+    void reconcileAttachmentStaging();
     void reconcileSubmittedTurnSettings();
     void interruptTurn(const QString& threadId, const QString& turnId);
     void showWriteError(const QString& error);
@@ -156,6 +168,10 @@ private:
     std::optional<ResumeWithOptionsSetup> pendingResumeSetup;
     UpcomingTurnDraft pendingTurnDraft;
     std::optional<SubmittedTurnSettings> submittedTurnSettings;
+    // Kept across frontend reconnects. Canonical terminal turn state is the
+    // only authority that triggers cleanup. Lease destruction itself retains
+    // files so closing the UI cannot break a backend turn that remains active.
+    QList<RetainedAttachmentStaging> retainedAttachmentStaging;
     QString turnThreadIdAwaitingState;
     QString turnIdAwaitingState;
     QString automaticResumeThreadId;

@@ -7,6 +7,8 @@
 #include <QString>
 #include <QStringList>
 
+#include <memory>
+
 namespace codexui {
 
 struct AttachmentInfo
@@ -30,12 +32,40 @@ struct PreparedAttachment
     bool staged = false;
 };
 
+class AttachmentStagingLease final
+{
+public:
+    ~AttachmentStagingLease();
+
+    AttachmentStagingLease(const AttachmentStagingLease&) = delete;
+    AttachmentStagingLease& operator=(const AttachmentStagingLease&) = delete;
+
+    [[nodiscard]] const QString& directory() const noexcept;
+    // Prepared-but-unsubmitted leases clean up on destruction. Dispatch makes
+    // cleanup explicit so destroying the frontend cannot break an active turn.
+    [[nodiscard]] bool cleanup() noexcept;
+    void markDispatched() noexcept;
+    void cancelDispatch() noexcept;
+
+private:
+    friend class AttachmentManager;
+    explicit AttachmentStagingLease(QString directory);
+    void trackFile(QString path);
+
+    QString stagingDirectory;
+    QStringList stagedFiles;
+    bool dispatched = false;
+};
+
+using AttachmentStagingLeasePtr = std::shared_ptr<AttachmentStagingLease>;
+
 struct AttachmentPreparation
 {
     QList<PreparedAttachment> items;
     QStringList imagePaths;
     QString genericFilePrompt;
     QString stagingDirectory;
+    AttachmentStagingLeasePtr stagingLease;
 };
 
 class AttachmentManager final
