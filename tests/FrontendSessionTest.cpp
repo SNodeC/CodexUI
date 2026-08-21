@@ -328,9 +328,40 @@ struct FrontendSessionFacadeTestAccess
         session.enqueueStatusForTest(generation, std::move(status));
     }
 
+    static void enqueueStatus(FrontendSession& session,
+                              std::uint64_t generation,
+                              FrontendSession::Lifecycle lifecycle,
+                              QString status)
+    {
+        session.enqueueStatusForTest(
+            generation, lifecycle, std::move(status));
+    }
+
+    static void enqueueLifecycle(FrontendSession& session,
+                                 std::uint64_t generation,
+                                 FrontendSession::Lifecycle lifecycle,
+                                 QString status)
+    {
+        session.enqueueLifecycleForTest(
+            generation, lifecycle, std::move(status));
+    }
+
+    static void enqueueModels(
+        FrontendSession& session,
+        std::uint64_t generation,
+        std::vector<ai::openai::codex::typed::Model> models)
+    {
+        session.enqueueModelsForTest(generation, std::move(models));
+    }
+
     static std::size_t pendingStateCount(const FrontendSession& session)
     {
         return session.pendingStateCountForTest();
+    }
+
+    static std::size_t pendingControlCount(const FrontendSession& session)
+    {
+        return session.pendingControlCountForTest();
     }
 
     static std::size_t postedWakeCount(const FrontendSession& session)
@@ -366,6 +397,7 @@ namespace {
 
 namespace frontend = ai::openai::codex::frontend;
 namespace sdk = ai::openai::codex::frontend::client;
+namespace typed = ai::openai::codex::typed;
 
 bool expect(bool condition, const char* message)
 {
@@ -1592,6 +1624,10 @@ bool testThreadedFacadeMailbox()
         codexui::FrontendSessionFacadeTestAccess::pendingStateCount(session) == 1,
         "interleaved control events must never let more than one full State wait for the GUI");
     passed &= expect(
+        codexui::FrontendSessionFacadeTestAccess::pendingControlCount(session)
+            == 2,
+        "a blocked GUI must retain only the latest replaceable status and the lossless completion");
+    passed &= expect(
         codexui::FrontendSessionFacadeTestAccess::postedWakeCount(session)
                 - wakesBefore
             == 1,
@@ -1599,7 +1635,7 @@ bool testThreadedFacadeMailbox()
 
     wait.restart();
     while ((codexui::FrontendSessionFacadeTestAccess::pendingStateCount(session) != 0
-            || statusSignals != 1'000 || successfulCompletions != 1)
+            || statusSignals != 1 || successfulCompletions != 1)
            && wait.elapsed() < 2'000) {
         QCoreApplication::processEvents();
         QThread::msleep(1);
@@ -1644,10 +1680,10 @@ bool testThreadedFacadeMailbox()
                 && deliveredScope->coalescedContentDeltaBytes == 13,
             "the one-slot mailbox must merge only bounded contiguous same-channel appends and degrade ambiguous or oversized sequences to replacement");
     }
-    passed &= expect(statusSignals == 1'000
+    passed &= expect(statusSignals == 1
                          && session.statusText()
                                 == QStringLiteral("diagnostic-999"),
-                     "ordered control publications must remain lossless around coalesced State updates");
+                     "replaceable status publications must collapse to the newest value around coalesced State updates");
     passed &= expect(successfulCompletions == 1
                          && successfulCompletionValue
                                 == QStringLiteral("completed"),
@@ -1685,6 +1721,141 @@ bool testThreadedFacadeMailbox()
                      "shutdown must fail every retained operation token exactly once in submission order before joining");
     passed &= expect(callbacksOnGuiThread,
                      "all facade signals and completions must execute on the GUI thread");
+    return passed;
+}
+
+bool testFacadeReplaceableControlCoalescing()
+{
+    codexui::FrontendSession session;
+    const auto model = [](std::string id) {
+        typed::Model result;
+        result.id = typed::ModelId{id};
+        result.model = typed::ModelId{id};
+        result.displayName = std::move(id);
+        return result;
+    };
+    const auto publish = [&session, &model](
+                             std::uint64_t generation,
+                             codexui::FrontendSession::Lifecycle lifecycle,
+                             QString status,
+                             std::string modelId) {
+        codexui::FrontendSessionFacadeTestAccess::enqueueStatus(
+            session, generation, lifecycle, std::move(status));
+        codexui::FrontendSessionFacadeTestAccess::enqueueModels(
+            session, generation, {model(std::move(modelId))});
+    };
+
+    int statusSignals = 0;
+    int lifecycleSignals = 0;
+    int modelSignals = 0;
+    std::vector<int> completionOrder;
+    bool completionSnapshotsCorrect = true;
+    QObject::connect(&session,
+                     &codexui::FrontendSession::statusChanged,
+                     [&statusSignals] { ++statusSignals; });
+    QObject::connect(&session,
+                     &codexui::FrontendSession::lifecycleChanged,
+                     [&lifecycleSignals] { ++lifecycleSignals; });
+    QObject::connect(&session,
+                     &codexui::FrontendSession::modelCatalogChanged,
+                     [&modelSignals] { ++modelSignals; });
+
+    publish(7,
+            codexui::FrontendSession::Lifecycle::Disconnected,
+            QStringLiteral("pre-old"),
+            "model-pre-old");
+    publish(8,
+            codexui::FrontendSession::Lifecycle::Disconnected,
+            QStringLiteral("pre-current"),
+            "model-pre-current");
+    publish(7,
+            codexui::FrontendSession::Lifecycle::Disconnected,
+            QStringLiteral("pre-stale"),
+            "model-pre-stale");
+
+    codexui::FrontendSessionFacadeTestAccess::enqueueLifecycle(
+        session,
+        8,
+        codexui::FrontendSession::Lifecycle::Connecting,
+        QStringLiteral("connecting"));
+    publish(8,
+            codexui::FrontendSession::Lifecycle::Connecting,
+            QStringLiteral("mid-old"),
+            "model-mid-old");
+    publish(8,
+            codexui::FrontendSession::Lifecycle::Connecting,
+            QStringLiteral("mid-current"),
+            "model-mid-current");
+    codexui::FrontendSessionFacadeTestAccess::completeOperation(
+        session,
+        8,
+        [&session, &completionOrder,
+         &completionSnapshotsCorrect](const QString&) {
+            completionOrder.push_back(1);
+            completionSnapshotsCorrect = completionSnapshotsCorrect
+                && session.lifecycle()
+                    == codexui::FrontendSession::Lifecycle::Connecting
+                && session.statusText() == QStringLiteral("mid-current")
+                && session.modelCatalog().size() == 1
+                && session.modelCatalog().front().model.value
+                    == "model-mid-current";
+        },
+        QString{});
+
+    publish(8,
+            codexui::FrontendSession::Lifecycle::Connecting,
+            QStringLiteral("post-old"),
+            "model-post-old");
+    publish(8,
+            codexui::FrontendSession::Lifecycle::Connecting,
+            QStringLiteral("post-current"),
+            "model-post-current");
+    codexui::FrontendSessionFacadeTestAccess::completeOperation(
+        session,
+        8,
+        [&session, &completionOrder,
+         &completionSnapshotsCorrect](const QString&) {
+            completionOrder.push_back(2);
+            completionSnapshotsCorrect = completionSnapshotsCorrect
+                && session.lifecycle()
+                    == codexui::FrontendSession::Lifecycle::Connecting
+                && session.statusText() == QStringLiteral("post-current")
+                && session.modelCatalog().size() == 1
+                && session.modelCatalog().front().model.value
+                    == "model-post-current";
+        },
+        QString{});
+
+    codexui::FrontendSessionFacadeTestAccess::enqueueLifecycle(
+        session,
+        8,
+        codexui::FrontendSession::Lifecycle::Ready,
+        QStringLiteral("ready"));
+
+    bool passed = expect(
+        codexui::FrontendSessionFacadeTestAccess::pendingControlCount(session)
+            == 10,
+        "replaceable controls must remain bounded to one status and one model per lifecycle/completion segment");
+    QCoreApplication::processEvents();
+    passed &= expect(
+        completionOrder == std::vector<int>{1, 2}
+            && completionSnapshotsCorrect,
+        "operation completions must remain FIFO barriers and observe the preceding status and model publications");
+    passed &= expect(
+        lifecycleSignals == 2
+            && session.lifecycle()
+                == codexui::FrontendSession::Lifecycle::Ready,
+        "semantically distinct lifecycle transitions must never be coalesced");
+    passed &= expect(
+        statusSignals == 3
+            && session.statusText() == QStringLiteral("ready"),
+        "each barrier segment must publish only its highest-generation latest status");
+    passed &= expect(
+        modelSignals == 3 && session.modelCatalog().size() == 1
+            && session.modelCatalog().front().model.value
+                == "model-post-current",
+        "each barrier segment must publish only its highest-generation latest model catalogue");
+    session.shutdown();
     return passed;
 }
 
@@ -1795,7 +1966,9 @@ int main(int argc, char* argv[])
                && testArchivedThreadPaginationTruncationIsTerminal()
                && testTurnSteeringSubmission()
                && testOutboundQueue() && testInboundBufferCompaction()
-               && testThreadedFacadeMailbox() && testImmediateFacadeShutdown()
+               && testThreadedFacadeMailbox()
+               && testFacadeReplaceableControlCoalescing()
+               && testImmediateFacadeShutdown()
                && testFacadeGenerationGating() && testFacadeScopeBound()
            ? 0
            : 1;

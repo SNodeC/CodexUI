@@ -178,7 +178,17 @@ private:
     void enqueueStateForTest(std::uint64_t generation,
                              detail::StateUpdateScope scope);
     void enqueueStatusForTest(std::uint64_t generation, QString status);
+    void enqueueStatusForTest(std::uint64_t generation,
+                              Lifecycle lifecycle,
+                              QString status);
+    void enqueueLifecycleForTest(std::uint64_t generation,
+                                 Lifecycle lifecycle,
+                                 QString status);
+    void enqueueModelsForTest(
+        std::uint64_t generation,
+        std::vector<ai::openai::codex::typed::Model> models);
     [[nodiscard]] std::size_t pendingStateCountForTest() const;
+    [[nodiscard]] std::size_t pendingControlCountForTest() const;
     [[nodiscard]] std::size_t postedWakeCountForTest() const noexcept;
     [[nodiscard]] bool workerAffinityValidatedForTest() const noexcept;
     void trackOperationForTest(OperationCompletion completion);

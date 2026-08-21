@@ -523,6 +523,55 @@ public:
         postWake(scheduleWake);
     }
 
+    [[nodiscard]] static bool isControlBarrier(const Control& control)
+    {
+        if (std::holds_alternative<CompletionPublication>(control))
+            return true;
+        const auto* status = std::get_if<StatusPublication>(&control);
+        return status && status->lifecycleChanged;
+    }
+
+    template<typename Value>
+    void appendReplaceableControl(Value value)
+    {
+        auto existing = controls.end();
+        while (existing != controls.begin()) {
+            --existing;
+            if (isControlBarrier(*existing))
+                break;
+            const auto* candidate = std::get_if<Value>(&*existing);
+            if (!candidate)
+                continue;
+            if (candidate->generation > value.generation)
+                return;
+            controls.erase(existing);
+            break;
+        }
+        // Append instead of replacing in place so the surviving publication
+        // keeps its last-occurrence ordering relative to the other
+        // replaceable control kind.
+        controls.push_back(Control{std::move(value)});
+    }
+
+    void appendControl(StatusPublication publication)
+    {
+        if (publication.lifecycleChanged) {
+            controls.push_back(Control{std::move(publication)});
+            return;
+        }
+        appendReplaceableControl(std::move(publication));
+    }
+
+    void appendControl(ModelPublication publication)
+    {
+        appendReplaceableControl(std::move(publication));
+    }
+
+    void appendControl(CompletionPublication publication)
+    {
+        controls.push_back(Control{std::move(publication)});
+    }
+
     template<typename Value>
     void enqueueControl(Value value)
     {
@@ -531,7 +580,7 @@ public:
             std::lock_guard lock(publicationMutex);
             if (!acceptingPublications)
                 return;
-            controls.push_back(Control{std::move(value)});
+            appendControl(std::move(value));
             scheduleWakeIfNeeded(scheduleWake);
         }
         postWake(scheduleWake);
@@ -678,11 +727,41 @@ void FrontendSession::enqueueStateForTest(
 void FrontendSession::enqueueStatusForTest(std::uint64_t generation,
                                            QString status)
 {
+    enqueueStatusForTest(
+        generation, impl->currentLifecycle, std::move(status));
+}
+
+void FrontendSession::enqueueStatusForTest(std::uint64_t generation,
+                                           Lifecycle lifecycle,
+                                           QString status)
+{
     impl->enqueueControl(Impl::StatusPublication{
         generation,
-        impl->currentLifecycle,
+        lifecycle,
         std::move(status),
         false,
+    });
+}
+
+void FrontendSession::enqueueLifecycleForTest(std::uint64_t generation,
+                                              Lifecycle lifecycle,
+                                              QString status)
+{
+    impl->enqueueControl(Impl::StatusPublication{
+        generation,
+        lifecycle,
+        std::move(status),
+        true,
+    });
+}
+
+void FrontendSession::enqueueModelsForTest(
+    std::uint64_t generation,
+    std::vector<ai::openai::codex::typed::Model> models)
+{
+    impl->enqueueControl(Impl::ModelPublication{
+        generation,
+        std::move(models),
     });
 }
 
@@ -690,6 +769,12 @@ std::size_t FrontendSession::pendingStateCountForTest() const
 {
     std::lock_guard lock(impl->publicationMutex);
     return impl->latestState ? 1U : 0U;
+}
+
+std::size_t FrontendSession::pendingControlCountForTest() const
+{
+    std::lock_guard lock(impl->publicationMutex);
+    return impl->controls.size();
 }
 
 std::size_t FrontendSession::postedWakeCountForTest() const noexcept
