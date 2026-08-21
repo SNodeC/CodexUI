@@ -851,7 +851,7 @@ void addActivityRow(QVBoxLayout* rows,
     prefix->setObjectName(QStringLiteral("conversationActivityPrefix"));
     auto* prefixLayout = new QHBoxLayout(prefix);
     prefixLayout->setContentsMargins(0, 0, 0, 0);
-    prefixLayout->setSpacing(1);
+    prefixLayout->setSpacing(0);
 
     auto* symbol = textLabel(statusGlyph(item.status));
     symbol->setObjectName(QStringLiteral("conversationActivitySymbol"));
@@ -863,10 +863,12 @@ void addActivityRow(QVBoxLayout* rows,
     auto* disclosure = disclosureButton(
         expanded,
         QStringLiteral("Activity details: %1").arg(item.title));
-    // Keep the row control only one pixel wider than its icon.  The odd width
-    // leaves no leading inset and one trailing pixel, matching the header's
-    // disclosure-to-label gap without shifting the aligned status column.
-    disclosure->setFixedWidth(disclosure->iconSize().width() + 1);
+    // Nested rows need a compact indicator rather than the header button's
+    // surrounding click-area padding; otherwise every expandable title is
+    // visibly indented. Keep the indicator flush with the status column and
+    // let the summary layout provide the single consistent text gap.
+    disclosure->setIconSize(QSize(10, 10));
+    disclosure->setFixedWidth(10);
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
     prefixLayout->addWidget(disclosure, 0, Qt::AlignTop);
