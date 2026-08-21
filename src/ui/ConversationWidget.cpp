@@ -781,14 +781,14 @@ void addActivityRow(QVBoxLayout* rows,
     summary->setObjectName(QStringLiteral("conversationActivitySummary"));
     auto* layout = new QHBoxLayout(summary);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(8);
+    layout->setSpacing(6);
 
     const bool hasDetails = !item.detail.isEmpty() || !item.output.isEmpty() || item.truncated;
     const QString color = statusColor(item.status);
     auto* symbol = textLabel(statusGlyph(item.status));
     symbol->setObjectName(QStringLiteral("conversationActivitySymbol"));
-    symbol->setFixedWidth(14);
-    symbol->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
+    symbol->setFixedSize(14, 22);
+    symbol->setAlignment(Qt::AlignCenter);
     symbol->setStyleSheet(QStringLiteral("color:%1;font-size:12px;font-weight:600;").arg(color));
     layout->addWidget(symbol, 0, Qt::AlignTop);
 
