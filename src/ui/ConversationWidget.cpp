@@ -663,8 +663,7 @@ QToolButton* disclosureButton(bool expanded, const QString& accessibleName)
         "QToolButton#activityDisclosure{background:transparent;border:1px solid transparent;"
         "border-radius:5px;padding:0;}"
         "QToolButton#activityDisclosure:hover{background:#f1f5fb;border-color:#d7dee8;}"
-        "QToolButton#activityDisclosure:pressed,QToolButton#activityDisclosure:checked{"
-        "background:#e5eeff;border-color:#bfd3f9;}"
+        "QToolButton#activityDisclosure:pressed{background:#e9eff7;border-color:#d7dee8;}"
         "QToolButton#activityDisclosure:focus{border:1px solid #2f6feb;}"));
     return button;
 }
@@ -688,7 +687,20 @@ QPlainTextEdit* activityOutputWidget(const QString& text)
     output->setMinimumHeight(96);
     output->setMaximumHeight(240);
     output->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    output->setStyleSheet(QStringLiteral("font-family:monospace;font-size:11px;"));
+    output->setStyleSheet(QStringLiteral(
+        "QPlainTextEdit#conversationActivityOutput{font-family:monospace;font-size:11px;"
+        "background:#fbfcfe;border:1px solid #e1e7ef;border-radius:6px;padding:6px;}"
+        "QAbstractScrollArea::corner{background:transparent;}"
+        "QScrollBar:vertical{background:transparent;border:0;width:8px;margin:2px;}"
+        "QScrollBar::handle:vertical{background:#b9c4d2;min-height:28px;border-radius:3px;}"
+        "QScrollBar::handle:vertical:hover{background:#98a2b3;}"
+        "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{background:transparent;border:0;height:0;}"
+        "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}"
+        "QScrollBar:horizontal{background:transparent;border:0;height:8px;margin:2px;}"
+        "QScrollBar::handle:horizontal{background:#b9c4d2;min-width:28px;border-radius:3px;}"
+        "QScrollBar::handle:horizontal:hover{background:#98a2b3;}"
+        "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{background:transparent;border:0;width:0;}"
+        "QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal{background:transparent;}"));
     output->setPlainText(text);
     output->setProperty("activityOutputText", text);
     return output;
@@ -765,25 +777,26 @@ void addActivityRow(QVBoxLayout* rows,
     lineLayout->setSpacing(5);
 
     auto* summary = new QWidget;
+    summary->setObjectName(QStringLiteral("conversationActivitySummary"));
     auto* layout = new QHBoxLayout(summary);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(8);
 
     const bool hasDetails = !item.detail.isEmpty() || !item.output.isEmpty() || item.truncated;
+    const QString color = statusColor(item.status);
+    auto* symbol = textLabel(statusGlyph(item.status));
+    symbol->setObjectName(QStringLiteral("conversationActivitySymbol"));
+    symbol->setFixedWidth(14);
+    symbol->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
+    symbol->setStyleSheet(QStringLiteral("color:%1;font-size:12px;font-weight:600;").arg(color));
+    layout->addWidget(symbol, 0, Qt::AlignTop);
+
     auto* disclosure = disclosureButton(
         expanded,
         QStringLiteral("Activity details: %1").arg(item.title));
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
     layout->addWidget(disclosure, 0, Qt::AlignTop);
-
-    const QString color = statusColor(item.status);
-    auto* symbol = textLabel(statusGlyph(item.status));
-    symbol->setObjectName(QStringLiteral("conversationActivitySymbol"));
-    symbol->setFixedWidth(14);
-    symbol->setAlignment(Qt::AlignTop);
-    symbol->setStyleSheet(QStringLiteral("color:%1;font-size:12px;font-weight:600;").arg(color));
-    layout->addWidget(symbol);
 
     auto* title = wrappingLabel(item.title);
     title->setObjectName(QStringLiteral("conversationActivityTitle"));

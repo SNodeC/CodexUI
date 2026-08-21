@@ -594,6 +594,25 @@ bool testActivityDisclosureAndFullOutput()
     passed &= expect(detailDisclosure && detailDisclosure->isCheckable()
                          && !row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput")),
                      "a collapsed activity must not materialize a potentially large output document");
+    auto* activitySummary = row
+                                ? row->findChild<QWidget*>(
+                                      QStringLiteral("conversationActivitySummary"))
+                                : nullptr;
+    auto* activitySummaryLayout = activitySummary
+                                      ? qobject_cast<QHBoxLayout*>(activitySummary->layout())
+                                      : nullptr;
+    auto* initialStatusSymbol = row
+                                    ? row->findChild<QLabel*>(
+                                          QStringLiteral("conversationActivitySymbol"))
+                                    : nullptr;
+    passed &= expect(activitySummaryLayout && initialStatusSymbol && detailDisclosure
+                         && activitySummaryLayout->indexOf(initialStatusSymbol) == 0
+                         && activitySummaryLayout->indexOf(detailDisclosure) == 1,
+                     "activity status indicators must precede disclosures in a stable aligned column");
+    passed &= expect(groupDisclosure
+                         && !groupDisclosure->styleSheet().contains(
+                             QStringLiteral("activityDisclosure:checked")),
+                     "expanded activity disclosures must remain transparent rather than painted as square buttons");
     passed &= expect(detailDisclosure
                          && detailDisclosure->accessibleName().contains(QStringLiteral("bash -lc")),
                      "each activity disclosure must identify its activity in its accessible name");
@@ -643,6 +662,14 @@ bool testActivityDisclosureAndFullOutput()
                               : nullptr;
     passed &= expect(details && !details->isHidden() && outputView && outputView->isVisible(),
                      "an individual activity disclosure must materialize and reveal its complete output");
+    passed &= expect(outputView
+                         && outputView->styleSheet().contains(
+                             QStringLiteral("QScrollBar:vertical"))
+                         && outputView->styleSheet().contains(
+                             QStringLiteral("QScrollBar:horizontal"))
+                         && outputView->styleSheet().contains(
+                             QStringLiteral("QAbstractScrollArea::corner")),
+                     "activity output must use the application scrollbar vocabulary on both axes");
     passed &= expect(detailDisclosure && detailDisclosure->isChecked() && outputHeading
                          && outputHeading->text() == QStringLiteral("Output"),
                      "expanded activity details must expose accessible checked state and label their output");
