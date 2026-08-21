@@ -795,6 +795,10 @@ void addActivityRow(QVBoxLayout* rows,
     auto* disclosure = disclosureButton(
         expanded,
         QStringLiteral("Activity details: %1").arg(item.title));
+    // Keep the row control only as wide as its icon.  The shared 22 px
+    // disclosure button is appropriate for the card header, but here it
+    // indents the chevron relative to non-expandable row titles.
+    disclosure->setFixedWidth(14);
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
     layout->addWidget(disclosure, 0, Qt::AlignTop);
