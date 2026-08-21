@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.20)
 project(CodexUI LANGUAGES CXX)
 
 include(CTest)
+include(GNUInstallDirs)
 
 set(CMAKE_AUTOMOC ON)
 
@@ -47,6 +48,12 @@ target_link_libraries(
         AISuite::OpenAICodexFrontendClient
         Qt6::Network
         Qt6::Widgets
+)
+
+install(
+    TARGETS codex-ui
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    BUNDLE DESTINATION .
 )
 
 if(BUILD_TESTING)
