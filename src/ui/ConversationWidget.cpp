@@ -751,13 +751,21 @@ bool streamingMessageStatus(const QString& status)
            || normalized.contains(QStringLiteral("stream"));
 }
 
-MessagePresentation messagePresentationMetadata(const sdk::ItemState& item, bool user)
+bool turnStreamsMessages(const sdk::TurnState& turn) noexcept
+{
+    return !turn.terminal && (turn.active || turn.connectionInvalidated);
+}
+
+MessagePresentation messagePresentationMetadata(const sdk::ItemState& item,
+                                                bool user,
+                                                bool turnStreaming)
 {
     MessagePresentation result;
     const QString itemStatusText = itemStatus(item);
     result.status = itemStatusText;
     result.statusColor = statusColor(itemStatusText);
-    result.streaming = !user && streamingMessageStatus(itemStatusText);
+    result.streaming = !user
+                       && (turnStreaming || streamingMessageStatus(itemStatusText));
 
     if (!user)
     {
@@ -773,9 +781,12 @@ MessagePresentation messagePresentationMetadata(const sdk::ItemState& item, bool
     return result;
 }
 
-MessagePresentation messagePresentation(const sdk::ItemState& item, bool user)
+MessagePresentation messagePresentation(const sdk::ItemState& item,
+                                        bool user,
+                                        bool turnStreaming)
 {
-    MessagePresentation result = messagePresentationMetadata(item, user);
+    MessagePresentation result = messagePresentationMetadata(
+        item, user, turnStreaming);
     const auto userMessage = user ? sdk::userMessageSemanticView(item) : std::nullopt;
     if (user)
     {
@@ -1776,9 +1787,11 @@ QFrame* activityCard(const sdk::State& state,
 
 void addMessage(QVBoxLayout* timeline,
                 const sdk::ItemState& item,
-                bool user)
+                bool user,
+                bool turnStreaming)
 {
-    const MessagePresentation presentation = messagePresentation(item, user);
+    const MessagePresentation presentation = messagePresentation(
+        item, user, turnStreaming);
     auto* header = new QHBoxLayout;
     header->addWidget(textLabel(user ? QStringLiteral("YOU") : QStringLiteral("CODEX"), "section"));
     header->addStretch();
@@ -2098,12 +2111,14 @@ TimelineWindow latestTimelineWindow(const sdk::State& state, const sdk::ThreadSt
 
 QByteArray segmentPresentationKey(const sdk::State& state,
                                   const TimelineSegment& segment,
-                                  bool typedPlanAvailable)
+                                  bool typedPlanAvailable,
+                                  bool turnStreaming)
 {
     QCryptographicHash hash(QCryptographicHash::Sha256);
     addPresentationValue(hash, segment.id);
     addPresentationValue(hash, segment.missing);
     addPresentationValue(hash, typedPlanAvailable);
+    addPresentationValue(hash, turnStreaming);
     for (const auto* item : segment.items)
     {
         addPresentationValue(hash, item != nullptr);
@@ -2179,6 +2194,7 @@ QByteArray segmentPresentationKey(const sdk::State& state,
 QWidget* timelineSegmentWidget(const sdk::State& state,
                                const TimelineSegment& segment,
                                bool typedPlanAvailable,
+                               bool turnStreaming,
                                const ActivityExpansionState& activityExpansion,
                                const std::function<void()>& layoutChanged)
 {
@@ -2219,7 +2235,7 @@ QWidget* timelineSegmentWidget(const sdk::State& state,
         const auto* item = segment.items.front();
         const bool user = item->kind.is(frontend::ThreadItemKind::UserMessage);
         host->setProperty("messageUser", user);
-        addMessage(layout, *item, user);
+        addMessage(layout, *item, user, turnStreaming);
     }
     else
     {
@@ -2472,6 +2488,7 @@ bool updateTimelineActivitySegment(QWidget* host,
 
 bool updateTimelineMessageSegment(QWidget* host,
                                   const TimelineSegment& segment,
+                                  bool turnStreaming,
                                   bool* geometryChanged,
                                   bool* mayShrink)
 {
@@ -2497,7 +2514,8 @@ bool updateTimelineMessageSegment(QWidget* host,
     const QString previousTruncation = truncation->text();
     const bool previousTruncationVisible = truncation->isVisible();
     const QString previousKind = contentWidget->property("kind").toString();
-    const MessagePresentation presentation = messagePresentation(*item, user);
+    const MessagePresentation presentation = messagePresentation(
+        *item, user, turnStreaming);
     if (mayShrink)
     {
         const QString nextKind = presentation.missing ? QStringLiteral("meta")
@@ -3176,8 +3194,9 @@ void ConversationWidget::render(const sdk::State& state,
                         segmentContentChanges = &segmentContentStorage;
                     }
                     const bool typedPlanAvailable = turn->plan.has_value();
+                    const bool turnStreaming = turnStreamsMessages(*turn);
                     const QByteArray segmentKey = segmentPresentationKey(
-                        state, *segment, typedPlanAvailable);
+                        state, *segment, typedPlanAvailable, turnStreaming);
                     if (oldWidget && !explicitlyAffected
                         && renderedSegmentKeys.value(storage) == segmentKey)
                         continue;
@@ -3188,6 +3207,7 @@ void ConversationWidget::render(const sdk::State& state,
                         && updateTimelineMessageSegment(
                             oldWidget,
                             *segment,
+                            turnStreaming,
                             &messageGeometryChanged,
                             &messageMayShrink))
                     {
@@ -3221,6 +3241,7 @@ void ConversationWidget::render(const sdk::State& state,
                         state,
                         *segment,
                         typedPlanAvailable,
+                        turnStreaming,
                         expansion,
                         [this] { activityLayoutChanged(); });
                     newWidget->setProperty("turnId", turnId);

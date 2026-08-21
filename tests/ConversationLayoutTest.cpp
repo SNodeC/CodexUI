@@ -55,6 +55,10 @@ struct TurnFixture
     std::string id;
     std::vector<MessageFixture> messages;
     std::optional<frontend::Json> plan;
+    std::string status = "completed";
+    bool active = false;
+    bool terminal = true;
+    bool connectionInvalidated = false;
 };
 
 struct ThreadFixture
@@ -230,9 +234,10 @@ client::State makeState(const std::vector<ThreadFixture>& fixtures)
                 items.push_back(messageJson(threadFixture.id, turnFixture.id, message));
             frontend::Json turn{{"id", turnFixture.id},
                                 {"threadId", threadFixture.id},
-                                {"status", "completed"},
-                                {"active", false},
-                                {"terminal", true},
+                                {"status", turnFixture.status},
+                                {"active", turnFixture.active},
+                                {"terminal", turnFixture.terminal},
+                                {"connectionInvalidated", turnFixture.connectionInvalidated},
                                 {"effectiveExecutionConfiguration", executionConfiguration},
                                 {"effectiveExecutionConfigurationProvenance", "turn_start_accepted"},
                                 {"items", std::move(items)},
@@ -1195,6 +1200,9 @@ bool testCompletedAgentMessageStreamsBeforeTerminalMarkdown()
             frontend::ThreadItemKind::AgentMessage,
             "**partial",
             "completed"}}}}};
+    fixture.turns.front().status = "inProgress";
+    fixture.turns.front().active = true;
+    fixture.turns.front().terminal = false;
     codexui::ConversationWidget conversation;
     conversation.resize(900, 700);
     conversation.show();
@@ -1204,21 +1212,27 @@ bool testCompletedAgentMessageStreamsBeforeTerminalMarkdown()
 
     QPointer<QWidget> message = segment(
         conversation, QStringLiteral("message:item-completed-streaming-markdown"));
-    QPointer<QWidget> initialMarkdown = messageContent(message);
+    QPointer<QWidget> streamingContent = messageContent(message);
     QWidget* const messageAddress = message.data();
+    QWidget* const streamingContentAddress = streamingContent.data();
     bool passed = expect(
-        initialMarkdown
-            && initialMarkdown->property("markdownRenderMode").toString()
-                   == QStringLiteral("markdown"),
-        "a completed agent-message snapshot must initially render canonical Markdown");
+        streamingContent
+            && streamingContent->property("markdownRenderMode").toString()
+                   == QStringLiteral("streaming-plain"),
+        "an active turn must keep a completed-looking agent message plain while content can still arrive");
+
+    conversation.render(makeState({fixture}),
+                        QStringLiteral("completed-streaming-markdown"));
+    settleEvents();
+    passed &= expect(
+        messageContent(message) == streamingContentAddress,
+        "an unrelated full refresh during the active turn must preserve the streaming view");
 
     const QStringList streamedContent{
         QStringLiteral("**partial result"),
         QStringLiteral("**partial result**\n\n- one"),
         QStringLiteral("**partial result**\n\n- one\n- two")};
     QString previous = QStringLiteral("**partial");
-    QPointer<QWidget> streamingContent;
-    QWidget* streamingContentAddress = nullptr;
     for (const QString& update : streamedContent)
     {
         fixture.turns.front().messages.front().text = update.toStdString();
@@ -1237,11 +1251,6 @@ bool testCompletedAgentMessageStreamsBeforeTerminalMarkdown()
         settleEvents();
 
         QWidget* const currentContent = messageContent(message);
-        if (!streamingContent)
-        {
-            streamingContent = currentContent;
-            streamingContentAddress = currentContent;
-        }
         passed &= expect(
             handled && message && message.data() == messageAddress
                 && currentContent && currentContent == streamingContentAddress
@@ -1258,6 +1267,9 @@ bool testCompletedAgentMessageStreamsBeforeTerminalMarkdown()
             && streamingContent->property("fullReplacementCount").toULongLong() == 0,
         "completed agent-message deltas must use only the cursor append path");
 
+    fixture.turns.front().status = "completed";
+    fixture.turns.front().active = false;
+    fixture.turns.front().terminal = true;
     const client::State finalState = makeState({fixture});
     conversation.render(finalState,
                         QStringLiteral("completed-streaming-markdown"));
