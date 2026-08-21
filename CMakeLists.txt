@@ -15,6 +15,8 @@ qt_add_executable(
     codex-ui
     src/app/Application.cpp
     src/app/Application.h
+    src/app/AttachmentManager.cpp
+    src/app/AttachmentManager.h
     src/app/FrontendSession.cpp
     src/app/FrontendSession.h
     src/main.cpp
@@ -48,6 +50,17 @@ target_link_libraries(
 )
 
 if(BUILD_TESTING)
+    add_executable(
+        CodexUIAttachmentManagerTest
+        tests/AttachmentManagerTest.cpp
+        src/app/AttachmentManager.cpp
+        src/app/AttachmentManager.h
+    )
+    target_compile_features(CodexUIAttachmentManagerTest PRIVATE cxx_std_20)
+    target_include_directories(CodexUIAttachmentManagerTest PRIVATE src)
+    target_link_libraries(CodexUIAttachmentManagerTest PRIVATE Qt6::Network)
+    add_test(NAME CodexUIAttachmentManagerTest COMMAND CodexUIAttachmentManagerTest)
+
     add_executable(
         CodexUIPromptLimitTest
         tests/PromptLimitTest.cpp
@@ -83,6 +96,8 @@ if(BUILD_TESTING)
     add_executable(
         CodexUIConversationLayoutTest
         tests/ConversationLayoutTest.cpp
+        src/app/AttachmentManager.cpp
+        src/app/AttachmentManager.h
         src/ui/ConversationWidget.cpp
         src/ui/ConversationWidget.h
         src/ui/InspectorWidget.cpp
@@ -104,6 +119,8 @@ if(BUILD_TESTING)
     add_executable(
         CodexUIPhase1ThreadTurnUxTest
         tests/Phase1ThreadTurnUxTest.cpp
+        src/app/AttachmentManager.cpp
+        src/app/AttachmentManager.h
         src/ui/SidebarWidget.cpp
         src/ui/SidebarWidget.h
         src/ui/ThreadSetupDialog.cpp

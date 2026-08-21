@@ -3,6 +3,8 @@
 #ifndef CODEXUI_UI_CONVERSATIONWIDGET_H
 #define CODEXUI_UI_CONVERSATIONWIDGET_H
 
+#include "app/AttachmentManager.h"
+
 #include <QWidget>
 
 #include <QByteArray>
@@ -52,6 +54,9 @@ public:
         const QHash<QString, QStringList>& exactContentChanges);
     void clearPrompt();
     void clearPromptIfUnchanged(const QString& submittedPrompt);
+    [[nodiscard]] const QList<AttachmentInfo>& attachments() const noexcept;
+    [[nodiscard]] QString attachmentWorkspace() const;
+    void clearAttachmentsIfUnchanged(const QList<AttachmentInfo>& submittedAttachments);
     void focusComposer();
     [[nodiscard]] UpcomingTurnDraft upcomingTurnDraft() const;
     void clearUpcomingTurnSettings();

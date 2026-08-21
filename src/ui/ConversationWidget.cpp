@@ -9,6 +9,7 @@
 
 #include <QCryptographicHash>
 #include <QByteArrayView>
+#include <QDesktopServices>
 #include <QEvent>
 #include <QFrame>
 #include <QHash>
@@ -23,8 +24,12 @@
 #include <QSizePolicy>
 #include <QStyle>
 #include <QTextCursor>
+#include <QTextDocument>
+#include <QTextFragment>
+#include <QTextImageFormat>
 #include <QTimer>
 #include <QToolButton>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QEasingCurve>
 
@@ -118,23 +123,39 @@ QLabel* textLabel(const QString& text, const char* kind = nullptr)
 class WrappingLabel final : public QLabel
 {
 public:
-    explicit WrappingLabel(const QString& text) : QLabel(text)
+    explicit WrappingLabel(const QString& text, bool markdown = false)
+        : markdown(markdown)
     {
-        setTextFormat(Qt::PlainText);
+        setTextFormat(markdown ? Qt::RichText : Qt::PlainText);
         setWordWrap(true);
         QSizePolicy policy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         policy.setHeightForWidth(true);
         setSizePolicy(policy);
+        if (markdown) {
+            setTextInteractionFlags(Qt::TextBrowserInteraction);
+            setOpenExternalLinks(false);
+            connect(this, &QLabel::linkActivated, this, [](const QString& target) {
+                const QUrl url = QUrl::fromUserInput(target);
+                if (url.scheme() == QStringLiteral("https")
+                    || url.scheme() == QStringLiteral("http"))
+                    (void)QDesktopServices::openUrl(url);
+            });
+        }
+        setContent(text);
     }
 
     void setContent(const QString& text)
     {
-        if (text == QLabel::text())
+        if (text == sourceText)
             return;
+        sourceText = text;
+        setProperty("sourceText", sourceText);
         heightCache.clear();
-        QLabel::setText(text);
+        QLabel::setText(markdown ? safeMarkdownHtml(text, font()) : text);
         updateGeometry();
     }
+
+    [[nodiscard]] const QString& content() const noexcept { return sourceText; }
 
     int heightForWidth(int width) const override
     {
@@ -151,10 +172,51 @@ protected:
     {
         if (event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange)
             heightCache.clear();
+        if (markdown && event->type() == QEvent::FontChange)
+            QLabel::setText(safeMarkdownHtml(sourceText, font()));
         QLabel::changeEvent(event);
     }
 
 private:
+    static QString safeMarkdownHtml(const QString& markdownText, const QFont& renderFont)
+    {
+        QTextDocument document;
+        document.setDefaultFont(renderFont);
+        document.setDefaultStyleSheet(QStringLiteral(
+            "a{color:#2f6feb;} code{font-family:monospace;background:#eef1f5;}"
+            "pre{font-family:monospace;background:#eef1f5;white-space:pre-wrap;}"));
+        document.setMarkdown(
+            markdownText,
+            QTextDocument::MarkdownFeatures(QTextDocument::MarkdownDialectGitHub)
+                | QTextDocument::MarkdownNoHTML);
+
+        struct ImageRange { int start; int length; QString alt; };
+        std::vector<ImageRange> images;
+        for (QTextBlock block = document.begin(); block.isValid(); block = block.next()) {
+            for (auto iterator = block.begin(); !iterator.atEnd(); ++iterator) {
+                const QTextFragment fragment = iterator.fragment();
+                if (!fragment.isValid() || !fragment.charFormat().isImageFormat())
+                    continue;
+                const QTextImageFormat format = fragment.charFormat().toImageFormat();
+                images.push_back(ImageRange{
+                    fragment.position(),
+                    fragment.length(),
+                    format.property(QTextFormat::ImageAltText).toString()});
+            }
+        }
+        for (auto iterator = images.rbegin(); iterator != images.rend(); ++iterator) {
+            QTextCursor cursor(&document);
+            cursor.setPosition(iterator->start);
+            cursor.setPosition(iterator->start + iterator->length, QTextCursor::KeepAnchor);
+            cursor.insertText(iterator->alt.isEmpty()
+                ? QStringLiteral("[Image]")
+                : QStringLiteral("[Image: %1]").arg(iterator->alt));
+        }
+        return document.toHtml();
+    }
+
+    bool markdown = false;
+    QString sourceText;
     mutable QHash<int, int> heightCache;
 };
 
@@ -169,8 +231,8 @@ QWidget* messageContentWidget(const QString& text)
 {
     if (text.size() <= largeMessageEditorThreshold)
     {
-        auto* result = static_cast<WrappingLabel*>(wrappingLabel(text, "body"));
-        result->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        auto* result = new WrappingLabel(text, true);
+        result->setProperty("kind", "body");
         return result;
     }
 
@@ -188,8 +250,8 @@ QWidget* messageContentWidget(const QString& text)
 
 QString messageContentText(const QWidget* content)
 {
-    if (const auto* label = qobject_cast<const QLabel*>(content))
-        return label->text();
+    if (const auto* label = dynamic_cast<const WrappingLabel*>(content))
+        return label->content();
     if (const auto* editor = qobject_cast<const QPlainTextEdit*>(content))
         return editor->toPlainText();
     return {};
@@ -2438,6 +2500,22 @@ void ConversationWidget::clearPrompt()
 void ConversationWidget::clearPromptIfUnchanged(const QString& submittedPrompt)
 {
     upcomingTurnDock->clearPromptIfUnchanged(submittedPrompt);
+}
+
+const QList<AttachmentInfo>& ConversationWidget::attachments() const noexcept
+{
+    return upcomingTurnDock->attachments();
+}
+
+QString ConversationWidget::attachmentWorkspace() const
+{
+    return upcomingTurnDock->attachmentWorkspace();
+}
+
+void ConversationWidget::clearAttachmentsIfUnchanged(
+    const QList<AttachmentInfo>& submittedAttachments)
+{
+    upcomingTurnDock->clearAttachmentsIfUnchanged(submittedAttachments);
 }
 
 void ConversationWidget::focusComposer()

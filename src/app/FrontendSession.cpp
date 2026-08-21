@@ -559,6 +559,15 @@ FrontendSession::startTurn(ai::openai::codex::typed::TurnStartParams parameters,
                            const QString& prompt,
                            TurnStartCompletion completion)
 {
+    return startTurn(std::move(parameters), prompt, {}, std::move(completion));
+}
+
+std::optional<QString>
+FrontendSession::startTurn(ai::openai::codex::typed::TurnStartParams parameters,
+                           const QString& prompt,
+                           const QStringList& localImagePaths,
+                           TurnStartCompletion completion)
+{
     if (currentLifecycle != Lifecycle::Ready)
         return QStringLiteral("Backend is not ready");
     if (const auto error = promptValidationError(prompt))
@@ -566,10 +575,20 @@ FrontendSession::startTurn(ai::openai::codex::typed::TurnStartParams parameters,
 
     if (parameters.threadId.value.empty())
         return QStringLiteral("Turn submission requires a thread ID");
-    ai::openai::codex::typed::TextInput input;
-    const QByteArray promptUtf8 = prompt.toUtf8();
-    input.text.assign(promptUtf8.constData(), static_cast<std::size_t>(promptUtf8.size()));
-    parameters.input.emplace_back(std::move(input));
+    if (!prompt.trimmed().isEmpty()) {
+        ai::openai::codex::typed::TextInput input;
+        const QByteArray promptUtf8 = prompt.toUtf8();
+        input.text.assign(promptUtf8.constData(), static_cast<std::size_t>(promptUtf8.size()));
+        parameters.input.emplace_back(std::move(input));
+    }
+    for (const QString& path : localImagePaths) {
+        ai::openai::codex::typed::LocalImageInput input;
+        const QByteArray pathUtf8 = path.toUtf8();
+        input.path.assign(pathUtf8.constData(), static_cast<std::size_t>(pathUtf8.size()));
+        parameters.input.emplace_back(std::move(input));
+    }
+    if (parameters.input.empty())
+        return QStringLiteral("Turn submission requires a prompt or attachment");
     sdk::Submission submission = client->turns().start(
         std::move(parameters),
         [completion = std::move(completion)](const sdk::OperationResult<sdk::TurnStartResult>& result) {
@@ -587,6 +606,15 @@ std::optional<QString> FrontendSession::steerTurn(const QString& threadId,
                                                   const QString& prompt,
                                                   OperationCompletion completion)
 {
+    return steerTurn(threadId, expectedTurnId, prompt, {}, std::move(completion));
+}
+
+std::optional<QString> FrontendSession::steerTurn(const QString& threadId,
+                                                  const QString& expectedTurnId,
+                                                  const QString& prompt,
+                                                  const QStringList& localImagePaths,
+                                                  OperationCompletion completion)
+{
     if (currentLifecycle != Lifecycle::Ready)
         return QStringLiteral("Backend is not ready");
     if (const auto error = promptValidationError(prompt))
@@ -597,10 +625,20 @@ std::optional<QString> FrontendSession::steerTurn(const QString& threadId,
     ai::openai::codex::typed::TurnSteerParams parameters;
     parameters.threadId = ai::openai::codex::typed::ThreadId{threadId.toStdString()};
     parameters.expectedTurnId = ai::openai::codex::typed::TurnId{expectedTurnId.toStdString()};
-    ai::openai::codex::typed::TextInput input;
-    const QByteArray promptUtf8 = prompt.toUtf8();
-    input.text.assign(promptUtf8.constData(), static_cast<std::size_t>(promptUtf8.size()));
-    parameters.input.emplace_back(std::move(input));
+    if (!prompt.trimmed().isEmpty()) {
+        ai::openai::codex::typed::TextInput input;
+        const QByteArray promptUtf8 = prompt.toUtf8();
+        input.text.assign(promptUtf8.constData(), static_cast<std::size_t>(promptUtf8.size()));
+        parameters.input.emplace_back(std::move(input));
+    }
+    for (const QString& path : localImagePaths) {
+        ai::openai::codex::typed::LocalImageInput input;
+        const QByteArray pathUtf8 = path.toUtf8();
+        input.path.assign(pathUtf8.constData(), static_cast<std::size_t>(pathUtf8.size()));
+        parameters.input.emplace_back(std::move(input));
+    }
+    if (parameters.input.empty())
+        return QStringLiteral("Steering requires a prompt or attachment");
 
     const std::string expectedId = parameters.expectedTurnId.value;
     sdk::Submission submission = client->turns().steer(

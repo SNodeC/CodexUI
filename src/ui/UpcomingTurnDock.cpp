@@ -5,19 +5,24 @@
 #include <QComboBox>
 #include <QAbstractTextDocumentLayout>
 #include <QEvent>
+#include <QFileDialog>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QIcon>
+#include <QImageReader>
 #include <QLineEdit>
 #include <QMenu>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QSet>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStandardItemModel>
@@ -478,13 +483,23 @@ UpcomingTurnDock::UpcomingTurnDock(QWidget* parent)
     auto* composerLayout = new QHBoxLayout(composerSurface);
     composerLayout->setContentsMargins(10, 8, 10, 8);
     composerLayout->setSpacing(8);
-    auto* attach = new QPushButton(QStringLiteral("Attach"));
+    attach = new QPushButton(QStringLiteral("Attach"));
     attach->setObjectName(QStringLiteral("upcomingAttach"));
-    attach->setEnabled(false);
-    attach->setToolTip(QStringLiteral("Attachments are not available in this phase."));
+    attach->setToolTip(QStringLiteral("Attach images or files"));
     attach->setFixedSize(54, 28);
     attach->setStyleSheet(QStringLiteral("color:#667085;background:transparent;border:0;padding:2px 4px;"));
     composerLayout->addWidget(attach, 0, Qt::AlignBottom);
+
+    attachmentSummary = new QPushButton;
+    attachmentSummary->setObjectName(QStringLiteral("upcomingAttachmentSummary"));
+    attachmentSummary->setMinimumSize(76, 28);
+    attachmentSummary->setMaximumWidth(112);
+    attachmentSummary->setStyleSheet(QStringLiteral(
+        "QPushButton{color:#2f6feb;background:#eef4ff;border:1px solid #c7d7f2;"
+        "border-radius:7px;padding:2px 7px;text-align:left;}"
+        "QPushButton:hover{background:#e3edff;}"));
+    attachmentSummary->hide();
+    composerLayout->addWidget(attachmentSummary, 0, Qt::AlignBottom);
 
     editor = new QPlainTextEdit;
     editor->setObjectName(QStringLiteral("upcomingPromptEditor"));
@@ -564,16 +579,14 @@ UpcomingTurnDock::UpcomingTurnDock(QWidget* parent)
     connect(cwd, &QLineEdit::textEdited, this, [this] { markTextChange(Field::Cwd, cwd); });
 
     connect(editor, &QPlainTextEdit::textChanged, this, [this] {
-        if (editor->toPlainText().trimmed().isEmpty())
-            draftPromptTarget.reset();
-        else
-            draftPromptTarget = currentPromptTarget;
+        updateDraftTarget();
         updatePromptHeight();
         updateSendEnabled();
     });
+    connect(attach, &QPushButton::clicked, this, &UpcomingTurnDock::chooseAttachments);
     connect(send, &QPushButton::clicked, this, [this] {
         const QString value = editor->toPlainText();
-        if (send->isEnabled() && !value.trimmed().isEmpty())
+        if (send->isEnabled())
             emit sendRequested(value, steeringMode);
     });
     connect(stop, &QPushButton::clicked, this, &UpcomingTurnDock::stopRequested);
@@ -803,6 +816,59 @@ QString UpcomingTurnDock::prompt() const
     return editor->toPlainText();
 }
 
+const QList<AttachmentInfo>& UpcomingTurnDock::attachments() const noexcept
+{
+    return selectedAttachments;
+}
+
+QString UpcomingTurnDock::attachmentWorkspace() const
+{
+    return cwd->text().trimmed();
+}
+
+bool UpcomingTurnDock::addAttachmentPaths(const QStringList& paths, QString* errorMessage)
+{
+    QList<AttachmentInfo> additions;
+    QSet<QString> knownPaths;
+    for (const auto& attachment : selectedAttachments)
+        knownPaths.insert(attachment.sourcePath);
+
+    for (const QString& path : paths) {
+        AttachmentInfo inspected;
+        QString error;
+        if (!AttachmentManager::inspectFile(path, &inspected, &error)) {
+            if (errorMessage)
+                *errorMessage = error;
+            return false;
+        }
+        if (knownPaths.contains(inspected.sourcePath))
+            continue;
+        knownPaths.insert(inspected.sourcePath);
+        additions.append(std::move(inspected));
+    }
+    constexpr qsizetype maximumAttachmentCount = 16;
+    if (selectedAttachments.size() + additions.size() > maximumAttachmentCount) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("A turn can contain at most %1 attachments.")
+                                .arg(maximumAttachmentCount);
+        return false;
+    }
+    QList<AttachmentInfo> candidate = selectedAttachments;
+    candidate.append(additions);
+    if (AttachmentManager::totalSize(candidate) > AttachmentManager::MaximumTotalBytes) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("Attachments exceed the %1 total limit.")
+                                .arg(AttachmentManager::formatSize(
+                                    AttachmentManager::MaximumTotalBytes));
+        return false;
+    }
+    selectedAttachments = std::move(candidate);
+    updateDraftTarget();
+    refreshAttachmentPresentation();
+    updateSendEnabled();
+    return true;
+}
+
 void UpcomingTurnDock::clearPrompt()
 {
     editor->clear();
@@ -812,6 +878,17 @@ void UpcomingTurnDock::clearPromptIfUnchanged(const QString& submittedPrompt)
 {
     if (editor->toPlainText() == submittedPrompt)
         editor->clear();
+}
+
+void UpcomingTurnDock::clearAttachmentsIfUnchanged(
+    const QList<AttachmentInfo>& submittedAttachments)
+{
+    if (selectedAttachments != submittedAttachments)
+        return;
+    selectedAttachments.clear();
+    updateDraftTarget();
+    refreshAttachmentPresentation();
+    updateSendEnabled();
 }
 
 void UpcomingTurnDock::focusPrompt()
@@ -836,6 +913,8 @@ void UpcomingTurnDock::setActionState(bool primaryAllowed,
                            steerMode ? activeTurnIdentity : QString{},
                            steerMode};
     editor->setEnabled(editorAllowed);
+    attach->setEnabled(editorAllowed);
+    attachmentSummary->setEnabled(editorAllowed);
     settingsSurface->setEnabled(settingsAllowed);
     more->setEnabled(settingsAllowed);
     const bool cwdAvailable = settingsAllowed;
@@ -1281,6 +1360,7 @@ void UpcomingTurnDock::refreshModelDependentControls(bool modelChangedByUser)
         collaborationAvailable
             ? QString{}
             : QStringLiteral("Choose a model and reasoning effort before changing collaboration mode"));
+    updateSendEnabled();
 }
 
 void UpcomingTurnDock::updatePromptHeight()
@@ -1309,15 +1389,23 @@ void UpcomingTurnDock::updatePromptHeight()
 void UpcomingTurnDock::updateSendEnabled()
 {
     const bool hasPrompt = !editor->toPlainText().trimmed().isEmpty();
+    const bool hasAttachments = !selectedAttachments.isEmpty();
+    const bool hasUnsupportedImages = std::ranges::any_of(
+        selectedAttachments,
+        [](const AttachmentInfo& attachment) {
+            return attachment.kind == AttachmentInfo::Kind::Image;
+        }) && !selectedModelSupportsImages();
     const bool actionMatchesDraft = !draftPromptTarget || *draftPromptTarget == currentPromptTarget;
-    send->setEnabled(sendContextAllowed && editor->isEnabled() && hasPrompt
-                     && actionMatchesDraft);
-    const QString mismatch = actionMatchesDraft
-                                 ? QString{}
-                                 : QStringLiteral(
-                                       "The turn state changed while this draft was open. Edit the draft to confirm its new action.");
-    send->setToolTip(mismatch);
-    editor->setToolTip(mismatch);
+    send->setEnabled(sendContextAllowed && editor->isEnabled()
+                     && (hasPrompt || hasAttachments) && actionMatchesDraft
+                     && !hasUnsupportedImages);
+    const QString problem = !actionMatchesDraft
+        ? QStringLiteral("The turn state changed while this draft was open. Edit the draft or attachments to confirm its new action.")
+        : hasUnsupportedImages
+            ? QStringLiteral("The selected model does not accept image input.")
+            : QString{};
+    send->setToolTip(problem);
+    editor->setToolTip(problem);
     if (!actionMatchesDraft) {
         const QString retained = QStringLiteral("Draft retained for a previous active turn; edit it to retarget");
         status->setProperty("draftTargetMismatch", true);
@@ -1327,6 +1415,104 @@ void UpcomingTurnDock::updateSendEnabled()
     } else if (status->property("draftTargetMismatch").toBool()) {
         setStatus({});
     }
+}
+
+void UpcomingTurnDock::chooseAttachments()
+{
+    const QStringList paths = QFileDialog::getOpenFileNames(
+        this,
+        QStringLiteral("Attach files"),
+        attachmentWorkspace(),
+        QStringLiteral("All files (*)"));
+    if (paths.isEmpty())
+        return;
+    QString error;
+    if (!addAttachmentPaths(paths, &error))
+        setStatus(error, true);
+    else
+        setStatus({});
+}
+
+void UpcomingTurnDock::refreshAttachmentPresentation()
+{
+    if (QMenu* previous = attachmentSummary->menu()) {
+        attachmentSummary->setMenu(nullptr);
+        previous->deleteLater();
+    }
+    attachmentSummary->setVisible(!selectedAttachments.isEmpty());
+    if (selectedAttachments.isEmpty()) {
+        attachmentSummary->setText({});
+        attachmentSummary->setToolTip({});
+        return;
+    }
+
+    attachmentSummary->setText(selectedAttachments.size() == 1
+        ? QStringLiteral("1 attached")
+        : QStringLiteral("%1 attached").arg(selectedAttachments.size()));
+    QStringList details;
+    auto* menu = new QMenu(attachmentSummary);
+    menu->setObjectName(QStringLiteral("upcomingAttachmentMenu"));
+    for (qsizetype index = 0; index < selectedAttachments.size(); ++index) {
+        const AttachmentInfo& attachment = selectedAttachments.at(index);
+        details.append(QStringLiteral("%1 (%2)")
+                           .arg(attachment.displayName,
+                                AttachmentManager::formatSize(attachment.sizeBytes)));
+        QIcon icon = style()->standardIcon(QStyle::SP_FileIcon);
+        if (attachment.kind == AttachmentInfo::Kind::Image) {
+            QImageReader reader(attachment.sourcePath);
+            reader.setAutoTransform(true);
+            const QSize sourceSize = reader.size();
+            constexpr qint64 maximumThumbnailSourcePixels = 100'000'000;
+            if (sourceSize.isValid() && sourceSize.width() <= 32'768
+                && sourceSize.height() <= 32'768
+                && static_cast<qint64>(sourceSize.width()) * sourceSize.height()
+                       <= maximumThumbnailSourcePixels) {
+                reader.setScaledSize(sourceSize.scaled(
+                    QSize(48, 48), Qt::KeepAspectRatio));
+                const QImage thumbnail = reader.read();
+                if (!thumbnail.isNull())
+                    icon = QIcon(QPixmap::fromImage(thumbnail));
+            }
+        }
+        QAction* remove = menu->addAction(
+            icon, QStringLiteral("Remove %1").arg(attachment.displayName));
+        connect(remove, &QAction::triggered, this, [this, path = attachment.sourcePath] {
+            selectedAttachments.removeIf([&path](const AttachmentInfo& value) {
+                return value.sourcePath == path;
+            });
+            updateDraftTarget();
+            refreshAttachmentPresentation();
+            updateSendEnabled();
+        });
+    }
+    menu->addSeparator();
+    QAction* clear = menu->addAction(QStringLiteral("Remove all attachments"));
+    connect(clear, &QAction::triggered, this, [this] {
+        selectedAttachments.clear();
+        updateDraftTarget();
+        refreshAttachmentPresentation();
+        updateSendEnabled();
+    });
+    attachmentSummary->setToolTip(details.join(QLatin1Char('\n')));
+    attachmentSummary->setMenu(menu);
+}
+
+bool UpcomingTurnDock::selectedModelSupportsImages() const
+{
+    const typed::Model* definition = selectedModelDefinition();
+    return !definition || std::ranges::any_of(
+        definition->inputModalities,
+        [](const typed::InputModality& modality) {
+            return modality == typed::InputModality::image();
+        });
+}
+
+void UpcomingTurnDock::updateDraftTarget()
+{
+    if (editor->toPlainText().trimmed().isEmpty() && selectedAttachments.isEmpty())
+        draftPromptTarget.reset();
+    else
+        draftPromptTarget = currentPromptTarget;
 }
 
 void UpcomingTurnDock::updateChangedPresentation()
