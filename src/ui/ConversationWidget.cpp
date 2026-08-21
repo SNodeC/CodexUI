@@ -3312,6 +3312,27 @@ bool ConversationWidget::updateExactMessageContent(
                 QStringLiteral("conversationMessageContent"));
             if (!content)
                 return false;
+            const QByteArray currentUtf8 = messageContentText(content).toUtf8();
+            if (static_cast<std::uint64_t>(currentUtf8.size())
+                    != update.append->baseContentBytes
+                || update.append->discardPrefixBytes
+                       > update.append->baseContentBytes)
+                return false;
+
+            auto* contentLayout = qobject_cast<QVBoxLayout*>(
+                content->parentWidget()->layout());
+            if (!contentLayout)
+                return false;
+            QWidget* const previousContent = content;
+            // Content deltas are the authoritative streaming boundary. Some
+            // provider/result items report a terminal-looking status before
+            // their final append arrives, so status alone must not repeatedly
+            // send the growing text through the Markdown renderer.
+            content = ensureMessageContentWidget(
+                contentLayout,
+                content,
+                QString::fromUtf8(currentUtf8),
+                true);
             const auto applied = appendMessageContent(
                 content,
                 update.append->baseContentBytes,
@@ -3319,7 +3340,7 @@ bool ConversationWidget::updateExactMessageContent(
                 update.append->delta);
             if (!applied)
                 return false;
-            contentGeometryChanged = *applied;
+            contentGeometryChanged = previousContent != content || *applied;
             contentMayShrink = update.append->discardPrefixBytes
                                > update.append->deltaUtf8Bytes;
             affectedStorage = messageStorage;

@@ -1186,6 +1186,109 @@ bool testStreamingPlainTextAndTerminalMarkdown()
     return passed;
 }
 
+bool testCompletedAgentMessageStreamsBeforeTerminalMarkdown()
+{
+    ThreadFixture fixture{
+        "completed-streaming-markdown",
+        {{"turn-completed-streaming-markdown",
+          {{"item-completed-streaming-markdown",
+            frontend::ThreadItemKind::AgentMessage,
+            "**partial",
+            "completed"}}}}};
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(makeState({fixture}),
+                        QStringLiteral("completed-streaming-markdown"));
+    settleTimeline();
+
+    QPointer<QWidget> message = segment(
+        conversation, QStringLiteral("message:item-completed-streaming-markdown"));
+    QPointer<QWidget> initialMarkdown = messageContent(message);
+    QWidget* const messageAddress = message.data();
+    bool passed = expect(
+        initialMarkdown
+            && initialMarkdown->property("markdownRenderMode").toString()
+                   == QStringLiteral("markdown"),
+        "a completed agent-message snapshot must initially render canonical Markdown");
+
+    const QStringList streamedContent{
+        QStringLiteral("**partial result"),
+        QStringLiteral("**partial result**\n\n- one"),
+        QStringLiteral("**partial result**\n\n- one\n- two")};
+    QString previous = QStringLiteral("**partial");
+    QPointer<QWidget> streamingContent;
+    QWidget* streamingContentAddress = nullptr;
+    for (const QString& update : streamedContent)
+    {
+        fixture.turns.front().messages.front().text = update.toStdString();
+        const QString delta = update.mid(previous.size());
+        const auto exactChange = appendUpdate(
+            QStringLiteral("turn-completed-streaming-markdown"),
+            QStringLiteral("item-completed-streaming-markdown"),
+            client::ItemContentChannel::AgentText,
+            static_cast<std::uint64_t>(previous.toUtf8().size()),
+            delta);
+        const client::State updatedState = makeState({fixture});
+        const bool handled = conversation.updateExactMessageContent(
+            updatedState,
+            QStringLiteral("completed-streaming-markdown"),
+            exactChange);
+        settleEvents();
+
+        QWidget* const currentContent = messageContent(message);
+        if (!streamingContent)
+        {
+            streamingContent = currentContent;
+            streamingContentAddress = currentContent;
+        }
+        passed &= expect(
+            handled && message && message.data() == messageAddress
+                && currentContent && currentContent == streamingContentAddress
+                && messageSourceText(currentContent) == update
+                && currentContent->property("markdownRenderMode").toString()
+                       == QStringLiteral("streaming-plain"),
+            "append-v2 deltas must keep a completed agent message in one plain streaming view");
+        previous = update;
+    }
+    passed &= expect(
+        streamingContent
+            && streamingContent->property("streamAppendCount").toULongLong()
+                   == static_cast<qulonglong>(streamedContent.size())
+            && streamingContent->property("fullReplacementCount").toULongLong() == 0,
+        "completed agent-message deltas must use only the cursor append path");
+
+    const client::State finalState = makeState({fixture});
+    conversation.render(finalState,
+                        QStringLiteral("completed-streaming-markdown"));
+    settleTimeline();
+
+    QPointer<QWidget> finalContent = messageContent(message);
+    auto* finalLabel = qobject_cast<QLabel*>(finalContent);
+    QWidget* const finalContentAddress = finalContent.data();
+    const QString finalRenderedText = finalLabel ? finalLabel->text() : QString{};
+    passed &= expect(
+        message && message.data() == messageAddress && finalContent
+            && finalContent.data() != streamingContentAddress && finalLabel
+            && messageSourceText(finalLabel) == streamedContent.back()
+            && finalContent->property("markdownRenderMode").toString()
+                   == QStringLiteral("markdown")
+            && finalRenderedText.contains(QStringLiteral("font-weight"))
+            && finalRenderedText.contains(QStringLiteral("two")),
+        "the first non-delta terminal publication must promote the stream to Markdown once");
+
+    conversation.render(finalState,
+                        QStringLiteral("completed-streaming-markdown"));
+    settleEvents();
+    QWidget* const repeatedContent = messageContent(message);
+    passed &= expect(
+        repeatedContent == finalContentAddress
+            && qobject_cast<QLabel*>(repeatedContent)
+            && qobject_cast<QLabel*>(repeatedContent)->text() == finalRenderedText,
+        "an unchanged terminal publication must preserve the final Markdown widget");
+    return passed;
+}
+
 bool testCompleteAndLargeUserMessagePresentation()
 {
     ThreadFixture completeFixture{
@@ -1848,6 +1951,7 @@ int main(int argc, char** argv)
     passed &= testPointerPreservingAppend();
     passed &= testInPlaceMessageReplacement();
     passed &= testStreamingPlainTextAndTerminalMarkdown();
+    passed &= testCompletedAgentMessageStreamsBeforeTerminalMarkdown();
     passed &= testCompleteAndLargeUserMessagePresentation();
     passed &= testExactContentInvalidation();
     passed &= testExactReasoningChannels();
