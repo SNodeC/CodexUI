@@ -945,6 +945,75 @@ bool testInPlaceMessageReplacement()
     return passed;
 }
 
+bool testStreamingMarkdownRenderCoalescing()
+{
+    ThreadFixture fixture{
+        "streaming-markdown",
+        {{"turn-streaming-markdown",
+          {{"item-streaming-markdown",
+            frontend::ThreadItemKind::AgentMessage,
+            "**stream**",
+            "started"}}}}};
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(makeState({fixture}), QStringLiteral("streaming-markdown"));
+    settleTimeline();
+
+    QPointer<QWidget> message =
+        segment(conversation, QStringLiteral("message:item-streaming-markdown"));
+    QPointer<QLabel> content =
+        messageLabel(message, QStringLiteral("conversationMessageContent"));
+    QWidget* const messageAddress = message.data();
+    QLabel* const contentAddress = content.data();
+    const QString initialHtml = content ? content->text() : QString{};
+    const QHash<QString, QStringList> exactChange{
+        {QStringLiteral("turn-streaming-markdown"),
+         QStringList{QStringLiteral("item-streaming-markdown")}}};
+
+    const QStringList streamedContent{
+        QStringLiteral("**stream** [docs](https://example.com)"),
+        QStringLiteral("**stream** [docs](https://example.com)\n\n`code`"),
+        QStringLiteral("**stream** [docs](https://example.com)\n\n`code`\n\n![secret](file:///etc/passwd)")};
+    bool passed = true;
+    for (const QString& update : streamedContent) {
+        fixture.turns.front().messages.front().text = update.toStdString();
+        conversation.render(
+            makeState({fixture}), QStringLiteral("streaming-markdown"), false, &exactChange);
+        passed &= expect(message && message.data() == messageAddress
+                             && content && content.data() == contentAddress
+                             && messageSourceText(content) == update,
+                         "streaming Markdown updates must preserve the message widget and exact canonical source");
+    }
+    passed &= expect(content && content->text() == initialHtml,
+                     "append-only streaming updates must coalesce full Markdown reparsing before the render timer fires");
+
+    settleEvents(2, 100);
+    const QString coalescedHtml = content ? content->text() : QString{};
+    passed &= expect(content && coalescedHtml != initialHtml
+                         && coalescedHtml.contains(QStringLiteral("font-weight"))
+                         && coalescedHtml.contains(QStringLiteral("https://example.com"))
+                         && coalescedHtml.contains(QStringLiteral("code"))
+                         && !coalescedHtml.contains(QStringLiteral("file:///etc/passwd"))
+                         && !coalescedHtml.contains(QStringLiteral("<img")),
+                     "the coalesced Markdown render must preserve formatting and the safe link/image policy");
+
+    const QString finalContent = streamedContent.back()
+                                 + QStringLiteral("\n\n_final answer_");
+    fixture.turns.front().messages.front().text = finalContent.toStdString();
+    fixture.turns.front().messages.front().status = "completed";
+    conversation.render(
+        makeState({fixture}), QStringLiteral("streaming-markdown"), false, &exactChange);
+    passed &= expect(content && messageSourceText(content) == finalContent
+                         && content->text() != coalescedHtml
+                         && content->text().contains(QStringLiteral("final answer"))
+                         && content->text().contains(QStringLiteral("https://example.com"))
+                         && !content->text().contains(QStringLiteral("file:///etc/passwd"))
+                         && !content->text().contains(QStringLiteral("<img")),
+                     "a terminal message update must synchronously render the exact final sanitized Markdown");
+    return passed;
+}
+
 bool testCompleteAndLargeUserMessagePresentation()
 {
     ThreadFixture completeFixture{
@@ -1429,6 +1498,7 @@ int main(int argc, char** argv)
     passed &= testActivityDisclosureAndFullOutput();
     passed &= testPointerPreservingAppend();
     passed &= testInPlaceMessageReplacement();
+    passed &= testStreamingMarkdownRenderCoalescing();
     passed &= testCompleteAndLargeUserMessagePresentation();
     passed &= testExactContentInvalidation();
     passed &= testSegmentReplacementShrink();
