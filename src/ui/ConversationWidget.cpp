@@ -2564,11 +2564,13 @@ bool updateTimelineMessageSegment(QWidget* host,
     QWidget* previousContentWidget = contentWidget;
     contentWidget = ensureMessageContentWidget(
         contentLayout, contentWidget, presentation.content, presentation.streaming);
+    const bool rendererChanged = previousContentWidget != contentWidget;
+    if (mayShrink)
+        *mayShrink = *mayShrink || rendererChanged;
     const bool presentationGeometryChanged = applyMessagePresentation(
         status, contentWidget, truncation, presentation);
     if (geometryChanged)
-        *geometryChanged = previousContentWidget != contentWidget
-                           || presentationGeometryChanged;
+        *geometryChanged = rendererChanged || presentationGeometryChanged;
     return true;
 }
 

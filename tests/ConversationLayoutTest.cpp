@@ -1342,6 +1342,72 @@ bool testCompletedAgentMessageStreamsBeforeTerminalMarkdown()
     return passed;
 }
 
+bool testTerminalMarkdownPromotionResettlesFollowedTail()
+{
+    ThreadFixture fixture = sequentialTurns("terminal-markdown-tail", 9);
+    auto& finalTurn = fixture.turns.back();
+    finalTurn.status = "inProgress";
+    finalTurn.active = true;
+    finalTurn.terminal = false;
+    const QString source = QStringLiteral("[compact](https://example.invalid/")
+                           + QString(6000, QLatin1Char('x'))
+                           + QLatin1Char(')');
+    finalTurn.messages.front().text = source.toStdString();
+    finalTurn.messages.front().status = "completed";
+
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 500);
+    conversation.show();
+    conversation.render(makeState({fixture}), QStringLiteral("terminal-markdown-tail"));
+    settleTimeline();
+
+    auto* scroll = conversation.findChild<QScrollArea*>();
+    QWidget* timelineHost = timeline(conversation);
+    QPointer<QWidget> message = segment(
+        conversation, QStringLiteral("message:item-terminal-markdown-tail-8"));
+    QPointer<QWidget> streamingContent = messageContent(message);
+    const int streamingPreferredHeight = streamingContent
+                                             ? streamingContent->heightForWidth(
+                                                   streamingContent->width())
+                                             : 0;
+    const int streamingTimelineHeight = timelineHost ? timelineHost->height() : 0;
+    const int streamingMaximum = scroll ? scroll->verticalScrollBar()->maximum() : 0;
+    bool passed = expect(
+        scroll && timelineHost && streamingContent
+            && streamingContent->property("markdownRenderMode").toString()
+                   == QStringLiteral("streaming-plain")
+            && streamingMaximum > 0
+            && scroll->verticalScrollBar()->value() == streamingMaximum,
+        "the tall streaming source must begin at a genuinely followed tail");
+
+    finalTurn.status = "completed";
+    finalTurn.active = false;
+    finalTurn.terminal = true;
+    conversation.render(makeState({fixture}), QStringLiteral("terminal-markdown-tail"));
+    settleTimeline();
+
+    QPointer<QWidget> finalContent = messageContent(message);
+    auto* finalLabel = qobject_cast<QLabel*>(finalContent.data());
+    const int finalPreferredHeight = finalContent
+                                         ? finalContent->heightForWidth(finalContent->width())
+                                         : 0;
+    const int finalMaximum = scroll ? scroll->verticalScrollBar()->maximum() : 0;
+    passed &= expect(
+        finalLabel && finalContent != streamingContent
+            && finalContent->property("markdownRenderMode").toString()
+                   == QStringLiteral("markdown")
+            && finalPreferredHeight < streamingPreferredHeight,
+        "terminal Markdown must replace the tall source with its compact rendered presentation");
+    passed &= expect(
+        timelineHost && timelineHost->height() < streamingTimelineHeight
+            && finalMaximum > 0 && finalMaximum < streamingMaximum,
+        "terminal renderer replacement must shrink the timeline and its retained scroll range");
+    passed &= expect(
+        scroll && scroll->verticalScrollBar()->value() == finalMaximum,
+        "terminal Markdown promotion must settle at the new true tail");
+    return passed;
+}
+
 bool testCompleteAndLargeUserMessagePresentation()
 {
     ThreadFixture completeFixture{
@@ -2005,6 +2071,7 @@ int main(int argc, char** argv)
     passed &= testInPlaceMessageReplacement();
     passed &= testStreamingPlainTextAndTerminalMarkdown();
     passed &= testCompletedAgentMessageStreamsBeforeTerminalMarkdown();
+    passed &= testTerminalMarkdownPromotionResettlesFollowedTail();
     passed &= testCompleteAndLargeUserMessagePresentation();
     passed &= testExactContentInvalidation();
     passed &= testExactReasoningChannels();
