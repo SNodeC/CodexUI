@@ -345,6 +345,7 @@ public:
         : sourceText(text)
         , sourceUtf8Bytes(static_cast<std::uint64_t>(text.toUtf8().size()))
     {
+        measurementDocument = new QTextDocument(this);
         QSizePolicy policy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         policy.setHeightForWidth(true);
         setSizePolicy(policy);
@@ -359,9 +360,13 @@ public:
         document()->setDocumentMargin(0.0);
         document()->setDefaultFont(font());
         document()->setPlainText(text);
+        measurementDocument->setDocumentMargin(0.0);
+        measurementDocument->setDefaultFont(font());
+        measurementDocument->setPlainText(text);
         setProperty("sourceUtf8Bytes", static_cast<qulonglong>(sourceUtf8Bytes));
         setProperty("streamAppendCount", 0);
         setProperty("fullReplacementCount", 0);
+        setProperty("geometryInvalidationCount", 0);
         setProperty("markdownRenderMode", QStringLiteral("streaming-plain"));
     }
 
@@ -372,16 +377,24 @@ public:
     {
         if (text == sourceText)
             return false;
+        if (text.startsWith(sourceText))
+        {
+            const auto applied = applyAppend(
+                sourceUtf8Bytes, 0, text.mid(sourceText.size()));
+            return applied.value_or(false);
+        }
         const int previousHeight = preferredHeight();
         sourceText = text;
         sourceUtf8Bytes = static_cast<std::uint64_t>(text.toUtf8().size());
         document()->setPlainText(text);
+        measurementDocument->setPlainText(text);
         heightCache.clear();
+        const bool geometryChanged = previousHeight != preferredHeight();
         setProperty("sourceUtf8Bytes", static_cast<qulonglong>(sourceUtf8Bytes));
         setProperty("fullReplacementCount", property("fullReplacementCount").toULongLong() + 1);
-        updateGeometry();
-        update();
-        return previousHeight != preferredHeight();
+        if (geometryChanged)
+            invalidateGeometry();
+        return geometryChanged;
     }
 
     std::optional<bool> applyAppend(std::uint64_t baseContentBytes,
@@ -399,6 +412,9 @@ public:
             QTextCursor cursor(document());
             cursor.movePosition(QTextCursor::End);
             cursor.insertText(delta);
+            QTextCursor measurementCursor(measurementDocument);
+            measurementCursor.movePosition(QTextCursor::End);
+            measurementCursor.insertText(delta);
         }
         else
         {
@@ -407,15 +423,17 @@ public:
                 static_cast<qsizetype>(discardPrefixBytes)) + deltaUtf8;
             sourceText = QString::fromUtf8(nextUtf8);
             document()->setPlainText(sourceText);
+            measurementDocument->setPlainText(sourceText);
         }
         sourceUtf8Bytes = baseContentBytes - discardPrefixBytes
                           + static_cast<std::uint64_t>(deltaUtf8.size());
         heightCache.clear();
+        const bool geometryChanged = previousHeight != preferredHeight();
         setProperty("sourceUtf8Bytes", static_cast<qulonglong>(sourceUtf8Bytes));
         setProperty("streamAppendCount", property("streamAppendCount").toULongLong() + 1);
-        updateGeometry();
-        update();
-        return previousHeight != preferredHeight();
+        if (geometryChanged)
+            invalidateGeometry();
+        return geometryChanged;
     }
 
     bool hasHeightForWidth() const override { return true; }
@@ -425,8 +443,10 @@ public:
         const auto found = heightCache.constFind(width);
         if (found != heightCache.cend())
             return *found;
-        document()->setTextWidth(qMax(1, width));
-        const int height = qCeil(document()->size().height());
+        const qreal textWidth = qMax(1, width);
+        if (measurementDocument->textWidth() != textWidth)
+            measurementDocument->setTextWidth(textWidth);
+        const int height = qCeil(measurementDocument->size().height());
         heightCache.insert(width, height);
         return height;
     }
@@ -448,7 +468,9 @@ protected:
     void resizeEvent(QResizeEvent* event) override
     {
         QTextEdit::resizeEvent(event);
-        document()->setTextWidth(qMax(1, viewport()->width()));
+        const qreal textWidth = qMax(1, viewport()->width());
+        if (document()->textWidth() != textWidth)
+            document()->setTextWidth(textWidth);
     }
 
     void changeEvent(QEvent* event) override
@@ -456,13 +478,23 @@ protected:
         if (event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange)
         {
             document()->setDefaultFont(font());
+            if (measurementDocument)
+                measurementDocument->setDefaultFont(font());
             heightCache.clear();
-            updateGeometry();
+            invalidateGeometry();
         }
         QTextEdit::changeEvent(event);
     }
 
 private:
+    void invalidateGeometry()
+    {
+        setProperty(
+            "geometryInvalidationCount",
+            property("geometryInvalidationCount").toULongLong() + 1);
+        updateGeometry();
+    }
+
     [[nodiscard]] int preferredHeight() const
     {
         const int availableWidth = width();
@@ -471,6 +503,7 @@ private:
 
     QString sourceText;
     std::uint64_t sourceUtf8Bytes = 0;
+    QTextDocument* measurementDocument = nullptr;
     mutable QHash<int, int> heightCache;
 };
 
@@ -2810,8 +2843,10 @@ void ConversationWidget::render(const sdk::State& state,
     bool timelineGeometryChanged = threadChanged;
     if (threadChanged)
         pendingViewportAnchor.clear();
-    else if (!layoutSettleTimer->isActive())
+    else if (!followLatest && !layoutSettleTimer->isActive())
         captureTimelineAnchor();
+    else if (followLatest)
+        pendingViewportAnchor.clear();
     renderedThreadId = threadId;
     renderedNewThreadDraft = newThreadDraft;
     if (threadChanged)
@@ -3297,8 +3332,10 @@ bool ConversationWidget::updateExactMessageContent(
     const int previousScroll = scrollBar->value();
     const bool followLatest = scrollBar->maximum() - previousScroll <= 72
                               || followingLatest;
-    if (!layoutSettleTimer->isActive())
+    if (!followLatest && !layoutSettleTimer->isActive())
         captureTimelineAnchor();
+    else if (followLatest)
+        pendingViewportAnchor.clear();
 
     bool timelineShrank = false;
     bool geometryChanged = false;
@@ -3402,7 +3439,14 @@ bool ConversationWidget::updateExactMessageContent(
         geometryChanged = geometryChanged || contentGeometryChanged;
     }
     if (geometryChanged)
+    {
+        // Document and layout repaints are queued. Hide the intermediate old
+        // extent until the existing settle pass has resized and pinned the
+        // conversation, then expose one final frame.
+        if (followLatest && scrollArea->viewport()->updatesEnabled())
+            scrollArea->viewport()->setUpdatesEnabled(false);
         scheduleTimelineLayout(previousScroll, followLatest, false, timelineShrank);
+    }
     else if (followLatest)
         scrollBar->setValue(scrollBar->maximum());
     return true;
@@ -3429,8 +3473,10 @@ void ConversationWidget::activityLayoutChanged()
     const int previousScroll = bar->value();
     const bool followLatest = bar->maximum() - previousScroll <= 72
                               || followingLatest;
-    if (!layoutSettleTimer->isActive())
+    if (!followLatest && !layoutSettleTimer->isActive())
         captureTimelineAnchor();
+    else if (followLatest)
+        pendingViewportAnchor.clear();
     scheduleTimelineLayout(previousScroll, followLatest, false, true);
 }
 
@@ -3480,9 +3526,18 @@ void ConversationWidget::settleTimelineLayout()
 
     synchronizeTimelineHeight(timelineShrank);
     scrollArea->widget()->layout()->activate();
-    scrollArea->widget()->adjustSize();
 
     auto* bar = scrollArea->verticalScrollBar();
+    if (followLatest)
+    {
+        pendingViewportAnchor.clear();
+        followingLatest = !renderedThreadId.isEmpty();
+        bar->setValue(bar->maximum());
+        if (!scrollArea->viewport()->updatesEnabled())
+            scrollArea->viewport()->setUpdatesEnabled(true);
+        return;
+    }
+
     bar->setValue(qMin(previousScroll, bar->maximum()));
     if (pendingViewportAnchor)
     {
@@ -3493,18 +3548,8 @@ void ConversationWidget::settleTimelineLayout()
     }
     pendingViewportAnchor.clear();
     if (!scrollArea->viewport()->updatesEnabled())
-    {
         scrollArea->viewport()->setUpdatesEnabled(true);
-        scrollArea->viewport()->update();
-    }
-    if (!followLatest)
-    {
-        followingLatest = false;
-        return;
-    }
-
-    followingLatest = !renderedThreadId.isEmpty();
-    bar->setValue(bar->maximum());
+    followingLatest = false;
 }
 
 void ConversationWidget::settleThreadSwitchLayout(std::uint64_t generation, int remainingPasses)
@@ -3530,7 +3575,6 @@ void ConversationWidget::settleThreadSwitchLayout(std::uint64_t generation, int 
     pinLatestDuringLayout = false;
     pendingViewportAnchor.clear();
     scrollArea->viewport()->setUpdatesEnabled(true);
-    scrollArea->viewport()->update();
 }
 
 void ConversationWidget::synchronizeTimelineHeight(bool allowShrink)

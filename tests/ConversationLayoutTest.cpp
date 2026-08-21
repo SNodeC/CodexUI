@@ -1228,11 +1228,46 @@ bool testCompletedAgentMessageStreamsBeforeTerminalMarkdown()
         messageContent(message) == streamingContentAddress,
         "an unrelated full refresh during the active turn must preserve the streaming view");
 
+    auto* streamingEditor = qobject_cast<QTextEdit*>(streamingContent.data());
+    const qreal liveDocumentWidth = streamingEditor
+                                        ? streamingEditor->document()->textWidth()
+                                        : 0.0;
+    const int speculativeHeight = streamingContent
+                                      ? streamingContent->heightForWidth(54)
+                                      : 0;
+    passed &= expect(
+        streamingEditor && speculativeHeight > 0
+            && streamingEditor->document()->textWidth() == liveDocumentWidth,
+        "speculative height-for-width measurement must not reflow the visible streaming document");
+
+    const qulonglong geometryInvalidationsBeforeGrowth =
+        streamingContent
+            ? streamingContent->property("geometryInvalidationCount").toULongLong()
+            : 0;
+    const QString fullyReconciledGrowth =
+        QStringLiteral("**partial via full reconciliation");
+    fixture.turns.front().messages.front().text =
+        fullyReconciledGrowth.toStdString();
+    conversation.render(makeState({fixture}),
+                        QStringLiteral("completed-streaming-markdown"));
+    settleEvents();
+    passed &= expect(
+        messageContent(message) == streamingContentAddress
+            && messageSourceText(streamingContent) == fullyReconciledGrowth
+            && streamingContent->property("streamAppendCount").toULongLong() == 1
+            && streamingContent->property("fullReplacementCount").toULongLong() == 0,
+        "a full active-turn reconciliation with grown canonical text must cursor-append in the existing streaming view");
+    passed &= expect(
+        streamingContent
+            && streamingContent->property("geometryInvalidationCount").toULongLong()
+                   == geometryInvalidationsBeforeGrowth,
+        "a same-line streaming append must not invalidate unchanged message geometry");
+
     const QStringList streamedContent{
-        QStringLiteral("**partial result"),
-        QStringLiteral("**partial result**\n\n- one"),
-        QStringLiteral("**partial result**\n\n- one\n- two")};
-    QString previous = QStringLiteral("**partial");
+        QStringLiteral("**partial via full reconciliation result"),
+        QStringLiteral("**partial via full reconciliation result**\n\n- one"),
+        QStringLiteral("**partial via full reconciliation result**\n\n- one\n- two")};
+    QString previous = fullyReconciledGrowth;
     for (const QString& update : streamedContent)
     {
         fixture.turns.front().messages.front().text = update.toStdString();
@@ -1263,9 +1298,15 @@ bool testCompletedAgentMessageStreamsBeforeTerminalMarkdown()
     passed &= expect(
         streamingContent
             && streamingContent->property("streamAppendCount").toULongLong()
-                   == static_cast<qulonglong>(streamedContent.size())
+                   == static_cast<qulonglong>(streamedContent.size() + 1)
             && streamingContent->property("fullReplacementCount").toULongLong() == 0,
         "completed agent-message deltas must use only the cursor append path");
+    auto* conversationScroll = conversation.findChild<QScrollArea*>();
+    passed &= expect(
+        conversationScroll && conversationScroll->viewport()->updatesEnabled()
+            && conversationScroll->verticalScrollBar()->value()
+                   == conversationScroll->verticalScrollBar()->maximum(),
+        "a height-changing stream batch must expose its settled geometry once and remain pinned at the tail");
 
     fixture.turns.front().status = "completed";
     fixture.turns.front().active = false;
