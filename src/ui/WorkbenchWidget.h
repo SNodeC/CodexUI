@@ -60,6 +60,13 @@ private:
         UpcomingTurnDraft draft;
     };
 
+    struct PreparedTurnSubmission {
+        QString userPrompt;
+        QString effectivePrompt;
+        QStringList imagePaths;
+        QList<AttachmentInfo> attachments;
+    };
+
     void refreshLifecycle();
     void scheduleStateRefresh(const detail::StateUpdateScope& scope);
     void refreshState(bool refreshSelectedPresentation = true,
@@ -91,10 +98,21 @@ private:
                                  const ResumeWithOptionsSetup& setup,
                                  std::uint64_t expectedSelectionGeneration);
     void mutateThread(PendingAction action, const QString& threadId, const QString& value = {});
-    void resumeThread(const QString& threadId, const QString& prompt, const UpcomingTurnDraft& settings);
+    [[nodiscard]] std::optional<PreparedTurnSubmission>
+    prepareTurnSubmission(const QString& threadId,
+                          const QString& prompt,
+                          const QList<AttachmentInfo>& attachments,
+                          const QString& workspace);
+    void resumeThread(const QString& threadId,
+                      const PreparedTurnSubmission& submission,
+                      const UpcomingTurnDraft& settings);
     void resumeThreadForOpen(const QString& threadId, std::uint64_t expectedSelectionGeneration);
-    void startTurn(const QString& threadId, const QString& prompt, const UpcomingTurnDraft& settings);
-    void steerTurn(const QString& threadId, const QString& turnId, const QString& prompt);
+    void startTurn(const QString& threadId,
+                   const PreparedTurnSubmission& submission,
+                   const UpcomingTurnDraft& settings);
+    void steerTurn(const QString& threadId,
+                   const QString& turnId,
+                   const PreparedTurnSubmission& submission);
     void reconcileSubmittedTurnSettings();
     void interruptTurn(const QString& threadId, const QString& turnId);
     void showWriteError(const QString& error);
@@ -128,6 +146,8 @@ private:
     QString projectedAgentThreadId;
     QString newThreadIdAwaitingState;
     QString pendingPrompt;
+    QList<AttachmentInfo> pendingAttachments;
+    QString pendingAttachmentWorkspace;
     QString pendingThreadId;
     QString pendingTurnId;
     QString pendingThreadValue;

@@ -346,12 +346,17 @@ QLabel* messageLabel(QWidget* messageSegment, const QString& objectName)
     return messageSegment ? messageSegment->findChild<QLabel*>(objectName) : nullptr;
 }
 
+QString messageSourceText(const QLabel* label)
+{
+    return label ? label->property("sourceText").toString() : QString{};
+}
+
 bool segmentHasLabel(QWidget* messageSegment, const QString& text)
 {
     if (!messageSegment)
         return false;
     for (QLabel* label : messageSegment->findChildren<QLabel*>()) {
-        if (label->text() == text)
+        if (label->text() == text || messageSourceText(label) == text)
             return true;
     }
     return false;
@@ -360,7 +365,7 @@ bool segmentHasLabel(QWidget* messageSegment, const QString& text)
 bool hasLabel(codexui::ConversationWidget& conversation, const QString& text)
 {
     for (QLabel* label : conversation.findChildren<QLabel*>()) {
-        if (label->text() == text)
+        if (label->text() == text || messageSourceText(label) == text)
             return true;
     }
     return false;
@@ -866,7 +871,7 @@ bool testInPlaceMessageReplacement()
                          && agentTruncation && agentTruncation.data() == agentTruncationAddress,
                      "canonical agent-message replacement must preserve the segment and message labels");
     passed &= expect(agentContent
-                         && agentContent->text()
+                         && messageSourceText(agentContent)
                                 == QStringLiteral("streamed prefix and canonical continuation")
                          && agentStatus && agentStatus->text() == QStringLiteral("Completed")
                          && agentTruncation && agentTruncation->isVisible()
@@ -882,7 +887,7 @@ bool testInPlaceMessageReplacement()
     settleTimeline();
     passed &= expect(agentSegment && agentSegment.data() == agentSegmentAddress
                          && agentContent && agentContent.data() == agentContentAddress
-                         && agentContent->text() == QStringLiteral("short canonical replacement")
+                         && messageSourceText(agentContent) == QStringLiteral("short canonical replacement")
                          && agentStatus && agentStatus->text() == QStringLiteral("Failed")
                          && agentTruncation && !agentTruncation->isVisible(),
                      "a shorter canonical replacement must update the same agent-message widget and hide its marker");
@@ -918,7 +923,7 @@ bool testInPlaceMessageReplacement()
                          && userTruncation && userTruncation.data() == userTruncationAddress,
                      "canonical user-message replacement must preserve the segment and message labels");
     passed &= expect(userContent
-                         && userContent->text()
+                         && messageSourceText(userContent)
                                 == QStringLiteral("final prompt\n\nwith multipart text"),
                      "the preserved user-message label must show exact canonical multipart text");
     passed &= expect(userTruncation && userTruncation->isVisible(),
@@ -935,7 +940,7 @@ bool testCompleteAndLargeUserMessagePresentation()
         {{"turn-complete-user-message",
           {{"item-complete-user-message",
             frontend::ThreadItemKind::UserMessage,
-            "complete canonical prompt",
+            "**complete** canonical prompt with [docs](https://example.com)\n\n```cpp\nint answer = 42;\n```\n\n![secret](file:///etc/passwd)\n<img src=\"file:///tmp/private.png\">",
             "completed",
             true,
             false,
@@ -953,10 +958,17 @@ bool testCompleteAndLargeUserMessagePresentation()
         messageLabel(completeSegment, QStringLiteral("conversationMessageContent"));
     QLabel* completeMarker =
         messageLabel(completeSegment, QStringLiteral("conversationMessageTruncation"));
+    const QString completeMarkdown = QStringLiteral(
+        "**complete** canonical prompt with [docs](https://example.com)\n\n```cpp\nint answer = 42;\n```\n\n![secret](file:///etc/passwd)\n<img src=\"file:///tmp/private.png\">");
     bool passed = expect(completeContent
-                             && completeContent->text()
-                                    == QStringLiteral("complete canonical prompt"),
-                         "a valid typed user-message view must render its complete canonical text");
+                             && messageSourceText(completeContent) == completeMarkdown
+                             && completeContent->textFormat() == Qt::RichText
+                             && completeContent->text().contains(QStringLiteral("font-weight"))
+                             && completeContent->text().contains(QStringLiteral("https://example.com"))
+                             && completeContent->text().contains(QStringLiteral("int answer = 42"))
+                             && !completeContent->text().contains(QStringLiteral("file:///etc/passwd"))
+                             && !completeContent->text().contains(QStringLiteral("<img")),
+                         "message Markdown must render formatting while blocking raw HTML and arbitrary image resources");
     passed &= expect(completeMarker && !completeMarker->isVisible(),
                      "non-text omissions and generic item bounds must not mark complete typed user text as truncated");
 
@@ -1043,10 +1055,10 @@ bool testExactContentInvalidation()
 
     bool passed = true;
     passed &= expect(exactApplied && first && first.data() == firstAddress && firstContent
-                         && firstContent->text() == QStringLiteral("first canonical continuation"),
+                         && messageSourceText(firstContent) == QStringLiteral("first canonical continuation"),
                      "an exact content update must mutate its canonical message directly in place");
     passed &= expect(second && second.data() == secondAddress && secondContent
-                         && secondContent->text() == QStringLiteral("second stable"),
+                         && messageSourceText(secondContent) == QStringLiteral("second stable"),
                      "an exact content update must preserve unaffected segment widgets");
 
     const QHash<QString, QStringList> activityChanges{
@@ -1060,7 +1072,7 @@ bool testExactContentInvalidation()
     conversation.render(makeState({fixture}), QStringLiteral("exact-content"));
     settleTimeline();
     passed &= expect(second && second.data() == secondAddress && secondContent
-                         && secondContent->text() == QStringLiteral("second structural fallback"),
+                         && messageSourceText(secondContent) == QStringLiteral("second structural fallback"),
                      "a full reconciliation fallback must still refresh every changed canonical segment");
     return passed;
 }

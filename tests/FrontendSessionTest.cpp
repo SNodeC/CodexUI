@@ -919,6 +919,35 @@ bool testTurnSteeringSubmission()
     passed &= expect(completionError.isEmpty(),
                      "a matching accepted turn identity must complete steering successfully");
 
+    QString imageCompletion = QStringLiteral("completion not called");
+    const auto imageError = session.steerTurn(
+        QStringLiteral("thread-active"),
+        QStringLiteral("turn-active"),
+        {},
+        QStringList{QStringLiteral("/tmp/screenshot.png")},
+        [&imageCompletion](const QString& error) { imageCompletion = error; });
+    const std::vector<frontend::Json> imageCommands = capturedCommands(outbound, "turn.steer");
+    passed &= expect(!imageError && imageCommands.size() == 2,
+                     "an image-only steer must submit one additional typed turn.steer command");
+    if (imageCommands.size() != 2 || !imageCommands.back().contains("requestId"))
+        return false;
+    const frontend::Json imageParams = imageCommands.back().value(
+        "params", frontend::Json::object());
+    passed &= expect(
+        imageParams.value("input", frontend::Json::array())
+            == frontend::Json::array({{{"path", "/tmp/screenshot.png"},
+                                       {"type", "localImage"}}}),
+        "local image attachments must stay typed instead of being embedded into prompt text");
+    const std::string imageRequestId = imageCommands.back()["requestId"].get<std::string>();
+    passed &= expect(
+        codexui::FrontendSessionTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::success(
+                imageRequestId, frontend::Json{{"turnId", "turn-active"}})}),
+        "the image-only turn.steer response must be accepted");
+    passed &= expect(imageCompletion.isEmpty(),
+                     "an accepted image-only steer must complete successfully");
+
     const std::size_t outboundBeforeInvalid = outbound.size();
     const auto missingIdentityError = session.steerTurn(
         QStringLiteral("thread-active"), {}, QStringLiteral("do not send"), [](const QString&) {});

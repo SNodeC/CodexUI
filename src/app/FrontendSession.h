@@ -97,9 +97,19 @@ public:
     startTurn(ai::openai::codex::typed::TurnStartParams parameters,
               const QString& prompt,
               TurnStartCompletion completion);
+    [[nodiscard]] std::optional<QString>
+    startTurn(ai::openai::codex::typed::TurnStartParams parameters,
+              const QString& prompt,
+              const QStringList& localImagePaths,
+              TurnStartCompletion completion);
     [[nodiscard]] std::optional<QString> steerTurn(const QString& threadId,
                                                    const QString& expectedTurnId,
                                                    const QString& prompt,
+                                                   OperationCompletion completion);
+    [[nodiscard]] std::optional<QString> steerTurn(const QString& threadId,
+                                                   const QString& expectedTurnId,
+                                                   const QString& prompt,
+                                                   const QStringList& localImagePaths,
                                                    OperationCompletion completion);
     [[nodiscard]] std::optional<QString>
     forkThread(ai::openai::codex::typed::ThreadForkParams parameters,

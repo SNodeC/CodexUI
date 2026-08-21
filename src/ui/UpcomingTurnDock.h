@@ -3,6 +3,8 @@
 #ifndef CODEXUI_UI_UPCOMINGTURNDOCK_H
 #define CODEXUI_UI_UPCOMINGTURNDOCK_H
 
+#include "app/AttachmentManager.h"
+
 #include <ai/openai/codex/frontend/client/StateTypes.h>
 #include <ai/openai/codex/typed/Models.h>
 #include <ai/openai/codex/typed/Turns.h>
@@ -67,8 +69,13 @@ public:
     void acknowledgeSubmittedSettings(const UpcomingTurnDraft& submitted);
 
     [[nodiscard]] QString prompt() const;
+    [[nodiscard]] const QList<AttachmentInfo>& attachments() const noexcept;
+    [[nodiscard]] QString attachmentWorkspace() const;
+    [[nodiscard]] bool addAttachmentPaths(const QStringList& paths,
+                                          QString* errorMessage = nullptr);
     void clearPrompt();
     void clearPromptIfUnchanged(const QString& submittedPrompt);
+    void clearAttachmentsIfUnchanged(const QList<AttachmentInfo>& submittedAttachments);
     void focusPrompt();
     void setActionState(bool primaryAllowed,
                         bool stopAllowed,
@@ -120,6 +127,10 @@ private:
     [[nodiscard]] const ai::openai::codex::typed::Model* defaultModelDefinition() const;
     [[nodiscard]] const ai::openai::codex::typed::Model* selectedModelDefinition() const;
     void resolveSubmittedSettings(const UpcomingTurnDraft& submitted);
+    void chooseAttachments();
+    void refreshAttachmentPresentation();
+    [[nodiscard]] bool selectedModelSupportsImages() const;
+    void updateDraftTarget();
     void updatePromptHeight();
     void updateSendEnabled();
     void updateChangedPresentation();
@@ -151,6 +162,8 @@ private:
     QComboBox* summary = nullptr;
     QComboBox* collaboration = nullptr;
     QFrame* composerSurface = nullptr;
+    QPushButton* attach = nullptr;
+    QPushButton* attachmentSummary = nullptr;
     QPlainTextEdit* editor = nullptr;
     QLabel* settingsHint = nullptr;
     QLabel* status = nullptr;
@@ -161,6 +174,7 @@ private:
     bool steeringMode = false;
     PromptDraftTarget currentPromptTarget;
     std::optional<PromptDraftTarget> draftPromptTarget;
+    QList<AttachmentInfo> selectedAttachments;
     int currentEditorHeight = 0;
     int compactBaseHeight = 0;
 };

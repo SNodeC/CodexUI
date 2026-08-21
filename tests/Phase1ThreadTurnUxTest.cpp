@@ -18,6 +18,8 @@
 #include <QCoreApplication>
 #include <QEvent>
 #include <QEventLoop>
+#include <QDir>
+#include <QFile>
 #include <QFrame>
 #include <QLabel>
 #include <QLineEdit>
@@ -585,6 +587,30 @@ bool testUpcomingTurnActionStates()
     dock.clearPromptIfUnchanged(QStringLiteral("newer draft"));
     passed &= expect(editor->toPlainText().isEmpty(),
                      "an accepted steer may clear only the exact submitted prompt");
+
+    QTemporaryDir attachmentDirectory;
+    QFile screenshot(QDir(attachmentDirectory.path()).filePath(QStringLiteral("screen.png")));
+    const bool screenshotWritten = screenshot.open(QIODevice::WriteOnly)
+        && screenshot.write("fake png") == 8;
+    screenshot.close();
+    QString attachmentError;
+    passed &= expect(screenshotWritten
+                         && dock.addAttachmentPaths(
+                             {screenshot.fileName()}, &attachmentError),
+                     qPrintable(attachmentError));
+    auto* attachmentSummary = dock.findChild<QPushButton*>(
+        QStringLiteral("upcomingAttachmentSummary"));
+    passed &= expect(send->isEnabled() && attachmentSummary
+                         && !attachmentSummary->isHidden()
+                         && dock.attachments().size() == 1,
+                     "an attachment must make an otherwise empty turn sendable and remain inspectable");
+    dock.clearAttachmentsIfUnchanged({});
+    passed &= expect(dock.attachments().size() == 1,
+                     "a failed or unrelated submission must not clear selected attachments");
+    const QList<codexui::AttachmentInfo> submittedAttachments = dock.attachments();
+    dock.clearAttachmentsIfUnchanged(submittedAttachments);
+    passed &= expect(dock.attachments().isEmpty() && !send->isEnabled(),
+                     "only the exact accepted attachment draft may be cleared");
     return passed;
 }
 

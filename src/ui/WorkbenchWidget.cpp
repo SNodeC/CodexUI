@@ -1031,8 +1031,9 @@ void WorkbenchWidget::showDeleteThreadConfirmation(const QString& threadId)
 
 void WorkbenchWidget::sendPrompt(const QString& prompt, bool steerRequested)
 {
-    if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready || prompt.trimmed().isEmpty()
-        || writeOperationBusy())
+    const QList<AttachmentInfo> attachments = conversation->attachments();
+    if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready
+        || (prompt.trimmed().isEmpty() && attachments.isEmpty()) || writeOperationBusy())
         return;
     if (const auto error = FrontendSession::promptValidationError(prompt)) {
         showWriteError(*error);
@@ -1053,6 +1054,8 @@ void WorkbenchWidget::sendPrompt(const QString& prompt, bool steerRequested)
         }
         pendingAction = PendingAction::SteerActiveTurn;
         pendingPrompt = prompt;
+        pendingAttachments = attachments;
+        pendingAttachmentWorkspace = conversation->attachmentWorkspace();
         pendingThreadId = selectedThreadId;
         pendingTurnId = QString::fromStdString(active->id.value);
         pendingTurnDraft = {};
@@ -1076,6 +1079,8 @@ void WorkbenchWidget::sendPrompt(const QString& prompt, bool steerRequested)
 
     pendingAction = PendingAction::SendExistingThread;
     pendingPrompt = prompt;
+    pendingAttachments = attachments;
+    pendingAttachmentWorkspace = conversation->attachmentWorkspace();
     pendingThreadId = selectedThreadId;
     pendingTurnId.clear();
     pendingTurnDraft = settings;
@@ -1179,6 +1184,8 @@ void WorkbenchWidget::ensureController()
         } else if (!error.isEmpty()) {
             self->pendingAction = PendingAction::None;
             self->pendingPrompt.clear();
+            self->pendingAttachments.clear();
+            self->pendingAttachmentWorkspace.clear();
             self->pendingThreadId.clear();
             self->pendingTurnId.clear();
             self->pendingThreadValue.clear();
@@ -1199,6 +1206,8 @@ void WorkbenchWidget::ensureController()
         controllerAcquireInFlight = false;
         pendingAction = PendingAction::None;
         pendingPrompt.clear();
+        pendingAttachments.clear();
+        pendingAttachmentWorkspace.clear();
         pendingThreadId.clear();
         pendingTurnId.clear();
         pendingThreadValue.clear();
@@ -1221,6 +1230,8 @@ void WorkbenchWidget::executePendingAction()
 
     const PendingAction action = pendingAction;
     const QString prompt = pendingPrompt;
+    const QList<AttachmentInfo> attachments = pendingAttachments;
+    const QString attachmentWorkspace = pendingAttachmentWorkspace;
     const QString threadId = pendingThreadId;
     const QString turnId = pendingTurnId;
     const QString value = pendingThreadValue;
@@ -1231,6 +1242,8 @@ void WorkbenchWidget::executePendingAction()
     const std::uint64_t expectedSelectionGeneration = pendingSelectionGeneration;
     pendingAction = PendingAction::None;
     pendingPrompt.clear();
+    pendingAttachments.clear();
+    pendingAttachmentWorkspace.clear();
     pendingThreadId.clear();
     pendingTurnId.clear();
     pendingThreadValue.clear();
@@ -1276,11 +1289,17 @@ void WorkbenchWidget::executePendingAction()
                 refreshControls();
                 break;
             }
+            const auto submission = prepareTurnSubmission(
+                threadId, prompt, attachments, attachmentWorkspace);
+            if (!submission) {
+                refreshControls();
+                break;
+            }
             // Resuming an already attached thread can replay its existing item projection.
             if (ai::openai::codex::frontend::client::threadIsIdle(*thread))
-                startTurn(threadId, prompt, turnSettings);
+                startTurn(threadId, *submission, turnSettings);
             else
-                resumeThread(threadId, prompt, turnSettings);
+                resumeThread(threadId, *submission, turnSettings);
             break;
         }
         case PendingAction::SteerActiveTurn:
@@ -1294,7 +1313,13 @@ void WorkbenchWidget::executePendingAction()
                 refreshControls();
                 break;
             }
-            steerTurn(threadId, turnId, prompt);
+            const auto submission = prepareTurnSubmission(
+                threadId, prompt, attachments, attachmentWorkspace);
+            if (!submission) {
+                refreshControls();
+                break;
+            }
+            steerTurn(threadId, turnId, *submission);
             break;
         }
         case PendingAction::InterruptTurn:
@@ -1418,8 +1443,34 @@ void WorkbenchWidget::startNewThread(const NewThreadSetup& setup,
     }
 }
 
+std::optional<WorkbenchWidget::PreparedTurnSubmission>
+WorkbenchWidget::prepareTurnSubmission(const QString& threadId,
+                                       const QString& prompt,
+                                       const QList<AttachmentInfo>& attachments,
+                                       const QString& workspace)
+{
+    AttachmentPreparation preparation;
+    QString error;
+    if (!AttachmentManager::prepare(
+            attachments, workspace, threadId, &preparation, &error)) {
+        showWriteError(error);
+        return std::nullopt;
+    }
+    const QString effectivePrompt = AttachmentManager::composePrompt(prompt, preparation);
+    if (const auto validationError = FrontendSession::promptValidationError(effectivePrompt)) {
+        showWriteError(*validationError);
+        return std::nullopt;
+    }
+    if (effectivePrompt.trimmed().isEmpty() && preparation.imagePaths.isEmpty()) {
+        showWriteError(QStringLiteral("A turn requires a prompt or attachment"));
+        return std::nullopt;
+    }
+    return PreparedTurnSubmission{
+        prompt, effectivePrompt, preparation.imagePaths, attachments};
+}
+
 void WorkbenchWidget::startTurn(const QString& threadId,
-                                const QString& prompt,
+                                const PreparedTurnSubmission& submission,
                                 const UpcomingTurnDraft& settings)
 {
     if (settings.threadIdentity != threadId) {
@@ -1448,9 +1499,12 @@ void WorkbenchWidget::startTurn(const QString& threadId,
     const QPointer<WorkbenchWidget> self(this);
     const auto immediateError = frontendSession.startTurn(
         std::move(parameters),
-        prompt,
+        submission.effectivePrompt,
+        submission.imagePaths,
         [self,
          targetThreadId = threadId,
+         submittedPrompt = submission.userPrompt,
+         submittedAttachments = submission.attachments,
          submittedSettings = settings](const QString& acceptedTurnId, const QString& error) {
             if (!self)
                 return;
@@ -1472,7 +1526,8 @@ void WorkbenchWidget::startTurn(const QString& threadId,
                 self->submittedTurnSettings = SubmittedTurnSettings{
                     targetThreadId, acceptedTurnId, submittedSettings};
                 if (self->selectedThreadId == targetThreadId) {
-                    self->conversation->clearPrompt();
+                    self->conversation->clearPromptIfUnchanged(submittedPrompt);
+                    self->conversation->clearAttachmentsIfUnchanged(submittedAttachments);
                     self->conversation->setWriteStatus(QStringLiteral("Waiting for canonical turn state…"));
                 }
             }
@@ -1494,7 +1549,7 @@ void WorkbenchWidget::startTurn(const QString& threadId,
 
 void WorkbenchWidget::steerTurn(const QString& threadId,
                                 const QString& turnId,
-                                const QString& prompt)
+                                const PreparedTurnSubmission& submission)
 {
     turnSteerInFlight = true;
     if (selectedThreadId == threadId)
@@ -1505,8 +1560,12 @@ void WorkbenchWidget::steerTurn(const QString& threadId,
     const auto immediateError = frontendSession.steerTurn(
         threadId,
         turnId,
-        prompt,
-        [self, targetThreadId = threadId, submittedPrompt = prompt](const QString& error) {
+        submission.effectivePrompt,
+        submission.imagePaths,
+        [self,
+         targetThreadId = threadId,
+         submittedPrompt = submission.userPrompt,
+         submittedAttachments = submission.attachments](const QString& error) {
             if (!self)
                 return;
             self->turnSteerInFlight = false;
@@ -1519,6 +1578,7 @@ void WorkbenchWidget::steerTurn(const QString& threadId,
                             .arg(targetThreadId, error));
             } else if (self->selectedThreadId == targetThreadId) {
                 self->conversation->clearPromptIfUnchanged(submittedPrompt);
+                self->conversation->clearAttachmentsIfUnchanged(submittedAttachments);
                 self->conversation->setWriteStatus({});
             }
             self->refreshState();
@@ -1578,7 +1638,7 @@ void WorkbenchWidget::reconcileSubmittedTurnSettings()
 }
 
 void WorkbenchWidget::resumeThread(const QString& threadId,
-                                   const QString& prompt,
+                                   const PreparedTurnSubmission& submission,
                                    const UpcomingTurnDraft& settings)
 {
     threadResumeInFlight = true;
@@ -1588,8 +1648,8 @@ void WorkbenchWidget::resumeThread(const QString& threadId,
     const QPointer<WorkbenchWidget> self(this);
     const auto immediateError = frontendSession.resumeThread(
         threadId,
-        [self, prompt, settings, targetThreadId = threadId](const QString& resumedThreadId,
-                                                            const QString& error) {
+        [self, submission, settings, targetThreadId = threadId](const QString& resumedThreadId,
+                                                                const QString& error) {
             if (!self)
                 return;
             self->threadResumeInFlight = false;
@@ -1603,7 +1663,7 @@ void WorkbenchWidget::resumeThread(const QString& threadId,
                 self->refreshControls();
                 return;
             }
-            self->startTurn(resumedThreadId, prompt, settings);
+            self->startTurn(resumedThreadId, submission, settings);
         });
     if (immediateError) {
         threadResumeInFlight = false;
@@ -1856,6 +1916,8 @@ void WorkbenchWidget::clearWriteTransients()
 {
     pendingAction = PendingAction::None;
     pendingPrompt.clear();
+    pendingAttachments.clear();
+    pendingAttachmentWorkspace.clear();
     pendingThreadId.clear();
     pendingTurnId.clear();
     pendingThreadValue.clear();
