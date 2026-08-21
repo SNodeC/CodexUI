@@ -717,6 +717,68 @@ bool testUnavailableCanonicalSettingsRemainEditable()
     return passed;
 }
 
+bool testCollaborationModeSwitching()
+{
+    codexui::UpcomingTurnDock codeDock;
+    sdk::ExecutionConfiguration planConfiguration =
+        configuration("gpt-test", typed::ReasoningEffort::high(), "/workspace");
+    planConfiguration.collaborationMode.mode = typed::ModeKind::plan();
+    planConfiguration.collaborationMode.settings.developerInstructions =
+        std::string{"plan-mode-instructions"};
+    codeDock.setCanonicalConfiguration(planConfiguration, QStringLiteral("thread-plan"));
+    codeDock.setActionState(true, false, true, true, false, false);
+
+    auto* codeChoice = codeDock.findChild<QComboBox*>(
+        QStringLiteral("upcomingCollaborationMode"));
+    bool passed = expect(codeChoice
+                             && codeChoice->currentData().toString() == QStringLiteral("plan")
+                             && codeChoice->itemText(codeChoice->findData(QStringLiteral("default")))
+                                 == QStringLiteral("Code"),
+                         "the collaboration selector must present wire default as Code");
+    if (!codeChoice)
+        return false;
+
+    codeChoice->setCurrentIndex(codeChoice->findData(QStringLiteral("default")));
+    QCoreApplication::processEvents();
+    const codexui::UpcomingTurnDraft codeDraft = codeDock.draft();
+    passed &= expect(codeDraft.collaborationMode.hasValue()
+                         && codeDraft.collaborationMode->mode.value == "default"
+                         && codeDraft.collaborationMode->settings.developerInstructions.isNull()
+                         && codeDraft.collaborationMode->settings.model.value == "gpt-test"
+                         && codeDraft.collaborationMode->settings.reasoningEffort.hasValue()
+                         && codeDraft.collaborationMode->settings.reasoningEffort->value == "high",
+                     "Plan to Code must clear Plan instructions and preserve model settings");
+
+    codexui::UpcomingTurnDock planDock;
+    sdk::ExecutionConfiguration codeConfiguration =
+        configuration("gpt-test", typed::ReasoningEffort::high(), "/workspace");
+    codeConfiguration.collaborationMode.settings.developerInstructions =
+        std::string{"code-mode-instructions"};
+    planDock.setCanonicalConfiguration(codeConfiguration, QStringLiteral("thread-code"));
+    planDock.setActionState(true, false, true, true, false, false);
+
+    auto* planChoice = planDock.findChild<QComboBox*>(
+        QStringLiteral("upcomingCollaborationMode"));
+    passed &= expect(planChoice
+                         && planChoice->currentData().toString() == QStringLiteral("default")
+                         && planChoice->currentText() == QStringLiteral("Code"),
+                     "canonical Code mode must remain selected by its default wire key");
+    if (!planChoice)
+        return false;
+
+    planChoice->setCurrentIndex(planChoice->findData(QStringLiteral("plan")));
+    QCoreApplication::processEvents();
+    const codexui::UpcomingTurnDraft planDraft = planDock.draft();
+    passed &= expect(planDraft.collaborationMode.hasValue()
+                         && planDraft.collaborationMode->mode.value == "plan"
+                         && planDraft.collaborationMode->settings.developerInstructions.isNull()
+                         && planDraft.collaborationMode->settings.model.value == "gpt-test"
+                         && planDraft.collaborationMode->settings.reasoningEffort.hasValue()
+                         && planDraft.collaborationMode->settings.reasoningEffort->value == "high",
+                     "Code to Plan must clear Code instructions and preserve model settings");
+    return passed;
+}
+
 bool setInstructions(codexui::ThreadSetupDialog& dialog,
                      const QString& base,
                      const QString& developer)
@@ -1139,6 +1201,7 @@ int main(int argc, char** argv)
     passed &= testUpcomingTurnActionStates();
     passed &= testUnsupportedCanonicalSettingsFailSoft();
     passed &= testUnavailableCanonicalSettingsRemainEditable();
+    passed &= testCollaborationModeSwitching();
     passed &= testThreadSetupResults();
     passed &= testThreadActionGating();
     passed &= testScopedDuplicateTurnActionGating();

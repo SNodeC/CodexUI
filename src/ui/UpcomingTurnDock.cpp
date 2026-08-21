@@ -293,7 +293,7 @@ void resetSummaryChoices(QComboBox* combo)
 void resetCollaborationChoices(QComboBox* combo)
 {
     combo->clear();
-    addChoice(combo, defaultSettingLabel(), QStringLiteral("default"));
+    addChoice(combo, QStringLiteral("Code"), QStringLiteral("default"));
     addChoice(combo, QStringLiteral("Plan"), QStringLiteral("plan"));
 }
 
@@ -304,9 +304,12 @@ typed::CollaborationMode collaborationForKey(
     const std::optional<sdk::ExecutionConfiguration>& canonical)
 {
     typed::CollaborationMode result;
-    if (canonical)
-        result = canonical->collaborationMode;
     result.mode.value = toUtf8(key);
+    // Developer instructions belong to the selected collaboration mode. An
+    // explicit null lets app-server install that mode's built-in instructions
+    // instead of retaining the previous mode's prompt.
+    result.settings.developerInstructions =
+        typed::OptionalNullable<std::string>::explicitNull();
     const QString effectiveModel = !selectedModel.isEmpty()
         ? selectedModel
         : canonical ? fromUtf8(canonical->model.value) : QString{};
@@ -1067,7 +1070,7 @@ void UpcomingTurnDock::refreshControls(bool resetAll)
         const QSignalBlocker blocker(collaboration);
         resetCollaborationChoices(collaboration);
         selectKey(collaboration, collaborationValue,
-                  collaborationValue == QStringLiteral("default") ? defaultSettingLabel()
+                  collaborationValue == QStringLiteral("default") ? QStringLiteral("Code")
                   : collaborationValue == QStringLiteral("unavailable") ? unavailableSettingLabel()
                                                                         : friendlyValue(collaborationValue),
                   typed::ModeKind{toUtf8(collaborationValue)}.isKnown());
