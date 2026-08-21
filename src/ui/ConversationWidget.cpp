@@ -1048,6 +1048,7 @@ QFrame* activityCard(const sdk::State& state,
     layout->setSpacing(0);
 
     auto* header = new QHBoxLayout;
+    header->setSpacing(7);
     auto* disclosure = disclosureButton(expanded, QStringLiteral("Activity group"));
     header->addWidget(disclosure);
     auto* title = textLabel(QStringLiteral("Activity"));
