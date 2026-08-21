@@ -1535,10 +1535,10 @@ void addActivityRow(QVBoxLayout* rows,
 
     auto* tail = textLabel(item.tail, "meta");
     tail->setObjectName(QStringLiteral("conversationActivityTail"));
-    tail->setVisible(!item.tail.isEmpty());
     tail->setFixedHeight(disclosure->height());
     tail->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     layout->addWidget(tail, 0, Qt::AlignTop);
+    tail->setVisible(!item.tail.isEmpty());
     auto* state = textLabel(item.status);
     state->setObjectName(QStringLiteral("conversationActivityStatus"));
     state->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;").arg(color));
@@ -1575,8 +1575,8 @@ void addActivityRow(QVBoxLayout* rows,
         omitted->setStyleSheet(QStringLiteral("color:#a76812;font-size:9px;"));
         detailsLayout->addWidget(omitted);
     }
-    setDisclosureState(disclosure, details, expanded && hasDetails);
     lineLayout->addWidget(details);
+    setDisclosureState(disclosure, details, expanded && hasDetails);
     QObject::connect(disclosure, &QToolButton::clicked, line,
                      [disclosure, details, detailsLayout, layoutChanged](bool)
                      {
@@ -1705,6 +1705,7 @@ QFrame* activityCard(const sdk::State& state,
     layout->setSpacing(0);
 
     auto* header = new QHBoxLayout;
+    layout->addLayout(header);
     auto* disclosure = disclosureButton(expanded, QStringLiteral("Activity group"));
     header->addWidget(disclosure);
     auto* title = textLabel(QStringLiteral("Activity"));
@@ -1716,15 +1717,14 @@ QFrame* activityCard(const sdk::State& state,
     });
     auto* planAvailable = textLabel(QStringLiteral("Plan available"), "small");
     planAvailable->setObjectName(QStringLiteral("conversationActivityPlanAvailable"));
-    planAvailable->setVisible(typedPlanAvailable || legacyPlanAvailable);
     header->addWidget(planAvailable);
+    planAvailable->setVisible(typedPlanAvailable || legacyPlanAvailable);
     header->addSpacing(8);
     auto* count = textLabel(
         QStringLiteral("%1 activit%2").arg(items.size()).arg(items.size() == 1 ? "y" : "ies"),
         "small");
     count->setObjectName(QStringLiteral("conversationActivityCount"));
     header->addWidget(count);
-    layout->addLayout(header);
     auto* body = new QWidget;
     body->setObjectName(QStringLiteral("conversationActivityBody"));
     auto* bodyLayout = new QVBoxLayout(body);
@@ -1745,8 +1745,8 @@ QFrame* activityCard(const sdk::State& state,
                        layoutChanged);
     }
     bodyLayout->addLayout(rows);
-    setDisclosureState(disclosure, body, expanded);
     layout->addWidget(body);
+    setDisclosureState(disclosure, body, expanded);
     QObject::connect(disclosure, &QToolButton::clicked, card,
                      [disclosure, body, layoutChanged](bool)
                      {

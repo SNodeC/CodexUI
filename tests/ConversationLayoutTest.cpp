@@ -14,6 +14,7 @@
 #include <QFrame>
 #include <QLabel>
 #include <QLayout>
+#include <QObject>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
@@ -76,6 +77,30 @@ bool expectAtLeast(int actual, int required, const char* message)
     std::cerr << message << " (actual " << actual << ", required " << required << ")\n";
     return false;
 }
+
+class ActivityTopLevelShowMonitor final : public QObject
+{
+public:
+    [[nodiscard]] bool empty() const noexcept
+    {
+        return unexpectedObjectNames.isEmpty();
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() == QEvent::Show) {
+            const auto* widget = qobject_cast<const QWidget*>(watched);
+            if (widget && widget->isWindow()
+                && widget->objectName().startsWith(QStringLiteral("conversationActivity")))
+                unexpectedObjectNames.append(widget->objectName());
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    QStringList unexpectedObjectNames;
+};
 
 void settleEvents(int passes = 3, int delayMs = 25)
 {
@@ -660,7 +685,10 @@ bool testActivityDisclosureAndFullOutput()
     codexui::ConversationWidget conversation;
     conversation.resize(900, 700);
     conversation.show();
+    ActivityTopLevelShowMonitor topLevelShowMonitor;
+    qApp->installEventFilter(&topLevelShowMonitor);
     conversation.render(makeState({fixture}), QStringLiteral("activity-detail"));
+    qApp->removeEventFilter(&topLevelShowMonitor);
     settleTimeline();
 
     auto* card = conversation.findChild<QFrame*>(QStringLiteral("conversationActivityCard"));
@@ -683,6 +711,8 @@ bool testActivityDisclosureAndFullOutput()
     }
 
     bool passed = true;
+    passed &= expect(topLevelShowMonitor.empty(),
+                     "rendering activity content must never show temporary top-level widgets");
     passed &= expect(card && body && !body->isHidden() && row && details && details->isHidden(),
                      "an activity group must start expanded while each activity starts collapsed");
     passed &= expect(row && details && detailDisclosure && detailDisclosure->isCheckable()
