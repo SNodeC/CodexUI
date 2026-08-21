@@ -52,6 +52,7 @@ constexpr qsizetype maximumRenderedTimelineItems = 256;
 constexpr std::size_t maximumActivityItemsPerSegment = 16;
 constexpr qsizetype largeMessageEditorThreshold = 64 * 1024;
 constexpr int largeMessageEditorHeight = 240;
+constexpr int streamingMarkdownRenderIntervalMs = 75;
 
 struct ActivityPresentation
 {
@@ -124,8 +125,11 @@ QLabel* textLabel(const QString& text, const char* kind = nullptr)
 class WrappingLabel final : public QLabel
 {
 public:
-    explicit WrappingLabel(const QString& text, bool markdown = false)
+    explicit WrappingLabel(const QString& text,
+                           bool markdown = false,
+                           std::function<void()> deferredRenderCompleted = {})
         : markdown(markdown)
+        , deferredRenderCompleted(std::move(deferredRenderCompleted))
     {
         setTextFormat(markdown ? Qt::RichText : Qt::PlainText);
         setWordWrap(true);
@@ -141,19 +145,44 @@ public:
                     || url.scheme() == QStringLiteral("http"))
                     (void)QDesktopServices::openUrl(url);
             });
+            markdownRenderTimer.setSingleShot(true);
+            markdownRenderTimer.setInterval(streamingMarkdownRenderIntervalMs);
+            connect(&markdownRenderTimer, &QTimer::timeout, this,
+                    [this] { renderMarkdownNow(true); });
         }
         setContent(text);
     }
 
-    void setContent(const QString& text)
+    void setContent(const QString& text, bool coalesceMarkdownRender = false)
     {
-        if (text == sourceText)
+        if (text == sourceText) {
+            if (markdown && !coalesceMarkdownRender && markdownRenderTimer.isActive())
+                renderMarkdownNow();
             return;
+        }
+        const QString previousSource = sourceText;
         sourceText = text;
         setProperty("sourceText", sourceText);
-        heightCache.clear();
-        QLabel::setText(markdown ? safeMarkdownHtml(text, font()) : text);
-        updateGeometry();
+        if (!markdown) {
+            heightCache.clear();
+            QLabel::setText(text);
+            updateGeometry();
+            return;
+        }
+
+        const bool appendOnly = !previousSource.isEmpty()
+                                && text.size() > previousSource.size()
+                                && text.startsWith(previousSource);
+        if (coalesceMarkdownRender && appendOnly && !renderedSourceText.isEmpty()) {
+            // Streaming deltas update the authoritative source immediately, but
+            // coalesce the expensive full Markdown parse at a bounded cadence.
+            // Do not restart an active timer: this is throttling, not an
+            // indefinitely postponable debounce.
+            if (!markdownRenderTimer.isActive())
+                markdownRenderTimer.start();
+            return;
+        }
+        renderMarkdownNow();
     }
 
     [[nodiscard]] const QString& content() const noexcept { return sourceText; }
@@ -174,11 +203,22 @@ protected:
         if (event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange)
             heightCache.clear();
         if (markdown && event->type() == QEvent::FontChange)
-            QLabel::setText(safeMarkdownHtml(sourceText, font()));
+            renderMarkdownNow();
         QLabel::changeEvent(event);
     }
 
 private:
+    void renderMarkdownNow(bool notifyDeferredCompletion = false)
+    {
+        markdownRenderTimer.stop();
+        renderedSourceText = sourceText;
+        heightCache.clear();
+        QLabel::setText(safeMarkdownHtml(sourceText, font()));
+        updateGeometry();
+        if (notifyDeferredCompletion && deferredRenderCompleted)
+            deferredRenderCompleted();
+    }
+
     static QString safeMarkdownHtml(const QString& markdownText, const QFont& renderFont)
     {
         QTextDocument document;
@@ -218,6 +258,9 @@ private:
 
     bool markdown = false;
     QString sourceText;
+    QString renderedSourceText;
+    QTimer markdownRenderTimer;
+    std::function<void()> deferredRenderCompleted;
     mutable QHash<int, int> heightCache;
 };
 
@@ -228,11 +271,12 @@ QLabel* wrappingLabel(const QString& text, const char* kind = nullptr)
     return result;
 }
 
-QWidget* messageContentWidget(const QString& text)
+QWidget* messageContentWidget(const QString& text,
+                              const std::function<void()>& deferredRenderCompleted = {})
 {
     if (text.size() <= largeMessageEditorThreshold)
     {
-        auto* result = new WrappingLabel(text, true);
+        auto* result = new WrappingLabel(text, true, deferredRenderCompleted);
         result->setProperty("kind", "body");
         return result;
     }
@@ -258,22 +302,27 @@ QString messageContentText(const QWidget* content)
     return {};
 }
 
-void setMessageContentText(QWidget* content, const QString& text)
+void setMessageContentText(QWidget* content,
+                           const QString& text,
+                           bool coalesceMarkdownRender = false)
 {
     if (auto* label = dynamic_cast<WrappingLabel*>(content))
-        label->setContent(text);
+        label->setContent(text, coalesceMarkdownRender);
     else if (auto* editor = qobject_cast<QPlainTextEdit*>(content); editor && editor->toPlainText() != text)
         editor->setPlainText(text);
 }
 
-QWidget* ensureMessageContentWidget(QVBoxLayout* layout, QWidget* content, const QString& text)
+QWidget* ensureMessageContentWidget(QVBoxLayout* layout,
+                                    QWidget* content,
+                                    const QString& text,
+                                    const std::function<void()>& deferredRenderCompleted = {})
 {
     const bool needsEditor = text.size() > largeMessageEditorThreshold;
     const bool hasEditor = qobject_cast<QPlainTextEdit*>(content) != nullptr;
     if (needsEditor == hasEditor)
         return content;
 
-    QWidget* replacement = messageContentWidget(text);
+    QWidget* replacement = messageContentWidget(text, deferredRenderCompleted);
     replacement->setObjectName(QStringLiteral("conversationMessageContent"));
     delete layout->replaceWidget(content, replacement);
     content->hide();
@@ -418,7 +467,19 @@ struct MessagePresentation
     QString content;
     QString truncation;
     bool missing = false;
+    bool streaming = false;
 };
+
+bool streamingMessageStatus(const QString& status)
+{
+    const QString normalized = status.toLower();
+    return normalized == QStringLiteral("started")
+           || normalized == QStringLiteral("unknown")
+           || normalized.contains(QStringLiteral("progress"))
+           || normalized.contains(QStringLiteral("running"))
+           || normalized.contains(QStringLiteral("active"))
+           || normalized.contains(QStringLiteral("stream"));
+}
 
 MessagePresentation messagePresentation(const sdk::ItemState& item, bool user)
 {
@@ -426,6 +487,7 @@ MessagePresentation messagePresentation(const sdk::ItemState& item, bool user)
     const QString itemStatusText = itemStatus(item);
     result.status = itemStatusText;
     result.statusColor = statusColor(itemStatusText);
+    result.streaming = !user && streamingMessageStatus(itemStatusText);
 
     if (!user)
     {
@@ -492,7 +554,7 @@ void applyMessagePresentation(QLabel* status,
         content->style()->unpolish(content);
         content->style()->polish(content);
     }
-    setMessageContentText(content, presentation.content);
+    setMessageContentText(content, presentation.content, presentation.streaming);
 
     if (truncation->text() != presentation.truncation)
         truncation->setText(presentation.truncation);
@@ -781,37 +843,59 @@ void addActivityRow(QVBoxLayout* rows,
     summary->setObjectName(QStringLiteral("conversationActivitySummary"));
     auto* layout = new QHBoxLayout(summary);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(8);
+    layout->setSpacing(6);
 
     const bool hasDetails = !item.detail.isEmpty() || !item.output.isEmpty() || item.truncated;
     const QString color = statusColor(item.status);
+    auto* prefix = new QWidget;
+    prefix->setObjectName(QStringLiteral("conversationActivityPrefix"));
+    auto* prefixLayout = new QHBoxLayout(prefix);
+    prefixLayout->setContentsMargins(0, 0, 0, 0);
+    prefixLayout->setSpacing(1);
+
     auto* symbol = textLabel(statusGlyph(item.status));
     symbol->setObjectName(QStringLiteral("conversationActivitySymbol"));
-    symbol->setFixedWidth(14);
-    symbol->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
+    symbol->setFixedSize(14, 22);
+    symbol->setAlignment(Qt::AlignCenter);
     symbol->setStyleSheet(QStringLiteral("color:%1;font-size:12px;font-weight:600;").arg(color));
-    layout->addWidget(symbol, 0, Qt::AlignTop);
+    prefixLayout->addWidget(symbol, 0, Qt::AlignTop);
 
     auto* disclosure = disclosureButton(
         expanded,
         QStringLiteral("Activity details: %1").arg(item.title));
+    // Keep the row control only as wide as its icon.  The shared 22 px
+    // disclosure button is appropriate for the card header, but here it
+    // indents the chevron relative to non-expandable row titles.
+    disclosure->setFixedWidth(14);
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
-    layout->addWidget(disclosure, 0, Qt::AlignTop);
+    prefixLayout->addWidget(disclosure, 0, Qt::AlignTop);
+    layout->addWidget(prefix, 0, Qt::AlignTop);
 
     auto* title = wrappingLabel(item.title);
     title->setObjectName(QStringLiteral("conversationActivityTitle"));
     title->setToolTip(plainTooltip(item.title));
     title->setStyleSheet(QStringLiteral("font-size:12px;font-weight:500;"));
+    // Align the first wrapped text line with the 22 px status/disclosure
+    // controls.  A top content inset keeps later lines flowing downward
+    // instead of vertically centering the complete multiline label.
+    const int titleTopInset = qMax(0, (disclosure->height() - title->fontMetrics().height()) / 2);
+    title->setContentsMargins(0, titleTopInset, 0, 0);
+    title->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    title->setMinimumHeight(disclosure->height());
     layout->addWidget(title, 1);
 
     auto* tail = textLabel(item.tail, "meta");
     tail->setObjectName(QStringLiteral("conversationActivityTail"));
     tail->setVisible(!item.tail.isEmpty());
+    tail->setFixedHeight(disclosure->height());
+    tail->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     layout->addWidget(tail, 0, Qt::AlignTop);
     auto* state = textLabel(item.status);
     state->setObjectName(QStringLiteral("conversationActivityStatus"));
     state->setStyleSheet(QStringLiteral("color:%1;font-size:9px;font-weight:600;").arg(color));
+    state->setFixedHeight(disclosure->height());
+    state->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     layout->addWidget(state, 0, Qt::AlignTop);
     lineLayout->addWidget(summary);
 
@@ -1017,7 +1101,10 @@ QFrame* activityCard(const sdk::State& state,
     return card;
 }
 
-void addMessage(QVBoxLayout* timeline, const sdk::ItemState& item, bool user)
+void addMessage(QVBoxLayout* timeline,
+                const sdk::ItemState& item,
+                bool user,
+                const std::function<void()>& layoutChanged)
 {
     const MessagePresentation presentation = messagePresentation(item, user);
     auto* header = new QHBoxLayout;
@@ -1051,7 +1138,7 @@ void addMessage(QVBoxLayout* timeline, const sdk::ItemState& item, bool user)
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(5);
     }
-    auto* copy = messageContentWidget(presentation.content);
+    auto* copy = messageContentWidget(presentation.content, layoutChanged);
     copy->setObjectName(QStringLiteral("conversationMessageContent"));
     layout->addWidget(copy);
     auto* marker = textLabel({}, "small");
@@ -1423,7 +1510,7 @@ QWidget* timelineSegmentWidget(const sdk::State& state,
         const auto* item = segment.items.front();
         const bool user = item->kind.is(frontend::ThreadItemKind::UserMessage);
         host->setProperty("messageUser", user);
-        addMessage(layout, *item, user);
+        addMessage(layout, *item, user, layoutChanged);
     }
     else
     {
@@ -1513,7 +1600,8 @@ bool updateTimelineActivitySegment(QWidget* host,
 
 bool updateTimelineMessageSegment(QWidget* host,
                                   const TimelineSegment& segment,
-                                  bool* mayShrink = nullptr)
+                                  bool* mayShrink,
+                                  const std::function<void()>& layoutChanged)
 {
     if (!host || segment.missing || segment.items.size() != 1)
         return false;
@@ -1550,7 +1638,8 @@ bool updateTimelineMessageSegment(QWidget* host,
     auto* contentLayout = qobject_cast<QVBoxLayout*>(contentWidget->parentWidget()->layout());
     if (!contentLayout)
         return false;
-    contentWidget = ensureMessageContentWidget(contentLayout, contentWidget, presentation.content);
+    contentWidget = ensureMessageContentWidget(
+        contentLayout, contentWidget, presentation.content, layoutChanged);
     applyMessagePresentation(status,
                              contentWidget,
                              truncation,
@@ -2158,7 +2247,12 @@ void ConversationWidget::render(const sdk::State& state,
                         continue;
 
                     bool messageMayShrink = false;
-                    if (oldWidget && updateTimelineMessageSegment(oldWidget, *segment, &messageMayShrink))
+                    if (oldWidget
+                        && updateTimelineMessageSegment(
+                            oldWidget,
+                            *segment,
+                            &messageMayShrink,
+                            [this] { activityLayoutChanged(); }))
                     {
                         renderedSegmentKeys.insert(storage, segmentKey);
                         timelineShrank = timelineShrank || messageMayShrink;
@@ -2294,7 +2388,11 @@ bool ConversationWidget::updateExactMessageContent(
     for (PendingMessageUpdate& update : updates)
     {
         bool messageMayShrink = false;
-        if (!updateTimelineMessageSegment(update.widget, update.segment, &messageMayShrink))
+        if (!updateTimelineMessageSegment(
+                update.widget,
+                update.segment,
+                &messageMayShrink,
+                [this] { activityLayoutChanged(); }))
             return false;
         renderedSegmentKeys.insert(update.storage, update.presentationKey);
         timelineShrank = timelineShrank || messageMayShrink;

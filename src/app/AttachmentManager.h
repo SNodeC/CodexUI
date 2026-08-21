@@ -7,6 +7,10 @@
 #include <QString>
 #include <QStringList>
 
+#include <memory>
+
+class QSettings;
+
 namespace codexui {
 
 struct AttachmentInfo
@@ -30,12 +34,49 @@ struct PreparedAttachment
     bool staged = false;
 };
 
+class AttachmentStagingLease final
+{
+public:
+    ~AttachmentStagingLease();
+
+    AttachmentStagingLease(const AttachmentStagingLease&) = delete;
+    AttachmentStagingLease& operator=(const AttachmentStagingLease&) = delete;
+
+    [[nodiscard]] const QString& directory() const noexcept;
+    // Prepared-but-unsubmitted leases clean up on destruction. Dispatch makes
+    // cleanup explicit so destroying the frontend cannot break an active turn.
+    [[nodiscard]] bool cleanup() noexcept;
+    void markDispatched() noexcept;
+    void cancelDispatch() noexcept;
+
+private:
+    friend class AttachmentManager;
+    AttachmentStagingLease(QString workspace, QString directory);
+    void trackFile(QString path);
+
+    QString workspaceDirectory;
+    QString stagingDirectory;
+    QStringList stagedFiles;
+    bool dispatched = false;
+};
+
+using AttachmentStagingLeasePtr = std::shared_ptr<AttachmentStagingLease>;
+
 struct AttachmentPreparation
 {
     QList<PreparedAttachment> items;
     QStringList imagePaths;
     QString genericFilePrompt;
     QString stagingDirectory;
+    AttachmentStagingLeasePtr stagingLease;
+};
+
+struct PersistedAttachmentStaging
+{
+    QString registryId;
+    QString threadId;
+    QString turnId;
+    AttachmentStagingLeasePtr stagingLease;
 };
 
 class AttachmentManager final
@@ -62,6 +103,22 @@ public:
                                                const AttachmentPreparation& preparation);
     [[nodiscard]] static QString formatSize(qint64 sizeBytes);
     [[nodiscard]] static qint64 totalSize(const QList<AttachmentInfo>& attachments);
+    [[nodiscard]] static QString createStagingRegistryId();
+    [[nodiscard]] static bool persistDispatchedStaging(
+        QSettings& settings,
+        const QString& registryId,
+        const QString& threadId,
+        const QString& turnId,
+        const AttachmentStagingLeasePtr& stagingLease,
+        QString* errorMessage = nullptr);
+    [[nodiscard]] static bool recoverDispatchedStaging(
+        QSettings& settings,
+        QList<PersistedAttachmentStaging>* result,
+        QString* errorMessage = nullptr);
+    [[nodiscard]] static bool forgetDispatchedStaging(
+        QSettings& settings,
+        const QString& registryId,
+        QString* errorMessage = nullptr);
 
 private:
     [[nodiscard]] static bool isSupportedLocalImage(const QString& path,
