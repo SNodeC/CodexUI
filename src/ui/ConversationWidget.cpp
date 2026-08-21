@@ -785,12 +785,18 @@ void addActivityRow(QVBoxLayout* rows,
 
     const bool hasDetails = !item.detail.isEmpty() || !item.output.isEmpty() || item.truncated;
     const QString color = statusColor(item.status);
+    auto* prefix = new QWidget;
+    prefix->setObjectName(QStringLiteral("conversationActivityPrefix"));
+    auto* prefixLayout = new QHBoxLayout(prefix);
+    prefixLayout->setContentsMargins(0, 0, 0, 0);
+    prefixLayout->setSpacing(1);
+
     auto* symbol = textLabel(statusGlyph(item.status));
     symbol->setObjectName(QStringLiteral("conversationActivitySymbol"));
     symbol->setFixedSize(14, 22);
     symbol->setAlignment(Qt::AlignCenter);
     symbol->setStyleSheet(QStringLiteral("color:%1;font-size:12px;font-weight:600;").arg(color));
-    layout->addWidget(symbol, 0, Qt::AlignTop);
+    prefixLayout->addWidget(symbol, 0, Qt::AlignTop);
 
     auto* disclosure = disclosureButton(
         expanded,
@@ -801,7 +807,8 @@ void addActivityRow(QVBoxLayout* rows,
     disclosure->setFixedWidth(14);
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
-    layout->addWidget(disclosure, 0, Qt::AlignTop);
+    prefixLayout->addWidget(disclosure, 0, Qt::AlignTop);
+    layout->addWidget(prefix, 0, Qt::AlignTop);
 
     auto* title = wrappingLabel(item.title);
     title->setObjectName(QStringLiteral("conversationActivityTitle"));
