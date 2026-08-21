@@ -25,6 +25,7 @@
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
+#include <QSettings>
 #include <QSplitter>
 #include <QTextDocument>
 #include <QTimer>
@@ -284,6 +285,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     });
 
     conversation->setModelCatalog(frontendSession.modelCatalog());
+    recoverAttachmentStaging();
     refreshLifecycle();
     refreshState();
 }
@@ -1487,6 +1489,13 @@ void WorkbenchWidget::startTurn(const QString& threadId,
         showWriteError(QStringLiteral("Upcoming-turn settings no longer match the target thread"));
         return;
     }
+    QString stagingError;
+    if (!retainAttachmentStaging(threadId, {}, submission.stagingLease, &stagingError)) {
+        if (submission.stagingLease)
+            (void)submission.stagingLease->cleanup();
+        showWriteError(stagingError);
+        return;
+    }
     turnStartInFlight = true;
     turnThreadIdAwaitingState.clear();
     turnIdAwaitingState.clear();
@@ -1506,7 +1515,6 @@ void WorkbenchWidget::startTurn(const QString& threadId,
     parameters.serviceTier = settings.serviceTier;
     parameters.summary = settings.summary;
     parameters.collaborationMode = settings.collaborationMode;
-    retainAttachmentStaging(threadId, {}, submission.stagingLease);
     const QPointer<WorkbenchWidget> self(this);
     const auto immediateError = frontendSession.startTurn(
         std::move(parameters),
@@ -1536,7 +1544,13 @@ void WorkbenchWidget::startTurn(const QString& threadId,
                     self->showWriteError(
                         QStringLiteral("Turn in %1 failed: %2").arg(targetThreadId, failure));
             } else {
-                self->retainAttachmentStaging(targetThreadId, acceptedTurnId, stagingLease);
+                QString stagingError;
+                if (!self->retainAttachmentStaging(
+                        targetThreadId, acceptedTurnId, stagingLease, &stagingError)) {
+                    self->showWriteError(QStringLiteral(
+                        "The turn started, but attachment cleanup ownership could not be updated: %1")
+                                             .arg(stagingError));
+                }
                 self->turnThreadIdAwaitingState = targetThreadId;
                 self->turnIdAwaitingState = acceptedTurnId;
                 self->submittedTurnSettings = SubmittedTurnSettings{
@@ -1568,12 +1582,19 @@ void WorkbenchWidget::steerTurn(const QString& threadId,
                                 const QString& turnId,
                                 const PreparedTurnSubmission& submission)
 {
+    QString stagingError;
+    if (!retainAttachmentStaging(
+            threadId, turnId, submission.stagingLease, &stagingError)) {
+        if (submission.stagingLease)
+            (void)submission.stagingLease->cleanup();
+        showWriteError(stagingError);
+        return;
+    }
     turnSteerInFlight = true;
     if (selectedThreadId == threadId)
         conversation->setWriteStatus(QStringLiteral("Steering turn…"));
     refreshControls();
 
-    retainAttachmentStaging(threadId, turnId, submission.stagingLease);
     const QPointer<WorkbenchWidget> self(this);
     const auto immediateError = frontendSession.steerTurn(
         threadId,
@@ -1599,7 +1620,13 @@ void WorkbenchWidget::steerTurn(const QString& threadId,
                         QStringLiteral("Turn in %1 could not be steered: %2")
                             .arg(targetThreadId, error));
             } else {
-                self->retainAttachmentStaging(targetThreadId, targetTurnId, stagingLease);
+                QString stagingError;
+                if (!self->retainAttachmentStaging(
+                        targetThreadId, targetTurnId, stagingLease, &stagingError)) {
+                    self->showWriteError(QStringLiteral(
+                        "The steering input was accepted, but attachment cleanup ownership could not be updated: %1")
+                                             .arg(stagingError));
+                }
                 if (self->selectedThreadId == targetThreadId) {
                     self->conversation->clearPromptIfUnchanged(submittedPrompt);
                     self->conversation->clearAttachmentsIfUnchanged(submittedAttachments);
@@ -1616,34 +1643,75 @@ void WorkbenchWidget::steerTurn(const QString& threadId,
     }
 }
 
-void WorkbenchWidget::retainAttachmentStaging(const QString& threadId,
+void WorkbenchWidget::recoverAttachmentStaging()
+{
+    QSettings settings;
+    QList<PersistedAttachmentStaging> recovered;
+    if (!AttachmentManager::recoverDispatchedStaging(settings, &recovered))
+        return;
+    for (auto& entry : recovered) {
+        retainedAttachmentStaging.append(RetainedAttachmentStaging{
+            std::move(entry.registryId), std::move(entry.threadId),
+            std::move(entry.turnId), std::move(entry.stagingLease)});
+    }
+}
+
+bool WorkbenchWidget::retainAttachmentStaging(const QString& threadId,
                                               const QString& turnId,
-                                              const AttachmentStagingLeasePtr& lease)
+                                              const AttachmentStagingLeasePtr& lease,
+                                              QString* errorMessage)
 {
     if (!lease)
-        return;
-    lease->markDispatched();
+        return true;
     const auto retained = std::ranges::find_if(
         retainedAttachmentStaging,
         [&lease](const auto& entry) { return entry.lease == lease; });
-    if (retained == retainedAttachmentStaging.end()) {
-        retainedAttachmentStaging.append(RetainedAttachmentStaging{threadId, turnId, lease});
-        return;
+    const QString registryId = retained == retainedAttachmentStaging.end()
+        ? AttachmentManager::createStagingRegistryId() : retained->registryId;
+    const QString retainedThreadId = retained == retainedAttachmentStaging.end()
+        || !threadId.isEmpty() ? threadId : retained->threadId;
+    const QString retainedTurnId = retained == retainedAttachmentStaging.end()
+        || !turnId.isEmpty() ? turnId : retained->turnId;
+    if (retained != retainedAttachmentStaging.end()) {
+        if (!threadId.isEmpty())
+            retained->threadId = threadId;
+        if (!turnId.isEmpty())
+            retained->turnId = turnId;
     }
-    if (!threadId.isEmpty())
-        retained->threadId = threadId;
-    if (!turnId.isEmpty())
-        retained->turnId = turnId;
+    QSettings settings;
+    if (!AttachmentManager::persistDispatchedStaging(
+            settings, registryId, retainedThreadId, retainedTurnId, lease, errorMessage)) {
+        return false;
+    }
+    if (retained == retainedAttachmentStaging.end()) {
+        retainedAttachmentStaging.append(
+            RetainedAttachmentStaging{registryId, threadId, turnId, lease});
+        return true;
+    }
+    return true;
 }
 
 void WorkbenchWidget::releaseAttachmentStaging(const AttachmentStagingLeasePtr& lease)
 {
     if (!lease)
         return;
-    retainedAttachmentStaging.removeIf(
-        [&lease](const auto& entry) { return entry.lease == lease; });
     lease->cancelDispatch();
-    (void)lease->cleanup();
+    if (!lease->cleanup())
+        return;
+
+    QSettings settings;
+    auto iterator = retainedAttachmentStaging.begin();
+    while (iterator != retainedAttachmentStaging.end()) {
+        if (iterator->lease != lease) {
+            ++iterator;
+            continue;
+        }
+        if (!AttachmentManager::forgetDispatchedStaging(settings, iterator->registryId)) {
+            ++iterator;
+            continue;
+        }
+        iterator = retainedAttachmentStaging.erase(iterator);
+    }
 }
 
 void WorkbenchWidget::reconcileAttachmentStaging()
@@ -1671,7 +1739,12 @@ void WorkbenchWidget::reconcileAttachmentStaging()
             ++iterator;
             continue;
         }
-        if (iterator->lease && !iterator->lease->cleanup()) {
+        if (!iterator->lease || !iterator->lease->cleanup()) {
+            ++iterator;
+            continue;
+        }
+        QSettings settings;
+        if (!AttachmentManager::forgetDispatchedStaging(settings, iterator->registryId)) {
             ++iterator;
             continue;
         }

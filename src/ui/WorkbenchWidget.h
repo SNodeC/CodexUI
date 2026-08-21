@@ -69,6 +69,7 @@ private:
     };
 
     struct RetainedAttachmentStaging {
+        QString registryId;
         QString threadId;
         QString turnId;
         AttachmentStagingLeasePtr lease;
@@ -120,9 +121,11 @@ private:
     void steerTurn(const QString& threadId,
                    const QString& turnId,
                    const PreparedTurnSubmission& submission);
-    void retainAttachmentStaging(const QString& threadId,
-                                 const QString& turnId,
-                                 const AttachmentStagingLeasePtr& lease);
+    void recoverAttachmentStaging();
+    [[nodiscard]] bool retainAttachmentStaging(const QString& threadId,
+                                               const QString& turnId,
+                                               const AttachmentStagingLeasePtr& lease,
+                                               QString* errorMessage = nullptr);
     void releaseAttachmentStaging(const AttachmentStagingLeasePtr& lease);
     void reconcileAttachmentStaging();
     void reconcileSubmittedTurnSettings();

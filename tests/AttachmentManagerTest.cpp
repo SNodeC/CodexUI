@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSettings>
 #include <QTemporaryDir>
 
 #include <iostream>
@@ -149,6 +150,149 @@ int main(int argc, char** argv)
     passed &= expect(inFlightLease->cleanup() && !QFileInfo::exists(leasedDirectory),
                      "explicit terminal cleanup must remove exact staged files and their empty directory");
     inFlightLease.reset();
+
+    QTemporaryDir registryDirectory;
+    passed &= expect(registryDirectory.isValid(),
+                     "an isolated staging registry must be available");
+    const QString registryPath =
+        QDir(registryDirectory.path()).filePath(QStringLiteral("attachments.ini"));
+    QSettings registry(registryPath, QSettings::IniFormat);
+    codexui::AttachmentPreparation restartPreparation;
+    error.clear();
+    passed &= expect(codexui::AttachmentManager::prepare(
+                         {archive}, workspace.path(), QStringLiteral("thread-restart"),
+                         &restartPreparation, &error),
+                     qPrintable(error));
+    const QString restartDirectory = restartPreparation.stagingDirectory;
+    const QString restartFile = restartPreparation.items.constFirst().effectivePath;
+    const QString restartRegistryId =
+        codexui::AttachmentManager::createStagingRegistryId();
+    passed &= expect(codexui::AttachmentManager::persistDispatchedStaging(
+                         registry, restartRegistryId, QStringLiteral("thread-restart"), {},
+                         restartPreparation.stagingLease, &error)
+                         && hasOnlyOwnerPermissions(registryPath, false),
+                     "dispatched attachment ownership must persist privately before correlation");
+    restartPreparation = {};
+    passed &= expect(QFileInfo::exists(restartDirectory) && QFileInfo::exists(restartFile),
+                     "closing the originating frontend must retain dispatched attachment files");
+
+    QList<codexui::PersistedAttachmentStaging> recovered;
+    QSettings restartedRegistry(registryPath, QSettings::IniFormat);
+    passed &= expect(codexui::AttachmentManager::recoverDispatchedStaging(
+                         restartedRegistry, &recovered, &error)
+                         && recovered.size() == 1
+                         && recovered.constFirst().registryId == restartRegistryId
+                         && recovered.constFirst().threadId == QStringLiteral("thread-restart")
+                         && recovered.constFirst().turnId.isEmpty(),
+                     "restart recovery must preserve ambiguous dispatched ownership without guessing a turn");
+    passed &= expect(codexui::AttachmentManager::persistDispatchedStaging(
+                         restartedRegistry, restartRegistryId,
+                         QStringLiteral("thread-restart"), QStringLiteral("turn-authoritative"),
+                         recovered.constFirst().stagingLease, &error),
+                     "the correlated authoritative turn identity must update the existing lease record");
+    recovered.clear();
+    passed &= expect(QFileInfo::exists(restartDirectory),
+                     "dropping a recovered lease must not clean an active backend turn");
+    passed &= expect(codexui::AttachmentManager::recoverDispatchedStaging(
+                         restartedRegistry, &recovered, &error)
+                         && recovered.size() == 1
+                         && recovered.constFirst().turnId == QStringLiteral("turn-authoritative"),
+                     "a later frontend must recover the authoritative thread and turn ownership");
+    passed &= expect(recovered.constFirst().stagingLease->cleanup()
+                         && codexui::AttachmentManager::forgetDispatchedStaging(
+                             restartedRegistry, restartRegistryId, &error)
+                         && !QFileInfo::exists(restartDirectory),
+                     "simulated canonical terminal state must safely clean and forget recovered staging");
+    recovered.clear();
+    passed &= expect(codexui::AttachmentManager::recoverDispatchedStaging(
+                         restartedRegistry, &recovered, &error)
+                         && recovered.isEmpty(),
+                     "terminal cleanup must not recover on another restart");
+
+    codexui::AttachmentPreparation stalePreparation;
+    error.clear();
+    passed &= expect(codexui::AttachmentManager::prepare(
+                         {archive}, workspace.path(), QStringLiteral("thread-stale"),
+                         &stalePreparation, &error),
+                     qPrintable(error));
+    const QString staleRegistryId =
+        codexui::AttachmentManager::createStagingRegistryId();
+    passed &= expect(codexui::AttachmentManager::persistDispatchedStaging(
+                         restartedRegistry, staleRegistryId,
+                         QStringLiteral("thread-stale"), QStringLiteral("turn-stale"),
+                         stalePreparation.stagingLease, &error),
+                     qPrintable(error));
+    stalePreparation.stagingLease->cancelDispatch();
+    passed &= expect(stalePreparation.stagingLease->cleanup(),
+                     "the stale-record fixture must remove its exact staged data");
+    stalePreparation = {};
+    recovered.clear();
+    passed &= expect(codexui::AttachmentManager::recoverDispatchedStaging(
+                         restartedRegistry, &recovered, &error)
+                         && recovered.isEmpty(),
+                     "restart recovery must retire a registry record whose staged data is already absent");
+    restartedRegistry.beginGroup(QStringLiteral("attachmentStaging/v1"));
+    passed &= expect(!restartedRegistry.childGroups().contains(staleRegistryId),
+                     "retiring absent staging must persistently remove its registry record");
+    restartedRegistry.endGroup();
+
+    codexui::AttachmentPreparation rejectedPreparation;
+    error.clear();
+    passed &= expect(codexui::AttachmentManager::prepare(
+                         {archive}, workspace.path(), QStringLiteral("thread-rejected"),
+                         &rejectedPreparation, &error),
+                     qPrintable(error));
+    const QString rejectedDirectory = rejectedPreparation.stagingDirectory;
+    const QString rejectedRegistryId =
+        codexui::AttachmentManager::createStagingRegistryId();
+    passed &= expect(codexui::AttachmentManager::persistDispatchedStaging(
+                         restartedRegistry, rejectedRegistryId,
+                         QStringLiteral("thread-rejected"), {},
+                         rejectedPreparation.stagingLease, &error),
+                     qPrintable(error));
+    rejectedPreparation.stagingLease->cancelDispatch();
+    passed &= expect(rejectedPreparation.stagingLease->cleanup()
+                         && codexui::AttachmentManager::forgetDispatchedStaging(
+                             restartedRegistry, rejectedRegistryId, &error)
+                         && !QFileInfo::exists(rejectedDirectory),
+                     "an immediate rejection must clean exact files before forgetting its registry entry");
+    rejectedPreparation = {};
+
+    codexui::AttachmentPreparation tamperedPreparation;
+    error.clear();
+    passed &= expect(codexui::AttachmentManager::prepare(
+                         {archive}, workspace.path(), QStringLiteral("thread-tampered"),
+                         &tamperedPreparation, &error),
+                     qPrintable(error));
+    const QString tamperedDirectory = tamperedPreparation.stagingDirectory;
+    const QString tamperedFile = tamperedPreparation.items.constFirst().effectivePath;
+    const QString outsideFile = writeFile(
+        QDir(workspace.path()).filePath(QStringLiteral("must-not-delete.txt")), "outside");
+    const QString tamperedRegistryId =
+        codexui::AttachmentManager::createStagingRegistryId();
+    passed &= expect(codexui::AttachmentManager::persistDispatchedStaging(
+                         restartedRegistry, tamperedRegistryId,
+                         QStringLiteral("thread-tampered"), QStringLiteral("turn-tampered"),
+                         tamperedPreparation.stagingLease, &error),
+                     qPrintable(error));
+    restartedRegistry.beginGroup(QStringLiteral("attachmentStaging/v1"));
+    restartedRegistry.beginGroup(tamperedRegistryId);
+    restartedRegistry.setValue(QStringLiteral("files"), QStringList{outsideFile});
+    restartedRegistry.endGroup();
+    restartedRegistry.endGroup();
+    restartedRegistry.sync();
+    tamperedPreparation = {};
+    recovered.clear();
+    passed &= expect(codexui::AttachmentManager::recoverDispatchedStaging(
+                         restartedRegistry, &recovered, &error)
+                         && recovered.isEmpty() && QFileInfo::exists(outsideFile)
+                         && QFileInfo::exists(tamperedFile),
+                     "recovery must reject paths outside the exact staging directory without deleting them");
+    passed &= expect(codexui::AttachmentManager::forgetDispatchedStaging(
+                         restartedRegistry, tamperedRegistryId, &error)
+                         && QFile::remove(tamperedFile) && QDir().rmdir(tamperedDirectory)
+                         && QFile::remove(outsideFile),
+                     "the tampered recovery fixture must remain removable without recursive deletion");
 
     codexui::AttachmentPreparation localFailure;
     error.clear();

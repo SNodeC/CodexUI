@@ -10,6 +10,7 @@
 #include <QMimeDatabase>
 #include <QSaveFile>
 #include <QSet>
+#include <QSettings>
 #include <QUuid>
 
 #include <algorithm>
@@ -22,6 +23,7 @@ constexpr QFileDevice::Permissions PrivateDirectoryPermissions =
     QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner;
 constexpr QFileDevice::Permissions PrivateFilePermissions =
     QFileDevice::ReadOwner | QFileDevice::WriteOwner;
+constexpr auto StagingRegistryGroup = "attachmentStaging/v1";
 
 QString errorWithPath(const QString& message, const QString& path)
 {
@@ -224,10 +226,126 @@ bool ensurePrivateStagingRoot(const QString& workspace,
     return true;
 }
 
+bool validRegistryId(const QString& registryId)
+{
+    const QUuid id(QStringLiteral("{%1}").arg(registryId));
+    return !id.isNull() && id.toString(QUuid::WithoutBraces) == registryId;
+}
+
+QString cleanAbsolutePath(const QString& path)
+{
+    if (!QDir::isAbsolutePath(path))
+        return {};
+    return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+}
+
+bool isSafeStagingPath(const QString& workspace,
+                       const QString& stagingDirectory,
+                       const QStringList& stagedFiles)
+{
+    const QString cleanWorkspace = cleanAbsolutePath(workspace);
+    const QString cleanStagingDirectory = cleanAbsolutePath(stagingDirectory);
+    if (cleanWorkspace.isEmpty() || cleanStagingDirectory.isEmpty())
+        return false;
+
+    const QFileInfo workspaceInfo(cleanWorkspace);
+    if (!workspaceInfo.exists() || !workspaceInfo.isDir() || workspaceInfo.isSymLink()
+        || workspaceInfo.canonicalFilePath() != cleanWorkspace) {
+        return false;
+    }
+
+    const QString metadataDirectory = QDir(cleanWorkspace).filePath(QStringLiteral(".codex-ui"));
+    const QString stagingRoot = QDir(metadataDirectory).filePath(QStringLiteral("attachments"));
+    const QFileInfo stagingInfo(cleanStagingDirectory);
+    if (QDir::cleanPath(stagingInfo.absolutePath()) != QDir::cleanPath(stagingRoot)
+        || stagingInfo.fileName().isEmpty() || stagingInfo.fileName() == QStringLiteral(".")
+        || stagingInfo.fileName() == QStringLiteral("..")) {
+        return false;
+    }
+
+    for (const QString& component : {metadataDirectory, stagingRoot, cleanStagingDirectory}) {
+        const QFileInfo info(component);
+        if (info.exists() && (info.isSymLink() || !info.isDir()))
+            return false;
+    }
+
+    QSet<QString> uniqueFiles;
+    for (const QString& path : stagedFiles) {
+        const QString cleanPath = cleanAbsolutePath(path);
+        const QFileInfo fileInfo(cleanPath);
+        if (cleanPath.isEmpty()
+            || QDir::cleanPath(fileInfo.absolutePath()) != cleanStagingDirectory
+            || fileInfo.fileName().isEmpty() || fileInfo.fileName() == QStringLiteral(".")
+            || fileInfo.fileName() == QStringLiteral("..")
+            || uniqueFiles.contains(cleanPath)) {
+            return false;
+        }
+        if (fileInfo.exists() && (fileInfo.isSymLink() || fileInfo.isDir()))
+            return false;
+        uniqueFiles.insert(cleanPath);
+    }
+    return !stagedFiles.isEmpty();
+}
+
+bool stagingArtifactsAreAbsent(const QString& stagingDirectory,
+                               const QStringList& stagedFiles)
+{
+    const QString cleanStagingDirectory = cleanAbsolutePath(stagingDirectory);
+    if (cleanStagingDirectory.isEmpty())
+        return false;
+
+    const QFileInfo directoryInfo(cleanStagingDirectory);
+    if (directoryInfo.exists() || directoryInfo.isSymLink())
+        return false;
+    return std::ranges::all_of(stagedFiles, [](const QString& path) {
+        const QString cleanPath = cleanAbsolutePath(path);
+        if (cleanPath.isEmpty())
+            return false;
+        const QFileInfo info(cleanPath);
+        return !info.exists() && !info.isSymLink();
+    });
+}
+
+bool synchronizePrivateSettings(QSettings& settings, QString* errorMessage)
+{
+    const QString fileName = settings.fileName();
+    QFileInfo settingsInfo(fileName);
+    if (settingsInfo.isSymLink()
+        || (settingsInfo.exists()
+            && (!settingsInfo.isFile()
+                || !QFile::setPermissions(fileName, PrivateFilePermissions)))) {
+        if (errorMessage)
+            *errorMessage = errorWithPath(
+                QStringLiteral("Unable to make the attachment staging registry private."),
+                fileName);
+        return false;
+    }
+
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("Unable to update the attachment staging registry.");
+        return false;
+    }
+
+    settingsInfo.refresh();
+    if (settingsInfo.exists()
+        && (!settingsInfo.isFile() || settingsInfo.isSymLink()
+            || !QFile::setPermissions(fileName, PrivateFilePermissions))) {
+        if (errorMessage)
+            *errorMessage = errorWithPath(
+                QStringLiteral("Unable to make the attachment staging registry private."),
+                fileName);
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
-AttachmentStagingLease::AttachmentStagingLease(QString directory)
-    : stagingDirectory(std::move(directory))
+AttachmentStagingLease::AttachmentStagingLease(QString workspace, QString directory)
+    : workspaceDirectory(std::move(workspace))
+    , stagingDirectory(std::move(directory))
 {
 }
 
@@ -409,7 +527,7 @@ bool AttachmentManager::prepare(const QList<AttachmentInfo>& attachments,
         }
         result->stagingDirectory = stagingDirectory;
         result->stagingLease = std::shared_ptr<AttachmentStagingLease>(
-            new AttachmentStagingLease(stagingDirectory));
+            new AttachmentStagingLease(canonicalWorkspace, stagingDirectory));
     }
 
     QSet<QString> occupiedNames;
@@ -490,6 +608,105 @@ qint64 AttachmentManager::totalSize(const QList<AttachmentInfo>& attachments)
         total += std::max<qint64>(0, attachment.sizeBytes);
     }
     return total;
+}
+
+QString AttachmentManager::createStagingRegistryId()
+{
+    return QUuid::createUuid().toString(QUuid::WithoutBraces);
+}
+
+bool AttachmentManager::persistDispatchedStaging(
+    QSettings& settings,
+    const QString& registryId,
+    const QString& threadId,
+    const QString& turnId,
+    const AttachmentStagingLeasePtr& stagingLease,
+    QString* errorMessage)
+{
+    if (!stagingLease || !validRegistryId(registryId) || threadId.isEmpty()
+        || !isSafeStagingPath(stagingLease->workspaceDirectory,
+                              stagingLease->stagingDirectory,
+                              stagingLease->stagedFiles)) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("Invalid attachment staging ownership metadata.");
+        return false;
+    }
+
+    settings.beginGroup(QString::fromLatin1(StagingRegistryGroup));
+    settings.beginGroup(registryId);
+    settings.setValue(QStringLiteral("workspace"), stagingLease->workspaceDirectory);
+    settings.setValue(QStringLiteral("directory"), stagingLease->stagingDirectory);
+    settings.setValue(QStringLiteral("files"), stagingLease->stagedFiles);
+    settings.setValue(QStringLiteral("threadId"), threadId);
+    settings.setValue(QStringLiteral("turnId"), turnId);
+    settings.endGroup();
+    settings.endGroup();
+    if (!synchronizePrivateSettings(settings, errorMessage))
+        return false;
+    stagingLease->markDispatched();
+    return true;
+}
+
+bool AttachmentManager::recoverDispatchedStaging(
+    QSettings& settings,
+    QList<PersistedAttachmentStaging>* result,
+    QString* errorMessage)
+{
+    if (!result) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("No attachment staging recovery result was provided.");
+        return false;
+    }
+    result->clear();
+    if (!synchronizePrivateSettings(settings, errorMessage))
+        return false;
+
+    settings.beginGroup(QString::fromLatin1(StagingRegistryGroup));
+    const QStringList registryIds = settings.childGroups();
+    bool removedStaleRecord = false;
+    for (const QString& registryId : registryIds) {
+        if (!validRegistryId(registryId))
+            continue;
+        settings.beginGroup(registryId);
+        const QString workspace = settings.value(QStringLiteral("workspace")).toString();
+        const QString directory = settings.value(QStringLiteral("directory")).toString();
+        const QStringList files = settings.value(QStringLiteral("files")).toStringList();
+        const QString threadId = settings.value(QStringLiteral("threadId")).toString();
+        const QString turnId = settings.value(QStringLiteral("turnId")).toString();
+        settings.endGroup();
+        if (stagingArtifactsAreAbsent(directory, files)) {
+            settings.remove(registryId);
+            removedStaleRecord = true;
+            continue;
+        }
+        if (threadId.isEmpty() || !isSafeStagingPath(workspace, directory, files))
+            continue;
+
+        auto stagingLease = std::shared_ptr<AttachmentStagingLease>(
+            new AttachmentStagingLease(workspace, directory));
+        for (const QString& file : files)
+            stagingLease->trackFile(cleanAbsolutePath(file));
+        stagingLease->markDispatched();
+        result->append(PersistedAttachmentStaging{
+            registryId, threadId, turnId, std::move(stagingLease)});
+    }
+    settings.endGroup();
+    return !removedStaleRecord || synchronizePrivateSettings(settings, errorMessage);
+}
+
+bool AttachmentManager::forgetDispatchedStaging(QSettings& settings,
+                                                 const QString& registryId,
+                                                 QString* errorMessage)
+{
+    if (!validRegistryId(registryId)) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("Invalid attachment staging registry identity.");
+        return false;
+    }
+    settings.beginGroup(QString::fromLatin1(StagingRegistryGroup));
+    settings.remove(registryId);
+    settings.endGroup();
+    return synchronizePrivateSettings(settings, errorMessage);
 }
 
 bool AttachmentManager::isSupportedLocalImage(const QString& path, const QString& mimeType)

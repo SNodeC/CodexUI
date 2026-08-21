@@ -9,6 +9,8 @@
 
 #include <memory>
 
+class QSettings;
+
 namespace codexui {
 
 struct AttachmentInfo
@@ -49,9 +51,10 @@ public:
 
 private:
     friend class AttachmentManager;
-    explicit AttachmentStagingLease(QString directory);
+    AttachmentStagingLease(QString workspace, QString directory);
     void trackFile(QString path);
 
+    QString workspaceDirectory;
     QString stagingDirectory;
     QStringList stagedFiles;
     bool dispatched = false;
@@ -65,6 +68,14 @@ struct AttachmentPreparation
     QStringList imagePaths;
     QString genericFilePrompt;
     QString stagingDirectory;
+    AttachmentStagingLeasePtr stagingLease;
+};
+
+struct PersistedAttachmentStaging
+{
+    QString registryId;
+    QString threadId;
+    QString turnId;
     AttachmentStagingLeasePtr stagingLease;
 };
 
@@ -92,6 +103,22 @@ public:
                                                const AttachmentPreparation& preparation);
     [[nodiscard]] static QString formatSize(qint64 sizeBytes);
     [[nodiscard]] static qint64 totalSize(const QList<AttachmentInfo>& attachments);
+    [[nodiscard]] static QString createStagingRegistryId();
+    [[nodiscard]] static bool persistDispatchedStaging(
+        QSettings& settings,
+        const QString& registryId,
+        const QString& threadId,
+        const QString& turnId,
+        const AttachmentStagingLeasePtr& stagingLease,
+        QString* errorMessage = nullptr);
+    [[nodiscard]] static bool recoverDispatchedStaging(
+        QSettings& settings,
+        QList<PersistedAttachmentStaging>* result,
+        QString* errorMessage = nullptr);
+    [[nodiscard]] static bool forgetDispatchedStaging(
+        QSettings& settings,
+        const QString& registryId,
+        QString* errorMessage = nullptr);
 
 private:
     [[nodiscard]] static bool isSupportedLocalImage(const QString& path,
