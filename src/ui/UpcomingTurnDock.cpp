@@ -303,7 +303,7 @@ void resetNetworkChoices(QComboBox* combo, const QString& access)
         return;
     }
     if (access == QStringLiteral("danger-full-access")) {
-        addChoice(combo, QStringLiteral("Enabled"), QStringLiteral("enabled"));
+        addChoice(combo, QStringLiteral("Included"), QStringLiteral("enabled"));
         return;
     }
     if (access == QStringLiteral("workspace-write")
@@ -1256,7 +1256,7 @@ void UpcomingTurnDock::refreshNetworkControl(bool accessChangedByUser)
     fieldSurfaces[static_cast<std::size_t>(Field::Network)]->setEnabled(editable);
     QString tooltip;
     if (access == QStringLiteral("danger-full-access"))
-        tooltip = QStringLiteral("Full access always includes network access");
+        tooltip = QStringLiteral("Full access includes network access; Codex does not provide a separate network override for this mode");
     else if (access == QStringLiteral("default"))
         tooltip = QStringLiteral("Network access follows the Codex default access policy");
     else if (!editable)

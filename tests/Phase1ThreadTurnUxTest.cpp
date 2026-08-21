@@ -487,10 +487,11 @@ bool testUpcomingTurnNetworkAccess()
     access->setCurrentIndex(access->findData(QStringLiteral("danger-full-access")));
     draft = dock.draft();
     passed &= expect(network->currentData().toString() == QStringLiteral("enabled")
-                         && !network->isEnabled() && draft.sandboxPolicy.hasValue()
+                         && network->currentText() == QStringLiteral("Included") && !network->isEnabled()
+                         && draft.sandboxPolicy.hasValue()
                          && std::holds_alternative<typed::DangerFullAccessSandboxPolicy>(
                              *draft.sandboxPolicy),
-                     "full access must display its fixed enabled network policy");
+                     "full access must clearly display its inherent network access without offering an unsupported override");
     return passed;
 }
 

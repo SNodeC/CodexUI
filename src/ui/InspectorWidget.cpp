@@ -312,7 +312,7 @@ QString approvalPolicyText(const typed::AskForApproval& policy)
 QString sandboxPolicyText(const typed::SandboxPolicy& policy)
 {
     if (std::holds_alternative<typed::DangerFullAccessSandboxPolicy>(policy))
-        return QStringLiteral("Danger full access");
+        return QStringLiteral("Danger full access · Network included");
     if (const auto* readOnly = std::get_if<typed::ReadOnlySandboxPolicy>(&policy))
         return readOnly->networkAccessOrDefault() ? QStringLiteral("Read only · Network enabled")
                                                   : QStringLiteral("Read only · Network restricted");
