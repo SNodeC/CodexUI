@@ -6,6 +6,7 @@
 #include <QHash>
 #include <QSet>
 #include <QString>
+#include <QStringList>
 #include <QWidget>
 
 #include <vector>
@@ -125,6 +126,10 @@ public:
     void setThreads(const ai::openai::codex::frontend::client::State& state,
                     const QString& selectedThreadId,
                     bool allThreadDiscoveryComplete);
+    void updateThreads(const ai::openai::codex::frontend::client::State& state,
+                       const QString& selectedThreadId,
+                       bool allThreadDiscoveryComplete,
+                       const QStringList& affectedThreadIds);
     void setConnectionStatus(const QString& title, const QString& detail, const QString& color);
     void setNewThreadEnabled(bool enabled);
     void setThreadInteractionEnabled(bool enabled);
@@ -150,6 +155,12 @@ private:
     };
 
     void renderThreadTree();
+    [[nodiscard]] ThreadPresentation threadPresentation(
+        const ai::openai::codex::frontend::client::State& state,
+        const ai::openai::codex::frontend::client::ThreadState& thread,
+        bool awaitingResponse) const;
+    void rebuildRenderedThreadIndex();
+    void updateRenderedRows(const QSet<QString>& threadIds);
     void tryAcquireOrganizationLock();
     void persistOrganization();
     void createFolder(const QString& parentFolderId = {});
@@ -166,6 +177,8 @@ private:
     QPushButton* newThread = nullptr;
     QPushButton* newFolder = nullptr;
     std::vector<ThreadPresentation> renderedThreads;
+    QHash<QString, qsizetype> renderedThreadIndexes;
+    QHash<QString, QWidget*> renderedThreadRows;
     QString renderedSelection;
     detail::ThreadOrganization organization;
     quint64 renderedOrganizationRevision = 0;

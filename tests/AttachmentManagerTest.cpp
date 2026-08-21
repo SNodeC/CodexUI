@@ -151,6 +151,23 @@ int main(int argc, char** argv)
                      "explicit terminal cleanup must remove exact staged files and their empty directory");
     inFlightLease.reset();
 
+    const QString cancellablePath = writeFile(
+        QDir(source.path()).filePath(QStringLiteral("cancellable.bin")),
+        QByteArray(2 * 1024 * 1024, 'x'));
+    const codexui::AttachmentInfo cancellable = inspect(cancellablePath);
+    codexui::AttachmentPreparation cancelledPreparation;
+    error.clear();
+    int cancellationChecks = 0;
+    passed &= expect(!codexui::AttachmentManager::prepare(
+                         {cancellable}, workspace.path(), QStringLiteral("thread-cancelled"),
+                         &cancelledPreparation, &error,
+                         [&cancellationChecks] { return ++cancellationChecks >= 5; })
+                         && error.contains(QStringLiteral("cancelled"), Qt::CaseInsensitive)
+                         && cancelledPreparation.stagingDirectory.isEmpty()
+                         && QDir(attachmentsPath).entryList(
+                                QDir::NoDotAndDotDot | QDir::Dirs).isEmpty(),
+                     "cooperative cancellation during a chunked copy must remove partial staging");
+
     QTemporaryDir registryDirectory;
     passed &= expect(registryDirectory.isValid(),
                      "an isolated staging registry must be available");

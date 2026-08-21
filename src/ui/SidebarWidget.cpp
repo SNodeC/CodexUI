@@ -1026,6 +1026,77 @@ SidebarWidget::~SidebarWidget()
     delete organizationLock;
 }
 
+SidebarWidget::ThreadPresentation SidebarWidget::threadPresentation(
+    const ai::openai::codex::frontend::client::State& state,
+    const ai::openai::codex::frontend::client::ThreadState& thread,
+    bool awaitingResponse) const
+{
+    const QString id = QString::fromStdString(thread.id.value);
+    const QString title = boundedRowText(
+        thread.title && !thread.title->empty() ? QString::fromStdString(*thread.title) : id);
+    const detail::ThreadUiStatus uiStatus = detail::threadUiStatus(
+        state, thread, awaitingResponse);
+    QStringList secondaryParts;
+    if (uiStatus.archived)
+        secondaryParts.append(QStringLiteral("Archived"));
+    else if (!thread.fullyLoaded)
+        secondaryParts.append(QStringLiteral("Loading"));
+    else if (uiStatus.running)
+        secondaryParts.append(QStringLiteral("Running"));
+    else if (!ai::openai::codex::frontend::client::threadIsIdle(thread))
+        secondaryParts.append(QStringLiteral("Ready to resume"));
+    else
+        secondaryParts.append(QStringLiteral("Idle"));
+    secondaryParts.append(thread.orderedTurns.empty()
+                              ? QStringLiteral("Ready for first turn")
+                              : QStringLiteral("%1 turn%2")
+                                    .arg(thread.orderedTurns.size())
+                                    .arg(thread.orderedTurns.size() == 1
+                                             ? QString{}
+                                             : QStringLiteral("s")));
+    if (thread.ephemeral.value_or(false))
+        secondaryParts.append(QStringLiteral("Temporary"));
+    return {id,
+            title,
+            boundedRowText(secondaryParts.join(QStringLiteral(" · "))),
+            threadStatusColor(thread.status),
+            uiStatus.actions,
+            uiStatus.running,
+            uiStatus.awaitingResponse,
+            uiStatus.archived};
+}
+
+void SidebarWidget::rebuildRenderedThreadIndex()
+{
+    renderedThreadIndexes.clear();
+    renderedThreadIndexes.reserve(static_cast<qsizetype>(renderedThreads.size()));
+    for (std::size_t index = 0; index < renderedThreads.size(); ++index)
+        renderedThreadIndexes.insert(renderedThreads[index].id, static_cast<qsizetype>(index));
+}
+
+void SidebarWidget::updateRenderedRows(const QSet<QString>& threadIds)
+{
+    for (const QString& threadId : threadIds) {
+        auto* row = static_cast<ThreadRow*>(renderedThreadRows.value(threadId, nullptr));
+        if (!row)
+            continue;
+        const auto index = renderedThreadIndexes.constFind(threadId);
+        if (index == renderedThreadIndexes.cend()
+            || *index < 0 || static_cast<std::size_t>(*index) >= renderedThreads.size())
+            continue;
+        const ThreadPresentation& presentation = renderedThreads[static_cast<std::size_t>(*index)];
+        row->updatePresentation(presentation.title,
+                                presentation.details,
+                                presentation.color,
+                                presentation.actions,
+                                presentation.running,
+                                presentation.attention,
+                                presentation.archived);
+        row->setSelected(presentation.id == renderedSelection);
+        row->setInteractionEnabled(threadInteractionEnabled);
+    }
+}
+
 void SidebarWidget::tryAcquireOrganizationLock()
 {
     if (organizationWritable || !organizationLock || !organizationLock->tryLock(0))
@@ -1071,39 +1142,8 @@ void SidebarWidget::setThreads(const ai::openai::codex::frontend::client::State&
     presentations.reserve(threads.size());
     for (const auto& thread : threads) {
         const QString id = QString::fromStdString(thread.id.value);
-        const QString title = boundedRowText(
-            thread.title && !thread.title->empty() ? QString::fromStdString(*thread.title) : id);
-        const detail::ThreadUiStatus uiStatus = detail::threadUiStatus(
-            state, thread, threadsAwaitingResponse.contains(id));
-        QStringList secondaryParts;
-        if (uiStatus.archived)
-            secondaryParts.append(QStringLiteral("Archived"));
-        else if (!thread.fullyLoaded)
-            secondaryParts.append(QStringLiteral("Loading"));
-        else if (uiStatus.running)
-            secondaryParts.append(QStringLiteral("Running"));
-        else if (!ai::openai::codex::frontend::client::threadIsIdle(thread))
-            secondaryParts.append(QStringLiteral("Ready to resume"));
-        else
-            secondaryParts.append(QStringLiteral("Idle"));
-        secondaryParts.append(thread.orderedTurns.empty()
-                                  ? QStringLiteral("Ready for first turn")
-                                  : QStringLiteral("%1 turn%2")
-                                        .arg(thread.orderedTurns.size())
-                                        .arg(thread.orderedTurns.size() == 1
-                                                 ? QString{}
-                                                 : QStringLiteral("s")));
-        if (thread.ephemeral.value_or(false))
-            secondaryParts.append(QStringLiteral("Temporary"));
-        const QString secondary = secondaryParts.join(QStringLiteral(" · "));
-        presentations.push_back({id,
-                                 title,
-                                 boundedRowText(secondary),
-                                 threadStatusColor(thread.status),
-                                 uiStatus.actions,
-                                 uiStatus.running,
-                                 uiStatus.awaitingResponse,
-                                 uiStatus.archived});
+        presentations.push_back(threadPresentation(
+            state, thread, threadsAwaitingResponse.contains(id)));
     }
     std::stable_partition(presentations.begin(), presentations.end(),
                           [](const ThreadPresentation& presentation) {
@@ -1122,49 +1162,82 @@ void SidebarWidget::setThreads(const ai::openai::codex::frontend::client::State&
     sameOrder = sameOrder && renderedOrganizationRevision == organization.revision();
     if (sameOrder) {
         renderedThreads = presentations;
+        rebuildRenderedThreadIndex();
         renderedSelection = selectedThreadId;
-        QHash<QString, const ThreadPresentation*> presentationsById;
-        presentationsById.reserve(static_cast<qsizetype>(renderedThreads.size()));
+        QSet<QString> allThreadIds;
+        allThreadIds.reserve(static_cast<qsizetype>(renderedThreads.size()));
         for (const ThreadPresentation& presentation : renderedThreads)
-            presentationsById.insert(presentation.id, &presentation);
-        std::size_t updatedRows = 0;
-        QTreeWidgetItemIterator iterator(threadTree);
-        while (*iterator) {
-            auto* item = *iterator;
-            auto* row = dynamic_cast<ThreadRow*>(threadTree->itemWidget(item, 0));
-            ++iterator;
-            if (!row)
-                continue;
-            const auto presentation = presentationsById.constFind(row->id());
-            if (presentation == presentationsById.cend()) {
-                sameOrder = false;
-                break;
-            }
-            const ThreadPresentation& value = **presentation;
-            row->updatePresentation(value.title,
-                                    value.details,
-                                    value.color,
-                                    value.actions,
-                                    value.running,
-                                    value.attention,
-                                    value.archived);
-            row->setSelected(value.id == selectedThreadId);
-            row->setInteractionEnabled(threadInteractionEnabled);
-            ++updatedRows;
-        }
-        sameOrder = sameOrder && updatedRows == renderedThreads.size();
-        if (sameOrder)
+            allThreadIds.insert(presentation.id);
+        if (renderedThreadRows.size() == static_cast<qsizetype>(renderedThreads.size())) {
+            updateRenderedRows(allThreadIds);
             return;
+        }
     }
     threadsRendered = true;
     renderedThreads = std::move(presentations);
+    rebuildRenderedThreadIndex();
     renderedSelection = selectedThreadId;
     renderThreadTree();
+}
+
+void SidebarWidget::updateThreads(
+    const ai::openai::codex::frontend::client::State& state,
+    const QString& selectedThreadId,
+    bool allThreadDiscoveryComplete,
+    const QStringList& affectedThreadIds)
+{
+    tryAcquireOrganizationLock();
+    if (!threadsRendered || selectedThreadId != renderedSelection
+        || renderedOrganizationRevision != organization.revision()) {
+        setThreads(state, selectedThreadId, allThreadDiscoveryComplete);
+        return;
+    }
+
+    QSet<QString> uniqueThreadIds(affectedThreadIds.cbegin(), affectedThreadIds.cend());
+    if (uniqueThreadIds.isEmpty())
+        return;
+
+    QSet<QString> threadsAwaitingResponse;
+    if (state.hasPendingRequestProjection()) {
+        for (const auto& request : state.pendingRequests()) {
+            if (request.threadId)
+                threadsAwaitingResponse.insert(QString::fromStdString(request.threadId->value));
+        }
+    }
+
+    QSet<QString> changedRows;
+    for (const QString& threadId : uniqueThreadIds) {
+        const auto existingIndex = renderedThreadIndexes.constFind(threadId);
+        const auto* thread = state.thread(threadId.toStdString());
+        if (!thread || existingIndex == renderedThreadIndexes.cend()
+            || *existingIndex < 0
+            || static_cast<std::size_t>(*existingIndex) >= renderedThreads.size()) {
+            // Insertions/removals and archive-boundary changes can alter the
+            // tree hierarchy and ordering. Reconcile those uncommon cases
+            // through the authoritative full path.
+            setThreads(state, selectedThreadId, allThreadDiscoveryComplete);
+            return;
+        }
+        ThreadPresentation& existing =
+            renderedThreads[static_cast<std::size_t>(*existingIndex)];
+        ThreadPresentation next = threadPresentation(
+            state, *thread, threadsAwaitingResponse.contains(threadId));
+        if (next.archived != existing.archived) {
+            setThreads(state, selectedThreadId, allThreadDiscoveryComplete);
+            return;
+        }
+        if (next != existing) {
+            existing = std::move(next);
+            changedRows.insert(threadId);
+        }
+    }
+    updateRenderedRows(changedRows);
 }
 
 void SidebarWidget::renderThreadTree()
 {
     rebuildingTree = true;
+    renderedThreadRows.clear();
     threadTree->clear();
     renderedOrganizationRevision = organization.revision();
 
@@ -1263,6 +1336,7 @@ void SidebarWidget::renderThreadTree()
                                       presentation.attention,
                                       presentation.archived,
                                       threadTree);
+            renderedThreadRows.insert(presentation.id, row);
             row->setSelected(presentation.id == renderedSelection);
             row->setInteractionEnabled(threadInteractionEnabled);
             row->clicked = [this](ThreadRow* selected) { emit threadSelected(selected->id()); };

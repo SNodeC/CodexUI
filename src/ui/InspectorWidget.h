@@ -8,6 +8,7 @@
 #include <QByteArray>
 #include <QString>
 #include <QWidget>
+#include <QSet>
 
 #include <cstdint>
 
@@ -32,6 +33,7 @@ public:
                 const QString& backendStatus,
                 const QString& selectedTurnId = {});
     void updateStateRevision(std::uint64_t revision);
+    [[nodiscard]] bool dependsOnThread(const QString& threadId) const;
     void showInfo();
 
 signals:
@@ -50,6 +52,7 @@ private:
     QVBoxLayout* changesContent = nullptr;
     QVBoxLayout* infoContent = nullptr;
     QString inspectedThreadId;
+    QSet<QString> dependentThreadIds;
     QString selectedAgentItemId;
     QByteArray unavailablePresentationKey;
     QByteArray planPresentationKey;

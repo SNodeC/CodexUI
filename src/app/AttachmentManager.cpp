@@ -63,8 +63,18 @@ QString uniqueDestinationName(const QString& requested, QSet<QString>& occupiedN
 
 bool copyFileAtomically(const QString& sourcePath,
                         const QString& destinationPath,
-                        QString* errorMessage)
+                        QString* errorMessage,
+                        const AttachmentManager::CancellationCheck& cancelled)
 {
+    const auto reportCancellation = [errorMessage]() {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("Attachment preparation was cancelled.");
+    };
+    if (cancelled && cancelled()) {
+        reportCancellation();
+        return false;
+    }
+
     QFile source(sourcePath);
     if (!source.open(QIODevice::ReadOnly)) {
         if (errorMessage)
@@ -85,9 +95,20 @@ bool copyFileAtomically(const QString& sourcePath,
         return false;
     }
 
+    const auto cancelDestination = [&]() {
+        destination.cancelWriting();
+        // QSaveFile's direct-write fallback cannot roll back by itself. This
+        // path is always a fresh file inside a fresh staging directory.
+        (void)QFile::remove(destinationPath);
+        reportCancellation();
+        return false;
+    };
+
     constexpr qint64 chunkSize = 1024 * 1024;
     QByteArray buffer(static_cast<qsizetype>(chunkSize), Qt::Uninitialized);
     while (!source.atEnd()) {
+        if (cancelled && cancelled())
+            return cancelDestination();
         const qint64 count = source.read(buffer.data(), chunkSize);
         if (count < 0 || (count > 0 && destination.write(buffer.constData(), count) != count)) {
             destination.cancelWriting();
@@ -102,7 +123,11 @@ bool copyFileAtomically(const QString& sourcePath,
         }
         if (count == 0)
             break;
+        if (cancelled && cancelled())
+            return cancelDestination();
     }
+    if (cancelled && cancelled())
+        return cancelDestination();
     if (!destination.commit()) {
         if (errorMessage)
             *errorMessage = errorWithPath(
@@ -493,7 +518,8 @@ bool AttachmentManager::prepare(const QList<AttachmentInfo>& attachments,
                                 const QString& workspace,
                                 const QString& threadId,
                                 AttachmentPreparation* result,
-                                QString* errorMessage)
+                                QString* errorMessage,
+                                CancellationCheck cancelled)
 {
     if (!result) {
         if (errorMessage)
@@ -501,6 +527,11 @@ bool AttachmentManager::prepare(const QList<AttachmentInfo>& attachments,
         return false;
     }
     *result = {};
+    if (cancelled && cancelled()) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("Attachment preparation was cancelled.");
+        return false;
+    }
     if (!validateForWorkspace(attachments, workspace, errorMessage))
         return false;
 
@@ -533,6 +564,14 @@ bool AttachmentManager::prepare(const QList<AttachmentInfo>& attachments,
     QSet<QString> occupiedNames;
     QStringList promptLines;
     for (const AttachmentInfo& attachment : attachments) {
+        if (cancelled && cancelled()) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("Attachment preparation was cancelled.");
+            if (result->stagingLease)
+                (void)result->stagingLease->cleanup();
+            *result = {};
+            return false;
+        }
         PreparedAttachment prepared;
         prepared.source = attachment;
         if (attachment.kind == AttachmentInfo::Kind::Image) {
@@ -543,7 +582,10 @@ bool AttachmentManager::prepare(const QList<AttachmentInfo>& attachments,
                 safeFileName(attachment.displayName), occupiedNames);
             prepared.effectivePath = QDir(stagingDirectory).filePath(destinationName);
             prepared.staged = true;
-            if (!copyFileAtomically(attachment.sourcePath, prepared.effectivePath, errorMessage)) {
+            if (!copyFileAtomically(attachment.sourcePath,
+                                    prepared.effectivePath,
+                                    errorMessage,
+                                    cancelled)) {
                 (void)result->stagingLease->cleanup();
                 *result = {};
                 return false;

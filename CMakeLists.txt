@@ -10,7 +10,7 @@ include(GNUInstallDirs)
 set(CMAKE_AUTOMOC ON)
 
 find_package(AISuite 0.5.0 CONFIG REQUIRED)
-find_package(Qt6 REQUIRED COMPONENTS Network Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Concurrent Network Widgets)
 
 qt_add_executable(
     codex-ui
@@ -35,6 +35,8 @@ qt_add_executable(
     src/ui/InteractiveRequestDialog.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
+    src/ui/PresentationRefreshAccumulator.cpp
+    src/ui/PresentationRefreshAccumulator.h
     src/ui/SidebarWidget.cpp
     src/ui/SidebarWidget.h
     src/ui/ThreadSetupDialog.cpp
@@ -52,6 +54,7 @@ target_link_libraries(
     codex-ui
     PRIVATE
         AISuite::OpenAICodexFrontendClient
+        Qt6::Concurrent
         Qt6::Network
         Qt6::Widgets
 )
@@ -109,6 +112,25 @@ if(BUILD_TESTING)
             Qt6::Network
     )
     add_test(NAME CodexUIFrontendSessionTest COMMAND CodexUIFrontendSessionTest)
+
+    add_executable(
+        CodexUIPresentationRefreshAccumulatorTest
+        tests/PresentationRefreshAccumulatorTest.cpp
+        src/ui/PresentationRefreshAccumulator.cpp
+        src/ui/PresentationRefreshAccumulator.h
+    )
+    target_compile_features(CodexUIPresentationRefreshAccumulatorTest PRIVATE cxx_std_20)
+    target_include_directories(CodexUIPresentationRefreshAccumulatorTest PRIVATE src)
+    target_link_libraries(
+        CodexUIPresentationRefreshAccumulatorTest
+        PRIVATE
+            AISuite::OpenAICodexFrontendClient
+            Qt6::Widgets
+    )
+    add_test(
+        NAME CodexUIPresentationRefreshAccumulatorTest
+        COMMAND CodexUIPresentationRefreshAccumulatorTest
+    )
 
     add_executable(
         CodexUIConversationLayoutTest

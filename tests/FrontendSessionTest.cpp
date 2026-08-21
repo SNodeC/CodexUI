@@ -515,17 +515,34 @@ bool testScopedItemPresentationChanges()
     replacementUpdate.changes.push_back(sdk::StateReplacedChange{});
     const auto replacement = codexui::detail::stateUpdateScope(replacementUpdate);
 
+    sdk::StateUpdate threadUpdate;
+    threadUpdate.changes.push_back(
+        sdk::ThreadUpsertedChange{ai::openai::codex::typed::ThreadId{"target-thread"}});
+    const auto threadScoped = codexui::detail::stateUpdateScope(threadUpdate);
+
     sdk::StateUpdate cursorUpdate;
     cursorUpdate.changes.push_back(
         sdk::CursorAdvancedChange{ai::openai::codex::frontend::SequenceNumber{43}});
     const auto cursor = codexui::detail::stateUpdateScope(cursorUpdate);
+
+    sdk::StateUpdate oversizedIdentityUpdate;
+    for (int index = 0;
+         index <= codexui::detail::maximumCoalescedPresentationIdentities;
+         ++index) {
+        oversizedIdentityUpdate.changes.push_back(
+            sdk::ThreadUpsertedChange{ai::openai::codex::typed::ThreadId{
+                "thread-" + std::to_string(index)}});
+    }
+    const auto boundedIdentities =
+        codexui::detail::stateUpdateScope(oversizedIdentityUpdate);
 
     bool passed = expect(unresolvedTurn.affectedThreadIds.empty()
                              && unresolvedTurn.fullyAffectedThreadIds.empty()
                              && unresolvedTurn.affectedInspectorThreadIds.empty()
                              && unresolvedTurn.allThreadsAffected
                              && unresolvedTurn.allInspectorsAffected
-                             && !unresolvedTurn.sidebarAffected
+                             && unresolvedTurn.allSidebarThreadsAffected
+                             && unresolvedTurn.sidebarAffected
                              && unresolvedTurn.hasPresentationChange,
                          "a turn upsert without a unique parent lookup must conservatively refresh all threads");
     passed &= expect(scoped.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
@@ -587,11 +604,34 @@ bool testScopedItemPresentationChanges()
                          && unscoped.hasPresentationChange,
                      "an unscoped item change must conservatively refresh all thread-bound presentations");
     passed &= expect(replacement.allThreadsAffected && replacement.allInspectorsAffected
+                         && replacement.allSidebarThreadsAffected
                          && replacement.sidebarAffected && replacement.hasPresentationChange,
                      "a State replacement must conservatively refresh every presentation");
+    passed &= expect(threadScoped.affectedThreadIds
+                             == QStringList{QStringLiteral("target-thread")}
+                         && threadScoped.fullyAffectedThreadIds
+                                == QStringList{QStringLiteral("target-thread")}
+                         && threadScoped.affectedInspectorThreadIds
+                                == QStringList{QStringLiteral("target-thread")}
+                         && threadScoped.affectedSidebarThreadIds
+                                == QStringList{QStringLiteral("target-thread")}
+                         && !threadScoped.allThreadsAffected
+                         && !threadScoped.allInspectorsAffected
+                         && !threadScoped.allSidebarThreadsAffected
+                         && threadScoped.sidebarAffected,
+                     "a thread upsert must target only its conversation, Inspector dependencies, and Sidebar row");
     passed &= expect(!cursor.allThreadsAffected && !cursor.allInspectorsAffected
+                         && !cursor.allSidebarThreadsAffected
                          && !cursor.sidebarAffected && cursor.hasPresentationChange,
                      "a cursor-only update must dispatch its revision without dirtying broad presentation");
+    passed &= expect(boundedIdentities.allThreadsAffected
+                         && boundedIdentities.allInspectorsAffected
+                         && boundedIdentities.allSidebarThreadsAffected
+                         && boundedIdentities.affectedThreadIds.empty()
+                         && boundedIdentities.fullyAffectedThreadIds.empty()
+                         && boundedIdentities.affectedInspectorThreadIds.empty()
+                         && boundedIdentities.affectedSidebarThreadIds.empty(),
+                     "an oversized identity batch must stop at the presentation bound and degrade to full refreshes");
     return passed;
 }
 
@@ -973,6 +1013,7 @@ bool testArchivedThreadRefresh()
                          && discoverySignals == 1 && discoveryScope
                          && discoveryScope->allThreadsAffected
                          && discoveryScope->allInspectorsAffected
+                         && discoveryScope->allSidebarThreadsAffected
                          && discoveryScope->sidebarAffected
                          && discoveryScope->hasPresentationChange,
                      "the terminal page must publish completion and one conservative presentation refresh");
@@ -1595,6 +1636,24 @@ bool testThreadedFacadeMailbox()
                 static_cast<qsizetype>(
                     codexui::detail::maximumCoalescedContentDeltaBytes + 1),
                 'x')));
+    {
+        codexui::detail::StateUpdateScope scope;
+        scope.affectedSidebarThreadIds = {
+            QStringLiteral("sidebar-a"), QStringLiteral("sidebar-b")};
+        scope.sidebarAffected = true;
+        scope.hasPresentationChange = true;
+        codexui::FrontendSessionFacadeTestAccess::enqueueState(
+            session, 7, std::move(scope));
+    }
+    {
+        codexui::detail::StateUpdateScope scope;
+        scope.affectedSidebarThreadIds = {
+            QStringLiteral("sidebar-b"), QStringLiteral("sidebar-c")};
+        scope.sidebarAffected = true;
+        scope.hasPresentationChange = true;
+        codexui::FrontendSessionFacadeTestAccess::enqueueState(
+            session, 7, std::move(scope));
+    }
     for (int index = 0; index < 1'000; ++index) {
         codexui::detail::StateUpdateScope scope;
         scope.affectedThreadIds.push_back(QStringLiteral("streaming-thread"));
@@ -1679,6 +1738,14 @@ bool testThreadedFacadeMailbox()
                 && !oversized->append
                 && deliveredScope->coalescedContentDeltaBytes == 13,
             "the one-slot mailbox must merge only bounded contiguous same-channel appends and degrade ambiguous or oversized sequences to replacement");
+        passed &= expect(
+            deliveredScope->sidebarAffected
+                && !deliveredScope->allSidebarThreadsAffected
+                && deliveredScope->affectedSidebarThreadIds
+                       == QStringList{QStringLiteral("sidebar-a"),
+                                      QStringLiteral("sidebar-b"),
+                                      QStringLiteral("sidebar-c")},
+            "the one-slot mailbox must merge and deduplicate targeted Sidebar rows");
     }
     passed &= expect(statusSignals == 1
                          && session.statusText()
@@ -1943,11 +2010,29 @@ bool testFacadeScopeBound()
             session, 1, std::move(scope));
     }
     QCoreApplication::processEvents();
-    const bool passed = expect(
+    bool passed = expect(
         delivered && delivered->allThreadsAffected
             && delivered->affectedThreadIds.empty()
             && delivered->affectedItemContents.empty(),
         "a blocked GUI must degrade an unbounded exact-scope burst to one bounded full refresh");
+
+    delivered.reset();
+    for (int index = 0;
+         index <= codexui::detail::maximumCoalescedPresentationIdentities;
+         ++index) {
+        codexui::detail::StateUpdateScope scope;
+        scope.affectedSidebarThreadIds.push_back(
+            QStringLiteral("sidebar-%1").arg(index));
+        scope.sidebarAffected = true;
+        scope.hasPresentationChange = true;
+        codexui::FrontendSessionFacadeTestAccess::enqueueState(
+            session, 1, std::move(scope));
+    }
+    QCoreApplication::processEvents();
+    passed &= expect(delivered && delivered->sidebarAffected
+                         && delivered->allSidebarThreadsAffected
+                         && delivered->affectedSidebarThreadIds.empty(),
+                     "a blocked GUI must bound targeted Sidebar identities and let full-refresh dominance clear them");
     session.shutdown();
     return passed;
 }

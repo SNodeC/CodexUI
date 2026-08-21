@@ -25,6 +25,7 @@ namespace codexui::detail {
 // performs an authoritative replacement refresh instead of retaining deltas.
 inline constexpr std::uint64_t maximumCoalescedContentDeltaBytes =
     1024U * 1024U;
+inline constexpr qsizetype maximumCoalescedPresentationIdentities = 1'024;
 
 struct StateUpdateScope {
     struct ItemContentAppend {
@@ -49,10 +50,12 @@ struct StateUpdateScope {
     QStringList affectedThreadIds;
     QStringList fullyAffectedThreadIds;
     QStringList affectedInspectorThreadIds;
+    QStringList affectedSidebarThreadIds;
     std::vector<ItemContentIdentity> affectedItemContents;
     std::uint64_t coalescedContentDeltaBytes = 0;
     bool allThreadsAffected = false;
     bool allInspectorsAffected = false;
+    bool allSidebarThreadsAffected = false;
     bool sidebarAffected = false;
     bool hasPresentationChange = false;
 };
