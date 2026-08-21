@@ -403,42 +403,41 @@ QString threadStatusColor(const std::optional<std::string>& status)
     return QStringLiteral("#2f6feb");
 }
 
-bool threadMayBeRunning(const ai::openai::codex::frontend::client::State& state,
-                        const ai::openai::codex::frontend::client::ThreadState& thread)
-{
-    for (const auto& turnId : thread.orderedTurns) {
-        const auto* turn = state.turn(thread.id, turnId);
-        if (turn && turn->active && !turn->terminal)
-            return true;
-    }
-    return false;
-}
-
 } // namespace
 
 namespace detail {
 
-ThreadActionAvailability
-threadActionAvailability(const ai::openai::codex::frontend::client::State& state,
-                         const ai::openai::codex::frontend::client::ThreadState& thread)
+ThreadUiStatus threadUiStatus(const ai::openai::codex::frontend::client::State& state,
+                              const ai::openai::codex::frontend::client::ThreadState& thread,
+                              bool awaitingResponse)
 {
-    const bool running = threadMayBeRunning(state, thread);
     bool hasInterruptibleTurn = false;
     for (const auto& turnId : thread.orderedTurns) {
         const auto* turn = state.turn(thread.id, turnId);
         hasInterruptibleTurn = hasInterruptibleTurn || (turn && turn->active && !turn->terminal);
     }
 
-    ThreadActionAvailability result;
+    ThreadUiStatus result;
     const bool archived = thread.archived.value_or(false);
     const bool fullyActionable = thread.fullyLoaded;
-    result.fork = fullyActionable;
-    result.interrupt = hasInterruptibleTurn;
-    result.resumeWithOptions = !running && fullyActionable;
-    result.remove = !running && fullyActionable;
-    result.archive = !running && fullyActionable && thread.archived.has_value() && !archived;
-    result.unarchive = !running && archived;
+    result.running = hasInterruptibleTurn;
+    result.awaitingResponse = awaitingResponse;
+    result.archived = archived;
+    result.actions.fork = fullyActionable;
+    result.actions.interrupt = hasInterruptibleTurn;
+    result.actions.resumeWithOptions = !result.running && fullyActionable;
+    result.actions.remove = !result.running && fullyActionable;
+    result.actions.archive = !result.running && fullyActionable
+                             && thread.archived.has_value() && !archived;
+    result.actions.unarchive = !result.running && archived;
     return result;
+}
+
+ThreadActionAvailability
+threadActionAvailability(const ai::openai::codex::frontend::client::State& state,
+                         const ai::openai::codex::frontend::client::ThreadState& thread)
+{
+    return threadUiStatus(state, thread).actions;
 }
 
 void ThreadOrganization::load(QSettings& settings)
@@ -1051,6 +1050,13 @@ void SidebarWidget::setThreads(const ai::openai::codex::frontend::client::State&
     tryAcquireOrganizationLock();
     std::vector<ThreadPresentation> presentations;
     const auto threads = state.threads();
+    QSet<QString> threadsAwaitingResponse;
+    if (state.hasPendingRequestProjection()) {
+        for (const auto& request : state.pendingRequests()) {
+            if (request.threadId)
+                threadsAwaitingResponse.insert(QString::fromStdString(request.threadId->value));
+        }
+    }
     if (organizationWritable && allThreadDiscoveryComplete
         && state.freshness()
                == ai::openai::codex::frontend::client::StateFreshness::Current
@@ -1067,14 +1073,14 @@ void SidebarWidget::setThreads(const ai::openai::codex::frontend::client::State&
         const QString id = QString::fromStdString(thread.id.value);
         const QString title = boundedRowText(
             thread.title && !thread.title->empty() ? QString::fromStdString(*thread.title) : id);
-        const bool running = threadMayBeRunning(state, thread);
-        const bool archived = thread.archived.value_or(false);
+        const detail::ThreadUiStatus uiStatus = detail::threadUiStatus(
+            state, thread, threadsAwaitingResponse.contains(id));
         QStringList secondaryParts;
-        if (archived)
+        if (uiStatus.archived)
             secondaryParts.append(QStringLiteral("Archived"));
         else if (!thread.fullyLoaded)
             secondaryParts.append(QStringLiteral("Loading"));
-        else if (running)
+        else if (uiStatus.running)
             secondaryParts.append(QStringLiteral("Running"));
         else if (!ai::openai::codex::frontend::client::threadIsIdle(thread))
             secondaryParts.append(QStringLiteral("Ready to resume"));
@@ -1090,19 +1096,14 @@ void SidebarWidget::setThreads(const ai::openai::codex::frontend::client::State&
         if (thread.ephemeral.value_or(false))
             secondaryParts.append(QStringLiteral("Temporary"));
         const QString secondary = secondaryParts.join(QStringLiteral(" · "));
-        bool attention = false;
-        if (state.hasPendingRequestProjection()) {
-            for (const auto& request : state.pendingRequests())
-                attention = attention || (request.threadId && request.threadId->value == thread.id.value);
-        }
         presentations.push_back({id,
                                  title,
                                  boundedRowText(secondary),
                                  threadStatusColor(thread.status),
-                                 detail::threadActionAvailability(state, thread),
-                                 running,
-                                 attention,
-                                 archived});
+                                 uiStatus.actions,
+                                 uiStatus.running,
+                                 uiStatus.awaitingResponse,
+                                 uiStatus.archived});
     }
     std::stable_partition(presentations.begin(), presentations.end(),
                           [](const ThreadPresentation& presentation) {
