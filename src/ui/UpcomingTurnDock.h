@@ -34,7 +34,7 @@ class ExpandingPromptEditor;
 struct UpcomingTurnDraft
 {
     QString threadIdentity;
-    std::array<QString, 10> presentationKeys{};
+    std::array<QString, 11> presentationKeys{};
     ai::openai::codex::typed::OptionalNullable<ai::openai::codex::typed::ModelId> model;
     ai::openai::codex::typed::OptionalNullable<ai::openai::codex::typed::ReasoningEffort> effort;
     ai::openai::codex::typed::OptionalNullable<ai::openai::codex::typed::Personality> personality;
@@ -108,6 +108,7 @@ private:
         Effort,
         Personality,
         Sandbox,
+        Network,
         Approval,
         Reviewer,
         Cwd,
@@ -118,6 +119,7 @@ private:
     };
 
     void refreshControls(bool resetAll);
+    void refreshNetworkControl(bool accessChangedByUser);
     void refreshModelControl();
     void refreshModelDependentControls(bool modelChangedByUser);
     [[nodiscard]] const ai::openai::codex::typed::Model* defaultModelDefinition() const;
@@ -149,6 +151,7 @@ private:
     QComboBox* effort = nullptr;
     QComboBox* personality = nullptr;
     QComboBox* sandbox = nullptr;
+    QComboBox* network = nullptr;
     QComboBox* approval = nullptr;
     QLineEdit* cwd = nullptr;
     QPushButton* more = nullptr;

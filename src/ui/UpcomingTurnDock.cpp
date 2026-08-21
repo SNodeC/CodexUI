@@ -176,6 +176,25 @@ QString sandboxKey(const typed::SandboxPolicy& value)
         value);
 }
 
+QString networkKey(const typed::SandboxPolicy& value)
+{
+    return std::visit(
+        [](const auto& item) -> QString {
+            using T = std::decay_t<decltype(item)>;
+            if constexpr (std::is_same_v<T, typed::DangerFullAccessSandboxPolicy>)
+                return QStringLiteral("enabled");
+            if constexpr (std::is_same_v<T, typed::ReadOnlySandboxPolicy>
+                          || std::is_same_v<T, typed::WorkspaceWriteSandboxPolicy>)
+                return item.networkAccessOrDefault() ? QStringLiteral("enabled")
+                                                     : QStringLiteral("restricted");
+            if constexpr (std::is_same_v<T, typed::ExternalSandboxPolicy>)
+                return fromUtf8(item.networkAccessOrDefault().value);
+            if constexpr (std::is_same_v<T, typed::UnknownSandboxPolicy>)
+                return QStringLiteral("unavailable");
+        },
+        value);
+}
+
 QString approvalKey(const typed::AskForApproval& value)
 {
     return std::visit(
@@ -207,6 +226,34 @@ std::optional<typed::SandboxPolicy> sandboxForKey(const QString& key)
     if (key == QStringLiteral("workspace-write"))
         return typed::WorkspaceWriteSandboxPolicy{};
     return std::nullopt;
+}
+
+bool applyNetworkChoice(typed::SandboxPolicy& policy, const QString& network)
+{
+    return std::visit(
+        [&network](auto& item) {
+            using T = std::decay_t<decltype(item)>;
+            if constexpr (std::is_same_v<T, typed::DangerFullAccessSandboxPolicy>)
+                return network == QStringLiteral("enabled");
+            if constexpr (std::is_same_v<T, typed::ReadOnlySandboxPolicy>
+                          || std::is_same_v<T, typed::WorkspaceWriteSandboxPolicy>) {
+                if (network != QStringLiteral("restricted")
+                    && network != QStringLiteral("enabled"))
+                    return false;
+                item.networkAccess = network == QStringLiteral("enabled");
+                return true;
+            }
+            if constexpr (std::is_same_v<T, typed::ExternalSandboxPolicy>) {
+                const typed::NetworkAccess value{toUtf8(network)};
+                if (!value.isKnown())
+                    return false;
+                item.networkAccess = value;
+                return true;
+            }
+            if constexpr (std::is_same_v<T, typed::UnknownSandboxPolicy>)
+                return false;
+        },
+        policy);
 }
 
 std::optional<typed::AskForApproval> approvalForKey(const QString& key)
@@ -246,6 +293,34 @@ void resetSandboxChoices(QComboBox* combo)
     addChoice(combo, QStringLiteral("Read only"), QStringLiteral("read-only"));
     addChoice(combo, QStringLiteral("Full access"), QStringLiteral("danger-full-access"));
     addChoice(combo, QStringLiteral("External"), QStringLiteral("external"));
+}
+
+void resetNetworkChoices(QComboBox* combo, const QString& access)
+{
+    combo->clear();
+    if (access == QStringLiteral("default")) {
+        addChoice(combo, defaultSettingLabel(), QStringLiteral("default"));
+        return;
+    }
+    if (access == QStringLiteral("danger-full-access")) {
+        addChoice(combo, QStringLiteral("Enabled"), QStringLiteral("enabled"));
+        return;
+    }
+    if (access == QStringLiteral("workspace-write")
+        || access == QStringLiteral("read-only")
+        || access == QStringLiteral("external")) {
+        addChoice(combo, QStringLiteral("Restricted"), QStringLiteral("restricted"));
+        addChoice(combo, QStringLiteral("Enabled"), QStringLiteral("enabled"));
+        return;
+    }
+    addChoice(combo, unavailableSettingLabel(), QStringLiteral("unavailable"));
+}
+
+bool networkIsEditable(const QString& access)
+{
+    return access == QStringLiteral("workspace-write")
+           || access == QStringLiteral("read-only")
+           || access == QStringLiteral("external");
 }
 
 void resetApprovalChoices(QComboBox* combo)
@@ -387,11 +462,13 @@ UpcomingTurnDock::UpcomingTurnDock(QWidget* parent)
     effort = compactCombo("upcomingReasoning");
     personality = compactCombo("upcomingStyle");
     sandbox = compactCombo("upcomingAccess");
+    network = compactCombo("upcomingNetwork");
     approval = compactCombo("upcomingApproval");
     fieldSurfaces[static_cast<std::size_t>(Field::Model)] = labelledControl(QStringLiteral("Model"), model);
     fieldSurfaces[static_cast<std::size_t>(Field::Effort)] = labelledControl(QStringLiteral("Reasoning"), effort);
     fieldSurfaces[static_cast<std::size_t>(Field::Personality)] = labelledControl(QStringLiteral("Style"), personality);
     fieldSurfaces[static_cast<std::size_t>(Field::Sandbox)] = labelledControl(QStringLiteral("Access"), sandbox);
+    fieldSurfaces[static_cast<std::size_t>(Field::Network)] = labelledControl(QStringLiteral("Network"), network);
     fieldSurfaces[static_cast<std::size_t>(Field::Approval)] = labelledControl(QStringLiteral("Approval"), approval);
     cwd = new QLineEdit;
     cwd->setObjectName(QStringLiteral("upcomingWorkspace"));
@@ -407,20 +484,29 @@ UpcomingTurnDock::UpcomingTurnDock(QWidget* parent)
         "QPushButton[changed=\"true\"]{background:#e5eeff;color:#2f6feb;border-color:#2f6feb;}"));
     auto* moreSurface = labelledControl(QStringLiteral("Additional"), more);
 
-    // Two stable rows keep every choice readable at the supported narrow
-    // window width. Model receives the extra column in the primary row while
-    // all controls retain the same caption-above-control alignment.
-    settingsGrid->addWidget(fieldSurfaces[static_cast<std::size_t>(Field::Model)], 0, 0, 1, 2);
-    settingsGrid->addWidget(fieldSurfaces[static_cast<std::size_t>(Field::Effort)], 0, 2);
-    settingsGrid->addWidget(fieldSurfaces[static_cast<std::size_t>(Field::Personality)], 0, 3);
-    settingsGrid->addWidget(fieldSurfaces[static_cast<std::size_t>(Field::Sandbox)], 1, 0);
+    const std::array<QWidget*, 8> primaryFields{
+        fieldSurfaces[static_cast<std::size_t>(Field::Model)],
+        fieldSurfaces[static_cast<std::size_t>(Field::Effort)],
+        fieldSurfaces[static_cast<std::size_t>(Field::Sandbox)],
+        fieldSurfaces[static_cast<std::size_t>(Field::Network)],
+        fieldSurfaces[static_cast<std::size_t>(Field::Cwd)],
+        fieldSurfaces[static_cast<std::size_t>(Field::Approval)],
+        fieldSurfaces[static_cast<std::size_t>(Field::Personality)],
+        moreSurface,
+    };
+    for (QWidget* field : primaryFields)
+        field->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+
+    settingsGrid->addWidget(primaryFields[0], 0, 0);
+    settingsGrid->addWidget(primaryFields[1], 0, 1);
+    settingsGrid->addWidget(primaryFields[2], 0, 2);
+    settingsGrid->addWidget(primaryFields[3], 0, 3);
+    settingsGrid->addWidget(primaryFields[4], 1, 0);
     settingsGrid->addWidget(fieldSurfaces[static_cast<std::size_t>(Field::Approval)], 1, 1);
-    settingsGrid->addWidget(fieldSurfaces[static_cast<std::size_t>(Field::Cwd)], 1, 2);
+    settingsGrid->addWidget(fieldSurfaces[static_cast<std::size_t>(Field::Personality)], 1, 2);
     settingsGrid->addWidget(moreSurface, 1, 3);
-    settingsGrid->setColumnStretch(0, 4);
-    settingsGrid->setColumnStretch(1, 4);
-    settingsGrid->setColumnStretch(2, 5);
-    settingsGrid->setColumnStretch(3, 4);
+    for (int column = 0; column < 4; ++column)
+        settingsGrid->setColumnStretch(column, 1);
     settingsLayout->addLayout(settingsGrid);
 
     settingsHint = plainLabel({}, "upcomingSettingsHint");
@@ -526,6 +612,7 @@ UpcomingTurnDock::UpcomingTurnDock(QWidget* parent)
     addChoice(effort, QStringLiteral("XHigh"), QStringLiteral("xhigh"));
     resetPersonalityChoices(personality);
     resetSandboxChoices(sandbox);
+    resetNetworkChoices(network, QStringLiteral("unavailable"));
     resetApprovalChoices(approval);
     resetReviewerChoices(reviewer);
     addChoice(serviceTier, defaultSettingLabel(), QStringLiteral("default"));
@@ -543,7 +630,12 @@ UpcomingTurnDock::UpcomingTurnDock(QWidget* parent)
     connect(effort, &QComboBox::currentIndexChanged, this, [this] { markComboChange(Field::Effort, effort); });
     connect(personality, &QComboBox::currentIndexChanged, this,
             [this] { markComboChange(Field::Personality, personality); });
-    connect(sandbox, &QComboBox::currentIndexChanged, this, [this] { markComboChange(Field::Sandbox, sandbox); });
+    connect(sandbox, &QComboBox::currentIndexChanged, this, [this] {
+        markComboChange(Field::Sandbox, sandbox);
+        refreshNetworkControl(true);
+    });
+    connect(network, &QComboBox::currentIndexChanged, this,
+            [this] { markComboChange(Field::Network, network); });
     connect(approval, &QComboBox::currentIndexChanged, this, [this] { markComboChange(Field::Approval, approval); });
     connect(reviewer, &QComboBox::currentIndexChanged, this, [this] { markComboChange(Field::Reviewer, reviewer); });
     connect(serviceTier, &QComboBox::currentIndexChanged, this,
@@ -677,11 +769,19 @@ UpcomingTurnDraft UpcomingTurnDock::draft() const
         else if (typed::Personality{toUtf8(value)}.isKnown())
             result.personality = typed::Personality{toUtf8(value)};
     }
-    if (touched(Field::Sandbox)) {
+    if (touched(Field::Sandbox) || touched(Field::Network)) {
         if (key(sandbox) == QStringLiteral("default"))
             result.sandboxPolicy = typed::OptionalNullable<typed::SandboxPolicy>::explicitNull();
-        else if (const auto value = sandboxForKey(key(sandbox)))
-            result.sandboxPolicy = *value;
+        else {
+            std::optional<typed::SandboxPolicy> value;
+            if (canonicalConfiguration
+                && sandboxKey(canonicalConfiguration->sandboxPolicy) == key(sandbox))
+                value = canonicalConfiguration->sandboxPolicy;
+            else
+                value = sandboxForKey(key(sandbox));
+            if (value && applyNetworkChoice(*value, key(network)))
+                result.sandboxPolicy = std::move(*value);
+        }
     }
     if (touched(Field::Approval)) {
         if (key(approval) == QStringLiteral("default"))
@@ -766,6 +866,7 @@ void UpcomingTurnDock::resolveSubmittedSettings(const UpcomingTurnDraft& submitt
             case Field::Personality:
                 return !submitted.personality.isOmitted();
             case Field::Sandbox:
+            case Field::Network:
                 return !submitted.sandboxPolicy.isOmitted();
             case Field::Approval:
                 return !submitted.approvalPolicy.isOmitted();
@@ -970,6 +1071,8 @@ void UpcomingTurnDock::refreshControls(bool resetAll)
                                                             : missingValue;
     const QString sandboxValue = canonicalConfiguration ? sandboxKey(canonicalConfiguration->sandboxPolicy)
                                                         : missingValue;
+    const QString networkValue = canonicalConfiguration ? networkKey(canonicalConfiguration->sandboxPolicy)
+                                                        : missingValue;
     const QString approvalValue = canonicalConfiguration ? approvalKey(canonicalConfiguration->approvalPolicy)
                                                          : missingValue;
     const QString reviewerValue = canonicalConfiguration ? fromUtf8(canonicalConfiguration->approvalsReviewer.value)
@@ -989,6 +1092,7 @@ void UpcomingTurnDock::refreshControls(bool resetAll)
         effortValue,
         personalityValue,
         sandboxValue,
+        networkValue,
         approvalValue,
         reviewerValue,
         cwdValue,
@@ -1008,8 +1112,10 @@ void UpcomingTurnDock::refreshControls(bool resetAll)
         || sandboxIsEditable(canonicalConfiguration->sandboxPolicy);
     const bool editableApproval = !canonicalConfiguration
         || approvalIsEditable(canonicalConfiguration->approvalPolicy);
-    if (!editableSandbox)
+    if (!editableSandbox) {
         setTouched(Field::Sandbox, false);
+        setTouched(Field::Network, false);
+    }
     if (!editableApproval)
         setTouched(Field::Approval, false);
 
@@ -1045,6 +1151,7 @@ void UpcomingTurnDock::refreshControls(bool resetAll)
                                                                  : friendlyValue(sandboxValue),
                   sandboxValue == QStringLiteral("default") || sandboxForKey(sandboxValue).has_value());
     }
+    refreshNetworkControl(false);
     if (shouldRefresh(Field::Approval))
     {
         const QSignalBlocker blocker(approval);
@@ -1113,6 +1220,52 @@ void UpcomingTurnDock::refreshControls(bool resetAll)
     fieldSurfaces[static_cast<std::size_t>(Field::Approval)]->setToolTip(
         editableApproval ? QString{}
                          : QStringLiteral("This projected approval policy is read-only in CodexUI"));
+}
+
+void UpcomingTurnDock::refreshNetworkControl(bool accessChangedByUser)
+{
+    const QString access = currentFieldKey(Field::Sandbox);
+    const QString previous = currentFieldKey(Field::Network);
+    QString target;
+
+    if (networkIsEditable(access)) {
+        const bool previousIsChoice = previous == QStringLiteral("restricted")
+            || previous == QStringLiteral("enabled");
+        if (previousIsChoice && (touched(Field::Network) || accessChangedByUser))
+            target = previous;
+        else if (canonicalConfiguration
+                 && sandboxKey(canonicalConfiguration->sandboxPolicy) == access)
+            target = networkKey(canonicalConfiguration->sandboxPolicy);
+        else
+            target = QStringLiteral("restricted");
+    } else if (access == QStringLiteral("danger-full-access")) {
+        target = QStringLiteral("enabled");
+    } else if (access == QStringLiteral("default")) {
+        target = QStringLiteral("default");
+    } else {
+        target = QStringLiteral("unavailable");
+    }
+
+    {
+        const QSignalBlocker blocker(network);
+        resetNetworkChoices(network, access);
+        selectKey(network, target, friendlyValue(target), true);
+    }
+
+    const bool editable = networkIsEditable(access);
+    fieldSurfaces[static_cast<std::size_t>(Field::Network)]->setEnabled(editable);
+    QString tooltip;
+    if (access == QStringLiteral("danger-full-access"))
+        tooltip = QStringLiteral("Full access always includes network access");
+    else if (access == QStringLiteral("default"))
+        tooltip = QStringLiteral("Network access follows the Codex default access policy");
+    else if (!editable)
+        tooltip = QStringLiteral("Network access is unavailable for this access policy");
+    fieldSurfaces[static_cast<std::size_t>(Field::Network)]->setToolTip(tooltip);
+
+    if (accessChangedByUser)
+        setTouched(Field::Network,
+                   target != canonicalKeys[static_cast<std::size_t>(Field::Network)]);
 }
 
 void UpcomingTurnDock::refreshModelControl()
@@ -1512,6 +1665,8 @@ QString UpcomingTurnDock::currentFieldKey(Field field) const
             return comboKey(personality);
         case Field::Sandbox:
             return comboKey(sandbox);
+        case Field::Network:
+            return comboKey(network);
         case Field::Approval:
             return comboKey(approval);
         case Field::Reviewer:
