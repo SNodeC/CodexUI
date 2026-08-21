@@ -863,10 +863,10 @@ void addActivityRow(QVBoxLayout* rows,
     auto* disclosure = disclosureButton(
         expanded,
         QStringLiteral("Activity details: %1").arg(item.title));
-    // Keep the row control only as wide as its icon.  The shared 22 px
-    // disclosure button is appropriate for the card header, but here it
-    // indents the chevron relative to non-expandable row titles.
-    disclosure->setFixedWidth(14);
+    // Keep the row control only one pixel wider than its icon.  The odd width
+    // leaves no leading inset and one trailing pixel, matching the header's
+    // disclosure-to-label gap without shifting the aligned status column.
+    disclosure->setFixedWidth(disclosure->iconSize().width() + 1);
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
     prefixLayout->addWidget(disclosure, 0, Qt::AlignTop);
@@ -1048,7 +1048,6 @@ QFrame* activityCard(const sdk::State& state,
     layout->setSpacing(0);
 
     auto* header = new QHBoxLayout;
-    header->setSpacing(7);
     auto* disclosure = disclosureButton(expanded, QStringLiteral("Activity group"));
     header->addWidget(disclosure);
     auto* title = textLabel(QStringLiteral("Activity"));
