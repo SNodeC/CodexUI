@@ -22,14 +22,17 @@ namespace sdk = ai::openai::codex::frontend::client;
 
 namespace {
 
-constexpr qsizetype maximumCoalescedPresentationIdentities = 1'024;
-
-void appendUnique(QStringList& destination, const QStringList& source)
+bool appendUniqueBounded(QStringList& destination, const QStringList& source)
 {
     for (const QString& value : source) {
-        if (!destination.contains(value))
-            destination.push_back(value);
+        if (destination.contains(value))
+            continue;
+        if (destination.size()
+            >= detail::maximumCoalescedPresentationIdentities)
+            return false;
+        destination.push_back(value);
     }
+    return true;
 }
 
 void mergeScope(detail::StateUpdateScope& destination,
@@ -37,16 +40,24 @@ void mergeScope(detail::StateUpdateScope& destination,
 {
     destination.allThreadsAffected |= source.allThreadsAffected;
     destination.allInspectorsAffected |= source.allInspectorsAffected;
+    destination.allSidebarThreadsAffected |= source.allSidebarThreadsAffected;
     destination.sidebarAffected |= source.sidebarAffected;
     destination.hasPresentationChange |= source.hasPresentationChange;
     if (!destination.allThreadsAffected) {
-        appendUnique(destination.affectedThreadIds, source.affectedThreadIds);
-        appendUnique(destination.fullyAffectedThreadIds,
-                     source.fullyAffectedThreadIds);
+        if (!appendUniqueBounded(destination.affectedThreadIds,
+                                 source.affectedThreadIds)
+            || !appendUniqueBounded(destination.fullyAffectedThreadIds,
+                                    source.fullyAffectedThreadIds))
+            destination.allThreadsAffected = true;
     }
-    if (!destination.allInspectorsAffected)
-        appendUnique(destination.affectedInspectorThreadIds,
-                     source.affectedInspectorThreadIds);
+    if (!destination.allInspectorsAffected
+        && !appendUniqueBounded(destination.affectedInspectorThreadIds,
+                                source.affectedInspectorThreadIds))
+        destination.allInspectorsAffected = true;
+    if (!destination.allSidebarThreadsAffected
+        && !appendUniqueBounded(destination.affectedSidebarThreadIds,
+                                source.affectedSidebarThreadIds))
+        destination.allSidebarThreadsAffected = true;
 
     const auto sameContent = [](const auto& left, const auto& right) {
         return left.threadId == right.threadId && left.turnId == right.turnId
@@ -60,6 +71,12 @@ void mergeScope(detail::StateUpdateScope& destination,
                     return sameContent(candidate, identity);
                 });
             if (existing == destination.affectedItemContents.end()) {
+                if (static_cast<qsizetype>(
+                        destination.affectedItemContents.size())
+                    >= detail::maximumCoalescedPresentationIdentities) {
+                    destination.allThreadsAffected = true;
+                    break;
+                }
                 auto bounded = identity;
                 if (bounded.append) {
                     const std::uint64_t bytes =
@@ -131,16 +148,20 @@ void mergeScope(detail::StateUpdateScope& destination,
     }
 
     if (destination.affectedThreadIds.size()
-            > maximumCoalescedPresentationIdentities
+            > detail::maximumCoalescedPresentationIdentities
         || destination.fullyAffectedThreadIds.size()
-               > maximumCoalescedPresentationIdentities
+               > detail::maximumCoalescedPresentationIdentities
         || static_cast<qsizetype>(destination.affectedItemContents.size())
-               > maximumCoalescedPresentationIdentities) {
+               > detail::maximumCoalescedPresentationIdentities) {
         destination.allThreadsAffected = true;
     }
     if (destination.affectedInspectorThreadIds.size()
-        > maximumCoalescedPresentationIdentities) {
+        > detail::maximumCoalescedPresentationIdentities) {
         destination.allInspectorsAffected = true;
+    }
+    if (destination.affectedSidebarThreadIds.size()
+        > detail::maximumCoalescedPresentationIdentities) {
+        destination.allSidebarThreadsAffected = true;
     }
     if (destination.allThreadsAffected) {
         destination.affectedThreadIds.clear();
@@ -150,6 +171,8 @@ void mergeScope(detail::StateUpdateScope& destination,
     }
     if (destination.allInspectorsAffected)
         destination.affectedInspectorThreadIds.clear();
+    if (destination.allSidebarThreadsAffected)
+        destination.affectedSidebarThreadIds.clear();
 }
 
 template<typename Completion>

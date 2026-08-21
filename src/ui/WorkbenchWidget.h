@@ -14,8 +14,10 @@
 #include <QString>
 #include <QStringList>
 
-#include <optional>
+#include <atomic>
 #include <cstdint>
+#include <memory>
+#include <optional>
 
 class QFrame;
 class QLabel;
@@ -38,6 +40,7 @@ class WorkbenchWidget : public QWidget
 {
 public:
     explicit WorkbenchWidget(FrontendSession& frontendSession, QWidget* parent = nullptr);
+    ~WorkbenchWidget() override;
 
 private:
     enum class PendingAction {
@@ -76,12 +79,30 @@ private:
         AttachmentStagingLeasePtr lease;
     };
 
+    struct TurnSubmissionPreparationRequest {
+        PendingAction action = PendingAction::None;
+        QString threadId;
+        QString turnId;
+        QString prompt;
+        QList<AttachmentInfo> attachments;
+        QString workspace;
+        UpcomingTurnDraft settings;
+        std::uint64_t expectedSelectionGeneration = 0;
+    };
+
+    struct TurnSubmissionPreparationOutcome {
+        AttachmentPreparation preparation;
+        QString error;
+        bool success = false;
+    };
+
     void refreshLifecycle();
     void scheduleStateRefresh(const detail::StateUpdateScope& scope);
     void refreshState(bool refreshSelectedPresentation = true,
                       bool refreshInspector = true,
                       bool refreshSidebar = true,
-                      const ConversationContentUpdates* exactContentChanges = nullptr);
+                      const ConversationContentUpdates* exactContentChanges = nullptr,
+                      const QStringList* sidebarThreadChanges = nullptr);
     void refreshControls();
     void refreshControllerStatus();
     [[nodiscard]] bool writeOperationBusy() const noexcept;
@@ -107,11 +128,15 @@ private:
                                  const ResumeWithOptionsSetup& setup,
                                  std::uint64_t expectedSelectionGeneration);
     void mutateThread(PendingAction action, const QString& threadId, const QString& value = {});
-    [[nodiscard]] std::optional<PreparedTurnSubmission>
-    prepareTurnSubmission(const QString& threadId,
-                          const QString& prompt,
-                          const QList<AttachmentInfo>& attachments,
-                          const QString& workspace);
+    void beginTurnSubmissionPreparation(TurnSubmissionPreparationRequest request);
+    void cancelAttachmentPreparation() noexcept;
+    void finishTurnSubmissionPreparation(TurnSubmissionPreparationRequest request,
+                                         TurnSubmissionPreparationOutcome outcome,
+                                         std::uint64_t preparationGeneration);
+    [[nodiscard]] std::optional<PreparedTurnSubmission> preparedTurnSubmission(
+        const QString& prompt,
+        const QList<AttachmentInfo>& attachments,
+        AttachmentPreparation preparation);
     void resumeThread(const QString& threadId,
                       const PreparedTurnSubmission& submission,
                       const UpcomingTurnDraft& settings);
@@ -188,6 +213,9 @@ private:
     bool threadResumeInFlight = false;
     bool turnStartInFlight = false;
     bool turnSteerInFlight = false;
+    bool attachmentPreparationInFlight = false;
+    std::uint64_t attachmentPreparationGeneration = 0;
+    std::shared_ptr<std::atomic_bool> attachmentPreparationCancellation;
     bool interruptInFlight = false;
     bool threadMutationInFlight = false;
     bool controllerUnavailable = false;
@@ -199,8 +227,12 @@ private:
     bool selectedPresentationRefreshPending = false;
     bool selectedPresentationFullRefreshPending = false;
     ConversationContentUpdates selectedContentRefreshPending;
+    std::uint64_t selectedContentRefreshPendingBytes = 0;
     bool inspectorRefreshPending = false;
     bool sidebarRefreshPending = false;
+    bool sidebarFullRefreshPending = false;
+    QStringList sidebarThreadRefreshPending;
+    QSet<QString> sidebarThreadRefreshPendingSet;
 };
 
 } // namespace codexui

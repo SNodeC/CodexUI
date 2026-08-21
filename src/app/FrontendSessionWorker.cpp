@@ -55,18 +55,34 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
     const auto addUnique = [](QStringList& ids, std::string_view id)
     {
         const QString threadId = QString::fromUtf8(id.data(), static_cast<qsizetype>(id.size()));
-        if (!ids.contains(threadId))
-            ids.append(threadId);
+        if (ids.contains(threadId))
+            return true;
+        if (ids.size() >= maximumCoalescedPresentationIdentities)
+            return false;
+        ids.append(threadId);
+        return true;
     };
     const auto addThread = [&scope, &addUnique](std::string_view id) {
-        addUnique(scope.affectedThreadIds, id);
+        if (!scope.allThreadsAffected
+            && !addUnique(scope.affectedThreadIds, id))
+            scope.allThreadsAffected = true;
     };
     const auto addFullyAffectedThread = [&scope, &addThread, &addUnique](std::string_view id) {
         addThread(id);
-        addUnique(scope.fullyAffectedThreadIds, id);
+        if (!scope.allThreadsAffected
+            && !addUnique(scope.fullyAffectedThreadIds, id))
+            scope.allThreadsAffected = true;
     };
     const auto addInspectorThread = [&scope, &addUnique](std::string_view id) {
-        addUnique(scope.affectedInspectorThreadIds, id);
+        if (!scope.allInspectorsAffected
+            && !addUnique(scope.affectedInspectorThreadIds, id))
+            scope.allInspectorsAffected = true;
+    };
+    const auto addSidebarThread = [&scope, &addUnique](std::string_view id) {
+        scope.sidebarAffected = true;
+        if (!scope.allSidebarThreadsAffected
+            && !addUnique(scope.affectedSidebarThreadIds, id))
+            scope.allSidebarThreadsAffected = true;
     };
     const auto markThreadAndInspector = [&addFullyAffectedThread, &addInspectorThread](std::string_view id) {
         addFullyAffectedThread(id);
@@ -81,6 +97,8 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
         const QString turnId = asQString(value.turnId->value);
         const QString itemId = asQString(value.itemId.value);
         addThread(value.threadId->value);
+        if (scope.allThreadsAffected)
+            return;
         StateUpdateScope::ItemContentIdentity identity{
             threadId,
             turnId,
@@ -98,6 +116,11 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                        && candidate.channel == identity.channel;
             });
         if (existing == scope.affectedItemContents.end()) {
+            if (static_cast<qsizetype>(scope.affectedItemContents.size())
+                >= maximumCoalescedPresentationIdentities) {
+                scope.allThreadsAffected = true;
+                return;
+            }
             if (identity.append) {
                 const std::uint64_t bytes =
                     static_cast<std::uint64_t>(
@@ -131,6 +154,7 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
     {
         scope.allThreadsAffected = true;
         scope.allInspectorsAffected = true;
+        scope.allSidebarThreadsAffected = true;
         scope.sidebarAffected = true;
         scope.hasPresentationChange = true;
         return scope;
@@ -151,25 +175,30 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                 {
                     scope.allThreadsAffected = true;
                     scope.allInspectorsAffected = true;
+                    scope.allSidebarThreadsAffected = true;
                     scope.sidebarAffected = true;
                 }
                 else if constexpr (std::is_same_v<Change, sdk::ThreadUpsertedChange>
                                    || std::is_same_v<Change, sdk::ThreadRemovedChange>)
                 {
                     addFullyAffectedThread(value.threadId.value);
-                    scope.sidebarAffected = true;
+                    addSidebarThread(value.threadId.value);
                     // The selected Inspector can show status/model facts from
                     // a linked subagent thread even when its conversation is
-                    // not selected.
-                    scope.allInspectorsAffected = true;
+                    // not selected. Workbench resolves this identity against
+                    // its retained Inspector dependency set.
+                    addInspectorThread(value.threadId.value);
                 }
                 else if constexpr (std::is_same_v<Change, sdk::TurnUpsertedChange>)
                 {
-                    if (const auto* turn = update.state.turn(value.turnId))
+                    if (const auto* turn = update.state.turn(value.turnId)) {
                         markThreadAndInspector(turn->threadId.value);
-                    else {
+                        addSidebarThread(turn->threadId.value);
+                    } else {
                         scope.allThreadsAffected = true;
                         scope.allInspectorsAffected = true;
+                        scope.allSidebarThreadsAffected = true;
+                        scope.sidebarAffected = true;
                     }
                 }
                 else if constexpr (std::is_same_v<Change, sdk::ItemUpsertedChange>)
@@ -244,12 +273,15 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                     // change has no thread identity, especially on removal.
                     scope.allThreadsAffected = true;
                     scope.allInspectorsAffected = true;
+                    scope.allSidebarThreadsAffected = true;
+                    scope.sidebarAffected = true;
                 }
                 else if constexpr (std::is_same_v<Change, sdk::ThreadListUpdatedChange>)
                 {
                     // A list replacement has no per-thread removal identity.
                     scope.allThreadsAffected = true;
                     scope.allInspectorsAffected = true;
+                    scope.allSidebarThreadsAffected = true;
                     scope.sidebarAffected = true;
                 }
                 else
@@ -263,6 +295,16 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
             },
             change);
     }
+    if (scope.allThreadsAffected) {
+        scope.affectedThreadIds.clear();
+        scope.fullyAffectedThreadIds.clear();
+        scope.affectedItemContents.clear();
+        scope.coalescedContentDeltaBytes = 0;
+    }
+    if (scope.allInspectorsAffected)
+        scope.affectedInspectorThreadIds.clear();
+    if (scope.allSidebarThreadsAffected)
+        scope.affectedSidebarThreadIds.clear();
     return scope;
 }
 
@@ -353,6 +395,7 @@ FrontendSessionWorker::FrontendSessionWorker(QObject* parent)
         detail::StateUpdateScope scope;
         scope.allThreadsAffected = true;
         scope.allInspectorsAffected = true;
+        scope.allSidebarThreadsAffected = true;
         scope.sidebarAffected = true;
         scope.hasPresentationChange = true;
         emit stateChanged(scope);
@@ -1177,6 +1220,7 @@ void FrontendSessionWorker::finishArchivedThreadRefresh(ArchivedThreadDiscoveryS
     detail::StateUpdateScope scope;
     scope.allThreadsAffected = true;
     scope.allInspectorsAffected = true;
+    scope.allSidebarThreadsAffected = true;
     scope.sidebarAffected = true;
     scope.hasPresentationChange = true;
     emit stateChanged(scope);

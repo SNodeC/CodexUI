@@ -666,6 +666,7 @@ void InspectorWidget::renderUnavailable(const QString& title, const QString& det
         return;
     unavailablePresentationKey = presentationKey;
     inspectedThreadId.clear();
+    dependentThreadIds.clear();
     selectedAgentItemId.clear();
     planPresentationKey.clear();
     agentsPresentationKey.clear();
@@ -678,6 +679,12 @@ void InspectorWidget::renderUnavailable(const QString& title, const QString& det
         addEmpty(layout, title, detail);
         refreshLayoutGeometry(layout);
     }
+}
+
+bool InspectorWidget::dependsOnThread(const QString& threadId) const
+{
+    return !threadId.isEmpty()
+        && (threadId == inspectedThreadId || dependentThreadIds.contains(threadId));
 }
 
 void InspectorWidget::setHistoricalTurnMode(bool enabled)
@@ -752,6 +759,7 @@ void InspectorWidget::render(const sdk::State& state,
     unavailablePresentationKey.clear();
     if (inspectedThreadId != threadId) {
         inspectedThreadId = threadId;
+        dependentThreadIds.clear();
         selectedAgentItemId.clear();
         planPresentationKey.clear();
         agentsPresentationKey.clear();
@@ -941,6 +949,11 @@ void InspectorWidget::render(const sdk::State& state,
     if (turn) {
         agents = agentPresentations(state, *thread, *turn);
         collaborations = collaborationPresentations(state, *thread, *turn);
+    }
+    dependentThreadIds.clear();
+    for (const AgentPresentation& agent : agents) {
+        if (!agent.agentThreadId.isEmpty())
+            dependentThreadIds.insert(agent.agentThreadId);
     }
     const auto selected = std::find_if(agents.begin(), agents.end(), [this](const AgentPresentation& agent) {
         return agent.itemIds.contains(selectedAgentItemId);

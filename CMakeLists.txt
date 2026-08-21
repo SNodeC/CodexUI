@@ -10,7 +10,7 @@ include(GNUInstallDirs)
 set(CMAKE_AUTOMOC ON)
 
 find_package(AISuite 0.5.0 CONFIG REQUIRED)
-find_package(Qt6 REQUIRED COMPONENTS Network Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Concurrent Network Widgets)
 
 qt_add_executable(
     codex-ui
@@ -52,6 +52,7 @@ target_link_libraries(
     codex-ui
     PRIVATE
         AISuite::OpenAICodexFrontendClient
+        Qt6::Concurrent
         Qt6::Network
         Qt6::Widgets
 )

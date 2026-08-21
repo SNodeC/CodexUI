@@ -18,6 +18,7 @@
 #include <QClipboard>
 #include <QFrame>
 #include <QFileInfo>
+#include <QFutureWatcher>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
@@ -30,8 +31,10 @@
 #include <QTextDocument>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QtConcurrentRun>
 
 #include <algorithm>
+#include <limits>
 #include <variant>
 
 namespace codexui {
@@ -292,6 +295,11 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession& session, QWidget* parent)
     refreshState();
 }
 
+WorkbenchWidget::~WorkbenchWidget()
+{
+    cancelAttachmentPreparation();
+}
+
 void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope)
 {
     const bool currentSelectionAffected = scope.affectedThreadIds.contains(selectedThreadId);
@@ -308,10 +316,12 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
                                              || scope.affectedThreadIds.contains(
                                                  automaticResumeThreadId));
     const bool selectedInspectorAffected = scope.allInspectorsAffected
-                                           || scope.affectedInspectorThreadIds.contains(selectedThreadId)
-                                           || (!newThreadIdAwaitingState.isEmpty()
-                                               && scope.affectedInspectorThreadIds.contains(
-                                                   newThreadIdAwaitingState));
+        || std::ranges::any_of(scope.affectedInspectorThreadIds,
+                              [this](const QString& threadId) {
+                                  return inspector->dependsOnThread(threadId)
+                                      || (!newThreadIdAwaitingState.isEmpty()
+                                          && threadId == newThreadIdAwaitingState);
+                              });
     // Keep the factual State revision current without invoking the expensive
     // Inspector projections when none of their selected semantics changed.
     if (!selectedInspectorAffected)
@@ -328,9 +338,14 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
         {
             selectedPresentationFullRefreshPending = true;
             selectedContentRefreshPending.clear();
+            selectedContentRefreshPendingBytes = 0;
         }
         else if (!selectedPresentationFullRefreshPending)
         {
+            // A worker mailbox publication is individually bounded, but more
+            // than one publication can reach the GUI during this 16 ms frame
+            // window. Bound the aggregate again and fall back to the newest
+            // authoritative State instead of growing presentation metadata.
             bool foundExactContent = false;
             for (const auto& identity : scope.affectedItemContents)
             {
@@ -346,37 +361,85 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
                                && update.itemId == identity.itemId
                                && update.channel == identity.channel;
                     });
-                ConversationContentUpdate next{
-                    identity.turnId,
-                    identity.itemId,
-                    identity.channel,
-                    std::nullopt};
-                if (identity.append)
-                {
-                    next.append = ConversationContentAppend{
-                        identity.append->baseContentBytes,
-                        identity.append->discardPrefixBytes,
-                        static_cast<std::uint64_t>(identity.append->deltaUtf8.size()),
-                        QString::fromUtf8(identity.append->deltaUtf8)};
-                }
                 if (existing == selectedContentRefreshPending.end())
                 {
+                    if (static_cast<qsizetype>(selectedContentRefreshPending.size())
+                        >= detail::maximumCoalescedPresentationIdentities)
+                    {
+                        selectedPresentationFullRefreshPending = true;
+                        selectedContentRefreshPending.clear();
+                        selectedContentRefreshPendingBytes = 0;
+                        break;
+                    }
+                    ConversationContentUpdate next{
+                        identity.turnId,
+                        identity.itemId,
+                        identity.channel,
+                        std::nullopt};
+                    if (identity.append)
+                    {
+                        const std::uint64_t deltaBytes = static_cast<std::uint64_t>(
+                            identity.append->deltaUtf8.size());
+                        if (selectedContentRefreshPendingBytes
+                                > detail::maximumCoalescedContentDeltaBytes
+                            || deltaBytes
+                                   > detail::maximumCoalescedContentDeltaBytes
+                                         - selectedContentRefreshPendingBytes)
+                        {
+                            selectedPresentationFullRefreshPending = true;
+                            selectedContentRefreshPending.clear();
+                            selectedContentRefreshPendingBytes = 0;
+                            break;
+                        }
+                        next.append = ConversationContentAppend{
+                            identity.append->baseContentBytes,
+                            identity.append->discardPrefixBytes,
+                            deltaBytes,
+                            QString::fromUtf8(identity.append->deltaUtf8)};
+                        selectedContentRefreshPendingBytes += deltaBytes;
+                    }
                     selectedContentRefreshPending.push_back(std::move(next));
                 }
-                else if (existing->append && next.append
+                else if (existing->append && identity.append
                          && existing->append->discardPrefixBytes == 0
-                         && next.append->discardPrefixBytes == 0
+                         && identity.append->discardPrefixBytes == 0
+                         && existing->append->baseContentBytes
+                                <= std::numeric_limits<std::uint64_t>::max()
+                                       - existing->append->deltaUtf8Bytes
                          && existing->append->baseContentBytes
                                 + existing->append->deltaUtf8Bytes
-                                == next.append->baseContentBytes)
+                                == identity.append->baseContentBytes)
                 {
-                    existing->append->delta.append(next.append->delta);
-                    existing->append->deltaUtf8Bytes += next.append->deltaUtf8Bytes;
+                    const std::uint64_t deltaBytes = static_cast<std::uint64_t>(
+                        identity.append->deltaUtf8.size());
+                    if (selectedContentRefreshPendingBytes
+                            > detail::maximumCoalescedContentDeltaBytes
+                        || deltaBytes
+                               > detail::maximumCoalescedContentDeltaBytes
+                                     - selectedContentRefreshPendingBytes)
+                    {
+                        selectedPresentationFullRefreshPending = true;
+                        selectedContentRefreshPending.clear();
+                        selectedContentRefreshPendingBytes = 0;
+                        break;
+                    }
+                    existing->append->delta.append(QString::fromUtf8(identity.append->deltaUtf8));
+                    existing->append->deltaUtf8Bytes += deltaBytes;
+                    selectedContentRefreshPendingBytes += deltaBytes;
                 }
                 else
                 {
                     // Ambiguous, rolling, or replacement updates retain the
                     // authoritative State fallback instead of guessing a delta.
+                    if (existing->append)
+                    {
+                        selectedContentRefreshPendingBytes =
+                            existing->append->deltaUtf8Bytes
+                                    <= selectedContentRefreshPendingBytes
+                                ? selectedContentRefreshPendingBytes
+                                      - existing->append->deltaUtf8Bytes
+                                : 0;
+                    }
                     existing->append.reset();
                 }
             }
@@ -386,11 +449,38 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
             {
                 selectedPresentationFullRefreshPending = true;
                 selectedContentRefreshPending.clear();
+                selectedContentRefreshPendingBytes = 0;
             }
         }
     }
     inspectorRefreshPending = inspectorRefreshPending || selectedInspectorAffected;
     sidebarRefreshPending = sidebarRefreshPending || scope.sidebarAffected;
+    if (scope.sidebarAffected) {
+        if (scope.allSidebarThreadsAffected) {
+            sidebarFullRefreshPending = true;
+            sidebarThreadRefreshPending.clear();
+            sidebarThreadRefreshPendingSet.clear();
+        } else if (!sidebarFullRefreshPending) {
+            for (const QString& threadId : scope.affectedSidebarThreadIds) {
+                if (sidebarThreadRefreshPendingSet.contains(threadId))
+                    continue;
+                if (sidebarThreadRefreshPending.size()
+                    >= detail::maximumCoalescedPresentationIdentities) {
+                    sidebarFullRefreshPending = true;
+                    sidebarThreadRefreshPending.clear();
+                    sidebarThreadRefreshPendingSet.clear();
+                    break;
+                }
+                sidebarThreadRefreshPendingSet.insert(threadId);
+                sidebarThreadRefreshPending.append(threadId);
+            }
+            if (scope.affectedSidebarThreadIds.isEmpty()) {
+                sidebarFullRefreshPending = true;
+                sidebarThreadRefreshPending.clear();
+                sidebarThreadRefreshPendingSet.clear();
+            }
+        }
+    }
     if (stateRefreshPending)
         return;
     stateRefreshPending = true;
@@ -403,6 +493,8 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
         const bool refreshSelectedPresentation = selectedPresentationRefreshPending;
         const bool refreshInspector = inspectorRefreshPending;
         const bool refreshSidebar = sidebarRefreshPending;
+        const bool refreshFullSidebar = sidebarFullRefreshPending;
+        QStringList sidebarThreadChanges = std::move(sidebarThreadRefreshPending);
         const bool exactContentOnly = refreshSelectedPresentation
                                       && !selectedPresentationFullRefreshPending
                                       && !selectedContentRefreshPending.empty();
@@ -410,8 +502,12 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
         selectedPresentationRefreshPending = false;
         selectedPresentationFullRefreshPending = false;
         selectedContentRefreshPending.clear();
+        selectedContentRefreshPendingBytes = 0;
         inspectorRefreshPending = false;
         sidebarRefreshPending = false;
+        sidebarFullRefreshPending = false;
+        sidebarThreadRefreshPending.clear();
+        sidebarThreadRefreshPendingSet.clear();
         if (exactContentOnly && !refreshInspector && !refreshSidebar
             && turnThreadIdAwaitingState.isEmpty() && automaticResumeThreadId.isEmpty()
             && conversation->updateExactMessageContent(
@@ -420,7 +516,10 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
         refreshState(refreshSelectedPresentation,
                      refreshInspector,
                      refreshSidebar,
-                     exactContentOnly ? &exactContentChanges : nullptr);
+                     exactContentOnly ? &exactContentChanges : nullptr,
+                     refreshSidebar && !refreshFullSidebar && !sidebarThreadChanges.isEmpty()
+                         ? &sidebarThreadChanges
+                         : nullptr);
     });
 }
 
@@ -472,7 +571,7 @@ void WorkbenchWidget::refreshLifecycle()
     if (frontendSession.lifecycle() != Lifecycle::Ready) {
         const bool writeWasPending = pendingAction != PendingAction::None || controllerAcquireInFlight
                                      || threadStartInFlight || threadResumeInFlight || turnStartInFlight
-                                     || turnSteerInFlight
+                                     || turnSteerInFlight || attachmentPreparationInFlight
                                      || interruptInFlight || threadMutationInFlight;
         clearWriteTransients();
         if (writeWasPending)
@@ -487,14 +586,19 @@ void WorkbenchWidget::refreshLifecycle()
 void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
                                    bool refreshInspector,
                                    bool refreshSidebar,
-                                   const ConversationContentUpdates* exactContentChanges)
+                                   const ConversationContentUpdates* exactContentChanges,
+                                   const QStringList* sidebarThreadChanges)
 {
     stateRefreshPending = false;
     selectedPresentationRefreshPending = false;
     selectedPresentationFullRefreshPending = false;
     selectedContentRefreshPending.clear();
+    selectedContentRefreshPendingBytes = 0;
     inspectorRefreshPending = false;
     sidebarRefreshPending = false;
+    sidebarFullRefreshPending = false;
+    sidebarThreadRefreshPending.clear();
+    sidebarThreadRefreshPendingSet.clear();
     const auto& state = frontendSession.state();
     const auto threads = state.threads();
     const bool ready = frontendSession.lifecycle() == FrontendSession::Lifecycle::Ready;
@@ -528,8 +632,13 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
     refreshInspector = refreshInspector || selectionChanged;
     refreshSidebar = refreshSidebar || selectionChanged;
 
-    if (refreshSidebar)
-        sidebar->setThreads(state, selectedThreadId, threadDiscoveryComplete);
+    if (refreshSidebar) {
+        if (!selectionChanged && sidebarThreadChanges && !sidebarThreadChanges->isEmpty())
+            sidebar->updateThreads(
+                state, selectedThreadId, threadDiscoveryComplete, *sidebarThreadChanges);
+        else
+            sidebar->setThreads(state, selectedThreadId, threadDiscoveryComplete);
+    }
 
     // ConversationWidget resolves the stable selection against this exact
     // immutable State and never retains backend object addresses.
@@ -627,7 +736,12 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
 
 void WorkbenchWidget::selectThread(const QString& threadId)
 {
-    ++selectionGeneration;
+    const bool semanticSelectionChanged = selectedThreadId != threadId
+                                          || !projectedAgentThreadId.isEmpty();
+    if (semanticSelectionChanged) {
+        cancelAttachmentPreparation();
+        ++selectionGeneration;
+    }
     if (automaticResumeThreadId != threadId)
         automaticResumeAttemptedThreadIds.remove(threadId);
     if (!newThreadIdAwaitingState.isEmpty() && threadId != newThreadIdAwaitingState)
@@ -638,13 +752,19 @@ void WorkbenchWidget::selectThread(const QString& threadId)
         selectedInspectorTurnId.clear();
     selectedThreadId = threadId;
     projectedAgentThreadId.clear();
-    conversation->setWriteStatus({});
+    if (semanticSelectionChanged)
+        conversation->setWriteStatus({});
     refreshState();
 }
 
 void WorkbenchWidget::selectProjectedAgentThread(const QString& threadId)
 {
-    ++selectionGeneration;
+    const bool semanticSelectionChanged = selectedThreadId != threadId
+                                          || projectedAgentThreadId != threadId;
+    if (semanticSelectionChanged) {
+        cancelAttachmentPreparation();
+        ++selectionGeneration;
+    }
     if (automaticResumeThreadId != threadId)
         automaticResumeAttemptedThreadIds.remove(threadId);
     if (!newThreadIdAwaitingState.isEmpty() && threadId != newThreadIdAwaitingState)
@@ -655,7 +775,8 @@ void WorkbenchWidget::selectProjectedAgentThread(const QString& threadId)
         selectedInspectorTurnId.clear();
     selectedThreadId = threadId;
     projectedAgentThreadId = threadId;
-    conversation->setWriteStatus({});
+    if (semanticSelectionChanged)
+        conversation->setWriteStatus({});
     refreshState();
 }
 
@@ -670,7 +791,8 @@ void WorkbenchWidget::refreshControls()
     const bool pendingControllerWrite = controllerAcquireInFlight || pendingAction != PendingAction::None
                                         || requestControllerAcquireInFlight || requestResponseInFlight
                                         || threadMutationInFlight;
-    const bool promptSubmissionInFlight = threadStartInFlight || threadResumeInFlight
+    const bool promptSubmissionInFlight = attachmentPreparationInFlight
+                                          || threadStartInFlight || threadResumeInFlight
                                           || turnStartInFlight || turnSteerInFlight;
     const bool selectedWritable = selected && selected->fullyLoaded
                                   && !selected->archived.value_or(false);
@@ -697,7 +819,7 @@ bool WorkbenchWidget::writeOperationBusy() const noexcept
 {
     return pendingAction != PendingAction::None || controllerAcquireInFlight
         || threadStartInFlight || threadResumeInFlight || turnStartInFlight
-        || turnSteerInFlight
+        || turnSteerInFlight || attachmentPreparationInFlight
         || interruptInFlight || threadMutationInFlight
         || requestControllerAcquireInFlight || requestResponseInFlight;
 }
@@ -1105,6 +1227,7 @@ void WorkbenchWidget::sendPrompt(const QString& prompt, bool steerRequested)
         pendingThreadId = selectedThreadId;
         pendingTurnId = QString::fromStdString(active->id.value);
         pendingTurnDraft = {};
+        pendingSelectionGeneration = selectionGeneration;
         conversation->setWriteStatus(QStringLiteral("Preparing steer…"));
         ensureController();
         return;
@@ -1130,6 +1253,7 @@ void WorkbenchWidget::sendPrompt(const QString& prompt, bool steerRequested)
     pendingThreadId = selectedThreadId;
     pendingTurnId.clear();
     pendingTurnDraft = settings;
+    pendingSelectionGeneration = selectionGeneration;
     conversation->setWriteStatus(QStringLiteral("Preparing write…"));
     ensureController();
 }
@@ -1329,23 +1453,22 @@ void WorkbenchWidget::executePendingAction()
         {
             const auto& state = frontendSession.state();
             const auto* thread = state.thread(threadId.toStdString());
-            if (!thread || !thread->fullyLoaded || thread->archived.value_or(false)
+            if (selectionGeneration != expectedSelectionGeneration
+                || selectedThreadId != threadId || !thread || !thread->fullyLoaded
+                || thread->archived.value_or(false)
                 || activeTurn(state, thread) || turnSettings.threadIdentity != threadId) {
                 showWriteError(QStringLiteral("The target thread changed before the prompt could be sent"));
                 refreshControls();
                 break;
             }
-            const auto submission = prepareTurnSubmission(
-                threadId, prompt, attachments, attachmentWorkspace);
-            if (!submission) {
-                refreshControls();
-                break;
-            }
-            // Resuming an already attached thread can replay its existing item projection.
-            if (ai::openai::codex::frontend::client::threadIsIdle(*thread))
-                startTurn(threadId, *submission, turnSettings);
-            else
-                resumeThread(threadId, *submission, turnSettings);
+            beginTurnSubmissionPreparation({action,
+                                            threadId,
+                                            {},
+                                            prompt,
+                                            attachments,
+                                            attachmentWorkspace,
+                                            turnSettings,
+                                            expectedSelectionGeneration});
             break;
         }
         case PendingAction::SteerActiveTurn:
@@ -1353,19 +1476,22 @@ void WorkbenchWidget::executePendingAction()
             const auto& state = frontendSession.state();
             const auto* thread = state.thread(threadId.toStdString());
             const auto* turn = activeTurn(state, thread);
-            if (!thread || !thread->fullyLoaded || thread->archived.value_or(false)
+            if (selectionGeneration != expectedSelectionGeneration
+                || selectedThreadId != threadId || !thread || !thread->fullyLoaded
+                || thread->archived.value_or(false)
                 || !turn || QString::fromStdString(turn->id.value) != turnId) {
                 showWriteError(QStringLiteral("The target turn changed before it could be steered"));
                 refreshControls();
                 break;
             }
-            const auto submission = prepareTurnSubmission(
-                threadId, prompt, attachments, attachmentWorkspace);
-            if (!submission) {
-                refreshControls();
-                break;
-            }
-            steerTurn(threadId, turnId, *submission);
+            beginTurnSubmissionPreparation({action,
+                                            threadId,
+                                            turnId,
+                                            prompt,
+                                            attachments,
+                                            attachmentWorkspace,
+                                            {},
+                                            expectedSelectionGeneration});
             break;
         }
         case PendingAction::InterruptTurn:
@@ -1489,19 +1615,150 @@ void WorkbenchWidget::startNewThread(const NewThreadSetup& setup,
     }
 }
 
-std::optional<WorkbenchWidget::PreparedTurnSubmission>
-WorkbenchWidget::prepareTurnSubmission(const QString& threadId,
-                                       const QString& prompt,
-                                       const QList<AttachmentInfo>& attachments,
-                                       const QString& workspace)
+void WorkbenchWidget::beginTurnSubmissionPreparation(
+    TurnSubmissionPreparationRequest request)
 {
-    AttachmentPreparation preparation;
-    QString error;
-    if (!AttachmentManager::prepare(
-            attachments, workspace, threadId, &preparation, &error)) {
-        showWriteError(error);
-        return std::nullopt;
+    cancelAttachmentPreparation();
+    const bool copiesGenericFiles = std::ranges::any_of(
+        request.attachments,
+        [](const AttachmentInfo& attachment) {
+            return attachment.kind == AttachmentInfo::Kind::File;
+        });
+    const std::uint64_t generation = attachmentPreparationGeneration;
+    if (!copiesGenericFiles) {
+        TurnSubmissionPreparationOutcome outcome;
+        outcome.success = AttachmentManager::prepare(request.attachments,
+                                                     request.workspace,
+                                                     request.threadId,
+                                                     &outcome.preparation,
+                                                     &outcome.error);
+        finishTurnSubmissionPreparation(std::move(request), std::move(outcome), generation);
+        return;
     }
+
+    attachmentPreparationInFlight = true;
+    auto cancellation = std::make_shared<std::atomic_bool>(false);
+    attachmentPreparationCancellation = cancellation;
+    conversation->setWriteStatus(QStringLiteral("Preparing attachments…"));
+    refreshControls();
+    QList<AttachmentInfo> workerAttachments = request.attachments;
+    QString workerWorkspace = request.workspace;
+    QString workerThreadId = request.threadId;
+    auto* watcher = new QFutureWatcher<TurnSubmissionPreparationOutcome>(this);
+    connect(watcher,
+            &QFutureWatcher<TurnSubmissionPreparationOutcome>::finished,
+            this,
+            [this, watcher, request = std::move(request), generation]() mutable {
+                TurnSubmissionPreparationOutcome outcome = watcher->result();
+                watcher->deleteLater();
+                finishTurnSubmissionPreparation(
+                    std::move(request), std::move(outcome), generation);
+            });
+    watcher->setFuture(QtConcurrent::run(
+        [attachments = std::move(workerAttachments),
+         workspace = std::move(workerWorkspace),
+         threadId = std::move(workerThreadId),
+         cancellation = std::move(cancellation)]() mutable {
+            TurnSubmissionPreparationOutcome outcome;
+            outcome.success = AttachmentManager::prepare(attachments,
+                                                         workspace,
+                                                         threadId,
+                                                         &outcome.preparation,
+                                                         &outcome.error,
+                                                         [cancellation] {
+                                                             return cancellation->load(
+                                                                 std::memory_order_relaxed);
+                                                         });
+            return outcome;
+        }));
+}
+
+void WorkbenchWidget::cancelAttachmentPreparation() noexcept
+{
+    if (attachmentPreparationCancellation)
+        attachmentPreparationCancellation->store(true, std::memory_order_relaxed);
+    attachmentPreparationCancellation.reset();
+    attachmentPreparationInFlight = false;
+    ++attachmentPreparationGeneration;
+}
+
+void WorkbenchWidget::finishTurnSubmissionPreparation(
+    TurnSubmissionPreparationRequest request,
+    TurnSubmissionPreparationOutcome outcome,
+    std::uint64_t preparationGeneration)
+{
+    if (preparationGeneration != attachmentPreparationGeneration)
+        return;
+    attachmentPreparationCancellation.reset();
+    attachmentPreparationInFlight = false;
+    if (!outcome.success) {
+        showWriteError(outcome.error.isEmpty()
+                           ? QStringLiteral("Unable to prepare attachments")
+                           : outcome.error);
+        refreshControls();
+        return;
+    }
+    if (frontendSession.lifecycle() != FrontendSession::Lifecycle::Ready
+        || selectionGeneration != request.expectedSelectionGeneration
+        || selectedThreadId != request.threadId) {
+        showWriteError(QStringLiteral(
+            "The target thread changed while attachments were being prepared"));
+        refreshControls();
+        return;
+    }
+
+    auto submission = preparedTurnSubmission(
+        request.prompt, request.attachments, std::move(outcome.preparation));
+    if (!submission) {
+        refreshControls();
+        return;
+    }
+
+    const auto& state = frontendSession.state();
+    const auto* thread = state.thread(request.threadId.toStdString());
+    if (request.action == PendingAction::SendExistingThread) {
+        if (!thread || !thread->fullyLoaded || thread->archived.value_or(false)
+            || activeTurn(state, thread)
+            || request.settings.threadIdentity != request.threadId) {
+            showWriteError(QStringLiteral(
+                "The target thread changed while attachments were being prepared"));
+            refreshControls();
+            return;
+        }
+        // Resuming an already attached thread can replay its existing item projection.
+        if (ai::openai::codex::frontend::client::threadIsIdle(*thread))
+            startTurn(request.threadId, *submission, request.settings);
+        else
+            resumeThread(request.threadId, *submission, request.settings);
+        return;
+    }
+    if (request.action == PendingAction::SteerActiveTurn) {
+        if (!thread || !thread->fullyLoaded || thread->archived.value_or(false)) {
+            showWriteError(QStringLiteral(
+                "The target turn changed while attachments were being prepared"));
+            refreshControls();
+            return;
+        }
+        const auto* turn = activeTurn(state, thread);
+        if (!turn || QString::fromStdString(turn->id.value) != request.turnId) {
+            showWriteError(QStringLiteral(
+                "The target turn changed while attachments were being prepared"));
+            refreshControls();
+            return;
+        }
+        steerTurn(request.threadId, request.turnId, *submission);
+        return;
+    }
+
+    showWriteError(QStringLiteral("The pending write changed while attachments were being prepared"));
+    refreshControls();
+}
+
+std::optional<WorkbenchWidget::PreparedTurnSubmission>
+WorkbenchWidget::preparedTurnSubmission(const QString& prompt,
+                                        const QList<AttachmentInfo>& attachments,
+                                        AttachmentPreparation preparation)
+{
     const QString effectivePrompt = AttachmentManager::composePrompt(prompt, preparation);
     if (const auto validationError = FrontendSession::promptValidationError(effectivePrompt)) {
         if (preparation.stagingLease)
@@ -2146,6 +2403,7 @@ void WorkbenchWidget::clearWriteTransients()
     threadResumeInFlight = false;
     turnStartInFlight = false;
     turnSteerInFlight = false;
+    cancelAttachmentPreparation();
     interruptInFlight = false;
     threadMutationInFlight = false;
     controllerUnavailable = false;

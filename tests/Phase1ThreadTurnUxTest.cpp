@@ -960,6 +960,80 @@ bool testScopedDuplicateTurnActionGating()
     return passed;
 }
 
+bool testTargetedSidebarRefreshKeepsUnchangedRows()
+{
+    const sdk::State initial = threadDiscoveryState(
+        {{"thread-a", false}, {"thread-b", false}}, std::string{"no-active-thread"});
+    const sdk::State updated = threadDiscoveryState(
+        {{"thread-a", false}, {"thread-b", false}}, std::string{"thread-a"});
+    codexui::SidebarWidget sidebar;
+    sidebar.setThreads(initial, QStringLiteral("thread-a"), true);
+
+    const auto rowFor = [&sidebar](const QString& threadId) -> QFrame* {
+        for (QFrame* row : sidebar.findChildren<QFrame*>(QStringLiteral("threadRow"))) {
+            if (row->property("threadId").toString() == threadId)
+                return row;
+        }
+        return nullptr;
+    };
+    const auto detailsFor = [](QFrame* row) {
+        if (!row)
+            return QString{};
+        for (QLabel* label : row->findChildren<QLabel*>()) {
+            if (label->property("kind").toString() == QStringLiteral("meta"))
+                return label->toolTip();
+        }
+        return QString{};
+    };
+
+    QFrame* threadARow = rowFor(QStringLiteral("thread-a"));
+    QFrame* threadBRow = rowFor(QStringLiteral("thread-b"));
+    const QString threadBBefore = detailsFor(threadBRow);
+    sidebar.updateThreads(updated,
+                          QStringLiteral("thread-a"),
+                          true,
+                          {QStringLiteral("thread-a")});
+
+    bool passed = expect(threadARow && threadBRow
+                             && rowFor(QStringLiteral("thread-a")) == threadARow
+                             && rowFor(QStringLiteral("thread-b")) == threadBRow,
+                         "a targeted Sidebar update must retain existing row widgets");
+    passed &= expect(detailsFor(threadARow).contains(QStringLiteral("Running"))
+                         && detailsFor(threadBRow) == threadBBefore,
+                     "a targeted Sidebar update must recompute only the affected row");
+
+    const sdk::State removed = threadDiscoveryState({{"thread-b", false}});
+    sidebar.updateThreads(removed,
+                          QStringLiteral("thread-a"),
+                          true,
+                          {QStringLiteral("thread-a")});
+    settleEvents();
+    passed &= expect(rowFor(QStringLiteral("thread-a")) == nullptr
+                         && rowFor(QStringLiteral("thread-b")) != nullptr,
+                     "a targeted removal must fall back to authoritative tree reconstruction");
+
+    sidebar.updateThreads(initial,
+                          QStringLiteral("thread-a"),
+                          true,
+                          {QStringLiteral("thread-a")});
+    settleEvents();
+    passed &= expect(rowFor(QStringLiteral("thread-a")) != nullptr
+                         && rowFor(QStringLiteral("thread-b")) != nullptr,
+                     "a targeted insertion must fall back to authoritative tree reconstruction");
+
+    const sdk::State archived = threadDiscoveryState(
+        {{"thread-a", true}, {"thread-b", false}});
+    sidebar.updateThreads(archived,
+                          QStringLiteral("thread-a"),
+                          true,
+                          {QStringLiteral("thread-a")});
+    settleEvents();
+    passed &= expect(detailsFor(rowFor(QStringLiteral("thread-a")))
+                             .contains(QStringLiteral("Archived")),
+                     "an archive-boundary change must rebuild the thread hierarchy");
+    return passed;
+}
+
 bool testThreadOrganizationPersistenceAndSafeMoves()
 {
     QTemporaryDir temporaryDirectory;
@@ -1249,6 +1323,7 @@ int main(int argc, char** argv)
     passed &= testThreadSetupResults();
     passed &= testThreadActionGating();
     passed &= testScopedDuplicateTurnActionGating();
+    passed &= testTargetedSidebarRefreshKeepsUnchangedRows();
     passed &= testThreadOrganizationPersistenceAndSafeMoves();
     passed &= testArchivedThreadAssignmentPruningWaitsForCompleteDiscovery();
     return passed ? 0 : 1;

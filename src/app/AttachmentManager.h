@@ -7,6 +7,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <functional>
 #include <memory>
 
 class QSettings;
@@ -82,11 +83,13 @@ struct PersistedAttachmentStaging
 class AttachmentManager final
 {
 public:
-    // Staging is deliberately synchronous and therefore bounded well below
-    // filesystem limits. Image contents travel by local path, not on the
-    // frontend protocol wire.
+    // Generic-file staging is bounded and may run off the GUI thread. Callers
+    // can cooperatively cancel it between fixed-size copy chunks. Image
+    // contents travel by local path, not on the frontend protocol wire.
     static constexpr qint64 MaximumSingleFileBytes = 64LL * 1024LL * 1024LL;
     static constexpr qint64 MaximumTotalBytes = 256LL * 1024LL * 1024LL;
+
+    using CancellationCheck = std::function<bool()>;
 
     [[nodiscard]] static bool inspectFile(const QString& path,
                                           AttachmentInfo* result,
@@ -98,7 +101,8 @@ public:
                                       const QString& workspace,
                                       const QString& threadId,
                                       AttachmentPreparation* result,
-                                      QString* errorMessage = nullptr);
+                                      QString* errorMessage = nullptr,
+                                      CancellationCheck cancelled = {});
     [[nodiscard]] static QString composePrompt(const QString& userPrompt,
                                                const AttachmentPreparation& preparation);
     [[nodiscard]] static QString formatSize(qint64 sizeBytes);

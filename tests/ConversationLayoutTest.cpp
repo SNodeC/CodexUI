@@ -48,6 +48,9 @@ struct MessageFixture
     bool genericItemTruncatedOnly = false;
     std::string command;
     std::string reasoningSummary;
+    std::string agentPath;
+    std::string agentThreadId;
+    std::string agentKind;
 };
 
 struct TurnFixture
@@ -145,6 +148,10 @@ frontend::Json messageJson(const std::string& threadId,
                               {"durationMs", 42}};
         if (fixture.status == "completed")
             data["exitCode"] = 0;
+    } else if (fixture.kind == frontend::ThreadItemKind::SubAgentActivity) {
+        data = frontend::Json{{"agentPath", fixture.agentPath},
+                              {"agentThreadId", fixture.agentThreadId},
+                              {"kind", fixture.agentKind}};
     }
     const bool carriesCommandOutput = fixture.kind == frontend::ThreadItemKind::CommandExecution
                                       || fixture.kind == frontend::ThreadItemKind::FileChange;
@@ -1823,6 +1830,43 @@ bool testInspectorRevisionOnlyUpdate()
                      "a revision-only update must preserve every existing Inspector pane widget");
 }
 
+bool testInspectorThreadDependencies()
+{
+    MessageFixture activity;
+    activity.id = "subagent-activity";
+    activity.kind = frontend::ThreadItemKind::SubAgentActivity;
+    activity.text = "Delegated work";
+    activity.agentPath = "agent/reviewer";
+    activity.agentThreadId = "inspector-agent-child";
+    activity.agentKind = "spawn";
+    const client::State state = makeState(
+        {{"inspector-parent", {{"turn-inspector-parent", {activity}, std::nullopt}}},
+         singleTurn("inspector-agent-child", 1)});
+
+    codexui::InspectorWidget inspector;
+    inspector.render(state,
+                     QStringLiteral("inspector-parent"),
+                     true,
+                     QStringLiteral("State synced"));
+    bool passed = expect(inspector.dependsOnThread(QStringLiteral("inspector-parent"))
+                             && inspector.dependsOnThread(
+                                 QStringLiteral("inspector-agent-child"))
+                             && !inspector.dependsOnThread(QStringLiteral("unrelated")),
+                         "Inspector invalidation must include its selected parent and linked agent thread only");
+
+    const client::State withoutActivity = makeState(
+        {singleTurn("inspector-parent", 1), singleTurn("inspector-agent-child", 1)});
+    inspector.render(withoutActivity,
+                     QStringLiteral("inspector-parent"),
+                     true,
+                     QStringLiteral("State synced"));
+    passed &= expect(inspector.dependsOnThread(QStringLiteral("inspector-parent"))
+                         && !inspector.dependsOnThread(
+                             QStringLiteral("inspector-agent-child")),
+                     "removing subagent activity must discard its stale linked-thread dependency");
+    return passed;
+}
+
 bool testStructuredPlanPresentation()
 {
     ThreadFixture fixture{"structured-plan",
@@ -2078,6 +2122,7 @@ int main(int argc, char** argv)
     passed &= testSegmentReplacementShrink();
     passed &= testThreadSwitchWindow();
     passed &= testInspectorRevisionOnlyUpdate();
+    passed &= testInspectorThreadDependencies();
     passed &= testStructuredPlanPresentation();
     passed &= testHistoricalTurnDetailsMode();
     passed &= testScopedDuplicateTurnIdentity();
