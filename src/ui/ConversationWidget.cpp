@@ -854,24 +854,26 @@ void addActivityRow(QVBoxLayout* rows,
     const QString color = statusColor(item.status);
     auto* prefix = new QWidget;
     prefix->setObjectName(QStringLiteral("conversationActivityPrefix"));
-    auto* prefixLayout = new QHBoxLayout(prefix);
-    prefixLayout->setContentsMargins(0, 0, 0, 0);
-    prefixLayout->setSpacing(1);
+    prefix->setFixedSize(hasDetails ? 31 : 14, 22);
 
     auto* symbol = textLabel(statusGlyph(item.status));
+    symbol->setParent(prefix);
     symbol->setObjectName(QStringLiteral("conversationActivitySymbol"));
     symbol->setFixedSize(14, 22);
+    symbol->move(0, 0);
     symbol->setAlignment(Qt::AlignCenter);
+    symbol->setAttribute(Qt::WA_TransparentForMouseEvents);
     symbol->setStyleSheet(QStringLiteral("color:%1;font-size:12px;font-weight:600;").arg(color));
-    prefixLayout->addWidget(symbol, 0, Qt::AlignTop);
 
     auto* disclosure = disclosureButton(
         expanded,
         QStringLiteral("Activity details: %1").arg(item.title),
         true);
+    disclosure->setParent(prefix);
+    disclosure->move(9, 0);
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
-    prefixLayout->addWidget(disclosure, 0, Qt::AlignTop);
+    symbol->raise();
 
     auto* title = wrappingLabel(item.title);
     title->setObjectName(QStringLiteral("conversationActivityTitle"));
@@ -885,11 +887,10 @@ void addActivityRow(QVBoxLayout* rows,
     title->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     title->setMinimumHeight(disclosure->height());
 
-    // Both disclosure controls use the same 22 px hit target.  The nested
-    // right-pointing indicator is narrower than the header's down indicator,
-    // so shift its native icon two pixels right and use the header's zero
-    // layout gap.  This keeps the visible indicator-to-text gap equal without
-    // shrinking the hover/focus surface.
+    // Keep a native 22 px hit target without letting that hit target define
+    // the visible columns.  Its right-pointing chevron begins at the same x as
+    // titles on rows without details, and the following title retains the
+    // header's measured seven-pixel visible gap.
     auto* leading = new QWidget;
     auto* leadingLayout = new QHBoxLayout(leading);
     leadingLayout->setObjectName(QStringLiteral("conversationActivityLeadingLayout"));
@@ -1025,6 +1026,8 @@ bool updateActivityRow(QWidget* row, const ActivityPresentation& item)
         incomplete->setVisible(item.truncated);
 
     const bool hasDetails = !item.detail.isEmpty() || !item.output.isEmpty() || item.truncated;
+    if (auto* prefix = row->findChild<QWidget*>(QStringLiteral("conversationActivityPrefix")))
+        prefix->setFixedWidth(hasDetails ? 31 : 14);
     if (auto* leadingLayout = row->findChild<QHBoxLayout*>(
             QStringLiteral("conversationActivityLeadingLayout")))
         leadingLayout->setSpacing(hasDetails ? 0 : 6);
