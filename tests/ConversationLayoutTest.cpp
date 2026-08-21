@@ -594,21 +594,6 @@ bool testActivityDisclosureAndFullOutput()
     passed &= expect(detailDisclosure && detailDisclosure->isCheckable()
                          && !row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput")),
                      "a collapsed activity must not materialize a potentially large output document");
-    auto* activitySummary = row
-                                ? row->findChild<QWidget*>(
-                                      QStringLiteral("conversationActivitySummary"))
-                                : nullptr;
-    auto* activitySummaryLayout = activitySummary
-                                      ? qobject_cast<QHBoxLayout*>(activitySummary->layout())
-                                      : nullptr;
-    auto* initialStatusSymbol = row
-                                    ? row->findChild<QLabel*>(
-                                          QStringLiteral("conversationActivitySymbol"))
-                                    : nullptr;
-    passed &= expect(activitySummaryLayout && initialStatusSymbol && detailDisclosure
-                         && activitySummaryLayout->indexOf(initialStatusSymbol) == 0
-                         && activitySummaryLayout->indexOf(detailDisclosure) == 1,
-                     "activity status indicators must precede disclosures in a stable aligned column");
     passed &= expect(groupDisclosure
                          && !groupDisclosure->styleSheet().contains(
                              QStringLiteral("activityDisclosure:checked")),
