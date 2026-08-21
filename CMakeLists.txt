@@ -9,7 +9,7 @@ include(GNUInstallDirs)
 
 set(CMAKE_AUTOMOC ON)
 
-find_package(AISuite 0.4.0 CONFIG REQUIRED)
+find_package(AISuite 0.5.0 CONFIG REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Network Widgets)
 
 qt_add_executable(
@@ -20,6 +20,8 @@ qt_add_executable(
     src/app/AttachmentManager.h
     src/app/FrontendSession.cpp
     src/app/FrontendSession.h
+    src/app/FrontendSessionWorker.cpp
+    src/app/FrontendSessionWorker.h
     src/main.cpp
     src/ui/AnchoredTurnSurface.cpp
     src/ui/AnchoredTurnSurface.h
@@ -77,6 +79,8 @@ if(BUILD_TESTING)
         tests/PromptLimitTest.cpp
         src/app/FrontendSession.cpp
         src/app/FrontendSession.h
+        src/app/FrontendSessionWorker.cpp
+        src/app/FrontendSessionWorker.h
     )
     target_compile_features(CodexUIPromptLimitTest PRIVATE cxx_std_20)
     target_include_directories(CodexUIPromptLimitTest PRIVATE src)
@@ -93,6 +97,8 @@ if(BUILD_TESTING)
         tests/FrontendSessionTest.cpp
         src/app/FrontendSession.cpp
         src/app/FrontendSession.h
+        src/app/FrontendSessionWorker.cpp
+        src/app/FrontendSessionWorker.h
     )
     target_compile_features(CodexUIFrontendSessionTest PRIVATE cxx_std_20)
     target_include_directories(CodexUIFrontendSessionTest PRIVATE src)

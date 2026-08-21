@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
-#include "app/FrontendSession.h"
+#include "app/FrontendSessionWorker.h"
 
 #include <ai/openai/codex/frontend/Codec.h>
 #include <ai/openai/codex/frontend/Messages.h>
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QTemporaryDir>
+#include <QThread>
 
 #include <algorithm>
 #include <iostream>
@@ -19,88 +22,99 @@
 
 namespace codexui {
 
-struct FrontendSessionTestAccess
+struct FrontendSessionWorkerTestAccess
 {
-    static void setLifecycle(FrontendSession& session, FrontendSession::Lifecycle lifecycle, QString detail = {})
+    static void setLifecycle(FrontendSessionWorker& session, FrontendSessionWorker::Lifecycle lifecycle, QString detail = {})
     {
         session.setLifecycle(lifecycle, std::move(detail));
     }
 
     static void handleConnectionStateChange(
-        FrontendSession& session,
+        FrontendSessionWorker& session,
         const ai::openai::codex::frontend::client::ConnectionStateChange& change)
     {
         session.handleConnectionStateChange(change);
     }
 
-    static void reportDiagnostic(FrontendSession& session, QString message)
+    static void reportDiagnostic(FrontendSessionWorker& session, QString message)
     {
         session.reportDiagnostic(std::move(message));
     }
 
-    static bool automaticReconnectEnabled(const FrontendSession& session)
+    static bool automaticReconnectEnabled(const FrontendSessionWorker& session)
     {
         return session.automaticReconnectEnabled;
     }
 
-    static int consecutivePreReadyDisconnects(const FrontendSession& session)
+    static int consecutivePreReadyDisconnects(const FrontendSessionWorker& session)
     {
         return session.consecutivePreReadyDisconnects;
     }
 
     static int maximumConsecutivePreReadyDisconnects()
     {
-        return FrontendSession::maximumConsecutivePreReadyDisconnects;
+        return FrontendSessionWorker::maximumConsecutivePreReadyDisconnects;
     }
 
-    static std::size_t maximumFrameBytes(const FrontendSession& session)
+    static std::size_t maximumFrameBytes(const FrontendSessionWorker& session)
     {
         return session.maximumFrameBytes;
     }
 
-    static void resetReconnectPolicy(FrontendSession& session)
+    static void resetReconnectPolicy(FrontendSessionWorker& session)
     {
         session.resetReconnectPolicy();
     }
 
-    static void setInbound(FrontendSession& session, QByteArray bytes, qsizetype offset)
+    static void setInbound(FrontendSessionWorker& session, QByteArray bytes, qsizetype offset)
     {
         session.inboundBuffer = std::move(bytes);
         session.inboundOffset = offset;
+        session.inboundScanOffset = offset;
     }
 
-    static void compactInbound(FrontendSession& session)
+    static void appendInbound(FrontendSessionWorker& session, const QByteArray& bytes)
+    {
+        session.inboundBuffer.append(bytes);
+    }
+
+    static qsizetype inboundScanOffset(const FrontendSessionWorker& session)
+    {
+        return session.inboundScanOffset;
+    }
+
+    static void compactInbound(FrontendSessionWorker& session)
     {
         session.compactInbound();
     }
 
-    static QByteArray inboundBytes(const FrontendSession& session)
+    static QByteArray inboundBytes(const FrontendSessionWorker& session)
     {
         return session.inboundBuffer;
     }
 
-    static qsizetype inboundOffset(const FrontendSession& session)
+    static qsizetype inboundOffset(const FrontendSessionWorker& session)
     {
         return session.inboundOffset;
     }
 
-    static bool hasCompleteInboundFrame(const FrontendSession& session)
+    static bool hasCompleteInboundFrame(const FrontendSessionWorker& session)
     {
         return session.hasCompleteInboundFrame();
     }
 
-    static void prepareReconnectReset(FrontendSession& session)
+    static void prepareReconnectReset(FrontendSessionWorker& session)
     {
         session.automaticReconnectEnabled = false;
-        session.reconnectDelayMs = FrontendSession::maximumReconnectDelayMs;
+        session.reconnectDelayMs = FrontendSessionWorker::maximumReconnectDelayMs;
         session.reconnectTimer.start(60'000);
     }
 
-    static void installConnectionWithTerminalClose(FrontendSession& session, bool& closeObserved)
+    static void installConnectionWithTerminalClose(FrontendSessionWorker& session, bool& closeObserved)
     {
         session.connection = session.client->openConnection({
-            [](FrontendSession::OutboundMessage) {
-                return FrontendSession::SendResult{
+            [](FrontendSessionWorker::OutboundMessage) {
+                return FrontendSessionWorker::SendResult{
                     ai::openai::codex::frontend::client::SendStatus::Accepted,
                     std::nullopt};
             },
@@ -118,7 +132,7 @@ struct FrontendSessionTestAccess
     }
 
     static ai::openai::codex::frontend::client::SendResult
-    acceptOutbound(FrontendSession& session,
+    acceptOutbound(FrontendSessionWorker& session,
                    std::string compactJson,
                    qint64 socketBufferedBytes,
                    const std::function<qint64(const char*, qint64)>& writer)
@@ -134,7 +148,7 @@ struct FrontendSessionTestAccess
     }
 
     static ai::openai::codex::frontend::client::SendResult
-    sendToTransport(FrontendSession& session,
+    sendToTransport(FrontendSessionWorker& session,
                     std::string compactJson,
                     bool transportConnected,
                     qint64 socketBufferedBytes,
@@ -150,18 +164,18 @@ struct FrontendSessionTestAccess
             std::move(message), transportConnected, socketBufferedBytes, writer);
     }
 
-    static bool drainOutbound(FrontendSession& session,
+    static bool drainOutbound(FrontendSessionWorker& session,
                               const std::function<qint64(const char*, qint64)>& writer)
     {
-        const FrontendSession::DrainResult result = session.drainOutbound(writer);
-        return result != FrontendSession::DrainResult::Failed
-               && result != FrontendSession::DrainResult::Reset;
+        const FrontendSessionWorker::DrainResult result = session.drainOutbound(writer);
+        return result != FrontendSessionWorker::DrainResult::Failed
+               && result != FrontendSessionWorker::DrainResult::Reset;
     }
 
-    static std::string pendingWire(const FrontendSession& session)
+    static std::string pendingWire(const FrontendSessionWorker& session)
     {
         std::string wire;
-        for (const FrontendSession::PendingWrite& pending : session.pendingWrites) {
+        for (const FrontendSessionWorker::PendingWrite& pending : session.pendingWrites) {
             const qint64 frameSize = static_cast<qint64>(pending.frame.size());
             if (pending.offset < 0 || pending.offset > frameSize)
                 return "<invalid pending-write offset>";
@@ -171,45 +185,45 @@ struct FrontendSessionTestAccess
         return wire;
     }
 
-    static qint64 pendingWriteBytes(const FrontendSession& session)
+    static qint64 pendingWriteBytes(const FrontendSessionWorker& session)
     {
         return session.pendingWriteBytes;
     }
 
     static qint64 maximumBufferedOutboundBytes()
     {
-        return FrontendSession::maximumBufferedOutboundBytes;
+        return FrontendSessionWorker::maximumBufferedOutboundBytes;
     }
 
-    static void clearOutbound(FrontendSession& session)
+    static void clearOutbound(FrontendSessionWorker& session)
     {
         session.clearOutbound();
     }
 
-    static bool outboundDrainIsScheduled(const FrontendSession& session)
+    static bool outboundDrainIsScheduled(const FrontendSessionWorker& session)
     {
         return session.outboundDrainTimer.isActive();
     }
 
     static ai::openai::codex::frontend::client::SendResult
-    send(FrontendSession& session, ai::openai::codex::frontend::client::OutboundMessage& message)
+    send(FrontendSessionWorker& session, ai::openai::codex::frontend::client::OutboundMessage& message)
     {
         return session.send(std::move(message));
     }
 
-    static bool outboundClearIsDeferred(const FrontendSession& session)
+    static bool outboundClearIsDeferred(const FrontendSessionWorker& session)
     {
         return session.outboundClearPending && session.pendingWriteBytes > 0;
     }
 
-    static void disconnectTransport(FrontendSession& session)
+    static void disconnectTransport(FrontendSessionWorker& session)
     {
         session.preReadyFailureRecordedCurrentConnection = false;
         session.socketDisconnected();
         session.reconnectTimer.stop();
     }
 
-    static void failTransport(FrontendSession& session, bool newConnectionAttempt = true)
+    static void failTransport(FrontendSessionWorker& session, bool newConnectionAttempt = true)
     {
         if (newConnectionAttempt)
             session.preReadyFailureRecordedCurrentConnection = false;
@@ -218,16 +232,16 @@ struct FrontendSessionTestAccess
     }
 
     static bool synchronizeWithCapturedTransport(
-        FrontendSession& session,
+        FrontendSessionWorker& session,
         std::vector<ai::openai::codex::frontend::client::OutboundMessage>& messages)
     {
         namespace frontend = ai::openai::codex::frontend;
         namespace sdk = frontend::client;
 
         session.connection = session.client->openConnection({
-            [&messages](FrontendSession::OutboundMessage message) {
+            [&messages](FrontendSessionWorker::OutboundMessage message) {
                 messages.push_back(std::move(message));
-                return FrontendSession::SendResult{sdk::SendStatus::Accepted, std::nullopt};
+                return FrontendSessionWorker::SendResult{sdk::SendStatus::Accepted, std::nullopt};
             },
             [](std::string) {},
         });
@@ -269,32 +283,111 @@ struct FrontendSessionTestAccess
                    .accepted;
     }
 
-    static bool receive(FrontendSession& session,
+    static bool receive(FrontendSessionWorker& session,
                         ai::openai::codex::frontend::ServerMessage message)
     {
         return session.connection.receive(std::move(message)).accepted;
     }
 
-    static void receiveWire(FrontendSession& session, QByteArray wire)
+    static void receiveWire(FrontendSessionWorker& session, QByteArray wire)
     {
         session.inboundBuffer = std::move(wire);
         session.inboundOffset = 0;
         session.socketReadyRead();
     }
 
-    static void beginArchivedThreadRefresh(FrontendSession& session)
+    static void beginArchivedThreadRefresh(FrontendSessionWorker& session)
     {
         session.beginArchivedThreadRefresh();
     }
 
-    static bool archivedThreadListInFlight(const FrontendSession& session)
+    static bool archivedThreadListInFlight(const FrontendSessionWorker& session)
     {
         return session.archivedThreadListInFlight;
     }
 
-    static std::size_t archivedThreadCursorCount(const FrontendSession& session)
+    static std::size_t archivedThreadCursorCount(const FrontendSessionWorker& session)
     {
         return session.archivedThreadListCursors.size();
+    }
+};
+
+struct FrontendSessionFacadeTestAccess
+{
+    static void enqueueState(FrontendSession& session,
+                             std::uint64_t generation,
+                             detail::StateUpdateScope scope)
+    {
+        session.enqueueStateForTest(generation, std::move(scope));
+    }
+
+    static void enqueueStatus(FrontendSession& session,
+                              std::uint64_t generation,
+                              QString status)
+    {
+        session.enqueueStatusForTest(generation, std::move(status));
+    }
+
+    static void enqueueStatus(FrontendSession& session,
+                              std::uint64_t generation,
+                              FrontendSession::Lifecycle lifecycle,
+                              QString status)
+    {
+        session.enqueueStatusForTest(
+            generation, lifecycle, std::move(status));
+    }
+
+    static void enqueueLifecycle(FrontendSession& session,
+                                 std::uint64_t generation,
+                                 FrontendSession::Lifecycle lifecycle,
+                                 QString status)
+    {
+        session.enqueueLifecycleForTest(
+            generation, lifecycle, std::move(status));
+    }
+
+    static void enqueueModels(
+        FrontendSession& session,
+        std::uint64_t generation,
+        std::vector<ai::openai::codex::typed::Model> models)
+    {
+        session.enqueueModelsForTest(generation, std::move(models));
+    }
+
+    static std::size_t pendingStateCount(const FrontendSession& session)
+    {
+        return session.pendingStateCountForTest();
+    }
+
+    static std::size_t pendingControlCount(const FrontendSession& session)
+    {
+        return session.pendingControlCountForTest();
+    }
+
+    static std::size_t postedWakeCount(const FrontendSession& session)
+    {
+        return session.postedWakeCountForTest();
+    }
+
+    static bool workerAffinityValidated(const FrontendSession& session)
+    {
+        return session.workerAffinityValidatedForTest();
+    }
+
+    static void trackOperation(FrontendSession& session,
+                               FrontendSession::OperationCompletion completion)
+    {
+        session.trackOperationForTest(std::move(completion));
+    }
+
+    static void completeOperation(
+        FrontendSession& session,
+        std::uint64_t generation,
+        FrontendSession::OperationCompletion completion,
+        QString error)
+    {
+        session.completeOperationForTest(
+            generation, std::move(completion), std::move(error));
     }
 };
 
@@ -304,6 +397,7 @@ namespace {
 
 namespace frontend = ai::openai::codex::frontend;
 namespace sdk = ai::openai::codex::frontend::client;
+namespace typed = ai::openai::codex::typed;
 
 bool expect(bool condition, const char* message)
 {
@@ -372,6 +466,36 @@ bool testScopedItemPresentationChanges()
                                        std::nullopt});
     const auto partiallyScoped = codexui::detail::stateUpdateScope(partiallyScopedUpdate);
 
+    sdk::StateUpdate appendedUpdate;
+    appendedUpdate.changes.push_back(
+        sdk::ItemContentAppendedChange{
+            ai::openai::codex::typed::ItemId{"streamed-item"},
+            sdk::ItemContentChannel::ReasoningText,
+            ai::openai::codex::typed::ThreadId{"target-thread"},
+            ai::openai::codex::typed::TurnId{"target-turn"},
+            17,
+            3,
+            std::string{"exact \xF0\x9F\x98\x80 bytes"},
+        });
+    const auto appended = codexui::detail::stateUpdateScope(appendedUpdate);
+
+    sdk::StateUpdate oversizedAppendUpdate;
+    oversizedAppendUpdate.changes.push_back(
+        sdk::ItemContentAppendedChange{
+            ai::openai::codex::typed::ItemId{"oversized-item"},
+            sdk::ItemContentChannel::CommandOutput,
+            ai::openai::codex::typed::ThreadId{"target-thread"},
+            ai::openai::codex::typed::TurnId{"target-turn"},
+            0,
+            0,
+            std::string(
+                static_cast<std::size_t>(
+                    codexui::detail::maximumCoalescedContentDeltaBytes + 1),
+                'x'),
+        });
+    const auto oversizedAppend =
+        codexui::detail::stateUpdateScope(oversizedAppendUpdate);
+
     sdk::StateUpdate mixedUpdate = streamedUpdate;
     mixedUpdate.changes.push_back(sdk::ItemUpsertedChange{
         ai::openai::codex::typed::ItemId{"structural-item"},
@@ -430,6 +554,26 @@ bool testScopedItemPresentationChanges()
                          && partiallyScoped.affectedItemContents.empty()
                          && !partiallyScoped.allThreadsAffected,
                      "partially scoped item content must require bounded full thread reconciliation");
+    passed &= expect(
+        appended.affectedItemContents.size() == 1
+            && appended.affectedItemContents.front().channel
+                   == sdk::ItemContentChannel::ReasoningText
+            && appended.affectedItemContents.front().append
+            && appended.affectedItemContents.front().append->baseContentBytes == 17
+            && appended.affectedItemContents.front().append->discardPrefixBytes == 3
+            && appended.affectedItemContents.front().append->deltaUtf8
+                   == QByteArray("exact \xF0\x9F\x98\x80 bytes")
+            && appended.coalescedContentDeltaBytes
+                   == static_cast<std::uint64_t>(
+                       QByteArray("exact \xF0\x9F\x98\x80 bytes").size()),
+        "an authoritative append change must retain its channel and exact UTF-8 byte contract");
+    passed &= expect(
+        oversizedAppend.affectedItemContents.size() == 1
+            && oversizedAppend.affectedItemContents.front().channel
+                   == sdk::ItemContentChannel::CommandOutput
+            && !oversizedAppend.affectedItemContents.front().append
+            && oversizedAppend.coalescedContentDeltaBytes == 0,
+        "an oversized append hint must degrade to an authoritative replacement without entering the GUI mailbox");
     passed &= expect(mixed.fullyAffectedThreadIds
                              == QStringList{QStringLiteral("target-thread")}
                          && mixed.affectedItemContents.size() == 1
@@ -456,18 +600,18 @@ bool testLifecycleAndDiagnostics()
     int lifecycleChanges = 0;
     int statusChanges = 0;
     bool reconnectCloseObserved = false;
-    codexui::FrontendSession session;
-    QObject::connect(&session, &codexui::FrontendSession::lifecycleChanged, [&lifecycleChanges] { ++lifecycleChanges; });
-    QObject::connect(&session, &codexui::FrontendSession::statusChanged, [&statusChanges] { ++statusChanges; });
+    codexui::FrontendSessionWorker session;
+    QObject::connect(&session, &codexui::FrontendSessionWorker::lifecycleChanged, [&lifecycleChanges] { ++lifecycleChanges; });
+    QObject::connect(&session, &codexui::FrontendSessionWorker::statusChanged, [&statusChanges] { ++statusChanges; });
 
-    codexui::FrontendSessionTestAccess::setLifecycle(session, codexui::FrontendSession::Lifecycle::Ready);
-    codexui::FrontendSessionTestAccess::setLifecycle(session, codexui::FrontendSession::Lifecycle::Ready);
+    codexui::FrontendSessionWorkerTestAccess::setLifecycle(session, codexui::FrontendSessionWorker::Lifecycle::Ready);
+    codexui::FrontendSessionWorkerTestAccess::setLifecycle(session, codexui::FrontendSessionWorker::Lifecycle::Ready);
     bool passed = expect(lifecycleChanges == 1, "an identical lifecycle and detail must not emit a duplicate transition");
 
-    codexui::FrontendSessionTestAccess::reportDiagnostic(session, QStringLiteral("projection diagnostic"));
-    codexui::FrontendSessionTestAccess::reportDiagnostic(session, QStringLiteral("projection diagnostic"));
-    codexui::FrontendSessionTestAccess::setLifecycle(session, codexui::FrontendSession::Lifecycle::Ready);
-    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Ready
+    codexui::FrontendSessionWorkerTestAccess::reportDiagnostic(session, QStringLiteral("projection diagnostic"));
+    codexui::FrontendSessionWorkerTestAccess::reportDiagnostic(session, QStringLiteral("projection diagnostic"));
+    codexui::FrontendSessionWorkerTestAccess::setLifecycle(session, codexui::FrontendSessionWorker::Lifecycle::Ready);
+    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Ready
                          && session.statusText() == QStringLiteral("projection diagnostic")
                          && lifecycleChanges == 1 && statusChanges == 1,
                      "an error diagnostic must update status once without changing a ready lifecycle");
@@ -477,98 +621,98 @@ bool testLifecycleAndDiagnostics()
     retryableError.retryable = true;
     const sdk::ConnectionStateChange retryableChange{
         sdk::ConnectionState::Ready, sdk::ConnectionState::Disconnected, retryableError};
-    codexui::FrontendSessionTestAccess::handleConnectionStateChange(session, retryableChange);
+    codexui::FrontendSessionWorkerTestAccess::handleConnectionStateChange(session, retryableChange);
     const int retryableSignalCount = lifecycleChanges;
-    codexui::FrontendSessionTestAccess::handleConnectionStateChange(session, retryableChange);
-    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
-                         && codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+    codexui::FrontendSessionWorkerTestAccess::handleConnectionStateChange(session, retryableChange);
+    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Failed
+                         && codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
                          && lifecycleChanges == retryableSignalCount && retryableSignalCount == 2,
                      "a retryable connection error must produce one failed transition and retain automatic reconnect");
 
     sdk::Error terminalError;
     terminalError.message = "terminal protocol failure";
     terminalError.retryable = false;
-    codexui::FrontendSessionTestAccess::handleConnectionStateChange(
+    codexui::FrontendSessionWorkerTestAccess::handleConnectionStateChange(
         session,
         {sdk::ConnectionState::Disconnected, sdk::ConnectionState::Closed, terminalError});
-    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
-                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Failed
+                         && !codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
                          && lifecycleChanges == 3,
                      "a nonretryable connection error must produce one failed transition and disable automatic reconnect");
-    codexui::FrontendSessionTestAccess::handleConnectionStateChange(
+    codexui::FrontendSessionWorkerTestAccess::handleConnectionStateChange(
         session,
         {sdk::ConnectionState::Closed, sdk::ConnectionState::Disconnected, std::nullopt});
-    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
+    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Failed
                          && lifecycleChanges == 3,
                      "a following physical close must preserve the terminal failure");
 
-    codexui::FrontendSessionTestAccess::prepareReconnectReset(session);
-    codexui::FrontendSessionTestAccess::installConnectionWithTerminalClose(session, reconnectCloseObserved);
+    codexui::FrontendSessionWorkerTestAccess::prepareReconnectReset(session);
+    codexui::FrontendSessionWorkerTestAccess::installConnectionWithTerminalClose(session, reconnectCloseObserved);
     session.reconnectToBackend();
     passed &= expect(reconnectCloseObserved
-                         && codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session),
+                         && codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session),
                      "the public reconnect path must override a terminal old-transport close callback");
     return passed;
 }
 
 bool testPreReadyReconnectBound()
 {
-    codexui::FrontendSession session;
-    const int maximum = codexui::FrontendSessionTestAccess::maximumConsecutivePreReadyDisconnects();
+    codexui::FrontendSessionWorker session;
+    const int maximum = codexui::FrontendSessionWorkerTestAccess::maximumConsecutivePreReadyDisconnects();
     bool passed = true;
     for (int attempt = 1; attempt < maximum; ++attempt) {
-        codexui::FrontendSessionTestAccess::disconnectTransport(session);
-        passed &= expect(codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
-                             && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == attempt,
+        codexui::FrontendSessionWorkerTestAccess::disconnectTransport(session);
+        passed &= expect(codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
+                             && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == attempt,
                          "a bounded number of pre-synchronization disconnects remains retryable");
     }
 
-    codexui::FrontendSessionTestAccess::disconnectTransport(session);
-    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
-                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
-                         && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == maximum
+    codexui::FrontendSessionWorkerTestAccess::disconnectTransport(session);
+    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Failed
+                         && !codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
+                         && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == maximum
                          && session.statusText().contains(QStringLiteral("before synchronization completed")),
                      "repeated pre-synchronization disconnects stop at a visible terminal boundary");
 
-    codexui::FrontendSessionTestAccess::resetReconnectPolicy(session);
+    codexui::FrontendSessionWorkerTestAccess::resetReconnectPolicy(session);
     std::vector<sdk::OutboundMessage> messages;
     passed &= expect(
-        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, messages)
-            && session.lifecycle() == codexui::FrontendSession::Lifecycle::Ready
-            && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(session, messages)
+            && session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Ready
+            && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == 0,
         "the real SDK synchronization callback must reset the pre-ready retry budget");
-    codexui::FrontendSessionTestAccess::disconnectTransport(session);
-    passed &= expect(codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
-                         && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
+    codexui::FrontendSessionWorkerTestAccess::disconnectTransport(session);
+    passed &= expect(codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
+                         && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == 0,
                      "a disconnect after synchronization does not consume the pre-ready retry budget");
 
-    codexui::FrontendSession failedConnectSession;
+    codexui::FrontendSessionWorker failedConnectSession;
     for (int attempt = 1; attempt < maximum; ++attempt) {
-        codexui::FrontendSessionTestAccess::failTransport(failedConnectSession);
+        codexui::FrontendSessionWorkerTestAccess::failTransport(failedConnectSession);
         passed &= expect(
-            codexui::FrontendSessionTestAccess::automaticReconnectEnabled(failedConnectSession)
-                && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(failedConnectSession) == attempt,
+            codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(failedConnectSession)
+                && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(failedConnectSession) == attempt,
             "a bounded number of failed pre-synchronization connection attempts remains retryable");
-        codexui::FrontendSessionTestAccess::failTransport(failedConnectSession, false);
+        codexui::FrontendSessionWorkerTestAccess::failTransport(failedConnectSession, false);
         passed &= expect(
-            codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(failedConnectSession) == attempt,
+            codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(failedConnectSession) == attempt,
             "multiple failure signals for one connection attempt consume the retry budget only once");
     }
-    codexui::FrontendSessionTestAccess::failTransport(failedConnectSession);
+    codexui::FrontendSessionWorkerTestAccess::failTransport(failedConnectSession);
     passed &= expect(
-        failedConnectSession.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
-            && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(failedConnectSession)
-            && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(failedConnectSession) == maximum,
+        failedConnectSession.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Failed
+            && !codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(failedConnectSession)
+            && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(failedConnectSession) == maximum,
         "repeated failed connection attempts stop at the same visible terminal boundary");
     return passed;
 }
 
 bool testReceiveRejectionPreservesPreciseError()
 {
-    codexui::FrontendSession session;
+    codexui::FrontendSessionWorker session;
     std::vector<sdk::OutboundMessage> messages;
     bool passed = expect(
-        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, messages),
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(session, messages),
         "the receive-rejection fixture must reach synchronized State");
 
     const auto duplicateWelcome = frontend::Codec::serializeServer(
@@ -582,37 +726,37 @@ bool testReceiveRejectionPreservesPreciseError()
     if (!duplicateWelcome)
         return false;
 
-    codexui::FrontendSessionTestAccess::receiveWire(
+    codexui::FrontendSessionWorkerTestAccess::receiveWire(
         session, QByteArray::fromStdString(duplicateWelcome.value() + '\n'));
-    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
-                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Failed
+                         && !codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
                          && session.statusText() == QStringLiteral("unexpected or duplicate Welcome")
                          && !session.statusText().contains(
                              QStringLiteral("frontend server message was rejected"),
                              Qt::CaseInsensitive),
                      "socketReadyRead must preserve the precise SDK lifecycle error instead of the generic receive rejection");
-    codexui::FrontendSessionTestAccess::failTransport(session, false);
-    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
-                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+    codexui::FrontendSessionWorkerTestAccess::failTransport(session, false);
+    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Failed
+                         && !codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
                          && session.statusText() == QStringLiteral("unexpected or duplicate Welcome")
-                         && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
+                         && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == 0,
                      "the socket error following a terminal SDK rejection must preserve its precise reason and retry budget");
-    codexui::FrontendSessionTestAccess::disconnectTransport(session);
-    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Failed
-                         && !codexui::FrontendSessionTestAccess::automaticReconnectEnabled(session)
+    codexui::FrontendSessionWorkerTestAccess::disconnectTransport(session);
+    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Failed
+                         && !codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
                          && session.statusText() == QStringLiteral("unexpected or duplicate Welcome")
-                         && codexui::FrontendSessionTestAccess::consecutivePreReadyDisconnects(session) == 0,
+                         && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == 0,
                      "the physical disconnect following a terminal SDK rejection must preserve its precise reason and retry budget");
     return passed;
 }
 
 bool testInboundFrameCapacityTracksSdk()
 {
-    codexui::FrontendSession session;
+    codexui::FrontendSessionWorker session;
     const sdk::ClientOptions defaults;
     return expect(
-        codexui::FrontendSessionTestAccess::maximumFrameBytes(session) == defaults.maximumInboundMessageBytes
-            && codexui::FrontendSessionTestAccess::maximumFrameBytes(session) > 16U * 1024U * 1024U,
+        codexui::FrontendSessionWorkerTestAccess::maximumFrameBytes(session) == defaults.maximumInboundMessageBytes
+            && codexui::FrontendSessionWorkerTestAccess::maximumFrameBytes(session) > 16U * 1024U * 1024U,
         "the Qt JSONL receiver must accept the SDK's complete provider-derived server-message range");
 }
 
@@ -639,7 +783,7 @@ frontend::Json modelListEntry(std::string id,
 {
     return frontend::Json{
         {"defaultReasoningEffort", "medium"},
-        {"description", "FrontendSession model catalogue fixture"},
+        {"description", "FrontendSessionWorker model catalogue fixture"},
         {"displayName", std::move(displayName)},
         {"hidden", hidden},
         {"id", std::move(id)},
@@ -653,14 +797,14 @@ frontend::Json modelListEntry(std::string id,
 
 bool testModelCatalogRefresh()
 {
-    codexui::FrontendSession session;
+    codexui::FrontendSessionWorker session;
     std::vector<sdk::OutboundMessage> outbound;
     int catalogueSignals = 0;
-    QObject::connect(&session, &codexui::FrontendSession::modelCatalogChanged,
+    QObject::connect(&session, &codexui::FrontendSessionWorker::modelCatalogChanged,
                      [&catalogueSignals] { ++catalogueSignals; });
 
     bool passed = expect(
-        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, outbound),
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(session, outbound),
         "the model-catalogue fixture must reach a synchronized SDK connection");
     std::vector<frontend::Json> commands = capturedCommands(outbound, "model.list");
     passed &= expect(commands.size() == 1
@@ -672,7 +816,7 @@ bool testModelCatalogRefresh()
 
     const std::string firstRequestId = commands.front()["requestId"].get<std::string>();
     passed &= expect(
-        codexui::FrontendSessionTestAccess::receive(
+        codexui::FrontendSessionWorkerTestAccess::receive(
             session,
             frontend::ServerMessage{frontend::Response::success(
                 firstRequestId,
@@ -694,7 +838,7 @@ bool testModelCatalogRefresh()
 
     const std::string secondRequestId = commands.back()["requestId"].get<std::string>();
     passed &= expect(
-        codexui::FrontendSessionTestAccess::receive(
+        codexui::FrontendSessionWorkerTestAccess::receive(
             session,
             frontend::ServerMessage{frontend::Response::success(
                 secondRequestId,
@@ -718,14 +862,14 @@ bool testModelCatalogRefresh()
 
 bool testModelCatalogRefreshFailureIsDiagnosed()
 {
-    codexui::FrontendSession session;
+    codexui::FrontendSessionWorker session;
     std::vector<sdk::OutboundMessage> outbound;
     int catalogueSignals = 0;
-    QObject::connect(&session, &codexui::FrontendSession::modelCatalogChanged,
+    QObject::connect(&session, &codexui::FrontendSessionWorker::modelCatalogChanged,
                      [&catalogueSignals] { ++catalogueSignals; });
 
     bool passed = expect(
-        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, outbound),
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(session, outbound),
         "the model-catalogue failure fixture must reach a synchronized SDK connection");
     const std::vector<frontend::Json> commands = capturedCommands(outbound, "model.list");
     if (!expect(commands.size() == 1 && commands.front().contains("requestId"),
@@ -734,7 +878,7 @@ bool testModelCatalogRefreshFailureIsDiagnosed()
 
     const std::string requestId = commands.front()["requestId"].get<std::string>();
     passed &= expect(
-        codexui::FrontendSessionTestAccess::receive(
+        codexui::FrontendSessionWorkerTestAccess::receive(
             session,
             frontend::ServerMessage{frontend::Response::failure(
                 requestId,
@@ -751,13 +895,13 @@ bool testModelCatalogRefreshFailureIsDiagnosed()
 
 bool testArchivedThreadRefresh()
 {
-    codexui::FrontendSession session;
+    codexui::FrontendSessionWorker session;
     std::vector<sdk::OutboundMessage> outbound;
     int discoverySignals = 0;
     std::optional<codexui::detail::StateUpdateScope> discoveryScope;
     QObject::connect(
         &session,
-        &codexui::FrontendSession::stateChanged,
+        &codexui::FrontendSessionWorker::stateChanged,
         [&session, &discoverySignals, &discoveryScope](
             const codexui::detail::StateUpdateScope& scope) {
             if (!session.archivedThreadDiscoveryComplete())
@@ -767,12 +911,12 @@ bool testArchivedThreadRefresh()
         });
 
     bool passed = expect(
-        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, outbound),
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(session, outbound),
         "the archived-thread fixture must reach a synchronized SDK connection");
     std::vector<frontend::Json> commands = capturedCommands(outbound, "thread.list");
-    passed &= expect(session.lifecycle() == codexui::FrontendSession::Lifecycle::Ready
+    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Ready
                          && !session.archivedThreadDiscoveryComplete()
-                         && codexui::FrontendSessionTestAccess::archivedThreadListInFlight(session)
+                         && codexui::FrontendSessionWorkerTestAccess::archivedThreadListInFlight(session)
                          && commands.size() == 1,
                      "synchronization must start exactly one incomplete archived-thread discovery request");
     if (commands.size() != 1)
@@ -789,7 +933,7 @@ bool testArchivedThreadRefresh()
 
     const std::string firstRequestId = first["requestId"].get<std::string>();
     passed &= expect(
-        codexui::FrontendSessionTestAccess::receive(
+        codexui::FrontendSessionWorkerTestAccess::receive(
             session,
             frontend::ServerMessage{frontend::Response::success(
                 firstRequestId,
@@ -798,7 +942,7 @@ bool testArchivedThreadRefresh()
         "the first archived-thread page response must be accepted");
     commands = capturedCommands(outbound, "thread.list");
     passed &= expect(!session.archivedThreadDiscoveryComplete()
-                         && codexui::FrontendSessionTestAccess::archivedThreadListInFlight(session)
+                         && codexui::FrontendSessionWorkerTestAccess::archivedThreadListInFlight(session)
                          && discoverySignals == 0 && commands.size() == 2,
                      "a continuation cursor must keep discovery incomplete and submit exactly one next page");
     if (commands.size() != 2)
@@ -817,15 +961,15 @@ bool testArchivedThreadRefresh()
 
     const std::string secondRequestId = second["requestId"].get<std::string>();
     passed &= expect(
-        codexui::FrontendSessionTestAccess::receive(
+        codexui::FrontendSessionWorkerTestAccess::receive(
             session,
             frontend::ServerMessage{frontend::Response::success(
                 secondRequestId,
                 frontend::Json{{"threads", frontend::Json::array()}})}),
         "the terminal archived-thread page response must be accepted");
     passed &= expect(session.archivedThreadDiscoveryComplete()
-                         && !codexui::FrontendSessionTestAccess::archivedThreadListInFlight(session)
-                         && codexui::FrontendSessionTestAccess::archivedThreadCursorCount(session) == 2
+                         && !codexui::FrontendSessionWorkerTestAccess::archivedThreadListInFlight(session)
+                         && codexui::FrontendSessionWorkerTestAccess::archivedThreadCursorCount(session) == 2
                          && discoverySignals == 1 && discoveryScope
                          && discoveryScope->allThreadsAffected
                          && discoveryScope->allInspectorsAffected
@@ -834,7 +978,7 @@ bool testArchivedThreadRefresh()
                      "the terminal page must publish completion and one conservative presentation refresh");
 
     const std::size_t outboundAtCompletion = outbound.size();
-    codexui::FrontendSessionTestAccess::beginArchivedThreadRefresh(session);
+    codexui::FrontendSessionWorkerTestAccess::beginArchivedThreadRefresh(session);
     passed &= expect(outbound.size() == outboundAtCompletion && discoverySignals == 1,
                      "completed archived-thread discovery must not restart or emit duplicate completion refreshes");
     return passed;
@@ -842,11 +986,11 @@ bool testArchivedThreadRefresh()
 
 bool testArchivedThreadRefreshFailureIsTerminal()
 {
-    codexui::FrontendSession session;
+    codexui::FrontendSessionWorker session;
     std::vector<sdk::OutboundMessage> outbound;
 
     bool passed = expect(
-        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, outbound),
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(session, outbound),
         "the archived-thread failure fixture must reach a synchronized SDK connection");
     const std::vector<frontend::Json> commands = capturedCommands(outbound, "thread.list");
     if (!expect(commands.size() == 1 && commands.front().contains("requestId"),
@@ -854,13 +998,13 @@ bool testArchivedThreadRefreshFailureIsTerminal()
         return false;
 
     int stateSignals = 0;
-    QObject::connect(&session, &codexui::FrontendSession::stateChanged,
+    QObject::connect(&session, &codexui::FrontendSessionWorker::stateChanged,
                      [&stateSignals](const codexui::detail::StateUpdateScope&) {
                          ++stateSignals;
                      });
     const std::string requestId = commands.front()["requestId"].get<std::string>();
     passed &= expect(
-        codexui::FrontendSessionTestAccess::receive(
+        codexui::FrontendSessionWorkerTestAccess::receive(
             session,
             frontend::ServerMessage{frontend::Response::failure(
                 requestId,
@@ -870,8 +1014,8 @@ bool testArchivedThreadRefreshFailureIsTerminal()
     passed &= expect(!session.archivedThreadDiscoveryComplete()
                          && session.archivedThreadDiscoveryTerminal()
                          && session.archivedThreadDiscoveryStatus()
-                                == codexui::FrontendSession::ArchivedThreadDiscoveryStatus::Failed
-                         && !codexui::FrontendSessionTestAccess::archivedThreadListInFlight(session),
+                                == codexui::FrontendSessionWorker::ArchivedThreadDiscoveryStatus::Failed
+                         && !codexui::FrontendSessionWorkerTestAccess::archivedThreadListInFlight(session),
                      "a failed archived-thread request must stop in-flight work as a terminal failure without claiming a complete result");
     passed &= expect(stateSignals == 1,
                      "a terminal archived-thread failure must unblock presentation reconciliation");
@@ -882,10 +1026,10 @@ bool testArchivedThreadRefreshFailureIsTerminal()
 
 bool testArchivedThreadPaginationTruncationIsTerminal()
 {
-    codexui::FrontendSession session;
+    codexui::FrontendSessionWorker session;
     std::vector<sdk::OutboundMessage> outbound;
     bool passed = expect(
-        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, outbound),
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(session, outbound),
         "the archived-thread truncation fixture must synchronize");
     std::vector<frontend::Json> commands = capturedCommands(outbound, "thread.list");
     if (!expect(commands.size() == 1 && commands.front().contains("requestId"),
@@ -894,7 +1038,7 @@ bool testArchivedThreadPaginationTruncationIsTerminal()
 
     const std::string firstRequestId = commands.front()["requestId"].get<std::string>();
     passed &= expect(
-        codexui::FrontendSessionTestAccess::receive(
+        codexui::FrontendSessionWorkerTestAccess::receive(
             session,
             frontend::ServerMessage{frontend::Response::success(
                 firstRequestId,
@@ -907,13 +1051,13 @@ bool testArchivedThreadPaginationTruncationIsTerminal()
         return false;
 
     int stateSignals = 0;
-    QObject::connect(&session, &codexui::FrontendSession::stateChanged,
+    QObject::connect(&session, &codexui::FrontendSessionWorker::stateChanged,
                      [&stateSignals](const codexui::detail::StateUpdateScope&) {
                          ++stateSignals;
                      });
     const std::string secondRequestId = commands.back()["requestId"].get<std::string>();
     passed &= expect(
-        codexui::FrontendSessionTestAccess::receive(
+        codexui::FrontendSessionWorkerTestAccess::receive(
             session,
             frontend::ServerMessage{frontend::Response::success(
                 secondRequestId,
@@ -923,8 +1067,8 @@ bool testArchivedThreadPaginationTruncationIsTerminal()
     passed &= expect(!session.archivedThreadDiscoveryComplete()
                          && session.archivedThreadDiscoveryTerminal()
                          && session.archivedThreadDiscoveryStatus()
-                                == codexui::FrontendSession::ArchivedThreadDiscoveryStatus::CompleteWithTruncation
-                         && !codexui::FrontendSessionTestAccess::archivedThreadListInFlight(session)
+                                == codexui::FrontendSessionWorker::ArchivedThreadDiscoveryStatus::CompleteWithTruncation
+                         && !codexui::FrontendSessionWorkerTestAccess::archivedThreadListInFlight(session)
                          && stateSignals == 1,
                      "a repeated pagination cursor must terminate discovery as a truncated result and unblock reconciliation");
     passed &= expect(session.statusText().contains(QStringLiteral("invalid pagination boundary")),
@@ -934,10 +1078,10 @@ bool testArchivedThreadPaginationTruncationIsTerminal()
 
 bool testTurnSteeringSubmission()
 {
-    codexui::FrontendSession session;
+    codexui::FrontendSessionWorker session;
     std::vector<sdk::OutboundMessage> outbound;
     bool passed = expect(
-        codexui::FrontendSessionTestAccess::synchronizeWithCapturedTransport(session, outbound),
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(session, outbound),
         "the turn-steering fixture must reach a synchronized SDK connection");
 
     QString completionError = QStringLiteral("completion not called");
@@ -966,7 +1110,7 @@ bool testTurnSteeringSubmission()
 
     const std::string requestId = commands.front()["requestId"].get<std::string>();
     passed &= expect(
-        codexui::FrontendSessionTestAccess::receive(
+        codexui::FrontendSessionWorkerTestAccess::receive(
             session,
             frontend::ServerMessage{frontend::Response::success(
                 requestId, frontend::Json{{"turnId", "turn-active"}})}),
@@ -995,7 +1139,7 @@ bool testTurnSteeringSubmission()
         "local image attachments must stay typed instead of being embedded into prompt text");
     const std::string imageRequestId = imageCommands.back()["requestId"].get<std::string>();
     passed &= expect(
-        codexui::FrontendSessionTestAccess::receive(
+        codexui::FrontendSessionWorkerTestAccess::receive(
             session,
             frontend::ServerMessage{frontend::Response::success(
                 imageRequestId, frontend::Json{{"turnId", "turn-active"}})}),
@@ -1014,7 +1158,7 @@ bool testTurnSteeringSubmission()
 
 bool testOutboundQueue()
 {
-    codexui::FrontendSession session;
+    codexui::FrontendSessionWorker session;
     bool passed = true;
 
     sdk::OutboundMessage closedMessage{
@@ -1022,7 +1166,7 @@ bool testOutboundQueue()
         R"({"closed":true})",
         15,
         true};
-    auto result = codexui::FrontendSessionTestAccess::send(session, closedMessage);
+    auto result = codexui::FrontendSessionWorkerTestAccess::send(session, closedMessage);
     passed &= expect(result.status == sdk::SendStatus::Closed
                          && closedMessage.compactJson.empty(),
                      "a closed transport must reject and scrub the moved outbound message");
@@ -1031,7 +1175,7 @@ bool testOutboundQueue()
     const std::string firstWire = firstFrame + '\n';
     std::string written;
     int writeCalls = 0;
-    result = codexui::FrontendSessionTestAccess::sendToTransport(
+    result = codexui::FrontendSessionWorkerTestAccess::sendToTransport(
         session,
         firstFrame,
         true,
@@ -1043,18 +1187,18 @@ bool testOutboundQueue()
             return accepted;
         });
     passed &= expect(result.status == sdk::SendStatus::Accepted
-                         && codexui::FrontendSessionTestAccess::outboundDrainIsScheduled(session)
-                         && written + codexui::FrontendSessionTestAccess::pendingWire(session) == firstWire,
+                         && codexui::FrontendSessionWorkerTestAccess::outboundDrainIsScheduled(session)
+                         && written + codexui::FrontendSessionWorkerTestAccess::pendingWire(session) == firstWire,
                      "a positive short write must accept ownership and retain the exact suffix");
-    passed &= expect(codexui::FrontendSessionTestAccess::drainOutbound(
+    passed &= expect(codexui::FrontendSessionWorkerTestAccess::drainOutbound(
                          session,
                          [&written](const char* bytes, qint64 size) {
                              written.append(bytes, static_cast<std::size_t>(size));
                              return size;
                          })
                          && written == firstWire
-                         && !codexui::FrontendSessionTestAccess::outboundDrainIsScheduled(session)
-                         && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) == 0,
+                         && !codexui::FrontendSessionWorkerTestAccess::outboundDrainIsScheduled(session)
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session) == 0,
                      "draining a short write must produce the original frame exactly once");
 
     const std::size_t maximumFrameSize =
@@ -1062,7 +1206,7 @@ bool testOutboundQueue()
     const std::string maximumFrame(maximumFrameSize, 'x');
     qint64 maximumWireWritten = 0;
     bool maximumWireValid = true;
-    result = codexui::FrontendSessionTestAccess::sendToTransport(
+    result = codexui::FrontendSessionWorkerTestAccess::sendToTransport(
         session,
         maximumFrame,
         true,
@@ -1076,10 +1220,10 @@ bool testOutboundQueue()
         });
     passed &= expect(result.status == sdk::SendStatus::Accepted
                          && maximumWireValid
-                         && codexui::FrontendSessionTestAccess::pendingWriteBytes(session)
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session)
                                 == static_cast<qint64>(maximumFrameSize + 1U) - maximumWireWritten,
                      "a maximum-size SDK frame must retain its exact suffix after a partial socket write");
-    passed &= expect(codexui::FrontendSessionTestAccess::drainOutbound(
+    passed &= expect(codexui::FrontendSessionWorkerTestAccess::drainOutbound(
                          session,
                          [&maximumWireWritten, &maximumWireValid, maximumFrameSize](
                              const char* bytes, qint64 size) {
@@ -1094,7 +1238,7 @@ bool testOutboundQueue()
                          })
                          && maximumWireValid
                          && maximumWireWritten == static_cast<qint64>(maximumFrameSize + 1U)
-                         && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) == 0,
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session) == 0,
                      "a partially written maximum-size SDK frame must drain once in exact wire order");
 
     written.clear();
@@ -1102,7 +1246,7 @@ bool testOutboundQueue()
     const std::string secondFrame = R"({"second":2})";
     const std::string thirdFrame = R"({"third":3})";
     const std::string orderedWire = secondFrame + '\n' + thirdFrame + '\n';
-    result = codexui::FrontendSessionTestAccess::acceptOutbound(
+    result = codexui::FrontendSessionWorkerTestAccess::acceptOutbound(
         session,
         secondFrame,
         0,
@@ -1113,7 +1257,7 @@ bool testOutboundQueue()
             return accepted;
         });
     bool secondWriterCalled = false;
-    const auto secondResult = codexui::FrontendSessionTestAccess::acceptOutbound(
+    const auto secondResult = codexui::FrontendSessionWorkerTestAccess::acceptOutbound(
         session,
         thirdFrame,
         0,
@@ -1122,27 +1266,27 @@ bool testOutboundQueue()
             return size;
         });
     for (int drain = 0;
-         drain < 3 && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) > 0;
+         drain < 3 && codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session) > 0;
          ++drain) {
-        const qint64 beforeDrain = codexui::FrontendSessionTestAccess::pendingWriteBytes(session);
-        const bool drained = codexui::FrontendSessionTestAccess::drainOutbound(
+        const qint64 beforeDrain = codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session);
+        const bool drained = codexui::FrontendSessionWorkerTestAccess::drainOutbound(
             session,
             [&written](const char* bytes, qint64 size) {
                 written.append(bytes, static_cast<std::size_t>(size));
                 return size;
             });
         passed &= drained
-                  && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) < beforeDrain;
+                  && codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session) < beforeDrain;
     }
     passed &= expect(result.status == sdk::SendStatus::Accepted
                          && secondResult.status == sdk::SendStatus::Accepted
                          && !secondWriterCalled
-                         && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) == 0
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session) == 0
                          && written == orderedWire,
                      "queued frames must preserve exact FIFO order");
 
     const std::string blockedFrame = R"({"blocked":true})";
-    result = codexui::FrontendSessionTestAccess::sendToTransport(
+    result = codexui::FrontendSessionWorkerTestAccess::sendToTransport(
         session,
         blockedFrame,
         true,
@@ -1151,24 +1295,24 @@ bool testOutboundQueue()
     const std::string blockedWire = blockedFrame + '\n';
     const qint64 blockedWireBytes = static_cast<qint64>(blockedWire.size());
     passed &= expect(result.status == sdk::SendStatus::Accepted
-                         && codexui::FrontendSessionTestAccess::pendingWire(session) == blockedWire
-                         && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) == blockedWireBytes
-                         && codexui::FrontendSessionTestAccess::outboundDrainIsScheduled(session)
-                         && codexui::FrontendSessionTestAccess::drainOutbound(
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWire(session) == blockedWire
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session) == blockedWireBytes
+                         && codexui::FrontendSessionWorkerTestAccess::outboundDrainIsScheduled(session)
+                         && codexui::FrontendSessionWorkerTestAccess::drainOutbound(
                              session,
                              [](const char*, qint64) { return qint64{0}; })
-                         && codexui::FrontendSessionTestAccess::pendingWire(session) == blockedWire
-                         && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) == blockedWireBytes,
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWire(session) == blockedWire
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session) == blockedWireBytes,
                      "zero write progress must retain the complete frame for retry");
-    codexui::FrontendSessionTestAccess::clearOutbound(session);
-    passed &= expect(!codexui::FrontendSessionTestAccess::outboundDrainIsScheduled(session),
+    codexui::FrontendSessionWorkerTestAccess::clearOutbound(session);
+    passed &= expect(!codexui::FrontendSessionWorkerTestAccess::outboundDrainIsScheduled(session),
                      "transport cleanup must cancel a pending drain retry");
 
     bool capacityWriterCalled = false;
-    result = codexui::FrontendSessionTestAccess::acceptOutbound(
+    result = codexui::FrontendSessionWorkerTestAccess::acceptOutbound(
         session,
         R"({"capacity":true})",
-        codexui::FrontendSessionTestAccess::maximumBufferedOutboundBytes(),
+        codexui::FrontendSessionWorkerTestAccess::maximumBufferedOutboundBytes(),
         [&capacityWriterCalled](const char*, qint64 size) {
             capacityWriterCalled = true;
             return size;
@@ -1176,16 +1320,16 @@ bool testOutboundQueue()
     passed &= expect(result.status == sdk::SendStatus::Backpressure
                          && result.error && result.error->retryable
                          && !capacityWriterCalled
-                         && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) == 0,
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session) == 0,
                      "capacity rejection must be retryable and occur before queue or writer mutation");
 
     const std::string exactFrame = R"({"exact":true})";
     const qint64 exactFrameBytes = static_cast<qint64>(exactFrame.size() + 1U);
     std::string exactWire;
-    result = codexui::FrontendSessionTestAccess::acceptOutbound(
+    result = codexui::FrontendSessionWorkerTestAccess::acceptOutbound(
         session,
         exactFrame,
-        codexui::FrontendSessionTestAccess::maximumBufferedOutboundBytes() - exactFrameBytes,
+        codexui::FrontendSessionWorkerTestAccess::maximumBufferedOutboundBytes() - exactFrameBytes,
         [&exactWire](const char* bytes, qint64 size) {
             exactWire.append(bytes, static_cast<std::size_t>(size));
             return size;
@@ -1195,7 +1339,7 @@ bool testOutboundQueue()
                      "an outbound frame that exactly fits the combined cap must be accepted");
 
     const std::string queuedFrame = R"({"queued":true})";
-    result = codexui::FrontendSessionTestAccess::acceptOutbound(
+    result = codexui::FrontendSessionWorkerTestAccess::acceptOutbound(
         session,
         queuedFrame,
         0,
@@ -1203,39 +1347,39 @@ bool testOutboundQueue()
     const std::string combinedFrame = R"({"combined":true})";
     const qint64 combinedFrameBytes = static_cast<qint64>(combinedFrame.size() + 1U);
     const qint64 expectedQueuedBytes = static_cast<qint64>(queuedFrame.size() + 1U);
-    const std::string queuedWire = codexui::FrontendSessionTestAccess::pendingWire(session);
-    const qint64 oneByteOver = codexui::FrontendSessionTestAccess::maximumBufferedOutboundBytes()
+    const std::string queuedWire = codexui::FrontendSessionWorkerTestAccess::pendingWire(session);
+    const qint64 oneByteOver = codexui::FrontendSessionWorkerTestAccess::maximumBufferedOutboundBytes()
                                - expectedQueuedBytes - combinedFrameBytes + 1;
-    const auto combinedRejected = codexui::FrontendSessionTestAccess::acceptOutbound(
+    const auto combinedRejected = codexui::FrontendSessionWorkerTestAccess::acceptOutbound(
         session,
         combinedFrame,
         oneByteOver,
         [](const char*, qint64 size) { return size; });
     passed &= expect(result.status == sdk::SendStatus::Accepted
-                         && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) == expectedQueuedBytes
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session) == expectedQueuedBytes
                          && combinedRejected.status == sdk::SendStatus::Backpressure
-                         && codexui::FrontendSessionTestAccess::pendingWire(session) == queuedWire,
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWire(session) == queuedWire,
                      "the cap must include both Qt-buffered and application-held suffix bytes");
-    const auto combinedAccepted = codexui::FrontendSessionTestAccess::acceptOutbound(
+    const auto combinedAccepted = codexui::FrontendSessionWorkerTestAccess::acceptOutbound(
         session,
         combinedFrame,
         oneByteOver - 1,
         [](const char*, qint64 size) { return size; });
     passed &= expect(combinedAccepted.status == sdk::SendStatus::Accepted
-                         && codexui::FrontendSessionTestAccess::pendingWire(session)
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWire(session)
                                 == queuedWire + combinedFrame + '\n',
                      "combined buffering exactly at the cap must remain admissible");
-    codexui::FrontendSessionTestAccess::clearOutbound(session);
+    codexui::FrontendSessionWorkerTestAccess::clearOutbound(session);
 
-    result = codexui::FrontendSessionTestAccess::acceptOutbound(
+    result = codexui::FrontendSessionWorkerTestAccess::acceptOutbound(
         session,
         R"({"old":true})",
         0,
         [](const char*, qint64 size) { return std::min<qint64>(1, size); });
-    codexui::FrontendSessionTestAccess::disconnectTransport(session);
+    codexui::FrontendSessionWorkerTestAccess::disconnectTransport(session);
     std::string newWire;
     const std::string newFrame = R"({"new":true})";
-    const auto newResult = codexui::FrontendSessionTestAccess::acceptOutbound(
+    const auto newResult = codexui::FrontendSessionWorkerTestAccess::acceptOutbound(
         session,
         newFrame,
         0,
@@ -1249,65 +1393,562 @@ bool testOutboundQueue()
                      "transport cleanup must not carry an old suffix into a new connection");
 
     bool reentrantClearWasDeferred = false;
-    result = codexui::FrontendSessionTestAccess::acceptOutbound(
+    result = codexui::FrontendSessionWorkerTestAccess::acceptOutbound(
         session,
         R"({"reentrant":true})",
         0,
         [&session, &reentrantClearWasDeferred](const char*, qint64) {
-            codexui::FrontendSessionTestAccess::clearOutbound(session);
-            reentrantClearWasDeferred = codexui::FrontendSessionTestAccess::outboundClearIsDeferred(session);
+            codexui::FrontendSessionWorkerTestAccess::clearOutbound(session);
+            reentrantClearWasDeferred = codexui::FrontendSessionWorkerTestAccess::outboundClearIsDeferred(session);
             return qint64{1};
         });
     passed &= expect(result.status == sdk::SendStatus::Closed
                          && reentrantClearWasDeferred
-                         && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) == 0,
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session) == 0,
                      "reentrant transport cleanup must invalidate the in-flight queue access");
 
-    result = codexui::FrontendSessionTestAccess::acceptOutbound(
+    result = codexui::FrontendSessionWorkerTestAccess::acceptOutbound(
         session,
         R"({"failure":true})",
         0,
         [](const char*, qint64) { return qint64{-1}; });
     passed &= expect(result.status == sdk::SendStatus::Failed
-                         && codexui::FrontendSessionTestAccess::pendingWriteBytes(session) == 0,
+                         && codexui::FrontendSessionWorkerTestAccess::pendingWriteBytes(session) == 0,
                      "a negative write must fail without retaining owned frame data");
     return passed;
 }
 
 bool testInboundBufferCompaction()
 {
-    codexui::FrontendSession session;
+    codexui::FrontendSessionWorker session;
     const QByteArray prefix(300 * 1024, 'p');
     const QByteArray tail(300 * 1024, 't');
     const QByteArray backlog = prefix + tail;
 
-    codexui::FrontendSessionTestAccess::setInbound(session, backlog, 64 * 1024);
-    codexui::FrontendSessionTestAccess::compactInbound(session);
+    codexui::FrontendSessionWorkerTestAccess::setInbound(session, backlog, 64 * 1024);
+    codexui::FrontendSessionWorkerTestAccess::compactInbound(session);
     bool passed = expect(
-        codexui::FrontendSessionTestAccess::inboundBytes(session) == backlog
-            && codexui::FrontendSessionTestAccess::inboundOffset(session) == 64 * 1024,
+        codexui::FrontendSessionWorkerTestAccess::inboundBytes(session) == backlog
+            && codexui::FrontendSessionWorkerTestAccess::inboundOffset(session) == 64 * 1024,
         "small consumed prefixes must remain as an offset instead of moving a large replay tail");
 
-    codexui::FrontendSessionTestAccess::setInbound(session, backlog, prefix.size());
-    codexui::FrontendSessionTestAccess::compactInbound(session);
+    codexui::FrontendSessionWorkerTestAccess::setInbound(session, backlog, prefix.size());
+    codexui::FrontendSessionWorkerTestAccess::compactInbound(session);
     passed &= expect(
-        codexui::FrontendSessionTestAccess::inboundBytes(session) == tail
-            && codexui::FrontendSessionTestAccess::inboundOffset(session) == 0,
+        codexui::FrontendSessionWorkerTestAccess::inboundBytes(session) == tail
+            && codexui::FrontendSessionWorkerTestAccess::inboundOffset(session) == 0,
         "a large consumed prefix must compact once it reaches both the threshold and half the buffer");
 
     const QByteArray completeAndPartial("done\npartial");
-    codexui::FrontendSessionTestAccess::setInbound(session, completeAndPartial, 0);
-    const bool completeAtStart = codexui::FrontendSessionTestAccess::hasCompleteInboundFrame(session);
-    codexui::FrontendSessionTestAccess::setInbound(session, completeAndPartial, 5);
+    codexui::FrontendSessionWorkerTestAccess::setInbound(session, completeAndPartial, 0);
+    const bool completeAtStart = codexui::FrontendSessionWorkerTestAccess::hasCompleteInboundFrame(session);
+    codexui::FrontendSessionWorkerTestAccess::setInbound(session, completeAndPartial, 5);
     passed &= expect(completeAtStart
-                         && !codexui::FrontendSessionTestAccess::hasCompleteInboundFrame(session),
+                         && !codexui::FrontendSessionWorkerTestAccess::hasCompleteInboundFrame(session),
                      "frame detection must ignore newlines in the consumed prefix");
 
-    codexui::FrontendSessionTestAccess::setInbound(session, tail, tail.size());
-    codexui::FrontendSessionTestAccess::compactInbound(session);
-    passed &= expect(codexui::FrontendSessionTestAccess::inboundBytes(session).isEmpty()
-                         && codexui::FrontendSessionTestAccess::inboundOffset(session) == 0,
+    codexui::FrontendSessionWorkerTestAccess::setInbound(session, tail, tail.size());
+    codexui::FrontendSessionWorkerTestAccess::compactInbound(session);
+    passed &= expect(codexui::FrontendSessionWorkerTestAccess::inboundBytes(session).isEmpty()
+                         && codexui::FrontendSessionWorkerTestAccess::inboundOffset(session) == 0,
                      "a fully consumed inbound buffer must reset without retaining capacity state");
+
+    const QByteArray firstPartial(16 * 1024 * 1024, 'a');
+    codexui::FrontendSessionWorkerTestAccess::setInbound(session, firstPartial, 0);
+    passed &= expect(
+        !codexui::FrontendSessionWorkerTestAccess::hasCompleteInboundFrame(session)
+            && codexui::FrontendSessionWorkerTestAccess::inboundScanOffset(session)
+                   == firstPartial.size(),
+        "a large partial frame must remember the exact prefix already scanned for a terminator");
+    const QByteArray secondPartial(1024 * 1024, 'b');
+    codexui::FrontendSessionWorkerTestAccess::appendInbound(session, secondPartial);
+    passed &= expect(
+        !codexui::FrontendSessionWorkerTestAccess::hasCompleteInboundFrame(session)
+            && codexui::FrontendSessionWorkerTestAccess::inboundScanOffset(session)
+                   == firstPartial.size() + secondPartial.size(),
+        "receiving another chunk must scan only the newly appended partial-frame suffix");
+    codexui::FrontendSessionWorkerTestAccess::appendInbound(session, QByteArray("\n"));
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::hasCompleteInboundFrame(session)
+            && codexui::FrontendSessionWorkerTestAccess::inboundScanOffset(session)
+                   == firstPartial.size() + secondPartial.size(),
+        "the incremental scan cursor must still detect the terminator at the first new byte");
+    return passed;
+}
+
+bool testThreadedFacadeMailbox()
+{
+    codexui::FrontendSession session;
+    QElapsedTimer wait;
+    wait.start();
+    while (!codexui::FrontendSessionFacadeTestAccess::workerAffinityValidated(session)
+           && wait.elapsed() < 2'000) {
+        QCoreApplication::processEvents();
+        QThread::msleep(1);
+    }
+
+    bool passed = expect(
+        codexui::FrontendSessionFacadeTestAccess::workerAffinityValidated(session),
+        "the frontend engine, Unix socket, and timers must originate on the one worker thread");
+
+    int stateSignals = 0;
+    int statusSignals = 0;
+    bool callbacksOnGuiThread = true;
+    QThread* const guiThread = QThread::currentThread();
+    QStringList deliveryOrder;
+    std::optional<codexui::detail::StateUpdateScope> deliveredScope;
+    QObject::connect(
+        &session,
+        &codexui::FrontendSession::stateChanged,
+        [&stateSignals, &deliveredScope, &callbacksOnGuiThread,
+         guiThread](const auto& scope) {
+            callbacksOnGuiThread = callbacksOnGuiThread
+                                   && QThread::currentThread() == guiThread;
+            ++stateSignals;
+            deliveredScope = scope;
+        });
+    QObject::connect(&session,
+                     &codexui::FrontendSession::statusChanged,
+                     [&statusSignals, &deliveryOrder, &callbacksOnGuiThread,
+                      guiThread] {
+                         callbacksOnGuiThread =
+                             callbacksOnGuiThread
+                             && QThread::currentThread() == guiThread;
+                         ++statusSignals;
+                         deliveryOrder.push_back(QStringLiteral("status"));
+                     });
+    QObject::connect(
+        &session,
+        &codexui::FrontendSession::stateChanged,
+        [&deliveryOrder](const auto&) {
+            deliveryOrder.push_back(QStringLiteral("state"));
+        });
+
+    const std::size_t wakesBefore =
+        codexui::FrontendSessionFacadeTestAccess::postedWakeCount(session);
+    const auto appendScope = [](QString itemId,
+                                sdk::ItemContentChannel channel,
+                                std::uint64_t base,
+                                QByteArray delta) {
+        codexui::detail::StateUpdateScope scope;
+        scope.affectedThreadIds.push_back(
+            QStringLiteral("streaming-thread"));
+        scope.affectedItemContents.push_back({
+            QStringLiteral("streaming-thread"),
+            QStringLiteral("streaming-turn"),
+            std::move(itemId),
+            channel,
+            codexui::detail::StateUpdateScope::ItemContentAppend{
+                base,
+                0,
+                std::move(delta),
+            },
+        });
+        scope.coalescedContentDeltaBytes = static_cast<std::uint64_t>(
+            scope.affectedItemContents.front().append->deltaUtf8.size());
+        scope.hasPresentationChange = true;
+        return scope;
+    };
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session,
+        7,
+        appendScope(QStringLiteral("contiguous"),
+                    sdk::ItemContentChannel::AgentText,
+                    10,
+                    QByteArray("ab")));
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session,
+        7,
+        appendScope(QStringLiteral("contiguous"),
+                    sdk::ItemContentChannel::AgentText,
+                    12,
+                    QByteArray("cd")));
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session,
+        7,
+        appendScope(QStringLiteral("contiguous"),
+                    sdk::ItemContentChannel::ReasoningText,
+                    20,
+                    QByteArray("reasoning")));
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session,
+        7,
+        appendScope(QStringLiteral("ambiguous"),
+                    sdk::ItemContentChannel::AgentText,
+                    0,
+                    QByteArray("first")));
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session,
+        7,
+        appendScope(QStringLiteral("ambiguous"),
+                    sdk::ItemContentChannel::AgentText,
+                    99,
+                    QByteArray("second")));
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session,
+        7,
+        appendScope(
+            QStringLiteral("oversized"),
+            sdk::ItemContentChannel::AgentText,
+            0,
+            QByteArray(
+                static_cast<qsizetype>(
+                    codexui::detail::maximumCoalescedContentDeltaBytes + 1),
+                'x')));
+    for (int index = 0; index < 1'000; ++index) {
+        codexui::detail::StateUpdateScope scope;
+        scope.affectedThreadIds.push_back(QStringLiteral("streaming-thread"));
+        scope.hasPresentationChange = true;
+        codexui::FrontendSessionFacadeTestAccess::enqueueState(
+            session, 7, std::move(scope));
+        codexui::FrontendSessionFacadeTestAccess::enqueueStatus(
+            session,
+            7,
+            QStringLiteral("diagnostic-%1").arg(index));
+    }
+    int successfulCompletions = 0;
+    QString successfulCompletionValue;
+    codexui::FrontendSessionFacadeTestAccess::completeOperation(
+        session,
+        7,
+        [&successfulCompletions, &successfulCompletionValue,
+         &callbacksOnGuiThread, guiThread](const QString& value) {
+            callbacksOnGuiThread = callbacksOnGuiThread
+                                   && QThread::currentThread() == guiThread;
+            ++successfulCompletions;
+            successfulCompletionValue = value;
+        },
+        QStringLiteral("completed"));
+
+    passed &= expect(
+        codexui::FrontendSessionFacadeTestAccess::pendingStateCount(session) == 1,
+        "interleaved control events must never let more than one full State wait for the GUI");
+    passed &= expect(
+        codexui::FrontendSessionFacadeTestAccess::pendingControlCount(session)
+            == 2,
+        "a blocked GUI must retain only the latest replaceable status and the lossless completion");
+    passed &= expect(
+        codexui::FrontendSessionFacadeTestAccess::postedWakeCount(session)
+                - wakesBefore
+            == 1,
+        "a burst of worker publications must post exactly one GUI wakeup");
+
+    wait.restart();
+    while ((codexui::FrontendSessionFacadeTestAccess::pendingStateCount(session) != 0
+            || statusSignals != 1 || successfulCompletions != 1)
+           && wait.elapsed() < 2'000) {
+        QCoreApplication::processEvents();
+        QThread::msleep(1);
+    }
+    passed &= expect(
+        stateSignals == 1 && deliveredScope
+            && deliveredScope->affectedThreadIds
+                   == QStringList{QStringLiteral("streaming-thread")},
+        "the one latest State publication must retain the merged presentation scope");
+    if (deliveredScope) {
+        const auto content = [&deliveredScope](QStringView itemId,
+                                                sdk::ItemContentChannel channel)
+            -> const codexui::detail::StateUpdateScope::ItemContentIdentity* {
+            const auto found = std::find_if(
+                deliveredScope->affectedItemContents.cbegin(),
+                deliveredScope->affectedItemContents.cend(),
+                [itemId, channel](const auto& candidate) {
+                    return candidate.itemId == itemId
+                           && candidate.channel == channel;
+                });
+            return found == deliveredScope->affectedItemContents.cend()
+                       ? nullptr
+                       : &*found;
+        };
+        const auto* contiguous = content(
+            QStringView{u"contiguous"}, sdk::ItemContentChannel::AgentText);
+        const auto* otherChannel = content(
+            QStringView{u"contiguous"}, sdk::ItemContentChannel::ReasoningText);
+        const auto* ambiguous = content(
+            QStringView{u"ambiguous"}, sdk::ItemContentChannel::AgentText);
+        const auto* oversized = content(
+            QStringView{u"oversized"}, sdk::ItemContentChannel::AgentText);
+        passed &= expect(
+            deliveredScope->affectedItemContents.size() == 4 && contiguous
+                && contiguous->append
+                && contiguous->append->baseContentBytes == 10
+                && contiguous->append->deltaUtf8 == QByteArray("abcd")
+                && otherChannel && otherChannel->append
+                && otherChannel->append->deltaUtf8 == QByteArray("reasoning")
+                && ambiguous && !ambiguous->append && oversized
+                && !oversized->append
+                && deliveredScope->coalescedContentDeltaBytes == 13,
+            "the one-slot mailbox must merge only bounded contiguous same-channel appends and degrade ambiguous or oversized sequences to replacement");
+    }
+    passed &= expect(statusSignals == 1
+                         && session.statusText()
+                                == QStringLiteral("diagnostic-999"),
+                     "replaceable status publications must collapse to the newest value around coalesced State updates");
+    passed &= expect(successfulCompletions == 1
+                         && successfulCompletionValue
+                                == QStringLiteral("completed"),
+                     "duplicate provider completion attempts must publish exactly one ordered GUI callback");
+    passed &= expect(!deliveryOrder.isEmpty()
+                         && deliveryOrder.front() == QStringLiteral("state"),
+                     "S-C-S interleaving must publish the newest State before callbacks observe it");
+
+    int shutdownCompletions = 0;
+    QString shutdownError;
+    std::vector<int> shutdownOrder;
+    codexui::FrontendSessionFacadeTestAccess::trackOperation(
+        session,
+        [&shutdownCompletions, &shutdownError, &shutdownOrder,
+         &callbacksOnGuiThread, guiThread](const QString& error) {
+            callbacksOnGuiThread = callbacksOnGuiThread
+                                   && QThread::currentThread() == guiThread;
+            ++shutdownCompletions;
+            shutdownOrder.push_back(1);
+            shutdownError = error;
+        });
+    codexui::FrontendSessionFacadeTestAccess::trackOperation(
+        session,
+        [&shutdownCompletions, &shutdownOrder, &callbacksOnGuiThread,
+         guiThread](const QString&) {
+            callbacksOnGuiThread = callbacksOnGuiThread
+                                   && QThread::currentThread() == guiThread;
+            ++shutdownCompletions;
+            shutdownOrder.push_back(2);
+        });
+    session.shutdown();
+    session.shutdown();
+    passed &= expect(shutdownCompletions == 2 && !shutdownError.isEmpty()
+                         && shutdownOrder == std::vector<int>{1, 2},
+                     "shutdown must fail every retained operation token exactly once in submission order before joining");
+    passed &= expect(callbacksOnGuiThread,
+                     "all facade signals and completions must execute on the GUI thread");
+    return passed;
+}
+
+bool testFacadeReplaceableControlCoalescing()
+{
+    codexui::FrontendSession session;
+    const auto model = [](std::string id) {
+        typed::Model result;
+        result.id = typed::ModelId{id};
+        result.model = typed::ModelId{id};
+        result.displayName = std::move(id);
+        return result;
+    };
+    const auto publish = [&session, &model](
+                             std::uint64_t generation,
+                             codexui::FrontendSession::Lifecycle lifecycle,
+                             QString status,
+                             std::string modelId) {
+        codexui::FrontendSessionFacadeTestAccess::enqueueStatus(
+            session, generation, lifecycle, std::move(status));
+        codexui::FrontendSessionFacadeTestAccess::enqueueModels(
+            session, generation, {model(std::move(modelId))});
+    };
+
+    int statusSignals = 0;
+    int lifecycleSignals = 0;
+    int modelSignals = 0;
+    std::vector<int> completionOrder;
+    bool completionSnapshotsCorrect = true;
+    QObject::connect(&session,
+                     &codexui::FrontendSession::statusChanged,
+                     [&statusSignals] { ++statusSignals; });
+    QObject::connect(&session,
+                     &codexui::FrontendSession::lifecycleChanged,
+                     [&lifecycleSignals] { ++lifecycleSignals; });
+    QObject::connect(&session,
+                     &codexui::FrontendSession::modelCatalogChanged,
+                     [&modelSignals] { ++modelSignals; });
+
+    publish(7,
+            codexui::FrontendSession::Lifecycle::Disconnected,
+            QStringLiteral("pre-old"),
+            "model-pre-old");
+    publish(8,
+            codexui::FrontendSession::Lifecycle::Disconnected,
+            QStringLiteral("pre-current"),
+            "model-pre-current");
+    publish(7,
+            codexui::FrontendSession::Lifecycle::Disconnected,
+            QStringLiteral("pre-stale"),
+            "model-pre-stale");
+
+    codexui::FrontendSessionFacadeTestAccess::enqueueLifecycle(
+        session,
+        8,
+        codexui::FrontendSession::Lifecycle::Connecting,
+        QStringLiteral("connecting"));
+    publish(8,
+            codexui::FrontendSession::Lifecycle::Connecting,
+            QStringLiteral("mid-old"),
+            "model-mid-old");
+    publish(8,
+            codexui::FrontendSession::Lifecycle::Connecting,
+            QStringLiteral("mid-current"),
+            "model-mid-current");
+    codexui::FrontendSessionFacadeTestAccess::completeOperation(
+        session,
+        8,
+        [&session, &completionOrder,
+         &completionSnapshotsCorrect](const QString&) {
+            completionOrder.push_back(1);
+            completionSnapshotsCorrect = completionSnapshotsCorrect
+                && session.lifecycle()
+                    == codexui::FrontendSession::Lifecycle::Connecting
+                && session.statusText() == QStringLiteral("mid-current")
+                && session.modelCatalog().size() == 1
+                && session.modelCatalog().front().model.value
+                    == "model-mid-current";
+        },
+        QString{});
+
+    publish(8,
+            codexui::FrontendSession::Lifecycle::Connecting,
+            QStringLiteral("post-old"),
+            "model-post-old");
+    publish(8,
+            codexui::FrontendSession::Lifecycle::Connecting,
+            QStringLiteral("post-current"),
+            "model-post-current");
+    codexui::FrontendSessionFacadeTestAccess::completeOperation(
+        session,
+        8,
+        [&session, &completionOrder,
+         &completionSnapshotsCorrect](const QString&) {
+            completionOrder.push_back(2);
+            completionSnapshotsCorrect = completionSnapshotsCorrect
+                && session.lifecycle()
+                    == codexui::FrontendSession::Lifecycle::Connecting
+                && session.statusText() == QStringLiteral("post-current")
+                && session.modelCatalog().size() == 1
+                && session.modelCatalog().front().model.value
+                    == "model-post-current";
+        },
+        QString{});
+
+    codexui::FrontendSessionFacadeTestAccess::enqueueLifecycle(
+        session,
+        8,
+        codexui::FrontendSession::Lifecycle::Ready,
+        QStringLiteral("ready"));
+
+    bool passed = expect(
+        codexui::FrontendSessionFacadeTestAccess::pendingControlCount(session)
+            == 10,
+        "replaceable controls must remain bounded to one status and one model per lifecycle/completion segment");
+    QCoreApplication::processEvents();
+    passed &= expect(
+        completionOrder == std::vector<int>{1, 2}
+            && completionSnapshotsCorrect,
+        "operation completions must remain FIFO barriers and observe the preceding status and model publications");
+    passed &= expect(
+        lifecycleSignals == 2
+            && session.lifecycle()
+                == codexui::FrontendSession::Lifecycle::Ready,
+        "semantically distinct lifecycle transitions must never be coalesced");
+    passed &= expect(
+        statusSignals == 3
+            && session.statusText() == QStringLiteral("ready"),
+        "each barrier segment must publish only its highest-generation latest status");
+    passed &= expect(
+        modelSignals == 3 && session.modelCatalog().size() == 1
+            && session.modelCatalog().front().model.value
+                == "model-post-current",
+        "each barrier segment must publish only its highest-generation latest model catalogue");
+    session.shutdown();
+    return passed;
+}
+
+bool testImmediateFacadeShutdown()
+{
+    QTemporaryDir isolatedRuntime;
+    const QByteArray previousRuntime = qgetenv("XDG_RUNTIME_DIR");
+    if (!isolatedRuntime.isValid())
+        return expect(false, "immediate-shutdown test requires an isolated runtime directory");
+    qputenv("XDG_RUNTIME_DIR", isolatedRuntime.path().toUtf8());
+
+    bool passed = true;
+    for (int iteration = 0; iteration < 32; ++iteration) {
+        codexui::FrontendSession session;
+        int completionCount = 0;
+        codexui::FrontendSessionFacadeTestAccess::trackOperation(
+            session,
+            [&completionCount](const QString&) { ++completionCount; });
+        // This deliberately races the worker's first construction/attach. A
+        // stop observed before attach must discard pending worker commands;
+        // the facade owns the one terminal completion for their gates.
+        session.connectToBackend();
+        session.shutdown();
+        passed &= expect(
+            completionCount == 1,
+            "immediate facade shutdown must join safely and complete retained operations exactly once");
+    }
+    if (previousRuntime.isNull())
+        qunsetenv("XDG_RUNTIME_DIR");
+    else
+        qputenv("XDG_RUNTIME_DIR", previousRuntime);
+    return passed;
+}
+
+bool testFacadeGenerationGating()
+{
+    codexui::FrontendSession session;
+    int statusSignals = 0;
+    int completionSignals = 0;
+    QObject::connect(&session,
+                     &codexui::FrontendSession::statusChanged,
+                     [&statusSignals] { ++statusSignals; });
+
+    codexui::FrontendSessionFacadeTestAccess::enqueueStatus(
+        session, 3, QStringLiteral("current generation"));
+    QCoreApplication::processEvents();
+    codexui::FrontendSessionFacadeTestAccess::enqueueStatus(
+        session, 2, QStringLiteral("stale generation"));
+    codexui::FrontendSessionFacadeTestAccess::completeOperation(
+        session,
+        1,
+        [&completionSignals](const QString&) { ++completionSignals; },
+        QString{});
+    QCoreApplication::processEvents();
+
+    const bool passed = expect(
+        session.statusText() == QStringLiteral("current generation")
+            && statusSignals == 1 && completionSignals == 1,
+        "stale lifecycle controls must not regress a newer connection generation while operation completions remain lossless");
+    session.shutdown();
+    return passed;
+}
+
+bool testFacadeScopeBound()
+{
+    codexui::FrontendSession session;
+    std::optional<codexui::detail::StateUpdateScope> delivered;
+    QObject::connect(
+        &session,
+        &codexui::FrontendSession::stateChanged,
+        [&delivered](const auto& scope) { delivered = scope; });
+
+    for (int index = 0; index < 1'100; ++index) {
+        codexui::detail::StateUpdateScope scope;
+        scope.affectedThreadIds.push_back(QStringLiteral("thread"));
+        scope.affectedItemContents.push_back({
+            QStringLiteral("thread"),
+            QStringLiteral("turn"),
+            QStringLiteral("item-%1").arg(index),
+            sdk::ItemContentChannel::AgentText,
+            std::nullopt,
+        });
+        scope.hasPresentationChange = true;
+        codexui::FrontendSessionFacadeTestAccess::enqueueState(
+            session, 1, std::move(scope));
+    }
+    QCoreApplication::processEvents();
+    const bool passed = expect(
+        delivered && delivered->allThreadsAffected
+            && delivered->affectedThreadIds.empty()
+            && delivered->affectedItemContents.empty(),
+        "a blocked GUI must degrade an unbounded exact-scope burst to one bounded full refresh");
+    session.shutdown();
     return passed;
 }
 
@@ -1325,6 +1966,10 @@ int main(int argc, char* argv[])
                && testArchivedThreadPaginationTruncationIsTerminal()
                && testTurnSteeringSubmission()
                && testOutboundQueue() && testInboundBufferCompaction()
+               && testThreadedFacadeMailbox()
+               && testFacadeReplaceableControlCoalescing()
+               && testImmediateFacadeShutdown()
+               && testFacadeGenerationGating() && testFacadeScopeBound()
            ? 0
            : 1;
 }

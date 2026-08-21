@@ -4,6 +4,13 @@
 
 namespace codexui {
 
+Application::~Application()
+{
+    // Complete/cancel frontend operations while MainWindow and its callback
+    // targets are still alive. Member destruction happens after this body.
+    frontendSession.shutdown();
+}
+
 void Application::show()
 {
     mainWindow.show();
