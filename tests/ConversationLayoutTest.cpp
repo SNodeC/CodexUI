@@ -587,8 +587,45 @@ bool testHotTurnWindow()
                          && renderedActivities == activityHost->property("renderedTimelineItems").toLongLong()
                          && activityHost->property("retainedTimelineItems").toLongLong() == 300,
                      "a contiguous activity run must be chunked and remain within the same global item budget");
-    passed &= expect(hasLabel(activityConversation, QStringLiteral("activity activity 299")),
-                     "the bounded activity window must retain its newest exact detail");
+    QWidget* newestActivityRow = nullptr;
+    for (QWidget* row : activityConversation.findChildren<QWidget*>(
+             QStringLiteral("conversationActivityRow")))
+    {
+        if (row->property("itemId").toString() == QStringLiteral("item-activity-299"))
+        {
+            newestActivityRow = row;
+            break;
+        }
+    }
+    auto* newestActivityDetails = newestActivityRow
+                                      ? newestActivityRow->findChild<QWidget*>(
+                                            QStringLiteral("conversationActivityDetails"))
+                                      : nullptr;
+    auto* newestActivityDisclosure = newestActivityRow
+                                         ? newestActivityRow->findChild<QToolButton*>(
+                                               QStringLiteral("activityDisclosure"))
+                                         : nullptr;
+    passed &= expect(newestActivityRow && newestActivityDetails
+                         && newestActivityDetails->isHidden()
+                         && !newestActivityRow->findChild<QTextEdit*>(
+                             QStringLiteral("conversationActivityDetail"))
+                         && newestActivityDetails->property("detailMaterializationCount").toULongLong() == 0
+                         && newestActivityDetails->property("deferredDetailBytes").toULongLong()
+                                == std::string_view("activity activity 299").size(),
+                     "the bounded activity window must retain its newest detail without materializing collapsed text");
+    if (newestActivityDisclosure)
+        newestActivityDisclosure->click();
+    settleTimeline();
+    auto* newestActivityDetail = newestActivityRow
+                                     ? newestActivityRow->findChild<QTextEdit*>(
+                                           QStringLiteral("conversationActivityDetail"))
+                                     : nullptr;
+    passed &= expect(newestActivityDetail
+                         && newestActivityDetail->toPlainText()
+                                == QStringLiteral("activity activity 299")
+                         && newestActivityDetails
+                         && newestActivityDetails->property("detailMaterializationCount").toULongLong() == 1,
+                     "expanding the newest bounded activity must materialize its exact retained detail once");
     const auto activityCards = activityConversation.findChildren<QFrame*>(
         QStringLiteral("conversationActivityCard"));
     passed &= expect(!activityCards.isEmpty()
@@ -648,8 +685,10 @@ bool testActivityDisclosureAndFullOutput()
     bool passed = true;
     passed &= expect(card && body && !body->isHidden() && row && details && details->isHidden(),
                      "an activity group must start expanded while each activity starts collapsed");
-    passed &= expect(detailDisclosure && detailDisclosure->isCheckable()
-                         && !row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput")),
+    passed &= expect(row && details && detailDisclosure && detailDisclosure->isCheckable()
+                         && !row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput"))
+                         && details->property("outputMaterializationCount").toULongLong() == 0
+                         && details->property("deferredOutputBytes").toULongLong() == output.size(),
                      "a collapsed activity must not materialize a potentially large output document");
     passed &= expect(groupDisclosure
                          && !groupDisclosure->styleSheet().contains(
@@ -689,8 +728,10 @@ bool testActivityDisclosureAndFullOutput()
     conversation.render(
         makeState({fixture}), QStringLiteral("activity-detail"), false, &exactOutputChange);
     settleTimeline();
-    passed &= expect(row == rowAddress && details && details->isHidden()
-                         && !row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput")),
+    passed &= expect(row && row == rowAddress && details && details->isHidden()
+                         && !row->findChild<QPlainTextEdit*>(QStringLiteral("conversationActivityOutput"))
+                         && details->property("outputMaterializationCount").toULongLong() == 0
+                         && details->property("deferredOutputBytes").toULongLong() == output.size(),
                      "a canonical output update must keep a collapsed activity lazy until expansion");
     const int collapsedActivityHeight = timeline(conversation)
                                             ? timeline(conversation)->height()
@@ -703,7 +744,9 @@ bool testActivityDisclosureAndFullOutput()
     auto* outputHeading = row
                               ? row->findChild<QLabel*>(QStringLiteral("conversationActivityOutputHeading"))
                               : nullptr;
-    passed &= expect(details && !details->isHidden() && outputView && outputView->isVisible(),
+    passed &= expect(details && !details->isHidden() && outputView && outputView->isVisible()
+                         && details->property("outputMaterializationCount").toULongLong() == 1
+                         && details->property("deferredOutputBytes").toULongLong() == output.size(),
                      "an individual activity disclosure must materialize and reveal its complete output");
     passed &= expect(outputView
                          && outputView->styleSheet().contains(
@@ -746,7 +789,10 @@ bool testActivityDisclosureAndFullOutput()
     passed &= expect(row && row == rowAddress && outputView && outputView.data() == outputAddress
                          && outputView->toPlainText() == QString::fromStdString(output)
                          && outputView->property("streamAppendCount").toULongLong() == 1
-                         && details && !details->isHidden(),
+                         && details
+                         && details->property("outputMaterializationCount").toULongLong() == 1
+                         && details->property("deferredOutputBytes").toULongLong() == output.size()
+                         && !details->isHidden(),
                      "streaming command output must update the expanded activity through the cursor append path");
     fixture.turns.front().messages.front().status = "completed";
     conversation.render(makeState({fixture}), QStringLiteral("activity-detail"));
@@ -1071,13 +1117,11 @@ bool testStreamingPlainTextAndTerminalMarkdown()
             client::ItemContentChannel::AgentText,
             static_cast<std::uint64_t>(previous.toUtf8().size()),
             delta);
-        // The verified append path must be independent of canonical item
-        // materialization.  In production the immutable State can retain a
-        // lazy content chain; the rendered widget's byte ledger is the
-        // authoritative fast-path guard.
-        const client::State deliberatelyUnmaterializedState;
+        // Descriptor lookup verifies the authoritative retained byte boundary
+        // without materializing the canonical item or its lazy content chain.
+        const client::State updatedState = makeState({fixture});
         passed &= conversation.updateExactMessageContent(
-            deliberatelyUnmaterializedState,
+            updatedState,
             QStringLiteral("streaming-markdown"),
             exactChange);
         passed &= expect(message && message.data() == messageAddress
@@ -1293,14 +1337,22 @@ bool testExactReasoningChannels()
         else if (row->property("itemId").toString() == QStringLiteral("reasoning-summary"))
             summaryRow = row;
     }
-    QPointer<QTextEdit> textDetail = textRow
-                                         ? textRow->findChild<QTextEdit*>(
-                                               QStringLiteral("conversationActivityDetail"))
-                                         : nullptr;
-    QPointer<QTextEdit> summaryDetail = summaryRow
-                                            ? summaryRow->findChild<QTextEdit*>(
-                                                  QStringLiteral("conversationActivityDetail"))
-                                            : nullptr;
+    auto* textDetails = textRow
+                            ? textRow->findChild<QWidget*>(
+                                  QStringLiteral("conversationActivityDetails"))
+                            : nullptr;
+    auto* summaryDetails = summaryRow
+                               ? summaryRow->findChild<QWidget*>(
+                                     QStringLiteral("conversationActivityDetails"))
+                               : nullptr;
+    auto* textDisclosure = textRow
+                               ? textRow->findChild<QToolButton*>(
+                                     QStringLiteral("activityDisclosure"))
+                               : nullptr;
+    auto* summaryDisclosure = summaryRow
+                                  ? summaryRow->findChild<QToolButton*>(
+                                        QStringLiteral("activityDisclosure"))
+                                  : nullptr;
     const QString textDelta = QStringLiteral(" through evidence");
     fixture.turns.front().messages.at(0).text += textDelta.toStdString();
     const auto textChange = appendUpdate(
@@ -1309,8 +1361,19 @@ bool testExactReasoningChannels()
         client::ItemContentChannel::ReasoningText,
         std::string_view("working").size(),
         textDelta);
-    bool passed = expect(textDetail && summaryDetail,
-                         "reasoning text and summary must use selectable incremental views");
+    bool passed = expect(textRow && summaryRow && textDetails && summaryDetails
+                             && textDetails->isHidden() && summaryDetails->isHidden()
+                             && !textRow->findChild<QTextEdit*>(
+                                 QStringLiteral("conversationActivityDetail"))
+                             && !summaryRow->findChild<QTextEdit*>(
+                                 QStringLiteral("conversationActivityDetail"))
+                             && textDetails->property("detailMaterializationCount").toULongLong() == 0
+                             && summaryDetails->property("detailMaterializationCount").toULongLong() == 0
+                             && textDetails->property("deferredDetailBytes").toULongLong()
+                                    == std::string_view("working").size()
+                             && summaryDetails->property("deferredDetailBytes").toULongLong()
+                                    == std::string_view("summary").size(),
+                         "collapsed reasoning channels must retain their source bytes without materializing text documents");
     passed &= conversation.updateExactMessageContent(
         makeState({fixture}), QStringLiteral("reasoning-channels"), textChange);
 
@@ -1324,14 +1387,80 @@ bool testExactReasoningChannels()
         summaryDelta);
     passed &= conversation.updateExactMessageContent(
         makeState({fixture}), QStringLiteral("reasoning-channels"), summaryChange);
-    passed &= expect(textDetail && textDetail->toPlainText()
-                                       == QStringLiteral("working through evidence")
+    passed &= expect(textDetails && summaryDetails
+                         && textDetails->isHidden() && summaryDetails->isHidden()
+                         && !textRow->findChild<QTextEdit*>(
+                             QStringLiteral("conversationActivityDetail"))
+                         && !summaryRow->findChild<QTextEdit*>(
+                             QStringLiteral("conversationActivityDetail"))
+                         && textDetails->property("detailMaterializationCount").toULongLong() == 0
+                         && summaryDetails->property("detailMaterializationCount").toULongLong() == 0
+                         && textDetails->property("deferredDetailBytes").toULongLong()
+                                == std::string_view("working through evidence").size()
+                         && summaryDetails->property("deferredDetailBytes").toULongLong()
+                                == std::string_view("summary complete").size(),
+                     "exact reasoning updates must advance collapsed deferred sources without creating hidden documents");
+
+    if (textDisclosure)
+        textDisclosure->click();
+    if (summaryDisclosure)
+        summaryDisclosure->click();
+    settleTimeline();
+    QPointer<QTextEdit> textDetail = textRow
+                                         ? textRow->findChild<QTextEdit*>(
+                                               QStringLiteral("conversationActivityDetail"))
+                                         : nullptr;
+    QPointer<QTextEdit> summaryDetail = summaryRow
+                                            ? summaryRow->findChild<QTextEdit*>(
+                                                  QStringLiteral("conversationActivityDetail"))
+                                            : nullptr;
+    passed &= expect(textDetail && summaryDetail && textDetails && summaryDetails
+                         && textDetail->toPlainText()
+                                == QStringLiteral("working through evidence")
+                         && summaryDetail->toPlainText()
+                                == QStringLiteral("summary complete")
+                         && textDetails->property("detailMaterializationCount").toULongLong() == 1
+                         && summaryDetails->property("detailMaterializationCount").toULongLong() == 1
+                         && textDetail->property("streamAppendCount").toULongLong() == 0
+                         && summaryDetail->property("streamAppendCount").toULongLong() == 0,
+                     "expanding reasoning rows must materialize each latest channel exactly once");
+
+    const QString expandedTextDelta = QStringLiteral(" after expansion");
+    const std::uint64_t expandedTextBase =
+        fixture.turns.front().messages.at(0).text.size();
+    fixture.turns.front().messages.at(0).text += expandedTextDelta.toStdString();
+    const auto expandedTextChange = appendUpdate(
+        QStringLiteral("turn-reasoning-channels"),
+        QStringLiteral("reasoning-text"),
+        client::ItemContentChannel::ReasoningText,
+        expandedTextBase,
+        expandedTextDelta);
+    passed &= conversation.updateExactMessageContent(
+        makeState({fixture}), QStringLiteral("reasoning-channels"), expandedTextChange);
+
+    const QString expandedSummaryDelta = QStringLiteral(" after expansion");
+    const std::uint64_t expandedSummaryBase =
+        fixture.turns.front().messages.at(1).reasoningSummary.size();
+    fixture.turns.front().messages.at(1).reasoningSummary +=
+        expandedSummaryDelta.toStdString();
+    const auto expandedSummaryChange = appendUpdate(
+        QStringLiteral("turn-reasoning-channels"),
+        QStringLiteral("reasoning-summary"),
+        client::ItemContentChannel::ReasoningSummary,
+        expandedSummaryBase,
+        expandedSummaryDelta);
+    passed &= conversation.updateExactMessageContent(
+        makeState({fixture}), QStringLiteral("reasoning-channels"), expandedSummaryChange);
+    passed &= expect(textDetail
+                         && textDetail->toPlainText()
+                                == QStringLiteral("working through evidence after expansion")
                          && textDetail->property("streamAppendCount").toULongLong() == 1,
-                     "reasoning-text deltas must append through the text cursor");
-    passed &= expect(summaryDetail && summaryDetail->toPlainText()
-                                             == QStringLiteral("summary complete")
+                     "an expanded reasoning-text delta must append through the text cursor");
+    passed &= expect(summaryDetail
+                         && summaryDetail->toPlainText()
+                                == QStringLiteral("summary complete after expansion")
                          && summaryDetail->property("streamAppendCount").toULongLong() == 1,
-                     "reasoning-summary deltas must remain independently channel-aware");
+                     "an expanded reasoning-summary delta must append independently through its text cursor");
 
     const auto wrongBase = appendUpdate(
         QStringLiteral("turn-reasoning-channels"),
@@ -1343,7 +1472,7 @@ bool testExactReasoningChannels()
                          makeState({fixture}), QStringLiteral("reasoning-channels"), wrongBase)
                          && textDetail
                          && textDetail->toPlainText()
-                                == QStringLiteral("working through evidence"),
+                                == QStringLiteral("working through evidence after expansion"),
                      "a mismatched reasoning base must decline the exact path without corrupting presentation");
     return passed;
 }

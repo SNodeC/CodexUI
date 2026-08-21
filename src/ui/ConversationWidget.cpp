@@ -36,8 +36,9 @@
 #include <QWheelEvent>
 
 #include <algorithm>
-#include <optional>
 #include <functional>
+#include <limits>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -58,11 +59,22 @@ struct ActivityPresentation
 {
     QString title;
     QString detail;
-    QString output;
     QString status;
     QString tail;
     bool truncated = false;
     std::optional<sdk::ItemContentChannel> detailChannel;
+    struct DeferredItemText
+    {
+        sdk::State state;
+        ai::openai::codex::typed::ItemId itemId;
+        ai::openai::codex::typed::ThreadId threadId;
+        ai::openai::codex::typed::TurnId turnId;
+        sdk::ItemContentChannel channel = sdk::ItemContentChannel::AgentText;
+        std::uint64_t contentRevision = 0;
+        std::uint64_t utf8Bytes = 0;
+    };
+    std::optional<DeferredItemText> deferredDetail;
+    std::optional<DeferredItemText> deferredOutput;
 };
 
 QString fromUtf8(std::string_view value)
@@ -73,6 +85,86 @@ QString fromUtf8(std::string_view value)
 QString fromUtf8(const std::string& value)
 {
     return QString::fromStdString(value);
+}
+
+std::string_view itemContent(const sdk::ItemState& item,
+                             sdk::ItemContentChannel channel) noexcept
+{
+    const std::optional<std::string>* content = nullptr;
+    switch (channel)
+    {
+        case sdk::ItemContentChannel::AgentText:
+            content = &item.agentText;
+            break;
+        case sdk::ItemContentChannel::ReasoningText:
+            content = &item.reasoningText;
+            break;
+        case sdk::ItemContentChannel::ReasoningSummary:
+            content = &item.reasoningSummary;
+            break;
+        case sdk::ItemContentChannel::CommandOutput:
+            content = &item.commandOutput;
+            break;
+    }
+    return content && *content ? std::string_view(**content) : std::string_view{};
+}
+
+std::optional<ActivityPresentation::DeferredItemText> deferredItemText(
+    const sdk::State& state,
+    const ai::openai::codex::typed::ThreadId& threadId,
+    const ai::openai::codex::typed::TurnId& turnId,
+    const ai::openai::codex::typed::ItemId& itemId,
+    sdk::ItemContentChannel channel)
+{
+    const auto descriptor = state.itemContentDescriptor(
+        threadId, turnId, itemId, channel);
+    if (!descriptor || !descriptor->present
+        || descriptor->retainedUtf8Bytes == 0)
+        return std::nullopt;
+    return ActivityPresentation::DeferredItemText{
+        state,
+        itemId,
+        threadId,
+        turnId,
+        channel,
+        descriptor->contentRevision,
+        descriptor->retainedUtf8Bytes};
+}
+
+std::optional<ActivityPresentation::DeferredItemText> deferredItemText(
+    const sdk::State& state,
+    const sdk::ItemState& item,
+    sdk::ItemContentChannel channel)
+{
+    const std::string_view content = itemContent(item, channel);
+    if (content.empty() || !item.threadId || !item.turnId)
+        return std::nullopt;
+    auto source = deferredItemText(
+        state, *item.threadId, *item.turnId, item.id, channel);
+    if (!source
+        || source->utf8Bytes != static_cast<std::uint64_t>(content.size()))
+        return std::nullopt;
+    return source;
+}
+
+bool sameDeferredItemText(
+    const ActivityPresentation::DeferredItemText& left,
+    const ActivityPresentation::DeferredItemText& right) noexcept
+{
+    return left.contentRevision == right.contentRevision
+           && left.itemId == right.itemId
+           && left.threadId == right.threadId
+           && left.turnId == right.turnId
+           && left.channel == right.channel
+           && left.utf8Bytes == right.utf8Bytes;
+}
+
+QString materializeDeferredItemText(
+    const ActivityPresentation::DeferredItemText& source)
+{
+    const sdk::ItemState* item = source.state.item(
+        source.threadId, source.turnId, source.itemId);
+    return item ? fromUtf8(itemContent(*item, source.channel)) : QString{};
 }
 
 QString humanize(QString value)
@@ -884,20 +976,23 @@ ActivityPresentation activityPresentation(const sdk::State& state,
 
     // Command execution is the common source, but file-change and future typed
     // activities may also carry the canonical command-output channel.
-    if (includeOutput && item.commandOutput && !item.commandOutput->empty())
-        result.output = fromUtf8(*item.commandOutput);
+    if (includeOutput)
+        result.deferredOutput = deferredItemText(
+            state, item, sdk::ItemContentChannel::CommandOutput);
 
     if (includeReasoningContent && item.kind.is(frontend::ThreadItemKind::Reasoning))
     {
         if (item.reasoningSummary && !item.reasoningSummary->empty())
         {
-            result.detail = fromUtf8(*item.reasoningSummary);
             result.detailChannel = sdk::ItemContentChannel::ReasoningSummary;
+            result.deferredDetail = deferredItemText(
+                state, item, *result.detailChannel);
         }
         else if (item.reasoningText && !item.reasoningText->empty())
         {
-            result.detail = fromUtf8(*item.reasoningText);
             result.detailChannel = sdk::ItemContentChannel::ReasoningText;
+            result.deferredDetail = deferredItemText(
+                state, item, *result.detailChannel);
         }
     }
 
@@ -987,54 +1082,210 @@ QPlainTextEdit* activityOutputWidget(const QString& text)
 class ActivityDetails final : public QWidget
 {
 public:
-    bool replaceOutput(const QString& text)
+    bool replaceDeferredDetail(
+        std::optional<ActivityPresentation::DeferredItemText> source)
     {
-        const bool previouslyVisible = hasOutput();
-        const std::uint64_t nextBytes = static_cast<std::uint64_t>(text.toUtf8().size());
+        const bool previouslyAvailable = hasDetail();
+        const bool contentChanged = source.has_value() != deferredDetail.has_value()
+                                    || (source && deferredDetail
+                                        && !sameDeferredItemText(
+                                            *source, *deferredDetail));
+        deferredDetail = std::move(source);
+        deferredDetailDirty = deferredDetail.has_value()
+                              && (deferredDetailDirty || contentChanged);
+        detailBytes = deferredDetail ? deferredDetail->utf8Bytes : 0;
+        if (deferredDetail)
+            detailChannel = deferredDetail->channel;
+        else
+            detailChannel.reset();
+        setProperty(
+            "deferredDetailBytes",
+            static_cast<qulonglong>(detailBytes));
+        return previouslyAvailable != hasDetail();
+    }
+
+    void clearDeferredDetail()
+    {
+        deferredDetail.reset();
+        deferredDetailDirty = false;
+        detailBytes = 0;
+        detailChannel.reset();
+        setProperty("deferredDetailBytes", 0ULL);
+    }
+
+    bool ensureDeferredDetail(QVBoxLayout* layout)
+    {
+        if (!layout || !deferredDetail || !deferredDetailDirty)
+            return false;
+
+        const QString text = materializeDeferredItemText(*deferredDetail);
+        auto* detail = findChild<QWidget*>(
+            QStringLiteral("conversationActivityDetail"));
+        auto* streaming = dynamic_cast<StreamingMessageView*>(detail);
+        const bool compatible = streaming
+                                && detail->property("activityContentChannel").toInt()
+                                       == static_cast<int>(deferredDetail->channel);
+        bool geometryChanged = false;
+        if (!compatible)
+        {
+            auto* replacement = new StreamingMessageView(text);
+            replacement->setObjectName(
+                QStringLiteral("conversationActivityDetail"));
+            replacement->setProperty("kind", "meta");
+            replacement->setProperty(
+                "activityContentChannel",
+                static_cast<int>(deferredDetail->channel));
+            replacement->style()->unpolish(replacement);
+            replacement->style()->polish(replacement);
+            if (detail)
+            {
+                delete layout->replaceWidget(detail, replacement);
+                detail->hide();
+                detail->deleteLater();
+            }
+            else
+            {
+                layout->insertWidget(0, replacement);
+            }
+            geometryChanged = true;
+        }
+        else
+        {
+            geometryChanged = streaming->replaceContent(text);
+        }
+        if (auto* current = findChild<QWidget*>(
+                QStringLiteral("conversationActivityDetail"));
+            current && current->isHidden())
+        {
+            current->show();
+            geometryChanged = true;
+        }
+        deferredDetailDirty = false;
+        ++detailMaterializationCount;
+        setProperty(
+            "detailMaterializationCount",
+            static_cast<qulonglong>(detailMaterializationCount));
+        return geometryChanged;
+    }
+
+    [[nodiscard]] bool acceptsDetailAppend(
+        sdk::ItemContentChannel channel,
+        std::uint64_t baseContentBytes,
+        std::uint64_t discardPrefixBytes) const noexcept
+    {
+        return baseContentBytes == detailBytes
+               && discardPrefixBytes <= detailBytes
+               && (!detailChannel || *detailChannel == channel);
+    }
+
+    void recordMaterializedDetailSource(
+        ActivityPresentation::DeferredItemText source)
+    {
+        detailBytes = source.utf8Bytes;
+        detailChannel = source.channel;
+        deferredDetail = std::move(source);
+        deferredDetailDirty = false;
+        setProperty(
+            "deferredDetailBytes",
+            static_cast<qulonglong>(detailBytes));
+    }
+
+    bool replaceOutput(
+        std::optional<ActivityPresentation::DeferredItemText> source)
+    {
+        const bool previouslyAvailable = hasOutput();
+        const bool contentChanged = source.has_value() != deferredOutput.has_value()
+                                    || (source && deferredOutput
+                                        && !sameDeferredItemText(
+                                            *source, *deferredOutput));
+        deferredOutput = std::move(source);
+        outputBytes = deferredOutput ? deferredOutput->utf8Bytes : 0;
+        deferredOutputDirty = deferredOutput.has_value()
+                              && (deferredOutputDirty || contentChanged);
+        setProperty("deferredOutputBytes", static_cast<qulonglong>(outputBytes));
+        if (!deferredOutput && outputEditor)
+        {
+            outputEditor->hide();
+            if (outputHeading)
+                outputHeading->hide();
+        }
+        return previouslyAvailable != hasOutput();
+    }
+
+    bool materializeOutput(QVBoxLayout* layout)
+    {
+        if (!layout || !deferredOutput || !deferredOutputDirty)
+            return false;
+        const QString text = materializeDeferredItemText(*deferredOutput);
+        bool geometryChanged = false;
         if (!outputEditor)
         {
-            deferredOutput = text;
-            outputBytes = nextBytes;
-            return previouslyVisible != hasOutput();
+            if (!outputHeading)
+            {
+                outputHeading = textLabel(QStringLiteral("Output"), "small");
+                outputHeading->setObjectName(
+                    QStringLiteral("conversationActivityOutputHeading"));
+                outputHeading->setStyleSheet(
+                    QStringLiteral("font-size:10px;font-weight:600;color:#475467;"));
+                const auto* incomplete = findChild<QLabel*>(
+                    QStringLiteral("conversationActivityIncomplete"));
+                const int headingPosition = incomplete
+                                                ? layout->indexOf(incomplete)
+                                                : layout->count();
+                layout->insertWidget(headingPosition, outputHeading);
+            }
+            outputEditor = activityOutputWidget(text);
+            const auto* incomplete = findChild<QLabel*>(
+                QStringLiteral("conversationActivityIncomplete"));
+            const int position = incomplete
+                                     ? layout->indexOf(incomplete)
+                                     : layout->count();
+            layout->insertWidget(position, outputEditor);
+            geometryChanged = true;
         }
-
-        const bool followsEnd = outputEditor->verticalScrollBar()->maximum()
-                                - outputEditor->verticalScrollBar()->value() <= 2;
-        const int previousScroll = outputEditor->verticalScrollBar()->value();
-        setMessageContentText(outputEditor, text);
-        outputBytes = nextBytes;
-        outputEditor->setVisible(!text.isEmpty());
+        else
+        {
+            const bool followsEnd = outputEditor->verticalScrollBar()->maximum()
+                                    - outputEditor->verticalScrollBar()->value() <= 2;
+            const int previousScroll = outputEditor->verticalScrollBar()->value();
+            geometryChanged = setMessageContentText(outputEditor, text);
+            outputEditor->verticalScrollBar()->setValue(
+                followsEnd ? outputEditor->verticalScrollBar()->maximum()
+                           : qMin(previousScroll,
+                                  outputEditor->verticalScrollBar()->maximum()));
+        }
+        outputEditor->show();
         if (outputHeading)
-            outputHeading->setVisible(!text.isEmpty());
-        outputEditor->verticalScrollBar()->setValue(
-            followsEnd ? outputEditor->verticalScrollBar()->maximum()
-                       : qMin(previousScroll, outputEditor->verticalScrollBar()->maximum()));
-        return previouslyVisible != hasOutput();
+            outputHeading->show();
+        deferredOutputDirty = false;
+        ++outputMaterializationCount;
+        setProperty(
+            "outputMaterializationCount",
+            static_cast<qulonglong>(outputMaterializationCount));
+        return geometryChanged;
+    }
+
+    void recordMaterializedOutputSource(
+        ActivityPresentation::DeferredItemText source)
+    {
+        outputBytes = source.utf8Bytes;
+        deferredOutput = std::move(source);
+        deferredOutputDirty = false;
+        setProperty(
+            "deferredOutputBytes",
+            static_cast<qulonglong>(outputBytes));
     }
 
     std::optional<bool> applyOutputAppend(std::uint64_t baseContentBytes,
                                           std::uint64_t discardPrefixBytes,
                                           const QString& delta)
     {
-        if (baseContentBytes != outputBytes || discardPrefixBytes > outputBytes)
+        if (!outputEditor || deferredOutputDirty
+            || baseContentBytes != outputBytes
+            || discardPrefixBytes > outputBytes)
             return std::nullopt;
 
         const QByteArray deltaUtf8 = delta.toUtf8();
-        if (!outputEditor)
-        {
-            if (discardPrefixBytes == 0)
-                deferredOutput.append(delta);
-            else
-            {
-                const QByteArray retained = deferredOutput.toUtf8().mid(
-                    static_cast<qsizetype>(discardPrefixBytes));
-                deferredOutput = QString::fromUtf8(retained + deltaUtf8);
-            }
-            outputBytes = baseContentBytes - discardPrefixBytes
-                          + static_cast<std::uint64_t>(deltaUtf8.size());
-            return false;
-        }
-
         const bool followsEnd = outputEditor->verticalScrollBar()->maximum()
                                 - outputEditor->verticalScrollBar()->value() <= 2;
         const int previousScroll = outputEditor->verticalScrollBar()->value();
@@ -1052,38 +1303,39 @@ public:
 
     QPlainTextEdit* ensureOutput(QVBoxLayout* layout)
     {
-        if (!layout || deferredOutput.isEmpty())
+        if (!layout || !hasOutput())
             return outputEditor;
-        if (!outputHeading)
-        {
-            outputHeading = textLabel(QStringLiteral("Output"), "small");
-            outputHeading->setObjectName(QStringLiteral("conversationActivityOutputHeading"));
-            outputHeading->setStyleSheet(
-                QStringLiteral("font-size:10px;font-weight:600;color:#475467;"));
-            const auto* incomplete = findChild<QLabel*>(
-                QStringLiteral("conversationActivityIncomplete"));
-            const int headingPosition = incomplete ? layout->indexOf(incomplete) : layout->count();
-            layout->insertWidget(headingPosition, outputHeading);
-        }
-        outputEditor = activityOutputWidget(deferredOutput);
-        deferredOutput.clear();
-        deferredOutput.squeeze();
-        const auto* incomplete = findChild<QLabel*>(QStringLiteral("conversationActivityIncomplete"));
-        const int position = incomplete ? layout->indexOf(incomplete) : layout->count();
-        layout->insertWidget(position, outputEditor);
-        outputHeading->show();
-        outputEditor->show();
+        static_cast<void>(materializeOutput(layout));
         return outputEditor;
     }
 
+    [[nodiscard]] bool hasDetail() const noexcept
+    {
+        if (detailBytes != 0)
+            return true;
+        const auto* detail = findChild<QWidget*>(
+            QStringLiteral("conversationActivityDetail"));
+        return detail && !detail->isHidden();
+    }
     [[nodiscard]] bool hasOutput() const noexcept { return outputBytes != 0; }
+    [[nodiscard]] std::uint64_t retainedDetailBytes() const noexcept
+    {
+        return detailBytes;
+    }
     [[nodiscard]] std::uint64_t retainedOutputBytes() const noexcept { return outputBytes; }
     [[nodiscard]] QPlainTextEdit* output() const noexcept { return outputEditor; }
     [[nodiscard]] QLabel* heading() const noexcept { return outputHeading; }
 
 private:
-    QString deferredOutput;
+    std::optional<ActivityPresentation::DeferredItemText> deferredDetail;
+    std::optional<ActivityPresentation::DeferredItemText> deferredOutput;
+    std::optional<sdk::ItemContentChannel> detailChannel;
+    std::uint64_t detailBytes = 0;
     std::uint64_t outputBytes = 0;
+    std::uint64_t detailMaterializationCount = 0;
+    std::uint64_t outputMaterializationCount = 0;
+    bool deferredDetailDirty = false;
+    bool deferredOutputDirty = false;
     QPlainTextEdit* outputEditor = nullptr;
     QLabel* outputHeading = nullptr;
 };
@@ -1116,11 +1368,20 @@ bool updateActivityDetail(ActivityDetails* details,
 {
     if (!details || !layout)
         return false;
+    if (presentation.deferredDetail)
+    {
+        bool changed = details->replaceDeferredDetail(
+            presentation.deferredDetail);
+        if (details->isVisible())
+            changed = details->ensureDeferredDetail(layout) || changed;
+        return changed;
+    }
+    details->clearDeferredDetail();
     QWidget* detail = details->findChild<QWidget*>(
         QStringLiteral("conversationActivityDetail"));
     if (presentation.detail.isEmpty())
     {
-        const bool changed = detail && detail->isVisible();
+        const bool changed = detail && !detail->isHidden();
         if (detail)
             detail->hide();
         return changed;
@@ -1158,7 +1419,7 @@ bool updateActivityDetail(ActivityDetails* details,
     {
         geometryChanged = label->setContent(presentation.detail);
     }
-    if (!detail->isVisible())
+    if (detail->isHidden())
     {
         detail->show();
         geometryChanged = true;
@@ -1175,13 +1436,10 @@ bool updateActivityDisclosureAvailability(QWidget* row)
     auto* disclosure = row->findChild<QToolButton*>(QStringLiteral("activityDisclosure"));
     if (!details || !disclosure)
         return false;
-    const auto* detail = details->findChild<QWidget*>(
-        QStringLiteral("conversationActivityDetail"));
     const auto* incomplete = details->findChild<QLabel*>(
         QStringLiteral("conversationActivityIncomplete"));
-    const bool hasDetails = (detail && detail->isVisible())
-                            || details->hasOutput()
-                            || (incomplete && incomplete->isVisible());
+    const bool hasDetails = details->hasDetail() || details->hasOutput()
+                            || (incomplete && !incomplete->isHidden());
     bool changed = disclosure->isVisible() != hasDetails;
     if (auto* prefix = row->findChild<QWidget*>(
             QStringLiteral("conversationActivityPrefix")))
@@ -1222,7 +1480,10 @@ void addActivityRow(QVBoxLayout* rows,
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(6);
 
-    const bool hasDetails = !item.detail.isEmpty() || !item.output.isEmpty() || item.truncated;
+    const bool hasDetails = !item.detail.isEmpty()
+                            || item.deferredDetail.has_value()
+                            || item.deferredOutput.has_value()
+                            || item.truncated;
     const QString color = statusColor(item.status);
     auto* prefix = new QWidget;
     prefix->setObjectName(QStringLiteral("conversationActivityPrefix"));
@@ -1291,13 +1552,19 @@ void addActivityRow(QVBoxLayout* rows,
     auto* detailsLayout = new QVBoxLayout(details);
     detailsLayout->setContentsMargins(42, 0, 4, 4);
     detailsLayout->setSpacing(6);
-    if (!item.detail.isEmpty())
+    if (item.deferredDetail)
+    {
+        details->replaceDeferredDetail(item.deferredDetail);
+        if (expanded)
+            details->ensureDeferredDetail(detailsLayout);
+    }
+    else if (!item.detail.isEmpty())
     {
         detailsLayout->addWidget(activityDetailWidget(item));
     }
-    if (!item.output.isEmpty())
+    if (item.deferredOutput)
     {
-        details->replaceOutput(item.output);
+        details->replaceOutput(item.deferredOutput);
         if (expanded)
             details->ensureOutput(detailsLayout);
     }
@@ -1315,7 +1582,10 @@ void addActivityRow(QVBoxLayout* rows,
                      {
                          const bool next = !details->isVisible();
                          if (next)
+                         {
+                             details->ensureDeferredDetail(detailsLayout);
                              details->ensureOutput(detailsLayout);
+                         }
                          setDisclosureState(disclosure, details, next);
                          if (layoutChanged)
                              layoutChanged();
@@ -1402,12 +1672,17 @@ bool updateActivityRow(QWidget* row,
         return false;
 
     bool contentGeometryChanged = updateActivityDetail(details, detailsLayout, item);
-    contentGeometryChanged = details->replaceOutput(item.output)
+    contentGeometryChanged = details->replaceOutput(item.deferredOutput)
                              || contentGeometryChanged;
-    if (details->isVisible() && details->hasOutput() && !details->output())
+    if (details->isVisible())
     {
-        details->ensureOutput(detailsLayout);
-        contentGeometryChanged = true;
+        contentGeometryChanged = details->ensureDeferredDetail(detailsLayout)
+                                 || contentGeometryChanged;
+        if (details->hasOutput())
+        {
+            contentGeometryChanged = details->materializeOutput(detailsLayout)
+                                     || contentGeometryChanged;
+        }
     }
     return updateActivityRowMetadata(
         row, item, contentGeometryChanged, geometryChanged);
@@ -1476,6 +1751,22 @@ QFrame* activityCard(const sdk::State& state,
                      [disclosure, body, layoutChanged](bool)
                      {
                          const bool next = !body->isVisible();
+                         if (next)
+                         {
+                             for (auto* candidate : body->findChildren<QWidget*>(
+                                      QStringLiteral("conversationActivityDetails")))
+                             {
+                                 auto* details = dynamic_cast<ActivityDetails*>(candidate);
+                                 if (!details)
+                                     continue;
+                                 if (details->isHidden())
+                                     continue;
+                                 auto* detailsLayout = qobject_cast<QVBoxLayout*>(
+                                     details->layout());
+                                 details->ensureDeferredDetail(detailsLayout);
+                                 details->ensureOutput(detailsLayout);
+                             }
+                         }
                          setDisclosureState(disclosure, body, next);
                          if (layoutChanged)
                              layoutChanged();
@@ -1602,6 +1893,31 @@ void addPresentationValue(QCryptographicHash& hash, std::string_view value)
 void addPresentationValue(QCryptographicHash& hash, bool value)
 {
     addPresentationValue(hash, value ? QByteArrayLiteral("1") : QByteArrayLiteral("0"));
+}
+
+bool addItemContentIdentity(QCryptographicHash& hash,
+                            const sdk::State& state,
+                            const sdk::ItemState& item,
+                            sdk::ItemContentChannel channel)
+{
+    if (!item.threadId || !item.turnId)
+    {
+        addPresentationValue(hash, false);
+        return false;
+    }
+    const auto descriptor = state.itemContentDescriptor(
+        *item.threadId, *item.turnId, item.id, channel);
+    addPresentationValue(hash, descriptor.has_value());
+    if (!descriptor)
+        return false;
+    addPresentationValue(hash, descriptor->present);
+    addPresentationValue(
+        hash,
+        QByteArray::number(static_cast<qulonglong>(descriptor->retainedUtf8Bytes)));
+    addPresentationValue(
+        hash,
+        QByteArray::number(static_cast<qulonglong>(descriptor->contentRevision)));
+    return true;
 }
 
 void addEmptyState(QVBoxLayout* timeline, const QString& title, const QString& detail)
@@ -1803,15 +2119,10 @@ QByteArray segmentPresentationKey(const sdk::State& state,
             addPresentationValue(hash, message.has_value());
             if (message)
             {
-                addPresentationValue(
-                    hash,
-                    QByteArray::number(static_cast<qulonglong>(message->text.size())));
-                if (item->stamp)
-                    addPresentationValue(
-                        hash,
-                        QByteArray::number(static_cast<qulonglong>(item->stamp->generation)));
-                else
-                    addPresentationValue(hash, message->text);
+                // User text has no append channel and is normally immutable;
+                // hash it directly so an equal-length authoritative repair is
+                // never mistaken for unchanged content.
+                addPresentationValue(hash, message->text);
                 addPresentationValue(hash, userMessageTruncationText(*message));
             }
         }
@@ -1822,14 +2133,9 @@ QByteArray segmentPresentationKey(const sdk::State& state,
                                                  : (item->summary
                                                         ? std::string_view(*item->summary)
                                                         : std::string_view{});
-            addPresentationValue(
-                hash,
-                QByteArray::number(static_cast<qulonglong>(content.size())));
-            if (item->stamp)
-                addPresentationValue(
-                    hash,
-                    QByteArray::number(static_cast<qulonglong>(item->stamp->generation)));
-            else
+            if (!item->agentText || item->agentText->empty()
+                || !addItemContentIdentity(
+                    hash, state, *item, sdk::ItemContentChannel::AgentText))
                 addPresentationValue(hash, content);
             const auto semantic = sdk::itemSemanticView(*item);
             const auto* agent = semantic ? std::get_if<sdk::AgentMessageSemanticView>(&semantic->details) : nullptr;
@@ -1847,39 +2153,20 @@ QByteArray segmentPresentationKey(const sdk::State& state,
                 state, *item, false, !reasoning);
             addPresentationValue(hash, presentation.title);
             addPresentationValue(hash, presentation.detail);
-            addPresentationValue(
-                hash,
-                QByteArray::number(static_cast<qulonglong>(
-                    item->commandOutput ? item->commandOutput->size() : 0)));
-            if (item->stamp)
-                addPresentationValue(
-                    hash,
-                    QByteArray::number(static_cast<qulonglong>(item->stamp->generation)));
-            else if (item->commandOutput)
-                // Compatibility states without a source stamp cannot provide
-                // a cheaper authoritative revision identity.
+            if (!addItemContentIdentity(
+                    hash, state, *item, sdk::ItemContentChannel::CommandOutput)
+                && item->commandOutput)
                 addPresentationValue(hash, std::string_view(*item->commandOutput));
             if (reasoning)
             {
-                addPresentationValue(
-                    hash,
-                    QByteArray::number(static_cast<qulonglong>(
-                        item->reasoningText ? item->reasoningText->size() : 0)));
-                addPresentationValue(
-                    hash,
-                    QByteArray::number(static_cast<qulonglong>(
-                        item->reasoningSummary ? item->reasoningSummary->size() : 0)));
-                if (item->stamp)
-                    addPresentationValue(
-                        hash,
-                        QByteArray::number(static_cast<qulonglong>(item->stamp->generation)));
-                else
-                {
-                    if (item->reasoningText)
-                        addPresentationValue(hash, std::string_view(*item->reasoningText));
-                    if (item->reasoningSummary)
-                        addPresentationValue(hash, std::string_view(*item->reasoningSummary));
-                }
+                if (!addItemContentIdentity(
+                        hash, state, *item, sdk::ItemContentChannel::ReasoningText)
+                    && item->reasoningText)
+                    addPresentationValue(hash, std::string_view(*item->reasoningText));
+                if (!addItemContentIdentity(
+                        hash, state, *item, sdk::ItemContentChannel::ReasoningSummary)
+                    && item->reasoningSummary)
+                    addPresentationValue(hash, std::string_view(*item->reasoningSummary));
             }
             addPresentationValue(hash, presentation.status);
             addPresentationValue(hash, presentation.tail);
@@ -1906,13 +2193,12 @@ QWidget* timelineSegmentWidget(const sdk::State& state,
 
     if (segment.missing)
     {
-        ActivityPresentation omitted{
-            QStringLiteral("Unavailable item"),
-            QStringLiteral("The ordered item shell is not retained in current State"),
-            {},
-            QStringLiteral("Omitted"),
-            {},
-            true};
+        ActivityPresentation omitted;
+        omitted.title = QStringLiteral("Unavailable item");
+        omitted.detail = QStringLiteral(
+            "The ordered item shell is not retained in current State");
+        omitted.status = QStringLiteral("Omitted");
+        omitted.truncated = true;
         auto* card = new QFrame;
         card->setProperty("kind", "panel");
         auto* rows = new QVBoxLayout(card);
@@ -1948,7 +2234,21 @@ QWidget* timelineSegmentWidget(const sdk::State& state,
     return host;
 }
 
-bool applyExactActivityAppend(QWidget* row,
+std::optional<std::uint64_t> exactAppendResultBytes(
+    const ConversationContentAppend& append) noexcept
+{
+    if (append.discardPrefixBytes > append.baseContentBytes
+        || append.baseContentBytes - append.discardPrefixBytes
+               > std::numeric_limits<std::uint64_t>::max()
+                     - append.deltaUtf8Bytes)
+        return std::nullopt;
+    return append.baseContentBytes - append.discardPrefixBytes
+           + append.deltaUtf8Bytes;
+}
+
+bool applyExactActivityAppend(const sdk::State& state,
+                              const ai::openai::codex::typed::ThreadId& threadId,
+                              QWidget* row,
                               const ConversationContentUpdate& update,
                               bool* geometryChanged,
                               bool* mayShrink)
@@ -1956,52 +2256,80 @@ bool applyExactActivityAppend(QWidget* row,
     if (!row || !update.append)
         return false;
     const ConversationContentAppend& append = *update.append;
-    if (append.discardPrefixBytes > append.baseContentBytes)
-        return false;
     auto* details = dynamic_cast<ActivityDetails*>(
         row->findChild<QWidget*>(QStringLiteral("conversationActivityDetails")));
     auto* detailsLayout = details ? qobject_cast<QVBoxLayout*>(details->layout()) : nullptr;
     if (!details || !detailsLayout)
         return false;
 
+    const auto expectedBytes = exactAppendResultBytes(append);
+    if (!expectedBytes)
+        return false;
+    auto source = deferredItemText(
+        state,
+        threadId,
+        ai::openai::codex::typed::TurnId{update.turnId.toStdString()},
+        ai::openai::codex::typed::ItemId{update.itemId.toStdString()},
+        update.channel);
+    if (!source || source->utf8Bytes != *expectedBytes)
+        return false;
+
     bool contentGeometryChanged = false;
     if (update.channel == sdk::ItemContentChannel::CommandOutput)
     {
-        const auto applied = details->applyOutputAppend(
-            append.baseContentBytes, append.discardPrefixBytes, append.delta);
-        if (!applied)
-            return false;
-        contentGeometryChanged = *applied;
-        if (details->isVisible() && details->hasOutput() && !details->output())
+        if (!details->isVisible())
         {
-            details->ensureOutput(detailsLayout);
-            contentGeometryChanged = true;
+            if (details->retainedOutputBytes() != append.baseContentBytes
+                || append.discardPrefixBytes > append.baseContentBytes)
+                return false;
+            contentGeometryChanged = details->replaceOutput(source);
+        }
+        else
+        {
+            const auto applied = details->applyOutputAppend(
+                append.baseContentBytes, append.discardPrefixBytes, append.delta);
+            if (!applied)
+                return false;
+            contentGeometryChanged = *applied;
+            details->recordMaterializedOutputSource(std::move(*source));
         }
     }
     else if ((update.channel == sdk::ItemContentChannel::ReasoningText
               || update.channel == sdk::ItemContentChannel::ReasoningSummary))
     {
-        auto* detail = dynamic_cast<StreamingMessageView*>(
-            details->findChild<QWidget*>(QStringLiteral("conversationActivityDetail")));
-        if (!detail && append.baseContentBytes == 0
-            && append.discardPrefixBytes == 0)
+        if (!details->acceptsDetailAppend(
+                update.channel,
+                append.baseContentBytes,
+                append.discardPrefixBytes))
+            return false;
+        if (!details->isVisible())
         {
-            ActivityPresentation initial;
-            initial.detail = append.delta;
-            initial.detailChannel = update.channel;
-            contentGeometryChanged = updateActivityDetail(details, detailsLayout, initial);
+            contentGeometryChanged = details->replaceDeferredDetail(source);
         }
         else
         {
-            if (!detail
-                || detail->property("activityContentChannel").toInt()
-                       != static_cast<int>(update.channel))
-                return false;
-            const auto applied = detail->applyAppend(
-                append.baseContentBytes, append.discardPrefixBytes, append.delta);
-            if (!applied)
-                return false;
-            contentGeometryChanged = *applied;
+            auto* detail = dynamic_cast<StreamingMessageView*>(
+                details->findChild<QWidget*>(QStringLiteral("conversationActivityDetail")));
+            if (!detail && append.baseContentBytes == 0
+                && append.discardPrefixBytes == 0)
+            {
+                contentGeometryChanged = details->replaceDeferredDetail(source);
+                contentGeometryChanged = details->ensureDeferredDetail(detailsLayout)
+                                         || contentGeometryChanged;
+            }
+            else
+            {
+                if (!detail
+                    || detail->property("activityContentChannel").toInt()
+                           != static_cast<int>(update.channel))
+                    return false;
+                const auto applied = detail->applyAppend(
+                    append.baseContentBytes, append.discardPrefixBytes, append.delta);
+                if (!applied)
+                    return false;
+                contentGeometryChanged = *applied;
+                details->recordMaterializedDetailSource(std::move(*source));
+            }
         }
     }
     else
@@ -2077,9 +2405,10 @@ bool updateTimelineActivitySegment(QWidget* host,
             {
                 if (update.itemId != fromUtf8(item->id.value))
                     continue;
-                handledExactly = applyExactActivityAppend(
-                    rows.at(index), update,
-                    &rowGeometryChanged, &rowMayShrink);
+                if (item->threadId)
+                    handledExactly = applyExactActivityAppend(
+                        state, *item->threadId, rows.at(index), update,
+                        &rowGeometryChanged, &rowMayShrink);
                 if (!handledExactly)
                     break;
             }
@@ -2943,7 +3272,6 @@ bool ConversationWidget::updateExactMessageContent(
         markPresentationDeferred();
         return true;
     }
-    (void)state;
     auto* scrollBar = scrollArea->verticalScrollBar();
     const int previousScroll = scrollBar->value();
     const bool followLatest = scrollBar->maximum() - previousScroll <= 72
@@ -2970,6 +3298,15 @@ bool ConversationWidget::updateExactMessageContent(
         {
             if (messageWidget->property("messageUser").toBool()
                 || update.channel != sdk::ItemContentChannel::AgentText)
+                return false;
+            const auto expectedBytes = exactAppendResultBytes(*update.append);
+            const auto descriptor = state.itemContentDescriptor(
+                ai::openai::codex::typed::ThreadId{threadId.toStdString()},
+                ai::openai::codex::typed::TurnId{update.turnId.toStdString()},
+                ai::openai::codex::typed::ItemId{update.itemId.toStdString()},
+                update.channel);
+            if (!expectedBytes || !descriptor || !descriptor->present
+                || descriptor->retainedUtf8Bytes != *expectedBytes)
                 return false;
             auto* content = messageWidget->findChild<QWidget*>(
                 QStringLiteral("conversationMessageContent"));
@@ -3011,7 +3348,10 @@ bool ConversationWidget::updateExactMessageContent(
             if (!activityRow)
                 continue;
             if (!applyExactActivityAppend(
-                    activityRow, update,
+                    state,
+                    ai::openai::codex::typed::ThreadId{threadId.toStdString()},
+                    activityRow,
+                    update,
                     &contentGeometryChanged, &contentMayShrink))
                 return false;
         }
