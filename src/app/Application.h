@@ -11,6 +11,7 @@ namespace codexui {
 class Application
 {
 public:
+    ~Application();
     void show();
 
 private:
