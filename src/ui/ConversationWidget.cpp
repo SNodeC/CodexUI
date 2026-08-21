@@ -851,7 +851,7 @@ void addActivityRow(QVBoxLayout* rows,
     prefix->setObjectName(QStringLiteral("conversationActivityPrefix"));
     auto* prefixLayout = new QHBoxLayout(prefix);
     prefixLayout->setContentsMargins(0, 0, 0, 0);
-    prefixLayout->setSpacing(0);
+    prefixLayout->setSpacing(1);
 
     auto* symbol = textLabel(statusGlyph(item.status));
     symbol->setObjectName(QStringLiteral("conversationActivitySymbol"));
@@ -863,16 +863,10 @@ void addActivityRow(QVBoxLayout* rows,
     auto* disclosure = disclosureButton(
         expanded,
         QStringLiteral("Activity details: %1").arg(item.title));
-    // Nested rows need a compact indicator rather than the header button's
-    // surrounding click-area padding; otherwise every expandable title is
-    // visibly indented. Keep the indicator flush with the status column and
-    // let the summary layout provide the single consistent text gap.
-    disclosure->setIconSize(QSize(10, 10));
-    disclosure->setFixedWidth(10);
+    disclosure->setFixedWidth(14);
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
     prefixLayout->addWidget(disclosure, 0, Qt::AlignTop);
-    layout->addWidget(prefix, 0, Qt::AlignTop);
 
     auto* title = wrappingLabel(item.title);
     title->setObjectName(QStringLiteral("conversationActivityTitle"));
@@ -885,7 +879,19 @@ void addActivityRow(QVBoxLayout* rows,
     title->setContentsMargins(0, titleTopInset, 0, 0);
     title->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     title->setMinimumHeight(disclosure->height());
-    layout->addWidget(title, 1);
+
+    // A right-pointing native indicator occupies less horizontal ink than the
+    // header's down-pointing indicator. Keep the same 12 px icon, but reduce
+    // only the nested icon-to-title gap by the measured four pixels. Rows
+    // without a disclosure retain the established status-to-title alignment.
+    auto* leading = new QWidget;
+    auto* leadingLayout = new QHBoxLayout(leading);
+    leadingLayout->setObjectName(QStringLiteral("conversationActivityLeadingLayout"));
+    leadingLayout->setContentsMargins(0, 0, 0, 0);
+    leadingLayout->setSpacing(hasDetails ? 2 : 6);
+    leadingLayout->addWidget(prefix, 0, Qt::AlignTop);
+    leadingLayout->addWidget(title, 1);
+    layout->addWidget(leading, 1);
 
     auto* tail = textLabel(item.tail, "meta");
     tail->setObjectName(QStringLiteral("conversationActivityTail"));
@@ -1013,6 +1019,9 @@ bool updateActivityRow(QWidget* row, const ActivityPresentation& item)
         incomplete->setVisible(item.truncated);
 
     const bool hasDetails = !item.detail.isEmpty() || !item.output.isEmpty() || item.truncated;
+    if (auto* leadingLayout = row->findChild<QHBoxLayout*>(
+            QStringLiteral("conversationActivityLeadingLayout")))
+        leadingLayout->setSpacing(hasDetails ? 2 : 6);
     disclosure->setEnabled(hasDetails);
     disclosure->setVisible(hasDetails);
     if (!hasDetails)
