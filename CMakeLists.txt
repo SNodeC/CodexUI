@@ -20,8 +20,12 @@ qt_add_executable(
     src/app/FrontendSession.cpp
     src/app/FrontendSession.h
     src/main.cpp
+    src/ui/AnchoredTurnSurface.cpp
+    src/ui/AnchoredTurnSurface.h
     src/ui/ConversationWidget.cpp
     src/ui/ConversationWidget.h
+    src/ui/ExpandingPromptEditor.cpp
+    src/ui/ExpandingPromptEditor.h
     src/ui/InspectorWidget.cpp
     src/ui/InspectorWidget.h
     src/ui/InteractiveRequestDialog.cpp
@@ -98,8 +102,12 @@ if(BUILD_TESTING)
         tests/ConversationLayoutTest.cpp
         src/app/AttachmentManager.cpp
         src/app/AttachmentManager.h
+        src/ui/AnchoredTurnSurface.cpp
+        src/ui/AnchoredTurnSurface.h
         src/ui/ConversationWidget.cpp
         src/ui/ConversationWidget.h
+        src/ui/ExpandingPromptEditor.cpp
+        src/ui/ExpandingPromptEditor.h
         src/ui/InspectorWidget.cpp
         src/ui/InspectorWidget.h
         src/ui/UpcomingTurnDock.cpp
@@ -121,6 +129,10 @@ if(BUILD_TESTING)
         tests/Phase1ThreadTurnUxTest.cpp
         src/app/AttachmentManager.cpp
         src/app/AttachmentManager.h
+        src/ui/AnchoredTurnSurface.cpp
+        src/ui/AnchoredTurnSurface.h
+        src/ui/ExpandingPromptEditor.cpp
+        src/ui/ExpandingPromptEditor.h
         src/ui/SidebarWidget.cpp
         src/ui/SidebarWidget.h
         src/ui/ThreadSetupDialog.cpp

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
+#include "ui/AnchoredTurnSurface.h"
 #include "ui/SidebarWidget.h"
 #include "ui/ThreadSetupDialog.h"
 #include "ui/UpcomingTurnDock.h"
@@ -28,6 +29,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QScrollBar>
 #include <QSet>
 #include <QSettings>
@@ -531,6 +533,18 @@ bool testUpcomingTurnActionStates()
                          && send->isEnabled() && !stop->isHidden() && stop->isEnabled()
                          && editor->isEnabled() && !sandbox->isEnabled() && !approval->isEnabled(),
                      "a running turn must permit steering and stopping while locking execution settings");
+    QString shortcutPrompt;
+    bool shortcutSteering = false;
+    QObject::connect(&dock, &codexui::UpcomingTurnDock::sendRequested,
+                     [&shortcutPrompt, &shortcutSteering](const QString& prompt, bool steering) {
+                         shortcutPrompt = prompt;
+                         shortcutSteering = steering;
+                     });
+    QKeyEvent submitShortcut(QEvent::KeyPress, Qt::Key_Return, Qt::ControlModifier);
+    QCoreApplication::sendEvent(editor, &submitShortcut);
+    passed &= expect(shortcutPrompt == QStringLiteral("redirect the active turn")
+                         && shortcutSteering,
+                     "the extracted prompt editor must preserve Ctrl+Enter submission semantics");
     dock.setActionState(false,
                         false,
                         false,
