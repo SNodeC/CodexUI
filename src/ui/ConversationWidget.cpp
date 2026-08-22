@@ -49,8 +49,11 @@ namespace
 namespace sdk = ai::openai::codex::frontend::client;
 namespace frontend = ai::openai::codex::frontend;
 
-constexpr qsizetype maximumRenderedTimelineTurns = 32;
-constexpr qsizetype maximumRenderedTimelineItems = 256;
+// Incomplete replacement proofs stay bounded even though a fully loaded
+// thread materializes all retained history. A partial publication that would
+// require more work simply keeps the existing presentation until recovery.
+constexpr qsizetype recoveryInspectionItemBudget = 256;
+constexpr qsizetype recoveryInspectionTurnBudget = 32;
 constexpr std::size_t maximumActivityItemsPerSegment = 16;
 constexpr qsizetype largeMessageEditorThreshold = 64 * 1024;
 constexpr int largeMessageEditorHeight = 240;
@@ -2072,7 +2075,6 @@ struct TimelineWindow
     std::vector<TimelineTurnSlice> turns;
     qsizetype renderedItems = 0;
     qsizetype totalItems = 0;
-    bool earlierItemsOmitted = false;
 };
 
 QString segmentStorageKey(const QString& turnId, const QString& segmentId)
@@ -2166,34 +2168,22 @@ qsizetype timelineItemCount(const TimelineSegment& segment)
     return qMax<qsizetype>(1, static_cast<qsizetype>(segment.items.size()));
 }
 
-TimelineWindow latestTimelineWindow(const sdk::State& state, const sdk::ThreadState& thread)
+TimelineWindow retainedTimelineWindow(const sdk::State& state, const sdk::ThreadState& thread)
 {
     TimelineWindow result;
-    qsizetype remainingItems = maximumRenderedTimelineItems;
-    for (qsizetype index = static_cast<qsizetype>(thread.orderedTurns.size());
-         index > 0 && remainingItems > 0
-         && static_cast<qsizetype>(result.turns.size()) < maximumRenderedTimelineTurns;
-         --index)
+    result.turns.reserve(thread.orderedTurns.size());
+    for (qsizetype index = 0;
+         index < static_cast<qsizetype>(thread.orderedTurns.size());
+         ++index)
     {
-        const auto* turn = state.turn(thread.id, thread.orderedTurns.at(index - 1));
+        const auto* turn = state.turn(thread.id, thread.orderedTurns.at(index));
         if (!turn)
             continue;
         const qsizetype itemCount = qMax<qsizetype>(1, static_cast<qsizetype>(turn->orderedItems.size()));
-        const qsizetype selectedItems = qMin(itemCount, remainingItems);
-        const qsizetype firstItem = turn->orderedItems.empty()
-                                         ? 0
-                                         : static_cast<qsizetype>(turn->orderedItems.size()) - selectedItems;
-        result.turns.insert(result.turns.begin(), {turn, index, firstItem});
-        result.renderedItems += selectedItems;
-        remainingItems -= selectedItems;
+        result.turns.push_back({turn, index + 1, 0});
+        result.renderedItems += itemCount;
     }
-    result.earlierItemsOmitted = !result.turns.empty()
-                                 && (result.turns.front().turnNumber > 1
-                                     || result.turns.front().firstItem > 0);
-    // Keep this presentation-only count a bounded lower bound. Computing the
-    // exact retained count required an all-turn scan on every live item event.
-    result.totalItems = result.renderedItems
-                        + (result.earlierItemsOmitted ? 1 : 0);
+    result.totalItems = result.renderedItems;
     return result;
 }
 
@@ -2208,9 +2198,9 @@ bool incompleteStateContainsRenderedTimeline(
 {
     inspectedItems = 0;
     constexpr qsizetype maximumRecoveryInspectedItems =
-        maximumRenderedTimelineItems
+        recoveryInspectionItemBudget
         + (static_cast<qsizetype>(maximumActivityItemsPerSegment) - 1)
-              * maximumRenderedTimelineTurns;
+              * recoveryInspectionTurnBudget;
     for (const QString& renderedTurnId : renderedTurnIds)
     {
         const sdk::TurnState* retainedTurn = state.turn(
@@ -2887,8 +2877,10 @@ ConversationWidget::ConversationWidget(QWidget* parent) : QWidget(parent)
 
     timelineHost = new QWidget;
     timelineHost->setObjectName(QStringLiteral("conversationTimeline"));
-    timelineHost->setProperty("maximumRenderedTurns", maximumRenderedTimelineTurns);
-    timelineHost->setProperty("maximumRenderedItems", maximumRenderedTimelineItems);
+    timelineHost->setProperty(
+        "recoveryInspectionTurnBudget", recoveryInspectionTurnBudget);
+    timelineHost->setProperty(
+        "recoveryInspectionItemBudget", recoveryInspectionItemBudget);
     timeline = new QVBoxLayout(timelineHost);
     timeline->setContentsMargins(0, 0, 0, 0);
     timeline->setSpacing(0);
@@ -3200,7 +3192,7 @@ void ConversationWidget::render(const sdk::State& state,
         std::optional<TimelineWindow> structuralWindow;
         if (structuralReconciliation)
         {
-            structuralWindow.emplace(latestTimelineWindow(state, *thread));
+            structuralWindow.emplace(retainedTimelineWindow(state, *thread));
             if (!structuralWindow->turns.empty())
                 currentTurn = structuralWindow->turns.back().turn;
         }
@@ -3266,7 +3258,7 @@ void ConversationWidget::render(const sdk::State& state,
         {
             const TimelineWindow window = structuralWindow
                                               ? std::move(*structuralWindow)
-                                              : latestTimelineWindow(state, *thread);
+                                              : retainedTimelineWindow(state, *thread);
             std::vector<TimelineEntry> entries;
             entries.reserve(static_cast<std::size_t>(window.renderedItems));
             for (const TimelineTurnSlice& slice : window.turns)
@@ -3277,19 +3269,7 @@ void ConversationWidget::render(const sdk::State& state,
             }
             timelineHost->setProperty("renderedTimelineItems", window.renderedItems);
             timelineHost->setProperty("retainedTimelineItems", window.totalItems);
-            if (window.earlierItemsOmitted)
-            {
-                timelineWindowDetail->setText(
-                    QStringLiteral("Showing the latest %1 synchronized timeline entries. "
-                                   "Earlier entries remain in canonical AISuite State and are not "
-                                   "materialized in this live view.")
-                        .arg(window.renderedItems));
-                timelineWindowNotice->show();
-            }
-            else
-            {
-                timelineWindowNotice->hide();
-            }
+            timelineWindowNotice->hide();
 
             struct VisibleTimelineTurn
             {
