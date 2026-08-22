@@ -213,20 +213,11 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                 }
                 else if constexpr (std::is_same_v<Change, sdk::ItemUpsertedChange>)
                 {
-                    if (value.threadId) {
-                        // A new or changed item requires bounded timeline
-                        // reconciliation, but it does not invalidate the
-                        // complete selected-thread presentation. Keeping it
-                        // out of fullyAffectedThreadIds lets ConversationWidget
-                        // retain and reconcile its existing segment widgets.
-                        addThread(value.threadId->value);
-                        addInspectorThread(value.threadId->value);
-                    }
+                    if (value.threadId)
+                        markThreadAndInspector(value.threadId->value);
                     else if (value.turnId) {
-                        if (const auto* turn = update.state.turn(*value.turnId)) {
-                            addThread(turn->threadId.value);
-                            addInspectorThread(turn->threadId.value);
-                        }
+                        if (const auto* turn = update.state.turn(*value.turnId))
+                            markThreadAndInspector(turn->threadId.value);
                         else {
                             scope.allThreadsAffected = true;
                             scope.allInspectorsAffected = true;
