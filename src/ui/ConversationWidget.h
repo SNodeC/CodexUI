@@ -39,6 +39,7 @@ namespace codexui {
 class AnchoredTurnSurface;
 class UpcomingTurnDock;
 struct UpcomingTurnDraft;
+struct ConversationWidgetTestAccess;
 
 struct ConversationContentAppend
 {
@@ -104,6 +105,8 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
+    friend struct ConversationWidgetTestAccess;
+
     void scheduleTimelineLayout(int previousScroll,
                                 bool followLatest,
                                 bool threadChanged,
