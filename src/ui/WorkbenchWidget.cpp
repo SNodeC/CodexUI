@@ -352,50 +352,11 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
         && !submittedTurnAffected && !automaticResumeAffected)
         return;
     if (selectedAffected)
-    {
-        selectedPresentationRefreshPending = true;
-        const bool requiresFullRefresh = scope.allThreadsAffected || awaitedSelectionAffected
-                                         || scope.fullyAffectedThreadIds.contains(selectedThreadId);
-        if (requiresFullRefresh)
-        {
-            selectedPresentationFullRefreshPending = true;
-            selectedContentRefreshPending.clear();
-            selectedContentRefreshPendingBytes = 0;
-        }
-        else if (!selectedPresentationFullRefreshPending)
-        {
-            // A worker mailbox publication is individually bounded, but more
-            // than one publication can reach the GUI during this 16 ms frame
-            // window. Bound the aggregate again and fall back to the newest
-            // authoritative State instead of growing presentation metadata.
-            bool foundExactContent = false;
-            for (const auto& identity : scope.affectedItemContents)
-            {
-                if (identity.threadId != selectedThreadId)
-                    continue;
-                foundExactContent = true;
-                if (detail::mergeConversationContentUpdate(
-                        selectedContentRefreshPending,
-                        selectedContentRefreshPendingBytes,
-                        identity)
-                    == detail::BoundedMergeResult::CapacityExceeded)
-                {
-                    selectedPresentationFullRefreshPending = true;
-                    selectedContentRefreshPending.clear();
-                    selectedContentRefreshPendingBytes = 0;
-                    break;
-                }
-            }
-            // A conversation-affecting update without an exact item identity
-            // must retain the existing bounded full reconciliation.
-            if (!foundExactContent)
-            {
-                selectedPresentationFullRefreshPending = true;
-                selectedContentRefreshPending.clear();
-                selectedContentRefreshPendingBytes = 0;
-            }
-        }
-    }
+        detail::mergeSelectedPresentationRefresh(
+            selectedPresentationRefresh,
+            scope,
+            selectedThreadId,
+            awaitedSelectionAffected);
     inspectorRefreshPending = inspectorRefreshPending || selectedInspectorAffected;
     sidebarRefreshPending = sidebarRefreshPending || scope.sidebarAffected;
     if (scope.sidebarAffected) {
@@ -432,19 +393,24 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
         if (!stateRefreshPending)
             return;
         stateRefreshPending = false;
-        const bool refreshSelectedPresentation = selectedPresentationRefreshPending;
+        const bool refreshSelectedPresentation =
+            selectedPresentationRefresh.refreshPending;
         const bool refreshInspector = inspectorRefreshPending;
         const bool refreshSidebar = sidebarRefreshPending;
         const bool refreshFullSidebar = sidebarFullRefreshPending;
         QStringList sidebarThreadChanges = std::move(sidebarThreadRefreshPending);
-        const bool exactContentOnly = refreshSelectedPresentation
-                                      && !selectedPresentationFullRefreshPending
-                                      && !selectedContentRefreshPending.empty();
-        ConversationContentUpdates exactContentChanges = std::move(selectedContentRefreshPending);
-        selectedPresentationRefreshPending = false;
-        selectedPresentationFullRefreshPending = false;
-        selectedContentRefreshPending.clear();
-        selectedContentRefreshPendingBytes = 0;
+        const bool exactContentAvailable = refreshSelectedPresentation
+                                           && !selectedPresentationRefresh.fullRefreshPending
+                                           && !selectedPresentationRefresh.contentChanges.empty();
+        const bool structuralReconciliation = refreshSelectedPresentation
+                                              && !selectedPresentationRefresh.fullRefreshPending
+                                              && selectedPresentationRefresh
+                                                     .structuralReconciliationPending;
+        const bool exactContentOnly = exactContentAvailable
+                                      && !structuralReconciliation;
+        ConversationContentUpdates exactContentChanges =
+            std::move(selectedPresentationRefresh.contentChanges);
+        selectedPresentationRefresh.clear();
         inspectorRefreshPending = false;
         sidebarRefreshPending = false;
         sidebarFullRefreshPending = false;
@@ -458,10 +424,11 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
         refreshState(refreshSelectedPresentation,
                      refreshInspector,
                      refreshSidebar,
-                     exactContentOnly ? &exactContentChanges : nullptr,
+                     exactContentAvailable ? &exactContentChanges : nullptr,
                      refreshSidebar && !refreshFullSidebar && !sidebarThreadChanges.isEmpty()
                          ? &sidebarThreadChanges
-                         : nullptr);
+                         : nullptr,
+                     structuralReconciliation);
     });
 }
 
@@ -539,13 +506,11 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
                                    bool refreshInspector,
                                    bool refreshSidebar,
                                    const ConversationContentUpdates* exactContentChanges,
-                                   const QStringList* sidebarThreadChanges)
+                                   const QStringList* sidebarThreadChanges,
+                                   bool requiresStructuralReconciliation)
 {
     stateRefreshPending = false;
-    selectedPresentationRefreshPending = false;
-    selectedPresentationFullRefreshPending = false;
-    selectedContentRefreshPending.clear();
-    selectedContentRefreshPendingBytes = 0;
+    selectedPresentationRefresh.clear();
     inspectorRefreshPending = false;
     sidebarRefreshPending = false;
     sidebarFullRefreshPending = false;
@@ -595,6 +560,8 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
     refreshSelectedPresentation = refreshSelectedPresentation || selectionChanged;
     refreshInspector = refreshInspector || selectionChanged;
     refreshSidebar = refreshSidebar || selectionChanged;
+    requiresStructuralReconciliation = requiresStructuralReconciliation
+                                       && !selectionChanged;
 
     if (refreshSidebar) {
         if (!selectionChanged && sidebarThreadChanges && !sidebarThreadChanges->isEmpty())
@@ -610,7 +577,8 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
         conversation->render(state,
                              selectedThreadId,
                              false,
-                             selectionChanged ? nullptr : exactContentChanges);
+                             selectionChanged ? nullptr : exactContentChanges,
+                             requiresStructuralReconciliation);
     }
     reconcileAttachmentStaging();
     reconcileSubmittedTurnSettings();
@@ -626,7 +594,7 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
                                                   && !selectedThreadId.isEmpty()
                                                   && !awaitingSelectedThread
                                                   && omittedThreads > 0;
-    if (refreshSelectedPresentation) {
+    if (refreshSelectedPresentation && !requiresStructuralReconciliation) {
         const QString context = ready && selected && selected->cwd
                                     ? QString::fromStdString(selected->cwd->value)
                                     : QStringLiteral("No thread context");
@@ -641,7 +609,9 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
                                          ? context.left(20) + QChar(0x2026) + context.right(20)
                                          : context);
         threadContextStatus->setToolTip(ready && selected && selected->cwd ? plainTooltip(context) : QString{});
+    }
 
+    if (refreshSelectedPresentation) {
         std::size_t agentActivities = 0;
         if (const auto* turn = ready ? latestTurn(state, selected) : nullptr) {
             for (const auto& itemId : turn->orderedItems) {

@@ -69,7 +69,8 @@ public:
     void render(const ai::openai::codex::frontend::client::State& state,
                 const QString& threadId,
                 bool newThreadDraft = false,
-                const ConversationContentUpdates* exactContentChanges = nullptr);
+                const ConversationContentUpdates* exactContentChanges = nullptr,
+                bool structurallyAffected = false);
     void setModelCatalog(const std::vector<ai::openai::codex::typed::Model>& catalog);
     [[nodiscard]] bool updateExactMessageContent(
         const ai::openai::codex::frontend::client::State& state,

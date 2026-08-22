@@ -2,6 +2,7 @@
 
 #include "ui/ConversationWidget.h"
 #include "ui/InspectorWidget.h"
+#include "ui/PresentationRefreshAccumulator.h"
 
 #include <ai/openai/codex/frontend/Messages.h>
 #include <ai/openai/codex/frontend/client/Client.h>
@@ -1380,6 +1381,180 @@ bool testKeyedSegmentInsertion()
             && orderedLayout->indexOf(middle) == 1
             && orderedLayout->indexOf(right.data()) == 2,
         "a middle insertion must place the new segment between its surviving neighbors");
+    return passed;
+}
+
+bool runStructuralItemUpsertReconciliation(
+    bool exactFirst, bool verifyDeletion)
+{
+    ThreadFixture fixture{
+        "structural-item-upserts",
+        {{"turn-structural-item-upserts",
+          {{"structural-stream",
+            frontend::ThreadItemKind::AgentMessage,
+            "streaming prefix",
+            "started"},
+           {"structural-stable",
+            frontend::ThreadItemKind::UserMessage,
+            "stable prompt"}}}}};
+    fixture.turns.front().status = "inProgress";
+    fixture.turns.front().active = true;
+    fixture.turns.front().terminal = false;
+
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(
+        makeState({fixture}), QStringLiteral("structural-item-upserts"));
+    settleTimeline();
+
+    QPointer<QWidget> stream = segment(
+        conversation, QStringLiteral("message:structural-stream"));
+    QPointer<QWidget> stable = segment(
+        conversation, QStringLiteral("message:structural-stable"));
+    QPointer<QWidget> streamContent = messageContent(stream);
+    QPointer<QLabel> streamStatus = messageLabel(
+        stream, QStringLiteral("conversationMessageStatus"));
+    QWidget* const streamAddress = stream.data();
+    QWidget* const stableAddress = stable.data();
+    QWidget* const streamContentAddress = streamContent.data();
+    const qulonglong appendCountBefore = streamContent
+                                             ? streamContent
+                                                   ->property("streamAppendCount")
+                                                   .toULongLong()
+                                             : 0;
+    const qulonglong materializationsBefore =
+        streamContent
+            ? streamContent->property("sourceMaterializationCount").toULongLong()
+            : 0;
+    const qulonglong replacementsBefore =
+        streamContent
+            ? streamContent->property("fullReplacementCount").toULongLong()
+            : 0;
+
+    const QString delta = QStringLiteral(" plus exact delta");
+    fixture.turns.front().messages.front().text += delta.toStdString();
+    fixture.turns.front().messages.front().status = "completed";
+    for (int index = 0; index < 50; ++index)
+    {
+        fixture.turns.front().messages.push_back(
+            {"structural-added-" + std::to_string(index),
+             frontend::ThreadItemKind::UserMessage,
+             "new prompt " + std::to_string(index)});
+    }
+    codexui::detail::StateUpdateScope structuralScope;
+    structuralScope.affectedThreadIds.push_back(
+        QStringLiteral("structural-item-upserts"));
+    structuralScope.structurallyAffectedThreadIds.push_back(
+        QStringLiteral("structural-item-upserts"));
+    codexui::detail::StateUpdateScope exactScope;
+    exactScope.affectedThreadIds.push_back(
+        QStringLiteral("structural-item-upserts"));
+    exactScope.affectedItemContents.push_back({
+        QStringLiteral("structural-item-upserts"),
+        QStringLiteral("turn-structural-item-upserts"),
+        QStringLiteral("structural-stream"),
+        client::ItemContentChannel::AgentText,
+        codexui::detail::StateUpdateScope::ItemContentAppend{
+            std::string_view("streaming prefix").size(),
+            0,
+            delta.toUtf8(),
+        },
+    });
+    exactScope.coalescedContentDeltaBytes =
+        static_cast<std::uint64_t>(delta.toUtf8().size());
+    codexui::detail::SelectedPresentationRefreshAccumulator accumulator;
+    const auto accumulate = [&accumulator](
+                                const codexui::detail::StateUpdateScope& scope)
+    {
+        codexui::detail::mergeSelectedPresentationRefresh(
+            accumulator,
+            scope,
+            QStringLiteral("structural-item-upserts"),
+            false);
+    };
+    if (exactFirst)
+    {
+        accumulate(exactScope);
+        accumulate(structuralScope);
+    }
+    else
+    {
+        accumulate(structuralScope);
+        accumulate(exactScope);
+    }
+    conversation.render(
+        makeState({fixture}),
+        QStringLiteral("structural-item-upserts"),
+        false,
+        &accumulator.contentChanges,
+        accumulator.structuralReconciliationPending);
+    settleTimeline();
+
+    bool everyAdditionRendered = true;
+    for (int index = 0; index < 50; ++index)
+    {
+        everyAdditionRendered = everyAdditionRendered
+                                && segment(
+                                    conversation,
+                                    QStringLiteral("message:structural-added-%1")
+                                        .arg(index));
+    }
+    bool passed = expect(
+        accumulator.refreshPending && !accumulator.fullRefreshPending
+            && accumulator.structuralReconciliationPending
+            && accumulator.contentChanges.size() == 1
+            && everyAdditionRendered && stream && stream.data() == streamAddress
+            && stable && stable.data() == stableAddress
+            && streamContent && streamContent.data() == streamContentAddress,
+        "a structural batch of 50 item upserts must materialize every new segment while preserving every unchanged QWidget");
+    passed &= expect(
+        streamContent
+            && messageSourceText(streamContent)
+                   == QStringLiteral("streaming prefix plus exact delta")
+            && streamContent->property("streamAppendCount").toULongLong()
+                   == appendCountBefore + 1
+            && streamContent->property("sourceMaterializationCount").toULongLong()
+                   == materializationsBefore
+            && streamContent->property("fullReplacementCount").toULongLong()
+                   == replacementsBefore
+            && streamStatus
+            && streamStatus->text() == QStringLiteral("Completed"),
+        "a coalesced exact append and structural batch must apply the delta once, refresh metadata, and never replace or rematerialize canonical content");
+
+    if (!verifyDeletion)
+        return passed;
+
+    const auto removedPosition = std::find_if(
+        fixture.turns.front().messages.begin(),
+        fixture.turns.front().messages.end(),
+        [](const MessageFixture& message)
+        {
+            return message.id == "structural-added-24";
+        });
+    QPointer<QWidget> removed = segment(
+        conversation, QStringLiteral("message:structural-added-24"));
+    fixture.turns.front().messages.erase(removedPosition);
+    conversation.render(
+        makeState({fixture}), QStringLiteral("structural-item-upserts"));
+    const bool removedUntracked =
+        !codexui::ConversationWidgetTestAccess::tracksSegment(
+            conversation,
+            QStringLiteral("turn-structural-item-upserts"),
+            QStringLiteral("message:structural-added-24"));
+    settleTimeline();
+    passed &= expect(
+        removedUntracked
+            && !segment(conversation, QStringLiteral("message:structural-added-24"))
+            && !removed && stream && stream.data() == streamAddress,
+        "a deletion-capable reconciliation must untrack and destroy the removed segment without replacing survivors");
+    return passed;
+}
+
+bool testStructuralItemUpsertReconciliation()
+{
+    bool passed = runStructuralItemUpsertReconciliation(true, true);
+    passed &= runStructuralItemUpsertReconciliation(false, false);
     return passed;
 }
 
@@ -2914,6 +3089,7 @@ int main(int argc, char** argv)
     passed &= testActivityDisclosureAndFullOutput();
     passed &= testPointerPreservingAppend();
     passed &= testKeyedSegmentInsertion();
+    passed &= testStructuralItemUpsertReconciliation();
     passed &= testInPlaceMessageReplacement();
     passed &= testIncompleteThreadPresentation();
     passed &= testIncompleteReplacementPreservesRenderedTimeline();
