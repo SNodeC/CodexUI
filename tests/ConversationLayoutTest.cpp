@@ -664,8 +664,9 @@ bool testHotTurnWindow()
     passed &= expect(activityState.thread("activity") != nullptr && boundedCards && activityHost
                          && renderedActivities == activityHost->property("maximumRenderedItems").toLongLong()
                          && renderedActivities == activityHost->property("renderedTimelineItems").toLongLong()
-                         && activityHost->property("retainedTimelineItems").toLongLong() == 300,
-                     "a contiguous activity run must be chunked and remain within the same global item budget");
+                         && activityHost->property("retainedTimelineItems").toLongLong()
+                                == renderedActivities + 1,
+                     "a contiguous activity run must be chunked within the global item budget without an all-history count scan");
     QWidget* newestActivityRow = nullptr;
     for (QWidget* row : activityConversation.findChildren<QWidget*>(
              QStringLiteral("conversationActivityRow")))
@@ -2259,6 +2260,15 @@ bool testThreadSwitchWindow()
                                         QStringLiteral("message:item-switch-b-1"));
     passed &= expect(shortHeight > 0 && shortHeight < firstLongHeight && secondLongHeight > shortHeight,
                      "thread switching must release a previous long timeline height before laying out a short thread");
+    conversation.render(state, QStringLiteral("switch-b"));
+    conversation.render(state, QStringLiteral("switch-a"));
+    settleTimeline();
+    auto* rapidSwitchScroll = conversation.findChild<QScrollArea*>();
+    passed &= expect(
+        rapidSwitchScroll && rapidSwitchScroll->viewport()->updatesEnabled()
+            && segment(conversation,
+                       QStringLiteral("message:item-switch-a-299")),
+        "two thread switches inside one settle interval must restore viewport updates for the newest generation");
     return passed;
 }
 

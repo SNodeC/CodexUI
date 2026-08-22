@@ -2072,6 +2072,7 @@ struct TimelineWindow
     std::vector<TimelineTurnSlice> turns;
     qsizetype renderedItems = 0;
     qsizetype totalItems = 0;
+    bool earlierItemsOmitted = false;
 };
 
 QString segmentStorageKey(const QString& turnId, const QString& segmentId)
@@ -2168,15 +2169,6 @@ qsizetype timelineItemCount(const TimelineSegment& segment)
 TimelineWindow latestTimelineWindow(const sdk::State& state, const sdk::ThreadState& thread)
 {
     TimelineWindow result;
-    // Count from ordered IDs only; item lookup and presentation stay bounded
-    // to the selected tail below.
-    for (const auto& turnId : thread.orderedTurns)
-    {
-        const auto* turn = state.turn(thread.id, turnId);
-        if (turn)
-            result.totalItems += qMax<qsizetype>(1, static_cast<qsizetype>(turn->orderedItems.size()));
-    }
-
     qsizetype remainingItems = maximumRenderedTimelineItems;
     for (qsizetype index = static_cast<qsizetype>(thread.orderedTurns.size());
          index > 0 && remainingItems > 0
@@ -2195,6 +2187,13 @@ TimelineWindow latestTimelineWindow(const sdk::State& state, const sdk::ThreadSt
         result.renderedItems += selectedItems;
         remainingItems -= selectedItems;
     }
+    result.earlierItemsOmitted = !result.turns.empty()
+                                 && (result.turns.front().turnNumber > 1
+                                     || result.turns.front().firstItem > 0);
+    // Keep this presentation-only count a bounded lower bound. Computing the
+    // exact retained count required an all-turn scan on every live item event.
+    result.totalItems = result.renderedItems
+                        + (result.earlierItemsOmitted ? 1 : 0);
     return result;
 }
 
@@ -2969,7 +2968,12 @@ void ConversationWidget::render(const sdk::State& state,
     const bool wasNearBottom = scrollBar->maximum() - previousScroll <= 72;
     const bool threadChanged = renderedThreadId != threadId || renderedNewThreadDraft != newThreadDraft;
     const auto* thread = threadId.isEmpty() ? nullptr : state.thread(threadId.toStdString());
-    const auto capacityProvenance = state.capacityProvenance();
+    // Capacity provenance is only needed to classify a missing selection.
+    // Avoid decoding its complete diagnostic object for every live delta of
+    // a thread that is already present.
+    const auto capacityProvenance = thread
+                                        ? decltype(state.capacityProvenance()){}
+                                        : state.capacityProvenance();
     const bool selectedThreadOmitted = !newThreadDraft && !thread
                                        && !threadId.isEmpty()
                                        && capacityProvenance
@@ -2992,6 +2996,18 @@ void ConversationWidget::render(const sdk::State& state,
                : std::optional<sdk::ExecutionConfiguration>{},
         thread ? threadId : QString{},
         newThreadDraft);
+    if (!threadChanged && shouldFreezePresentation(threadId, newThreadDraft))
+    {
+        markPresentationDeferred();
+        return;
+    }
+    // Exact content appends cannot remove turns or items. Apply them before
+    // the bounded incomplete-history proof so streaming on a partial thread
+    // remains proportional to the changed bytes.
+    if (exactContentChanges && !threadChanged && !threadCompletenessChanged
+        && thread && !newThreadDraft
+        && updateExactMessageContent(state, threadId, *exactContentChanges))
+        return;
     // A bounded replacement is not deletion authority. Keep the same-thread
     // widgets until an incomplete publication can account for every rendered
     // descendant; requester-local Merge will make that true, while Replace is
@@ -3028,15 +3044,6 @@ void ConversationWidget::render(const sdk::State& state,
         return;
     }
     if (!thread && !threadChanged && !missingThreadPresentationChanged)
-        return;
-    if (!threadChanged && shouldFreezePresentation(threadId, newThreadDraft))
-    {
-        markPresentationDeferred();
-        return;
-    }
-    if (exactContentChanges && !threadChanged && !threadCompletenessChanged
-        && thread && !newThreadDraft
-        && updateExactMessageContent(state, threadId, *exactContentChanges))
         return;
     if (threadChanged)
     {
@@ -3222,14 +3229,13 @@ void ConversationWidget::render(const sdk::State& state,
             }
             timelineHost->setProperty("renderedTimelineItems", window.renderedItems);
             timelineHost->setProperty("retainedTimelineItems", window.totalItems);
-            if (window.renderedItems < window.totalItems)
+            if (window.earlierItemsOmitted)
             {
                 timelineWindowDetail->setText(
-                    QStringLiteral("Showing the latest %1 of %2 synchronized timeline entries. "
+                    QStringLiteral("Showing the latest %1 synchronized timeline entries. "
                                    "Earlier entries remain in canonical AISuite State and are not "
                                    "materialized in this live view.")
-                        .arg(window.renderedItems)
-                        .arg(window.totalItems));
+                        .arg(window.renderedItems));
                 timelineWindowNotice->show();
             }
             else
@@ -3763,24 +3769,33 @@ bool ConversationWidget::updateExactMessageContent(
         }
         else
         {
-            QWidget* activityRow = nullptr;
-            for (const QString& segmentId : renderedSegmentIds.value(update.turnId))
-            {
-                QWidget* candidate = renderedSegmentWidgets.value(
-                    segmentStorageKey(update.turnId, segmentId));
-                if (!candidate)
-                    continue;
-                const auto rows = candidate->findChildren<QWidget*>(
-                    QStringLiteral("conversationActivityRow"));
-                const auto found = std::find_if(
-                    rows.cbegin(), rows.cend(), [&update](const QWidget* row) {
-                        return row->property("itemId").toString() == update.itemId;
-                    });
-                if (found == rows.cend())
-                    continue;
-                activityRow = *found;
-                affectedStorage = segmentStorageKey(update.turnId, segmentId);
-                break;
+            const QString activityIdentity = update.turnId
+                                             + QChar::Null
+                                             + update.itemId;
+            QWidget* activityRow = renderedActivityRows.value(activityIdentity);
+            if (!activityRow) {
+                for (const QString& segmentId : renderedSegmentIds.value(update.turnId))
+                {
+                    const QString storage = segmentStorageKey(update.turnId, segmentId);
+                    QWidget* candidate = renderedSegmentWidgets.value(storage);
+                    if (!candidate)
+                        continue;
+                    const auto rows = candidate->findChildren<QWidget*>(
+                        QStringLiteral("conversationActivityRow"));
+                    const auto found = std::find_if(
+                        rows.cbegin(), rows.cend(), [&update](const QWidget* row) {
+                            return row->property("itemId").toString() == update.itemId;
+                        });
+                    if (found == rows.cend())
+                        continue;
+                    activityRow = *found;
+                    affectedStorage = storage;
+                    renderedActivityRows.insert(activityIdentity, activityRow);
+                    renderedActivityRowSegments.insert(activityIdentity, storage);
+                    break;
+                }
+            } else {
+                affectedStorage = renderedActivityRowSegments.value(activityIdentity);
             }
             if (!activityRow)
                 continue;
@@ -3912,8 +3927,15 @@ void ConversationWidget::settleTimelineLayout()
 
 void ConversationWidget::settleThreadSwitchLayout(std::uint64_t generation, int remainingPasses)
 {
-    if (generation != pinLatestGeneration || !pinLatestDuringLayout)
+    // An older generation must leave ownership to the newer settle pass. If
+    // the current generation was cancelled, however, no later callback owns
+    // the viewport freeze and updates must be restored here.
+    if (generation != pinLatestGeneration)
         return;
+    if (!pinLatestDuringLayout) {
+        scrollArea->viewport()->setUpdatesEnabled(true);
+        return;
+    }
     synchronizeTimelineHeight(true);
     scrollArea->widget()->layout()->activate();
     scrollArea->widget()->adjustSize();

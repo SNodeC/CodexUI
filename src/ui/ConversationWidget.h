@@ -152,6 +152,11 @@ private:
     QHash<QString, QStringList> renderedSegmentItemIds;
     QHash<QString, QByteArray> renderedSegmentKeys;
     QHash<QString, QWidget*> renderedSegmentWidgets;
+    // Exact streaming updates are the hottest presentation path. Keep direct
+    // guarded identities instead of repeatedly walking every activity-card
+    // subtree for each content delta.
+    QHash<QString, QPointer<QWidget>> renderedActivityRows;
+    QHash<QString, QString> renderedActivityRowSegments;
     QPointer<QWidget> pendingViewportAnchor;
     std::uint64_t renderGeneration = 0;
     std::uint64_t pinLatestGeneration = 0;
