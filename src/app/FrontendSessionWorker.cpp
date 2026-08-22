@@ -69,26 +69,9 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
     };
     const auto addFullyAffectedThread = [&scope, &addThread, &addUnique](std::string_view id) {
         addThread(id);
-        if (scope.allThreadsAffected)
-            return;
-        if (!addUnique(scope.fullyAffectedThreadIds, id)) {
+        if (!scope.allThreadsAffected
+            && !addUnique(scope.fullyAffectedThreadIds, id))
             scope.allThreadsAffected = true;
-            return;
-        }
-        scope.structurallyAffectedThreadIds.removeAll(
-            QString::fromUtf8(id.data(), static_cast<qsizetype>(id.size())));
-    };
-    const auto addStructurallyAffectedThread =
-        [&scope, &addThread, &addUnique](std::string_view id) {
-            addThread(id);
-            if (scope.allThreadsAffected)
-                return;
-            const QString threadId = QString::fromUtf8(
-                id.data(), static_cast<qsizetype>(id.size()));
-            if (scope.fullyAffectedThreadIds.contains(threadId))
-                return;
-            if (!addUnique(scope.structurallyAffectedThreadIds, id))
-                scope.allThreadsAffected = true;
     };
     const auto addInspectorThread = [&scope, &addUnique](std::string_view id) {
         if (!scope.allInspectorsAffected
@@ -230,16 +213,11 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                 }
                 else if constexpr (std::is_same_v<Change, sdk::ItemUpsertedChange>)
                 {
-                    if (value.threadId) {
-                        addStructurallyAffectedThread(value.threadId->value);
-                        addInspectorThread(value.threadId->value);
-                    }
+                    if (value.threadId)
+                        markThreadAndInspector(value.threadId->value);
                     else if (value.turnId) {
-                        if (const auto* turn = update.state.turn(*value.turnId)) {
-                            addStructurallyAffectedThread(
-                                turn->threadId.value);
-                            addInspectorThread(turn->threadId.value);
-                        }
+                        if (const auto* turn = update.state.turn(*value.turnId))
+                            markThreadAndInspector(turn->threadId.value);
                         else {
                             scope.allThreadsAffected = true;
                             scope.allInspectorsAffected = true;
@@ -330,7 +308,6 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
     if (scope.allThreadsAffected) {
         scope.affectedThreadIds.clear();
         scope.fullyAffectedThreadIds.clear();
-        scope.structurallyAffectedThreadIds.clear();
         scope.affectedItemContents.clear();
         scope.coalescedContentDeltaBytes = 0;
     }

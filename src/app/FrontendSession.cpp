@@ -61,25 +61,8 @@ void mergeScope(detail::StateUpdateScope& destination,
         if (!appendUniqueBounded(destination.affectedThreadIds,
                                  source.affectedThreadIds)
             || !appendUniqueBounded(destination.fullyAffectedThreadIds,
-                                    source.fullyAffectedThreadIds)) {
+                                    source.fullyAffectedThreadIds))
             destination.allThreadsAffected = true;
-        } else {
-            for (const QString& threadId : destination.fullyAffectedThreadIds)
-                destination.structurallyAffectedThreadIds.removeAll(threadId);
-            for (const QString& threadId :
-                 source.structurallyAffectedThreadIds) {
-                if (destination.fullyAffectedThreadIds.contains(threadId)
-                    || destination.structurallyAffectedThreadIds.contains(
-                        threadId))
-                    continue;
-                if (destination.structurallyAffectedThreadIds.size()
-                    >= detail::maximumCoalescedPresentationIdentities) {
-                    destination.allThreadsAffected = true;
-                    break;
-                }
-                destination.structurallyAffectedThreadIds.push_back(threadId);
-            }
-        }
     }
     if (!destination.allInspectorsAffected
         && !appendUniqueBounded(destination.affectedInspectorThreadIds,
@@ -182,8 +165,6 @@ void mergeScope(detail::StateUpdateScope& destination,
             > detail::maximumCoalescedPresentationIdentities
         || destination.fullyAffectedThreadIds.size()
                > detail::maximumCoalescedPresentationIdentities
-        || destination.structurallyAffectedThreadIds.size()
-               > detail::maximumCoalescedPresentationIdentities
         || destination.removedThreadIds.size()
                > detail::maximumCoalescedPresentationIdentities
         || static_cast<qsizetype>(destination.affectedItemContents.size())
@@ -201,7 +182,6 @@ void mergeScope(detail::StateUpdateScope& destination,
     if (destination.allThreadsAffected) {
         destination.affectedThreadIds.clear();
         destination.fullyAffectedThreadIds.clear();
-        destination.structurallyAffectedThreadIds.clear();
         // Keep exact removals even when the rest of the presentation scope
         // degrades to an all-thread refresh. Global omission provenance makes
         // a missing selected ID ambiguous without this bounded evidence.

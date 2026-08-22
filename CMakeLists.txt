@@ -145,8 +145,6 @@ if(BUILD_TESTING)
         src/ui/ExpandingPromptEditor.h
         src/ui/InspectorWidget.cpp
         src/ui/InspectorWidget.h
-        src/ui/PresentationRefreshAccumulator.cpp
-        src/ui/PresentationRefreshAccumulator.h
         src/ui/UpcomingTurnDock.cpp
         src/ui/UpcomingTurnDock.h
     )

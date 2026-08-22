@@ -16,22 +16,6 @@ namespace codexui::detail {
 
 enum class BoundedMergeResult { Retained, CapacityExceeded };
 
-struct SelectedPresentationRefreshAccumulator {
-    bool refreshPending = false;
-    bool fullRefreshPending = false;
-    bool structuralReconciliationPending = false;
-    ConversationContentUpdates contentChanges;
-    std::uint64_t retainedContentUtf8Bytes = 0;
-
-    void clear() noexcept;
-};
-
-void mergeSelectedPresentationRefresh(
-    SelectedPresentationRefreshAccumulator& accumulator,
-    const StateUpdateScope& scope,
-    const QString& selectedThreadId,
-    bool awaitedSelectionAffected);
-
 [[nodiscard]] BoundedMergeResult mergeConversationContentUpdate(
     ConversationContentUpdates& updates,
     std::uint64_t& retainedUtf8Bytes,
