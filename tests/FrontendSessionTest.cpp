@@ -668,13 +668,12 @@ bool testScopedItemPresentationChanges()
                              && unresolvedTurn.hasPresentationChange,
                          "a turn upsert without a unique parent lookup must conservatively refresh all threads");
     passed &= expect(scoped.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
-                             && scoped.fullyAffectedThreadIds
-                                    == QStringList{QStringLiteral("target-thread")}
+                             && scoped.fullyAffectedThreadIds.empty()
                              && scoped.affectedInspectorThreadIds
                                     == QStringList{QStringLiteral("target-thread")}
                              && !scoped.allThreadsAffected && !scoped.allInspectorsAffected
                              && !scoped.sidebarAffected && scoped.hasPresentationChange,
-                         "a scoped item upsert must refresh its canonical conversation and Inspector");
+                         "a scoped item upsert must reconcile its canonical conversation and Inspector without invalidating retained widgets");
     passed &= expect(streamed.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
                          && streamed.fullyAffectedThreadIds.empty()
                          && streamed.affectedInspectorThreadIds.empty()
@@ -713,11 +712,10 @@ bool testScopedItemPresentationChanges()
             && !oversizedAppend.affectedItemContents.front().append
             && oversizedAppend.coalescedContentDeltaBytes == 0,
         "an oversized append hint must degrade to an authoritative replacement without entering the GUI mailbox");
-    passed &= expect(mixed.fullyAffectedThreadIds
-                             == QStringList{QStringLiteral("target-thread")}
+    passed &= expect(mixed.fullyAffectedThreadIds.empty()
                          && mixed.affectedItemContents.size() == 1
                          && !mixed.allThreadsAffected,
-                     "a structural change mixed with exact content must require full thread reconciliation");
+                     "a structural item change mixed with exact content must retain bounded widget reconciliation");
     passed &= expect(unscoped.affectedThreadIds.empty() && unscoped.allThreadsAffected
                          && unscoped.fullyAffectedThreadIds.empty()
                          && unscoped.affectedItemContents.empty()
