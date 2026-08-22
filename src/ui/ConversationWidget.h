@@ -11,6 +11,7 @@
 
 #include <QByteArray>
 #include <QHash>
+#include <QPair>
 #include <QPointer>
 #include <QString>
 #include <QStringList>
@@ -129,6 +130,8 @@ private:
     QVBoxLayout* timeline = nullptr;
     QTimer* layoutSettleTimer = nullptr;
     QString renderedThreadId;
+    std::optional<bool> renderedThreadFullyLoaded;
+    bool renderedSelectedThreadOmitted = false;
     // Identity only; conversation content remains owned by immutable AISuite State.
     QByteArray renderedSummaryKey;
     QStringList renderedTurnIds;
@@ -136,9 +139,24 @@ private:
     QHash<QString, QLabel*> renderedTurnLabels;
     QHash<QString, QLabel*> renderedTurnStatusLabels;
     QHash<QString, QVBoxLayout*> renderedTurnItemLayouts;
+    // Original bounded item ranges for the materialized tail of each turn.
+    // Incomplete replacement recovery rechecks only these ranges, so a large
+    // retained prefix or a burst of later appends cannot turn proof of the
+    // existing presentation into an unbounded GUI-thread scan.
+    QHash<QString, QPair<qsizetype, qsizetype>> renderedTurnItemRanges;
     QHash<QString, QStringList> renderedSegmentIds;
+    // Exact item identities retained by each rendered segment. Activity cards
+    // group several descendants under one stable segment identity, so segment
+    // IDs alone cannot prove that an incomplete State still contains every
+    // rendered row.
+    QHash<QString, QStringList> renderedSegmentItemIds;
     QHash<QString, QByteArray> renderedSegmentKeys;
     QHash<QString, QWidget*> renderedSegmentWidgets;
+    // Exact streaming updates are the hottest presentation path. Keep direct
+    // guarded identities instead of repeatedly walking every activity-card
+    // subtree for each content delta.
+    QHash<QString, QPointer<QWidget>> renderedActivityRows;
+    QHash<QString, QString> renderedActivityRowSegments;
     QPointer<QWidget> pendingViewportAnchor;
     std::uint64_t renderGeneration = 0;
     std::uint64_t pinLatestGeneration = 0;

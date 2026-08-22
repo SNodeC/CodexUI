@@ -367,6 +367,7 @@ public:
         setProperty("streamAppendCount", 0);
         setProperty("fullReplacementCount", 0);
         setProperty("geometryInvalidationCount", 0);
+        setProperty("sourceMaterializationCount", 0);
         setProperty("markdownRenderMode", QStringLiteral("streaming-plain"));
     }
 
@@ -526,6 +527,8 @@ QWidget* messageContentWidget(const QString& text, bool streaming)
     {
         auto* result = new WrappingLabel(text, true);
         result->setProperty("kind", "body");
+        result->setProperty("sourceUtf8Bytes", static_cast<qulonglong>(text.toUtf8().size()));
+        result->setProperty("sourceMaterializationCount", 0);
         return result;
     }
 
@@ -541,12 +544,16 @@ QWidget* messageContentWidget(const QString& text, bool streaming)
     result->setProperty("sourceUtf8Bytes", static_cast<qulonglong>(text.toUtf8().size()));
     result->setProperty("streamAppendCount", 0);
     result->setProperty("fullReplacementCount", 0);
+    result->setProperty("sourceMaterializationCount", 0);
     result->setProperty("markdownRenderMode", QStringLiteral("large-plain"));
     return result;
 }
 
-QString messageContentText(const QWidget* content)
+QString messageContentText(QWidget* content)
 {
+    content->setProperty(
+        "sourceMaterializationCount",
+        content->property("sourceMaterializationCount").toULongLong() + 1);
     if (const auto* label = dynamic_cast<const WrappingLabel*>(content))
         return label->content();
     if (const auto* streaming = dynamic_cast<const StreamingMessageView*>(content))
@@ -556,11 +563,33 @@ QString messageContentText(const QWidget* content)
     return {};
 }
 
+qsizetype messageContentSize(const QWidget* content)
+{
+    if (const auto* label = dynamic_cast<const WrappingLabel*>(content))
+        return label->content().size();
+    if (const auto* streaming = dynamic_cast<const StreamingMessageView*>(content))
+        return streaming->content().size();
+    if (const auto* editor = qobject_cast<const QPlainTextEdit*>(content))
+        return qMax(0, editor->document()->characterCount() - 1);
+    return 0;
+}
+
+std::uint64_t messageContentUtf8Bytes(const QWidget* content)
+{
+    if (const auto* streaming = dynamic_cast<const StreamingMessageView*>(content))
+        return streaming->utf8Bytes();
+    return content->property("sourceUtf8Bytes").toULongLong();
+}
+
 bool setMessageContentText(QWidget* content,
                            const QString& text)
 {
     if (auto* label = dynamic_cast<WrappingLabel*>(content))
-        return label->setContent(text);
+    {
+        const bool geometryChanged = label->setContent(text);
+        label->setProperty("sourceUtf8Bytes", static_cast<qulonglong>(text.toUtf8().size()));
+        return geometryChanged;
+    }
     if (auto* streamingView = dynamic_cast<StreamingMessageView*>(content))
         return streamingView->replaceContent(text);
     else if (auto* editor = qobject_cast<QPlainTextEdit*>(content); editor && editor->toPlainText() != text)
@@ -610,23 +639,33 @@ std::optional<bool> appendMessageContent(QWidget* content,
     return false;
 }
 
+bool messageContentWidgetMatches(const QWidget* content,
+                                 qsizetype textSize,
+                                 bool streaming)
+{
+    const bool needsEditor = textSize > largeMessageEditorThreshold;
+    const bool hasEditor = qobject_cast<const QPlainTextEdit*>(content) != nullptr;
+    const bool needsStreamingView = !needsEditor && streaming;
+    const bool hasStreamingView = dynamic_cast<const StreamingMessageView*>(content) != nullptr;
+    const bool hasMarkdownView = dynamic_cast<const WrappingLabel*>(content) != nullptr;
+    return (needsEditor && hasEditor)
+           || (needsStreamingView && hasStreamingView)
+           || (!needsEditor && !needsStreamingView && hasMarkdownView);
+}
+
 QWidget* ensureMessageContentWidget(QVBoxLayout* layout,
                                     QWidget* content,
                                     const QString& text,
                                     bool streaming)
 {
-    const bool needsEditor = text.size() > largeMessageEditorThreshold;
-    const bool hasEditor = qobject_cast<QPlainTextEdit*>(content) != nullptr;
-    const bool needsStreamingView = !needsEditor && streaming;
-    const bool hasStreamingView = dynamic_cast<StreamingMessageView*>(content) != nullptr;
-    const bool hasMarkdownView = dynamic_cast<WrappingLabel*>(content) != nullptr;
-    if ((needsEditor && hasEditor)
-        || (needsStreamingView && hasStreamingView)
-        || (!needsEditor && !needsStreamingView && hasMarkdownView))
+    if (messageContentWidgetMatches(content, text.size(), streaming))
         return content;
 
     QWidget* replacement = messageContentWidget(text, streaming);
     replacement->setObjectName(QStringLiteral("conversationMessageContent"));
+    replacement->setProperty(
+        "sourceMaterializationCount",
+        content->property("sourceMaterializationCount"));
     delete layout->replaceWidget(content, replacement);
     content->hide();
     content->deleteLater();
@@ -2033,6 +2072,7 @@ struct TimelineWindow
     std::vector<TimelineTurnSlice> turns;
     qsizetype renderedItems = 0;
     qsizetype totalItems = 0;
+    bool earlierItemsOmitted = false;
 };
 
 QString segmentStorageKey(const QString& turnId, const QString& segmentId)
@@ -2043,7 +2083,8 @@ QString segmentStorageKey(const QString& turnId, const QString& segmentId)
 std::vector<TimelineSegment> timelineSegments(const sdk::State& state,
                                               const sdk::ThreadState& thread,
                                               const sdk::TurnState& turn,
-                                              qsizetype firstItem)
+                                              qsizetype firstItem,
+                                              qsizetype endItem)
 {
     std::vector<TimelineSegment> result;
     if (turn.orderedItems.empty())
@@ -2066,8 +2107,11 @@ std::vector<TimelineSegment> timelineSegments(const sdk::State& state,
     // Stable ordinal buckets keep activity-card identities from shifting on
     // every append while inspecting at most one partial bucket before the window.
     const qsizetype scanStart = firstItem - firstItem % activityWidth;
+    const qsizetype scanEnd = qMin(
+        qMax(scanStart, endItem),
+        static_cast<qsizetype>(turn.orderedItems.size()));
     qsizetype activityBucket = -1;
-    for (qsizetype index = scanStart; index < static_cast<qsizetype>(turn.orderedItems.size()); ++index)
+    for (qsizetype index = scanStart; index < scanEnd; ++index)
     {
         const auto& itemId = turn.orderedItems.at(index);
         const qsizetype itemBucket = index / activityWidth;
@@ -2104,6 +2148,19 @@ std::vector<TimelineSegment> timelineSegments(const sdk::State& state,
     return result;
 }
 
+std::vector<TimelineSegment> timelineSegments(const sdk::State& state,
+                                              const sdk::ThreadState& thread,
+                                              const sdk::TurnState& turn,
+                                              qsizetype firstItem)
+{
+    return timelineSegments(
+        state,
+        thread,
+        turn,
+        firstItem,
+        static_cast<qsizetype>(turn.orderedItems.size()));
+}
+
 qsizetype timelineItemCount(const TimelineSegment& segment)
 {
     return qMax<qsizetype>(1, static_cast<qsizetype>(segment.items.size()));
@@ -2112,15 +2169,6 @@ qsizetype timelineItemCount(const TimelineSegment& segment)
 TimelineWindow latestTimelineWindow(const sdk::State& state, const sdk::ThreadState& thread)
 {
     TimelineWindow result;
-    // Count from ordered IDs only; item lookup and presentation stay bounded
-    // to the selected tail below.
-    for (const auto& turnId : thread.orderedTurns)
-    {
-        const auto* turn = state.turn(thread.id, turnId);
-        if (turn)
-            result.totalItems += qMax<qsizetype>(1, static_cast<qsizetype>(turn->orderedItems.size()));
-    }
-
     qsizetype remainingItems = maximumRenderedTimelineItems;
     for (qsizetype index = static_cast<qsizetype>(thread.orderedTurns.size());
          index > 0 && remainingItems > 0
@@ -2139,19 +2187,115 @@ TimelineWindow latestTimelineWindow(const sdk::State& state, const sdk::ThreadSt
         result.renderedItems += selectedItems;
         remainingItems -= selectedItems;
     }
+    result.earlierItemsOmitted = !result.turns.empty()
+                                 && (result.turns.front().turnNumber > 1
+                                     || result.turns.front().firstItem > 0);
+    // Keep this presentation-only count a bounded lower bound. Computing the
+    // exact retained count required an all-turn scan on every live item event.
+    result.totalItems = result.renderedItems
+                        + (result.earlierItemsOmitted ? 1 : 0);
     return result;
+}
+
+bool incompleteStateContainsRenderedTimeline(
+    const sdk::State& state,
+    const sdk::ThreadState& thread,
+    const QStringList& renderedTurnIds,
+    const QHash<QString, QPair<qsizetype, qsizetype>>& renderedTurnItemRanges,
+    const QHash<QString, QStringList>& renderedSegmentIds,
+    const QHash<QString, QStringList>& renderedSegmentItemIds,
+    qsizetype& inspectedItems)
+{
+    inspectedItems = 0;
+    constexpr qsizetype maximumRecoveryInspectedItems =
+        maximumRenderedTimelineItems
+        + (static_cast<qsizetype>(maximumActivityItemsPerSegment) - 1)
+              * maximumRenderedTimelineTurns;
+    for (const QString& renderedTurnId : renderedTurnIds)
+    {
+        const sdk::TurnState* retainedTurn = state.turn(
+            thread.id,
+            ai::openai::codex::typed::TurnId{
+                renderedTurnId.toStdString()});
+        if (!retainedTurn)
+            return false;
+
+        const auto range = renderedTurnItemRanges.constFind(renderedTurnId);
+        if (range == renderedTurnItemRanges.cend()
+            || range->first < 0 || range->second < range->first
+            || range->second
+                   > static_cast<qsizetype>(retainedTurn->orderedItems.size()))
+            return false;
+        const qsizetype activityWidth =
+            static_cast<qsizetype>(maximumActivityItemsPerSegment);
+        const qsizetype scanStart =
+            range->first - range->first % activityWidth;
+        const qsizetype inspectedRange = range->second - scanStart;
+        if (inspectedRange < 0
+            || inspectedRange
+                   > maximumRecoveryInspectedItems - inspectedItems)
+            return false;
+        inspectedItems += inspectedRange;
+
+        const std::vector<TimelineSegment> retainedSegments =
+            timelineSegments(
+                state,
+                thread,
+                *retainedTurn,
+                range->first,
+                range->second);
+        QHash<QString, QSet<QString>> retainedItemsBySegment;
+        retainedItemsBySegment.reserve(
+            static_cast<qsizetype>(retainedSegments.size()));
+        for (const TimelineSegment& segment : retainedSegments)
+        {
+            QSet<QString> retainedItemIds;
+            retainedItemIds.reserve(
+                static_cast<qsizetype>(segment.items.size()));
+            for (const sdk::ItemState* item : segment.items)
+            {
+                if (item)
+                    retainedItemIds.insert(fromUtf8(item->id.value));
+            }
+            retainedItemsBySegment.insert(
+                segment.id, std::move(retainedItemIds));
+        }
+        for (const QString& renderedSegmentId :
+             renderedSegmentIds.value(renderedTurnId))
+        {
+            const auto retained =
+                retainedItemsBySegment.constFind(renderedSegmentId);
+            if (retained == retainedItemsBySegment.cend())
+                return false;
+            const QString storage = segmentStorageKey(
+                renderedTurnId, renderedSegmentId);
+            for (const QString& renderedItemId :
+                 renderedSegmentItemIds.value(storage))
+            {
+                if (!retained->contains(renderedItemId))
+                    return false;
+            }
+        }
+    }
+    return true;
 }
 
 QByteArray segmentPresentationKey(const sdk::State& state,
                                   const TimelineSegment& segment,
                                   bool typedPlanAvailable,
-                                  bool turnStreaming)
+                                  bool turnStreaming,
+                                  bool threadFullyLoaded)
 {
     QCryptographicHash hash(QCryptographicHash::Sha256);
     addPresentationValue(hash, segment.id);
     addPresentationValue(hash, segment.missing);
     addPresentationValue(hash, typedPlanAvailable);
     addPresentationValue(hash, turnStreaming);
+    // A bounded backend snapshot can preserve an empty turn shell while
+    // omitting its descendants. Completeness affects only that empty-state
+    // presentation; populated segments should keep their stable identity.
+    if (segment.items.empty())
+        addPresentationValue(hash, threadFullyLoaded);
     for (const auto* item : segment.items)
     {
         addPresentationValue(hash, item != nullptr);
@@ -2228,6 +2372,7 @@ QWidget* timelineSegmentWidget(const sdk::State& state,
                                const TimelineSegment& segment,
                                bool typedPlanAvailable,
                                bool turnStreaming,
+                               bool threadFullyLoaded,
                                const ActivityExpansionState& activityExpansion,
                                const std::function<void()>& layoutChanged)
 {
@@ -2258,8 +2403,14 @@ QWidget* timelineSegmentWidget(const sdk::State& state,
     }
     else if (segment.items.empty())
     {
-        addEmptyState(layout, QStringLiteral("No items in this turn"),
-                      QStringLiteral("The synchronized turn currently has no retained items."));
+        addEmptyState(
+            layout,
+            threadFullyLoaded ? QStringLiteral("No items in this turn")
+                              : QStringLiteral("Conversation history incomplete"),
+            threadFullyLoaded
+                ? QStringLiteral("The synchronized turn currently has no retained items.")
+                : QStringLiteral(
+                    "Some turns or items are unavailable in the current synchronized view."));
     }
     else if (segment.items.size() == 1
              && (segment.items.front()->kind.is(frontend::ThreadItemKind::UserMessage)
@@ -2817,20 +2968,82 @@ void ConversationWidget::render(const sdk::State& state,
     const bool wasNearBottom = scrollBar->maximum() - previousScroll <= 72;
     const bool threadChanged = renderedThreadId != threadId || renderedNewThreadDraft != newThreadDraft;
     const auto* thread = threadId.isEmpty() ? nullptr : state.thread(threadId.toStdString());
+    // Capacity provenance is only needed to classify a missing selection.
+    // Avoid decoding its complete diagnostic object for every live delta of
+    // a thread that is already present.
+    const auto capacityProvenance = thread
+                                        ? decltype(state.capacityProvenance()){}
+                                        : state.capacityProvenance();
+    const bool selectedThreadOmitted = !newThreadDraft && !thread
+                                       && !threadId.isEmpty()
+                                       && capacityProvenance
+                                       && capacityProvenance->omittedThreads > 0;
+    const bool selectedThreadUnresolved = !newThreadDraft && !thread
+                                          && !threadId.isEmpty()
+                                          && (selectedThreadOmitted
+                                              || (state.threadList().value
+                                                  && !state.threadList().value->complete));
+    const bool missingThreadPresentationChanged =
+        !thread && !threadChanged
+        && (renderedThreadFullyLoaded.has_value()
+            || renderedSelectedThreadOmitted != selectedThreadOmitted);
+    const bool threadCompletenessChanged = thread
+                                           && (!renderedThreadFullyLoaded
+                                               || *renderedThreadFullyLoaded
+                                                      != thread->fullyLoaded);
     upcomingTurnDock->setCanonicalConfiguration(
         thread ? thread->executionConfiguration
                : std::optional<sdk::ExecutionConfiguration>{},
         thread ? threadId : QString{},
         newThreadDraft);
-    if (!thread && !threadChanged && threadId.isEmpty())
-        return;
     if (!threadChanged && shouldFreezePresentation(threadId, newThreadDraft))
     {
         markPresentationDeferred();
         return;
     }
-    if (exactContentChanges && !threadChanged && thread && !newThreadDraft
+    // Exact content appends cannot remove turns or items. Apply them before
+    // the bounded incomplete-history proof so streaming on a partial thread
+    // remains proportional to the changed bytes.
+    if (exactContentChanges && !threadChanged && !threadCompletenessChanged
+        && thread && !newThreadDraft
         && updateExactMessageContent(state, threadId, *exactContentChanges))
+        return;
+    // A bounded replacement is not deletion authority. Keep the same-thread
+    // widgets until an incomplete publication can account for every rendered
+    // descendant; requester-local Merge will make that true, while Replace is
+    // necessarily fullyLoaded and exact Absent changes the selection.
+    const bool renderedTimelineRetained = !renderedTurnIds.isEmpty();
+    qsizetype recoveryInspectedItems = 0;
+    const bool incompleteTimelineRetained =
+        !thread || thread->fullyLoaded
+        || incompleteStateContainsRenderedTimeline(
+            state,
+            *thread,
+            renderedTurnIds,
+            renderedTurnItemRanges,
+            renderedSegmentIds,
+            renderedSegmentItemIds,
+            recoveryInspectedItems);
+    timelineHost->setProperty(
+        "recoveryInspectedTimelineItems", recoveryInspectedItems);
+    const bool incompleteTimelineRegressed =
+        !threadChanged && renderedTimelineRetained
+        && (selectedThreadUnresolved
+            || !incompleteTimelineRetained);
+    if (incompleteTimelineRegressed)
+    {
+        const QString recovery = QStringLiteral("History recovery pending");
+        if (!threadDetail->text().contains(recovery))
+        {
+            const QString detail = threadDetail->text();
+            threadDetail->setText(detail.isEmpty()
+                                      ? recovery
+                                      : detail + QStringLiteral(" · ") + recovery);
+            threadDetail->setToolTip(threadDetail->text());
+        }
+        return;
+    }
+    if (!thread && !threadChanged && !missingThreadPresentationChanged)
         return;
     if (threadChanged)
     {
@@ -2838,7 +3051,8 @@ void ConversationWidget::render(const sdk::State& state,
         deferredPresentationRequestScheduled = false;
     }
     const bool followLatest = threadChanged || wasNearBottom || followingLatest;
-    const bool exactContentOnly = exactContentChanges && !threadChanged && thread && !newThreadDraft
+    const bool exactContentOnly = exactContentChanges && !threadChanged
+                                  && !threadCompletenessChanged && thread && !newThreadDraft
                                   && !renderedSummaryKey.isEmpty();
     const std::uint64_t generation = ++renderGeneration;
     bool timelineShrank = false;
@@ -2851,6 +3065,11 @@ void ConversationWidget::render(const sdk::State& state,
         pendingViewportAnchor.clear();
     renderedThreadId = threadId;
     renderedNewThreadDraft = newThreadDraft;
+    if (thread)
+        renderedThreadFullyLoaded = thread->fullyLoaded;
+    else
+        renderedThreadFullyLoaded.reset();
+    renderedSelectedThreadOmitted = selectedThreadOmitted;
     if (threadChanged)
     {
         followingLatest = false;
@@ -2868,7 +3087,9 @@ void ConversationWidget::render(const sdk::State& state,
         renderedTurnLabels.clear();
         renderedTurnStatusLabels.clear();
         renderedTurnItemLayouts.clear();
+        renderedTurnItemRanges.clear();
         renderedSegmentIds.clear();
+        renderedSegmentItemIds.clear();
         renderedSegmentKeys.clear();
         renderedSegmentWidgets.clear();
         clearLayout(timeline);
@@ -2883,24 +3104,45 @@ void ConversationWidget::render(const sdk::State& state,
             renderedSummaryKey.clear();
             turnFailure->hide();
         }
-        contextPath->setText(newThreadDraft ? QStringLiteral("New thread draft")
-                                            : QStringLiteral("No thread selected"));
+        QString pathText;
+        QString titleText;
+        QString detailText;
+        QString emptyTitle;
+        QString emptyDetail;
+        if (newThreadDraft) {
+            pathText = QStringLiteral("New thread draft");
+            titleText = QStringLiteral("New conversation");
+            detailText = QStringLiteral(
+                "A real thread will be created when the first prompt is sent");
+            emptyTitle = QStringLiteral("Start a new conversation");
+            emptyDetail = QStringLiteral(
+                "Type a prompt below. Backend defaults will be used for the new thread.");
+        } else if (selectedThreadOmitted) {
+            pathText = QStringLiteral("History incomplete");
+            titleText = QStringLiteral("Conversation history incomplete");
+            detailText = QStringLiteral(
+                "This conversation is not available in the current synchronized view.");
+            emptyTitle = titleText;
+            emptyDetail = detailText;
+        } else {
+            pathText = QStringLiteral("No thread selected");
+            titleText = QStringLiteral("No synchronized thread");
+            detailText = QStringLiteral(
+                "Select a synchronized thread to view its conversation");
+            emptyTitle = QStringLiteral("No thread selected");
+            emptyDetail = QStringLiteral(
+                "Choose a synchronized thread from the sidebar.");
+        }
+        contextPath->setText(pathText);
         contextPath->setToolTip({});
-        threadTitle->setText(newThreadDraft ? QStringLiteral("New conversation")
-                                            : QStringLiteral("No synchronized thread"));
+        threadTitle->setText(titleText);
         threadTitle->setToolTip({});
-        threadDetail->setText(newThreadDraft
-                                  ? QStringLiteral("A real thread will be created when the first prompt is sent")
-                                  : QStringLiteral("Select a synchronized thread to view its conversation"));
+        threadDetail->setText(detailText);
         threadDetail->setToolTip({});
         timelineWindowNotice->hide();
         timelineHost->setProperty("renderedTimelineItems", 0);
         timelineHost->setProperty("retainedTimelineItems", 0);
-        addEmptyState(timeline,
-                      newThreadDraft ? QStringLiteral("Start a new conversation")
-                                     : QStringLiteral("No thread selected"),
-                      newThreadDraft ? QStringLiteral("Type a prompt below. Backend defaults will be used for the new thread.")
-                                     : QStringLiteral("Choose a synchronized thread from the sidebar."));
+        addEmptyState(timeline, emptyTitle, emptyDetail);
         timelineGeometryChanged = true;
     }
     else
@@ -2920,7 +3162,7 @@ void ConversationWidget::render(const sdk::State& state,
                             .arg(thread->orderedTurns.size())
                             .arg(thread->orderedTurns.size() == 1 ? QString{} : QStringLiteral("s")));
         if (!thread->fullyLoaded)
-            metadata.append(QStringLiteral("Loading conversation…"));
+            metadata.append(QStringLiteral("History incomplete"));
         threadDetail->setText(metadata.join(QStringLiteral(" · ")));
         threadDetail->setToolTip(threadDetail->text());
 
@@ -2959,13 +3201,18 @@ void ConversationWidget::render(const sdk::State& state,
             timelineWindowNotice->hide();
             timelineHost->setProperty("renderedTimelineItems", 0);
             timelineHost->setProperty("retainedTimelineItems", 0);
-            if (threadChanged || !renderedTurnIds.isEmpty() || timeline->count() == 0)
+            if (threadChanged || threadCompletenessChanged
+                || !renderedTurnIds.isEmpty() || timeline->count() == 0)
             {
                 clearTimelineState();
-                addEmptyState(timeline, QStringLiteral("Ready for the first turn"),
-                              thread->fullyLoaded
-                                  ? QStringLiteral("Use the upcoming-turn dock below to start this thread.")
-                                  : QStringLiteral("No turn projection is currently retained for this thread."));
+                addEmptyState(
+                    timeline,
+                    thread->fullyLoaded ? QStringLiteral("Ready for the first turn")
+                                        : QStringLiteral("Conversation history incomplete"),
+                    thread->fullyLoaded
+                        ? QStringLiteral("Use the upcoming-turn dock below to start this thread.")
+                        : QStringLiteral(
+                            "Some turns or items are unavailable in the current synchronized view."));
                 timelineGeometryChanged = true;
             }
         }
@@ -2982,14 +3229,13 @@ void ConversationWidget::render(const sdk::State& state,
             }
             timelineHost->setProperty("renderedTimelineItems", window.renderedItems);
             timelineHost->setProperty("retainedTimelineItems", window.totalItems);
-            if (window.renderedItems < window.totalItems)
+            if (window.earlierItemsOmitted)
             {
                 timelineWindowDetail->setText(
-                    QStringLiteral("Showing the latest %1 of %2 synchronized timeline entries. "
+                    QStringLiteral("Showing the latest %1 synchronized timeline entries. "
                                    "Earlier entries remain in canonical AISuite State and are not "
                                    "materialized in this live view.")
-                        .arg(window.renderedItems)
-                        .arg(window.totalItems));
+                        .arg(window.renderedItems));
                 timelineWindowNotice->show();
             }
             else
@@ -3020,12 +3266,14 @@ void ConversationWidget::render(const sdk::State& state,
                 for (const QString& segmentId : renderedSegmentIds.take(turnId))
                 {
                     const QString storage = segmentStorageKey(turnId, segmentId);
+                    renderedSegmentItemIds.remove(storage);
                     renderedSegmentKeys.remove(storage);
                     renderedSegmentWidgets.remove(storage);
                 }
                 renderedTurnLabels.remove(turnId);
                 renderedTurnStatusLabels.remove(turnId);
                 renderedTurnItemLayouts.remove(turnId);
+                renderedTurnItemRanges.remove(turnId);
                 if (QWidget* widget = renderedTurnWidgets.take(turnId))
                 {
                     if (pendingViewportAnchor == widget
@@ -3083,6 +3331,20 @@ void ConversationWidget::render(const sdk::State& state,
             {
                 const auto* turn = visibleTurn.turn;
                 const QString turnId = fromUtf8(turn->id.value);
+                const auto windowSlice = std::ranges::find_if(
+                    window.turns,
+                    [turn](const TimelineTurnSlice& slice) {
+                        return slice.turn == turn;
+                    });
+                if (windowSlice != window.turns.cend())
+                {
+                    renderedTurnItemRanges.insert(
+                        turnId,
+                        qMakePair(
+                            windowSlice->firstItem,
+                            static_cast<qsizetype>(
+                                turn->orderedItems.size())));
+                }
                 QVBoxLayout* itemLayout = renderedTurnItemLayouts.value(turnId);
                 QLabel* turnLabel = renderedTurnLabels.value(turnId);
                 QLabel* statusLabel = renderedTurnStatusLabels.value(turnId);
@@ -3158,6 +3420,7 @@ void ConversationWidget::render(const sdk::State& state,
                     for (const QString& oldId : oldSegmentIds)
                     {
                         const QString storage = segmentStorageKey(turnId, oldId);
+                        renderedSegmentItemIds.remove(storage);
                         renderedSegmentKeys.remove(storage);
                         renderedSegmentWidgets.remove(storage);
                     }
@@ -3199,12 +3462,21 @@ void ConversationWidget::render(const sdk::State& state,
                             timelineGeometryChanged = true;
                         }
                         renderedSegmentKeys.remove(storage);
+                        renderedSegmentItemIds.remove(storage);
                     }
                 }
 
                 for (const TimelineSegment* segment : visibleTurn.segments)
                 {
                     const QString storage = segmentStorageKey(turnId, segment->id);
+                    QStringList itemIds;
+                    itemIds.reserve(static_cast<qsizetype>(segment->items.size()));
+                    for (const sdk::ItemState* item : segment->items)
+                    {
+                        if (item)
+                            itemIds.append(fromUtf8(item->id.value));
+                    }
+                    renderedSegmentItemIds.insert(storage, std::move(itemIds));
                     QWidget* oldWidget = renderedSegmentWidgets.value(storage);
                     const ConversationContentUpdates* segmentContentChanges = nullptr;
                     ConversationContentUpdates segmentContentStorage;
@@ -3233,7 +3505,11 @@ void ConversationWidget::render(const sdk::State& state,
                     const bool typedPlanAvailable = turn->plan.has_value();
                     const bool turnStreaming = turnStreamsMessages(*turn);
                     const QByteArray segmentKey = segmentPresentationKey(
-                        state, *segment, typedPlanAvailable, turnStreaming);
+                        state,
+                        *segment,
+                        typedPlanAvailable,
+                        turnStreaming,
+                        thread->fullyLoaded);
                     if (oldWidget && !explicitlyAffected
                         && renderedSegmentKeys.value(storage) == segmentKey)
                         continue;
@@ -3279,6 +3555,7 @@ void ConversationWidget::render(const sdk::State& state,
                         *segment,
                         typedPlanAvailable,
                         turnStreaming,
+                        thread->fullyLoaded,
                         expansion,
                         [this] { activityLayoutChanged(); });
                     newWidget->setProperty("turnId", turnId);
@@ -3359,22 +3636,36 @@ bool ConversationWidget::updateExactMessageContent(
             if (messageWidget->property("messageUser").toBool()
                 || update.channel != sdk::ItemContentChannel::AgentText)
                 return false;
+            const ai::openai::codex::typed::ThreadId typedThreadId{
+                threadId.toStdString()};
+            const ai::openai::codex::typed::TurnId typedTurnId{
+                update.turnId.toStdString()};
+            const ai::openai::codex::typed::ItemId typedItemId{
+                update.itemId.toStdString()};
             const auto expectedBytes = exactAppendResultBytes(*update.append);
             const auto descriptor = state.itemContentDescriptor(
-                ai::openai::codex::typed::ThreadId{threadId.toStdString()},
-                ai::openai::codex::typed::TurnId{update.turnId.toStdString()},
-                ai::openai::codex::typed::ItemId{update.itemId.toStdString()},
+                typedThreadId,
+                typedTurnId,
+                typedItemId,
                 update.channel);
+            const auto* turn = state.turn(typedThreadId, typedTurnId);
+            const auto* item = state.item(typedThreadId, typedTurnId, typedItemId);
             if (!expectedBytes || !descriptor || !descriptor->present
-                || descriptor->retainedUtf8Bytes != *expectedBytes)
+                || descriptor->retainedUtf8Bytes != *expectedBytes
+                || !turn || !item
+                || !item->kind.is(frontend::ThreadItemKind::AgentMessage))
                 return false;
             auto* content = messageWidget->findChild<QWidget*>(
                 QStringLiteral("conversationMessageContent"));
             if (!content)
                 return false;
-            const QByteArray currentUtf8 = messageContentText(content).toUtf8();
-            if (static_cast<std::uint64_t>(currentUtf8.size())
-                    != update.append->baseContentBytes
+            const bool emptyCanonicalPlaceholder =
+                content->property("kind").toString() == QStringLiteral("meta")
+                && update.append->baseContentBytes == 0;
+            const std::uint64_t currentUtf8Bytes = emptyCanonicalPlaceholder
+                                                       ? 0
+                                                       : messageContentUtf8Bytes(content);
+            if (currentUtf8Bytes != update.append->baseContentBytes
                 || update.append->discardPrefixBytes
                        > update.append->baseContentBytes)
                 return false;
@@ -3384,47 +3675,127 @@ bool ConversationWidget::updateExactMessageContent(
             if (!contentLayout)
                 return false;
             QWidget* const previousContent = content;
-            // Content deltas are the authoritative streaming boundary. Some
-            // provider/result items report a terminal-looking status before
-            // their final append arrives, so status alone must not repeatedly
-            // send the growing text through the Markdown renderer.
-            content = ensureMessageContentWidget(
-                contentLayout,
-                content,
-                QString::fromUtf8(currentUtf8),
-                true);
-            const auto applied = appendMessageContent(
-                content,
-                update.append->baseContentBytes,
-                update.append->discardPrefixBytes,
-                update.append->delta);
-            if (!applied)
-                return false;
-            contentGeometryChanged = previousContent != content || *applied;
-            contentMayShrink = update.append->discardPrefixBytes
-                               > update.append->deltaUtf8Bytes;
+            const bool authoritativeStreaming =
+                turnStreamsMessages(*turn)
+                || streamingMessageStatus(itemStatus(*item));
+            if (!authoritativeStreaming)
+            {
+                auto* status = messageWidget->findChild<QLabel*>(
+                    QStringLiteral("conversationMessageStatus"));
+                auto* truncation = messageWidget->findChild<QLabel*>(
+                    QStringLiteral("conversationMessageTruncation"));
+                if (!status || !truncation)
+                    return false;
+                const MessagePresentation presentation = messagePresentation(
+                    *item, false, false);
+                content = ensureMessageContentWidget(
+                    contentLayout,
+                    content,
+                    presentation.content,
+                    false);
+                const bool rendererChanged = previousContent != content;
+                contentGeometryChanged = rendererChanged
+                                         || applyMessagePresentation(
+                                             status,
+                                             content,
+                                             truncation,
+                                             presentation);
+                // Markdown reparsing can reduce its preferred height even
+                // when the raw source only grew (for example, when this
+                // append closes an emphasis span or fenced block).
+                contentMayShrink = true;
+            }
+            else
+            {
+                bool mutationGeometryChanged = false;
+                if (emptyCanonicalPlaceholder)
+                {
+                    // The visible copy is explanatory UI text, not canonical
+                    // message content. Reset that small placeholder directly
+                    // so the first real delta still enters the O(delta) path.
+                    if (dynamic_cast<StreamingMessageView*>(content))
+                        mutationGeometryChanged = setMessageContentText(
+                            content, QString{});
+                    else
+                        content = ensureMessageContentWidget(
+                            contentLayout, content, QString{}, true);
+                    if (content->property("kind").toString()
+                        != QStringLiteral("body"))
+                    {
+                        content->setProperty("kind", QStringLiteral("body"));
+                        content->style()->unpolish(content);
+                        content->style()->polish(content);
+                    }
+                }
+                else if (!dynamic_cast<StreamingMessageView*>(content)
+                         && !qobject_cast<QPlainTextEdit*>(content))
+                {
+                    content = ensureMessageContentWidget(
+                        contentLayout,
+                        content,
+                        messageContentText(content),
+                        true);
+                }
+
+                const auto applied = appendMessageContent(
+                    content,
+                    update.append->baseContentBytes,
+                    update.append->discardPrefixBytes,
+                    update.append->delta);
+                if (!applied)
+                    return false;
+                mutationGeometryChanged = mutationGeometryChanged || *applied;
+
+                // Select the renderer from the post-append size. In
+                // particular, the append that crosses 64 KiB performs the
+                // one required source materialization immediately; it does
+                // not leave the small-message renderer alive until a later
+                // event happens to arrive.
+                if (!messageContentWidgetMatches(
+                        content, messageContentSize(content), true))
+                {
+                    content = ensureMessageContentWidget(
+                        contentLayout,
+                        content,
+                        messageContentText(content),
+                        true);
+                }
+                contentGeometryChanged = previousContent != content
+                                         || mutationGeometryChanged;
+                contentMayShrink = update.append->discardPrefixBytes
+                                   > update.append->deltaUtf8Bytes;
+            }
             affectedStorage = messageStorage;
         }
         else
         {
-            QWidget* activityRow = nullptr;
-            for (const QString& segmentId : renderedSegmentIds.value(update.turnId))
-            {
-                QWidget* candidate = renderedSegmentWidgets.value(
-                    segmentStorageKey(update.turnId, segmentId));
-                if (!candidate)
-                    continue;
-                const auto rows = candidate->findChildren<QWidget*>(
-                    QStringLiteral("conversationActivityRow"));
-                const auto found = std::find_if(
-                    rows.cbegin(), rows.cend(), [&update](const QWidget* row) {
-                        return row->property("itemId").toString() == update.itemId;
-                    });
-                if (found == rows.cend())
-                    continue;
-                activityRow = *found;
-                affectedStorage = segmentStorageKey(update.turnId, segmentId);
-                break;
+            const QString activityIdentity = update.turnId
+                                             + QChar::Null
+                                             + update.itemId;
+            QWidget* activityRow = renderedActivityRows.value(activityIdentity);
+            if (!activityRow) {
+                for (const QString& segmentId : renderedSegmentIds.value(update.turnId))
+                {
+                    const QString storage = segmentStorageKey(update.turnId, segmentId);
+                    QWidget* candidate = renderedSegmentWidgets.value(storage);
+                    if (!candidate)
+                        continue;
+                    const auto rows = candidate->findChildren<QWidget*>(
+                        QStringLiteral("conversationActivityRow"));
+                    const auto found = std::find_if(
+                        rows.cbegin(), rows.cend(), [&update](const QWidget* row) {
+                            return row->property("itemId").toString() == update.itemId;
+                        });
+                    if (found == rows.cend())
+                        continue;
+                    activityRow = *found;
+                    affectedStorage = storage;
+                    renderedActivityRows.insert(activityIdentity, activityRow);
+                    renderedActivityRowSegments.insert(activityIdentity, storage);
+                    break;
+                }
+            } else {
+                affectedStorage = renderedActivityRowSegments.value(activityIdentity);
             }
             if (!activityRow)
                 continue;
@@ -3556,8 +3927,15 @@ void ConversationWidget::settleTimelineLayout()
 
 void ConversationWidget::settleThreadSwitchLayout(std::uint64_t generation, int remainingPasses)
 {
-    if (generation != pinLatestGeneration || !pinLatestDuringLayout)
+    // An older generation must leave ownership to the newer settle pass. If
+    // the current generation was cancelled, however, no later callback owns
+    // the viewport freeze and updates must be restored here.
+    if (generation != pinLatestGeneration)
         return;
+    if (!pinLatestDuringLayout) {
+        scrollArea->viewport()->setUpdatesEnabled(true);
+        return;
+    }
     synchronizeTimelineHeight(true);
     scrollArea->widget()->layout()->activate();
     scrollArea->widget()->adjustSize();

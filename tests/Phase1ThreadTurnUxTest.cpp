@@ -5,6 +5,7 @@
 #include "ui/ThreadSetupDialog.h"
 #include "ui/UpcomingTurnDock.h"
 #include "ui/UiStyle.h"
+#include "ui/WorkbenchWidget.h"
 
 #include <ai/openai/codex/frontend/Messages.h>
 #include <ai/openai/codex/frontend/client/Client.h>
@@ -392,15 +393,17 @@ bool testNarrowUpcomingTurnLayout()
     auto* effort = dock.findChild<QComboBox*>(QStringLiteral("upcomingReasoning"));
     auto* style = dock.findChild<QComboBox*>(QStringLiteral("upcomingStyle"));
     auto* access = dock.findChild<QComboBox*>(QStringLiteral("upcomingAccess"));
+    auto* network = dock.findChild<QComboBox*>(QStringLiteral("upcomingNetwork"));
+    auto* approval = dock.findChild<QComboBox*>(QStringLiteral("upcomingApproval"));
     auto* workspace = dock.findChild<QLineEdit*>(QStringLiteral("upcomingWorkspace"));
     auto* more = dock.findChild<QPushButton*>(QStringLiteral("upcomingMore"));
     auto* status = dock.findChild<QLabel*>(QStringLiteral("upcomingTurnStatus"));
     auto* send = dock.findChild<QPushButton*>(QStringLiteral("upcomingSendButton"));
     bool passed = expect(settings && composer && model && effort && style && access
-                             && workspace && more && status && send,
+                             && network && approval && workspace && more && status && send,
                          "the narrow upcoming-turn layout controls must be discoverable");
     if (!settings || !composer || !model || !effort || !style || !access
-        || !workspace || !more || !status || !send)
+        || !network || !approval || !workspace || !more || !status || !send)
         return false;
 
     const auto inDock = [&dock](QWidget* widget) {
@@ -410,20 +413,86 @@ bool testNarrowUpcomingTurnLayout()
     const QRect effortRect = inDock(effort);
     const QRect styleRect = inDock(style);
     const QRect accessRect = inDock(access);
+    const QRect networkRect = inDock(network);
+    const QRect approvalRect = inDock(approval);
     const QRect workspaceRect = inDock(workspace);
     const QRect moreRect = inDock(more);
     const QRect statusRect = inDock(status);
     const QRect sendRect = inDock(send);
     passed &= expect(settings->geometry().bottom() < composer->geometry().top()
-                         && modelRect.bottom() < accessRect.top()
-                         && effortRect.right() < styleRect.left()
-                         && workspaceRect.right() < moreRect.left()
+                         && modelRect.top() == effortRect.top()
+                         && effortRect.top() == accessRect.top()
+                         && accessRect.top() == networkRect.top()
+                         && modelRect.bottom() < workspaceRect.top()
+                         && std::abs(workspaceRect.top() - approvalRect.top()) <= 2
+                         && std::abs(approvalRect.top() - styleRect.top()) <= 2
+                         && std::abs(styleRect.top() - moreRect.top()) <= 2
+                         && modelRect.left() == workspaceRect.left()
+                         && effortRect.left() == approvalRect.left()
+                         && accessRect.left() == styleRect.left()
+                         && networkRect.left() == moreRect.left()
                          && statusRect.right() < sendRect.left(),
                      "the two-row settings and composer actions must not overlap at narrow width");
-    passed &= expect(modelRect.width() > effortRect.width()
-                         && effortRect.width() >= 70 && styleRect.width() >= 70
-                         && accessRect.width() >= 70 && workspaceRect.width() >= 70,
-                     "narrow settings must retain readable choice widths with extra space for the model");
+    const std::array<int, 8> widths{
+        modelRect.width(), effortRect.width(), accessRect.width(), networkRect.width(),
+        workspaceRect.width(), approvalRect.width(), styleRect.width(), moreRect.width()};
+    const auto [minimumWidth, maximumWidth] = std::minmax_element(widths.begin(), widths.end());
+    passed &= expect(*minimumWidth >= 70 && *maximumWidth - *minimumWidth <= 1,
+                     "all eight primary settings must retain equal readable widths");
+    return passed;
+}
+
+bool testUpcomingTurnNetworkAccess()
+{
+    codexui::UpcomingTurnDock dock;
+    sdk::ExecutionConfiguration canonical =
+        configuration("gpt-test", typed::ReasoningEffort::high(), "/workspace");
+    typed::WorkspaceWriteSandboxPolicy workspacePolicy;
+    workspacePolicy.networkAccess = false;
+    workspacePolicy.writableRoots = std::vector<typed::AbsolutePath>{
+        typed::AbsolutePath{"/workspace/extra"}};
+    workspacePolicy.excludeSlashTmp = true;
+    canonical.sandboxPolicy = workspacePolicy;
+    dock.setCanonicalConfiguration(canonical, QStringLiteral("thread-network"));
+    dock.setActionState(true, false, true, true, false, false);
+
+    auto* access = dock.findChild<QComboBox*>(QStringLiteral("upcomingAccess"));
+    auto* network = dock.findChild<QComboBox*>(QStringLiteral("upcomingNetwork"));
+    bool passed = expect(access && network,
+                         "the access and network controls must be discoverable");
+    if (!access || !network)
+        return false;
+    passed &= expect(access->currentData().toString() == QStringLiteral("workspace-write")
+                         && network->currentData().toString() == QStringLiteral("restricted")
+                         && network->isEnabled(),
+                     "workspace access must expose its canonical network restriction");
+
+    network->setCurrentIndex(network->findData(QStringLiteral("enabled")));
+    codexui::UpcomingTurnDraft draft = dock.draft();
+    const auto* submittedWorkspace = draft.sandboxPolicy.hasValue()
+        ? std::get_if<typed::WorkspaceWriteSandboxPolicy>(&*draft.sandboxPolicy)
+        : nullptr;
+    passed &= expect(submittedWorkspace && submittedWorkspace->networkAccessOrDefault()
+                         && submittedWorkspace->writableRoots == workspacePolicy.writableRoots
+                         && submittedWorkspace->excludeSlashTmp == workspacePolicy.excludeSlashTmp,
+                     "changing only network access must preserve the canonical workspace policy details");
+
+    access->setCurrentIndex(access->findData(QStringLiteral("read-only")));
+    draft = dock.draft();
+    const auto* readOnly = draft.sandboxPolicy.hasValue()
+        ? std::get_if<typed::ReadOnlySandboxPolicy>(&*draft.sandboxPolicy)
+        : nullptr;
+    passed &= expect(readOnly && readOnly->networkAccessOrDefault(),
+                     "network access must remain enabled when switching to read-only access");
+
+    access->setCurrentIndex(access->findData(QStringLiteral("danger-full-access")));
+    draft = dock.draft();
+    passed &= expect(network->currentData().toString() == QStringLiteral("enabled")
+                         && network->currentText() == QStringLiteral("Included") && !network->isEnabled()
+                         && draft.sandboxPolicy.hasValue()
+                         && std::holds_alternative<typed::DangerFullAccessSandboxPolicy>(
+                             *draft.sandboxPolicy),
+                     "full access must clearly display its inherent network access without offering an unsupported override");
     return passed;
 }
 
@@ -514,10 +583,11 @@ bool testUpcomingTurnActionStates()
     auto* send = dock.findChild<QPushButton*>(QStringLiteral("upcomingSendButton"));
     auto* stop = dock.findChild<QPushButton*>(QStringLiteral("upcomingStopButton"));
     auto* sandbox = dock.findChild<QComboBox*>(QStringLiteral("upcomingAccess"));
+    auto* network = dock.findChild<QComboBox*>(QStringLiteral("upcomingNetwork"));
     auto* approval = dock.findChild<QComboBox*>(QStringLiteral("upcomingApproval"));
-    bool passed = expect(editor && send && stop && sandbox && approval,
+    bool passed = expect(editor && send && stop && sandbox && network && approval,
                          "the upcoming-turn action controls must be discoverable");
-    if (!editor || !send || !stop || !sandbox || !approval)
+    if (!editor || !send || !stop || !sandbox || !network || !approval)
         return false;
 
     dock.setActionState(true,
@@ -531,7 +601,8 @@ bool testUpcomingTurnActionStates()
     editor->setPlainText(QStringLiteral("redirect the active turn"));
     passed &= expect(!send->isHidden() && send->text() == QStringLiteral("Steer")
                          && send->isEnabled() && !stop->isHidden() && stop->isEnabled()
-                         && editor->isEnabled() && !sandbox->isEnabled() && !approval->isEnabled(),
+                         && editor->isEnabled() && !sandbox->isEnabled()
+                         && !network->isEnabled() && !approval->isEnabled(),
                      "a running turn must permit steering and stopping while locking execution settings");
     QString shortcutPrompt;
     bool shortcutSteering = false;
@@ -589,7 +660,7 @@ bool testUpcomingTurnActionStates()
     dock.setActionState(true, false, true, true, false, false);
     passed &= expect(!send->isHidden() && editor->isEnabled()
                          && !send->isEnabled() && !send->toolTip().isEmpty()
-                         && sandbox->isEnabled() && approval->isEnabled(),
+                         && sandbox->isEnabled() && network->isEnabled() && approval->isEnabled(),
                      "an idle thread must not silently reinterpret a steer draft as a new turn");
     editor->insertPlainText(QStringLiteral(" "));
     passed &= expect(send->isEnabled() && send->toolTip().isEmpty(),
@@ -1302,6 +1373,41 @@ bool testArchivedThreadAssignmentPruningWaitsForCompleteDiscovery()
     return passed;
 }
 
+bool testMissingSelectedThreadRetentionPolicy()
+{
+    using codexui::detail::shouldClearMissingSelectedThread;
+    return expect(
+        !shouldClearMissingSelectedThread(true, true, false, 1, false)
+            && shouldClearMissingSelectedThread(true, true, false, 0, false)
+            && shouldClearMissingSelectedThread(true, true, false, 1, true)
+            && shouldClearMissingSelectedThread(false, false, true, 1, true)
+            && !shouldClearMissingSelectedThread(false, true, false, 0, false)
+            && !shouldClearMissingSelectedThread(true, false, false, 0, false)
+            && !shouldClearMissingSelectedThread(true, true, true, 0, false),
+        "a missing selection must survive only incomplete discovery, pending creation, or unresolved snapshot omission");
+}
+
+bool testProjectedSelectionReconnectRecoveryPolicy()
+{
+    using codexui::detail::shouldRetryProjectedSelectionAfterReady;
+    return expect(
+        shouldRetryProjectedSelectionAfterReady(
+            true,
+            QStringLiteral("projected-thread"),
+            QStringLiteral("projected-thread"))
+            && !shouldRetryProjectedSelectionAfterReady(
+                false,
+                QStringLiteral("projected-thread"),
+                QStringLiteral("projected-thread"))
+            && !shouldRetryProjectedSelectionAfterReady(
+                true,
+                QStringLiteral("ordinary-thread"),
+                QStringLiteral("projected-thread"))
+            && !shouldRetryProjectedSelectionAfterReady(
+                true, QString{}, QString{}),
+        "only a retained projected-agent selection may receive one retry at a new Ready boundary");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1315,6 +1421,7 @@ int main(int argc, char** argv)
     passed &= testUpcomingTurnCanonicalRebase();
     passed &= testAnchoredGrowingComposer();
     passed &= testNarrowUpcomingTurnLayout();
+    passed &= testUpcomingTurnNetworkAccess();
     passed &= testTypedModelCatalog();
     passed &= testUpcomingTurnActionStates();
     passed &= testUnsupportedCanonicalSettingsFailSoft();
@@ -1326,5 +1433,7 @@ int main(int argc, char** argv)
     passed &= testTargetedSidebarRefreshKeepsUnchangedRows();
     passed &= testThreadOrganizationPersistenceAndSafeMoves();
     passed &= testArchivedThreadAssignmentPruningWaitsForCompleteDiscovery();
+    passed &= testMissingSelectedThreadRetentionPolicy();
+    passed &= testProjectedSelectionReconnectRecoveryPolicy();
     return passed ? 0 : 1;
 }

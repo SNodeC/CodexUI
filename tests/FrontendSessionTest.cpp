@@ -56,6 +56,14 @@ struct FrontendSessionWorkerTestAccess
         return FrontendSessionWorker::maximumConsecutivePreReadyDisconnects;
     }
 
+    static void markUnstableSynchronized(FrontendSessionWorker& session)
+    {
+        session.synchronizedCurrentConnection = true;
+        session.preReadyFailureRecordedCurrentConnection = false;
+        session.connectionStabilityTimer.start(
+            FrontendSessionWorker::stableConnectionDwellMs);
+    }
+
     static std::size_t maximumFrameBytes(const FrontendSessionWorker& session)
     {
         return session.maximumFrameBytes;
@@ -233,7 +241,10 @@ struct FrontendSessionWorkerTestAccess
 
     static bool synchronizeWithCapturedTransport(
         FrontendSessionWorker& session,
-        std::vector<ai::openai::codex::frontend::client::OutboundMessage>& messages)
+        std::vector<ai::openai::codex::frontend::client::OutboundMessage>& messages,
+        ai::openai::codex::frontend::Json threads =
+            ai::openai::codex::frontend::Json::array(),
+        std::size_t omittedThreads = 0)
     {
         namespace frontend = ai::openai::codex::frontend;
         namespace sdk = frontend::client;
@@ -247,6 +258,21 @@ struct FrontendSessionWorkerTestAccess
         });
         session.connection.transportConnected();
 
+        // ThreadReadStateEffects is a required observed mechanism. It must not
+        // be mixed into Hello's representation-capability request list.
+        if (messages.empty())
+            return false;
+        const auto decodedHello = frontend::Codec::decodeClient(
+            std::string_view(messages.front().compactJson));
+        const auto* hello = decodedHello
+            ? std::get_if<frontend::Hello>(&decodedHello.value())
+            : nullptr;
+        if (!hello || !hello->capabilities
+            || std::ranges::find(*hello->capabilities,
+                                 frontend::FrontendCapability::ThreadReadStateEffects)
+                   != hello->capabilities->end())
+            return false;
+
         const frontend::Json state{
             {"backendRevision", std::uint64_t{1}},
             {"lifecycle", "ready"},
@@ -257,21 +283,32 @@ struct FrontendSessionWorkerTestAccess
              {{"hasLoadedPage", true},
               {"complete", true},
               {"pagesLoaded", std::uint64_t{1}}}},
-            {"threads", frontend::Json::array()},
+            {"threads", std::move(threads)},
             {"pendingRequests", frontend::Json::array()},
             {"codexExtensions", frontend::Json::array()},
             {"omittedCodexExtensions", std::uint64_t{0}},
+            {"capacityProvenance",
+             {{"omittedThreads", omittedThreads},
+              {"truncated", omittedThreads > 0}}},
             {"journal",
              {{"oldestReplayableAfter", std::uint64_t{0}},
               {"currentSequence", std::uint64_t{0}}}},
             {"sequenceExhausted", false},
         };
+        const frontend::FrontendCapability threadReadStateEffects =
+            frontend::FrontendCapability::ThreadReadStateEffects;
         return session.connection
                    .receive(frontend::ServerMessage{frontend::Welcome{
                        "archived-refresh-test",
                        frontend::SessionRole::Observer,
                        frontend::SequenceNumber{0},
-                       frontend::SyncMode::Snapshot}})
+                       frontend::SyncMode::Snapshot,
+                       frontend::Json::object(),
+                       frontend::CapabilityAdvertisement{
+                           {threadReadStateEffects},
+                           {threadReadStateEffects},
+                           {threadReadStateEffects},
+                           frontend::Json::object()}}})
                    .accepted
             && session.connection
                    .receive(frontend::ServerMessage{
@@ -283,10 +320,47 @@ struct FrontendSessionWorkerTestAccess
                    .accepted;
     }
 
+    static bool rejectsMissingThreadReadStateEffects(
+        FrontendSessionWorker& session,
+        std::vector<ai::openai::codex::frontend::client::OutboundMessage>& messages)
+    {
+        namespace frontend = ai::openai::codex::frontend;
+        namespace sdk = frontend::client;
+
+        session.connection = session.client->openConnection({
+            [&messages](FrontendSessionWorker::OutboundMessage message) {
+                messages.push_back(std::move(message));
+                return FrontendSessionWorker::SendResult{
+                    sdk::SendStatus::Accepted, std::nullopt};
+            },
+            [](std::string) {},
+        });
+        session.connection.transportConnected();
+        const auto result = session.connection.receive(
+            frontend::ServerMessage{frontend::Welcome{
+                "missing-thread-read-effects",
+                frontend::SessionRole::Observer,
+                frontend::SequenceNumber{0},
+                frontend::SyncMode::Snapshot,
+                frontend::Json::object(),
+                frontend::CapabilityAdvertisement{
+                    {}, {}, {}, frontend::Json::object()}}});
+        return !result.accepted
+            && session.currentLifecycle == FrontendSessionWorker::Lifecycle::Failed
+            && !session.automaticReconnectEnabled;
+    }
+
     static bool receive(FrontendSessionWorker& session,
                         ai::openai::codex::frontend::ServerMessage message)
     {
         return session.connection.receive(std::move(message)).accepted;
+    }
+
+    static void publishStateUpdate(
+        FrontendSessionWorker& session,
+        const ai::openai::codex::frontend::client::StateUpdate& update)
+    {
+        session.handleStateUpdate(update);
     }
 
     static void receiveWire(FrontendSessionWorker& session, QByteArray wire)
@@ -406,6 +480,56 @@ bool expect(bool condition, const char* message)
     return condition;
 }
 
+frontend::Json threadReadStateEffect(std::string_view authority,
+                                     bool sourcePartial = false,
+                                     std::uint64_t omittedTurns = 0,
+                                     std::uint64_t omittedItems = 0)
+{
+    const bool responseTruncated = omittedTurns != 0 || omittedItems != 0;
+    return frontend::Json{
+        {"scope", "thread"},
+        {"authority", authority},
+        {"truncation",
+         {{"sourcePartial", sourcePartial},
+          {"responseTruncated", responseTruncated},
+          {"responseOmittedTurns", omittedTurns},
+          {"responseOmittedItems", omittedItems}}},
+    };
+}
+
+frontend::Json threadReadBody(std::string_view threadId, bool fullyLoaded)
+{
+    return frontend::Json{
+        {"id", threadId},
+        {"fullyLoaded", fullyLoaded},
+        {"turns", frontend::Json::array()},
+        {"extensions", frontend::Json::object()},
+    };
+}
+
+frontend::Json negotiatedThreadReadResult(std::string_view threadId,
+                                          std::string_view authority,
+                                          bool sourcePartial = false)
+{
+    if (authority == "absent") {
+        return frontend::Json{
+            {"threadId", threadId},
+            {"stateEffect", threadReadStateEffect(authority)},
+        };
+    }
+    const bool fullyLoaded = authority == "replace";
+    return frontend::Json{
+        {"thread", threadReadBody(threadId, fullyLoaded)},
+        {"stateEffect",
+         threadReadStateEffect(authority, sourcePartial)},
+    };
+}
+
+bool negotiatedThreadReadRequested(const frontend::Json& command)
+{
+    return command.value("threadReadStateEffectVersion", 0) == 1;
+}
+
 bool testPeerCredentials()
 {
     int sockets[2]{-1, -1};
@@ -520,6 +644,12 @@ bool testScopedItemPresentationChanges()
         sdk::ThreadUpsertedChange{ai::openai::codex::typed::ThreadId{"target-thread"}});
     const auto threadScoped = codexui::detail::stateUpdateScope(threadUpdate);
 
+    sdk::StateUpdate removedThreadUpdate;
+    removedThreadUpdate.changes.push_back(
+        sdk::ThreadRemovedChange{ai::openai::codex::typed::ThreadId{"removed-thread"}});
+    const auto removedThreadScoped =
+        codexui::detail::stateUpdateScope(removedThreadUpdate);
+
     sdk::StateUpdate cursorUpdate;
     cursorUpdate.changes.push_back(
         sdk::CursorAdvancedChange{ai::openai::codex::frontend::SequenceNumber{43}});
@@ -620,6 +750,18 @@ bool testScopedItemPresentationChanges()
                          && !threadScoped.allSidebarThreadsAffected
                          && threadScoped.sidebarAffected,
                      "a thread upsert must target only its conversation, Inspector dependencies, and Sidebar row");
+    passed &= expect(
+        removedThreadScoped.affectedThreadIds
+                == QStringList{QStringLiteral("removed-thread")}
+            && removedThreadScoped.fullyAffectedThreadIds
+                   == QStringList{QStringLiteral("removed-thread")}
+            && removedThreadScoped.removedThreadIds
+                   == QStringList{QStringLiteral("removed-thread")}
+            && removedThreadScoped.affectedSidebarThreadIds
+                   == QStringList{QStringLiteral("removed-thread")}
+            && removedThreadScoped.affectedInspectorThreadIds
+                   == QStringList{QStringLiteral("removed-thread")},
+        "an authoritative thread removal must preserve its exact identity through the GUI scope");
     passed &= expect(!cursor.allThreadsAffected && !cursor.allInspectorsAffected
                          && !cursor.allSidebarThreadsAffected
                          && !cursor.sidebarAffected && cursor.hasPresentationChange,
@@ -664,10 +806,10 @@ bool testLifecycleAndDiagnostics()
     codexui::FrontendSessionWorkerTestAccess::handleConnectionStateChange(session, retryableChange);
     const int retryableSignalCount = lifecycleChanges;
     codexui::FrontendSessionWorkerTestAccess::handleConnectionStateChange(session, retryableChange);
-    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Failed
+    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Disconnected
                          && codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
                          && lifecycleChanges == retryableSignalCount && retryableSignalCount == 2,
-                     "a retryable connection error must produce one failed transition and retain automatic reconnect");
+                     "a retryable connection error must remain visibly disconnected while automatic reconnect is active");
 
     sdk::Error terminalError;
     terminalError.message = "terminal protocol failure";
@@ -711,8 +853,8 @@ bool testPreReadyReconnectBound()
     passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Failed
                          && !codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
                          && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == maximum
-                         && session.statusText().contains(QStringLiteral("before synchronization completed")),
-                     "repeated pre-synchronization disconnects stop at a visible terminal boundary");
+                         && session.statusText().contains(QStringLiteral("stable synchronized state")),
+                     "repeated unstable connection attempts stop at a visible terminal boundary");
 
     codexui::FrontendSessionWorkerTestAccess::resetReconnectPolicy(session);
     std::vector<sdk::OutboundMessage> messages;
@@ -720,11 +862,35 @@ bool testPreReadyReconnectBound()
         codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(session, messages)
             && session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Ready
             && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == 0,
-        "the real SDK synchronization callback must reset the pre-ready retry budget");
+        "the first SDK synchronization callback must enter Ready without inventing retry failures");
     codexui::FrontendSessionWorkerTestAccess::disconnectTransport(session);
     passed &= expect(codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
-                         && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == 0,
-                     "a disconnect after synchronization does not consume the pre-ready retry budget");
+                         && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == 1,
+                     "a disconnect before the Ready dwell boundary must retain unstable-connection retry history");
+
+    codexui::FrontendSessionWorker unstableReadySession;
+    for (int attempt = 1; attempt < maximum; ++attempt) {
+        codexui::FrontendSessionWorkerTestAccess::markUnstableSynchronized(
+            unstableReadySession);
+        codexui::FrontendSessionWorkerTestAccess::disconnectTransport(
+            unstableReadySession);
+        passed &= expect(
+            codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(
+                unstableReadySession)
+                && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(
+                       unstableReadySession) == attempt,
+            "a short-lived synchronized connection must retain exponential retry history");
+    }
+    codexui::FrontendSessionWorkerTestAccess::markUnstableSynchronized(
+        unstableReadySession);
+    codexui::FrontendSessionWorkerTestAccess::disconnectTransport(
+        unstableReadySession);
+    passed &= expect(
+        !codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(
+            unstableReadySession)
+            && unstableReadySession.lifecycle()
+                   == codexui::FrontendSessionWorker::Lifecycle::Failed,
+        "repeated post-synchronization flapping must stop at the same bounded retry boundary");
 
     codexui::FrontendSessionWorker failedConnectSession;
     for (int attempt = 1; attempt < maximum; ++attempt) {
@@ -798,6 +964,346 @@ bool testInboundFrameCapacityTracksSdk()
         codexui::FrontendSessionWorkerTestAccess::maximumFrameBytes(session) == defaults.maximumInboundMessageBytes
             && codexui::FrontendSessionWorkerTestAccess::maximumFrameBytes(session) > 16U * 1024U * 1024U,
         "the Qt JSONL receiver must accept the SDK's complete provider-derived server-message range");
+}
+
+std::vector<frontend::Json>
+capturedCommands(const std::vector<sdk::OutboundMessage>& messages,
+                 std::string_view method);
+
+bool testIncompleteThreadReadIsBounded()
+{
+    codexui::FrontendSessionWorker incompatibleSession;
+    std::vector<sdk::OutboundMessage> incompatibleOutbound;
+    bool passed = expect(
+        codexui::FrontendSessionWorkerTestAccess::rejectsMissingThreadReadStateEffects(
+            incompatibleSession, incompatibleOutbound),
+        "a backend without required thread-read State effects must fail the handshake without reconnecting");
+
+    codexui::FrontendSessionWorker session;
+    std::vector<sdk::OutboundMessage> outbound;
+    frontend::Json threads = frontend::Json::array({
+        frontend::Json{{"id", "partial-thread"},
+                       {"fullyLoaded", false},
+                       {"turns", frontend::Json::array()},
+                       {"extensions", frontend::Json::object()}},
+        frontend::Json{{"id", "retry-thread"},
+                       {"fullyLoaded", false},
+                       {"turns", frontend::Json::array()},
+                       {"extensions", frontend::Json::object()}},
+        frontend::Json{{"id", "complete-thread"},
+                       {"fullyLoaded", true},
+                       {"turns", frontend::Json::array()},
+                       {"extensions", frontend::Json::object()}},
+    });
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(
+            session, outbound, std::move(threads)),
+        "the incomplete-thread recovery fixture must reach synchronized State");
+    outbound.clear();
+
+    session.loadThread(QStringLiteral("complete-thread"));
+    // Without explicit omission provenance, absence from a complete thread
+    // list remains authoritative and must not trigger a speculative read.
+    session.loadThread(QStringLiteral("missing-thread"));
+    session.loadThread(QStringLiteral("partial-thread"));
+    session.loadThread(QStringLiteral("partial-thread"));
+    std::vector<frontend::Json> reads = capturedCommands(outbound, "thread.read");
+    passed &= expect(
+        reads.size() == 1
+            && negotiatedThreadReadRequested(reads.front())
+            && reads.front().value("params", frontend::Json::object())
+                   == frontend::Json{{"threadId", "partial-thread"},
+                                     {"includeTurns", true}},
+        "only an incomplete retained thread may request one negotiated authoritative full read");
+    if (reads.size() != 1 || !reads.front().contains("requestId"))
+        return false;
+
+    const auto publishThreadCompleteness = [&session](std::uint64_t sequence,
+                                                       bool fullyLoaded) {
+        frontend::FrontendEvent update{
+            frontend::SequenceNumber{sequence},
+            "thread.updated",
+            frontend::Json{{"thread",
+                            {{"id", "partial-thread"},
+                             {"fullyLoaded", fullyLoaded}}}},
+        };
+        return codexui::FrontendSessionWorkerTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::EventBatch{
+                update.sequence, update.sequence, {std::move(update)}}});
+    };
+    passed &= expect(
+        publishThreadCompleteness(1, true)
+            && publishThreadCompleteness(2, false),
+        "intermediate State updates around an outstanding thread read must be accepted");
+    session.loadThread(QStringLiteral("partial-thread"));
+    reads = capturedCommands(outbound, "thread.read");
+    passed &= expect(
+        reads.size() == 1,
+        "State reconciliation must not release in-flight thread-read ownership before its operation completes");
+
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::success(
+                reads.front()["requestId"].get<std::string>(),
+                negotiatedThreadReadResult(
+                    "partial-thread", "merge", true))}),
+        "the partial-thread Merge result must be accepted");
+    session.loadThread(QStringLiteral("partial-thread"));
+    reads = capturedCommands(outbound, "thread.read");
+    passed &= expect(
+        reads.size() == 1,
+        "a successful acknowledgement must remain de-duplicated until authoritative State completes the thread");
+
+    sdk::StateUpdate regressingReplacement;
+    regressingReplacement.state = session.state();
+    regressingReplacement.changes.push_back(sdk::StateReplacedChange{});
+    codexui::FrontendSessionWorkerTestAccess::publishStateUpdate(
+        session, regressingReplacement);
+    session.loadThread(QStringLiteral("partial-thread"));
+    session.loadThread(QStringLiteral("partial-thread"));
+    reads = capturedCommands(outbound, "thread.read");
+    passed &= expect(
+        reads.size() == 2,
+        "a later replacement revision that regresses retained history must earn exactly one new automatic read");
+    if (reads.size() != 2 || !reads.back().contains("requestId"))
+        return false;
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::success(
+                reads.back()["requestId"].get<std::string>(),
+                negotiatedThreadReadResult(
+                    "partial-thread", "merge", true))}),
+        "the replacement-epoch recovery acknowledgement must be accepted");
+    session.loadThread(QStringLiteral("partial-thread"));
+    reads = capturedCommands(outbound, "thread.read");
+    passed &= expect(
+        reads.size() == 2,
+        "an unchanged incomplete replacement epoch must remain bounded after its successful read");
+
+    session.loadThread(QStringLiteral("partial-thread"), true);
+    reads = capturedCommands(outbound, "thread.read");
+    passed &= expect(
+        reads.size() == 3,
+        "an explicit user retry may re-read a still-incomplete thread without enabling an automatic loop");
+    if (reads.size() != 3 || !reads.back().contains("requestId"))
+        return false;
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::success(
+                reads.back()["requestId"].get<std::string>(),
+                negotiatedThreadReadResult(
+                    "partial-thread", "merge", true))}),
+        "the explicit incomplete-thread retry acknowledgement must be accepted");
+
+    session.loadThread(QStringLiteral("retry-thread"));
+    reads = capturedCommands(outbound, "thread.read");
+    if (!expect(reads.size() == 4 && reads.back().contains("requestId"),
+                "a different incomplete thread must receive its own bounded read"))
+        return false;
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::receive(
+            session,
+            frontend::ServerMessage{frontend::Response::failure(
+                reads.back()["requestId"].get<std::string>(),
+                frontend::CommandError{frontend::ErrorCode::CapacityExceeded,
+                                       "thread read fence was overtaken"})}),
+        "the capacity-limited recovery read must be accepted as an operation response");
+    sdk::StateUpdate liveRetryThreadUpdate;
+    liveRetryThreadUpdate.state = session.state();
+    liveRetryThreadUpdate.changes.push_back(
+        sdk::ThreadUpsertedChange{
+            ai::openai::codex::typed::ThreadId{"retry-thread"}});
+    codexui::FrontendSessionWorkerTestAccess::publishStateUpdate(
+        session, liveRetryThreadUpdate);
+    session.loadThread(QStringLiteral("retry-thread"));
+    reads = capturedCommands(outbound, "thread.read");
+    passed &= expect(
+        reads.size() == 4,
+        "a failed automatic read must consume the current replacement epoch instead of polling after live updates");
+
+    session.loadThread(QStringLiteral("retry-thread"), true);
+    reads = capturedCommands(outbound, "thread.read");
+    passed &= expect(
+        reads.size() == 5 && reads.back().contains("requestId"),
+        "an explicit retry may re-read a capacity-limited recovery without enabling automatic polling");
+
+    codexui::FrontendSessionWorker authoritySession;
+    std::vector<sdk::OutboundMessage> authorityOutbound;
+    frontend::Json authorityThreads = frontend::Json::array({
+        frontend::Json{{"id", "replace-thread"},
+                       {"fullyLoaded", false},
+                       {"turns", frontend::Json::array()},
+                       {"extensions", frontend::Json::object()}},
+    });
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(
+            authoritySession,
+            authorityOutbound,
+            std::move(authorityThreads),
+            1),
+        "the negotiated authority fixture must reach synchronized State");
+    std::optional<codexui::detail::StateUpdateScope> authorityScope;
+    QObject::connect(
+        &authoritySession,
+        &codexui::FrontendSessionWorker::stateChanged,
+        [&authorityScope](const auto& scope) { authorityScope = scope; });
+    authorityOutbound.clear();
+    authoritySession.loadThread(QStringLiteral("replace-thread"));
+    std::vector<frontend::Json> authorityReads = capturedCommands(
+        authorityOutbound, "thread.read");
+    if (!expect(authorityReads.size() == 1
+                    && negotiatedThreadReadRequested(authorityReads.front())
+                    && authorityReads.front().contains("requestId"),
+                "the complete authority fixture must negotiate one Replace read"))
+        return false;
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::receive(
+            authoritySession,
+            frontend::ServerMessage{frontend::Response::success(
+                authorityReads.front()["requestId"].get<std::string>(),
+                negotiatedThreadReadResult(
+                    "replace-thread", "replace"))}),
+        "the authoritative Replace result must be accepted");
+    const auto* replaced = authoritySession.state().thread("replace-thread");
+    authoritySession.loadThread(QStringLiteral("replace-thread"));
+    passed &= expect(
+        replaced && replaced->fullyLoaded
+            && capturedCommands(authorityOutbound, "thread.read").size() == 1,
+        "Replace must complete the cached thread and suppress further recovery reads");
+
+    authorityScope.reset();
+    authoritySession.loadThread(QStringLiteral("absent-thread"));
+    authorityReads = capturedCommands(authorityOutbound, "thread.read");
+    if (!expect(authorityReads.size() == 2
+                    && authorityReads.back().contains("requestId"),
+                "an omitted identity must receive one negotiated absence check"))
+        return false;
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::receive(
+            authoritySession,
+            frontend::ServerMessage{frontend::Response::success(
+                authorityReads.back()["requestId"].get<std::string>(),
+                negotiatedThreadReadResult(
+                    "absent-thread", "absent"))})
+            && authoritySession.state().thread("absent-thread") == nullptr
+            && authorityScope
+            && authorityScope->removedThreadIds
+                   == QStringList{QStringLiteral("absent-thread")},
+        "Absent must publish one exact removal tombstone before completion");
+
+    codexui::FrontendSessionWorker omittedSession;
+    std::vector<sdk::OutboundMessage> omittedOutbound;
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(
+            omittedSession,
+            omittedOutbound,
+            frontend::Json::array(),
+            1),
+        "the omitted-thread recovery fixture must reach synchronized State");
+    passed &= expect(
+        omittedSession.state().capacityProvenance()
+            && omittedSession.state().capacityProvenance()->omittedThreads == 1,
+        "the recovery fixture must expose its bounded snapshot omission provenance");
+    omittedOutbound.clear();
+    omittedSession.loadThread(QStringLiteral("omitted-thread"));
+    omittedSession.loadThread(QStringLiteral("omitted-thread"));
+    std::vector<frontend::Json> omittedReads = capturedCommands(
+        omittedOutbound, "thread.read");
+    passed &= expect(
+        omittedReads.size() == 1
+            && omittedReads.front().value("params", frontend::Json::object())
+                   == frontend::Json{{"threadId", "omitted-thread"},
+                                     {"includeTurns", true}},
+        "a selected ID absent from an explicitly bounded snapshot must receive one recovery read");
+    if (omittedReads.size() != 1 || !omittedReads.front().contains("requestId"))
+        return false;
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::receive(
+            omittedSession,
+            frontend::ServerMessage{frontend::Response::success(
+                omittedReads.front()["requestId"].get<std::string>(),
+                negotiatedThreadReadResult(
+                    "omitted-thread", "merge", true))}),
+        "the omitted-thread Merge result must be accepted");
+    omittedSession.loadThread(QStringLiteral("omitted-thread"));
+    omittedReads = capturedCommands(omittedOutbound, "thread.read");
+    passed &= expect(
+        omittedReads.size() == 1,
+        "a successful missing-thread recovery must remain bounded until State resolves the omission");
+    omittedSession.loadThread(QStringLiteral("omitted-thread"), true);
+    omittedReads = capturedCommands(omittedOutbound, "thread.read");
+    passed &= expect(
+        omittedReads.size() == 2,
+        "an explicit user retry may verify a still-omitted identity without enabling automatic polling");
+
+    const auto projectedThreads = [] {
+        return frontend::Json::array({
+            frontend::Json{{"id", "projected-thread"},
+                           {"fullyLoaded", false},
+                           {"turns", frontend::Json::array()},
+                           {"extensions", frontend::Json::object()}},
+        });
+    };
+    codexui::FrontendSessionWorker reconnectSession;
+    std::vector<sdk::OutboundMessage> firstConnectionOutbound;
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(
+            reconnectSession,
+            firstConnectionOutbound,
+            projectedThreads()),
+        "the projected-selection fixture must synchronize its first connection");
+    firstConnectionOutbound.clear();
+    reconnectSession.loadThread(QStringLiteral("projected-thread"), true);
+    std::vector<frontend::Json> firstConnectionReads = capturedCommands(
+        firstConnectionOutbound, "thread.read");
+    if (!expect(firstConnectionReads.size() == 1
+                    && firstConnectionReads.front().contains("requestId"),
+                "a projected incomplete selection must issue one read on its first Ready boundary"))
+        return false;
+    passed &= expect(
+        codexui::FrontendSessionWorkerTestAccess::receive(
+            reconnectSession,
+            frontend::ServerMessage{frontend::Response::success(
+                firstConnectionReads.front()["requestId"].get<std::string>(),
+                negotiatedThreadReadResult(
+                    "projected-thread", "merge", true))}),
+        "the first projected-selection read acknowledgement must be accepted");
+
+    codexui::FrontendSessionWorkerTestAccess::disconnectTransport(
+        reconnectSession);
+    std::vector<sdk::OutboundMessage> secondConnectionOutbound;
+    const bool disconnectedForRetry =
+        reconnectSession.lifecycle()
+                == codexui::FrontendSessionWorker::Lifecycle::Disconnected
+        && codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(
+            reconnectSession);
+    const bool synchronizedAgain =
+        codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(
+            reconnectSession,
+            secondConnectionOutbound,
+            projectedThreads());
+    passed &= expect(
+        disconnectedForRetry && synchronizedAgain
+            && reconnectSession.lifecycle()
+                   == codexui::FrontendSessionWorker::Lifecycle::Ready,
+        "the projected-selection fixture must disconnect and synchronize a new Ready connection");
+    secondConnectionOutbound.clear();
+    // Workbench invokes the explicit retry once when the retained projected
+    // selection crosses the new Ready boundary. Ordinary presentation refreshes
+    // can immediately follow it and must not submit duplicates.
+    reconnectSession.loadThread(QStringLiteral("projected-thread"), true);
+    reconnectSession.loadThread(QStringLiteral("projected-thread"));
+    reconnectSession.loadThread(QStringLiteral("projected-thread"));
+    const std::vector<frontend::Json> secondConnectionReads = capturedCommands(
+        secondConnectionOutbound, "thread.read");
+    passed &= expect(
+        secondConnectionReads.size() == 1,
+        "a projected selection retained across disconnect and a new Ready connection must issue exactly one recovery read");
+    return passed;
 }
 
 std::vector<frontend::Json>
@@ -1647,6 +2153,15 @@ bool testThreadedFacadeMailbox()
     }
     {
         codexui::detail::StateUpdateScope scope;
+        scope.affectedThreadIds = {QStringLiteral("removed-thread")};
+        scope.fullyAffectedThreadIds = {QStringLiteral("removed-thread")};
+        scope.removedThreadIds = {QStringLiteral("removed-thread")};
+        scope.hasPresentationChange = true;
+        codexui::FrontendSessionFacadeTestAccess::enqueueState(
+            session, 7, std::move(scope));
+    }
+    {
+        codexui::detail::StateUpdateScope scope;
         scope.affectedSidebarThreadIds = {
             QStringLiteral("sidebar-b"), QStringLiteral("sidebar-c")};
         scope.sidebarAffected = true;
@@ -1702,7 +2217,10 @@ bool testThreadedFacadeMailbox()
     passed &= expect(
         stateSignals == 1 && deliveredScope
             && deliveredScope->affectedThreadIds
-                   == QStringList{QStringLiteral("streaming-thread")},
+                   == QStringList{QStringLiteral("streaming-thread"),
+                                  QStringLiteral("removed-thread")}
+            && deliveredScope->removedThreadIds
+                   == QStringList{QStringLiteral("removed-thread")},
         "the one latest State publication must retain the merged presentation scope");
     if (deliveredScope) {
         const auto content = [&deliveredScope](QStringView itemId,
@@ -1995,6 +2513,15 @@ bool testFacadeScopeBound()
         &codexui::FrontendSession::stateChanged,
         [&delivered](const auto& scope) { delivered = scope; });
 
+    {
+        codexui::detail::StateUpdateScope scope;
+        scope.affectedThreadIds.push_back(QStringLiteral("removed-thread"));
+        scope.fullyAffectedThreadIds.push_back(QStringLiteral("removed-thread"));
+        scope.removedThreadIds.push_back(QStringLiteral("removed-thread"));
+        scope.hasPresentationChange = true;
+        codexui::FrontendSessionFacadeTestAccess::enqueueState(
+            session, 1, std::move(scope));
+    }
     for (int index = 0; index < 1'100; ++index) {
         codexui::detail::StateUpdateScope scope;
         scope.affectedThreadIds.push_back(QStringLiteral("thread"));
@@ -2013,8 +2540,55 @@ bool testFacadeScopeBound()
     bool passed = expect(
         delivered && delivered->allThreadsAffected
             && delivered->affectedThreadIds.empty()
-            && delivered->affectedItemContents.empty(),
-        "a blocked GUI must degrade an unbounded exact-scope burst to one bounded full refresh");
+            && delivered->affectedItemContents.empty()
+            && delivered->removedThreadIds
+                   == QStringList{QStringLiteral("removed-thread")},
+        "a blocked GUI must degrade an unbounded exact-scope burst to one bounded full refresh while retaining exact removals");
+
+    delivered.reset();
+    {
+        codexui::detail::StateUpdateScope removed;
+        removed.affectedThreadIds.push_back(
+            QStringLiteral("remove-then-upsert"));
+        removed.removedThreadIds.push_back(
+            QStringLiteral("remove-then-upsert"));
+        removed.hasPresentationChange = true;
+        codexui::FrontendSessionFacadeTestAccess::enqueueState(
+            session, 1, std::move(removed));
+
+        codexui::detail::StateUpdateScope upserted;
+        upserted.affectedThreadIds.push_back(
+            QStringLiteral("remove-then-upsert"));
+        upserted.fullyAffectedThreadIds.push_back(
+            QStringLiteral("remove-then-upsert"));
+        upserted.hasPresentationChange = true;
+        codexui::FrontendSessionFacadeTestAccess::enqueueState(
+            session, 1, std::move(upserted));
+    }
+    QCoreApplication::processEvents();
+    passed &= expect(
+        delivered && delivered->removedThreadIds.empty(),
+        "a newer exact upsert must supersede a coalesced removal tombstone");
+
+    delivered.reset();
+    for (int index = 0;
+         index <= codexui::detail::maximumCoalescedPresentationIdentities;
+         ++index) {
+        codexui::detail::StateUpdateScope scope;
+        const QString threadId = QStringLiteral("removed-%1").arg(index);
+        scope.affectedThreadIds.push_back(threadId);
+        scope.removedThreadIds.push_back(threadId);
+        scope.hasPresentationChange = true;
+        codexui::FrontendSessionFacadeTestAccess::enqueueState(
+            session, 1, std::move(scope));
+    }
+    QCoreApplication::processEvents();
+    passed &= expect(
+        delivered && delivered->allThreadsAffected
+            && delivered->removedThreadIdsOverflowed
+            && delivered->removedThreadIds.size()
+                   == codexui::detail::maximumCoalescedPresentationIdentities,
+        "a removal burst must expose bounded tombstone overflow so the selected identity can be verified explicitly");
 
     delivered.reset();
     for (int index = 0;
@@ -2045,6 +2619,7 @@ int main(int argc, char* argv[])
     return testPeerCredentials() && testScopedItemPresentationChanges() && testLifecycleAndDiagnostics()
                && testPreReadyReconnectBound() && testReceiveRejectionPreservesPreciseError()
                && testInboundFrameCapacityTracksSdk()
+               && testIncompleteThreadReadIsBounded()
                && testModelCatalogRefresh() && testModelCatalogRefreshFailureIsDiagnosed()
                && testArchivedThreadRefresh()
                && testArchivedThreadRefreshFailureIsTerminal()

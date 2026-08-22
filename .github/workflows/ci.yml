@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AISUITE_REVISION: d70f8484766728d4ecb650da7c683ced39d33ed5
+  AISUITE_REVISION: ff130d741ec50ed7dba1890f7981bc62f26f15db
   SNODEC_REVISION: bc43179dbee2b5a0286420a61d8f1ceaef01530d
   CMAKE_BUILD_PARALLEL_LEVEL: 2
   CTEST_PARALLEL_LEVEL: 2
@@ -42,7 +42,7 @@ jobs:
           ref: ${{ env.SNODEC_REVISION }}
           path: _deps/snodec
 
-      - name: Check out required AISuite 0.5.0
+      - name: Check out required AISuite 0.6.0
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
@@ -87,7 +87,7 @@ jobs:
           cmake --build _build/snodec --target all
           cmake --install _build/snodec
 
-      - name: Build and install AISuite 0.5.0
+      - name: Build and install AISuite 0.6.0
         run: |
           cmake -S _deps/aisuite -B _build/aisuite -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
@@ -101,7 +101,7 @@ jobs:
             -DAISUITE_ENABLE_CODEX_FRONTEND_RFCOMM=OFF
           cmake --build _build/aisuite --target all
           cmake --install _build/aisuite
-          grep -F 'set(PACKAGE_VERSION "0.5.0")' \
+          grep -F 'set(PACKAGE_VERSION "0.6.0")' \
             _stage/aisuite/lib/cmake/AISuite/AISuiteConfigVersion.cmake
 
       - name: Configure CodexUI

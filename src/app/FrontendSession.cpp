@@ -38,11 +38,25 @@ bool appendUniqueBounded(QStringList& destination, const QStringList& source)
 void mergeScope(detail::StateUpdateScope& destination,
                 const detail::StateUpdateScope& source)
 {
+    // A newer exact update for an identity supersedes an older removal. Apply
+    // this before appending the source tombstones so remove-after-upsert still
+    // wins while upsert-after-remove cannot clear a live selection.
+    for (const QString& threadId : source.affectedThreadIds) {
+        if (!source.removedThreadIds.contains(threadId))
+            destination.removedThreadIds.removeAll(threadId);
+    }
     destination.allThreadsAffected |= source.allThreadsAffected;
     destination.allInspectorsAffected |= source.allInspectorsAffected;
     destination.allSidebarThreadsAffected |= source.allSidebarThreadsAffected;
     destination.sidebarAffected |= source.sidebarAffected;
     destination.hasPresentationChange |= source.hasPresentationChange;
+    destination.removedThreadIdsOverflowed |=
+        source.removedThreadIdsOverflowed;
+    if (!appendUniqueBounded(destination.removedThreadIds,
+                             source.removedThreadIds)) {
+        destination.removedThreadIdsOverflowed = true;
+        destination.allThreadsAffected = true;
+    }
     if (!destination.allThreadsAffected) {
         if (!appendUniqueBounded(destination.affectedThreadIds,
                                  source.affectedThreadIds)
@@ -151,6 +165,8 @@ void mergeScope(detail::StateUpdateScope& destination,
             > detail::maximumCoalescedPresentationIdentities
         || destination.fullyAffectedThreadIds.size()
                > detail::maximumCoalescedPresentationIdentities
+        || destination.removedThreadIds.size()
+               > detail::maximumCoalescedPresentationIdentities
         || static_cast<qsizetype>(destination.affectedItemContents.size())
                > detail::maximumCoalescedPresentationIdentities) {
         destination.allThreadsAffected = true;
@@ -166,6 +182,9 @@ void mergeScope(detail::StateUpdateScope& destination,
     if (destination.allThreadsAffected) {
         destination.affectedThreadIds.clear();
         destination.fullyAffectedThreadIds.clear();
+        // Keep exact removals even when the rest of the presentation scope
+        // degrades to an all-thread refresh. Global omission provenance makes
+        // a missing selected ID ambiguous without this bounded evidence.
         destination.affectedItemContents.clear();
         destination.coalescedContentDeltaBytes = 0;
     }
@@ -538,6 +557,16 @@ public:
                 latestState->state = std::move(publication.state);
                 latestState->archivedStatus = publication.archivedStatus;
                 mergeScope(latestState->scope, publication.scope);
+                // The newest immutable State is the final authority for any
+                // identity it actually retains. Capacity-omitted identities
+                // remain ambiguous and therefore keep their exact tombstone.
+                for (auto iterator = latestState->scope.removedThreadIds.begin();
+                     iterator != latestState->scope.removedThreadIds.end();) {
+                    if (latestState->state.thread(iterator->toStdString()))
+                        iterator = latestState->scope.removedThreadIds.erase(iterator);
+                    else
+                        ++iterator;
+                }
             } else {
                 latestState = std::move(publication);
             }
@@ -897,12 +926,12 @@ bool FrontendSession::ownsController() const noexcept
     return projection.value && projection.value->ownedByThisClient;
 }
 
-void FrontendSession::loadThread(const QString& threadId)
+void FrontendSession::loadThread(const QString& threadId, bool retryIncomplete)
 {
     if (impl->currentLifecycle != Lifecycle::Ready || threadId.isEmpty())
         return;
-    impl->post([threadId](FrontendSessionWorker& worker) {
-        worker.loadThread(threadId);
+    impl->post([threadId, retryIncomplete](FrontendSessionWorker& worker) {
+        worker.loadThread(threadId, retryIncomplete);
     });
 }
 

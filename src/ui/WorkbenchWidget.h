@@ -15,6 +15,7 @@
 #include <QStringList>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -28,6 +29,27 @@ namespace codexui {
 
 namespace detail {
 struct StateUpdateScope;
+
+[[nodiscard]] constexpr bool shouldClearMissingSelectedThread(
+    bool ready,
+    bool threadDiscoveryTerminal,
+    bool awaitingSelectedThread,
+    std::size_t omittedThreads,
+    bool authoritativelyRemoved) noexcept
+{
+    return authoritativelyRemoved
+           || (ready && threadDiscoveryTerminal && !awaitingSelectedThread
+               && omittedThreads == 0);
+}
+
+[[nodiscard]] inline bool shouldRetryProjectedSelectionAfterReady(
+    bool becameReady,
+    const QString& selectedThreadId,
+    const QString& projectedAgentThreadId) noexcept
+{
+    return becameReady && !selectedThreadId.isEmpty()
+           && selectedThreadId == projectedAgentThreadId;
+}
 }
 
 class ConversationWidget;
@@ -183,6 +205,10 @@ private:
     QPushButton* reconnectButton = nullptr;
     InteractiveRequestDialog* interactiveRequestDialog = nullptr;
     QString selectedThreadId;
+    // Only the current selection matters to presentation reconciliation. One
+    // retained identity keeps the 16 ms GUI coalescing window strictly
+    // bounded even during a pathological removal burst.
+    QString authoritativelyRemovedSelectedThreadId;
     QString selectedInspectorTurnId;
     QString projectedAgentThreadId;
     QString newThreadIdAwaitingState;
@@ -231,6 +257,7 @@ private:
     bool inspectorRefreshPending = false;
     bool sidebarRefreshPending = false;
     bool sidebarFullRefreshPending = false;
+    bool frontendWasReady = false;
     QStringList sidebarThreadRefreshPending;
     QSet<QString> sidebarThreadRefreshPendingSet;
 };

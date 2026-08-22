@@ -49,10 +49,18 @@ struct StateUpdateScope {
 
     QStringList affectedThreadIds;
     QStringList fullyAffectedThreadIds;
+    // Exact authoritative removals must survive mailbox coalescing. An
+    // omitted thread is otherwise indistinguishable from one deleted by an
+    // authoritative thread/read while the global snapshot remains bounded.
+    QStringList removedThreadIds;
     QStringList affectedInspectorThreadIds;
     QStringList affectedSidebarThreadIds;
     std::vector<ItemContentIdentity> affectedItemContents;
     std::uint64_t coalescedContentDeltaBytes = 0;
+    // The bounded list omitted at least one exact removal identity. The UI
+    // must verify any missing retained selection instead of treating global
+    // snapshot omission as either presence or deletion.
+    bool removedThreadIdsOverflowed = false;
     bool allThreadsAffected = false;
     bool allInspectorsAffected = false;
     bool allSidebarThreadsAffected = false;
@@ -104,7 +112,7 @@ public:
     [[nodiscard]] bool archivedThreadDiscoveryTerminal() const noexcept;
     [[nodiscard]] ArchivedThreadDiscoveryStatus archivedThreadDiscoveryStatus() const noexcept;
     [[nodiscard]] bool ownsController() const noexcept;
-    void loadThread(const QString& threadId);
+    void loadThread(const QString& threadId, bool retryIncomplete = false);
     [[nodiscard]] std::optional<QString> acquireController(OperationCompletion completion);
     [[nodiscard]] std::optional<QString> startThread(ThreadStartCompletion completion);
     [[nodiscard]] std::optional<QString>
