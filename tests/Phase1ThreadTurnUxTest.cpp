@@ -186,9 +186,12 @@ bool testUpcomingTurnCanonicalRebase()
     auto* cwd = dock.findChild<QLineEdit*>(QStringLiteral("upcomingWorkspace"));
     auto* settings = dock.findChild<QFrame*>(QStringLiteral("upcomingTurnSettings"));
     auto* composer = dock.findChild<QFrame*>(QStringLiteral("upcomingComposer"));
+    auto* editor = dock.findChild<QPlainTextEdit*>(QStringLiteral("upcomingPromptEditor"));
+    auto* send = dock.findChild<QPushButton*>(QStringLiteral("upcomingSendButton"));
+    const auto stableControlTree = dock.findChildren<QWidget*>();
     bool passed = expect(model && effort && cwd,
                          "the upcoming-turn canonical controls must be discoverable");
-    if (!model || !effort || !cwd || !settings || !composer)
+    if (!model || !effort || !cwd || !settings || !composer || !editor || !send)
         return false;
     const int stableBaseHeight = dock.height();
     const int stableComposerTop = composer->geometry().top();
@@ -228,6 +231,13 @@ bool testUpcomingTurnCanonicalRebase()
                          && cwd->text() == QStringLiteral("/workspace/refreshed")
                          && effort->currentData().toString() == QStringLiteral("xhigh"),
                      "same-thread refreshes must rebase untouched controls without overwriting a user change");
+    passed &= expect(model == dock.findChild<QComboBox*>(QStringLiteral("upcomingModel"))
+                         && effort == dock.findChild<QComboBox*>(QStringLiteral("upcomingReasoning"))
+                         && cwd == dock.findChild<QLineEdit*>(QStringLiteral("upcomingWorkspace"))
+                         && editor == dock.findChild<QPlainTextEdit*>(QStringLiteral("upcomingPromptEditor"))
+                         && send == dock.findChild<QPushButton*>(QStringLiteral("upcomingSendButton"))
+                         && stableControlTree == dock.findChildren<QWidget*>(),
+                     "a harmless same-thread refresh must retain the complete upcoming-turn control tree");
     passed &= expect(dock.draft().effort.hasValue()
                          && dock.draft().effort->value == "xhigh",
                      "a same-thread state update must preserve the pending typed override");
@@ -606,15 +616,17 @@ bool testUpcomingTurnActionStates()
                      "a running turn must permit steering and stopping while locking execution settings");
     QString shortcutPrompt;
     bool shortcutSteering = false;
+    int submissionCount = 0;
     QObject::connect(&dock, &codexui::UpcomingTurnDock::sendRequested,
-                     [&shortcutPrompt, &shortcutSteering](const QString& prompt, bool steering) {
+                     [&shortcutPrompt, &shortcutSteering, &submissionCount](const QString& prompt, bool steering) {
+                         ++submissionCount;
                          shortcutPrompt = prompt;
                          shortcutSteering = steering;
                      });
     QKeyEvent submitShortcut(QEvent::KeyPress, Qt::Key_Return, Qt::ControlModifier);
     QCoreApplication::sendEvent(editor, &submitShortcut);
     passed &= expect(shortcutPrompt == QStringLiteral("redirect the active turn")
-                         && shortcutSteering,
+                         && shortcutSteering && submissionCount == 1,
                      "the extracted prompt editor must preserve Ctrl+Enter submission semantics");
     dock.setActionState(false,
                         false,
@@ -641,6 +653,10 @@ bool testUpcomingTurnActionStates()
                          && !send->isEnabled() && !send->toolTip().isEmpty()
                          && status && status->text().contains(QStringLiteral("previous active turn")),
                      "a steering draft must stay bound to its exact active turn and remain blocked after turn rollover");
+    QCoreApplication::sendEvent(editor, &submitShortcut);
+    send->click();
+    passed &= expect(submissionCount == 1,
+                     "an obsolete turn-bound control state must not submit through click or Ctrl+Enter");
     editor->insertPlainText(QStringLiteral(" "));
     passed &= expect(send->isEnabled() && send->toolTip().isEmpty()
                          && status && status->text() == QStringLiteral("Ctrl+Enter to steer"),

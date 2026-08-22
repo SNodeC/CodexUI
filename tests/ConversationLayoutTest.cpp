@@ -41,7 +41,6 @@ struct ConversationWidgetTestAccess
         ConversationWidget& conversation, QWidget* anchor, int anchorY)
     {
         auto* scroll = conversation.scrollArea->verticalScrollBar();
-        scroll->setValue(scroll->minimum());
         conversation.followingLatest = false;
         conversation.pinLatestDuringLayout = true;
         conversation.layoutSettleTimer->start(60'000);
@@ -79,6 +78,14 @@ struct ConversationWidgetTestAccess
         conversation.pendingThreadChanged = false;
         conversation.pendingTimelineShrink = false;
         conversation.scrollArea->viewport()->setUpdatesEnabled(true);
+    }
+
+    static void settleAnchoredReconciliation(ConversationWidget& conversation)
+    {
+        conversation.layoutSettleTimer->stop();
+        conversation.layoutSettleTimer->setInterval(16);
+        conversation.pinLatestDuringLayout = false;
+        conversation.settleTimelineLayout();
     }
 };
 
@@ -1056,12 +1063,17 @@ bool testPointerPreservingAppend()
     beforeFixture.turns.front().messages.push_back(
         {"item-append-257", frontend::ThreadItemKind::AgentMessage, "final answer"});
     const client::State after = makeState({beforeFixture});
+    ThreadFixture latestFixture = beforeFixture;
+    latestFixture.turns.front().messages.back().text = "updated final answer";
+    const client::State latest = makeState({latestFixture});
     int latestPresentationRequests = 0;
     QObject::connect(&conversation,
                      &codexui::ConversationWidget::latestPresentationRequested,
                      &conversation,
                      [&latestPresentationRequests] { ++latestPresentationRequests; });
     conversation.render(after, QStringLiteral("append"));
+    settleTimeline();
+    conversation.render(latest, QStringLiteral("append"));
     settleTimeline();
 
     QWidget* host = timeline(conversation);
@@ -1072,14 +1084,15 @@ bool testPointerPreservingAppend()
     passed &= expect(readingHistory && evicted && survivor
                          && survivor.data() == survivorAddress
                          && qAbs(frozenAnchorY - anchorYBefore) <= 2
-                         && !segment(conversation, QStringLiteral("message:item-append-256")),
-                     "an off-bottom reader must see a completely frozen presentation while canonical state advances");
+                         && !segment(conversation, QStringLiteral("message:item-append-256"))
+                         && !hasLabel(conversation, QStringLiteral("updated final answer")),
+                     "an off-bottom reader must see a completely frozen presentation across repeated canonical updates");
     if (scroll)
         scroll->verticalScrollBar()->setValue(scroll->verticalScrollBar()->maximum());
     settleEvents();
     passed &= expect(latestPresentationRequests == 1,
                      "returning to the tail must request exactly one latest authoritative presentation");
-    conversation.render(after, QStringLiteral("append"));
+    conversation.render(latest, QStringLiteral("append"));
     settleTimeline();
 
     passed &= expect(!evicted && survivor && survivor.data() == survivorAddress
@@ -1088,7 +1101,7 @@ bool testPointerPreservingAppend()
     passed &= expect(segment(conversation, QStringLiteral("message:item-append-256")) != nullptr
                          && segment(conversation, QStringLiteral("message:item-append-257")) != nullptr
                          && hasLabel(conversation, QStringLiteral("reflected prompt"))
-                         && hasLabel(conversation, QStringLiteral("final answer")),
+                         && hasLabel(conversation, QStringLiteral("updated final answer")),
                      "the reflected prompt and final answer must append at the timeline tail");
     passed &= expect(host && host->property("renderedTimelineItems").toLongLong()
                                  <= host->property("maximumRenderedItems").toLongLong(),
@@ -1099,13 +1112,24 @@ bool testPointerPreservingAppend()
     followingConversation.show();
     followingConversation.render(before, QStringLiteral("append"));
     settleTimeline();
+    QPointer<QWidget> followedSurvivor = segment(
+        followingConversation, QStringLiteral("message:item-append-10"));
+    QWidget* const followedSurvivorAddress = followedSurvivor.data();
     followingConversation.render(after, QStringLiteral("append"));
+    followingConversation.render(latest, QStringLiteral("append"));
     settleTimeline();
     QScrollArea* followingScroll = followingConversation.findChild<QScrollArea*>();
     passed &= expect(followingScroll
                          && followingScroll->verticalScrollBar()->value()
-                                == followingScroll->verticalScrollBar()->maximum(),
-                     "a followed append must settle smoothly at the newest timeline content");
+                                == followingScroll->verticalScrollBar()->maximum()
+                         && followedSurvivor
+                         && followedSurvivor.data() == followedSurvivorAddress
+                         && followedSurvivor.data()
+                                == segment(followingConversation,
+                                           QStringLiteral("message:item-append-10"))
+                         && hasLabel(followingConversation,
+                                     QStringLiteral("updated final answer")),
+                     "rapid followed updates must retain widgets and settle at the newest timeline content");
     return passed;
 }
 
@@ -1236,7 +1260,19 @@ bool testKeyedSegmentInsertion()
             && activityLayout->indexOf(activity.data()) == 1,
         "reordering unchanged segment keys must move the original QWidgets into the new order");
 
-    constexpr int anchoredY = 37;
+    QScrollArea* activityScroll = activityConversation.findChild<QScrollArea*>();
+    if (activityScroll && activity)
+    {
+        const int currentY = activityScroll->viewport()->mapFromGlobal(
+            activity->mapToGlobal(QPoint{})).y();
+        auto* bar = activityScroll->verticalScrollBar();
+        bar->setValue(qBound(0, bar->value() + currentY - 96, bar->maximum()));
+        settleEvents();
+    }
+    const int anchoredY = activityScroll && activity
+                              ? activityScroll->viewport()->mapFromGlobal(
+                                    activity->mapToGlobal(QPoint{})).y()
+                              : 0;
     const bool anchorPathAvailable =
         codexui::ConversationWidgetTestAccess::primeViewportAnchor(
             activityConversation, activity.data(), anchoredY);
@@ -1247,15 +1283,26 @@ bool testKeyedSegmentInsertion()
     activityConversation.render(
         makeState({activityFixture}),
         QStringLiteral("keyed-activity-growth"));
-    passed &= expect(
+    const bool survivingAnchorTracked =
         anchorPathAvailable
             && codexui::ConversationWidgetTestAccess::viewportAnchor(
                    activityConversation)
                    == activity.data()
             && codexui::ConversationWidgetTestAccess::viewportAnchorY(
                    activityConversation)
-                   == anchoredY,
-        "reordering a surviving segment must preserve its pending viewport anchor and offset");
+                   == anchoredY;
+    codexui::ConversationWidgetTestAccess::settleAnchoredReconciliation(
+        activityConversation);
+    const int settledAnchorY = activityScroll && activity
+                                   ? activityScroll->viewport()->mapFromGlobal(
+                                         activity->mapToGlobal(QPoint{})).y()
+                                   : 0;
+    passed &= expect(
+        survivingAnchorTracked && activity
+            && qAbs(settledAnchorY - anchoredY) <= 2
+            && !codexui::ConversationWidgetTestAccess::viewportAnchor(
+                activityConversation),
+        "reordering a surviving segment must preserve its widget and observable viewport position");
 
     codexui::ConversationWidgetTestAccess::primeViewportAnchor(
         activityConversation, activity.data(), anchoredY);
