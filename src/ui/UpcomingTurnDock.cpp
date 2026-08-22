@@ -323,6 +323,16 @@ bool networkIsEditable(const QString& access)
            || access == QStringLiteral("external");
 }
 
+bool networkChoiceIsRepresentable(const QString& access, const QString& network)
+{
+    if (access == QStringLiteral("workspace-write")
+        || access == QStringLiteral("read-only"))
+        return network == QStringLiteral("restricted") || network == QStringLiteral("enabled");
+    if (access == QStringLiteral("external"))
+        return typed::NetworkAccess{toUtf8(network)}.isKnown();
+    return true;
+}
+
 void resetApprovalChoices(QComboBox* combo)
 {
     combo->clear();
@@ -1229,13 +1239,20 @@ void UpcomingTurnDock::refreshNetworkControl(bool accessChangedByUser)
     QString target;
 
     if (networkIsEditable(access)) {
+        const bool canonicalAccessSelected = canonicalConfiguration
+            && sandboxKey(canonicalConfiguration->sandboxPolicy) == access;
+        const QString canonicalNetwork = canonicalAccessSelected
+            ? networkKey(canonicalConfiguration->sandboxPolicy)
+            : QString{};
         const bool previousIsChoice = previous == QStringLiteral("restricted")
             || previous == QStringLiteral("enabled");
-        if (previousIsChoice && (touched(Field::Network) || accessChangedByUser))
+        if (canonicalAccessSelected
+            && !networkChoiceIsRepresentable(access, canonicalNetwork))
+            target = canonicalNetwork;
+        else if (previousIsChoice && (touched(Field::Network) || accessChangedByUser))
             target = previous;
-        else if (canonicalConfiguration
-                 && sandboxKey(canonicalConfiguration->sandboxPolicy) == access)
-            target = networkKey(canonicalConfiguration->sandboxPolicy);
+        else if (canonicalAccessSelected)
+            target = canonicalNetwork;
         else
             target = QStringLiteral("restricted");
     } else if (access == QStringLiteral("danger-full-access")) {
@@ -1246,16 +1263,24 @@ void UpcomingTurnDock::refreshNetworkControl(bool accessChangedByUser)
         target = QStringLiteral("unavailable");
     }
 
+    const bool representable = networkChoiceIsRepresentable(access, target);
+
     {
         const QSignalBlocker blocker(network);
         resetNetworkChoices(network, access);
-        selectKey(network, target, friendlyValue(target), true);
+        selectKey(network, target,
+                  representable
+                      ? friendlyValue(target)
+                      : QStringLiteral("Unsupported (%1)").arg(target),
+                  representable);
     }
 
-    const bool editable = networkIsEditable(access);
+    const bool editable = networkIsEditable(access) && representable;
     fieldSurfaces[static_cast<std::size_t>(Field::Network)]->setEnabled(editable);
     QString tooltip;
-    if (access == QStringLiteral("danger-full-access"))
+    if (!representable)
+        tooltip = QStringLiteral("This network-access value cannot be represented or changed by CodexUI and will be left unchanged");
+    else if (access == QStringLiteral("danger-full-access"))
         tooltip = QStringLiteral("Full access includes network access; Codex does not provide a separate network override for this mode");
     else if (access == QStringLiteral("default"))
         tooltip = QStringLiteral("Network access follows the Codex default access policy");
