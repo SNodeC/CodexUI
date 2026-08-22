@@ -617,19 +617,24 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
 
     if (refreshSelectedPresentation) {
         QSet<QString> projectedAgentActivityItemIds;
-        if (const auto* turn = ready ? latestTurn(state, selected) : nullptr) {
-            for (const auto& itemId : turn->orderedItems) {
-                const auto* item = state.item(selected->id, turn->id, itemId);
-                if (!item)
+        if (ready && selected) {
+            for (const auto& turnId : selected->orderedTurns) {
+                const auto* turn = state.turn(selected->id, turnId);
+                if (!turn)
                     continue;
-                const auto semantic = ai::openai::codex::frontend::client::itemSemanticView(*item);
-                if (semantic
-                    && (std::holds_alternative<
-                            ai::openai::codex::frontend::client::SubAgentActivitySemanticView>(semantic->details)
-                        || std::holds_alternative<
-                            ai::openai::codex::frontend::client::CollabAgentToolCallSemanticView>(semantic->details)))
-                    projectedAgentActivityItemIds.insert(
-                        QString::fromStdString(item->id.value));
+                for (const auto& itemId : turn->orderedItems) {
+                    const auto* item = state.item(selected->id, turn->id, itemId);
+                    if (!item)
+                        continue;
+                    const auto semantic = ai::openai::codex::frontend::client::itemSemanticView(*item);
+                    if (semantic
+                        && (std::holds_alternative<
+                                ai::openai::codex::frontend::client::SubAgentActivitySemanticView>(semantic->details)
+                            || std::holds_alternative<
+                                ai::openai::codex::frontend::client::CollabAgentToolCallSemanticView>(semantic->details)))
+                        projectedAgentActivityItemIds.insert(
+                            QString::fromStdString(item->id.value));
+                }
             }
         }
         if (retainedAgentActivityThreadId != selectedThreadId) {

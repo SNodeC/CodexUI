@@ -3349,14 +3349,23 @@ void ConversationWidget::render(const sdk::State& state,
                 else
                 {
                     removedTurnPrefix = renderedTurnIds.indexOf(visibleTurnIds.front());
-                    compatibleTurns = removedTurnPrefix >= 0
-                                      && renderedTurnIds.size() - removedTurnPrefix <= visibleTurnIds.size();
+                    qsizetype visibleTurnPrefix = 0;
+                    if (removedTurnPrefix < 0)
+                    {
+                        removedTurnPrefix = 0;
+                        visibleTurnPrefix = visibleTurnIds.indexOf(
+                            renderedTurnIds.front());
+                    }
+                    compatibleTurns = visibleTurnPrefix >= 0
+                                      && renderedTurnIds.size() - removedTurnPrefix
+                                             <= visibleTurnIds.size() - visibleTurnPrefix;
                     for (qsizetype index = 0;
-                         compatibleTurns && index < renderedTurnIds.size() - removedTurnPrefix;
+                         compatibleTurns
+                         && index < renderedTurnIds.size() - removedTurnPrefix;
                          ++index)
                     {
                         const QString oldId = renderedTurnIds.at(removedTurnPrefix + index);
-                        compatibleTurns = oldId == visibleTurnIds.at(index)
+                        compatibleTurns = oldId == visibleTurnIds.at(visibleTurnPrefix + index)
                                           && renderedTurnWidgets.contains(oldId)
                                           && renderedTurnLabels.contains(oldId)
                                           && renderedTurnItemLayouts.contains(oldId)
@@ -3378,8 +3387,12 @@ void ConversationWidget::render(const sdk::State& state,
                 }
             }
 
-            for (const VisibleTimelineTurn& visibleTurn : visibleTurns)
+            for (qsizetype visibleTurnIndex = 0;
+                 visibleTurnIndex < static_cast<qsizetype>(visibleTurns.size());
+                 ++visibleTurnIndex)
             {
+                const VisibleTimelineTurn& visibleTurn = visibleTurns.at(
+                    static_cast<std::size_t>(visibleTurnIndex));
                 const auto* turn = visibleTurn.turn;
                 const QString turnId = fromUtf8(turn->id.value);
                 const auto windowSlice = std::ranges::find_if(
@@ -3408,7 +3421,8 @@ void ConversationWidget::render(const sdk::State& state,
                         turnLabel,
                         statusLabel,
                         [this, turnId] { emit turnDetailsRequested(turnId); });
-                    timeline->addWidget(turnWidget, 0, Qt::AlignTop);
+                    timeline->insertWidget(
+                        visibleTurnIndex, turnWidget, 0, Qt::AlignTop);
                     renderedTurnWidgets.insert(turnId, turnWidget);
                     renderedTurnLabels.insert(turnId, turnLabel);
                     renderedTurnItemLayouts.insert(turnId, itemLayout);

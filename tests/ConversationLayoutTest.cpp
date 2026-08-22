@@ -1975,12 +1975,23 @@ bool testIncompleteReplacementPreservesRenderedTimeline()
             : 0;
     passed &= expect(
         retainedTail && retainedTail.data() == retainedTailAddress
-            && hasLabel(boundedConversation,
-                        QStringLiteral("bounded appended tail"))
+            && !hasLabel(boundedConversation,
+                         QStringLiteral("bounded appended tail"))
+            && hasLabelContaining(boundedConversation,
+                                  QStringLiteral("History recovery pending"))
             && boundedHost
             && boundedHost->property("recoveryInspectedTimelineItems").toLongLong()
                    <= maximumRecoveryScan,
-        "incomplete replacement recovery must remain bounded even when the complete retained timeline is large");
+        "incomplete replacement recovery must freeze safely within its inspection budget when the retained timeline is large");
+    largePrefix.fullyLoaded = true;
+    boundedConversation.render(
+        makeState({largePrefix}), QStringLiteral("bounded-recovery-prefix"));
+    settleTimeline();
+    passed &= expect(
+        retainedTail && retainedTail.data() == retainedTailAddress
+            && hasLabel(boundedConversation,
+                        QStringLiteral("bounded appended tail")),
+        "authoritative recovery must append new history without replacing retained widgets");
     return passed;
 }
 
@@ -2876,9 +2887,16 @@ bool testInspectorThreadDependencies()
     activity.agentPath = "agent/reviewer";
     activity.agentThreadId = "inspector-agent-child";
     activity.agentKind = "spawn";
+    ThreadFixture parent{
+        "inspector-parent",
+        {{"turn-inspector-parent-agents", {activity}, std::nullopt},
+         {"turn-inspector-parent-latest",
+          {{"inspector-parent-latest-message",
+            frontend::ThreadItemKind::AgentMessage,
+            "A newer turn without agent activity"}},
+          std::nullopt}}};
     const client::State state = makeState(
-        {{"inspector-parent", {{"turn-inspector-parent", {activity}, std::nullopt}}},
-         singleTurn("inspector-agent-child", 1)});
+        {parent, singleTurn("inspector-agent-child", 1)});
 
     codexui::InspectorWidget inspector;
     inspector.render(state,
@@ -2889,7 +2907,7 @@ bool testInspectorThreadDependencies()
                              && inspector.dependsOnThread(
                                  QStringLiteral("inspector-agent-child"))
                              && !inspector.dependsOnThread(QStringLiteral("unrelated")),
-                         "Inspector invalidation must include its selected parent and linked agent thread only");
+                         "Inspector reconstruction must retain earlier-turn agents and their linked thread dependencies");
 
     QPointer<QPushButton> retainedAgentRow;
     for (QPushButton* button : inspector.findChildren<QPushButton*>()) {

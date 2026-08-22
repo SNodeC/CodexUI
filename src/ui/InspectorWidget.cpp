@@ -15,6 +15,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <iterator>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -570,6 +571,62 @@ std::vector<CollaborationPresentation> collaborationPresentations(const sdk::Sta
     return result;
 }
 
+std::vector<AgentPresentation> retainedAgentPresentations(
+    const sdk::State& state,
+    const sdk::ThreadState& thread)
+{
+    std::vector<AgentPresentation> result;
+    for (const auto& turnId : thread.orderedTurns) {
+        const auto* turn = state.turn(thread.id, turnId);
+        if (!turn)
+            continue;
+        for (AgentPresentation projected : agentPresentations(state, thread, *turn)) {
+            const auto existing = std::find_if(
+                result.begin(),
+                result.end(),
+                [&projected](const AgentPresentation& retained) {
+                    if (!projected.agentThreadId.isEmpty())
+                        return retained.agentThreadId == projected.agentThreadId;
+                    return retained.agentThreadId.isEmpty()
+                        && !projected.agentPath.isEmpty()
+                        && retained.agentPath == projected.agentPath;
+                });
+            if (existing == result.end()) {
+                result.push_back(std::move(projected));
+                continue;
+            }
+            existing->itemIds.append(projected.itemIds);
+            if (!projected.kind.isEmpty())
+                existing->kind = std::move(projected.kind);
+            if (!projected.status.isEmpty())
+                existing->status = std::move(projected.status);
+            if (!projected.summary.isEmpty())
+                existing->summary = std::move(projected.summary);
+            if (!projected.duration.isEmpty())
+                existing->duration = std::move(projected.duration);
+        }
+    }
+    return result;
+}
+
+std::vector<CollaborationPresentation> retainedCollaborationPresentations(
+    const sdk::State& state,
+    const sdk::ThreadState& thread)
+{
+    std::vector<CollaborationPresentation> result;
+    for (const auto& turnId : thread.orderedTurns) {
+        const auto* turn = state.turn(thread.id, turnId);
+        if (!turn)
+            continue;
+        auto projected = collaborationPresentations(state, thread, *turn);
+        result.insert(
+            result.end(),
+            std::make_move_iterator(projected.begin()),
+            std::make_move_iterator(projected.end()));
+    }
+    return result;
+}
+
 void addPresentationValue(QCryptographicHash& hash, const QByteArray& value)
 {
     hash.addData(QByteArray::number(value.size()));
@@ -957,10 +1014,8 @@ void InspectorWidget::render(const sdk::State& state,
     // representation flat rather than inferring a parent/child tree.
     std::vector<AgentPresentation> agents;
     std::vector<CollaborationPresentation> collaborations;
-    if (turn) {
-        agents = agentPresentations(state, *thread, *turn);
-        collaborations = collaborationPresentations(state, *thread, *turn);
-    }
+    agents = retainedAgentPresentations(state, *thread);
+    collaborations = retainedCollaborationPresentations(state, *thread);
     QSet<QString> projectedAgentActivityItemIds;
     for (const AgentPresentation& agent : agents) {
         for (const QString& itemId : agent.itemIds)
@@ -1034,7 +1089,7 @@ void InspectorWidget::render(const sdk::State& state,
         clearLayout(agentsContent);
         if (agents.empty() && collaborations.empty()) {
             addEmpty(agentsContent, QStringLiteral("No agent activity"),
-                     turn ? QStringLiteral("No collab or subagent activity is projected for the latest turn.")
+                     turn ? QStringLiteral("No retained collab or subagent activity is projected for this thread.")
                           : QStringLiteral("This thread has no retained turns."));
         } else {
             if (!agents.empty()) {
