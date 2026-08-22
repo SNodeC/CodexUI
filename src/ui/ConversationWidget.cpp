@@ -3022,11 +3022,12 @@ void ConversationWidget::render(const sdk::State& state,
                                          state, threadId, *exactContentChanges);
     if (exactContentApplied && !structuralReconciliation)
         return;
-    // A bounded replacement is not deletion authority. Keep the same-thread
-    // widgets until an incomplete publication can account for every rendered
-    // descendant; requester-local Merge will make that true, while Replace is
-    // necessarily fullyLoaded and exact Absent changes the selection.
-    if (!structuralReconciliation)
+    // A bounded replacement is not deletion authority. This proof also gates
+    // structural item upserts: their scope says that topology may have grown,
+    // not that an incomplete State is authoritative for deleting every item it
+    // omitted. Keep the same-thread widgets until the publication can account
+    // for every rendered descendant; requester-local Merge will make that
+    // true, while Replace is fullyLoaded and exact Absent changes selection.
     {
         const bool renderedTimelineRetained = !renderedTurnIds.isEmpty();
         qsizetype recoveryInspectedItems = 0;

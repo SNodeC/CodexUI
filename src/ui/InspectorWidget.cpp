@@ -38,6 +38,7 @@ struct AgentPresentation
 
 struct CollaborationPresentation
 {
+    QString itemId;
     QString title;
     QString status;
     QString detail;
@@ -550,6 +551,7 @@ std::vector<CollaborationPresentation> collaborationPresentations(const sdk::Sta
         if (!collab)
             continue;
         CollaborationPresentation presentation;
+        presentation.itemId = fromUtf8(item->id.value);
         presentation.title = collab->tool ? humanize(fromUtf8(*collab->tool)) : QStringLiteral("Collaboration activity");
         presentation.status = collab->status ? humanize(fromUtf8(*collab->status)) : itemStatus(*item);
         QStringList detail;
@@ -667,6 +669,7 @@ void InspectorWidget::renderUnavailable(const QString& title, const QString& det
     unavailablePresentationKey = presentationKey;
     inspectedThreadId.clear();
     dependentThreadIds.clear();
+    presentedAgentActivityItemIds.clear();
     selectedAgentItemId.clear();
     planPresentationKey.clear();
     agentsPresentationKey.clear();
@@ -752,6 +755,13 @@ void InspectorWidget::render(const sdk::State& state,
     }
     const auto* thread = state.thread(threadId.toStdString());
     if (!thread) {
+        const auto capacity = state.capacityProvenance();
+        const bool boundedSelectionUnresolved = threadId == inspectedThreadId
+            && ((capacity && capacity->omittedThreads > 0)
+                || (state.threadList().value
+                    && !state.threadList().value->complete));
+        if (boundedSelectionUnresolved)
+            return;
         renderUnavailable(QStringLiteral("Thread unavailable"),
                           QStringLiteral("The selected thread is not retained in the current State."));
         return;
@@ -760,6 +770,7 @@ void InspectorWidget::render(const sdk::State& state,
     if (inspectedThreadId != threadId) {
         inspectedThreadId = threadId;
         dependentThreadIds.clear();
+        presentedAgentActivityItemIds.clear();
         selectedAgentItemId.clear();
         planPresentationKey.clear();
         agentsPresentationKey.clear();
@@ -950,16 +961,34 @@ void InspectorWidget::render(const sdk::State& state,
         agents = agentPresentations(state, *thread, *turn);
         collaborations = collaborationPresentations(state, *thread, *turn);
     }
-    dependentThreadIds.clear();
+    QSet<QString> projectedAgentActivityItemIds;
     for (const AgentPresentation& agent : agents) {
-        if (!agent.agentThreadId.isEmpty())
-            dependentThreadIds.insert(agent.agentThreadId);
+        for (const QString& itemId : agent.itemIds)
+            projectedAgentActivityItemIds.insert(itemId);
     }
-    const auto selected = std::find_if(agents.begin(), agents.end(), [this](const AgentPresentation& agent) {
-        return agent.itemIds.contains(selectedAgentItemId);
-    });
-    if (selected == agents.end())
-        selectedAgentItemId = agents.empty() ? QString{} : agents.front().itemIds.back();
+    for (const CollaborationPresentation& collaboration : collaborations)
+        projectedAgentActivityItemIds.insert(collaboration.itemId);
+    const bool incompleteAgentsRegressed = !thread->fullyLoaded
+        && !presentedAgentActivityItemIds.isEmpty()
+        && std::ranges::any_of(
+            presentedAgentActivityItemIds,
+            [&projectedAgentActivityItemIds](const QString& itemId) {
+                return !projectedAgentActivityItemIds.contains(itemId);
+            });
+
+    bool agentsChanged = false;
+    if (!incompleteAgentsRegressed) {
+        presentedAgentActivityItemIds = projectedAgentActivityItemIds;
+        dependentThreadIds.clear();
+        for (const AgentPresentation& agent : agents) {
+            if (!agent.agentThreadId.isEmpty())
+                dependentThreadIds.insert(agent.agentThreadId);
+        }
+        const auto selected = std::find_if(agents.begin(), agents.end(), [this](const AgentPresentation& agent) {
+            return agent.itemIds.contains(selectedAgentItemId);
+        });
+        if (selected == agents.end())
+            selectedAgentItemId = agents.empty() ? QString{} : agents.front().itemIds.back();
 
     QCryptographicHash agentsHash(QCryptographicHash::Sha256);
     addPresentationValue(agentsHash, turn != nullptr);
@@ -986,6 +1015,7 @@ void InspectorWidget::render(const sdk::State& state,
         }
     }
     for (const auto& collaboration : collaborations) {
+        addPresentationValue(agentsHash, collaboration.itemId);
         addPresentationValue(agentsHash, collaboration.title);
         addPresentationValue(agentsHash, collaboration.status);
         addPresentationValue(agentsHash, collaboration.detail);
@@ -998,7 +1028,7 @@ void InspectorWidget::render(const sdk::State& state,
         }
     }
     const QByteArray nextAgentsKey = agentsHash.result();
-    const bool agentsChanged = nextAgentsKey != agentsPresentationKey;
+    agentsChanged = nextAgentsKey != agentsPresentationKey;
     if (agentsChanged) {
         agentsPresentationKey = nextAgentsKey;
         clearLayout(agentsContent);
@@ -1150,6 +1180,7 @@ void InspectorWidget::render(const sdk::State& state,
             }
             agentsContent->addStretch();
         }
+    }
     }
 
     // Changes: only canonical projected metadata is shown. The installed view

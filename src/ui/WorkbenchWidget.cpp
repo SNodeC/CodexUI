@@ -476,6 +476,8 @@ void WorkbenchWidget::refreshLifecycle()
     if (frontendSession.lifecycle() != Lifecycle::Ready) {
         threadContextStatus->setText(QStringLiteral("No thread context"));
         threadContextStatus->setToolTip({});
+        retainedAgentActivityThreadId.clear();
+        retainedAgentActivityItemIds.clear();
         agentActivityStatus->setText(QStringLiteral("No agent activity"));
         inspector->render(frontendSession.state(), {}, false, frontendSession.statusText());
     }
@@ -593,7 +595,9 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
     const bool selectedMissingFromBoundedState = !selected
                                                   && !selectedThreadId.isEmpty()
                                                   && !awaitingSelectedThread
-                                                  && omittedThreads > 0;
+                                                  && (omittedThreads > 0
+                                                      || (state.threadList().value
+                                                          && !state.threadList().value->complete));
     if (refreshSelectedPresentation && !requiresStructuralReconciliation) {
         const QString context = ready && selected && selected->cwd
                                     ? QString::fromStdString(selected->cwd->value)
@@ -612,7 +616,7 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
     }
 
     if (refreshSelectedPresentation) {
-        std::size_t agentActivities = 0;
+        QSet<QString> projectedAgentActivityItemIds;
         if (const auto* turn = ready ? latestTurn(state, selected) : nullptr) {
             for (const auto& itemId : turn->orderedItems) {
                 const auto* item = state.item(selected->id, turn->id, itemId);
@@ -624,9 +628,23 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
                             ai::openai::codex::frontend::client::SubAgentActivitySemanticView>(semantic->details)
                         || std::holds_alternative<
                             ai::openai::codex::frontend::client::CollabAgentToolCallSemanticView>(semantic->details)))
-                    ++agentActivities;
+                    projectedAgentActivityItemIds.insert(
+                        QString::fromStdString(item->id.value));
             }
         }
+        if (retainedAgentActivityThreadId != selectedThreadId) {
+            retainedAgentActivityThreadId = selectedThreadId;
+            retainedAgentActivityItemIds.clear();
+        }
+        if (selected) {
+            if (selected->fullyLoaded)
+                retainedAgentActivityItemIds = projectedAgentActivityItemIds;
+            else
+                retainedAgentActivityItemIds.unite(projectedAgentActivityItemIds);
+        } else if (!selectedMissingFromBoundedState) {
+            retainedAgentActivityItemIds.clear();
+        }
+        const qsizetype agentActivities = retainedAgentActivityItemIds.size();
         agentActivityStatus->setText(agentActivities == 0
                                          ? QStringLiteral("No agent activity")
                                          : QStringLiteral("%1 agent activit%2")

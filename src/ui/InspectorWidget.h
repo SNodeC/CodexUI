@@ -53,6 +53,10 @@ private:
     QVBoxLayout* infoContent = nullptr;
     QString inspectedThreadId;
     QSet<QString> dependentThreadIds;
+    // An incomplete latest-turn projection may omit previously rendered
+    // activities. Retain their identities until a complete projection has
+    // authority to remove them.
+    QSet<QString> presentedAgentActivityItemIds;
     QString selectedAgentItemId;
     QByteArray unavailablePresentationKey;
     QByteArray planPresentationKey;

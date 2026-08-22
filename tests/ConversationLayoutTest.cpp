@@ -1880,12 +1880,22 @@ bool testIncompleteReplacementPreservesRenderedTimeline()
     ThreadFixture completeActivities{
         "grouped-activity-retention",
         {{"grouped-activity-turn",
-          {{"grouped-activity-first",
-            frontend::ThreadItemKind::Reasoning,
-            "first retained activity"},
+           {{"grouped-activity-first",
+            frontend::ThreadItemKind::CommandExecution,
+            "first retained command output",
+            "completed",
+            false,
+            false,
+            false,
+            "printf first"},
            {"grouped-activity-second",
-            frontend::ThreadItemKind::Reasoning,
-            "second retained activity"}}}}};
+            frontend::ThreadItemKind::CommandExecution,
+            "second retained command output",
+            "completed",
+            false,
+            false,
+            false,
+            "printf second"}}}}};
     codexui::ConversationWidget groupedConversation;
     groupedConversation.resize(900, 700);
     groupedConversation.show();
@@ -1915,7 +1925,10 @@ bool testIncompleteReplacementPreservesRenderedTimeline()
     partialActivities.turns.front().messages.pop_back();
     groupedConversation.render(
         makeState({partialActivities}),
-        QStringLiteral("grouped-activity-retention"));
+        QStringLiteral("grouped-activity-retention"),
+        false,
+        nullptr,
+        true);
     settleTimeline();
     passed &= expect(
         activitySegment && activitySegment.data() == activitySegmentAddress
@@ -1923,7 +1936,7 @@ bool testIncompleteReplacementPreservesRenderedTimeline()
             && secondActivityRow.data() == secondActivityRowAddress
             && hasLabelContaining(groupedConversation,
                                   QStringLiteral("History recovery pending")),
-        "an incomplete activity group must preserve every rendered descendant, not only the row that owns its segment identity");
+        "a structural command upsert from an incomplete projection must preserve every rendered shell row, not only the row that owns its segment identity");
 
     ThreadFixture largePrefix{"bounded-recovery-prefix", {{"bounded-recovery-turn", {}}}};
     constexpr int largePrefixItems = 2'048;
@@ -2877,15 +2890,45 @@ bool testInspectorThreadDependencies()
                              && !inspector.dependsOnThread(QStringLiteral("unrelated")),
                          "Inspector invalidation must include its selected parent and linked agent thread only");
 
+    QPointer<QPushButton> retainedAgentRow;
+    for (QPushButton* button : inspector.findChildren<QPushButton*>()) {
+        if (button->toolTip() == QStringLiteral("agent/reviewer")) {
+            retainedAgentRow = button;
+            break;
+        }
+    }
+    ThreadFixture partialParent = singleTurn("inspector-parent", 1);
+    partialParent.fullyLoaded = false;
+    const client::State partialWithoutActivity = makeState(
+        {partialParent, singleTurn("inspector-agent-child", 1)});
+    inspector.render(partialWithoutActivity,
+                     QStringLiteral("inspector-parent"),
+                     true,
+                     QStringLiteral("State synced"));
+    settleEvents();
+    const auto partialLabels = inspector.findChildren<QLabel*>();
+    passed &= expect(retainedAgentRow
+                         && inspector.dependsOnThread(
+                             QStringLiteral("inspector-agent-child"))
+                         && std::ranges::none_of(
+                             partialLabels,
+                             [](const QLabel* label) {
+                                 return label->text()
+                                     == QStringLiteral("No agent activity");
+                             }),
+                     "an incomplete latest-turn projection must retain the Agents row and its linked-thread dependency");
+
     const client::State withoutActivity = makeState(
         {singleTurn("inspector-parent", 1), singleTurn("inspector-agent-child", 1)});
     inspector.render(withoutActivity,
                      QStringLiteral("inspector-parent"),
                      true,
                      QStringLiteral("State synced"));
+    settleEvents();
     passed &= expect(inspector.dependsOnThread(QStringLiteral("inspector-parent"))
                          && !inspector.dependsOnThread(
-                             QStringLiteral("inspector-agent-child")),
+                             QStringLiteral("inspector-agent-child"))
+                         && !retainedAgentRow,
                      "removing subagent activity must discard its stale linked-thread dependency");
     return passed;
 }
