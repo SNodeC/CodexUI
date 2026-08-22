@@ -567,6 +567,46 @@ bool testScopedItemPresentationChanges()
         ai::openai::codex::typed::TurnId{"target-turn"}});
     const auto scoped = codexui::detail::stateUpdateScope(scopedUpdate);
 
+    codexui::FrontendSessionWorker resolvedParentSession;
+    std::vector<sdk::OutboundMessage> resolvedParentOutbound;
+    frontend::Json resolvedParentThreads = frontend::Json::array({
+        frontend::Json{
+            {"id", "resolved-parent-thread"},
+            {"fullyLoaded", true},
+            {"turns",
+             frontend::Json::array({frontend::Json{
+                 {"id", "resolved-parent-turn"},
+                 {"threadId", "resolved-parent-thread"},
+                 {"status", "completed"},
+                 {"active", false},
+                 {"terminal", true},
+                 {"items", frontend::Json::array()},
+                 {"extensions", frontend::Json::object()},
+             }})},
+            {"extensions", frontend::Json::object()},
+        },
+    });
+    const bool resolvedParentReady =
+        codexui::FrontendSessionWorkerTestAccess::
+            synchronizeWithCapturedTransport(
+                resolvedParentSession,
+                resolvedParentOutbound,
+                std::move(resolvedParentThreads));
+    sdk::StateUpdate resolvedParentItemUpdate;
+    resolvedParentItemUpdate.state = resolvedParentSession.state();
+    resolvedParentItemUpdate.changes.push_back(sdk::ItemUpsertedChange{
+        ai::openai::codex::typed::ItemId{"resolved-parent-item"},
+        std::nullopt,
+        ai::openai::codex::typed::TurnId{"resolved-parent-turn"}});
+    const auto resolvedParentItem =
+        codexui::detail::stateUpdateScope(resolvedParentItemUpdate);
+    sdk::StateUpdate resolvedTurnUpdate;
+    resolvedTurnUpdate.state = resolvedParentSession.state();
+    resolvedTurnUpdate.changes.push_back(sdk::TurnUpsertedChange{
+        ai::openai::codex::typed::TurnId{"resolved-parent-turn"}});
+    const auto resolvedTurn =
+        codexui::detail::stateUpdateScope(resolvedTurnUpdate);
+
     sdk::StateUpdate streamedUpdate;
     streamedUpdate.changes.push_back(
         sdk::ItemContentReplacedChange{ai::openai::codex::typed::ItemId{"streamed-item"},
@@ -644,6 +684,21 @@ bool testScopedItemPresentationChanges()
         sdk::ThreadUpsertedChange{ai::openai::codex::typed::ThreadId{"target-thread"}});
     const auto threadScoped = codexui::detail::stateUpdateScope(threadUpdate);
 
+    sdk::StateUpdate structuralThenFullUpdate = scopedUpdate;
+    structuralThenFullUpdate.changes.push_back(
+        sdk::ThreadUpsertedChange{
+            ai::openai::codex::typed::ThreadId{"target-thread"}});
+    const auto structuralThenFull =
+        codexui::detail::stateUpdateScope(structuralThenFullUpdate);
+
+    sdk::StateUpdate fullThenStructuralUpdate = threadUpdate;
+    fullThenStructuralUpdate.changes.push_back(sdk::ItemUpsertedChange{
+        ai::openai::codex::typed::ItemId{"duplicate-item"},
+        ai::openai::codex::typed::ThreadId{"target-thread"},
+        ai::openai::codex::typed::TurnId{"target-turn"}});
+    const auto fullThenStructural =
+        codexui::detail::stateUpdateScope(fullThenStructuralUpdate);
+
     sdk::StateUpdate removedThreadUpdate;
     removedThreadUpdate.changes.push_back(
         sdk::ThreadRemovedChange{ai::openai::codex::typed::ThreadId{"removed-thread"}});
@@ -668,6 +723,7 @@ bool testScopedItemPresentationChanges()
 
     bool passed = expect(unresolvedTurn.affectedThreadIds.empty()
                              && unresolvedTurn.fullyAffectedThreadIds.empty()
+                             && unresolvedTurn.structurallyAffectedThreadIds.empty()
                              && unresolvedTurn.affectedInspectorThreadIds.empty()
                              && unresolvedTurn.allThreadsAffected
                              && unresolvedTurn.allInspectorsAffected
@@ -676,15 +732,40 @@ bool testScopedItemPresentationChanges()
                              && unresolvedTurn.hasPresentationChange,
                          "a turn upsert without a unique parent lookup must conservatively refresh all threads");
     passed &= expect(scoped.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
-                             && scoped.fullyAffectedThreadIds
+                             && scoped.fullyAffectedThreadIds.empty()
+                             && scoped.structurallyAffectedThreadIds
                                     == QStringList{QStringLiteral("target-thread")}
                              && scoped.affectedInspectorThreadIds
                                     == QStringList{QStringLiteral("target-thread")}
                              && !scoped.allThreadsAffected && !scoped.allInspectorsAffected
                              && !scoped.sidebarAffected && scoped.hasPresentationChange,
-                         "a scoped item upsert must refresh its canonical conversation and Inspector");
+                         "a scoped item upsert must structurally reconcile its canonical conversation and refresh its Inspector");
+    passed &= expect(
+        resolvedParentReady
+            && resolvedParentItem.affectedThreadIds
+                   == QStringList{QStringLiteral("resolved-parent-thread")}
+            && resolvedParentItem.fullyAffectedThreadIds.empty()
+            && resolvedParentItem.structurallyAffectedThreadIds
+                   == QStringList{QStringLiteral("resolved-parent-thread")}
+            && resolvedParentItem.affectedInspectorThreadIds
+                   == QStringList{QStringLiteral("resolved-parent-thread")}
+            && !resolvedParentItem.allThreadsAffected
+            && !resolvedParentItem.allInspectorsAffected,
+        "an item upsert resolved through its retained turn must use the structural conversation scope");
+    passed &= expect(
+        resolvedTurn.affectedThreadIds
+                == QStringList{QStringLiteral("resolved-parent-thread")}
+            && resolvedTurn.fullyAffectedThreadIds
+                   == QStringList{QStringLiteral("resolved-parent-thread")}
+            && resolvedTurn.structurallyAffectedThreadIds.empty()
+            && resolvedTurn.affectedInspectorThreadIds
+                   == QStringList{QStringLiteral("resolved-parent-thread")}
+            && resolvedTurn.affectedSidebarThreadIds
+                   == QStringList{QStringLiteral("resolved-parent-thread")},
+        "a resolved turn upsert must remain deletion-capable while legacy turn.updated can replace its items");
     passed &= expect(streamed.affectedThreadIds == QStringList{QStringLiteral("target-thread")}
                          && streamed.fullyAffectedThreadIds.empty()
+                         && streamed.structurallyAffectedThreadIds.empty()
                          && streamed.affectedInspectorThreadIds.empty()
                          && streamed.affectedItemContents
                                 == std::vector<codexui::detail::StateUpdateScope::ItemContentIdentity>{
@@ -698,6 +779,7 @@ bool testScopedItemPresentationChanges()
                              == QStringList{QStringLiteral("target-thread")}
                          && partiallyScoped.fullyAffectedThreadIds
                                 == QStringList{QStringLiteral("target-thread")}
+                         && partiallyScoped.structurallyAffectedThreadIds.empty()
                          && partiallyScoped.affectedItemContents.empty()
                          && !partiallyScoped.allThreadsAffected,
                      "partially scoped item content must require bounded full thread reconciliation");
@@ -722,18 +804,23 @@ bool testScopedItemPresentationChanges()
             && oversizedAppend.coalescedContentDeltaBytes == 0,
         "an oversized append hint must degrade to an authoritative replacement without entering the GUI mailbox");
     passed &= expect(mixed.fullyAffectedThreadIds
-                             == QStringList{QStringLiteral("target-thread")}
+                             .empty()
+                         && mixed.structurallyAffectedThreadIds
+                                == QStringList{QStringLiteral("target-thread")}
                          && mixed.affectedItemContents.size() == 1
                          && !mixed.allThreadsAffected,
-                     "a structural change mixed with exact content must require full thread reconciliation");
+                     "a structural item upsert mixed with exact content must preserve both presentation hints");
     passed &= expect(unscoped.affectedThreadIds.empty() && unscoped.allThreadsAffected
                          && unscoped.fullyAffectedThreadIds.empty()
+                         && unscoped.structurallyAffectedThreadIds.empty()
                          && unscoped.affectedItemContents.empty()
                          && unscoped.affectedInspectorThreadIds.empty()
                          && unscoped.allInspectorsAffected && !unscoped.sidebarAffected
                          && unscoped.hasPresentationChange,
                      "an unscoped item change must conservatively refresh all thread-bound presentations");
-    passed &= expect(replacement.allThreadsAffected && replacement.allInspectorsAffected
+    passed &= expect(replacement.allThreadsAffected
+                         && replacement.structurallyAffectedThreadIds.empty()
+                         && replacement.allInspectorsAffected
                          && replacement.allSidebarThreadsAffected
                          && replacement.sidebarAffected && replacement.hasPresentationChange,
                      "a State replacement must conservatively refresh every presentation");
@@ -741,6 +828,7 @@ bool testScopedItemPresentationChanges()
                              == QStringList{QStringLiteral("target-thread")}
                          && threadScoped.fullyAffectedThreadIds
                                 == QStringList{QStringLiteral("target-thread")}
+                         && threadScoped.structurallyAffectedThreadIds.empty()
                          && threadScoped.affectedInspectorThreadIds
                                 == QStringList{QStringLiteral("target-thread")}
                          && threadScoped.affectedSidebarThreadIds
@@ -751,10 +839,19 @@ bool testScopedItemPresentationChanges()
                          && threadScoped.sidebarAffected,
                      "a thread upsert must target only its conversation, Inspector dependencies, and Sidebar row");
     passed &= expect(
+        structuralThenFull.fullyAffectedThreadIds
+                == QStringList{QStringLiteral("target-thread")}
+            && structuralThenFull.structurallyAffectedThreadIds.empty()
+            && fullThenStructural.fullyAffectedThreadIds
+                   == QStringList{QStringLiteral("target-thread")}
+            && fullThenStructural.structurallyAffectedThreadIds.empty(),
+        "deletion-capable mapper scope must dominate structural scope in either change order");
+    passed &= expect(
         removedThreadScoped.affectedThreadIds
                 == QStringList{QStringLiteral("removed-thread")}
             && removedThreadScoped.fullyAffectedThreadIds
                    == QStringList{QStringLiteral("removed-thread")}
+            && removedThreadScoped.structurallyAffectedThreadIds.empty()
             && removedThreadScoped.removedThreadIds
                    == QStringList{QStringLiteral("removed-thread")}
             && removedThreadScoped.affectedSidebarThreadIds
@@ -771,6 +868,7 @@ bool testScopedItemPresentationChanges()
                          && boundedIdentities.allSidebarThreadsAffected
                          && boundedIdentities.affectedThreadIds.empty()
                          && boundedIdentities.fullyAffectedThreadIds.empty()
+                         && boundedIdentities.structurallyAffectedThreadIds.empty()
                          && boundedIdentities.affectedInspectorThreadIds.empty()
                          && boundedIdentities.affectedSidebarThreadIds.empty(),
                      "an oversized identity batch must stop at the presentation bound and degrade to full refreshes");
@@ -2504,6 +2602,133 @@ bool testFacadeGenerationGating()
     return passed;
 }
 
+bool testFacadeStructuralScopeMerge()
+{
+    codexui::FrontendSession session;
+    std::optional<codexui::detail::StateUpdateScope> delivered;
+    QObject::connect(
+        &session,
+        &codexui::FrontendSession::stateChanged,
+        [&delivered](const auto& scope) { delivered = scope; });
+
+    const auto structuralScope = [](QString threadId) {
+        codexui::detail::StateUpdateScope scope;
+        scope.affectedThreadIds.push_back(threadId);
+        scope.structurallyAffectedThreadIds.push_back(
+            std::move(threadId));
+        scope.hasPresentationChange = true;
+        return scope;
+    };
+    const auto fullScope = [](QString threadId) {
+        codexui::detail::StateUpdateScope scope;
+        scope.affectedThreadIds.push_back(threadId);
+        scope.fullyAffectedThreadIds.push_back(std::move(threadId));
+        scope.hasPresentationChange = true;
+        return scope;
+    };
+    const auto exactScope = [](QString threadId, QString itemId) {
+        codexui::detail::StateUpdateScope scope;
+        scope.affectedThreadIds.push_back(threadId);
+        scope.affectedItemContents.push_back({
+            threadId,
+            QStringLiteral("turn"),
+            std::move(itemId),
+            sdk::ItemContentChannel::AgentText,
+            codexui::detail::StateUpdateScope::ItemContentAppend{
+                4,
+                0,
+                QByteArray(" delta"),
+            },
+        });
+        scope.coalescedContentDeltaBytes = 6;
+        scope.hasPresentationChange = true;
+        return scope;
+    };
+    const auto preservedExact = [](const auto& scope, QStringView itemId) {
+        return scope.affectedItemContents.size() == 1
+            && scope.affectedItemContents.front().itemId == itemId
+            && scope.affectedItemContents.front().append
+            && scope.affectedItemContents.front().append->deltaUtf8
+                   == QByteArray(" delta")
+            && scope.coalescedContentDeltaBytes == 6;
+    };
+
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session,
+        1,
+        exactScope(QStringLiteral("exact-first"),
+                   QStringLiteral("exact-first-item")));
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session, 1, structuralScope(QStringLiteral("exact-first")));
+    QCoreApplication::processEvents();
+    bool passed = expect(
+        delivered
+            && delivered->structurallyAffectedThreadIds
+                   == QStringList{QStringLiteral("exact-first")}
+            && delivered->fullyAffectedThreadIds.empty()
+            && preservedExact(*delivered, QStringView{u"exact-first-item"}),
+        "exact append metadata followed by structural scope must survive mailbox coalescing");
+
+    delivered.reset();
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session, 1, structuralScope(QStringLiteral("structural-first")));
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session,
+        1,
+        exactScope(QStringLiteral("structural-first"),
+                   QStringLiteral("structural-first-item")));
+    QCoreApplication::processEvents();
+    passed &= expect(
+        delivered
+            && delivered->structurallyAffectedThreadIds
+                   == QStringList{QStringLiteral("structural-first")}
+            && delivered->fullyAffectedThreadIds.empty()
+            && preservedExact(*delivered,
+                              QStringView{u"structural-first-item"}),
+        "structural scope followed by exact append metadata must survive mailbox coalescing");
+
+    delivered.reset();
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session,
+        1,
+        exactScope(QStringLiteral("full-later"),
+                   QStringLiteral("full-later-item")));
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session, 1, structuralScope(QStringLiteral("full-later")));
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session, 1, fullScope(QStringLiteral("full-later")));
+    QCoreApplication::processEvents();
+    passed &= expect(
+        delivered
+            && delivered->fullyAffectedThreadIds
+                   == QStringList{QStringLiteral("full-later")}
+            && delivered->structurallyAffectedThreadIds.empty()
+            && preservedExact(*delivered, QStringView{u"full-later-item"}),
+        "a later deletion-capable scope must dominate structural scope without discarding exact metadata");
+
+    delivered.reset();
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session, 1, fullScope(QStringLiteral("full-first")));
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session, 1, structuralScope(QStringLiteral("full-first")));
+    codexui::FrontendSessionFacadeTestAccess::enqueueState(
+        session,
+        1,
+        exactScope(QStringLiteral("full-first"),
+                   QStringLiteral("full-first-item")));
+    QCoreApplication::processEvents();
+    passed &= expect(
+        delivered
+            && delivered->fullyAffectedThreadIds
+                   == QStringList{QStringLiteral("full-first")}
+            && delivered->structurallyAffectedThreadIds.empty()
+            && preservedExact(*delivered, QStringView{u"full-first-item"}),
+        "an existing deletion-capable scope must dominate a later structural scope without discarding exact metadata");
+
+    session.shutdown();
+    return passed;
+}
+
 bool testFacadeScopeBound()
 {
     codexui::FrontendSession session;
@@ -2540,10 +2765,30 @@ bool testFacadeScopeBound()
     bool passed = expect(
         delivered && delivered->allThreadsAffected
             && delivered->affectedThreadIds.empty()
+            && delivered->structurallyAffectedThreadIds.empty()
             && delivered->affectedItemContents.empty()
             && delivered->removedThreadIds
                    == QStringList{QStringLiteral("removed-thread")},
         "a blocked GUI must degrade an unbounded exact-scope burst to one bounded full refresh while retaining exact removals");
+
+    delivered.reset();
+    for (int index = 0;
+         index <= codexui::detail::maximumCoalescedPresentationIdentities;
+         ++index) {
+        codexui::detail::StateUpdateScope scope;
+        scope.affectedThreadIds.push_back(QStringLiteral("thread"));
+        scope.structurallyAffectedThreadIds.push_back(
+            QStringLiteral("structural-%1").arg(index));
+        scope.hasPresentationChange = true;
+        codexui::FrontendSessionFacadeTestAccess::enqueueState(
+            session, 1, std::move(scope));
+    }
+    QCoreApplication::processEvents();
+    passed &= expect(
+        delivered && delivered->allThreadsAffected
+            && delivered->affectedThreadIds.empty()
+            && delivered->structurallyAffectedThreadIds.empty(),
+        "a blocked GUI must bound structural thread identities and let all-thread dominance clear them");
 
     delivered.reset();
     {
@@ -2629,7 +2874,9 @@ int main(int argc, char* argv[])
                && testThreadedFacadeMailbox()
                && testFacadeReplaceableControlCoalescing()
                && testImmediateFacadeShutdown()
-               && testFacadeGenerationGating() && testFacadeScopeBound()
+               && testFacadeGenerationGating()
+               && testFacadeStructuralScopeMerge()
+               && testFacadeScopeBound()
            ? 0
            : 1;
 }

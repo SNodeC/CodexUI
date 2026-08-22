@@ -5,6 +5,7 @@
 
 #include "ui/InteractiveRequestDialog.h"
 #include "ui/ConversationWidget.h"
+#include "ui/PresentationRefreshAccumulator.h"
 #include "ui/ThreadSetupDialog.h"
 #include "ui/UpcomingTurnDock.h"
 
@@ -124,7 +125,8 @@ private:
                       bool refreshInspector = true,
                       bool refreshSidebar = true,
                       const ConversationContentUpdates* exactContentChanges = nullptr,
-                      const QStringList* sidebarThreadChanges = nullptr);
+                      const QStringList* sidebarThreadChanges = nullptr,
+                      bool requiresStructuralReconciliation = false);
     void refreshControls();
     void refreshControllerStatus();
     [[nodiscard]] bool writeOperationBusy() const noexcept;
@@ -250,10 +252,7 @@ private:
     bool requestControllerAcquireInFlight = false;
     bool requestResponseInFlight = false;
     bool stateRefreshPending = false;
-    bool selectedPresentationRefreshPending = false;
-    bool selectedPresentationFullRefreshPending = false;
-    ConversationContentUpdates selectedContentRefreshPending;
-    std::uint64_t selectedContentRefreshPendingBytes = 0;
+    detail::SelectedPresentationRefreshAccumulator selectedPresentationRefresh;
     bool inspectorRefreshPending = false;
     bool sidebarRefreshPending = false;
     bool sidebarFullRefreshPending = false;
