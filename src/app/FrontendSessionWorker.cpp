@@ -178,8 +178,7 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                     scope.allSidebarThreadsAffected = true;
                     scope.sidebarAffected = true;
                 }
-                else if constexpr (std::is_same_v<Change, sdk::ThreadUpsertedChange>
-                                   || std::is_same_v<Change, sdk::ThreadRemovedChange>)
+                else if constexpr (std::is_same_v<Change, sdk::ThreadUpsertedChange>)
                 {
                     addFullyAffectedThread(value.threadId.value);
                     addSidebarThread(value.threadId.value);
@@ -187,6 +186,17 @@ StateUpdateScope stateUpdateScope(const sdk::StateUpdate& update)
                     // a linked subagent thread even when its conversation is
                     // not selected. Workbench resolves this identity against
                     // its retained Inspector dependency set.
+                    addInspectorThread(value.threadId.value);
+                }
+                else if constexpr (std::is_same_v<Change, sdk::ThreadRemovedChange>)
+                {
+                    addFullyAffectedThread(value.threadId.value);
+                    if (!addUnique(scope.removedThreadIds,
+                                   value.threadId.value)) {
+                        scope.removedThreadIdsOverflowed = true;
+                        scope.allThreadsAffected = true;
+                    }
+                    addSidebarThread(value.threadId.value);
                     addInspectorThread(value.threadId.value);
                 }
                 else if constexpr (std::is_same_v<Change, sdk::TurnUpsertedChange>)
@@ -322,6 +332,12 @@ constexpr std::size_t maximumArchivedThreadListPages = 64;
 constexpr std::uint32_t modelListPageSize = 100;
 constexpr std::size_t maximumModelListPages = 64;
 
+bool synchronizedStateOmitsThreads(const sdk::State& state)
+{
+    const auto capacity = state.capacityProvenance();
+    return capacity && capacity->omittedThreads > 0;
+}
+
 QString operationError(const std::optional<sdk::Error>& error, const QString& fallback)
 {
     if (error && !error->message.empty())
@@ -354,6 +370,12 @@ FrontendSessionWorker::FrontendSessionWorker(QObject* parent)
     : QObject(parent)
 {
     sdk::ClientOptions options;
+    // CodexUI consumes includeTurns thread/read results through AISuite's
+    // authoritative State publication. This is an observed mechanism, not a
+    // representation request: requiring it validates the server's Welcome
+    // while leaving Hello's representation selection unchanged.
+    options.requiredCapabilities.push_back(
+        frontend::FrontendCapability::ThreadReadStateEffects);
     maximumFrameBytes = options.maximumInboundMessageBytes;
     options.credentialProvider = [] {
         return sdk::AuthenticationContext{
@@ -367,15 +389,7 @@ FrontendSessionWorker::FrontendSessionWorker(QObject* parent)
         handleConnectionStateChange(change);
     };
     callbacks.onStateUpdated = [this](const sdk::StateUpdate& update) {
-        currentState = update.state;
-        for (const auto& change : update.changes) {
-            if (const auto* removed = std::get_if<sdk::ThreadRemovedChange>(&change))
-                requestedThreadReads.erase(removed->threadId.value);
-        }
-        reconcileRequestedThreadReads();
-        const detail::StateUpdateScope scope = detail::stateUpdateScope(update);
-        if (scope.hasPresentationChange)
-            emit stateChanged(scope);
+        handleStateUpdate(update);
     };
     callbacks.onSynchronized = [this](const sdk::SynchronizationInfo& info) {
         reconnectDelayMs = initialReconnectDelayMs;
@@ -383,7 +397,7 @@ FrontendSessionWorker::FrontendSessionWorker(QObject* parent)
         synchronizedCurrentConnection = true;
         automaticReconnectEnabled = true;
         currentState = info.state;
-        reconcileRequestedThreadReads();
+        reconcileIncompleteThreadReadAttempts();
         const bool clearReadyDiagnostic = currentLifecycle == Lifecycle::Ready
                                           && detail.isEmpty()
                                           && !diagnosticDetail.isEmpty();
@@ -452,7 +466,8 @@ void FrontendSessionWorker::reconnectToBackend()
     connection = Connection{};
     clearInbound();
     receiveContinuationScheduled = false;
-    requestedThreadReads.clear();
+    threadReadsInFlight.clear();
+    attemptedIncompleteThreadReads.clear();
     if (socket.state() != QLocalSocket::UnconnectedState) {
         socket.abort();
         resetReconnectPolicy();
@@ -577,29 +592,79 @@ bool FrontendSessionWorker::transportAffinityIsCurrentThread() const noexcept
            && outboundDrainTimer.thread() == current;
 }
 
-void FrontendSessionWorker::loadThread(const QString& threadId)
+void FrontendSessionWorker::loadThread(const QString& threadId,
+                                       bool retryIncomplete)
 {
     if (currentLifecycle != Lifecycle::Ready || threadId.isEmpty())
         return;
     const std::string id = threadId.toStdString();
     const auto* thread = currentState.thread(id);
-    if (!thread || thread->fullyLoaded || requestedThreadReads.contains(id))
+    const bool missingFromBoundedState = !thread && synchronizedStateOmitsThreads(currentState);
+    if (retryIncomplete)
+        attemptedIncompleteThreadReads.erase(id);
+    const auto attempted = attemptedIncompleteThreadReads.find(id);
+    const bool attemptedCurrentRecoveryEpoch =
+        attempted != attemptedIncompleteThreadReads.end()
+        && attempted->second == incompleteReadRecoveryEpoch;
+    if ((!thread && !missingFromBoundedState) || (thread && thread->fullyLoaded)
+        || threadReadsInFlight.contains(id)
+        || attemptedCurrentRecoveryEpoch)
+        return;
+    if (threadReadsInFlight.size()
+        >= static_cast<std::size_t>(
+            detail::maximumCoalescedPresentationIdentities))
         return;
 
-    requestedThreadReads.insert(id);
+    threadReadsInFlight.insert(id);
     sdk::Submission submission = client->threads().read(
         {ai::openai::codex::typed::ThreadId{id}, true},
         [this, id](const sdk::OperationResult<sdk::ThreadReadResult>& result) {
-            // A successful operation acknowledgement can precede the State
-            // projection. Keep suppressing duplicate reads until that thread is
-            // fully loaded (or a failure/removal/disconnect makes retry valid).
-            if (!result)
-                requestedThreadReads.erase(id);
-            else
-                reconcileRequestedThreadReads();
+            threadReadsInFlight.erase(id);
+            reconcileIncompleteThreadReadAttempts();
+            const auto* resolved = currentState.thread(id);
+            const bool remainsIncomplete =
+                (!resolved && synchronizedStateOmitsThreads(currentState))
+                || (resolved && !resolved->fullyLoaded);
+            // CapacityExceeded is a negotiated result, not proof that another
+            // immediate full read can succeed. It consumes this replacement
+            // epoch just like a successful read whose projection remains
+            // incomplete; explicit user/reconnect recovery can still retry.
+            if (!result) {
+                if (remainsIncomplete)
+                    rememberIncompleteThreadReadAttempt(id);
+                return;
+            }
+            const bool authoritativelyAbsent = result.value
+                && result.value->stateEffect
+                && result.value->stateEffect->authority
+                       == frontend::ThreadReadStateEffectAuthority::Absent;
+            if (authoritativelyAbsent)
+                return;
+            if (remainsIncomplete)
+                rememberIncompleteThreadReadAttempt(id);
         });
     if (!submission)
-        requestedThreadReads.erase(id);
+        threadReadsInFlight.erase(id);
+}
+
+void FrontendSessionWorker::handleStateUpdate(const sdk::StateUpdate& update)
+{
+    currentState = update.state;
+    const bool stateReplaced = std::ranges::any_of(
+        update.changes,
+        [](const sdk::Change& change) {
+            return std::holds_alternative<sdk::StateReplacedChange>(change);
+        });
+    if (stateReplaced)
+        ++incompleteReadRecoveryEpoch;
+    for (const auto& change : update.changes) {
+        if (const auto* removed = std::get_if<sdk::ThreadRemovedChange>(&change))
+            attemptedIncompleteThreadReads.erase(removed->threadId.value);
+    }
+    reconcileIncompleteThreadReadAttempts();
+    const detail::StateUpdateScope scope = detail::stateUpdateScope(update);
+    if (scope.hasPresentationChange)
+        emit stateChanged(scope);
 }
 
 std::optional<QString> FrontendSessionWorker::acquireController(OperationCompletion completion)
@@ -1122,6 +1187,21 @@ void FrontendSessionWorker::compactInbound() noexcept
     inboundOffset = 0;
 }
 
+void FrontendSessionWorker::rememberIncompleteThreadReadAttempt(
+    const std::string& threadId)
+{
+    // The UI has one active selection. Retain the newest bounded recovery
+    // identity if pathological rapid selection has left more unresolved
+    // omitted IDs than presentation can track.
+    if (!attemptedIncompleteThreadReads.contains(threadId)
+        && attemptedIncompleteThreadReads.size()
+               >= static_cast<std::size_t>(
+                   detail::maximumCoalescedPresentationIdentities))
+        attemptedIncompleteThreadReads.clear();
+    attemptedIncompleteThreadReads.insert_or_assign(
+        threadId, incompleteReadRecoveryEpoch);
+}
+
 void FrontendSessionWorker::scheduleSocketRead()
 {
     if (receiveContinuationScheduled || localShutdown)
@@ -1139,18 +1219,20 @@ void FrontendSessionWorker::scheduleSocketRead()
                        });
 }
 
-void FrontendSessionWorker::reconcileRequestedThreadReads()
+void FrontendSessionWorker::reconcileIncompleteThreadReadAttempts()
 {
     const bool threadListComplete = currentState.threadList().value
                                     && currentState.threadList().value->complete;
-    for (auto iterator = requestedThreadReads.begin(); iterator != requestedThreadReads.end();)
-    {
-        const auto* thread = currentState.thread(*iterator);
-        if ((thread && thread->fullyLoaded) || (!thread && threadListComplete))
-            iterator = requestedThreadReads.erase(iterator);
-        else
-            ++iterator;
-    }
+    const bool boundedStateOmitsThreads = synchronizedStateOmitsThreads(currentState);
+    const auto resolved = [&](const std::string& id) {
+        const auto* thread = currentState.thread(id);
+        return (thread && thread->fullyLoaded)
+               || (!thread && threadListComplete && !boundedStateOmitsThreads);
+    };
+    std::erase_if(attemptedIncompleteThreadReads,
+                  [&resolved](const auto& entry) {
+                      return resolved(entry.first);
+                  });
 }
 
 void FrontendSessionWorker::beginArchivedThreadRefresh()
@@ -1317,7 +1399,8 @@ void FrontendSessionWorker::socketDisconnected()
     clearOutbound();
     clearInbound();
     receiveContinuationScheduled = false;
-    requestedThreadReads.clear();
+    threadReadsInFlight.clear();
+    attemptedIncompleteThreadReads.clear();
     if (!localShutdown) {
         if (recordPreReadyTransportFailure())
             return;
@@ -1341,7 +1424,8 @@ void FrontendSessionWorker::socketFailed(QLocalSocket::LocalSocketError)
     clearOutbound();
     clearInbound();
     receiveContinuationScheduled = false;
-    requestedThreadReads.clear();
+    threadReadsInFlight.clear();
+    attemptedIncompleteThreadReads.clear();
     if (recordPreReadyTransportFailure())
         return;
     if (automaticReconnectEnabled && currentLifecycle != Lifecycle::Failed)

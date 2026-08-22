@@ -302,6 +302,28 @@ WorkbenchWidget::~WorkbenchWidget()
 
 void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope)
 {
+    const bool selectedThreadExactlyRemoved =
+        scope.removedThreadIds.contains(selectedThreadId);
+    if (selectedThreadExactlyRemoved)
+        authoritativelyRemovedSelectedThreadId = selectedThreadId;
+    else if (authoritativelyRemovedSelectedThreadId == selectedThreadId
+             && (!selectedThreadId.isEmpty()
+                 && (scope.affectedThreadIds.contains(selectedThreadId)
+                     || frontendSession.state().thread(
+                            selectedThreadId.toStdString())))) {
+        // Match mailbox ordering across the separate 16 ms presentation
+        // window: newer exact presence supersedes an already delivered
+        // tombstone before a later bounded omission can become ambiguous.
+        authoritativelyRemovedSelectedThreadId.clear();
+    }
+    // If a pathological removal burst exceeded the bounded GUI mailbox, ask
+    // the backend for the one identity the presentation actually needs. An
+    // absent result publishes one exact tombstone; an omitted result restores
+    // the retained thread without guessing from global capacity provenance.
+    if (scope.removedThreadIdsOverflowed && !selectedThreadExactlyRemoved
+        && !selectedThreadId.isEmpty()
+        && frontendSession.state().thread(selectedThreadId.toStdString()) == nullptr)
+        frontendSession.loadThread(selectedThreadId, true);
     const bool currentSelectionAffected = scope.affectedThreadIds.contains(selectedThreadId);
     const bool awaitedSelectionAffected = !newThreadIdAwaitingState.isEmpty()
                                           && scope.affectedThreadIds.contains(newThreadIdAwaitingState);
@@ -446,6 +468,9 @@ void WorkbenchWidget::scheduleStateRefresh(const detail::StateUpdateScope& scope
 void WorkbenchWidget::refreshLifecycle()
 {
     using Lifecycle = FrontendSession::Lifecycle;
+    const bool ready = frontendSession.lifecycle() == Lifecycle::Ready;
+    const bool becameReady = ready && !frontendWasReady;
+    frontendWasReady = ready;
     QString color = QStringLiteral("#667085");
     QString title = QStringLiteral("App server disconnected");
     QString detail = frontendSession.statusText();
@@ -501,6 +526,13 @@ void WorkbenchWidget::refreshLifecycle()
     }
     refreshControllerStatus();
     refreshControls();
+    // Inspector-projected selections deliberately survive reconnects. The
+    // worker clears its bounded read ownership on disconnect, so one explicit
+    // retry at the next Ready boundary restores that selection even when no
+    // later presentation event happens to arrive.
+    if (detail::shouldRetryProjectedSelectionAfterReady(
+            becameReady, selectedThreadId, projectedAgentThreadId))
+        frontendSession.loadThread(selectedThreadId, true);
 }
 
 void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
@@ -527,7 +559,14 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
                                          && frontendSession.archivedThreadDiscoveryComplete();
     const bool threadDiscoveryTerminal = threadListComplete
                                          && frontendSession.archivedThreadDiscoveryTerminal();
+    const auto capacityProvenance = state.capacityProvenance();
+    const std::size_t omittedThreads = capacityProvenance
+                                           ? capacityProvenance->omittedThreads
+                                           : 0;
     const QString previousThreadId = selectedThreadId;
+    const bool selectedAuthoritativelyRemoved =
+        authoritativelyRemovedSelectedThreadId == selectedThreadId;
+    authoritativelyRemovedSelectedThreadId.clear();
 
     if (!newThreadIdAwaitingState.isEmpty()
         && state.thread(newThreadIdAwaitingState.toStdString()) != nullptr) {
@@ -538,8 +577,13 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
     const bool awaitingSelectedThread = !newThreadIdAwaitingState.isEmpty()
         && selectedThreadId == newThreadIdAwaitingState;
     if (!selectedThreadId.isEmpty()
-        && state.thread(selectedThreadId.toStdString()) == nullptr && ready && threadDiscoveryTerminal
-        && !awaitingSelectedThread)
+        && state.thread(selectedThreadId.toStdString()) == nullptr
+        && detail::shouldClearMissingSelectedThread(
+            ready,
+            threadDiscoveryTerminal,
+            awaitingSelectedThread,
+            omittedThreads,
+            selectedAuthoritativelyRemoved))
         selectedThreadId.clear();
     if (selectedThreadId.isEmpty() && !threads.empty() && newThreadIdAwaitingState.isEmpty())
         selectedThreadId = QString::fromStdString(threads.front().id.value);
@@ -578,6 +622,10 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
     const auto* selected = !selectedThreadId.isEmpty()
                                ? state.thread(selectedThreadId.toStdString())
                                : nullptr;
+    const bool selectedMissingFromBoundedState = !selected
+                                                  && !selectedThreadId.isEmpty()
+                                                  && !awaitingSelectedThread
+                                                  && omittedThreads > 0;
     if (refreshSelectedPresentation) {
         const QString context = ready && selected && selected->cwd
                                     ? QString::fromStdString(selected->cwd->value)
@@ -639,7 +687,7 @@ void WorkbenchWidget::refreshState(bool refreshSelectedPresentation,
                                                : QStringLiteral("Codex has no pending requests"));
     interactiveRequestDialog->synchronize(state);
 
-    if (selected && !selected->fullyLoaded && projectedAgentThreadId != selectedThreadId)
+    if ((selected && !selected->fullyLoaded) || selectedMissingFromBoundedState)
         frontendSession.loadThread(selectedThreadId);
 
     reconcileAutomaticResumeState();
@@ -672,6 +720,7 @@ void WorkbenchWidget::selectThread(const QString& threadId)
         selectedInspectorTurnId.clear();
     selectedThreadId = threadId;
     projectedAgentThreadId.clear();
+    frontendSession.loadThread(selectedThreadId, true);
     if (semanticSelectionChanged)
         conversation->setWriteStatus({});
     refreshState();
@@ -695,6 +744,7 @@ void WorkbenchWidget::selectProjectedAgentThread(const QString& threadId)
         selectedInspectorTurnId.clear();
     selectedThreadId = threadId;
     projectedAgentThreadId = threadId;
+    frontendSession.loadThread(selectedThreadId, true);
     if (semanticSelectionChanged)
         conversation->setWriteStatus({});
     refreshState();

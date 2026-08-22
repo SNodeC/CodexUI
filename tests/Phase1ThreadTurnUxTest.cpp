@@ -5,6 +5,7 @@
 #include "ui/ThreadSetupDialog.h"
 #include "ui/UpcomingTurnDock.h"
 #include "ui/UiStyle.h"
+#include "ui/WorkbenchWidget.h"
 
 #include <ai/openai/codex/frontend/Messages.h>
 #include <ai/openai/codex/frontend/client/Client.h>
@@ -1372,6 +1373,41 @@ bool testArchivedThreadAssignmentPruningWaitsForCompleteDiscovery()
     return passed;
 }
 
+bool testMissingSelectedThreadRetentionPolicy()
+{
+    using codexui::detail::shouldClearMissingSelectedThread;
+    return expect(
+        !shouldClearMissingSelectedThread(true, true, false, 1, false)
+            && shouldClearMissingSelectedThread(true, true, false, 0, false)
+            && shouldClearMissingSelectedThread(true, true, false, 1, true)
+            && shouldClearMissingSelectedThread(false, false, true, 1, true)
+            && !shouldClearMissingSelectedThread(false, true, false, 0, false)
+            && !shouldClearMissingSelectedThread(true, false, false, 0, false)
+            && !shouldClearMissingSelectedThread(true, true, true, 0, false),
+        "a missing selection must survive only incomplete discovery, pending creation, or unresolved snapshot omission");
+}
+
+bool testProjectedSelectionReconnectRecoveryPolicy()
+{
+    using codexui::detail::shouldRetryProjectedSelectionAfterReady;
+    return expect(
+        shouldRetryProjectedSelectionAfterReady(
+            true,
+            QStringLiteral("projected-thread"),
+            QStringLiteral("projected-thread"))
+            && !shouldRetryProjectedSelectionAfterReady(
+                false,
+                QStringLiteral("projected-thread"),
+                QStringLiteral("projected-thread"))
+            && !shouldRetryProjectedSelectionAfterReady(
+                true,
+                QStringLiteral("ordinary-thread"),
+                QStringLiteral("projected-thread"))
+            && !shouldRetryProjectedSelectionAfterReady(
+                true, QString{}, QString{}),
+        "only a retained projected-agent selection may receive one retry at a new Ready boundary");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1397,5 +1433,7 @@ int main(int argc, char** argv)
     passed &= testTargetedSidebarRefreshKeepsUnchangedRows();
     passed &= testThreadOrganizationPersistenceAndSafeMoves();
     passed &= testArchivedThreadAssignmentPruningWaitsForCompleteDiscovery();
+    passed &= testMissingSelectedThreadRetentionPolicy();
+    passed &= testProjectedSelectionReconnectRecoveryPolicy();
     return passed ? 0 : 1;
 }

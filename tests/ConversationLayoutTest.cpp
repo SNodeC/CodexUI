@@ -68,6 +68,7 @@ struct ThreadFixture
 {
     std::string id;
     std::vector<TurnFixture> turns;
+    bool fullyLoaded = true;
 };
 
 bool expect(bool condition, const char* message)
@@ -129,7 +130,7 @@ frontend::Json messageJson(const std::string& threadId,
                            const std::string& turnId,
                            const MessageFixture& fixture)
 {
-    constexpr std::size_t initialCommandOutputBytes = 12U * 1024U;
+    constexpr std::size_t initialIncrementalContentBytes = 12U * 1024U;
     frontend::Json data = frontend::Json::object();
     if (fixture.kind == frontend::ThreadItemKind::UserMessage) {
         data = frontend::Json{{"clientId", nullptr},
@@ -155,15 +156,26 @@ frontend::Json messageJson(const std::string& threadId,
     }
     const bool carriesCommandOutput = fixture.kind == frontend::ThreadItemKind::CommandExecution
                                       || fixture.kind == frontend::ThreadItemKind::FileChange;
+    const std::string initialAgentText = fixture.kind == frontend::ThreadItemKind::AgentMessage
+                                             ? fixture.text.substr(
+                                                   0,
+                                                   std::min(
+                                                       fixture.text.size(),
+                                                       initialIncrementalContentBytes))
+                                             : std::string{};
     const std::string summary = fixture.kind == frontend::ThreadItemKind::UserMessage
                                     ? std::string{}
                                 : carriesCommandOutput
                                     ? fixture.text.substr(0, std::min<std::size_t>(fixture.text.size(), 500))
+                                : fixture.kind == frontend::ThreadItemKind::AgentMessage
+                                    ? initialAgentText
                                     : fixture.text;
     const std::string initialCommandOutput = carriesCommandOutput
                                                  ? fixture.text.substr(
                                                        0,
-                                                       std::min(fixture.text.size(), initialCommandOutputBytes))
+                                                       std::min(
+                                                           fixture.text.size(),
+                                                           initialIncrementalContentBytes))
                                                  : std::string{};
     return frontend::Json{{"id", fixture.id},
                           {"type", frontend::toString(fixture.kind)},
@@ -171,7 +183,7 @@ frontend::Json messageJson(const std::string& threadId,
                           {"turnId", turnId},
                           {"status", fixture.status},
                           {"summary", summary},
-                          {"agentText", fixture.kind == frontend::ThreadItemKind::AgentMessage ? fixture.text : ""},
+                          {"agentText", initialAgentText},
                           {"reasoningText",
                            fixture.kind == frontend::ThreadItemKind::Reasoning
                                ? fixture.text
@@ -185,7 +197,8 @@ frontend::Json messageJson(const std::string& threadId,
                           {"extensions", frontend::Json::object()}};
 }
 
-client::State makeState(const std::vector<ThreadFixture>& fixtures)
+client::State makeState(const std::vector<ThreadFixture>& fixtures,
+                        std::size_t omittedThreads = 0)
 {
     client::ClientOptions options;
     options.requestedCapabilities = {frontend::FrontendCapability::CompleteThreadItems};
@@ -256,7 +269,7 @@ client::State makeState(const std::vector<ThreadFixture>& fixtures)
         threads.push_back(frontend::Json{{"id", threadFixture.id},
                                          {"title", threadFixture.id},
                                          {"status", "idle"},
-                                         {"fullyLoaded", true},
+                                         {"fullyLoaded", threadFixture.fullyLoaded},
                                          {"executionConfiguration", executionConfiguration},
                                          {"turns", std::move(turns)},
                                          {"extensions", frontend::Json::object()}});
@@ -273,6 +286,12 @@ client::State makeState(const std::vector<ThreadFixture>& fixtures)
                          {"omittedCodexExtensions", 0},
                          {"journal", {{"oldestReplayableAfter", 0}, {"currentSequence", 0}}},
                          {"sequenceExhausted", false}};
+    if (omittedThreads > 0) {
+        state["capacityProvenance"] = {
+            {"omittedThreads", omittedThreads},
+            {"truncated", true},
+        };
+    }
     if (!connection
              .receive(frontend::ServerMessage{
                  frontend::Snapshot{frontend::SequenceNumber{0}, std::move(state)}})
@@ -283,27 +302,38 @@ client::State makeState(const std::vector<ThreadFixture>& fixtures)
 
     // Exercise the public negotiated append-v2 path instead of putting an
     // over-capacity scalar into a synthetic Snapshot. This mirrors how the
-    // real backend restores complete retained command output incrementally.
-    constexpr std::size_t initialCommandOutputBytes = 12U * 1024U;
-    constexpr std::size_t commandOutputDeltaBytes = 12U * 1024U;
+    // real backend restores complete retained message and command content
+    // incrementally.
+    constexpr std::size_t initialIncrementalContentBytes = 12U * 1024U;
+    constexpr std::size_t incrementalContentDeltaBytes = 12U * 1024U;
     std::uint64_t sequence = 0;
     for (const ThreadFixture& thread : fixtures) {
         for (const TurnFixture& turn : thread.turns) {
             for (const MessageFixture& item : turn.messages) {
-                if (item.kind != frontend::ThreadItemKind::CommandExecution
-                    && item.kind != frontend::ThreadItemKind::FileChange)
+                const bool carriesCommandOutput =
+                    item.kind == frontend::ThreadItemKind::CommandExecution
+                    || item.kind == frontend::ThreadItemKind::FileChange;
+                const bool carriesAgentText =
+                    item.kind == frontend::ThreadItemKind::AgentMessage;
+                if (!carriesCommandOutput && !carriesAgentText)
                     continue;
-                std::size_t retained = std::min(item.text.size(), initialCommandOutputBytes);
+                std::size_t retained = std::min(
+                    item.text.size(), initialIncrementalContentBytes);
                 while (retained < item.text.size()) {
                     const std::size_t deltaBytes =
-                        std::min(commandOutputDeltaBytes, item.text.size() - retained);
+                        std::min(
+                            incrementalContentDeltaBytes,
+                            item.text.size() - retained);
                     frontend::FrontendEvent event{
                         frontend::SequenceNumber{++sequence},
                         "item.content.updated",
                         frontend::Json{{"threadId", thread.id},
                                        {"turnId", turn.id},
                                        {"itemId", item.id},
-                                       {"channel", "commandOutput"},
+                                       {"channel",
+                                        carriesCommandOutput
+                                            ? "commandOutput"
+                                            : "agentText"},
                                        {"content", ""},
                                        {"contentDelta", item.text.substr(retained, deltaBytes)},
                                        {"baseContentBytes", retained},
@@ -434,6 +464,8 @@ QString messageSourceText(const QWidget* widget)
         return messageSourceText(label);
     if (const auto* editor = qobject_cast<const QTextEdit*>(widget))
         return editor->toPlainText();
+    if (const auto* editor = qobject_cast<const QPlainTextEdit*>(widget))
+        return editor->toPlainText();
     return {};
 }
 
@@ -463,6 +495,16 @@ bool hasLabel(codexui::ConversationWidget& conversation, const QString& text)
             return true;
     }
     return false;
+}
+
+bool hasLabelContaining(codexui::ConversationWidget& conversation,
+                        const QString& text)
+{
+    return std::ranges::any_of(
+        conversation.findChildren<QLabel*>(),
+        [&text](const QLabel* label) {
+            return label->text().contains(text);
+        });
 }
 
 QStringList renderedTurnIds(codexui::ConversationWidget& conversation)
@@ -1123,6 +1165,263 @@ bool testInPlaceMessageReplacement()
     return passed;
 }
 
+bool testIncompleteThreadPresentation()
+{
+    ThreadFixture fixture{"bounded-thread",
+                          {{"bounded-turn", {}}},
+                          false};
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(makeState({fixture}), QStringLiteral("bounded-thread"));
+    settleTimeline();
+
+    bool passed = expect(
+        hasLabel(conversation, QStringLiteral("Conversation history incomplete"))
+            && hasLabel(
+                conversation,
+                QStringLiteral(
+                    "Some turns or items are unavailable in the current synchronized view."))
+            && !hasLabel(conversation, QStringLiteral("No items in this turn")),
+        "an incomplete bounded thread must distinguish its empty turn from a genuinely empty turn");
+
+    fixture.fullyLoaded = true;
+    conversation.render(makeState({fixture}), QStringLiteral("bounded-thread"));
+    settleTimeline();
+    passed &= expect(
+        hasLabel(conversation, QStringLiteral("No items in this turn"))
+            && !hasLabel(conversation, QStringLiteral("Conversation history incomplete")),
+        "an authoritative full-thread replacement must restore the genuine empty-turn presentation");
+
+    ThreadFixture noTurns{"bounded-thread-without-turns", {}, false};
+    conversation.render(makeState({noTurns}),
+                        QStringLiteral("bounded-thread-without-turns"));
+    settleTimeline();
+    passed &= expect(
+        hasLabel(conversation, QStringLiteral("Conversation history incomplete"))
+            && !hasLabel(conversation, QStringLiteral("Ready for the first turn")),
+        "an incomplete thread without retained turn shells must not masquerade as a new empty thread");
+
+    noTurns.fullyLoaded = true;
+    conversation.render(makeState({noTurns}),
+                        QStringLiteral("bounded-thread-without-turns"));
+    settleTimeline();
+    passed &= expect(
+        hasLabel(conversation, QStringLiteral("Ready for the first turn"))
+            && !hasLabel(conversation, QStringLiteral("Conversation history incomplete")),
+        "a same-thread authoritative replacement must refresh the no-turn presentation");
+
+    noTurns.fullyLoaded = false;
+    conversation.render(makeState({noTurns}),
+                        QStringLiteral("bounded-thread-without-turns"));
+    settleTimeline();
+    passed &= expect(
+        hasLabel(conversation, QStringLiteral("Conversation history incomplete"))
+            && !hasLabel(conversation, QStringLiteral("Ready for the first turn")),
+        "a same-thread bounded replacement must refresh the no-turn presentation");
+
+    conversation.render(makeState({}, 1),
+                        QStringLiteral("bounded-thread-without-turns"));
+    settleTimeline();
+    passed &= expect(
+        hasLabel(conversation, QStringLiteral("Conversation history incomplete"))
+            && hasLabel(
+                conversation,
+                QStringLiteral(
+                    "This conversation is not available in the current synchronized view."))
+            && !hasLabel(conversation, QStringLiteral("No synchronized thread"))
+            && !hasLabel(conversation, QStringLiteral("No thread selected")),
+        "an explicitly omitted selected thread must not masquerade as no selection");
+
+    conversation.render(makeState({}),
+                        QStringLiteral("bounded-thread-without-turns"));
+    settleTimeline();
+    passed &= expect(
+        hasLabel(conversation, QStringLiteral("No synchronized thread"))
+            && hasLabel(conversation, QStringLiteral("No thread selected"))
+            && !hasLabel(conversation, QStringLiteral("Conversation history incomplete")),
+        "removing omission provenance must refresh a same-ID missing-thread presentation");
+    return passed;
+}
+
+bool testIncompleteReplacementPreservesRenderedTimeline()
+{
+    ThreadFixture complete{
+        "replacement-retention",
+        {{"replacement-retention-turn",
+          {{"replacement-retention-item",
+            frontend::ThreadItemKind::AgentMessage,
+            "retained answer"}}}}};
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(makeState({complete}),
+                        QStringLiteral("replacement-retention"));
+    settleTimeline();
+
+    QPointer<QWidget> retainedSegment = segment(
+        conversation, QStringLiteral("message:replacement-retention-item"));
+    QPointer<QWidget> retainedContent = messageContent(retainedSegment);
+    QWidget* const retainedSegmentAddress = retainedSegment.data();
+    QWidget* const retainedContentAddress = retainedContent.data();
+
+    conversation.render(makeState({}, 1),
+                        QStringLiteral("replacement-retention"));
+    settleTimeline();
+    bool passed = expect(
+        retainedSegment && retainedSegment.data() == retainedSegmentAddress
+            && retainedContent && retainedContent.data() == retainedContentAddress
+            && messageSourceText(retainedContent) == QStringLiteral("retained answer")
+            && hasLabelContaining(conversation,
+                                  QStringLiteral("History recovery pending")),
+        "an omitted same-thread replacement must retain the rendered timeline while recovery is pending");
+
+    ThreadFixture partialWithoutDescendants{
+        "replacement-retention", {}, false};
+    conversation.render(makeState({partialWithoutDescendants}),
+                        QStringLiteral("replacement-retention"));
+    settleTimeline();
+    passed &= expect(
+        retainedSegment && retainedSegment.data() == retainedSegmentAddress
+            && retainedContent && retainedContent.data() == retainedContentAddress
+            && messageSourceText(retainedContent) == QStringLiteral("retained answer"),
+        "an incomplete header-only replacement must not delete rendered descendants");
+
+    ThreadFixture merged = complete;
+    merged.fullyLoaded = false;
+    merged.turns.front().messages.push_back(
+        {"replacement-retention-new-item",
+         frontend::ThreadItemKind::AgentMessage,
+         "merged continuation"});
+    conversation.render(makeState({merged}),
+                        QStringLiteral("replacement-retention"));
+    settleTimeline();
+    passed &= expect(
+        retainedSegment && retainedSegment.data() == retainedSegmentAddress
+            && retainedContent && retainedContent.data() == retainedContentAddress
+            && hasLabel(conversation, QStringLiteral("merged continuation"))
+            && !hasLabelContaining(conversation,
+                                   QStringLiteral("History recovery pending")),
+        "an incomplete requester-local Merge that accounts for rendered descendants must reconcile in place");
+
+    conversation.render(makeState({}), QString{});
+    settleTimeline();
+    passed &= expect(
+        !retainedSegment && !retainedContent
+            && hasLabel(conversation, QStringLiteral("No thread selected"))
+            && !hasLabel(conversation, QStringLiteral("retained answer"))
+            && !hasLabel(conversation, QStringLiteral("merged continuation")),
+        "an exact Absent transition must clear a populated rendered timeline");
+
+    conversation.render(makeState({complete}),
+                        QStringLiteral("replacement-retention"));
+    settleTimeline();
+    QPointer<QWidget> replaceAuthoritySegment = segment(
+        conversation, QStringLiteral("message:replacement-retention-item"));
+    ThreadFixture exactReplacement{
+        "replacement-retention", {}, true};
+    conversation.render(makeState({exactReplacement}),
+                        QStringLiteral("replacement-retention"));
+    settleTimeline();
+    passed &= expect(
+        !replaceAuthoritySegment
+            && hasLabel(conversation, QStringLiteral("Ready for the first turn")),
+        "a fully-loaded Replace remains authoritative to delete absent descendants");
+
+    ThreadFixture completeActivities{
+        "grouped-activity-retention",
+        {{"grouped-activity-turn",
+          {{"grouped-activity-first",
+            frontend::ThreadItemKind::Reasoning,
+            "first retained activity"},
+           {"grouped-activity-second",
+            frontend::ThreadItemKind::Reasoning,
+            "second retained activity"}}}}};
+    codexui::ConversationWidget groupedConversation;
+    groupedConversation.resize(900, 700);
+    groupedConversation.show();
+    groupedConversation.render(
+        makeState({completeActivities}),
+        QStringLiteral("grouped-activity-retention"));
+    settleTimeline();
+    QPointer<QWidget> activitySegment = segment(
+        groupedConversation,
+        QStringLiteral("activities:grouped-activity-first"));
+    QPointer<QWidget> secondActivityRow;
+    if (activitySegment)
+    {
+        for (QWidget* row : activitySegment->findChildren<QWidget*>(
+                 QStringLiteral("conversationActivityRow")))
+        {
+            if (row->property("itemId").toString()
+                == QStringLiteral("grouped-activity-second"))
+                secondActivityRow = row;
+        }
+    }
+    QWidget* const activitySegmentAddress = activitySegment.data();
+    QWidget* const secondActivityRowAddress = secondActivityRow.data();
+
+    ThreadFixture partialActivities = completeActivities;
+    partialActivities.fullyLoaded = false;
+    partialActivities.turns.front().messages.pop_back();
+    groupedConversation.render(
+        makeState({partialActivities}),
+        QStringLiteral("grouped-activity-retention"));
+    settleTimeline();
+    passed &= expect(
+        activitySegment && activitySegment.data() == activitySegmentAddress
+            && secondActivityRow
+            && secondActivityRow.data() == secondActivityRowAddress
+            && hasLabelContaining(groupedConversation,
+                                  QStringLiteral("History recovery pending")),
+        "an incomplete activity group must preserve every rendered descendant, not only the row that owns its segment identity");
+
+    ThreadFixture largePrefix{"bounded-recovery-prefix", {{"bounded-recovery-turn", {}}}};
+    constexpr int largePrefixItems = 2'048;
+    largePrefix.turns.front().messages.reserve(largePrefixItems + 1);
+    for (int index = 0; index < largePrefixItems; ++index)
+    {
+        largePrefix.turns.front().messages.push_back(
+            {"bounded-recovery-item-" + std::to_string(index),
+             frontend::ThreadItemKind::AgentMessage,
+             "prefix " + std::to_string(index)});
+    }
+    codexui::ConversationWidget boundedConversation;
+    boundedConversation.resize(900, 700);
+    boundedConversation.show();
+    boundedConversation.render(
+        makeState({largePrefix}), QStringLiteral("bounded-recovery-prefix"));
+    settleTimeline();
+    QPointer<QWidget> retainedTail = segment(
+        boundedConversation,
+        QStringLiteral("message:bounded-recovery-item-2047"));
+    QWidget* const retainedTailAddress = retainedTail.data();
+
+    largePrefix.fullyLoaded = false;
+    largePrefix.turns.front().messages.push_back(
+        {"bounded-recovery-appended",
+         frontend::ThreadItemKind::AgentMessage,
+         "bounded appended tail"});
+    boundedConversation.render(
+        makeState({largePrefix}), QStringLiteral("bounded-recovery-prefix"));
+    settleTimeline();
+    QWidget* boundedHost = timeline(boundedConversation);
+    const qlonglong maximumRecoveryScan =
+        boundedHost
+            ? boundedHost->property("maximumRenderedItems").toLongLong()
+                  + 15 * boundedHost->property("maximumRenderedTurns").toLongLong()
+            : 0;
+    passed &= expect(
+        retainedTail && retainedTail.data() == retainedTailAddress
+            && hasLabel(boundedConversation,
+                        QStringLiteral("bounded appended tail"))
+            && boundedHost
+            && boundedHost->property("recoveryInspectedTimelineItems").toLongLong()
+                   <= maximumRecoveryScan,
+        "incomplete replacement recovery must inspect only the previously rendered bounded tail, not a large retained prefix or later appends");
+    return passed;
+}
+
 bool testStreamingPlainTextAndTerminalMarkdown()
 {
     ThreadFixture fixture{
@@ -1150,6 +1449,8 @@ bool testStreamingPlainTextAndTerminalMarkdown()
         QStringLiteral("**stream** [docs](https://example.com)\n\n`code`\n\n![secret](file:///etc/passwd)")};
     bool passed = true;
     QString previous = QStringLiteral("**stream**");
+    const qulonglong sourceMaterializationsBeforeStreaming =
+        content ? content->property("sourceMaterializationCount").toULongLong() : 0;
     for (const QString& update : streamedContent) {
         fixture.turns.front().messages.front().text = update.toStdString();
         const QString delta = update.mid(previous.size());
@@ -1178,6 +1479,11 @@ bool testStreamingPlainTextAndTerminalMarkdown()
                          && content->property("streamAppendCount").toULongLong()
                                 == static_cast<qulonglong>(streamedContent.size()),
                      "each verified streaming delta must use the cursor append path");
+    passed &= expect(
+        content
+            && content->property("sourceMaterializationCount").toULongLong()
+                   == sourceMaterializationsBeforeStreaming,
+        "verified streaming deltas must not materialize or transcode the accumulated message source");
 
     const QString finalContent = streamedContent.back()
                                  + QStringLiteral("\n\n_final answer_");
@@ -1195,6 +1501,165 @@ bool testStreamingPlainTextAndTerminalMarkdown()
                          && !finalLabel->text().contains(QStringLiteral("file:///etc/passwd"))
                          && !finalLabel->text().contains(QStringLiteral("<img")),
                      "the terminal update must replace the streaming view with one sanitized Markdown render");
+    return passed;
+}
+
+bool testEmptyAgentMessageAcceptsFirstExactDelta()
+{
+    ThreadFixture fixture{
+        "empty-streaming-message",
+        {{"turn-empty-streaming-message",
+          {{"item-empty-streaming-message",
+            frontend::ThreadItemKind::AgentMessage,
+            "",
+            "started"}},
+          std::nullopt,
+          "inProgress",
+          true,
+          false}}};
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(makeState({fixture}),
+                        QStringLiteral("empty-streaming-message"));
+    settleTimeline();
+
+    QWidget* message = segment(
+        conversation, QStringLiteral("message:item-empty-streaming-message"));
+    QPointer<QWidget> content = messageContent(message);
+    QWidget* const contentAddress = content.data();
+    bool passed = expect(
+        content && content->property("kind").toString() == QStringLiteral("meta")
+            && messageSourceText(content)
+                   == QStringLiteral("No retained message content"),
+        "an empty canonical agent message must initially show explanatory placeholder text");
+
+    const QString firstContent = QStringLiteral("first **streamed** content");
+    fixture.turns.front().messages.front().text = firstContent.toStdString();
+    const auto exactChange = appendUpdate(
+        QStringLiteral("turn-empty-streaming-message"),
+        QStringLiteral("item-empty-streaming-message"),
+        client::ItemContentChannel::AgentText,
+        0,
+        firstContent);
+    passed &= conversation.updateExactMessageContent(
+        makeState({fixture}), QStringLiteral("empty-streaming-message"), exactChange);
+    settleEvents();
+
+    QWidget* const updatedContent = messageContent(message);
+    passed &= expect(
+        updatedContent && updatedContent == contentAddress
+            && updatedContent->property("kind").toString() == QStringLiteral("body")
+            && updatedContent->property("markdownRenderMode").toString()
+                   == QStringLiteral("streaming-plain")
+            && messageSourceText(updatedContent) == firstContent
+            && updatedContent->property("streamAppendCount").toULongLong() == 1
+            && updatedContent->property("sourceMaterializationCount").toULongLong() == 0,
+        "the first exact delta must replace only the placeholder and append without materializing the canonical source");
+    return passed;
+}
+
+bool testMaximumRetainedAgentMessageStaysIncremental()
+{
+    // AISuite's negotiated agentText append channel retains at most 32 KiB.
+    // CodexUI's large-message renderer threshold is 64 KiB, so a retained
+    // streaming agent message cannot validly cross it.
+    constexpr qsizetype maximumRetainedAgentText = 32 * 1024;
+    const QString initial(maximumRetainedAgentText - 1, QLatin1Char('a'));
+    ThreadFixture fixture{
+        "streaming-threshold",
+        {{"turn-streaming-threshold",
+          {{"item-streaming-threshold",
+            frontend::ThreadItemKind::AgentMessage,
+            initial.toStdString(),
+            "started"}}}}};
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(makeState({fixture}), QStringLiteral("streaming-threshold"));
+    settleTimeline();
+
+    QWidget* message = segment(
+        conversation, QStringLiteral("message:item-streaming-threshold"));
+    QPointer<QWidget> streamingContent = messageContent(message);
+    QWidget* const streamingAddress = streamingContent.data();
+    bool passed = expect(
+        streamingContent
+            && streamingContent->property("markdownRenderMode").toString()
+                   == QStringLiteral("streaming-plain"),
+        "a near-maximum retained agent message must start in the incremental renderer");
+
+    QString current = initial + QLatin1Char('b');
+    fixture.turns.front().messages.front().text = current.toStdString();
+    passed &= conversation.updateExactMessageContent(
+        makeState({fixture}),
+        QStringLiteral("streaming-threshold"),
+        appendUpdate(QStringLiteral("turn-streaming-threshold"),
+                     QStringLiteral("item-streaming-threshold"),
+                     client::ItemContentChannel::AgentText,
+                     static_cast<std::uint64_t>(initial.toUtf8().size()),
+                     QStringLiteral("b")));
+    settleEvents();
+    QWidget* const updatedContent = messageContent(message);
+    passed &= expect(
+        updatedContent && updatedContent == streamingAddress
+            && updatedContent->property("markdownRenderMode").toString()
+                   == QStringLiteral("streaming-plain")
+            && messageSourceText(updatedContent) == current
+            && updatedContent->property("streamAppendCount").toULongLong() == 1
+            && updatedContent->property("sourceMaterializationCount").toULongLong() == 0,
+        "the append reaching the retained agent-text maximum must stay incremental without materializing the accumulated source");
+    return passed;
+}
+
+bool testTerminalMarkdownAcceptsLateExactDelta()
+{
+    const QString initial = QStringLiteral("**finished** result");
+    ThreadFixture fixture{
+        "terminal-late-delta",
+        {{"turn-terminal-late-delta",
+          {{"item-terminal-late-delta",
+            frontend::ThreadItemKind::AgentMessage,
+            initial.toStdString(),
+            "completed"}}}}};
+    codexui::ConversationWidget conversation;
+    conversation.resize(900, 700);
+    conversation.show();
+    conversation.render(makeState({fixture}), QStringLiteral("terminal-late-delta"));
+    settleTimeline();
+
+    QWidget* message = segment(
+        conversation, QStringLiteral("message:item-terminal-late-delta"));
+    QPointer<QWidget> content = messageContent(message);
+    QWidget* const contentAddress = content.data();
+    bool passed = expect(
+        content && qobject_cast<QLabel*>(content)
+            && content->property("markdownRenderMode").toString()
+                   == QStringLiteral("markdown"),
+        "a terminal agent message must start in the Markdown renderer");
+
+    const QString delta = QStringLiteral("\n\n_late terminal suffix_");
+    const QString finalContent = initial + delta;
+    fixture.turns.front().messages.front().text = finalContent.toStdString();
+    passed &= conversation.updateExactMessageContent(
+        makeState({fixture}),
+        QStringLiteral("terminal-late-delta"),
+        appendUpdate(QStringLiteral("turn-terminal-late-delta"),
+                     QStringLiteral("item-terminal-late-delta"),
+                     client::ItemContentChannel::AgentText,
+                     static_cast<std::uint64_t>(initial.toUtf8().size()),
+                     delta));
+    settleTimeline();
+
+    QWidget* const finalWidget = messageContent(message);
+    auto* finalLabel = qobject_cast<QLabel*>(finalWidget);
+    passed &= expect(
+        finalWidget && finalWidget == contentAddress && finalLabel
+            && messageSourceText(finalLabel) == finalContent
+            && finalWidget->property("markdownRenderMode").toString()
+                   == QStringLiteral("markdown")
+            && finalLabel->text().contains(QStringLiteral("late terminal suffix")),
+        "a late exact delta on a terminal item must remain in the final Markdown renderer");
     return passed;
 }
 
@@ -2113,7 +2578,12 @@ int main(int argc, char** argv)
     passed &= testActivityDisclosureAndFullOutput();
     passed &= testPointerPreservingAppend();
     passed &= testInPlaceMessageReplacement();
+    passed &= testIncompleteThreadPresentation();
+    passed &= testIncompleteReplacementPreservesRenderedTimeline();
     passed &= testStreamingPlainTextAndTerminalMarkdown();
+    passed &= testEmptyAgentMessageAcceptsFirstExactDelta();
+    passed &= testMaximumRetainedAgentMessageStaysIncremental();
+    passed &= testTerminalMarkdownAcceptsLateExactDelta();
     passed &= testCompletedAgentMessageStreamsBeforeTerminalMarkdown();
     passed &= testTerminalMarkdownPromotionResettlesFollowedTail();
     passed &= testCompleteAndLargeUserMessagePresentation();

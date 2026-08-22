@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -67,7 +68,7 @@ public:
     [[nodiscard]] bool ownsController() const noexcept;
     [[nodiscard]] std::uint64_t generation() const noexcept;
     [[nodiscard]] bool transportAffinityIsCurrentThread() const noexcept;
-    void loadThread(const QString& threadId);
+    void loadThread(const QString& threadId, bool retryIncomplete = false);
     [[nodiscard]] std::optional<QString> acquireController(OperationCompletion completion);
     [[nodiscard]] std::optional<QString> startThread(ThreadStartCompletion completion);
     [[nodiscard]] std::optional<QString>
@@ -166,13 +167,16 @@ private:
     void socketBytesWritten(qint64 bytes);
     void socketDisconnected();
     void socketFailed(QLocalSocket::LocalSocketError error);
+    void handleStateUpdate(
+        const ai::openai::codex::frontend::client::StateUpdate& update);
     void handleConnectionStateChange(const ai::openai::codex::frontend::client::ConnectionStateChange& change);
     void reportDiagnostic(QString message);
     void scheduleSocketRead();
     void clearInbound() noexcept;
     [[nodiscard]] bool hasCompleteInboundFrame() const noexcept;
     void compactInbound() noexcept;
-    void reconcileRequestedThreadReads();
+    void rememberIncompleteThreadReadAttempt(const std::string& threadId);
+    void reconcileIncompleteThreadReadAttempts();
     void beginArchivedThreadRefresh();
     void requestArchivedThreadPage(std::uint64_t generation,
                                    std::optional<std::string> cursor);
@@ -219,7 +223,13 @@ private:
     Lifecycle currentLifecycle = Lifecycle::Disconnected;
     QString detail;
     QString diagnosticDetail;
-    std::set<std::string> requestedThreadReads;
+    std::set<std::string> threadReadsInFlight;
+    // One successful incomplete read is enough for one immutable replacement
+    // epoch. A later StateReplaced publication may have evicted that
+    // requester-local cache population and therefore earns exactly one new
+    // recovery attempt without turning ordinary live revisions into polling.
+    std::map<std::string, std::uint64_t> attemptedIncompleteThreadReads;
+    std::uint64_t incompleteReadRecoveryEpoch = 0;
     std::set<std::string> archivedThreadListCursors;
     std::set<std::string> modelListCursors;
     std::vector<ai::openai::codex::typed::Model> pendingModelCatalog;

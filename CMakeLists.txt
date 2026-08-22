@@ -9,7 +9,7 @@ include(GNUInstallDirs)
 
 set(CMAKE_AUTOMOC ON)
 
-find_package(AISuite 0.5.0 CONFIG REQUIRED)
+find_package(AISuite 0.6.0 CONFIG REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Concurrent Network Widgets)
 
 qt_add_executable(
