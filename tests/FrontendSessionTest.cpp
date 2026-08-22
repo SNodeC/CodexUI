@@ -56,6 +56,14 @@ struct FrontendSessionWorkerTestAccess
         return FrontendSessionWorker::maximumConsecutivePreReadyDisconnects;
     }
 
+    static void markUnstableSynchronized(FrontendSessionWorker& session)
+    {
+        session.synchronizedCurrentConnection = true;
+        session.preReadyFailureRecordedCurrentConnection = false;
+        session.connectionStabilityTimer.start(
+            FrontendSessionWorker::stableConnectionDwellMs);
+    }
+
     static std::size_t maximumFrameBytes(const FrontendSessionWorker& session)
     {
         return session.maximumFrameBytes;
@@ -796,10 +804,10 @@ bool testLifecycleAndDiagnostics()
     codexui::FrontendSessionWorkerTestAccess::handleConnectionStateChange(session, retryableChange);
     const int retryableSignalCount = lifecycleChanges;
     codexui::FrontendSessionWorkerTestAccess::handleConnectionStateChange(session, retryableChange);
-    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Failed
+    passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Disconnected
                          && codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
                          && lifecycleChanges == retryableSignalCount && retryableSignalCount == 2,
-                     "a retryable connection error must produce one failed transition and retain automatic reconnect");
+                     "a retryable connection error must remain visibly disconnected while automatic reconnect is active");
 
     sdk::Error terminalError;
     terminalError.message = "terminal protocol failure";
@@ -843,8 +851,8 @@ bool testPreReadyReconnectBound()
     passed &= expect(session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Failed
                          && !codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
                          && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == maximum
-                         && session.statusText().contains(QStringLiteral("before synchronization completed")),
-                     "repeated pre-synchronization disconnects stop at a visible terminal boundary");
+                         && session.statusText().contains(QStringLiteral("stable synchronized state")),
+                     "repeated unstable connection attempts stop at a visible terminal boundary");
 
     codexui::FrontendSessionWorkerTestAccess::resetReconnectPolicy(session);
     std::vector<sdk::OutboundMessage> messages;
@@ -852,11 +860,35 @@ bool testPreReadyReconnectBound()
         codexui::FrontendSessionWorkerTestAccess::synchronizeWithCapturedTransport(session, messages)
             && session.lifecycle() == codexui::FrontendSessionWorker::Lifecycle::Ready
             && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == 0,
-        "the real SDK synchronization callback must reset the pre-ready retry budget");
+        "the first SDK synchronization callback must enter Ready without inventing retry failures");
     codexui::FrontendSessionWorkerTestAccess::disconnectTransport(session);
     passed &= expect(codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(session)
-                         && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == 0,
-                     "a disconnect after synchronization does not consume the pre-ready retry budget");
+                         && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(session) == 1,
+                     "a disconnect before the Ready dwell boundary must retain unstable-connection retry history");
+
+    codexui::FrontendSessionWorker unstableReadySession;
+    for (int attempt = 1; attempt < maximum; ++attempt) {
+        codexui::FrontendSessionWorkerTestAccess::markUnstableSynchronized(
+            unstableReadySession);
+        codexui::FrontendSessionWorkerTestAccess::disconnectTransport(
+            unstableReadySession);
+        passed &= expect(
+            codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(
+                unstableReadySession)
+                && codexui::FrontendSessionWorkerTestAccess::consecutivePreReadyDisconnects(
+                       unstableReadySession) == attempt,
+            "a short-lived synchronized connection must retain exponential retry history");
+    }
+    codexui::FrontendSessionWorkerTestAccess::markUnstableSynchronized(
+        unstableReadySession);
+    codexui::FrontendSessionWorkerTestAccess::disconnectTransport(
+        unstableReadySession);
+    passed &= expect(
+        !codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(
+            unstableReadySession)
+            && unstableReadySession.lifecycle()
+                   == codexui::FrontendSessionWorker::Lifecycle::Failed,
+        "repeated post-synchronization flapping must stop at the same bounded retry boundary");
 
     codexui::FrontendSessionWorker failedConnectSession;
     for (int attempt = 1; attempt < maximum; ++attempt) {
@@ -1244,7 +1276,7 @@ bool testIncompleteThreadReadIsBounded()
     std::vector<sdk::OutboundMessage> secondConnectionOutbound;
     const bool disconnectedForRetry =
         reconnectSession.lifecycle()
-                == codexui::FrontendSessionWorker::Lifecycle::Failed
+                == codexui::FrontendSessionWorker::Lifecycle::Disconnected
         && codexui::FrontendSessionWorkerTestAccess::automaticReconnectEnabled(
             reconnectSession);
     const bool synchronizedAgain =

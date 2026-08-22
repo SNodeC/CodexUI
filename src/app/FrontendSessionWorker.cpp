@@ -401,9 +401,8 @@ FrontendSessionWorker::FrontendSessionWorker(QObject* parent)
         handleStateUpdate(update);
     };
     callbacks.onSynchronized = [this](const sdk::SynchronizationInfo& info) {
-        reconnectDelayMs = initialReconnectDelayMs;
-        consecutivePreReadyDisconnects = 0;
         synchronizedCurrentConnection = true;
+        connectionStabilityTimer.start(stableConnectionDwellMs);
         automaticReconnectEnabled = true;
         currentState = info.state;
         reconcileIncompleteThreadReadAttempts();
@@ -438,6 +437,9 @@ FrontendSessionWorker::FrontendSessionWorker(QObject* parent)
     connect(&socket, &QLocalSocket::errorOccurred, this, &FrontendSessionWorker::socketFailed);
     reconnectTimer.setSingleShot(true);
     connect(&reconnectTimer, &QTimer::timeout, this, &FrontendSessionWorker::retryConnection);
+    connectionStabilityTimer.setSingleShot(true);
+    connect(&connectionStabilityTimer, &QTimer::timeout,
+            this, &FrontendSessionWorker::markConnectionStable);
     outboundDrainTimer.setSingleShot(true);
     connect(&outboundDrainTimer, &QTimer::timeout, this, &FrontendSessionWorker::drainSocketWrites);
 }
@@ -453,6 +455,7 @@ void FrontendSessionWorker::shutdown()
         return;
     localShutdown = true;
     reconnectTimer.stop();
+    connectionStabilityTimer.stop();
     clearOutbound();
     if (connection.isOpen())
         connection.close("CodexUI is closing");
@@ -598,6 +601,7 @@ bool FrontendSessionWorker::transportAffinityIsCurrentThread() const noexcept
     QThread* current = QThread::currentThread();
     return thread() == current && socket.thread() == current
            && reconnectTimer.thread() == current
+           && connectionStabilityTimer.thread() == current
            && outboundDrainTimer.thread() == current;
 }
 
@@ -1398,6 +1402,11 @@ void FrontendSessionWorker::finishModelCatalogRefresh(QString diagnostic)
 
 void FrontendSessionWorker::socketDisconnected()
 {
+    const bool unstableReadyConnection = synchronizedCurrentConnection
+                                         && connectionStabilityTimer.isActive();
+    connectionStabilityTimer.stop();
+    if (unstableReadyConnection)
+        synchronizedCurrentConnection = false;
     if (connection.isOpen()) {
         if (localShutdown || !automaticReconnectEnabled)
             connection.transportDisconnected();
@@ -1423,6 +1432,11 @@ void FrontendSessionWorker::socketFailed(QLocalSocket::LocalSocketError)
 {
     if (localShutdown)
         return;
+    const bool unstableReadyConnection = synchronizedCurrentConnection
+                                         && connectionStabilityTimer.isActive();
+    connectionStabilityTimer.stop();
+    if (unstableReadyConnection)
+        synchronizedCurrentConnection = false;
     if (connection.isOpen()) {
         if (!automaticReconnectEnabled)
             connection.transportDisconnected();
@@ -1438,7 +1452,7 @@ void FrontendSessionWorker::socketFailed(QLocalSocket::LocalSocketError)
     if (recordPreReadyTransportFailure())
         return;
     if (automaticReconnectEnabled && currentLifecycle != Lifecycle::Failed)
-        setLifecycle(Lifecycle::Failed, socket.errorString());
+        setLifecycle(Lifecycle::Disconnected, socket.errorString());
     scheduleReconnect();
 }
 
@@ -1448,8 +1462,12 @@ void FrontendSessionWorker::handleConnectionStateChange(const sdk::ConnectionSta
         if (!change.error->retryable) {
             automaticReconnectEnabled = false;
             reconnectTimer.stop();
+            setLifecycle(Lifecycle::Failed,
+                         QString::fromStdString(change.error->message));
+        } else {
+            setLifecycle(Lifecycle::Disconnected,
+                         QString::fromStdString(change.error->message));
         }
-        setLifecycle(Lifecycle::Failed, QString::fromStdString(change.error->message));
         return;
     }
 
@@ -1519,10 +1537,20 @@ void FrontendSessionWorker::resetReconnectPolicy()
 {
     automaticReconnectEnabled = true;
     reconnectTimer.stop();
+    connectionStabilityTimer.stop();
     reconnectDelayMs = initialReconnectDelayMs;
     consecutivePreReadyDisconnects = 0;
     synchronizedCurrentConnection = false;
     preReadyFailureRecordedCurrentConnection = false;
+}
+
+void FrontendSessionWorker::markConnectionStable()
+{
+    if (!localShutdown && synchronizedCurrentConnection
+        && currentLifecycle == Lifecycle::Ready) {
+        reconnectDelayMs = initialReconnectDelayMs;
+        consecutivePreReadyDisconnects = 0;
+    }
 }
 
 bool FrontendSessionWorker::recordPreReadyTransportFailure()
@@ -1540,7 +1568,7 @@ bool FrontendSessionWorker::recordPreReadyTransportFailure()
         return false;
 
     failWithoutReconnect(
-        QStringLiteral("Backend connection failed before synchronization completed on %1 consecutive connections")
+        QStringLiteral("Backend connection failed before reaching a stable synchronized state on %1 consecutive connections")
             .arg(consecutivePreReadyDisconnects));
     return true;
 }

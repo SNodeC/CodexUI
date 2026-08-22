@@ -143,6 +143,7 @@ private:
     static constexpr int initialReconnectDelayMs = 250;
     static constexpr int maximumReconnectDelayMs = 5'000;
     static constexpr int maximumConsecutivePreReadyDisconnects = 5;
+    static constexpr int stableConnectionDwellMs = 10'000;
     static constexpr int outboundDrainRetryMs = 10;
     static constexpr qint64 maximumBufferedOutboundBytes = static_cast<qint64>(
         4U * (ai::openai::codex::frontend::DefaultFrontendMaximumInboundMessageBytes + 1U));
@@ -190,6 +191,7 @@ private:
     void scheduleReconnect();
     void retryConnection();
     void resetReconnectPolicy();
+    void markConnectionStable();
     [[nodiscard]] bool recordPreReadyTransportFailure();
     void failWithoutReconnect(QString reason);
     [[nodiscard]] SendResult send(OutboundMessage&& message);
@@ -209,6 +211,7 @@ private:
 
     QLocalSocket socket;
     QTimer reconnectTimer;
+    QTimer connectionStabilityTimer;
     QTimer outboundDrainTimer;
     QByteArray inboundBuffer;
     qsizetype inboundOffset = 0;
