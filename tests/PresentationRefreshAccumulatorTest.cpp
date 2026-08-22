@@ -135,6 +135,107 @@ bool testContiguousAppendMerge()
     return passed;
 }
 
+detail::StateUpdateScope structuralScope()
+{
+    detail::StateUpdateScope scope;
+    scope.affectedThreadIds.push_back(QStringLiteral("thread"));
+    scope.structurallyAffectedThreadIds.push_back(QStringLiteral("thread"));
+    return scope;
+}
+
+detail::StateUpdateScope exactScope()
+{
+    detail::StateUpdateScope scope;
+    scope.affectedThreadIds.push_back(QStringLiteral("thread"));
+    scope.affectedItemContents.push_back(
+        identity(0, QByteArray("append"), 7));
+    return scope;
+}
+
+bool retainedStructuralAppend(
+    const detail::SelectedPresentationRefreshAccumulator& accumulator)
+{
+    return accumulator.refreshPending
+           && !accumulator.fullRefreshPending
+           && accumulator.structuralReconciliationPending
+           && accumulator.contentChanges.size() == 1
+           && accumulator.contentChanges.front().append
+           && accumulator.contentChanges.front().append->baseContentBytes == 7
+           && accumulator.contentChanges.front().append->delta
+                  == QStringLiteral("append")
+           && accumulator.retainedContentUtf8Bytes == 6;
+}
+
+bool testStructuralAndExactMergeInBothOrders()
+{
+    const auto structural = structuralScope();
+    const auto exact = exactScope();
+    detail::SelectedPresentationRefreshAccumulator structuralThenExact;
+    detail::mergeSelectedPresentationRefresh(
+        structuralThenExact, structural, QStringLiteral("thread"), false);
+    detail::mergeSelectedPresentationRefresh(
+        structuralThenExact, exact, QStringLiteral("thread"), false);
+
+    detail::SelectedPresentationRefreshAccumulator exactThenStructural;
+    detail::mergeSelectedPresentationRefresh(
+        exactThenStructural, exact, QStringLiteral("thread"), false);
+    detail::mergeSelectedPresentationRefresh(
+        exactThenStructural, structural, QStringLiteral("thread"), false);
+
+    return expect(
+        retainedStructuralAppend(structuralThenExact)
+            && retainedStructuralAppend(exactThenStructural),
+        "structural reconciliation and exact append metadata must survive frame accumulation in both arrival orders");
+}
+
+bool testFullRefreshDominatesStructuralAndExact()
+{
+    auto structural = structuralScope();
+    auto exact = exactScope();
+    detail::StateUpdateScope full;
+    full.affectedThreadIds.push_back(QStringLiteral("thread"));
+    full.fullyAffectedThreadIds.push_back(QStringLiteral("thread"));
+
+    detail::SelectedPresentationRefreshAccumulator accumulator;
+    detail::mergeSelectedPresentationRefresh(
+        accumulator, structural, QStringLiteral("thread"), false);
+    detail::mergeSelectedPresentationRefresh(
+        accumulator, exact, QStringLiteral("thread"), false);
+    detail::mergeSelectedPresentationRefresh(
+        accumulator, full, QStringLiteral("thread"), false);
+    bool passed = expect(
+        accumulator.refreshPending && accumulator.fullRefreshPending
+            && !accumulator.structuralReconciliationPending
+            && accumulator.contentChanges.empty()
+            && accumulator.retainedContentUtf8Bytes == 0,
+        "a later deletion-capable refresh must dominate structural and exact presentation metadata");
+
+    detail::mergeSelectedPresentationRefresh(
+        accumulator, structural, QStringLiteral("thread"), false);
+    detail::mergeSelectedPresentationRefresh(
+        accumulator, exact, QStringLiteral("thread"), false);
+    passed &= expect(
+        accumulator.fullRefreshPending
+            && !accumulator.structuralReconciliationPending
+            && accumulator.contentChanges.empty(),
+        "structural and exact publications must not weaken an accumulated full refresh");
+    return passed;
+}
+
+bool testUnscopedChangeFallsBackToFullRefresh()
+{
+    detail::StateUpdateScope unscoped;
+    unscoped.affectedThreadIds.push_back(QStringLiteral("thread"));
+    detail::SelectedPresentationRefreshAccumulator accumulator;
+    detail::mergeSelectedPresentationRefresh(
+        accumulator, unscoped, QStringLiteral("thread"), false);
+    return expect(
+        accumulator.refreshPending && accumulator.fullRefreshPending
+            && !accumulator.structuralReconciliationPending
+            && accumulator.contentChanges.empty(),
+        "a selected update without structural or exact metadata must retain the authoritative refresh fallback");
+}
+
 bool testSidebarIdentityBound()
 {
     QStringList ordered;
@@ -171,6 +272,9 @@ int main(int argc, char** argv)
     passed &= testAggregateByteBound();
     passed &= testReplacementReleasesRetainedBytes();
     passed &= testContiguousAppendMerge();
+    passed &= testStructuralAndExactMergeInBothOrders();
+    passed &= testFullRefreshDominatesStructuralAndExact();
+    passed &= testUnscopedChangeFallsBackToFullRefresh();
     passed &= testSidebarIdentityBound();
     return passed ? 0 : 1;
 }

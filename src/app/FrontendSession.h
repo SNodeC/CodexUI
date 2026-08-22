@@ -49,6 +49,9 @@ struct StateUpdateScope {
 
     QStringList affectedThreadIds;
     QStringList fullyAffectedThreadIds;
+    // Pure descendant additions: always a subset of affectedThreadIds. A
+    // full/deletion-capable scope for the same thread always dominates.
+    QStringList structurallyAffectedThreadIds;
     // Exact authoritative removals must survive mailbox coalescing. An
     // omitted thread is otherwise indistinguishable from one deleted by an
     // authoritative thread/read while the global snapshot remains bounded.
