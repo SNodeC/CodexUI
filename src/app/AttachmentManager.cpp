@@ -128,19 +128,21 @@ bool copyFileAtomically(const QString& sourcePath,
     }
     if (cancelled && cancelled())
         return cancelDestination();
+    // Apply the final private mode to QSaveFile's temporary inode before its
+    // atomic rename publishes that inode at destinationPath.
+    if (!destination.setPermissions(PrivateFilePermissions)) {
+        destination.cancelWriting();
+        if (errorMessage)
+            *errorMessage = errorWithPath(
+                QStringLiteral("Unable to make the staged attachment private."),
+                destinationPath);
+        return false;
+    }
     if (!destination.commit()) {
         if (errorMessage)
             *errorMessage = errorWithPath(
                 QStringLiteral("Unable to finish the staged attachment: %1")
                     .arg(destination.errorString()),
-                destinationPath);
-        return false;
-    }
-    if (!QFile::setPermissions(destinationPath, PrivateFilePermissions)) {
-        (void)QFile::remove(destinationPath);
-        if (errorMessage)
-            *errorMessage = errorWithPath(
-                QStringLiteral("Unable to make the staged attachment private."),
                 destinationPath);
         return false;
     }
