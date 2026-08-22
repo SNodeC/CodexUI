@@ -32,6 +32,57 @@
 #include <utility>
 #include <vector>
 
+namespace codexui {
+
+struct ConversationWidgetTestAccess
+{
+    static bool primeViewportAnchor(
+        ConversationWidget& conversation, QWidget* anchor, int anchorY)
+    {
+        auto* scroll = conversation.scrollArea->verticalScrollBar();
+        scroll->setValue(scroll->minimum());
+        conversation.followingLatest = false;
+        conversation.pinLatestDuringLayout = true;
+        conversation.layoutSettleTimer->start(60'000);
+        conversation.pendingViewportAnchor = anchor;
+        conversation.pendingViewportAnchorY = anchorY;
+        return scroll->maximum() - scroll->value() > 72;
+    }
+
+    static QWidget* viewportAnchor(const ConversationWidget& conversation)
+    {
+        return conversation.pendingViewportAnchor.data();
+    }
+
+    static int viewportAnchorY(const ConversationWidget& conversation)
+    {
+        return conversation.pendingViewportAnchorY;
+    }
+
+    static bool tracksSegment(
+        const ConversationWidget& conversation,
+        const QString& turnId,
+        const QString& segmentId)
+    {
+        return conversation.renderedSegmentWidgets.contains(
+            turnId + QChar(0x1f) + segmentId);
+    }
+
+    static void finishAnchoredReconciliation(ConversationWidget& conversation)
+    {
+        conversation.layoutSettleTimer->stop();
+        conversation.layoutSettleTimer->setInterval(16);
+        conversation.pinLatestDuringLayout = false;
+        conversation.pendingViewportAnchor.clear();
+        conversation.pendingFollowLatest = false;
+        conversation.pendingThreadChanged = false;
+        conversation.pendingTimelineShrink = false;
+        conversation.scrollArea->viewport()->setUpdatesEnabled(true);
+    }
+};
+
+} // namespace codexui
+
 namespace {
 
 namespace frontend = ai::openai::codex::frontend;
@@ -1054,6 +1105,281 @@ bool testPointerPreservingAppend()
                          && followingScroll->verticalScrollBar()->value()
                                 == followingScroll->verticalScrollBar()->maximum(),
                      "a followed append must settle smoothly at the newest timeline content");
+    return passed;
+}
+
+bool testKeyedSegmentInsertion()
+{
+    ThreadFixture activityFixture{
+        "keyed-activity-growth",
+        {{"turn-keyed-activity-growth",
+          {{"activity-keyed-0",
+            frontend::ThreadItemKind::Reasoning,
+            "first activity"},
+           {"activity-keyed-1",
+            frontend::ThreadItemKind::Reasoning,
+            "second activity"},
+           {"message-keyed-tail",
+            frontend::ThreadItemKind::UserMessage,
+            "stable tail"}}}}};
+    activityFixture.turns.front().status = "inProgress";
+    activityFixture.turns.front().active = true;
+    activityFixture.turns.front().terminal = false;
+    for (int index = 0; index < 18; ++index)
+    {
+        activityFixture.turns.front().messages.push_back(
+            {"message-keyed-padding-" + std::to_string(index),
+             frontend::ThreadItemKind::UserMessage,
+             "padding row " + std::to_string(index)});
+    }
+    codexui::ConversationWidget activityConversation;
+    activityConversation.resize(900, 420);
+    activityConversation.show();
+    activityConversation.render(
+        makeState({activityFixture}),
+        QStringLiteral("keyed-activity-growth"));
+    settleTimeline();
+
+    QPointer<QWidget> activity = segment(
+        activityConversation,
+        QStringLiteral("activities:activity-keyed-0"));
+    QPointer<QWidget> activityTail = segment(
+        activityConversation,
+        QStringLiteral("message:message-keyed-tail"));
+    QWidget* const activityAddress = activity.data();
+    QWidget* const activityTailAddress = activityTail.data();
+
+    const auto activityTailFixturePosition = std::find_if(
+        activityFixture.turns.front().messages.begin(),
+        activityFixture.turns.front().messages.end(),
+        [](const MessageFixture& message)
+        {
+            return message.id == "message-keyed-tail";
+        });
+    activityFixture.turns.front().messages.insert(
+        activityTailFixturePosition,
+        {"activity-keyed-2",
+         frontend::ThreadItemKind::Reasoning,
+         "third activity"});
+    activityConversation.render(
+        makeState({activityFixture}),
+        QStringLiteral("keyed-activity-growth"));
+    settleTimeline();
+
+    bool passed = expect(
+        activity && activity.data() == activityAddress
+            && activity.data()
+                   == segment(
+                       activityConversation,
+                       QStringLiteral("activities:activity-keyed-0"))
+            && activity->findChildren<QWidget*>(
+                           QStringLiteral("conversationActivityRow"))
+                       .size()
+                   == 3
+            && activityTail && activityTail.data() == activityTailAddress
+            && activityTail.data()
+                   == segment(
+                       activityConversation,
+                       QStringLiteral("message:message-keyed-tail")),
+        "an activity bucket that gains a row must retain its segment and every unchanged trailing widget");
+
+    QHash<QString, QPointer<QWidget>> unchangedActivitySegments;
+    unchangedActivitySegments.insert(
+        QStringLiteral("activities:activity-keyed-0"), activity);
+    unchangedActivitySegments.insert(
+        QStringLiteral("message:message-keyed-tail"), activityTail);
+    for (int index = 0; index < 18; ++index)
+    {
+        const QString segmentId = QStringLiteral("message:message-keyed-padding-%1")
+                                      .arg(index);
+        unchangedActivitySegments.insert(
+            segmentId, segment(activityConversation, segmentId));
+    }
+
+    auto& activityMessages = activityFixture.turns.front().messages;
+    std::rotate(
+        activityMessages.begin(),
+        activityMessages.begin() + 3,
+        activityMessages.begin() + 4);
+    activityConversation.render(
+        makeState({activityFixture}),
+        QStringLiteral("keyed-activity-growth"));
+    settleTimeline();
+
+    QLayout* activityLayout = activityTail && activityTail->parentWidget()
+                                  ? activityTail->parentWidget()->layout()
+                                  : nullptr;
+    bool allReorderedSegmentsRetained = true;
+    for (auto retained = unchangedActivitySegments.cbegin();
+         retained != unchangedActivitySegments.cend();
+         ++retained)
+    {
+        allReorderedSegmentsRetained =
+            allReorderedSegmentsRetained && retained.value()
+            && retained.value().data()
+                   == segment(activityConversation, retained.key());
+    }
+    passed &= expect(
+        allReorderedSegmentsRetained
+            && activity && activity.data() == activityAddress
+            && activity.data()
+                   == segment(
+                       activityConversation,
+                       QStringLiteral("activities:activity-keyed-0"))
+            && activityTail && activityTail.data() == activityTailAddress
+            && activityTail.data()
+                   == segment(
+                       activityConversation,
+                       QStringLiteral("message:message-keyed-tail"))
+            && activityLayout && activityLayout->indexOf(activityTail.data()) == 0
+            && activityLayout->indexOf(activity.data()) == 1,
+        "reordering unchanged segment keys must move the original QWidgets into the new order");
+
+    constexpr int anchoredY = 37;
+    const bool anchorPathAvailable =
+        codexui::ConversationWidgetTestAccess::primeViewportAnchor(
+            activityConversation, activity.data(), anchoredY);
+    std::rotate(
+        activityMessages.begin(),
+        activityMessages.begin() + 1,
+        activityMessages.begin() + 4);
+    activityConversation.render(
+        makeState({activityFixture}),
+        QStringLiteral("keyed-activity-growth"));
+    passed &= expect(
+        anchorPathAvailable
+            && codexui::ConversationWidgetTestAccess::viewportAnchor(
+                   activityConversation)
+                   == activity.data()
+            && codexui::ConversationWidgetTestAccess::viewportAnchorY(
+                   activityConversation)
+                   == anchoredY,
+        "reordering a surviving segment must preserve its pending viewport anchor and offset");
+
+    codexui::ConversationWidgetTestAccess::primeViewportAnchor(
+        activityConversation, activity.data(), anchoredY);
+    const auto tailPosition = std::find_if(
+        activityMessages.begin(),
+        activityMessages.end(),
+        [](const MessageFixture& message)
+        {
+            return message.id == "message-keyed-tail";
+        });
+    activityMessages.erase(tailPosition);
+    activityConversation.render(
+        makeState({activityFixture}),
+        QStringLiteral("keyed-activity-growth"));
+    const bool removedTailUntracked =
+        !codexui::ConversationWidgetTestAccess::tracksSegment(
+            activityConversation,
+            QStringLiteral("turn-keyed-activity-growth"),
+            QStringLiteral("message:message-keyed-tail"));
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QCoreApplication::processEvents();
+    passed &= expect(
+        removedTailUntracked && !activityTail
+            && activity && activity.data() == activityAddress
+            && codexui::ConversationWidgetTestAccess::viewportAnchor(
+                   activityConversation)
+                   == activity.data()
+            && codexui::ConversationWidgetTestAccess::viewportAnchorY(
+                   activityConversation)
+                   == anchoredY,
+        "removing a different segment must destroy only that widget and retain the surviving anchor");
+
+    codexui::ConversationWidgetTestAccess::primeViewportAnchor(
+        activityConversation, activity.data(), anchoredY);
+    activityMessages.erase(
+        std::remove_if(
+            activityMessages.begin(),
+            activityMessages.end(),
+            [](const MessageFixture& message)
+            {
+                return message.id.starts_with("activity-keyed-");
+            }),
+        activityMessages.end());
+    activityConversation.render(
+        makeState({activityFixture}),
+        QStringLiteral("keyed-activity-growth"));
+    const bool removedAnchorCleared =
+        !codexui::ConversationWidgetTestAccess::viewportAnchor(
+            activityConversation);
+    const bool removedAnchorUntracked =
+        !codexui::ConversationWidgetTestAccess::tracksSegment(
+            activityConversation,
+            QStringLiteral("turn-keyed-activity-growth"),
+            QStringLiteral("activities:activity-keyed-0"));
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QCoreApplication::processEvents();
+    passed &= expect(
+        removedAnchorCleared && removedAnchorUntracked && !activity,
+        "destroying the anchor segment must clear its viewport anchor and delete the widget");
+    codexui::ConversationWidgetTestAccess::finishAnchoredReconciliation(
+        activityConversation);
+
+    ThreadFixture insertionFixture{
+        "keyed-middle-insertion",
+        {{"turn-keyed-middle-insertion",
+          {{"message-keyed-left",
+            frontend::ThreadItemKind::UserMessage,
+            "left"},
+           {"message-keyed-right",
+            frontend::ThreadItemKind::UserMessage,
+            "right"}}}}};
+    insertionFixture.turns.front().status = "inProgress";
+    insertionFixture.turns.front().active = true;
+    insertionFixture.turns.front().terminal = false;
+    codexui::ConversationWidget insertionConversation;
+    insertionConversation.resize(900, 700);
+    insertionConversation.show();
+    insertionConversation.render(
+        makeState({insertionFixture}),
+        QStringLiteral("keyed-middle-insertion"));
+    settleTimeline();
+
+    QPointer<QWidget> left = segment(
+        insertionConversation,
+        QStringLiteral("message:message-keyed-left"));
+    QPointer<QWidget> right = segment(
+        insertionConversation,
+        QStringLiteral("message:message-keyed-right"));
+    QWidget* const leftAddress = left.data();
+    QWidget* const rightAddress = right.data();
+
+    insertionFixture.turns.front().messages.insert(
+        insertionFixture.turns.front().messages.begin() + 1,
+        {"message-keyed-middle",
+         frontend::ThreadItemKind::UserMessage,
+         "middle"});
+    insertionConversation.render(
+        makeState({insertionFixture}),
+        QStringLiteral("keyed-middle-insertion"));
+    settleTimeline();
+
+    QWidget* const middle = segment(
+        insertionConversation,
+        QStringLiteral("message:message-keyed-middle"));
+    QLayout* const orderedLayout = middle && middle->parentWidget()
+                                       ? middle->parentWidget()->layout()
+                                       : nullptr;
+    passed &= expect(
+        left && left.data() == leftAddress
+            && left.data()
+                   == segment(
+                       insertionConversation,
+                       QStringLiteral("message:message-keyed-left"))
+            && right && right.data() == rightAddress
+            && right.data()
+                   == segment(
+                       insertionConversation,
+                       QStringLiteral("message:message-keyed-right")),
+        "inserting a segment in the middle must preserve every unchanged keyed QWidget");
+    passed &= expect(
+        orderedLayout && middle
+            && orderedLayout->indexOf(left.data()) == 0
+            && orderedLayout->indexOf(middle) == 1
+            && orderedLayout->indexOf(right.data()) == 2,
+        "a middle insertion must place the new segment between its surviving neighbors");
     return passed;
 }
 
@@ -2587,6 +2913,7 @@ int main(int argc, char** argv)
     passed &= testHotTurnWindow();
     passed &= testActivityDisclosureAndFullOutput();
     passed &= testPointerPreservingAppend();
+    passed &= testKeyedSegmentInsertion();
     passed &= testInPlaceMessageReplacement();
     passed &= testIncompleteThreadPresentation();
     passed &= testIncompleteReplacementPreservesRenderedTimeline();

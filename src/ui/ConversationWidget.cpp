@@ -3092,6 +3092,8 @@ void ConversationWidget::render(const sdk::State& state,
         renderedSegmentItemIds.clear();
         renderedSegmentKeys.clear();
         renderedSegmentWidgets.clear();
+        renderedActivityRows.clear();
+        renderedActivityRowSegments.clear();
         clearLayout(timeline);
     };
 
@@ -3261,14 +3263,37 @@ void ConversationWidget::render(const sdk::State& state,
             for (const VisibleTimelineTurn& visibleTurn : visibleTurns)
                 visibleTurnIds.append(fromUtf8(visibleTurn.turn->id.value));
 
-            const auto removeRenderedTurn = [this, &timelineShrank, &timelineGeometryChanged](const QString& turnId)
+            const auto forgetRenderedActivityRows = [this](const QString& storage)
+            {
+                for (auto row = renderedActivityRowSegments.begin();
+                     row != renderedActivityRowSegments.end();)
+                {
+                    if (row.value() != storage)
+                    {
+                        ++row;
+                        continue;
+                    }
+                    renderedActivityRows.remove(row.key());
+                    row = renderedActivityRowSegments.erase(row);
+                }
+            };
+            const auto forgetRenderedSegment =
+                [this, &forgetRenderedActivityRows](const QString& storage)
+            {
+                forgetRenderedActivityRows(storage);
+                renderedSegmentItemIds.remove(storage);
+                renderedSegmentKeys.remove(storage);
+                renderedSegmentWidgets.remove(storage);
+            };
+            const auto removeRenderedTurn = [this,
+                                             &forgetRenderedSegment,
+                                             &timelineShrank,
+                                             &timelineGeometryChanged](const QString& turnId)
             {
                 for (const QString& segmentId : renderedSegmentIds.take(turnId))
                 {
                     const QString storage = segmentStorageKey(turnId, segmentId);
-                    renderedSegmentItemIds.remove(storage);
-                    renderedSegmentKeys.remove(storage);
-                    renderedSegmentWidgets.remove(storage);
+                    forgetRenderedSegment(storage);
                 }
                 renderedTurnLabels.remove(turnId);
                 renderedTurnStatusLabels.remove(turnId);
@@ -3384,90 +3409,34 @@ void ConversationWidget::render(const sdk::State& state,
                     segmentIds.append(segment->id);
 
                 const QStringList oldSegmentIds = renderedSegmentIds.value(turnId);
-                bool compatibleSegments = true;
-                qsizetype removedSegmentPrefix = 0;
-                if (!oldSegmentIds.isEmpty())
+                const QSet<QString> nextSegmentIds(
+                    segmentIds.cbegin(), segmentIds.cend());
+                for (const QString& oldId : oldSegmentIds)
                 {
-                    if (segmentIds.isEmpty())
+                    if (nextSegmentIds.contains(oldId))
+                        continue;
+                    const QString storage = segmentStorageKey(turnId, oldId);
+                    if (QWidget* widget = renderedSegmentWidgets.value(storage))
                     {
-                        compatibleSegments = false;
+                        if (pendingViewportAnchor == widget
+                            || (pendingViewportAnchor
+                                && widget->isAncestorOf(pendingViewportAnchor)))
+                            pendingViewportAnchor.clear();
+                        itemLayout->removeWidget(widget);
+                        widget->hide();
+                        widget->deleteLater();
+                        timelineShrank = true;
+                        timelineGeometryChanged = true;
                     }
-                    else
-                    {
-                        removedSegmentPrefix = oldSegmentIds.indexOf(segmentIds.front());
-                        compatibleSegments = removedSegmentPrefix >= 0
-                                             && oldSegmentIds.size() - removedSegmentPrefix <= segmentIds.size();
-                        for (qsizetype segmentIndex = 0;
-                             compatibleSegments && segmentIndex < oldSegmentIds.size() - removedSegmentPrefix;
-                             ++segmentIndex)
-                        {
-                            const QString oldId = oldSegmentIds.at(removedSegmentPrefix + segmentIndex);
-                            const QString storage = segmentStorageKey(turnId, oldId);
-                            compatibleSegments = oldId == segmentIds.at(segmentIndex)
-                                                 && renderedSegmentWidgets.contains(storage);
-                        }
-                    }
-                }
-                if (!compatibleSegments)
-                {
-                    if (QWidget* turnWidget = renderedTurnWidgets.value(turnId);
-                        pendingViewportAnchor && turnWidget
-                        && (pendingViewportAnchor == turnWidget
-                            || turnWidget->isAncestorOf(pendingViewportAnchor)))
-                        pendingViewportAnchor.clear();
-                    clearLayout(itemLayout);
-                    timelineShrank = timelineShrank || !oldSegmentIds.isEmpty();
-                    for (const QString& oldId : oldSegmentIds)
-                    {
-                        const QString storage = segmentStorageKey(turnId, oldId);
-                        renderedSegmentItemIds.remove(storage);
-                        renderedSegmentKeys.remove(storage);
-                        renderedSegmentWidgets.remove(storage);
-                    }
-                }
-                else
-                {
-                    if (removedSegmentPrefix > 0 && pendingViewportAnchor)
-                    {
-                        bool anchorRemoved = false;
-                        for (qsizetype segmentIndex = 0; segmentIndex < removedSegmentPrefix; ++segmentIndex)
-                        {
-                            QWidget* removed = renderedSegmentWidgets.value(
-                                segmentStorageKey(turnId, oldSegmentIds.at(segmentIndex)));
-                            anchorRemoved = anchorRemoved || pendingViewportAnchor == removed
-                                            || (removed && removed->isAncestorOf(pendingViewportAnchor));
-                        }
-                        if (anchorRemoved && removedSegmentPrefix < oldSegmentIds.size())
-                        {
-                            QWidget* survivor = renderedSegmentWidgets.value(
-                                segmentStorageKey(turnId, oldSegmentIds.at(removedSegmentPrefix)));
-                            pendingViewportAnchor = survivor;
-                            if (survivor)
-                            {
-                                pendingViewportAnchorY = scrollArea->viewport()
-                                                             ->mapFromGlobal(survivor->mapToGlobal(QPoint{}))
-                                                             .y();
-                            }
-                        }
-                    }
-                    for (qsizetype segmentIndex = 0; segmentIndex < removedSegmentPrefix; ++segmentIndex)
-                    {
-                        const QString storage = segmentStorageKey(turnId, oldSegmentIds.at(segmentIndex));
-                        if (QWidget* widget = renderedSegmentWidgets.take(storage))
-                        {
-                            itemLayout->removeWidget(widget);
-                            widget->hide();
-                            widget->deleteLater();
-                            timelineShrank = true;
-                            timelineGeometryChanged = true;
-                        }
-                        renderedSegmentKeys.remove(storage);
-                        renderedSegmentItemIds.remove(storage);
-                    }
+                    forgetRenderedSegment(storage);
                 }
 
-                for (const TimelineSegment* segment : visibleTurn.segments)
+                for (qsizetype segmentIndex = 0;
+                     segmentIndex < static_cast<qsizetype>(visibleTurn.segments.size());
+                     ++segmentIndex)
                 {
+                    const TimelineSegment* segment = visibleTurn.segments.at(
+                        static_cast<std::size_t>(segmentIndex));
                     const QString storage = segmentStorageKey(turnId, segment->id);
                     QStringList itemIds;
                     itemIds.reserve(static_cast<qsizetype>(segment->items.size()));
@@ -3478,6 +3447,16 @@ void ConversationWidget::render(const sdk::State& state,
                     }
                     renderedSegmentItemIds.insert(storage, std::move(itemIds));
                     QWidget* oldWidget = renderedSegmentWidgets.value(storage);
+                    if (oldWidget)
+                        oldWidget->setProperty(
+                            "timelineItemCount", timelineItemCount(*segment));
+                    if (oldWidget && itemLayout->indexOf(oldWidget) != segmentIndex)
+                    {
+                        itemLayout->removeWidget(oldWidget);
+                        itemLayout->insertWidget(
+                            segmentIndex, oldWidget, 0, Qt::AlignTop);
+                        timelineGeometryChanged = true;
+                    }
                     const ConversationContentUpdates* segmentContentChanges = nullptr;
                     ConversationContentUpdates segmentContentStorage;
                     bool explicitlyAffected = false;
@@ -3564,19 +3543,21 @@ void ConversationWidget::render(const sdk::State& state,
                         const bool replacesAnchor = pendingViewportAnchor == oldWidget
                                                     || (pendingViewportAnchor
                                                         && oldWidget->isAncestorOf(pendingViewportAnchor));
-                        const int position = itemLayout->indexOf(oldWidget);
                         itemLayout->removeWidget(oldWidget);
                         oldWidget->hide();
                         oldWidget->deleteLater();
-                        itemLayout->insertWidget(position, newWidget, 0, Qt::AlignTop);
+                        forgetRenderedActivityRows(storage);
+                        itemLayout->insertWidget(
+                            segmentIndex, newWidget, 0, Qt::AlignTop);
                         if (replacesAnchor)
-                            pendingViewportAnchor = newWidget;
+                            pendingViewportAnchor.clear();
                         timelineShrank = true;
                         timelineGeometryChanged = true;
                     }
                     else
                     {
-                        itemLayout->addWidget(newWidget, 0, Qt::AlignTop);
+                        itemLayout->insertWidget(
+                            segmentIndex, newWidget, 0, Qt::AlignTop);
                         timelineGeometryChanged = true;
                     }
                     renderedSegmentWidgets.insert(storage, newWidget);
