@@ -213,6 +213,8 @@ private:
     QString authoritativelyRemovedSelectedThreadId;
     QString selectedInspectorTurnId;
     QString projectedAgentThreadId;
+    QString retainedAgentActivityThreadId;
+    QSet<QString> retainedAgentActivityItemIds;
     QString newThreadIdAwaitingState;
     QString pendingPrompt;
     QList<AttachmentInfo> pendingAttachments;

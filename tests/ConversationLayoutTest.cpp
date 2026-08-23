@@ -629,21 +629,20 @@ bool testTurnWindow()
 
     QWidget* host = timeline(conversation);
     QFrame* notice = windowNotice(conversation);
-    const qsizetype maximumTurns = host ? host->property("maximumRenderedTurns").toLongLong() : 0;
     const QStringList turns = renderedTurnIds(conversation);
     bool passed = true;
     passed &= expect(state.thread("many-turns") != nullptr, "the long-turn fixture must produce public AISuite State");
-    passed &= expect(host && maximumTurns == 32, "the conversation must publish its bounded live-turn budget");
-    passed &= expect(turns.size() == maximumTurns, "the live timeline must remain within the turn budget");
-    passed &= expect(!turns.isEmpty() && turns.front() == QStringLiteral("turn-many-turns-8")
+    passed &= expect(host && turns.size() == 40,
+                     "a fully loaded conversation must materialize every retained turn");
+    passed &= expect(!turns.isEmpty() && turns.front() == QStringLiteral("turn-many-turns-0")
                          && turns.back() == QStringLiteral("turn-many-turns-39"),
-                     "the turn window must preserve the exact canonical tail order and original identities");
-    passed &= expect(notice && notice->isVisible(),
-                     "a bounded timeline must truthfully disclose omitted earlier entries");
+                     "the timeline must preserve complete canonical order and original identities");
+    passed &= expect(notice && !notice->isVisible(),
+                     "a fully loaded timeline must not claim that retained entries are omitted");
     passed &= expect(hasLabel(conversation, QStringLiteral("message many-turns 39")),
                      "the newest retained turn must remain visible");
-    passed &= expect(!hasLabel(conversation, QStringLiteral("message many-turns 0")),
-                     "an entry outside the live turn window must not allocate a widget");
+    passed &= expect(hasLabel(conversation, QStringLiteral("message many-turns 0")),
+                     "the earliest retained turn must remain available after reconstruction");
     return passed;
 }
 
@@ -685,22 +684,23 @@ bool testHotTurnWindow()
     settleTimeline();
 
     QWidget* host = timeline(conversation);
-    const qsizetype maximumItems = host ? host->property("maximumRenderedItems").toLongLong() : 0;
     const auto segments = conversation.findChildren<QWidget*>(QStringLiteral("conversationSegment"));
     qsizetype renderedItems = 0;
     for (QWidget* item : segments)
         renderedItems += item->property("timelineItemCount").toLongLong();
     bool passed = true;
     passed &= expect(state.thread("hot") != nullptr, "the hot-turn fixture must produce public AISuite State");
-    passed &= expect(maximumItems == 256 && renderedItems == maximumItems,
-                     "one oversized turn must remain within the global live-item budget");
-    passed &= expect(segment(conversation, QStringLiteral("message:item-hot-0")) == nullptr,
-                     "the oversized turn must not materialize its earliest out-of-window message");
+    passed &= expect(host && renderedItems == 300
+                         && host->property("renderedTimelineItems").toLongLong() == 300
+                         && host->property("retainedTimelineItems").toLongLong() == 300,
+                     "one oversized turn must materialize its complete retained history");
+    passed &= expect(segment(conversation, QStringLiteral("message:item-hot-0")) != nullptr,
+                     "the oversized turn must retain its earliest message after reconstruction");
     passed &= expect(segment(conversation, QStringLiteral("message:item-hot-299")) != nullptr
                          && hasLabel(conversation, QStringLiteral("message hot 299")),
                      "the oversized turn must retain its exact newest message");
-    passed &= expect(windowNotice(conversation) && windowNotice(conversation)->isVisible(),
-                     "the oversized turn must show the presentation-window notice");
+    passed &= expect(windowNotice(conversation) && !windowNotice(conversation)->isVisible(),
+                     "complete retained history must not show a presentation-window notice");
     passed &= expect(windowNotice(conversation)
                          && windowNotice(conversation)->styleSheet().contains(
                              QStringLiteral("QFrame#conversationWindowNotice")),
@@ -721,11 +721,11 @@ bool testHotTurnWindow()
         boundedCards = boundedCards && cardItems <= 16;
     }
     passed &= expect(activityState.thread("activity") != nullptr && boundedCards && activityHost
-                         && renderedActivities == activityHost->property("maximumRenderedItems").toLongLong()
+                         && renderedActivities == 300
                          && renderedActivities == activityHost->property("renderedTimelineItems").toLongLong()
                          && activityHost->property("retainedTimelineItems").toLongLong()
-                                == renderedActivities + 1,
-                     "a contiguous activity run must be chunked within the global item budget without an all-history count scan");
+                                == renderedActivities,
+                     "a contiguous activity run must retain every canonical row in bounded-size cards");
     QWidget* newestActivityRow = nullptr;
     for (QWidget* row : activityConversation.findChildren<QWidget*>(
              QStringLiteral("conversationActivityRow")))
@@ -751,7 +751,7 @@ bool testHotTurnWindow()
                          && newestActivityDetails->property("detailMaterializationCount").toULongLong() == 0
                          && newestActivityDetails->property("deferredDetailBytes").toULongLong()
                                 == std::string_view("activity activity 299").size(),
-                     "the bounded activity window must retain its newest detail without materializing collapsed text");
+                     "the complete activity timeline must retain its newest detail without materializing collapsed text");
     if (newestActivityDisclosure)
         newestActivityDisclosure->click();
     settleTimeline();
@@ -764,7 +764,7 @@ bool testHotTurnWindow()
                                 == QStringLiteral("activity activity 299")
                          && newestActivityDetails
                          && newestActivityDetails->property("detailMaterializationCount").toULongLong() == 1,
-                     "expanding the newest bounded activity must materialize its exact retained detail once");
+                     "expanding the newest activity must materialize its exact retained detail once");
     const auto activityCards = activityConversation.findChildren<QFrame*>(
         QStringLiteral("conversationActivityCard"));
     passed &= expect(!activityCards.isEmpty()
@@ -1039,7 +1039,7 @@ bool testPointerPreservingAppend()
     conversation.render(before, QStringLiteral("append"));
     settleTimeline();
 
-    QPointer<QWidget> evicted = segment(conversation, QStringLiteral("message:item-append-0"));
+    QPointer<QWidget> retainedHead = segment(conversation, QStringLiteral("message:item-append-0"));
     QPointer<QWidget> survivor = segment(conversation, QStringLiteral("message:item-append-2"));
     QPointer<QWidget> readingAnchor = segment(conversation, QStringLiteral("message:item-append-10"));
     QWidget* survivorAddress = survivor.data();
@@ -1081,7 +1081,7 @@ bool testPointerPreservingAppend()
                                   ? scroll->viewport()->mapFromGlobal(readingAnchor->mapToGlobal(QPoint{})).y()
                                   : 0;
     bool passed = true;
-    passed &= expect(readingHistory && evicted && survivor
+    passed &= expect(readingHistory && retainedHead && survivor
                          && survivor.data() == survivorAddress
                          && qAbs(frozenAnchorY - anchorYBefore) <= 2
                          && !segment(conversation, QStringLiteral("message:item-append-256"))
@@ -1095,17 +1095,17 @@ bool testPointerPreservingAppend()
     conversation.render(latest, QStringLiteral("append"));
     settleTimeline();
 
-    passed &= expect(!evicted && survivor && survivor.data() == survivorAddress
+    passed &= expect(retainedHead && survivor && survivor.data() == survivorAddress
                          && survivor.data() == segment(conversation, QStringLiteral("message:item-append-2")),
-                     "rolling the bounded head must preserve every overlapping segment widget");
+                     "appending past the former window boundary must preserve the retained head and overlapping widgets");
     passed &= expect(segment(conversation, QStringLiteral("message:item-append-256")) != nullptr
                          && segment(conversation, QStringLiteral("message:item-append-257")) != nullptr
                          && hasLabel(conversation, QStringLiteral("reflected prompt"))
                          && hasLabel(conversation, QStringLiteral("updated final answer")),
                      "the reflected prompt and final answer must append at the timeline tail");
-    passed &= expect(host && host->property("renderedTimelineItems").toLongLong()
-                                 <= host->property("maximumRenderedItems").toLongLong(),
-                     "appending at the rolling boundary must keep the live-item count bounded");
+    passed &= expect(host && host->property("renderedTimelineItems").toLongLong() == 258
+                         && host->property("retainedTimelineItems").toLongLong() == 258,
+                     "appending at the former rolling boundary must retain every canonical item");
 
     codexui::ConversationWidget followingConversation;
     followingConversation.resize(900, 700);
@@ -1880,12 +1880,22 @@ bool testIncompleteReplacementPreservesRenderedTimeline()
     ThreadFixture completeActivities{
         "grouped-activity-retention",
         {{"grouped-activity-turn",
-          {{"grouped-activity-first",
-            frontend::ThreadItemKind::Reasoning,
-            "first retained activity"},
+           {{"grouped-activity-first",
+            frontend::ThreadItemKind::CommandExecution,
+            "first retained command output",
+            "completed",
+            false,
+            false,
+            false,
+            "printf first"},
            {"grouped-activity-second",
-            frontend::ThreadItemKind::Reasoning,
-            "second retained activity"}}}}};
+            frontend::ThreadItemKind::CommandExecution,
+            "second retained command output",
+            "completed",
+            false,
+            false,
+            false,
+            "printf second"}}}}};
     codexui::ConversationWidget groupedConversation;
     groupedConversation.resize(900, 700);
     groupedConversation.show();
@@ -1915,7 +1925,10 @@ bool testIncompleteReplacementPreservesRenderedTimeline()
     partialActivities.turns.front().messages.pop_back();
     groupedConversation.render(
         makeState({partialActivities}),
-        QStringLiteral("grouped-activity-retention"));
+        QStringLiteral("grouped-activity-retention"),
+        false,
+        nullptr,
+        true);
     settleTimeline();
     passed &= expect(
         activitySegment && activitySegment.data() == activitySegmentAddress
@@ -1923,7 +1936,7 @@ bool testIncompleteReplacementPreservesRenderedTimeline()
             && secondActivityRow.data() == secondActivityRowAddress
             && hasLabelContaining(groupedConversation,
                                   QStringLiteral("History recovery pending")),
-        "an incomplete activity group must preserve every rendered descendant, not only the row that owns its segment identity");
+        "a structural command upsert from an incomplete projection must preserve every rendered shell row, not only the row that owns its segment identity");
 
     ThreadFixture largePrefix{"bounded-recovery-prefix", {{"bounded-recovery-turn", {}}}};
     constexpr int largePrefixItems = 2'048;
@@ -1957,17 +1970,28 @@ bool testIncompleteReplacementPreservesRenderedTimeline()
     QWidget* boundedHost = timeline(boundedConversation);
     const qlonglong maximumRecoveryScan =
         boundedHost
-            ? boundedHost->property("maximumRenderedItems").toLongLong()
-                  + 15 * boundedHost->property("maximumRenderedTurns").toLongLong()
+            ? boundedHost->property("recoveryInspectionItemBudget").toLongLong()
+                  + 15 * boundedHost->property("recoveryInspectionTurnBudget").toLongLong()
             : 0;
     passed &= expect(
         retainedTail && retainedTail.data() == retainedTailAddress
-            && hasLabel(boundedConversation,
-                        QStringLiteral("bounded appended tail"))
+            && !hasLabel(boundedConversation,
+                         QStringLiteral("bounded appended tail"))
+            && hasLabelContaining(boundedConversation,
+                                  QStringLiteral("History recovery pending"))
             && boundedHost
             && boundedHost->property("recoveryInspectedTimelineItems").toLongLong()
                    <= maximumRecoveryScan,
-        "incomplete replacement recovery must inspect only the previously rendered bounded tail, not a large retained prefix or later appends");
+        "incomplete replacement recovery must freeze safely within its inspection budget when the retained timeline is large");
+    largePrefix.fullyLoaded = true;
+    boundedConversation.render(
+        makeState({largePrefix}), QStringLiteral("bounded-recovery-prefix"));
+    settleTimeline();
+    passed &= expect(
+        retainedTail && retainedTail.data() == retainedTailAddress
+            && hasLabel(boundedConversation,
+                        QStringLiteral("bounded appended tail")),
+        "authoritative recovery must append new history without replacing retained widgets");
     return passed;
 }
 
@@ -2792,9 +2816,10 @@ bool testThreadSwitchWindow()
         QScrollArea* scroll = conversation.findChild<QScrollArea*>();
         passed &= expect(segment(conversation, present) != nullptr && segment(conversation, absent) == nullptr,
                          "thread switching must retain only the selected canonical window");
+        const qlonglong expectedItems = selected == QStringLiteral("switch-a") ? 300 : 2;
         passed &= expect(host && host->property("renderedTimelineItems").toLongLong()
-                                     <= host->property("maximumRenderedItems").toLongLong(),
-                         "every selected thread must remain within the live-item budget");
+                                     == expectedItems,
+                         "every selected thread must reconstruct its complete retained timeline");
         passed &= expect(scroll && scroll->verticalScrollBar()->value() == scroll->verticalScrollBar()->maximum(),
                          "a selected historical thread must settle at its newest retained entry");
         return host ? host->height() : 0;
@@ -2862,9 +2887,16 @@ bool testInspectorThreadDependencies()
     activity.agentPath = "agent/reviewer";
     activity.agentThreadId = "inspector-agent-child";
     activity.agentKind = "spawn";
+    ThreadFixture parent{
+        "inspector-parent",
+        {{"turn-inspector-parent-agents", {activity}, std::nullopt},
+         {"turn-inspector-parent-latest",
+          {{"inspector-parent-latest-message",
+            frontend::ThreadItemKind::AgentMessage,
+            "A newer turn without agent activity"}},
+          std::nullopt}}};
     const client::State state = makeState(
-        {{"inspector-parent", {{"turn-inspector-parent", {activity}, std::nullopt}}},
-         singleTurn("inspector-agent-child", 1)});
+        {parent, singleTurn("inspector-agent-child", 1)});
 
     codexui::InspectorWidget inspector;
     inspector.render(state,
@@ -2875,7 +2907,35 @@ bool testInspectorThreadDependencies()
                              && inspector.dependsOnThread(
                                  QStringLiteral("inspector-agent-child"))
                              && !inspector.dependsOnThread(QStringLiteral("unrelated")),
-                         "Inspector invalidation must include its selected parent and linked agent thread only");
+                         "Inspector reconstruction must retain earlier-turn agents and their linked thread dependencies");
+
+    QPointer<QPushButton> retainedAgentRow;
+    for (QPushButton* button : inspector.findChildren<QPushButton*>()) {
+        if (button->toolTip() == QStringLiteral("agent/reviewer")) {
+            retainedAgentRow = button;
+            break;
+        }
+    }
+    ThreadFixture partialParent = singleTurn("inspector-parent", 1);
+    partialParent.fullyLoaded = false;
+    const client::State partialWithoutActivity = makeState(
+        {partialParent, singleTurn("inspector-agent-child", 1)});
+    inspector.render(partialWithoutActivity,
+                     QStringLiteral("inspector-parent"),
+                     true,
+                     QStringLiteral("State synced"));
+    settleEvents();
+    const auto partialLabels = inspector.findChildren<QLabel*>();
+    passed &= expect(retainedAgentRow
+                         && inspector.dependsOnThread(
+                             QStringLiteral("inspector-agent-child"))
+                         && std::ranges::none_of(
+                             partialLabels,
+                             [](const QLabel* label) {
+                                 return label->text()
+                                     == QStringLiteral("No agent activity");
+                             }),
+                     "an incomplete latest-turn projection must retain the Agents row and its linked-thread dependency");
 
     const client::State withoutActivity = makeState(
         {singleTurn("inspector-parent", 1), singleTurn("inspector-agent-child", 1)});
@@ -2883,9 +2943,11 @@ bool testInspectorThreadDependencies()
                      QStringLiteral("inspector-parent"),
                      true,
                      QStringLiteral("State synced"));
+    settleEvents();
     passed &= expect(inspector.dependsOnThread(QStringLiteral("inspector-parent"))
                          && !inspector.dependsOnThread(
-                             QStringLiteral("inspector-agent-child")),
+                             QStringLiteral("inspector-agent-child"))
+                         && !retainedAgentRow,
                      "removing subagent activity must discard its stale linked-thread dependency");
     return passed;
 }
