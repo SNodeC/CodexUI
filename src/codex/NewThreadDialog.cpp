@@ -8,13 +8,17 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QFrame>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScreen>
 #include <QScrollArea>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 namespace codexui::codex {
 namespace {
@@ -44,7 +48,6 @@ NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
     : QDialog(parent) {
   setModal(true);
   setWindowTitle(QStringLiteral("New thread"));
-  resize(680, 620);
   setMinimumSize(540, 480);
 
   auto *root = new QVBoxLayout(this);
@@ -59,6 +62,7 @@ NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
   auto *scroll = new QScrollArea;
   scroll->setWidgetResizable(true);
   scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
   auto *content = new QWidget;
   auto *form = new QVBoxLayout(content);
   form->setContentsMargins(0, 2, 8, 2);
@@ -130,6 +134,26 @@ NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
   connect(browse, &QPushButton::clicked, this, [this] { chooseWorkspace(); });
   connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
   connect(create, &QPushButton::clicked, this, [this] { acceptDraft(); });
+
+  QScreen *targetScreen =
+      parent ? parent->screen() : QGuiApplication::primaryScreen();
+  const QRect available =
+      targetScreen ? targetScreen->availableGeometry() : QRect(0, 0, 1280, 800);
+  constexpr int ScreenMargin = 64;
+  const int maximumWidth =
+      std::max(minimumWidth(), available.width() - ScreenMargin);
+  const int targetWidth = std::clamp(680, minimumWidth(), maximumWidth);
+  resize(targetWidth, minimumHeight());
+  root->activate();
+  form->activate();
+  const int desiredScrollHeight =
+      content->sizeHint().height() + 2 * scroll->frameWidth();
+  const int desiredHeight = root->sizeHint().height() -
+                            scroll->sizeHint().height() + desiredScrollHeight;
+  const int maximumHeight =
+      std::max(minimumHeight(), available.height() - ScreenMargin);
+  resize(targetWidth,
+         std::clamp(desiredHeight, minimumHeight(), maximumHeight));
 }
 
 NewThreadDraft NewThreadDialog::draft() const {
