@@ -343,10 +343,14 @@ request content is not copied into diagnostics.
 
 ### 5.8 Raw JSON and Compatibility
 
-The codex2 SDK preserves complete native app-server JSON and unknown fields.
-Raw JSON remains available only through the explicit bounded
-`diagnostic.raw.send` development action and SNode.C-side diagnostics. It is
-not normal UI state, deletion authority, or an escape from typed normalization.
+The codex2 SDK preserves complete native app-server JSON and unknown fields in
+its generated C++ values on the SNode.C side. The regular socketpair boundary
+carries bounded normalized presentation data, including only the native fields
+needed to render and answer a pending request. The request object is retained
+transiently until that request is resolved and is never rendered as a raw dump.
+Arbitrary raw JSON crosses the boundary only through the explicit bounded
+`diagnostic.raw.send` development action. Raw data is not normal UI state,
+deletion authority, or an escape from typed normalization.
 
 Consumers reject an unsupported protocol name or major version. They ignore
 unknown semantic event types without deleting state. New optional fields,
@@ -400,6 +404,35 @@ turn ID.
 Switching threads or inspector tabs while turns, plans, commands, agents, or
 requests are changing must not stop, reset, or reorder those lifecycles.
 
+### 7.1 Upcoming-Turn Settings
+
+The real shell has a codex2-native upcoming-turn settings surface. It does not
+compile or adapt the legacy frontend `State` types. Its primary controls are:
+
+- model and model-constrained reasoning effort;
+- sandbox access and the sandbox-native network choice;
+- workspace;
+- approval policy;
+- personality/style.
+
+The compact More menu contains the named permission profile, approval
+reviewer, service tier, reasoning summary, and collaboration mode. Model,
+effort, service-tier, and permission-profile choices are populated from fresh
+app-server catalogs. A named permission profile and a sandbox policy are
+mutually exclusive, matching the native app-server contract.
+
+The settings object is a transient draft bound to the stable selected thread
+identity. User changes are serialized into native `thread/start` and
+`turn/start` fields; untouched fields remain omitted so UI defaults cannot
+replace provider state. Collaboration mode is the deliberate exception:
+app-server may retain Plan mode without returning it from a later
+`thread/read`, so every `turn/start` explicitly sends the Code or Plan mode
+currently displayed by CodexUI. The new-thread workspace always has an
+explicit local fallback. Settings are disabled while steering because
+`turn/steer` does not accept upcoming-turn configuration. No setting is
+persisted by CodexUI or treated as canonical before the app-server publishes
+it.
+
 ## 8. Plans and Agents
 
 ### 8.1 Plans
@@ -411,7 +444,9 @@ steps with `pending`, `inProgress`, or `completed` status.
 Plan presentation is retained across tab and thread switching. It changes only
 for the identified turn and is cleared only by an explicit authoritative empty
 or replacement event for that turn. A completed textual plan item may be shown
-as conversation activity, but it does not override a newer authoritative
+as conversation activity. When no structured plan survives a fresh
+`thread/read`, the Plan inspector renders the newest retained textual plan item
+as a read-only compatibility view; it never overrides a newer authoritative
 structured turn plan.
 
 ### 8.2 Agents
@@ -432,6 +467,13 @@ Completion must not collapse this information into only a generic
 inspectable as part of its owning turn. Later partial events may update status
 without erasing richer agent identity or prompt data.
 
+Only spawn operations create agent rows. Provisional spawn starts without a
+child identity are not independently presented, and `wait`, `sendInput`, and
+other collaboration operations update an already identified child rather than
+being counted as additional agents. Once supplied, the child thread ID is the
+stable presentation identity across spawn completion, child activity, wait,
+and result events.
+
 App-server may publish a parent `subAgentActivity(kind=started)` and later
 complete the child thread without replacing the parent item with a completed
 variant. CodexUI correlates those authoritative records by `agentThreadId` and
@@ -450,6 +492,16 @@ events using the native stable JSON-RPC request ID and associated thread ID.
 Supported request families include approvals, user input, MCP elicitation,
 permission approval, dynamic tool calls, and other generated server-request
 types.
+
+The Requests view presents each pending request independently. Command and
+file-change approvals use native decision enums, user-input answers preserve
+question IDs and support options/free text/secret input, MCP form responses
+return structured JSON, and permission approvals preserve the requested
+permission object and selected turn/session scope. Dynamic tools unavailable
+in CodexUI return a typed failed-tool response. Authentication, attestation,
+and unknown capabilities receive an explicit JSON-RPC error rather than
+remaining pending indefinitely. Canceling the dialog itself does not resolve
+the request.
 
 The UI attention/brown state is derived only from currently unresolved pending
 requests associated with that thread. It is not inferred from historical item
@@ -648,7 +700,307 @@ path is proven there, the existing externally designed visual shell consumes
 the same model and command surface through narrow Qt adapters. The visual shell
 must not reintroduce the legacy frontend State/snapshot architecture.
 
-## 17. Architectural Invariants
+## 17. Implemented Harness Components and APIs
+
+The first codex2 CodexUI milestone is a complete functional presentation
+harness. Legacy CodexUI transport, frontend `State`, snapshot, replay, and SDK
+sources remain on disk but are excluded from the codex2 executable and CI
+build. Only the existing `ExpandingPromptEditor` and visual style helpers are
+shared because they contain no legacy protocol authority.
+
+The implementation is divided into the following concrete components:
+
+| Component | Responsibility |
+| --- | --- |
+| `Configuration` | CodexUI `utils::SubCommand`; adds only CodexUI-specific frame-size and WebSocket-path options |
+| `SocketPair` | Movable RAII owner for the unnamed nonblocking `AF_UNIX` socketpair |
+| `QtSocketPairEndpoint` | Qt-thread descriptor adapter using `QSocketNotifier`, bounded reads, and bounded writes |
+| `SNodeSocketPairEndpoint` | SNode.C-thread descriptor adapter using `core::socket::Socket`, bounded reads, and bounded writes |
+| `FrontendSession` | Qt-side asynchronous command facade, correlation registry, lifecycle owner, and socketpair JSONL endpoint |
+| `ClientRuntime` | SNode.C-thread application graph, selected transport, frontend proxy SDK dispatch, reconnect, and shutdown |
+| `ProtocolNormalizer` | Native app-server/bridge input to `codexui.presentation` result/event conversion |
+| `PresentationProtocol` | Frame construction, validation, authority, sequence, generation, and scope utilities |
+| `PresentationModel` | Qt-owned stable-ID reducer for threads, turns, items, plans, agents, requests, global domains, and telemetry |
+| `WorkbenchWidget` | Permanent development harness and user-intent adapter |
+| `ShellWidget` | Normal externally designed CodexUI shell over the same model and command API |
+| `TurnSettingsWidget` | Codex2-native transient settings draft and native thread/turn option encoder |
+| `PendingRequestDialog` | Typed, generation-preserving UI for app-server server-request families |
+| `MainWindow` | Top-level Qt window ownership only |
+
+### 17.1 FrontendSession API
+
+`FrontendSession` is the normal Qt-side entry point. It provides asynchronous
+methods for thread discovery/read/create/resume/fork/rename/archive/delete,
+model and environment discovery, turn start/steer/interrupt, controller
+claim/release, reconnect, raw diagnostic send, and typed server-request
+resolution. Every correlated method returns a presentation correlation ID and
+optionally invokes a Qt-thread response callback. It never blocks the GUI
+thread or exposes a transport socket.
+
+The generic operation method:
+
+```cpp
+request(std::string operation,
+        nlohmann::json parameters,
+        ResponseHandler handler = {})
+```
+
+supports the complete generated AISuite operation catalog without adding one
+Qt facade method per rarely used operation. Frequently used UI actions have
+narrow named methods such as `listThreads()`, `readThread()`, `startTurn()`,
+`steerTurn()`, and `respondToServerRequest()`.
+
+Lifecycle is explicit: `start()` creates the endpoint/runtime graph,
+`shutdown()` requests orderly asynchronous termination, and `wait()` joins the
+SNode.C thread. `setEventHandler()` receives normalized frames and
+`setRuntimeStoppedHandler()` reports terminal worker shutdown.
+
+### 17.2 Normalizer and reducer APIs
+
+`ProtocolNormalizer` accepts transport lifecycle, bridge telemetry, typed
+server notifications, server requests, raw inbound observation, operation
+success, and operation rejection. Its only output is a validated bounded
+presentation frame through its sink. `knownServerMethod()` makes coverage gaps
+observable rather than silently treating an unknown method as state.
+
+`PresentationModel::applyEvent()` is the single public reduction entry point.
+The model exposes stable thread ordering and lookup, active-turn lookup,
+generation-aware pending-request queries, retained global domains, bounded
+telemetry, and pending-request presentation records. Internal upsert helpers
+preserve complete fields across partial events, correlate child-agent threads,
+and apply explicit merge/replace/remove authority.
+
+### 17.3 Transport availability
+
+The executable always builds Unix, IPv4, and IPv6 JSONL clients. TLS, RFCOMM,
+WebSocket, and WSS clients are compiled when their SNode.C targets are
+available. Exactly one configured client instance may be enabled. Address,
+certificate, timeout, queue, reconnect, and instance-enable options come from
+the corresponding SNode.C client configuration; CodexUI adds no duplicate
+transport configuration.
+
+The build produces two independently launchable applications:
+
+- `codex-ui` is the normal visual UI/UX shell;
+- `codex-ui-harness` is the permanent plain protocol/reducer harness.
+
+They compile the same `FrontendSession`, `ClientRuntime`, socketpair,
+normalizer, protocol, and presentation-model sources. Only the top-level Qt
+consumer differs. Neither executable has a privileged transport or state path.
+
+The current build links the codex2 AISuite frontend library as
+`AISuite::OpenAICodex2`, Qt Widgets, Threads, and the selected SNode.C client
+modules. The canonical incremental build directory is `build-codex2`.
+
+### 17.4 Shell settings and pending-request APIs
+
+`TurnSettingsWidget` owns only an upcoming-turn draft. The shell supplies fresh
+provider context and catalogs through:
+
+```cpp
+setContext(std::string identity,
+           const nlohmann::json &canonical,
+           const nlohmann::json &models,
+           const nlohmann::json &permissionProfiles);
+setControlsEnabled(bool enabled);
+```
+
+`workspace()` resolves the visible workspace against the caller's local
+fallback. `threadStartOptions()` emits only native `thread/start` fields, while
+`turnStartOptions()` emits only native `turn/start` fields. Untouched fields are
+omitted except that collaboration mode is always explicit because app-server
+does not reliably reconstruct its retained value. Explicitly selecting a
+provider default emits `null`; named permissions and sandbox policy remain
+mutually exclusive. The three app-server
+`thread/start` sandbox strings are encoded directly. The richer
+`externalSandbox` object is emitted only as a `turn/start.sandboxPolicy`, where
+the native protocol defines it. Reasoning efforts, service tiers, default tier,
+and personality availability follow the selected model catalog.
+
+The native collaboration object is not a partial mask: its nested `model` is
+mandatory, while `reasoning_effort` and `developer_instructions` use the
+app-server schema's snake-case names. When the UI shows `Codex default`, the
+encoder resolves the catalog entry marked `isDefault` and sends its concrete
+model ID. Until that fresh catalog is available, CodexUI omits the otherwise
+explicit collaboration object rather than constructing an invalid one.
+
+`PendingRequestDialog::present()` accepts one generation-preserving
+`PendingRequestPresentation` and returns either no value when the user closes
+the dialog or a `PendingRequestResponse` containing exactly one native result
+or JSON-RPC error. `negativeResponse()` constructs the family-specific explicit
+decline used by the Requests surface. The caller resolves through
+`FrontendSession::respondToServerRequest()` with the stable connection
+generation and request ID; the dialog never mutates presentation state itself.
+
+`ShellWidget` is the sole visual command adapter. It translates selection,
+composer, settings, controller, thread-management, and request-review actions
+into `FrontendSession` calls. Agent messages, plan text, reasoning summaries,
+and agent results pass through `QTextDocument::setMarkdown()` with
+`MarkdownNoHTML`; user prompts, commands, and command output remain literal.
+
+## 18. Live Harness Validation
+
+The harness was exercised against one persistent real topology:
+
+```text
+Codex app-server 0.144.6 over IPv4 WebSocket
+    <-> codex-bridge over IPv4 WebSocket
+    <-> CodexUI harness over IPv4 WebSocket
+```
+
+An independent `codex-bridge-client` observer remained connected to the same
+bridge while CodexUI held controller ownership. The run used an authenticated
+isolated Codex home and an existing persistent bridge process rather than a
+simulated provider.
+
+Validated behavior includes:
+
+- initial connection, explicit controller claim/release, and observer fanout;
+- fresh thread discovery followed by selected `thread/read(includeTurns=true)`;
+- no automatic thread selection when another client or subagent creates a
+  thread;
+- multiple turns, steering, structured plan updates, command execution,
+  command output/completion, and final answers;
+- pending-request presentation and resolution without stale brown attention;
+- parent/child agent correlation, child history hydration, and retained child
+  result presentation in the parent Agents view;
+- switching among Conversation, Plan, Agents, Requests, State, and Protocol
+  surfaces while turns and agents were active;
+- retention of an early completed marker command while later commands, plan
+  transitions, subagent activity, and final output arrived;
+- stable presentation after turn completion, with no observed disconnect,
+  sequence gap, stale pending request, or retained-item disappearance.
+
+The final validation turn lasted about 36 seconds and included a completed
+marker command, a three-step completed plan, one subagent thread, later shell
+activity, and a final answer. At the final checkpoint the normalized model held
+one top-level selected thread, three turns, seventeen items, zero pending
+requests, and the retained marker and later activity simultaneously.
+
+A fresh rebuilt visual shell was then validated against the same persistent
+bridge. Selecting the completed parent thread retained all top-level rows and
+hydrated the Conversation. The Plan inspector reconstructed the retained
+textual plan with Markdown formatting; Changes displayed the explicit
+read-only empty state; Requests remained at zero; and opening Info lazily
+populated the environment State without clearing or blocking Conversation.
+Controller and connection status remained stable throughout these tab
+transitions. The fresh Agents view correctly remained empty because the
+authoritative `thread/read` omitted all prior collaboration items, as documented
+below.
+
+A final focused live turn requested exactly one subagent. Raw observer events
+contained one completed `spawnAgent` item with child thread ID, one `wait`
+operation, the child command/result, and the parent final answer. During the
+turn the shell reported `1 agent | 1 active`; after completion it reported
+`1 agent | 0 active` and retained one completed agent card with model, effort,
+prompt, child thread ID, and result. No provisional spawn or wait row appeared.
+The settings controls also displayed explicit chevrons. This run exposed one
+additional compatibility defect: Code was displayed after a fresh read while
+`turn/start` omitted collaboration mode and app-server silently continued its
+retained Plan mode. The encoder now sends the displayed collaboration mode on
+every new turn once the mandatory model has been resolved from the fresh
+catalog.
+
+The post-fix live acceptance used frontend connection `frontend-27` and a fresh
+thread. Its raw `turn/start` contained `mode: "default"`, catalog-resolved model
+`gpt-5.6-sol`, and native `reasoning_effort: null` and
+`developer_instructions: null` fields. App-server accepted the request,
+published matching Default collaboration settings, completed the turn without
+tools, and returned the requested `CODE_MODE_OK` response.
+
+Startup latency was traced to eager account/configuration/plugin/app catalogs
+queued before the selected thread read. Startup now requests thread discovery
+plus the small model and permission-profile catalogs required by the composer.
+The larger environment catalog is fetched lazily when Info is first opened,
+allowing the selected conversation to hydrate promptly without introducing a
+cache.
+
+This live run proves the implemented paths exercised by the scenario; it is
+not a claim that every generated operation or every optional transport has
+received equivalent live coverage. The canonical build and `git diff --check`
+completed successfully. No automated CodexUI codex2 tests are part of this
+milestone.
+
+## 19. Provider Limitations Observed Live
+
+### 19.1 Reconstruction Shortcomings
+
+Three app-server reconstruction shortcomings were observed live:
+
+1. Live parent events include `collabAgentToolCall` and child-agent activity,
+   but a later `thread/read(includeTurns=true)` returned both parent turns while
+   omitting every collaboration and subagent item. A fresh no-cache CodexUI
+   therefore cannot reconstruct historical Agents content. During a continuous
+   connection CodexUI correlates the authoritative live records by child thread
+   ID and keeps implementation threads out of the ordinary top-level list.
+2. `turn/plan/updated` notifications produced and updated the Plan view
+   correctly during the live session, but a later
+   `thread/read(includeTurns=true)` did not return those completed plan updates
+   or an equivalent current-plan field. When the read retains a completed
+   textual plan item, CodexUI uses that item as the Plan inspector's read-only
+   fallback; otherwise it correctly displays `No plan for this thread`.
+3. Under legacy history mode, a later `thread/read` can reconstruct generic
+   item IDs and omit a live command-execution item even though the live event
+   stream contained the richer item.
+
+CodexUI accommodates the representations it receives, but it must not preserve
+or synthesize missing provider history across a fresh-read boundary. The
+app-server read is authoritative and the codex2 architecture deliberately has
+no semantic cache.
+
+### 19.2 Capability Limitations
+
+The current app-server does not support `historyMode: "paginated"` and returns
+`paginated_threads is not supported yet`. A newly started thread is also not
+materialized for `thread/read(includeTurns=true)` until it receives its first
+user message.
+
+These are provider-boundary discrepancies. CodexUI reports and renders the
+authoritative result it receives; it does not hide them with a bridge snapshot,
+AISuite cache, or CodexUI persistence layer. A future caching design requires a
+separate explicit authority and retention decision.
+
+## 20. Visual Shell Integration Boundary
+
+The externally designed legacy CodexUI files remain available as visual and
+interaction reference, but their widget implementations directly consume the
+legacy AISuite frontend `State` and SDK types. Compiling those widgets unchanged
+would reintroduce the architecture intentionally removed by codex2.
+
+The real shell therefore preserves the established layout, hierarchy,
+spacing, typography, controls, conversation cards, inspector organization, and
+interaction behavior in codex2-owned Qt widgets. Those widgets consume only
+`PresentationModel` and call only `FrontendSession`. Legacy source files remain
+untouched and disabled. The permanent harness remains available as the
+protocol/reducer diagnostic surface and is not itself the final visual design.
+
+The implemented shell contains the 56-pixel top bar, hideable work sidebar,
+thread list, conversation timeline and composer, hideable inspector, Plan,
+Agents, Changes, Requests, and Info surfaces, explicit controller control,
+connection/request status, complete upcoming-turn settings, and the 40-pixel
+status bar. Agent messages, plans, reasoning summaries, and agent results are
+rendered with Qt Markdown parsing while embedded HTML is disabled. User text,
+commands, and command output remain literal. State and Protocol diagnostics
+remain nested under Info rather than dominating normal use.
+
+Pending-request presentation exposes category, stable request ID, connection
+generation, owning thread, and a bounded set of safe typed details. The native
+request object remains transiently available to the typed response dialog but
+is never dumped to the shell, harness State view, notice banner, or protocol
+log. Secret answers are held only by password editors until the dialog is
+destroyed.
+
+Operation errors, provider notices, protocol diagnostics, and connection
+failures produce a dismissible latest-notice banner. Its text is extracted
+only from bounded message/detail fields. The complete bounded frame chronology
+remains in Info/Protocol. Neither surface has state authority.
+
+Further shell work remains presentation-only. It must not change the socketpair
+protocol, app-server normalization, model authority, bridge role semantics,
+recovery policy, or AISuite codex2 implementation unless a proven missing
+contract requires a separately reviewed change.
+
+## 21. Architectural Invariants
 
 1. The app-server is Codex semantic and persistence authority.
 2. `codex-bridge` is a thin multi-client router with telemetry, not a cache.
@@ -668,15 +1020,19 @@ must not reintroduce the legacy frontend State/snapshot architecture.
 14. Generic Qt and SNode.C socket classes remain free of Codex-specific methods.
 15. Native app-server and bridge transport failures remain distinguishable.
 
-## 18. Remaining Narrow Decisions
+## 22. Resolved Presentation Decisions
 
-Only presentation-level choices remain open:
+The remaining presentation-level choices are implemented as follows:
 
-- event batching needed to keep large delta streams responsive;
-- the bounded diagnostic retention size;
-- the exact user-visible presentation of individual typed errors and unknown
-  protocol events.
+- every incoming frame is reduced immediately, while widget reconstruction is
+  coalesced by one 16-millisecond single-shot Qt timer;
+- the Info/Protocol view retains at most 2,000 text blocks and the presentation
+  model retains at most 256 authority-free telemetry records;
+- typed operation errors and provider notices use a dismissible latest-notice
+  banner, while unknown/malformed protocol input remains visible in bounded
+  diagnostics and never mutates retained presentation state.
 
-These choices may refine boundedness and presentation but must not extend the
-authority, caching, threading, controller, transport, or protocol boundaries
-defined above.
+No architectural decision remains open in the codex2 CodexUI implementation.
+Interactive visual validation covered settings, Markdown, plans, pending
+requests, and live agent lifecycle. Provider-omitted history remains visible as
+an explicit reconstruction boundary rather than being hidden by client state.

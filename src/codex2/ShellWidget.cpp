@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
-#include "codex2/WorkbenchWidget.h"
+#include "codex2/ShellWidget.h"
 
 #include "codex2/FrontendSession.h"
+#include "codex2/PendingRequestDialog.h"
+#include "codex2/TurnSettingsWidget.h"
 #include "ui/ExpandingPromptEditor.h"
 
 #include <QAbstractItemView>
@@ -11,6 +13,7 @@
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
+#include <QFontMetrics>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -64,9 +67,37 @@ QString displayStatus(const std::string &status) {
 QLabel *makeLabel(QString value, const char *kind = "body") {
   auto *label = new QLabel(std::move(value));
   label->setProperty("kind", kind);
+  label->setTextFormat(Qt::PlainText);
   label->setWordWrap(true);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse);
   return label;
+}
+
+QLabel *makeMarkdownLabel(const QString &value) {
+  QTextDocument document;
+  document.setMarkdown(value, QTextDocument::MarkdownNoHTML);
+  auto *label = new QLabel(document.toHtml());
+  label->setProperty("kind", "body");
+  label->setTextFormat(Qt::RichText);
+  label->setWordWrap(true);
+  label->setOpenExternalLinks(true);
+  label->setTextInteractionFlags(Qt::TextSelectableByMouse |
+                                 Qt::LinksAccessibleByMouse);
+  return label;
+}
+
+QFrame *makeDivider() {
+  auto *divider = new QFrame;
+  divider->setFixedHeight(1);
+  divider->setStyleSheet(QStringLiteral("background:#d7dee8;"));
+  return divider;
+}
+
+QFrame *makeStatusDot() {
+  auto *dot = new QFrame;
+  dot->setFixedSize(8, 8);
+  dot->setStyleSheet(QStringLiteral("background:#98a2b3;border-radius:4px;"));
+  return dot;
 }
 
 void clearLayout(QLayout *layout) {
@@ -112,11 +143,30 @@ QString messageText(const nlohmann::json &item) {
   return {};
 }
 
+std::string safeMessage(const nlohmann::json &value) {
+  std::string message = stringValue(value, "message");
+  if (message.empty())
+    message = stringValue(value, "detail");
+  if (!message.empty())
+    return message;
+  const auto error = value.find("error");
+  return error != value.end() && error->is_object()
+             ? stringValue(*error, "message")
+             : std::string{};
+}
+
 QFrame *itemFrame(const ItemPresentation &presentation) {
   const nlohmann::json &item = presentation.raw;
   const std::string typeName = stringValue(item, "type");
   auto *frame = new QFrame;
   frame->setProperty("kind", "raised");
+  if (typeName == "userMessage") {
+    frame->setStyleSheet(QStringLiteral(
+        "background:#eaf2ff;border:1px solid #bfd3f9;border-radius:8px;"));
+  } else if (typeName == "agentMessage") {
+    frame->setStyleSheet(
+        QStringLiteral("background:#ffffff;border:0;border-radius:8px;"));
+  }
   auto *layout = new QVBoxLayout(frame);
   layout->setContentsMargins(12, 10, 12, 10);
   layout->setSpacing(6);
@@ -141,8 +191,11 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
   layout->addWidget(makeLabel(title, "title"));
 
   const QString body = messageText(item);
-  if (!body.isEmpty())
-    layout->addWidget(makeLabel(body));
+  if (!body.isEmpty()) {
+    layout->addWidget(typeName == "agentMessage" || typeName == "plan"
+                          ? makeMarkdownLabel(body)
+                          : makeLabel(body));
+  }
 
   if (typeName == "commandExecution") {
     const QString command = text(stringValue(item, "command"));
@@ -151,6 +204,9 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
       commandView->setReadOnly(true);
       commandView->setMaximumHeight(90);
       commandView->setProperty("kind", "command");
+      commandView->setStyleSheet(QStringLiteral(
+          "background:#f8fafc;border:1px solid #d7dee8;border-radius:6px;"
+          "padding:7px;font-family:monospace;font-size:11px;"));
       layout->addWidget(commandView);
     }
     const QString output = text(stringValue(item, "aggregatedOutput"));
@@ -158,6 +214,9 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
       auto *outputView = new QPlainTextEdit(output);
       outputView->setReadOnly(true);
       outputView->setMaximumHeight(220);
+      outputView->setStyleSheet(QStringLiteral(
+          "background:#111827;color:#e5e7eb;border-radius:6px;padding:7px;"
+          "font-family:monospace;font-size:11px;"));
       layout->addWidget(outputView);
     }
     QStringList metadata;
@@ -169,10 +228,16 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
       metadata << cwd;
     layout->addWidget(
         makeLabel(metadata.join(QStringLiteral("  |  ")), "meta"));
-  } else if (typeName == "collabAgentToolCall") {
+  } else if (typeName == "collabAgentToolCall" ||
+             typeName == "subAgentActivity") {
     QStringList metadata;
-    metadata << text(stringValue(item, "tool"));
-    metadata << displayStatus(stringValue(item, "status"));
+    const QString tool = text(stringValue(item, "tool"));
+    if (!tool.isEmpty())
+      metadata << tool;
+    std::string status = stringValue(item, "status");
+    if (status.empty())
+      status = stringValue(item, "kind");
+    metadata << displayStatus(status);
     const QString receivers =
         joinedStrings(item.value("receiverThreadIds", nlohmann::json::array()));
     if (!receivers.isEmpty())
@@ -182,11 +247,24 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
     const QString prompt = text(stringValue(item, "prompt"));
     if (!prompt.isEmpty())
       layout->addWidget(makeLabel(prompt));
+    const QString result = text(stringValue(item, "resultText"));
+    if (!result.isEmpty())
+      layout->addWidget(makeMarkdownLabel(result));
   } else if (typeName == "reasoning") {
     const QString summaries =
         joinedStrings(item.value("summary", nlohmann::json::array()));
     if (!summaries.isEmpty())
-      layout->addWidget(makeLabel(summaries));
+      layout->addWidget(makeMarkdownLabel(summaries));
+  } else if (typeName == "fileChange") {
+    QStringList metadata;
+    metadata << displayStatus(stringValue(item, "status"));
+    const nlohmann::json changes =
+        item.value("changes", nlohmann::json::array());
+    if (changes.is_array())
+      metadata << QStringLiteral("%1 paths")
+                      .arg(static_cast<qulonglong>(changes.size()));
+    layout->addWidget(
+        makeLabel(metadata.join(QStringLiteral("  |  ")), "meta"));
   } else if (body.isEmpty()) {
     layout->addWidget(makeLabel(text(item.dump(2)), "meta"));
   }
@@ -230,7 +308,7 @@ QFrame *agentFrame(const AgentPresentation &agent) {
 
   const QString result = text(stringValue(activity, "resultText"));
   if (!result.isEmpty())
-    layout->addWidget(makeLabel(result));
+    layout->addWidget(makeMarkdownLabel(result));
 
   QStringList identities;
   if (!agent.childThreadId.empty())
@@ -250,7 +328,7 @@ QFrame *agentFrame(const AgentPresentation &agent) {
 
 } // namespace
 
-WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
+ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
     : QWidget(parent), session(session) {
   setObjectName(QStringLiteral("workbench"));
   auto *root = new QVBoxLayout(this);
@@ -258,16 +336,41 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   root->setSpacing(0);
 
   auto *top = new QFrame;
-  top->setProperty("kind", "panel");
+  top->setObjectName(QStringLiteral("topBar"));
+  top->setStyleSheet(QStringLiteral(
+      "QFrame#topBar{background:#ffffff;border-bottom:1px solid #d7dee8;}"));
+  top->setFixedHeight(56);
   auto *topLayout = new QHBoxLayout(top);
-  topLayout->setContentsMargins(14, 8, 14, 8);
-  topLayout->addWidget(makeLabel(QStringLiteral("Codex"), "heading"));
+  topLayout->setContentsMargins(20, 0, 18, 0);
+  topLayout->setSpacing(12);
+  auto *brand = makeLabel(QStringLiteral("CODEX WORKBENCH"), "title");
+  brand->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
+  topLayout->addWidget(brand);
+  restoreSidebarButton = new QPushButton(QStringLiteral("Show threads"));
+  restoreSidebarButton->setProperty("kind", "subtle");
+  restoreSidebarButton->setFixedHeight(32);
+  restoreSidebarButton->hide();
+  topLayout->addSpacing(12);
+  topLayout->addWidget(restoreSidebarButton);
+  topLayout->addSpacing(18);
+  workspaceBreadcrumb = makeLabel(QStringLiteral("No workspace"), "muted");
+  workspaceBreadcrumb->setWordWrap(false);
+  workspaceBreadcrumb->setMaximumWidth(280);
+  workspaceBreadcrumb->setStyleSheet(
+      QStringLiteral("color:#667085;font-size:12px;font-weight:500;"));
+  topLayout->addWidget(workspaceBreadcrumb);
   topLayout->addStretch();
-  attentionLabel = makeLabel({}, "attentionSection");
-  connectionLabel = makeLabel(QStringLiteral("Disconnected"), "meta");
-  controllerLabel = makeLabel(QStringLiteral("No role"), "meta");
+  reconnectButton = new QPushButton(QStringLiteral("Reconnect"));
+  reconnectButton->setProperty("kind", "subtle");
+  reconnectButton->setFixedHeight(32);
+  attentionButton = new QPushButton(QStringLiteral("0 requests"));
+  attentionButton->setFixedSize(106, 32);
   controllerButton = new QPushButton(QStringLiteral("Claim control"));
-  auto *reconnectButton = new QPushButton(QStringLiteral("Reconnect"));
+  controllerButton->setFixedHeight(32);
+  restoreInspectorButton = new QPushButton(QStringLiteral("Show inspector"));
+  restoreInspectorButton->setProperty("kind", "subtle");
+  restoreInspectorButton->setFixedHeight(32);
+  restoreInspectorButton->hide();
   connect(controllerButton, &QPushButton::clicked, this, [this] {
     if (model.connection().role == "controller")
       this->session.releaseController();
@@ -276,29 +379,54 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   });
   connect(reconnectButton, &QPushButton::clicked, this,
           [this] { this->session.reconnect(); });
-  topLayout->addWidget(attentionLabel);
-  topLayout->addWidget(connectionLabel);
-  topLayout->addWidget(controllerLabel);
-  topLayout->addWidget(controllerButton);
   topLayout->addWidget(reconnectButton);
+  topLayout->addWidget(attentionButton);
+  topLayout->addWidget(controllerButton);
+  topLayout->addWidget(restoreInspectorButton);
   root->addWidget(top);
 
-  auto *splitter = new QSplitter;
+  splitter = new QSplitter(Qt::Horizontal);
   splitter->setChildrenCollapsible(false);
+  splitter->setHandleWidth(8);
 
-  auto *sidebar = new QFrame;
-  sidebar->setProperty("kind", "panel");
-  sidebar->setMinimumWidth(230);
-  sidebar->setMaximumWidth(390);
+  sidebar = new QFrame;
+  sidebar->setObjectName(QStringLiteral("sidebar"));
+  sidebar->setStyleSheet(QStringLiteral("QFrame#sidebar{background:#f8fafc;}"));
+  sidebar->setMinimumWidth(220);
+  sidebar->setMaximumWidth(440);
   auto *sidebarLayout = new QVBoxLayout(sidebar);
-  sidebarLayout->setContentsMargins(10, 10, 10, 10);
+  sidebarLayout->setContentsMargins(10, 14, 10, 17);
+  sidebarLayout->setSpacing(0);
   auto *sidebarHeader = new QHBoxLayout;
-  sidebarHeader->addWidget(makeLabel(QStringLiteral("Threads"), "section"));
+  sidebarHeader->setContentsMargins(8, 0, 6, 8);
+  sidebarHeader->addWidget(makeLabel(QStringLiteral("WORK"), "section"));
   sidebarHeader->addStretch();
+  auto *hideSidebarButton = new QPushButton(QStringLiteral("Hide"));
+  hideSidebarButton->setProperty("kind", "subtle");
+  hideSidebarButton->setFixedSize(52, 24);
+  sidebarHeader->addWidget(hideSidebarButton);
+  sidebarLayout->addLayout(sidebarHeader);
+
+  auto *newButton = new QPushButton(QStringLiteral("+  New thread"));
+  newButton->setFixedHeight(36);
+  newButton->setStyleSheet(QStringLiteral(
+      "QPushButton{background:#ffffff;color:#2f6feb;border:1px solid #bfd3f9;"
+      "border-radius:8px;text-align:left;padding-left:14px;font-weight:600;}"
+      "QPushButton:hover{background:#e5eeff;border-color:#2f6feb;}"
+      "QPushButton:disabled{background:#f6f8fb;color:#98a2b3;"
+      "border-color:#d7dee8;}"));
+  sidebarLayout->addWidget(newButton);
+  sidebarLayout->addSpacing(8);
+
+  auto *threadToolbar = new QHBoxLayout;
+  threadToolbar->setContentsMargins(4, 0, 4, 6);
   auto *refreshButton = new QPushButton(QStringLiteral("Refresh"));
-  auto *newButton = new QPushButton(QStringLiteral("New"));
+  refreshButton->setProperty("kind", "subtle");
+  refreshButton->setFixedHeight(28);
   threadActionsButton = new QToolButton;
   threadActionsButton->setText(QStringLiteral("More"));
+  threadActionsButton->setProperty("kind", "subtle");
+  threadActionsButton->setFixedHeight(28);
   threadActionsButton->setPopupMode(QToolButton::InstantPopup);
   auto *threadActions = new QMenu(threadActionsButton);
   threadActions->addAction(QStringLiteral("Reload"), this,
@@ -313,18 +441,47 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   threadActions->addAction(QStringLiteral("Delete"), this,
                            [this] { deleteSelectedThread(); });
   threadActionsButton->setMenu(threadActions);
-  sidebarHeader->addWidget(refreshButton);
-  sidebarHeader->addWidget(newButton);
-  sidebarHeader->addWidget(threadActionsButton);
-  sidebarLayout->addLayout(sidebarHeader);
+  threadToolbar->addWidget(refreshButton);
+  threadToolbar->addStretch();
+  threadToolbar->addWidget(threadActionsButton);
+  sidebarLayout->addLayout(threadToolbar);
   threadList = new QListWidget;
+  threadList->setObjectName(QStringLiteral("threadList"));
   threadList->setSelectionMode(QAbstractItemView::SingleSelection);
   threadList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   threadList->setTextElideMode(Qt::ElideRight);
+  threadList->setStyleSheet(QStringLiteral(
+      "QListWidget#threadList{background:transparent;border:0;outline:0;}"
+      "QListWidget#threadList::item{min-height:30px;border:0;border-radius:5px;"
+      "padding:2px 8px;color:#344054;}"
+      "QListWidget#threadList::item:hover{background:#eef3fa;}"
+      "QListWidget#threadList::item:selected{background:#e5eeff;"
+      "color:#1d2633;font-weight:600;}"));
   sidebarLayout->addWidget(threadList);
+  sidebarLayout->addWidget(makeDivider());
+  sidebarLayout->addSpacing(18);
+  auto *serverRow = new QHBoxLayout;
+  serverRow->setContentsMargins(8, 0, 0, 0);
+  serverRow->setSpacing(10);
+  connectionStatusDot = makeStatusDot();
+  serverRow->addWidget(connectionStatusDot);
+  connectionLabel = makeLabel(QStringLiteral("Not connected"), "meta");
+  connectionLabel->setStyleSheet(
+      QStringLiteral("color:#1d2633;font-size:11px;font-weight:500;"));
+  serverRow->addWidget(connectionLabel);
+  serverRow->addStretch();
+  sidebarLayout->addLayout(serverRow);
   connect(refreshButton, &QPushButton::clicked, this,
           [this] { requestThreads(); });
   connect(newButton, &QPushButton::clicked, this, [this] { beginNewThread(); });
+  connect(hideSidebarButton, &QPushButton::clicked, this, [this] {
+    sidebar->hide();
+    restoreSidebarButton->show();
+  });
+  connect(restoreSidebarButton, &QPushButton::clicked, this, [this] {
+    sidebar->show();
+    restoreSidebarButton->hide();
+  });
   connect(threadList, &QListWidget::itemClicked, this,
           [this](QListWidgetItem *item) {
             selectThread(item->data(Qt::UserRole).toString().toStdString());
@@ -332,20 +489,55 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   splitter->addWidget(sidebar);
 
   auto *center = new QFrame;
-  center->setProperty("kind", "panel");
+  center->setObjectName(QStringLiteral("conversation"));
+  center->setStyleSheet(
+      QStringLiteral("QFrame#conversation{background:#f6f8fb;}"));
+  center->setMinimumWidth(480);
   auto *centerLayout = new QVBoxLayout(center);
-  centerLayout->setContentsMargins(16, 12, 16, 12);
-  centerLayout->setSpacing(8);
-  conversationTitle = makeLabel(QStringLiteral("Select a thread"), "heading");
+  centerLayout->setContentsMargins(24, 14, 24, 12);
+  centerLayout->setSpacing(0);
+  auto *context = new QHBoxLayout;
+  auto *threadBadge = makeLabel(QStringLiteral("THREAD"), "small");
+  threadBadge->setAlignment(Qt::AlignCenter);
+  threadBadge->setFixedSize(54, 18);
+  threadBadge->setStyleSheet(
+      QStringLiteral("background:#e5eeff;color:#2f6feb;border-radius:5px;"
+                     "font-size:9px;font-weight:600;"));
+  context->addWidget(threadBadge);
+  context->addStretch();
+  centerLayout->addLayout(context);
+  centerLayout->addSpacing(2);
+  conversationTitle =
+      makeLabel(QStringLiteral("No synchronized thread"), "heading");
   conversationMeta = makeLabel({}, "meta");
   centerLayout->addWidget(conversationTitle);
+  centerLayout->addSpacing(2);
   centerLayout->addWidget(conversationMeta);
+  centerLayout->addSpacing(7);
+  centerLayout->addWidget(makeDivider());
+  centerLayout->addSpacing(7);
+
+  noticeBar = new QFrame;
+  noticeBar->setStyleSheet(QStringLiteral(
+      "background:#fff4f2;border:1px solid #efc2bc;border-radius:6px;"));
+  auto *noticeLayout = new QHBoxLayout(noticeBar);
+  noticeLayout->setContentsMargins(10, 6, 8, 6);
+  noticeLabel = makeLabel({}, "meta");
+  noticeLabel->setStyleSheet(QStringLiteral("color:#9d2e2e;font-size:11px;"));
+  auto *dismissNotice = new QPushButton(QStringLiteral("Dismiss"));
+  dismissNotice->setProperty("kind", "subtle");
+  dismissNotice->setFixedSize(62, 24);
+  noticeLayout->addWidget(noticeLabel, 1);
+  noticeLayout->addWidget(dismissNotice);
+  noticeBar->hide();
+  connect(dismissNotice, &QPushButton::clicked, noticeBar, &QWidget::hide);
+  centerLayout->addWidget(noticeBar);
 
   conversationScroll = new QScrollArea;
   conversationScroll->setWidgetResizable(true);
   conversationContent = new QWidget;
   conversationLayout = new QVBoxLayout(conversationContent);
-  conversationLayout->setContentsMargins(4, 6, 4, 6);
+  conversationLayout->setContentsMargins(0, 0, 0, 16);
   conversationLayout->setSpacing(8);
   emptyConversation =
       makeLabel(QStringLiteral("Conversation activity appears here."), "muted");
@@ -361,7 +553,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   attentionLayout->addWidget(makeLabel(
       QStringLiteral("A Codex request needs attention"), "attentionSection"));
   attentionLayout->addStretch();
-  approveButton = new QPushButton(QStringLiteral("Approve"));
+  approveButton = new QPushButton(QStringLiteral("Review"));
   denyButton = new QPushButton(QStringLiteral("Deny"));
   attentionLayout->addWidget(denyButton);
   attentionLayout->addWidget(approveButton);
@@ -370,6 +562,9 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   connect(denyButton, &QPushButton::clicked, this,
           [this] { respondToFirstPending(false); });
   centerLayout->addWidget(attention);
+
+  turnSettings = new TurnSettingsWidget;
+  centerLayout->addWidget(turnSettings);
 
   auto *composer = new QFrame;
   composer->setProperty("kind", "composer");
@@ -391,9 +586,26 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
           [this] { interruptActiveTurn(); });
   splitter->addWidget(center);
 
+  inspector = new QFrame;
+  inspector->setObjectName(QStringLiteral("inspector"));
+  inspector->setStyleSheet(
+      QStringLiteral("QFrame#inspector{background:#fbfcfe;}"));
+  inspector->setMinimumWidth(300);
+  inspector->setMaximumWidth(520);
+  auto *inspectorLayout = new QVBoxLayout(inspector);
+  inspectorLayout->setContentsMargins(18, 14, 20, 0);
+  inspectorLayout->setSpacing(0);
+  auto *inspectorHeader = new QHBoxLayout;
+  inspectorHeader->addWidget(makeLabel(QStringLiteral("INSPECTOR"), "section"));
+  inspectorHeader->addStretch();
+  auto *hideInspectorButton = new QPushButton(QStringLiteral("Hide"));
+  hideInspectorButton->setProperty("kind", "subtle");
+  hideInspectorButton->setFixedSize(58, 24);
+  inspectorHeader->addWidget(hideInspectorButton);
+  inspectorLayout->addLayout(inspectorHeader);
+  inspectorLayout->addSpacing(7);
   inspectorTabs = new QTabWidget;
-  inspectorTabs->setMinimumWidth(260);
-  inspectorTabs->setMaximumWidth(430);
+  inspectorTabs->setDocumentMode(true);
   planContent = new QWidget;
   planLayout = new QVBoxLayout(planContent);
   planLayout->setContentsMargins(12, 12, 12, 12);
@@ -402,6 +614,10 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   agentsLayout = new QVBoxLayout(agentsContent);
   agentsLayout->setContentsMargins(12, 12, 12, 12);
   agentsLayout->setSpacing(8);
+  changesContent = new QWidget;
+  changesLayout = new QVBoxLayout(changesContent);
+  changesLayout->setContentsMargins(12, 12, 12, 12);
+  changesLayout->setSpacing(8);
   requestsContent = new QWidget;
   requestsLayout = new QVBoxLayout(requestsContent);
   requestsLayout->setContentsMargins(12, 12, 12, 12);
@@ -412,6 +628,9 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   auto *agentsScroll = new QScrollArea;
   agentsScroll->setWidgetResizable(true);
   agentsScroll->setWidget(agentsContent);
+  auto *changesScroll = new QScrollArea;
+  changesScroll->setWidgetResizable(true);
+  changesScroll->setWidget(changesContent);
   auto *requestsScroll = new QScrollArea;
   requestsScroll->setWidgetResizable(true);
   requestsScroll->setWidget(requestsContent);
@@ -433,18 +652,62 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   stateView->setReadOnly(true);
   stateView->setLineWrapMode(QPlainTextEdit::NoWrap);
   stateLayout->addWidget(stateView);
+  auto *infoTabs = new QTabWidget;
+  infoTabs->setDocumentMode(true);
+  infoTabs->addTab(stateContent, QStringLiteral("State"));
+  infoTabs->addTab(protocolContent, QStringLiteral("Protocol"));
   inspectorTabs->addTab(planScroll, QStringLiteral("Plan"));
   inspectorTabs->addTab(agentsScroll, QStringLiteral("Agents"));
+  inspectorTabs->addTab(changesScroll, QStringLiteral("Changes"));
   inspectorTabs->addTab(requestsScroll, QStringLiteral("Requests"));
-  inspectorTabs->addTab(stateContent, QStringLiteral("State"));
-  inspectorTabs->addTab(protocolContent, QStringLiteral("Protocol"));
+  inspectorTabs->addTab(infoTabs, QStringLiteral("Info"));
   connect(inspectorTabs, &QTabWidget::currentChanged, this, [this](int index) {
-    if (index == 3)
+    if (index == 4)
       requestEnvironment();
   });
-  splitter->addWidget(inspectorTabs);
-  splitter->setSizes({270, 900, 320});
+  inspectorLayout->addWidget(inspectorTabs, 1);
+  connect(hideInspectorButton, &QPushButton::clicked, this, [this] {
+    inspector->hide();
+    restoreInspectorButton->show();
+  });
+  connect(restoreInspectorButton, &QPushButton::clicked, this, [this] {
+    inspector->show();
+    restoreInspectorButton->hide();
+  });
+  connect(attentionButton, &QPushButton::clicked, this, [this] {
+    inspector->show();
+    restoreInspectorButton->hide();
+    inspectorTabs->setCurrentIndex(3);
+  });
+  splitter->addWidget(inspector);
+  splitter->setStretchFactor(0, 0);
+  splitter->setStretchFactor(1, 1);
+  splitter->setStretchFactor(2, 0);
+  splitter->setSizes({282, 834, 404});
   root->addWidget(splitter, 1);
+
+  auto *statusBar = new QFrame;
+  statusBar->setObjectName(QStringLiteral("customStatusBar"));
+  statusBar->setStyleSheet(
+      QStringLiteral("QFrame#customStatusBar{background:#f8fafc;"
+                     "border-top:1px solid #d7dee8;}"));
+  statusBar->setFixedHeight(40);
+  auto *statusLayout = new QHBoxLayout(statusBar);
+  statusLayout->setContentsMargins(18, 0, 24, 0);
+  statusLayout->setSpacing(8);
+  bottomConnectionStatusDot = makeStatusDot();
+  statusLayout->addWidget(bottomConnectionStatusDot);
+  statusLayout->addWidget(makeLabel(QStringLiteral("Codex"), "meta"));
+  statusLayout->addSpacing(42);
+  threadContextStatus = makeLabel(QStringLiteral("No thread context"), "meta");
+  statusLayout->addWidget(threadContextStatus);
+  statusLayout->addSpacing(42);
+  agentActivityStatus = makeLabel(QStringLiteral("No agent activity"), "meta");
+  statusLayout->addWidget(agentActivityStatus);
+  statusLayout->addStretch();
+  controllerLabel = makeLabel(QStringLiteral("Observer"), "meta");
+  statusLayout->addWidget(controllerLabel);
+  root->addWidget(statusBar);
 
   refreshTimer = new QTimer(this);
   refreshTimer->setSingleShot(true);
@@ -456,16 +719,44 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   refresh();
 }
 
-void WorkbenchWidget::handleEvent(const nlohmann::json &event) {
+void ShellWidget::handleEvent(const nlohmann::json &event) {
   appendProtocolFrame(event);
   model.applyEvent(event);
+  const std::string kind = stringValue(event, "kind");
+  const std::string type = stringValue(event, "type");
+  const nlohmann::json data = event.value("data", nlohmann::json::object());
+  if (kind == "result" && !event.value("ok", false)) {
+    const nlohmann::json error = event.value("error", nlohmann::json::object());
+    const std::string message = safeMessage(error);
+    showNotice(text(message.empty() ? std::string("Codex operation failed")
+                                    : message));
+  } else if (kind == "event" && type == "notice.added") {
+    const nlohmann::json notice =
+        data.value("notice", nlohmann::json::object());
+    const std::string message = safeMessage(notice);
+    if (!message.empty())
+      showNotice(text(message), stringValue(data, "severity") == "error");
+  } else if (kind == "event" && type == "system.diagnostic") {
+    const std::string message = safeMessage(data);
+    if (!message.empty())
+      showNotice(QStringLiteral("Protocol diagnostic: %1").arg(text(message)));
+  } else if (kind == "event" && type == "connection.lifecycle" &&
+             (stringValue(data, "state") == "failure" ||
+              stringValue(data, "state") == "disconnected")) {
+    const std::string detail = stringValue(data, "detail");
+    showNotice(detail.empty() ? QStringLiteral("Codex bridge disconnected")
+                              : text(detail));
+  }
   if (event.value("kind", std::string{}) == "event" &&
       event.value("type", std::string{}) == "connection.bridge" &&
       event.value("data", nlohmann::json::object())
               .value("state", std::string{}) == "opened") {
     environmentRequested = false;
     requestThreads();
-    if (inspectorTabs->currentIndex() == 3)
+    requestModels();
+    session.listPermissionProfiles(
+        {{"cwd", QDir::currentPath().toStdString()}});
+    if (inspectorTabs->currentIndex() == 4)
       requestEnvironment();
   }
 
@@ -476,7 +767,7 @@ void WorkbenchWidget::handleEvent(const nlohmann::json &event) {
   scheduleRefresh();
 }
 
-void WorkbenchWidget::hydrateHistoricalAgents() {
+void ShellWidget::hydrateHistoricalAgents() {
   const ThreadPresentation *thread = model.thread(selectedThreadId);
   if (!thread)
     return;
@@ -491,21 +782,37 @@ void WorkbenchWidget::hydrateHistoricalAgents() {
   }
 }
 
-void WorkbenchWidget::scheduleRefresh() {
+void ShellWidget::scheduleRefresh() {
   if (!refreshTimer->isActive())
     refreshTimer->start();
 }
 
-void WorkbenchWidget::refresh() {
+void ShellWidget::refresh() {
   refreshThreads();
   refreshConversation();
   refreshInspector();
   refreshStateInspector();
   refreshProtocolStats();
+  refreshTurnSettings();
   refreshStatus();
 }
 
-void WorkbenchWidget::refreshProtocolStats() {
+void ShellWidget::showNotice(QString message, bool error) {
+  if (message.trimmed().isEmpty())
+    return;
+  noticeLabel->setText(std::move(message));
+  noticeBar->setStyleSheet(
+      error ? QStringLiteral("background:#fff4f2;border:1px solid #efc2bc;"
+                             "border-radius:6px;")
+            : QStringLiteral("background:#fff8e8;border:1px solid #e5c77d;"
+                             "border-radius:6px;"));
+  noticeLabel->setStyleSheet(
+      error ? QStringLiteral("color:#9d2e2e;font-size:11px;")
+            : QStringLiteral("color:#8a5a00;font-size:11px;"));
+  noticeBar->show();
+}
+
+void ShellWidget::refreshProtocolStats() {
   std::size_t turns = 0;
   std::size_t items = 0;
   if (const ThreadPresentation *thread = model.thread(selectedThreadId)) {
@@ -527,7 +834,34 @@ void WorkbenchWidget::refreshProtocolStats() {
           .arg(static_cast<qulonglong>(model.telemetry().size())));
 }
 
-void WorkbenchWidget::appendProtocolFrame(const nlohmann::json &frame) {
+void ShellWidget::refreshTurnSettings() {
+  nlohmann::json canonical = nlohmann::json::object();
+  std::string identity = "new-thread";
+  if (const ThreadPresentation *thread = model.thread(selectedThreadId)) {
+    identity = thread->id;
+    canonical = thread->raw;
+    const auto settings = thread->domains.find("thread.settings.changed");
+    if (settings != thread->domains.end() && settings->second.is_object()) {
+      nlohmann::json update = settings->second;
+      if (update.contains("threadSettings") &&
+          update["threadSettings"].is_object())
+        update = update["threadSettings"];
+      canonical.merge_patch(update);
+    }
+  } else {
+    canonical["cwd"] = QDir::currentPath().toStdString();
+  }
+
+  nlohmann::json permissionProfiles = nlohmann::json::array();
+  const auto profiles =
+      model.globalDomains().find("operation.permission-profiles.list");
+  if (profiles != model.globalDomains().end())
+    permissionProfiles = profiles->second;
+  turnSettings->setContext(identity, canonical, model.modelCatalog(),
+                           permissionProfiles);
+}
+
+void ShellWidget::appendProtocolFrame(const nlohmann::json &frame) {
   if (!protocolLog)
     return;
 
@@ -586,7 +920,7 @@ void WorkbenchWidget::appendProtocolFrame(const nlohmann::json &frame) {
   protocolLog->appendPlainText(parts.join(QStringLiteral("  ")));
 }
 
-void WorkbenchWidget::refreshThreads() {
+void ShellWidget::refreshThreads() {
   threadList->blockSignals(true);
   threadList->clear();
   for (const std::string &threadId : model.threadOrder()) {
@@ -598,18 +932,44 @@ void WorkbenchWidget::refreshThreads() {
       title = text(threadId.substr(0, 12));
     if (model.pendingRequestCount(threadId) != 0)
       title.prepend(QStringLiteral("! "));
-    auto *item = new QListWidgetItem(title, threadList);
-    if (model.pendingRequestCount(threadId) != 0)
-      item->setForeground(QColor(QStringLiteral("#8a5a00")));
+    auto *item = new QListWidgetItem(threadList);
+    item->setSizeHint(QSize(0, 44));
     item->setData(Qt::UserRole, text(threadId));
     item->setToolTip(text(thread->cwd));
+    auto *row = new QWidget;
+    row->setAttribute(Qt::WA_TransparentForMouseEvents);
+    row->setStyleSheet(QStringLiteral("background:transparent;"));
+    auto *rowLayout = new QHBoxLayout(row);
+    rowLayout->setContentsMargins(5, 2, 5, 2);
+    rowLayout->setSpacing(8);
+    auto *dot = makeStatusDot();
+    QString dotColor = QStringLiteral("#98a2b3");
+    if (model.pendingRequestCount(threadId) != 0)
+      dotColor = QStringLiteral("#a76812");
+    else if (thread->status == "active" || thread->status == "inProgress")
+      dotColor = QStringLiteral("#2f6feb");
+    else if (thread->status == "failed" || thread->status == "systemError")
+      dotColor = QStringLiteral("#b83a3a");
+    dot->setStyleSheet(
+        QStringLiteral("background:%1;border-radius:4px;").arg(dotColor));
+    rowLayout->addWidget(dot);
+    auto *copy = new QVBoxLayout;
+    copy->setContentsMargins(0, 0, 0, 0);
+    copy->setSpacing(1);
+    auto *titleLabel = makeLabel(title, "title");
+    titleLabel->setStyleSheet(
+        QStringLiteral("font-size:11px;font-weight:500;"));
+    copy->addWidget(titleLabel);
+    copy->addWidget(makeLabel(displayStatus(thread->status), "small"));
+    rowLayout->addLayout(copy, 1);
+    threadList->setItemWidget(item, row);
     if (threadId == selectedThreadId)
       threadList->setCurrentItem(item);
   }
   threadList->blockSignals(false);
 }
 
-void WorkbenchWidget::refreshConversation() {
+void ShellWidget::refreshConversation() {
   const int previousMaximum =
       conversationScroll->verticalScrollBar()->maximum();
   const bool followLatest =
@@ -660,9 +1020,10 @@ void WorkbenchWidget::refreshConversation() {
     });
 }
 
-void WorkbenchWidget::refreshInspector() {
+void ShellWidget::refreshInspector() {
   clearLayout(planLayout);
   clearLayout(agentsLayout);
+  clearLayout(changesLayout);
   clearLayout(requestsLayout);
   const ThreadPresentation *thread = model.thread(selectedThreadId);
   if (!thread) {
@@ -672,6 +1033,9 @@ void WorkbenchWidget::refreshInspector() {
     agentsLayout->addWidget(
         makeLabel(QStringLiteral("No selected thread."), "muted"));
     agentsLayout->addStretch();
+    changesLayout->addWidget(
+        makeLabel(QStringLiteral("No selected thread."), "muted"));
+    changesLayout->addStretch();
     requestsLayout->addWidget(
         makeLabel(QStringLiteral("No selected thread."), "muted"));
     requestsLayout->addStretch();
@@ -679,20 +1043,33 @@ void WorkbenchWidget::refreshInspector() {
   }
 
   const TurnPresentation *planTurn = nullptr;
+  const ItemPresentation *planItem = nullptr;
   for (auto turnId = thread->turnOrder.rbegin();
        turnId != thread->turnOrder.rend(); ++turnId) {
     const auto turn = thread->turns.find(*turnId);
-    if (turn != thread->turns.end() && turn->second.plan.is_object() &&
-        turn->second.plan.contains("steps")) {
+    if (turn == thread->turns.end())
+      continue;
+    if (turn->second.plan.is_object() && turn->second.plan.contains("steps")) {
       planTurn = &turn->second;
       break;
     }
+    for (auto itemId = turn->second.itemOrder.rbegin();
+         itemId != turn->second.itemOrder.rend(); ++itemId) {
+      const auto item = turn->second.items.find(*itemId);
+      if (item != turn->second.items.end() &&
+          stringValue(item->second.raw, "type") == "plan") {
+        planItem = &item->second;
+        break;
+      }
+    }
+    if (planItem)
+      break;
   }
   if (planTurn) {
     const QString explanation =
         text(stringValue(planTurn->plan, "explanation"));
     if (!explanation.isEmpty())
-      planLayout->addWidget(makeLabel(explanation));
+      planLayout->addWidget(makeMarkdownLabel(explanation));
     const nlohmann::json steps =
         planTurn->plan.value("steps", nlohmann::json::array());
     for (const auto &step : steps) {
@@ -705,6 +1082,13 @@ void WorkbenchWidget::refreshInspector() {
           makeLabel(displayStatus(stringValue(step, "status")), "meta"));
       planLayout->addWidget(row);
     }
+  } else if (planItem) {
+    const QString planText = text(stringValue(planItem->raw, "text"));
+    if (planText.isEmpty())
+      planLayout->addWidget(
+          makeLabel(QStringLiteral("Plan is being prepared."), "muted"));
+    else
+      planLayout->addWidget(makeMarkdownLabel(planText));
   } else {
     planLayout->addWidget(
         makeLabel(QStringLiteral("No plan for this thread."), "muted"));
@@ -724,6 +1108,49 @@ void WorkbenchWidget::refreshInspector() {
         QStringLiteral("No agent activity for this thread."), "muted"));
   agentsLayout->addStretch();
 
+  std::size_t changeCount = 0;
+  for (const std::string &turnId : thread->turnOrder) {
+    const auto turn = thread->turns.find(turnId);
+    if (turn == thread->turns.end())
+      continue;
+    for (const std::string &itemId : turn->second.itemOrder) {
+      const auto item = turn->second.items.find(itemId);
+      if (item == turn->second.items.end() ||
+          stringValue(item->second.raw, "type") != "fileChange")
+        continue;
+      auto *frame = new QFrame;
+      frame->setProperty("kind", "summary");
+      auto *layout = new QVBoxLayout(frame);
+      layout->setContentsMargins(9, 7, 9, 7);
+      layout->setSpacing(5);
+      layout->addWidget(makeLabel(QStringLiteral("File changes"), "title"));
+      layout->addWidget(makeLabel(
+          displayStatus(stringValue(item->second.raw, "status")), "meta"));
+      const nlohmann::json changes =
+          item->second.raw.value("changes", nlohmann::json::array());
+      if (changes.is_array()) {
+        for (const auto &change : changes) {
+          QString path = text(stringValue(change, "path"));
+          if (path.isEmpty())
+            path = text(stringValue(change, "filePath"));
+          const QString changeKind = text(stringValue(change, "kind"));
+          if (!path.isEmpty())
+            layout->addWidget(makeLabel(
+                changeKind.isEmpty()
+                    ? path
+                    : QStringLiteral("%1  |  %2").arg(path, changeKind),
+                "meta"));
+        }
+      }
+      changesLayout->addWidget(frame);
+      ++changeCount;
+    }
+  }
+  if (changeCount == 0)
+    changesLayout->addWidget(
+        makeLabel(QStringLiteral("No file changes for this thread."), "muted"));
+  changesLayout->addStretch();
+
   std::size_t requestCount = 0;
   for (const auto &[id, request] : model.pendingRequestPresentations()) {
     if (request.threadId != selectedThreadId)
@@ -739,9 +1166,38 @@ void WorkbenchWidget::refreshInspector() {
                       .arg(static_cast<qulonglong>(request.generation))
                       .arg(text(id)),
                   "meta"));
-    layout->addWidget(makeLabel(
-        QStringLiteral("Review and answer this request using the action bar."),
-        "meta"));
+    const std::string command = stringValue(request.raw, "command");
+    const std::string reason = stringValue(request.raw, "reason");
+    const std::string message = stringValue(request.raw, "message");
+    if (!command.empty())
+      layout->addWidget(
+          makeLabel(QStringLiteral("Command: %1").arg(text(command)), "meta"));
+    if (!reason.empty())
+      layout->addWidget(
+          makeLabel(QStringLiteral("Reason: %1").arg(text(reason)), "meta"));
+    if (!message.empty())
+      layout->addWidget(makeLabel(text(message), "meta"));
+    if (request.raw.contains("questions") &&
+        request.raw["questions"].is_array())
+      layout->addWidget(makeLabel(
+          QStringLiteral("%1 questions")
+              .arg(static_cast<qulonglong>(request.raw["questions"].size())),
+          "meta"));
+    auto *actions = new QHBoxLayout;
+    actions->setContentsMargins(0, 2, 0, 0);
+    auto *deny = new QPushButton(QStringLiteral("Deny"));
+    auto *review = new QPushButton(QStringLiteral("Review"));
+    review->setProperty("kind", "primary");
+    deny->setFixedHeight(28);
+    review->setFixedHeight(28);
+    connect(deny, &QPushButton::clicked, this,
+            [this, id] { rejectPending(id); });
+    connect(review, &QPushButton::clicked, this,
+            [this, id] { reviewPending(id); });
+    actions->addStretch();
+    actions->addWidget(deny);
+    actions->addWidget(review);
+    layout->addLayout(actions);
     requestsLayout->addWidget(frame);
     ++requestCount;
   }
@@ -751,11 +1207,18 @@ void WorkbenchWidget::refreshInspector() {
   requestsLayout->addStretch();
 }
 
-void WorkbenchWidget::refreshStatus() {
+void ShellWidget::refreshStatus() {
   const ConnectionPresentation &connection = model.connection();
   connectionLabel->setText(connection.connected
                                ? QStringLiteral("Connected")
-                               : QStringLiteral("Disconnected"));
+                               : QStringLiteral("Not connected"));
+  const QString dotStyle =
+      connection.connected
+          ? QStringLiteral("background:#23845a;border-radius:4px;")
+          : QStringLiteral("background:#98a2b3;border-radius:4px;");
+  connectionStatusDot->setStyleSheet(dotStyle);
+  bottomConnectionStatusDot->setStyleSheet(dotStyle);
+  reconnectButton->setVisible(!connection.connected);
   controllerLabel->setText(connection.role.empty() ? QStringLiteral("No role")
                                                    : text(connection.role));
   controllerButton->setText(connection.role == "controller"
@@ -763,23 +1226,63 @@ void WorkbenchWidget::refreshStatus() {
                                 : QStringLiteral("Claim control"));
   controllerButton->setEnabled(connection.connected);
   const std::size_t pending = model.pendingRequestCount(selectedThreadId);
-  attentionLabel->setText(
-      pending == 0
-          ? QString{}
-          : QStringLiteral("%1 pending").arg(static_cast<qulonglong>(pending)));
+  const std::size_t totalPending = model.pendingRequestCount();
+  attentionButton->setText(
+      QStringLiteral("%1 requests").arg(static_cast<qulonglong>(totalPending)));
+  attentionButton->setStyleSheet(
+      totalPending == 0 ? QString{}
+                        : QStringLiteral("background:#fff6df;color:#8a5a00;"
+                                         "border:1px solid #e5c77d;"));
   approveButton->parentWidget()->setVisible(pending != 0);
+
+  const ThreadPresentation *thread = model.thread(selectedThreadId);
+  if (thread) {
+    const QString workspace = text(thread->cwd);
+    workspaceBreadcrumb->setToolTip(workspace);
+    workspaceBreadcrumb->setText(workspaceBreadcrumb->fontMetrics().elidedText(
+        workspace, Qt::ElideMiddle, workspaceBreadcrumb->maximumWidth()));
+    threadContextStatus->setText(
+        QStringLiteral("%1  |  %2")
+            .arg(text(thread->title), displayStatus(thread->status)));
+    std::size_t runningAgents = 0;
+    for (const auto &[agentId, agent] : thread->agents) {
+      static_cast<void>(agentId);
+      if (agent.status == "inProgress" || agent.status == "running" ||
+          agent.status == "started")
+        ++runningAgents;
+    }
+    agentActivityStatus->setText(
+        thread->agents.empty()
+            ? QStringLiteral("No agent activity")
+            : QStringLiteral("%1 agents  |  %2 active")
+                  .arg(static_cast<qulonglong>(thread->agents.size()))
+                  .arg(static_cast<qulonglong>(runningAgents)));
+  } else {
+    const QString workspace = localNewThreadIntent
+                                  ? QDir::currentPath()
+                                  : QStringLiteral("No workspace");
+    workspaceBreadcrumb->setToolTip(workspace);
+    workspaceBreadcrumb->setText(workspaceBreadcrumb->fontMetrics().elidedText(
+        workspace, Qt::ElideMiddle, workspaceBreadcrumb->maximumWidth()));
+    threadContextStatus->setText(localNewThreadIntent
+                                     ? QStringLiteral("New thread")
+                                     : QStringLiteral("No thread context"));
+    agentActivityStatus->setText(QStringLiteral("No agent activity"));
+  }
   const bool active = model.activeTurnId(selectedThreadId).has_value();
   interruptButton->setVisible(active);
   sendButton->setText(active ? QStringLiteral("Steer")
                              : QStringLiteral("Send"));
   sendButton->setEnabled(connection.connected &&
                          connection.role == "controller");
+  turnSettings->setControlsEnabled(connection.connected &&
+                                   connection.role == "controller" && !active);
   threadActionsButton->setEnabled(!selectedThreadId.empty() &&
                                   connection.connected &&
                                   connection.role == "controller");
 }
 
-void WorkbenchWidget::refreshStateInspector() {
+void ShellWidget::refreshStateInspector() {
   if (!stateView)
     return;
   nlohmann::json domains = nlohmann::json::object();
@@ -799,14 +1302,14 @@ void WorkbenchWidget::refreshStateInspector() {
   stateView->setPlainText(text(state.dump(2)));
 }
 
-void WorkbenchWidget::selectThread(std::string threadId) {
+void ShellWidget::selectThread(std::string threadId) {
   selectedThreadId = std::move(threadId);
   localNewThreadIntent = false;
   readSelectedThread();
   refresh();
 }
 
-void WorkbenchWidget::beginNewThread() {
+void ShellWidget::beginNewThread() {
   selectedThreadId.clear();
   localNewThreadIntent = true;
   threadList->clearSelection();
@@ -814,11 +1317,11 @@ void WorkbenchWidget::beginNewThread() {
   refresh();
 }
 
-void WorkbenchWidget::requestThreads() { session.listThreads(); }
+void ShellWidget::requestThreads() { session.listThreads(); }
 
-void WorkbenchWidget::requestModels() { session.listModels(); }
+void ShellWidget::requestModels() { session.listModels(); }
 
-void WorkbenchWidget::requestEnvironment() {
+void ShellWidget::requestEnvironment() {
   if (environmentRequested)
     return;
   environmentRequested = true;
@@ -840,13 +1343,13 @@ void WorkbenchWidget::requestEnvironment() {
   session.listMcpServers();
 }
 
-void WorkbenchWidget::readSelectedThread() {
+void ShellWidget::readSelectedThread() {
   if (selectedThreadId.empty())
     return;
   session.readThread(selectedThreadId);
 }
 
-void WorkbenchWidget::renameSelectedThread() {
+void ShellWidget::renameSelectedThread() {
   const ThreadPresentation *thread = model.thread(selectedThreadId);
   if (!thread)
     return;
@@ -860,7 +1363,7 @@ void WorkbenchWidget::renameSelectedThread() {
     session.renameThread(selectedThreadId, name.toStdString());
 }
 
-void WorkbenchWidget::forkSelectedThread() {
+void ShellWidget::forkSelectedThread() {
   if (selectedThreadId.empty())
     return;
   session.forkThread(selectedThreadId, nlohmann::json::object(),
@@ -876,7 +1379,7 @@ void WorkbenchWidget::forkSelectedThread() {
                      });
 }
 
-void WorkbenchWidget::toggleSelectedThreadArchive() {
+void ShellWidget::toggleSelectedThreadArchive() {
   const ThreadPresentation *thread = model.thread(selectedThreadId);
   if (!thread)
     return;
@@ -886,7 +1389,7 @@ void WorkbenchWidget::toggleSelectedThreadArchive() {
     session.archiveThread(selectedThreadId);
 }
 
-void WorkbenchWidget::deleteSelectedThread() {
+void ShellWidget::deleteSelectedThread() {
   if (selectedThreadId.empty())
     return;
   if (QMessageBox::question(this, QStringLiteral("Delete thread"),
@@ -897,7 +1400,7 @@ void WorkbenchWidget::deleteSelectedThread() {
   }
 }
 
-void WorkbenchWidget::submitPrompt() {
+void ShellWidget::submitPrompt() {
   const QString promptValue = promptEditor->toPlainText().trimmed();
   if (promptValue.isEmpty())
     return;
@@ -905,29 +1408,43 @@ void WorkbenchWidget::submitPrompt() {
   promptEditor->clear();
 
   if (!selectedThreadId.empty()) {
-    submitPromptToThread(selectedThreadId, prompt);
+    submitPromptToThread(selectedThreadId, prompt,
+                         turnSettings->turnStartOptions());
     return;
   }
   localNewThreadIntent = true;
-  session.createThread({{"cwd", QDir::currentPath().toStdString()}},
-                       [this, prompt](const nlohmann::json &result) {
-                         if (!result.value("ok", false))
-                           return;
-                         const std::string threadId = stringValue(
-                             result.value("data", nlohmann::json::object())
-                                 .value("thread", nlohmann::json::object()),
-                             "id");
-                         if (threadId.empty())
-                           return;
-                         selectedThreadId = threadId;
-                         localNewThreadIntent = false;
-                         submitPromptToThread(threadId, prompt);
-                         scheduleRefresh();
-                       });
+  nlohmann::json threadOptions = turnSettings->threadStartOptions();
+  threadOptions["cwd"] =
+      turnSettings->workspace(QDir::currentPath().toStdString());
+  nlohmann::json turnOptions = turnSettings->turnStartOptions();
+  session.createThread(
+      std::move(threadOptions),
+      [this, prompt, turnOptions = std::move(turnOptions)](
+          const nlohmann::json &result) mutable {
+        if (!result.value("ok", false)) {
+          const nlohmann::json error =
+              result.value("error", nlohmann::json::object());
+          const std::string message = safeMessage(error);
+          showNotice(text(message.empty()
+                              ? std::string("Thread creation failed")
+                              : message));
+          return;
+        }
+        const std::string threadId =
+            stringValue(result.value("data", nlohmann::json::object())
+                            .value("thread", nlohmann::json::object()),
+                        "id");
+        if (threadId.empty())
+          return;
+        selectedThreadId = threadId;
+        localNewThreadIntent = false;
+        submitPromptToThread(threadId, prompt, std::move(turnOptions));
+        scheduleRefresh();
+      });
 }
 
-void WorkbenchWidget::submitPromptToThread(std::string threadId,
-                                           std::string prompt) {
+void ShellWidget::submitPromptToThread(std::string threadId, std::string prompt,
+                                       nlohmann::json options) {
   const nlohmann::json input =
       nlohmann::json::array({{{"type", "text"},
                               {"text", std::move(prompt)},
@@ -936,18 +1453,28 @@ void WorkbenchWidget::submitPromptToThread(std::string threadId,
   if (activeTurn) {
     session.steerTurn(threadId, *activeTurn, input);
   } else {
-    session.startTurn(threadId, input);
+    session.startTurn(threadId, input, std::move(options),
+                      [this](const nlohmann::json &result) {
+                        if (result.value("ok", false))
+                          return;
+                        const nlohmann::json error =
+                            result.value("error", nlohmann::json::object());
+                        const std::string message = safeMessage(error);
+                        showNotice(text(message.empty()
+                                            ? std::string("Turn start failed")
+                                            : message));
+                      });
   }
 }
 
-void WorkbenchWidget::interruptActiveTurn() {
+void ShellWidget::interruptActiveTurn() {
   const auto turnId = model.activeTurnId(selectedThreadId);
   if (!turnId)
     return;
   session.interruptTurn(selectedThreadId, *turnId);
 }
 
-void WorkbenchWidget::respondToFirstPending(bool approve) {
+void ShellWidget::respondToFirstPending(bool approve) {
   const auto &pending = model.pendingRequestPresentations();
   const auto request =
       std::find_if(pending.begin(), pending.end(), [this](const auto &entry) {
@@ -956,25 +1483,32 @@ void WorkbenchWidget::respondToFirstPending(bool approve) {
   if (request == pending.end())
     return;
 
-  nlohmann::json result;
-  const std::string &type = request->second.kind;
-  if (type == "command-approval" || type == "file-change-approval") {
-    result = {{"decision", approve ? "accept" : "decline"}};
-  } else if (type == "legacy-patch-approval" ||
-             type == "legacy-command-approval") {
-    result = {{"decision",
-               approve ? nlohmann::json("approved")
-                       : nlohmann::json{
-                             {"denied", {{"rejection", "Denied by user"}}}}}};
-  } else if (type == "mcp-elicitation") {
-    result = {{"action", approve ? "accept" : "decline"},
-              {"content", nullptr},
-              {"_meta", nullptr}};
-  } else {
+  if (approve)
+    reviewPending(request->first);
+  else
+    rejectPending(request->first);
+}
+
+void ShellWidget::reviewPending(const std::string &requestKey) {
+  const auto request = model.pendingRequestPresentations().find(requestKey);
+  if (request == model.pendingRequestPresentations().end())
     return;
-  }
-  session.respondToServerRequest(nlohmann::json::parse(request->first),
-                                 std::move(result));
+  const auto response = PendingRequestDialog::present(request->second, this);
+  if (!response)
+    return;
+  session.respondToServerRequest(nlohmann::json::parse(requestKey),
+                                 response->result, response->error);
+}
+
+void ShellWidget::rejectPending(const std::string &requestKey) {
+  const auto request = model.pendingRequestPresentations().find(requestKey);
+  if (request == model.pendingRequestPresentations().end())
+    return;
+  PendingRequestResponse response =
+      PendingRequestDialog::negativeResponse(request->second);
+  session.respondToServerRequest(nlohmann::json::parse(requestKey),
+                                 std::move(response.result),
+                                 std::move(response.error));
 }
 
 } // namespace codexui::codex2

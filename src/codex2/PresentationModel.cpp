@@ -41,8 +41,18 @@ std::string requestKey(const nlohmann::json &value) {
   return value.is_null() ? std::string{} : value.dump();
 }
 
-std::string agentIdentity(const nlohmann::json &activity,
-                          const nlohmann::json &scope) {
+bool isSpawnActivity(const nlohmann::json &activity) {
+  const std::string type = stringValue(activity, "type");
+  if (type == "subAgentActivity")
+    return true;
+  if (type != "collabAgentToolCall")
+    return false;
+  const std::string tool = stringValue(activity, "tool");
+  return tool == "spawn_agent" || tool == "spawnAgent" ||
+         tool == "spawn_agents_on_csv" || tool == "spawnAgentsOnCsv";
+}
+
+std::string childThreadIdentity(const nlohmann::json &activity) {
   const std::string childThreadId = stringValue(activity, "agentThreadId");
   if (!childThreadId.empty())
     return childThreadId;
@@ -51,6 +61,14 @@ std::string agentIdentity(const nlohmann::json &activity,
   if (receivers.is_array() && receivers.size() == 1 &&
       receivers.front().is_string())
     return receivers.front().get<std::string>();
+  return {};
+}
+
+std::string agentIdentity(const nlohmann::json &activity,
+                          const nlohmann::json &scope) {
+  const std::string childThreadId = childThreadIdentity(activity);
+  if (!childThreadId.empty())
+    return childThreadId;
   const std::string itemId = stringValue(scope, "itemId");
   return itemId.empty() ? stringValue(activity, "id") : itemId;
 }
@@ -576,6 +594,32 @@ void PresentationModel::upsertAgentActivity(ThreadPresentation &owner,
                                             const nlohmann::json &scope,
                                             const nlohmann::json &activity,
                                             bool live) {
+  const std::string type = stringValue(activity, "type");
+  if (type == "collabAgentToolCall" && !isSpawnActivity(activity)) {
+    const nlohmann::json states =
+        memberValue(activity, "agentsStates", nlohmann::json::object());
+    if (!states.is_object())
+      return;
+    for (const auto &[childThreadId, state] : states.items()) {
+      const auto existing = owner.agents.find(childThreadId);
+      if (existing == owner.agents.end() || !state.is_object())
+        continue;
+      const std::string status = stringValue(state, "status");
+      const std::string message = stringValue(state, "message");
+      if (!status.empty())
+        existing->second.status = status;
+      if (!message.empty())
+        existing->second.raw["resultText"] = message;
+      existing->second.raw["agentState"] = state;
+      correlateAgentThread(childThreadId);
+    }
+    return;
+  }
+
+  const std::string childThreadId = childThreadIdentity(activity);
+  if (type == "collabAgentToolCall" && childThreadId.empty())
+    return;
+
   const std::string id = agentIdentity(activity, scope);
   if (id.empty())
     return;
@@ -590,16 +634,8 @@ void PresentationModel::upsertAgentActivity(ThreadPresentation &owner,
   agent.ownerTurnId = stringValue(scope, "turnId");
   mergePreservingCompleteness(agent.raw, activity);
 
-  const std::string explicitChild = stringValue(activity, "agentThreadId");
-  if (!explicitChild.empty())
-    agent.childThreadId = explicitChild;
-  if (agent.childThreadId.empty()) {
-    const nlohmann::json receivers =
-        memberValue(activity, "receiverThreadIds", nlohmann::json::array());
-    if (receivers.is_array() && receivers.size() == 1 &&
-        receivers.front().is_string())
-      agent.childThreadId = receivers.front().get<std::string>();
-  }
+  if (!childThreadId.empty())
+    agent.childThreadId = childThreadId;
 
   const std::string activityStatus = stringValue(activity, "status");
   const std::string activityKind = stringValue(activity, "kind");
