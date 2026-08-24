@@ -12,19 +12,10 @@ This document records the current CodexUI presentation as implemented and observ
 | Codex app-server | `codex-cli 0.144.6` |
 | SNode.C reported by `codex-backend --version` | `1.0-rc1` |
 
-CodexUI was configured from `/home/voc/projects/drafts/CodexUI/codexui` into the existing incremental build directory `/home/voc/projects/drafts/CodexUI/build-codex`. It used Ninja, GCC 16.2.0, CMake 4.3.4, `RelWithDebInfo`, and Qt 6.10.2 (`Widgets` and `Network`). `find_package(AISuite 0.1.1 CONFIG REQUIRED)` resolved to the exact-head workspace-local AISuite install at:
-
-```text
-/home/voc/projects/drafts/AISuite-extraction/build/Desktop_GCC-Release/local-install
-```
-
-AISuite itself was built as `Release` with Ninja in the existing incremental directory:
-
-```text
-/home/voc/projects/drafts/AISuite-extraction/build/Desktop_GCC-Release
-```
-
-Both incremental builds completed successfully. `ldd` confirmed that the captured CodexUI executable loaded the AISuite libraries from that exact workspace-local installation.
+The baseline used Ninja, GCC 16.2.0, CMake 4.3.4, `RelWithDebInfo`, and Qt
+6.10.2 (`Widgets` and `Network`). Both builds completed successfully, and
+`ldd` confirmed that the captured CodexUI executable loaded the intended
+workspace-local AISuite libraries.
 
 ## Capture environment
 

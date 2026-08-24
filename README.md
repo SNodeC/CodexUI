@@ -37,11 +37,11 @@ Qt 6 Widgets, Threads, SNode.C `master`/HEAD, and an installed canonical
 AISuite package exporting `AISuite::OpenAICodex` are required.
 
 ```sh
-cmake -S . -B build-codex -G Ninja \
+cmake -S . -B "${BUILD_DIR}" -G Ninja \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_PREFIX_PATH="/path/to/aisuite;/path/to/snodec"
-cmake --build build-codex --parallel 8
-ctest --test-dir build-codex --output-on-failure --parallel 8
+cmake --build "${BUILD_DIR}" --parallel 8
+ctest --test-dir "${BUILD_DIR}" --output-on-failure --parallel 8
 ```
 
 ## Architecture

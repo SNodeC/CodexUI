@@ -791,10 +791,9 @@ consumer differs. Neither executable has a privileged transport or state path.
 
 The current build links the codex AISuite frontend library as
 `AISuite::OpenAICodex`, Qt Widgets, Threads, and the selected SNode.C client
-modules. The canonical incremental build directory is `build-codex`.
-CodexUI CI consumes AISuite from `master`/HEAD and does not pin a particular
-AISuite revision. The canonical AISuite replacement must therefore be merged
-before the dependent CodexUI change.
+modules. CodexUI CI consumes AISuite from `master`/HEAD and does not pin a
+particular AISuite revision. The canonical AISuite replacement must therefore
+be merged before the dependent CodexUI change.
 
 ### 17.4 Shell settings and pending-request APIs
 
@@ -852,10 +851,10 @@ the application architecture independently of the particular symptom that
 revealed it.
 
 Two standalone CTest executables form the initial essential suite. They use
-production classes directly and are built from the canonical `build-codex`
-directory when standard CMake `BUILD_TESTING` is enabled. CTest enables that
-option by default; disabling it remains the conventional packaging choice and
-does not select a different runtime implementation.
+production classes directly and are built when standard CMake `BUILD_TESTING`
+is enabled. CTest enables that option by default; disabling it remains the
+conventional packaging choice and does not select a different runtime
+implementation.
 
 #### Socketpair Contract
 
@@ -937,10 +936,10 @@ bridge into the CodexUI repository.
 The two focused tests can be built and run directly:
 
 ```sh
-cmake --build build-codex --parallel 8 \
+cmake --build "${BUILD_DIR}" --parallel 8 \
   --target codexui-socketpair-contract-test \
            codexui-presentation-pipeline-test
-ctest --test-dir build-codex --output-on-failure \
+ctest --test-dir "${BUILD_DIR}" --output-on-failure \
   -R '^codexui-(socketpair-contract|presentation-pipeline)$'
 ```
 
