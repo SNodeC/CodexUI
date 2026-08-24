@@ -75,7 +75,8 @@ The Qt thread exclusively owns:
 
 - `QApplication`, the Qt event loop, and all GUI objects;
 - selected thread, selected tab, scroll, expansion, draft, and focus state;
-- the presentation model derived from normalized UI events;
+- the `PresentationModel`, which is the sole retained authoritative store for
+  normalized presentation state;
 - rendering and user-action translation;
 - correlation of normalized UI operation results with UI intents.
 
@@ -337,8 +338,7 @@ presentation category, and typed request data. Categories are:
 
 - `command-approval`, `file-change-approval`, `user-input`,
   `mcp-elicitation`, and `permissions-approval`;
-- `dynamic-tool-call`, `authentication-refresh`, and `attestation`;
-- `legacy-patch-approval` and `legacy-command-approval`.
+- `dynamic-tool-call`, `authentication-refresh`, and `attestation`.
 
 Resolution uses `pending-request.resolve` in the other direction and
 `pending-request.removed` when authoritative resolution is observed. Secret
@@ -363,8 +363,11 @@ identity requires a new major version.
 
 ## 6. Presentation Authority and Reduction
 
-Qt owns a transient presentation model so widgets can be rendered efficiently.
-That model is not a semantic cache, persistence layer, or substitute for
+Qt owns `PresentationModel`, the sole retained authoritative store for
+normalized presentation state. Widgets and projections read from it; they do
+not retain competing copies of thread, turn, item, plan, agent, request, or
+global-domain state. The app-server remains the semantic and persistence
+authority, so the model is not a persistence layer or substitute for
 app-server history.
 
 Presentation reduction follows these rules:
@@ -497,19 +500,37 @@ hunk highlighting. A user can select a file, copy its patch, or open an
 expanded viewer. The file list and patch view retain canonical CodexUI sizing,
 colors, controls, and scrollbars.
 
-### 7.5 Pending Prompts, Scrolling, and Composer Geometry
+### 7.5 Conversation Projection and Prompt Admission
+
+The selected conversation is a pure projection of `PresentationModel` plus
+client-local prompt admissions. Its one structural grouping level is the
+app-server turn: each retained turn contributes one transparent section, and
+its items remain in exact server order. A turn is identified only by its stable
+turn ID; CodexUI does not infer a turn boundary from a user-message card.
+
+Authoritative cards use the stable `(threadId, turnId, itemId)` identity.
+Locally admitted cards use a process-wide submission identity that remains
+stable when a new-thread draft receives its app-server thread ID. Initial
+render and later updates use the same keyed reconcile path. Existing widgets
+are updated in place, absent keys are removed, new keys are inserted at their
+projected positions, and an identical typed projection is a true visual no-op.
 
 Prompt admission and app-server acknowledgment are separate states. On Send or
 Steer, CodexUI immediately appends a client-local pending user card to the
 destination thread. The card uses a muted blue user-prompt treatment and a
 Qt-painted highlight sweeping left and right until the correlated app-server
-result arrives. A fast successful result retains a short accepted sweep, so the
-acknowledgment transition is visible even when it completes before the first
-pending frame could be painted. Pending cards are
-keyed by stable thread ID and client-local submission ID, survive thread
-switching, and become normal authoritative user messages when the corresponding
-app-server item materializes. The pending and authoritative forms share one
-visual anchor during replacement. Failure produces a retained error card.
+result callback arrives. Only the matching `turn.start` or `turn.steer`
+completion callback acknowledges the prompt; conversation events cannot infer
+acknowledgment. Each request carries a unique `clientUserMessageId`, allowing
+the resulting user item to bind exactly even when prompts have identical text.
+A fast successful result retains a 500-millisecond accepted transition so the
+state change remains visible. Pending cards survive thread switching and
+become normal authoritative user messages when the corresponding app-server
+item materializes. The pending and authoritative forms share one visual key
+and anchor during replacement. Once materialization and the accepted transition
+are complete, the prompt coordinator releases dispatch-only payload while
+retaining that lightweight identity alias. Failure produces a retained error
+card.
 
 The composer remains enabled while acknowledgments are outstanding. Multiple
 prompts may be admitted, but CodexUI dispatches them sequentially per thread so
@@ -519,26 +540,35 @@ to the explicit creation draft until `thread.create` returns its stable ID.
 Dispatch waits for explicit connection-generation thread hydration. A
 provider-marked `notLoaded` thread is resumed first, and a transient
 thread-not-found submission result permits exactly one resume-and-retry before
-becoming a terminal error.
+becoming a terminal error. Failed hydration rejects local admission without
+clearing the composer draft; an explicit reload is required before sending.
+Transport eligibility is rechecked at the queued dispatch boundary: a
+disconnect leaves the prompt queued until bridge-open re-drives dispatch, and
+an in-flight resume gates both hydration reads and turn operations.
 
 The conversation smoothly follows new content only while its vertical scrollbar
 is at the bottom. Geometry bursts retarget a short monotonic animation to the
 latest maximum. Manual upward scrolling interrupts that animation immediately
 and pauses following until the user returns to the bottom. Programmatic Qt
-range clamps from card reflow do not change this user-owned state. While paused, the
-first visible stable card and its viewport offset anchor the reading position
+range clamps from card reflow do not change this user-owned state. While paused,
+the first visible stable card and its viewport offset anchor the reading position
 across appends, card reflow, and reconstruction. Wheel and touchpad events over
 non-scrollable center-pane chrome and splitter handles are forwarded to the
-conversation; nested scrollable controls retain their own wheel handling.
+conversation. Nested scrollable controls consume an event only while they can
+move in that direction and return edge events to the conversation.
+Follow/pause mode and the stable anchor are stored per thread and restored when
+the user returns to that thread.
 
-The update pipeline fingerprints only each card's visible projection.
-Protocol-only changes cannot trigger widget replacement. All visible item
-changes coalesced into one refresh are measured and replaced inside one
-paint-suppressed layout transaction, followed by one scroll settlement. This
-is especially important for Command execution cards, whose streaming output
-and bounded nested viewer alter geometry. New authoritative items are inserted
-at their server-ordered layout position without rebuilding retained cards. A
-full visible history window evicts its oldest card within the same transaction.
+The update pipeline compares each card's typed visible projection.
+Protocol-only changes cannot mutate widgets or scroll state. All visible item
+changes in one reconcile are measured and applied inside one paint-suppressed
+layout transaction, followed by one scroll settlement. This is especially
+important for Command execution cards, whose streaming output and bounded
+nested viewer alter geometry. New authoritative items are inserted at their
+server-ordered layout position without rebuilding retained cards. While
+following is paused, the effective history window expands with appends so its
+stable visual anchor cannot be evicted; the requested bound is restored when
+following resumes.
 
 The bottom composer overlay has a canonical in-layout reservation. As multiline
 input, attachments, settings, or attention controls grow beyond that height,
@@ -554,10 +584,10 @@ new maximum re-enables following. Composer contraction removes the spacer; Qt
 may clamp the value to the reduced range, and being at that maximum re-enables
 following for later content.
 
-### 7.6 Nested Output and Info Viewers
+### 7.6 Command Execution Output and Info Viewers
 
-Shell-output controls exist only for printable, non-whitespace output after
-terminal control sequences are ignored. Empty, whitespace-only, and
+Command execution output controls exist only for printable, non-whitespace
+output after terminal control sequences are ignored. Empty, whitespace-only, and
 ANSI/control-only results create no black output surface. A shown control grows
 from zero content height to a 220-pixel maximum. Its width-dependent content
 height is measured synchronously inside the conversation update transaction.
@@ -566,11 +596,14 @@ place; a protocol update with an unchanged visible fingerprint touches neither
 the widget nor scroll state. Beyond the maximum the output control uses the
 shared styled vertical scrollbar. It follows appended output only while already
 at its bottom; manual upward scrolling pauses following, and the state is
-retained when its conversation card is rebuilt.
+retained across in-place output updates.
 
 The Info tab's State and Protocol viewers use the same scrollbar styling and
 show vertical scrollbars only when required. The Protocol log owns the tab's
-expanding region and its statistics summary is placed below the log.
+expanding region and its statistics summary is placed below the log. Inspector
+content is read from retained per-thread presentation snapshots; selecting an
+already materialized thread does not temporarily clear Plan, Agents, Changes,
+or Requests while unrelated frames are processed.
 
 ## 8. Plans and Agents
 
@@ -619,7 +652,9 @@ variant. CodexUI correlates those authoritative records by `agentThreadId` and
 projects child turn status and retained child result into the original parent
 activity. This is transient presentation correlation, not backend state.
 Identified subagent implementation threads remain addressable for correlation
-but are omitted from the ordinary top-level thread list.
+but are omitted from the ordinary top-level thread list. When one is already
+user-selected, the sidebar retains that visible row across subsequent
+navigation for the session. An authoritative thread removal still drops it.
 
 The Agents view follows the currently selected thread; it never selects an
 agent thread or parent thread automatically.
@@ -882,7 +917,15 @@ The implementation is divided into the following concrete components:
 | `PresentationProtocol` | Frame construction, validation, authority, sequence, generation, and scope utilities |
 | `PresentationModel` | Qt-owned stable-ID reducer for threads, turns, items, plans, agents, requests, global domains, and telemetry |
 | `WorkbenchWidget` | Permanent development harness and user-intent adapter |
-| `ShellWidget` | Product shell, stable thread routing, per-thread prompt-admission queues, scrolling policy, and command API adapter |
+| `ShellWidget` | Product shell and protocol/application coordinator; owns stable selection, hydration, recovery, and command dispatch |
+| `MiddleRegionWidget` | Three-pane visual composition and center-region wheel routing |
+| `ThreadPane` | Stable-ID thread-list projection and thread actions |
+| `ConversationProjection` | Pure thread-to-turn-to-card projection over `PresentationModel` and local prompts |
+| `ConversationView` | Stable-key reconciliation, card geometry, per-thread follow/pause state, and anchor-preserving scrolling |
+| `ConversationCard` implementations | In-place typed card presentation, including pending prompts and bounded Command execution output |
+| `PromptCoordinator` | Per-thread prompt admission queues, callback-only acknowledgment, and authoritative-item correlation |
+| `ComposerPane` | Bottom-anchored upcoming-turn controls, attachments, prompt editor, and overlay-height reporting |
+| `InspectorPane` | Retained Plan, Agents, Changes, Requests, State, and Protocol presentation |
 | `TurnSettingsWidget` | Codex-native transient settings draft and native thread/turn option encoder |
 | `NewThreadDialog` | Transient native thread-start draft with workspace selection and instructions |
 | `FileSelectionDialog` | Canonical directory or bounded multi-file browser shared by workspace and attachments |
@@ -1022,11 +1065,10 @@ codex suite only when it validates a boundary whose failure would undermine
 the application architecture independently of the particular symptom that
 revealed it.
 
-Two standalone CTest executables form the initial essential suite. They use
-production classes directly and are built when standard CMake `BUILD_TESTING`
-is enabled. CTest enables that option by default; disabling it remains the
-conventional packaging choice and does not select a different runtime
-implementation.
+Six focused CTest executables form the essential suite. They use production
+classes directly and are built when standard CMake `BUILD_TESTING` is enabled.
+CTest enables that option by default; disabling it remains the conventional
+packaging choice and does not select a different runtime implementation.
 
 #### Socketpair Contract
 
@@ -1087,13 +1129,47 @@ socketpair itself is independently covered by the first test. This keeps a
 failure attributable to either inter-thread transport or semantic reduction
 instead of repeating both mechanisms in every case.
 
+#### Conversation Projection
+
+`codexui-greenfield-projection-test` verifies the pure typed projection and
+prompt coordinator: one section per app-server turn, stable card identity and
+server ordering, per-thread prompt queues, dispatch-time Start/Steer choice,
+callback-only acknowledgment, exact `clientUserMessageId` correlation,
+duplicate-prompt ordering, history bounds, resolved-payload compaction, and
+Command execution output visibility.
+
+#### Middle-Region Behavior
+
+`codexui-greenfield-middle-test` exercises the actual conversation widgets
+programmatically. It verifies smooth follow, user-owned pause, stable
+card-and-pixel anchoring across every card type and width-dependent reflow,
+per-thread restoration, composer trailing space, pending-prompt animation,
+and independent Command execution output sizing and scroll ownership.
+
+`codexui-greenfield-layout-test` verifies the three-pane constraints, composer
+overlay geometry, complete center-region wheel routing, thread-list selection
+projection, nested-scroll handoff, and retained Inspector/Info behavior. These
+are state and geometry assertions over Qt widgets, not golden-screenshot or
+pixel-perfect visual baselines. The pending-animation check compares two
+transient card rasters only to prove that motion exists.
+
+#### Shell Integration
+
+`codexui-greenfield-shell-test` drives the production `ShellWidget` and
+`FrontendSession` across their real socketpair presentation boundary. It
+verifies exact visible-thread routing, independent prompt queues, real result
+acknowledgment, background completion, retained Plan/Agents state, monotonic
+hydration across reconnect, terminal callbacks, failed-hydration draft
+retention, bounded child-thread reads, and one-shot thread-not-found recovery.
+
 #### Explicit Exclusions
 
 The permanent automated suite does not include:
 
 - a fake or scripted codex-bridge;
 - a fake app-server or synthetic network server;
-- GUI mouse/keyboard automation or pixel-level styling assertions;
+- external GUI-driving automation, golden screenshots, or pixel-perfect
+  styling baselines;
 - one test per fixed issue, setting, request family, widget, or source branch;
 - the Unix/IPv4/IPv6/TLS/WebSocket/RFCOMM transport matrix already owned by
   AISuite and SNode.C;
@@ -1107,17 +1183,21 @@ deterministic CI test would be misleading. The persistent live topology and
 independent bridge observer provide that evidence without introducing a fake
 bridge into the CodexUI repository.
 
-The two focused tests can be built and run directly:
+The six focused tests can be built and run directly:
 
 ```sh
 cmake --build "${BUILD_DIR}" --parallel 8 \
   --target codexui-socketpair-contract-test \
-           codexui-presentation-pipeline-test
+           codexui-presentation-pipeline-test \
+           codexui-greenfield-projection-test \
+           codexui-greenfield-middle-test \
+           codexui-greenfield-layout-test \
+           codexui-greenfield-shell-test
 ctest --test-dir "${BUILD_DIR}" --output-on-failure \
-  -R '^codexui-(socketpair-contract|presentation-pipeline)$'
+  -R '^codexui-(socketpair-contract|presentation-pipeline|greenfield-(projection|middle|layout|shell))$'
 ```
 
-Each test has a ten-second CTest ceiling. Normal successful execution is
+Each test has a 10-to-20-second CTest ceiling. Normal successful execution is
 substantially shorter and requires no network listener, credentials, isolated
 Codex home, or user interaction.
 
@@ -1126,7 +1206,7 @@ Codex home, or user interaction.
 The harness was exercised against one persistent real topology:
 
 ```text
-Codex app-server 0.144.6 over IPv4 WebSocket
+Codex app-server over IPv4 WebSocket
     <-> codex-bridge over IPv4 WebSocket
     <-> CodexUI harness over IPv4 WebSocket
 ```
@@ -1155,13 +1235,13 @@ Validated behavior includes:
   sequence gap, stale pending request, or retained-item disappearance.
 
 The final validation turn lasted about 36 seconds and included a completed
-marker command, a three-step completed plan, one subagent thread, later shell
-activity, and a final answer. At the final checkpoint the normalized model held
-one top-level selected thread, three turns, seventeen items, zero pending
+marker command, a three-step completed plan, one subagent thread, later Command
+execution activity, and a final answer. At the final checkpoint the normalized
+model held one top-level selected thread, three turns, seventeen items, zero pending
 requests, and the retained marker and later activity simultaneously.
 
-A fresh rebuilt visual shell was then validated against the same persistent
-bridge. Selecting the completed parent thread retained all top-level rows and
+A new CodexUI process was then validated against the same persistent bridge.
+Selecting the completed parent thread retained all top-level rows and
 hydrated the Conversation. The Plan inspector reconstructed the retained
 textual plan with Markdown formatting; Changes displayed the explicit
 read-only empty state; Requests remained at zero; and opening Info lazily
@@ -1316,13 +1396,19 @@ contract requires a separately reviewed change.
     thread-not-found result.
 21. Nonvisual item updates do not reconstruct cards; one coalesced refresh uses
     one hidden layout transaction and one scroll settlement.
+22. Conversation hierarchy has exactly one semantic grouping level: stable
+    app-server turns containing stable server-ordered items.
+23. `PresentationModel` is the only retained normalized presentation store;
+    conversation and inspector views are keyed projections, not parallel state
+    authorities.
 
 ## 22. Resolved Presentation Decisions
 
 The remaining presentation-level choices are implemented as follows:
 
-- every incoming frame is reduced immediately, while widget reconstruction is
-  coalesced by one 32-millisecond single-shot Qt timer;
+- every incoming frame is reduced immediately; the selected conversation then
+  takes one typed projection snapshot and one stable-key reconcile, with
+  identical visible projections producing no widget or geometry work;
 - the Info/Protocol view retains at most 2,000 text blocks and the presentation
   model retains at most 256 authority-free telemetry records; the protocol
   statistics summary is below the expanding log;

@@ -23,6 +23,7 @@ class QtSocketPairEndpoint;
 namespace codexui::codex {
 
 class Configuration;
+class FrontendSessionTestPeer;
 
 class FrontendSession final {
 public:
@@ -107,6 +108,8 @@ public:
   bool releaseController();
 
 private:
+  friend class FrontendSessionTestPeer;
+
   bool sendMessage(const nlohmann::json &message);
   void receiveMessage(nlohmann::json message);
   void reportLocalError(std::string message);

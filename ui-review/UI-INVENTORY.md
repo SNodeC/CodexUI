@@ -21,10 +21,14 @@
 ## Conversation region
 
 - Thread title, workspace, and status context.
-- Ordered user, Codex, plan, reasoning, command, file-change, and collaboration
-  cards from `PresentationModel`.
+- One transparent section per app-server turn, containing server-ordered user,
+  Codex, plan, reasoning, Command execution, file-change, and collaboration
+  cards projected from `PresentationModel`.
+- Stable keyed in-place reconciliation for authoritative cards and local prompt
+  cards; visually identical projections perform no widget or geometry update.
 - Per-thread pending prompt cards with muted blue content and a brighter blue
-  highlight sweeping left and right.
+  highlight sweeping left and right until the correlated operation callback,
+  followed by a 500-millisecond accepted transition.
 - Windowed materialization of long conversations with an explicit Load More
   control.
 - Short, interruptible smooth bottom-follow only while the user remains at the
@@ -32,12 +36,15 @@
 - Wheel and touchpad forwarding from surrounding center chrome and splitter
   handles.
 
-## Command-execution output
+## Command execution output
 
+- Visible card label: **Command execution**.
+- No output surface for empty, whitespace-only, ANSI-only, or control-only
+  output.
 - Read-only monospace output with zero content minimum height.
 - Automatic growth to 220 pixels.
 - Styled vertical scrollbar beyond the maximum.
-- Independent follow-bottom/pause state retained across card reconstruction.
+- Independent follow-bottom/pause state retained across in-place output updates.
 
 ## Upcoming-turn surface
 
@@ -69,6 +76,8 @@
 - **Info / Protocol:** bounded frame log with the statistics summary below it.
 
 State and Protocol use the common styled, as-needed vertical scrollbars.
+Plan, Agents, Changes, and Requests retain their visible per-thread state across
+thread and tab navigation.
 
 ## Status bar
 
@@ -80,5 +89,6 @@ State and Protocol use the common styled, as-needed vertical scrollbars.
 
 CodexUI locally owns visible selection, drafts, pending prompt cards, per-thread
 submission queues, scroll-follow state, nested-output scroll state, splitter
-sizes, tab selection, and focus. These values do not replace AISuite or
-app-server domain authority.
+sizes, tab selection, and focus. `PresentationModel` is the sole retained store
+for normalized presentation domains; these local interaction values do not
+replace AISuite or app-server domain authority.

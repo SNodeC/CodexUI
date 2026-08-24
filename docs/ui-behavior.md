@@ -4,9 +4,35 @@ This document defines the current CodexUI interaction contract. AISuite and the
 Codex app-server own protocol and domain semantics; CodexUI owns only local
 presentation, input, selection, and scroll state.
 
+## Conversation source and structure
+
+`PresentationModel` is the sole retained authoritative store for normalized UI
+state. The message view is a projection of its selected thread plus
+client-local prompt admissions; cards and inspectors do not maintain a second
+domain store.
+
+The conversation has one semantic grouping level: an app-server turn contains
+its items in server order. Authoritative cards are keyed by stable thread,
+turn, and item IDs; local prompt cards are keyed by their submission IDs. The
+same keyed reconcile path handles initial display and updates, mutating a card
+in place when its visible data changes. An identical visible projection does
+not rebuild widgets or change geometry.
+
+Local prompt admission resumes bottom following when the only pause was caused
+by composer overlay growth, so the complete pending prompt becomes visible.
+It never overrides a pause created by user scrolling.
+
+Mouse-wheel and touchpad gestures use Qt's native platform/device scroll
+handling. CodexUI only records whether the resulting position follows the
+bottom or is owned by the user.
+
 ## Thread identity and prompt routing
 
 - The selected thread is identified by its stable app-server thread ID.
+- Once selected, a hydrated thread remains visible in the sidebar for the
+  session even when it is outside the ordinary top-level thread ordering; an
+  authoritative removal still removes it, and other rows retain app-server
+  ordering.
 - Sending always targets the visibly selected thread. CodexUI validates the
   visible selection before dispatch and never creates a thread as an implicit
   fallback for missing or inconsistent selection state.
@@ -27,15 +53,18 @@ the destination thread immediately. The card uses a muted version of the normal
 blue user-card treatment, with a brighter blue highlight sweeping left and
 right across it until the app-server acknowledges the operation.
 
-Pending prompt state is keyed by thread ID and a client-local submission ID. It
-therefore remains visible when the user switches threads and returns. On
+Each pending prompt has a process-wide client-local submission ID and remains
+associated with its destination thread. It therefore remains visible when the
+user switches threads and returns. On
 successful acknowledgment, the card shows a short accepted sweep before it
 becomes a normal user message. If the authoritative app-server item arrives
 during that transition, it inherits the pending card's stable visual anchor and
-replaces it after the transition completes. Matching uses stable item identity
-and prompt content so an older identical prompt is not mistaken for the
-submitted item. A failed submission remains visible with an explicit error
-state.
+replaces it after the 500-millisecond transition completes. Only the correlated
+`turn.start` or `turn.steer` completion callback acknowledges a prompt;
+conversation events never infer acknowledgment. Each operation carries a
+unique `clientUserMessageId`, which binds the authoritative user item without
+confusing identical prompt text. A failed submission remains visible with an
+explicit error state.
 
 The composer is cleared immediately after local admission and remains enabled.
 Users may enter additional prompts while earlier prompts await acknowledgment.
@@ -48,7 +77,12 @@ Submission waits until the destination thread has completed its connection-
 generation hydration. A provider-marked `notLoaded` thread is resumed before
 the turn operation. If a submission still receives a transient thread-not-found
 result, CodexUI performs one bounded resume-and-retry; a repeated failure is
-shown on the pending card rather than retried indefinitely.
+shown on the pending card rather than retried indefinitely. If hydration has
+failed, submission is rejected without clearing the composer draft; Reload
+must succeed before that prompt can be admitted. A disconnect between admission
+and dispatch leaves the pending card in place and unsent until bridge-open
+re-drives it. An active resume prevents a concurrent hydration read or turn
+operation for the same thread.
 
 For an explicit new-thread draft, prompts entered while `thread.create` is in
 flight remain attached to that draft. When creation succeeds, all pending
@@ -61,6 +95,9 @@ the bottom. Consecutive geometry changes retarget one short, monotonic animation
 to the newest bottom. If the user scrolls upward, the animation stops
 immediately and automatic following pauses so the current text can be read.
 Returning to the bottom re-enables following.
+
+Follow/pause mode and the visible-card/pixel-offset anchor are retained per
+thread and restored when the user switches back.
 
 This policy applies to new messages, streaming updates, pending prompt cards,
 and card reconstruction. It is based on the scroll bar's actual bottom state,
@@ -75,8 +112,9 @@ card's visible projection do not rebuild that card. Multiple visible card
 changes from one refresh are applied as one paint-suppressed layout transaction
 with one anchor restoration, including streaming Command execution updates.
 New authoritative cards are inserted at their server-ordered position without
-reconstructing retained cards. When the visible history window is full, its
-oldest card is evicted within that same transaction.
+reconstructing retained cards. While following is paused, the effective history
+window expands with incoming cards so its visible anchor is not evicted; the
+requested bound is restored after following resumes.
 
 User scrolling to the current bottom re-enables following. A generic Qt range
 clamp caused by card reflow does not count as user intent and cannot silently
@@ -86,8 +124,9 @@ position is the new bottom.
 
 The complete center region is wheel- and touchpad-scroll sensitive. Wheel
 events over non-scrollable center chrome and the horizontal splitter handles
-are forwarded to the message view. A nested scrollable control, such as shell
-output, consumes its own events.
+are forwarded to the message view. A nested scrollable control, such as Command
+execution output, consumes an event while it can scroll in that direction and
+hands an edge event back to the conversation.
 
 ## Composer geometry
 
@@ -108,9 +147,11 @@ subsequent content. When the composer returns to canonical height, the spacer
 is removed; Qt may clamp a former bottom position to the reduced range, after
 which the normal viewport state and bottom-follow policy apply again.
 
-## Shell-output cards
+## Command execution cards
 
-Shell-output boxes are created only when command output contains printable,
+The card's visible label is **Command execution**.
+
+Command execution output boxes are created only when output contains printable,
 non-whitespace text after terminal control sequences are ignored; empty,
 whitespace-only, and ANSI/control-only output has no output surface. A shown box
 has no non-content minimum height, grows from zero to a maximum of 220 pixels,
@@ -120,7 +161,7 @@ transaction. Streaming output, completion status, and metadata update the
 retained outer Command execution card in place; they do not replace it. Output
 follows its bottom while already at the bottom. A manual upward scroll pauses
 following until the user returns to the bottom. Each output card retains its
-own follow/pause position across conversation-card reconstruction.
+own follow/pause position across in-place output updates.
 
 ## Inspector and Info presentation
 
@@ -128,7 +169,9 @@ The State and Protocol viewers use the common CodexUI scrollbar styling and
 show vertical scrollbars only when needed. The Protocol log occupies the
 expanding area of its tab; protocol statistics are displayed below the log.
 Protocol and State data are diagnostic presentation only and do not create
-domain authority.
+domain authority. Plan, Agents, Changes, and Requests use retained per-thread
+presentation snapshots, so revisiting a materialized thread does not clear or
+flash those surfaces while unrelated frames arrive.
 
 ## Desktop identity
 
@@ -142,7 +185,7 @@ correct launcher and taskbar icon.
 Long-running operations need scoped progress presentation rather than a global
 busy state. Candidate scopes include prompt acknowledgment, thread creation,
 and loading a long thread. Pending prompt acknowledgment already has its own
-animated card border. Any additional progress indicator must preserve input and
-navigation that can safely remain interactive, identify the operation it
+animated highlight sweep. Any additional progress indicator must preserve input
+and navigation that can safely remain interactive, identify the operation it
 represents, and avoid suggesting that unrelated threads are blocked. No general
 spinner contract is defined yet.
