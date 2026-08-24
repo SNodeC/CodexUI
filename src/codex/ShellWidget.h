@@ -8,8 +8,11 @@
 #include <QWidget>
 
 #include <cstdint>
+#include <deque>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 class QFrame;
 class QLabel;
@@ -37,25 +40,42 @@ public:
   explicit ShellWidget(FrontendSession &session, QWidget *parent = nullptr);
 
 private:
+  enum RefreshArea : std::uint32_t {
+    RefreshNone = 0,
+    RefreshThreads = 1U << 0U,
+    RefreshConversation = 1U << 1U,
+    RefreshInspector = 1U << 2U,
+    RefreshState = 1U << 3U,
+    RefreshProtocolStats = 1U << 4U,
+    RefreshTurnSettings = 1U << 5U,
+    RefreshStatus = 1U << 6U,
+    RefreshAll = (1U << 7U) - 1U,
+  };
+
   void handleEvent(const nlohmann::json &event);
-  void scheduleRefresh();
+  void scheduleRefresh(std::uint32_t areas = RefreshAll);
   void refresh();
   void refreshThreads();
   void refreshConversation();
+  [[nodiscard]] bool refreshConversationItem(const std::string &key,
+                                             const std::string &turnId,
+                                             const std::string &itemId);
   void refreshInspector();
   void refreshStateInspector();
   void refreshProtocolStats();
+  void showProtocolTail();
   void refreshStatus();
   void refreshTurnSettings();
   void appendProtocolFrame(const nlohmann::json &frame);
   void hydrateHistoricalAgents();
   void showNotice(QString message, bool error = true);
+  [[nodiscard]] std::uint32_t
+  refreshAreasForEvent(const nlohmann::json &event) const;
 
   void selectThread(std::string threadId);
   void beginNewThread();
   void requestThreads();
   void requestModels();
-  void requestEnvironment();
   void readSelectedThread();
   void renameSelectedThread();
   void forkSelectedThread();
@@ -73,7 +93,6 @@ private:
   PresentationModel model;
   std::string selectedThreadId;
   bool localNewThreadIntent = false;
-  bool environmentRequested = false;
 
   QLabel *connectionLabel = nullptr;
   QLabel *controllerLabel = nullptr;
@@ -95,6 +114,7 @@ private:
   QVBoxLayout *conversationLayout = nullptr;
   QScrollArea *conversationScroll = nullptr;
   QTabWidget *inspectorTabs = nullptr;
+  QTabWidget *infoTabs = nullptr;
   QWidget *planContent = nullptr;
   QVBoxLayout *planLayout = nullptr;
   QWidget *agentsContent = nullptr;
@@ -120,6 +140,13 @@ private:
   QPushButton *denyButton = nullptr;
   QTimer *refreshTimer = nullptr;
   std::uint64_t observedPresentationSequence = 0;
+  std::uint32_t pendingRefreshAreas = RefreshAll;
+  std::size_t conversationItemLimit = 80;
+  bool conversationRebuildPending = true;
+  std::unordered_map<std::string, QWidget *> conversationCards;
+  std::unordered_map<std::string, std::pair<std::string, std::string>>
+      dirtyConversationItems;
+  std::deque<QString> protocolLines;
   std::unordered_set<std::string> requestedAgentThreads;
 };
 

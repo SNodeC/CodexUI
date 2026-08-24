@@ -28,6 +28,7 @@
 #include <QScrollBar>
 #include <QSplitter>
 #include <QTabWidget>
+#include <QTextCursor>
 #include <QTextDocument>
 #include <QTimer>
 #include <QToolButton>
@@ -69,6 +70,8 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
   label->setProperty("kind", kind);
   label->setTextFormat(Qt::PlainText);
   label->setWordWrap(true);
+  label->setMinimumWidth(0);
+  label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse);
   return label;
 }
@@ -80,6 +83,8 @@ QLabel *makeMarkdownLabel(const QString &value) {
   label->setProperty("kind", "body");
   label->setTextFormat(Qt::RichText);
   label->setWordWrap(true);
+  label->setMinimumWidth(0);
+  label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   label->setOpenExternalLinks(true);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse |
                                  Qt::LinksAccessibleByMouse);
@@ -203,6 +208,9 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
       auto *commandView = new QPlainTextEdit(command);
       commandView->setReadOnly(true);
       commandView->setMaximumHeight(90);
+      commandView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+      commandView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+      commandView->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
       commandView->setProperty("kind", "command");
       commandView->setStyleSheet(QStringLiteral(
           "background:#f8fafc;border:1px solid #d7dee8;border-radius:6px;"
@@ -214,6 +222,9 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
       auto *outputView = new QPlainTextEdit(output);
       outputView->setReadOnly(true);
       outputView->setMaximumHeight(220);
+      outputView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+      outputView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+      outputView->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
       outputView->setStyleSheet(QStringLiteral(
           "background:#111827;color:#e5e7eb;border-radius:6px;padding:7px;"
           "font-family:monospace;font-size:11px;"));
@@ -535,7 +546,11 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
 
   conversationScroll = new QScrollArea;
   conversationScroll->setWidgetResizable(true);
+  conversationScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   conversationContent = new QWidget;
+  conversationContent->setMinimumWidth(0);
+  conversationContent->setSizePolicy(QSizePolicy::Ignored,
+                                     QSizePolicy::Preferred);
   conversationLayout = new QVBoxLayout(conversationContent);
   conversationLayout->setContentsMargins(0, 0, 0, 16);
   conversationLayout->setSpacing(8);
@@ -624,15 +639,19 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   requestsLayout->setSpacing(8);
   auto *planScroll = new QScrollArea;
   planScroll->setWidgetResizable(true);
+  planScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   planScroll->setWidget(planContent);
   auto *agentsScroll = new QScrollArea;
   agentsScroll->setWidgetResizable(true);
+  agentsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   agentsScroll->setWidget(agentsContent);
   auto *changesScroll = new QScrollArea;
   changesScroll->setWidgetResizable(true);
+  changesScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   changesScroll->setWidget(changesContent);
   auto *requestsScroll = new QScrollArea;
   requestsScroll->setWidgetResizable(true);
+  requestsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   requestsScroll->setWidget(requestsContent);
   auto *protocolContent = new QWidget;
   auto *protocolLayout = new QVBoxLayout(protocolContent);
@@ -641,8 +660,9 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   protocolStats = makeLabel({}, "meta");
   protocolLog = new QPlainTextEdit;
   protocolLog->setReadOnly(true);
-  protocolLog->setLineWrapMode(QPlainTextEdit::NoWrap);
-  protocolLog->document()->setMaximumBlockCount(2000);
+  protocolLog->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+  protocolLog->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  protocolLog->document()->setMaximumBlockCount(200);
   protocolLayout->addWidget(protocolStats);
   protocolLayout->addWidget(protocolLog, 1);
   auto *stateContent = new QWidget;
@@ -650,20 +670,32 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   stateLayout->setContentsMargins(8, 8, 8, 8);
   stateView = new QPlainTextEdit;
   stateView->setReadOnly(true);
-  stateView->setLineWrapMode(QPlainTextEdit::NoWrap);
+  stateView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+  stateView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   stateLayout->addWidget(stateView);
-  auto *infoTabs = new QTabWidget;
+  infoTabs = new QTabWidget;
   infoTabs->setDocumentMode(true);
   infoTabs->addTab(stateContent, QStringLiteral("State"));
   infoTabs->addTab(protocolContent, QStringLiteral("Protocol"));
+  connect(infoTabs, &QTabWidget::currentChanged, this, [this](int index) {
+    if (index == 0) {
+      scheduleRefresh(RefreshState);
+      return;
+    }
+    showProtocolTail();
+    scheduleRefresh(RefreshProtocolStats);
+  });
   inspectorTabs->addTab(planScroll, QStringLiteral("Plan"));
   inspectorTabs->addTab(agentsScroll, QStringLiteral("Agents"));
   inspectorTabs->addTab(changesScroll, QStringLiteral("Changes"));
   inspectorTabs->addTab(requestsScroll, QStringLiteral("Requests"));
   inspectorTabs->addTab(infoTabs, QStringLiteral("Info"));
   connect(inspectorTabs, &QTabWidget::currentChanged, this, [this](int index) {
-    if (index == 4)
-      requestEnvironment();
+    if (index == 4) {
+      if (infoTabs && infoTabs->currentIndex() == 1)
+        showProtocolTail();
+    }
+    scheduleRefresh(RefreshInspector | RefreshState | RefreshProtocolStats);
   });
   inspectorLayout->addWidget(inspectorTabs, 1);
   connect(hideInspectorButton, &QPushButton::clicked, this, [this] {
@@ -711,7 +743,7 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
 
   refreshTimer = new QTimer(this);
   refreshTimer->setSingleShot(true);
-  refreshTimer->setInterval(16);
+  refreshTimer->setInterval(32);
   connect(refreshTimer, &QTimer::timeout, this, [this] { refresh(); });
 
   session.setEventHandler(
@@ -751,20 +783,87 @@ void ShellWidget::handleEvent(const nlohmann::json &event) {
       event.value("type", std::string{}) == "connection.bridge" &&
       event.value("data", nlohmann::json::object())
               .value("state", std::string{}) == "opened") {
-    environmentRequested = false;
     requestThreads();
     requestModels();
     session.listPermissionProfiles(
         {{"cwd", QDir::currentPath().toStdString()}});
-    if (inspectorTabs->currentIndex() == 4)
-      requestEnvironment();
   }
 
   hydrateHistoricalAgents();
 
   if (!selectedThreadId.empty() && !model.thread(selectedThreadId))
     selectedThreadId.clear();
-  scheduleRefresh();
+
+  const nlohmann::json scope = event.value("scope", nlohmann::json::object());
+  const std::string eventThreadId = stringValue(scope, "threadId");
+  const std::string turnId = stringValue(scope, "turnId");
+  const std::string itemId = stringValue(scope, "itemId");
+  if (eventThreadId == selectedThreadId && !turnId.empty() && !itemId.empty() &&
+      (type == "conversation.item.upsert" ||
+       type == "conversation.item.append" ||
+       type == "conversation.reasoning.part-added" ||
+       type == "conversation.file-change.output-appended" ||
+       type == "conversation.file-change.patch-replaced" ||
+       type == "conversation.mcp.progress")) {
+    const std::string key = turnId + '\x1f' + itemId;
+    dirtyConversationItems[key] = {turnId, itemId};
+  }
+
+  const std::string action = stringValue(event, "action");
+  if ((event.value("kind", std::string{}) == "result" &&
+       action == "thread.read" && eventThreadId == selectedThreadId) ||
+      type == "thread.removed") {
+    conversationRebuildPending = true;
+  }
+  scheduleRefresh(refreshAreasForEvent(event));
+}
+
+std::uint32_t
+ShellWidget::refreshAreasForEvent(const nlohmann::json &event) const {
+  const std::string kind = stringValue(event, "kind");
+  if (kind == "result") {
+    const std::string action = stringValue(event, "action");
+    if (action == "thread.read")
+      return RefreshAll;
+    if (action == "threads.list")
+      return RefreshThreads | RefreshProtocolStats | RefreshStatus;
+    if (action == "thread.create" || action == "thread.resume" ||
+        action == "thread.fork")
+      return RefreshThreads | RefreshTurnSettings | RefreshStatus;
+    if (action == "turn.start")
+      return RefreshThreads | RefreshInspector | RefreshProtocolStats |
+             RefreshStatus;
+    if (action == "models.list" || action == "permission-profiles.list")
+      return RefreshState | RefreshProtocolStats | RefreshTurnSettings;
+    return RefreshState | RefreshProtocolStats;
+  }
+
+  const std::string type = stringValue(event, "type");
+  if (type.starts_with("connection."))
+    return RefreshThreads | RefreshInspector | RefreshProtocolStats |
+           RefreshStatus;
+  if (type == "thread.upsert" || type == "thread.name.changed" ||
+      type == "thread.status.changed" || type == "thread.lifecycle")
+    return RefreshThreads | RefreshTurnSettings | RefreshProtocolStats |
+           RefreshStatus;
+  if (type == "thread.removed")
+    return RefreshThreads | RefreshConversation | RefreshInspector |
+           RefreshTurnSettings | RefreshProtocolStats | RefreshStatus;
+  if (type == "turn.upsert")
+    return RefreshThreads | RefreshInspector | RefreshProtocolStats |
+           RefreshStatus;
+  if (type == "plan.replaced")
+    return RefreshInspector | RefreshProtocolStats;
+  if (type.starts_with("conversation."))
+    return RefreshConversation | RefreshInspector | RefreshProtocolStats;
+  if (type == "agents.activity.upsert")
+    return RefreshInspector | RefreshProtocolStats | RefreshStatus;
+  if (type.starts_with("pending-request."))
+    return RefreshThreads | RefreshInspector | RefreshProtocolStats |
+           RefreshStatus;
+  if (type == "thread.token-usage.changed")
+    return RefreshProtocolStats | RefreshStatus;
+  return RefreshState | RefreshProtocolStats;
 }
 
 void ShellWidget::hydrateHistoricalAgents() {
@@ -782,19 +881,44 @@ void ShellWidget::hydrateHistoricalAgents() {
   }
 }
 
-void ShellWidget::scheduleRefresh() {
+void ShellWidget::scheduleRefresh(std::uint32_t areas) {
+  pendingRefreshAreas |= areas;
   if (!refreshTimer->isActive())
     refreshTimer->start();
 }
 
 void ShellWidget::refresh() {
-  refreshThreads();
-  refreshConversation();
-  refreshInspector();
-  refreshStateInspector();
-  refreshProtocolStats();
-  refreshTurnSettings();
-  refreshStatus();
+  const std::uint32_t areas = pendingRefreshAreas;
+  pendingRefreshAreas = RefreshNone;
+  if ((areas & RefreshThreads) != 0)
+    refreshThreads();
+  if ((areas & RefreshConversation) != 0) {
+    if (conversationRebuildPending) {
+      refreshConversation();
+    } else {
+      bool requiresRebuild = false;
+      for (const auto &[key, identity] : dirtyConversationItems) {
+        if (!refreshConversationItem(key, identity.first, identity.second)) {
+          requiresRebuild = true;
+          break;
+        }
+      }
+      if (requiresRebuild)
+        refreshConversation();
+    }
+    dirtyConversationItems.clear();
+    conversationRebuildPending = false;
+  }
+  if ((areas & RefreshInspector) != 0)
+    refreshInspector();
+  if ((areas & RefreshState) != 0)
+    refreshStateInspector();
+  if ((areas & RefreshProtocolStats) != 0)
+    refreshProtocolStats();
+  if ((areas & RefreshTurnSettings) != 0)
+    refreshTurnSettings();
+  if ((areas & RefreshStatus) != 0)
+    refreshStatus();
 }
 
 void ShellWidget::showNotice(QString message, bool error) {
@@ -813,6 +937,9 @@ void ShellWidget::showNotice(QString message, bool error) {
 }
 
 void ShellWidget::refreshProtocolStats() {
+  if (!infoTabs || inspectorTabs->currentIndex() != 4 ||
+      infoTabs->currentIndex() != 1)
+    return;
   std::size_t turns = 0;
   std::size_t items = 0;
   if (const ThreadPresentation *thread = model.thread(selectedThreadId)) {
@@ -832,6 +959,17 @@ void ShellWidget::refreshProtocolStats() {
           .arg(static_cast<qulonglong>(items))
           .arg(static_cast<qulonglong>(model.pendingRequestCount()))
           .arg(static_cast<qulonglong>(model.telemetry().size())));
+}
+
+void ShellWidget::showProtocolTail() {
+  if (!protocolLog)
+    return;
+  QStringList lines;
+  lines.reserve(static_cast<qsizetype>(protocolLines.size()));
+  for (const QString &line : protocolLines)
+    lines.push_back(line);
+  protocolLog->setPlainText(lines.join(QLatin1Char('\n')));
+  protocolLog->moveCursor(QTextCursor::End);
 }
 
 void ShellWidget::refreshTurnSettings() {
@@ -865,6 +1003,15 @@ void ShellWidget::appendProtocolFrame(const nlohmann::json &frame) {
   if (!protocolLog)
     return;
 
+  const auto recordLine = [this](QString line) {
+    if (protocolLines.size() == 200)
+      protocolLines.pop_front();
+    protocolLines.push_back(line);
+    if (inspectorTabs->currentIndex() == 4 && infoTabs &&
+        infoTabs->currentIndex() == 1)
+      protocolLog->appendPlainText(std::move(line));
+  };
+
   const std::uint64_t sequence = frame.value("sequence", 0ULL);
   if (sequence != 0) {
     if (observedPresentationSequence != 0 &&
@@ -872,7 +1019,7 @@ void ShellWidget::appendProtocolFrame(const nlohmann::json &frame) {
       const QString relation = sequence <= observedPresentationSequence
                                    ? QStringLiteral("NON-MONOTONIC")
                                    : QStringLiteral("SEQUENCE GAP");
-      protocolLog->appendPlainText(
+      recordLine(
           QStringLiteral("[%1] %2 expected=%3 received=%4")
               .arg(QDateTime::currentDateTime().toString(
                        QStringLiteral("HH:mm:ss.zzz")),
@@ -917,7 +1064,7 @@ void ShellWidget::appendProtocolFrame(const nlohmann::json &frame) {
     if (!message.empty())
       parts << text(message);
   }
-  protocolLog->appendPlainText(parts.join(QStringLiteral("  ")));
+  recordLine(parts.join(QStringLiteral("  ")));
 }
 
 void ShellWidget::refreshThreads() {
@@ -974,6 +1121,7 @@ void ShellWidget::refreshConversation() {
       conversationScroll->verticalScrollBar()->maximum();
   const bool followLatest =
       conversationScroll->verticalScrollBar()->value() >= previousMaximum - 12;
+  conversationCards.clear();
   clearLayout(conversationLayout);
 
   const ThreadPresentation *thread = model.thread(selectedThreadId);
@@ -996,7 +1144,11 @@ void ShellWidget::refreshConversation() {
   conversationTitle->setText(text(thread->title));
   conversationMeta->setText(text(thread->cwd) + QStringLiteral("  |  ") +
                             displayStatus(thread->status));
-  std::size_t count = 0;
+  struct VisibleItem {
+    std::string key;
+    const ItemPresentation *item = nullptr;
+  };
+  std::vector<VisibleItem> items;
   for (const std::string &turnId : thread->turnOrder) {
     const auto turn = thread->turns.find(turnId);
     if (turn == thread->turns.end())
@@ -1005,11 +1157,33 @@ void ShellWidget::refreshConversation() {
       const auto item = turn->second.items.find(itemId);
       if (item == turn->second.items.end())
         continue;
-      conversationLayout->addWidget(itemFrame(item->second));
-      ++count;
+      items.push_back({turnId + '\x1f' + itemId, &item->second});
     }
   }
-  if (count == 0)
+  const std::size_t first = items.size() > conversationItemLimit
+                                ? items.size() - conversationItemLimit
+                                : 0;
+  if (first != 0) {
+    const std::size_t page = std::min<std::size_t>(80, first);
+    auto *loadEarlier = new QPushButton(
+        QStringLiteral("Load %1 earlier activities (%2 retained)")
+            .arg(static_cast<qulonglong>(page))
+            .arg(static_cast<qulonglong>(first)));
+    loadEarlier->setProperty("kind", "subtle");
+    loadEarlier->setFixedHeight(30);
+    connect(loadEarlier, &QPushButton::clicked, this, [this, page] {
+      conversationItemLimit += page;
+      conversationRebuildPending = true;
+      scheduleRefresh(RefreshConversation);
+    });
+    conversationLayout->addWidget(loadEarlier);
+  }
+  for (std::size_t index = first; index < items.size(); ++index) {
+    QWidget *card = itemFrame(*items[index].item);
+    conversationCards[items[index].key] = card;
+    conversationLayout->addWidget(card);
+  }
+  if (items.empty())
     conversationLayout->addWidget(
         makeLabel(QStringLiteral("No materialized activity."), "muted"));
   conversationLayout->addStretch();
@@ -1020,136 +1194,183 @@ void ShellWidget::refreshConversation() {
     });
 }
 
+bool ShellWidget::refreshConversationItem(const std::string &key,
+                                          const std::string &turnId,
+                                          const std::string &itemId) {
+  const auto existing = conversationCards.find(key);
+  if (existing == conversationCards.end())
+    return false;
+  const ThreadPresentation *thread = model.thread(selectedThreadId);
+  if (!thread)
+    return false;
+  const auto turn = thread->turns.find(turnId);
+  if (turn == thread->turns.end())
+    return false;
+  const auto item = turn->second.items.find(itemId);
+  if (item == turn->second.items.end())
+    return false;
+
+  QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
+  const bool followLatest = scrollBar->value() >= scrollBar->maximum() - 12;
+  QWidget *replacement = itemFrame(item->second);
+  QLayoutItem *replaced =
+      conversationLayout->replaceWidget(existing->second, replacement);
+  if (!replaced) {
+    replacement->deleteLater();
+    return false;
+  }
+  delete replaced;
+  existing->second->deleteLater();
+  existing->second = replacement;
+  if (followLatest)
+    QTimer::singleShot(0, conversationScroll, [scroll = conversationScroll] {
+      scroll->verticalScrollBar()->setValue(
+          scroll->verticalScrollBar()->maximum());
+    });
+  return true;
+}
+
 void ShellWidget::refreshInspector() {
-  clearLayout(planLayout);
-  clearLayout(agentsLayout);
-  clearLayout(changesLayout);
-  clearLayout(requestsLayout);
+  const int activeTab = inspectorTabs->currentIndex();
+  QVBoxLayout *activeLayout = nullptr;
+  if (activeTab == 0)
+    activeLayout = planLayout;
+  else if (activeTab == 1)
+    activeLayout = agentsLayout;
+  else if (activeTab == 2)
+    activeLayout = changesLayout;
+  else if (activeTab == 3)
+    activeLayout = requestsLayout;
+  if (!activeLayout)
+    return;
+
+  clearLayout(activeLayout);
   const ThreadPresentation *thread = model.thread(selectedThreadId);
   if (!thread) {
-    planLayout->addWidget(
+    activeLayout->addWidget(
         makeLabel(QStringLiteral("No selected thread."), "muted"));
-    planLayout->addStretch();
-    agentsLayout->addWidget(
-        makeLabel(QStringLiteral("No selected thread."), "muted"));
-    agentsLayout->addStretch();
-    changesLayout->addWidget(
-        makeLabel(QStringLiteral("No selected thread."), "muted"));
-    changesLayout->addStretch();
-    requestsLayout->addWidget(
-        makeLabel(QStringLiteral("No selected thread."), "muted"));
-    requestsLayout->addStretch();
+    activeLayout->addStretch();
     return;
   }
 
-  const TurnPresentation *planTurn = nullptr;
-  const ItemPresentation *planItem = nullptr;
-  for (auto turnId = thread->turnOrder.rbegin();
-       turnId != thread->turnOrder.rend(); ++turnId) {
-    const auto turn = thread->turns.find(*turnId);
-    if (turn == thread->turns.end())
-      continue;
-    if (turn->second.plan.is_object() && turn->second.plan.contains("steps")) {
-      planTurn = &turn->second;
-      break;
-    }
-    for (auto itemId = turn->second.itemOrder.rbegin();
-         itemId != turn->second.itemOrder.rend(); ++itemId) {
-      const auto item = turn->second.items.find(*itemId);
-      if (item != turn->second.items.end() &&
-          stringValue(item->second.raw, "type") == "plan") {
-        planItem = &item->second;
+  if (activeTab == 0) {
+    const TurnPresentation *planTurn = nullptr;
+    const ItemPresentation *planItem = nullptr;
+    for (auto turnId = thread->turnOrder.rbegin();
+         turnId != thread->turnOrder.rend(); ++turnId) {
+      const auto turn = thread->turns.find(*turnId);
+      if (turn == thread->turns.end())
+        continue;
+      if (turn->second.plan.is_object() &&
+          turn->second.plan.contains("steps")) {
+        planTurn = &turn->second;
         break;
       }
-    }
-    if (planItem)
-      break;
-  }
-  if (planTurn) {
-    const QString explanation =
-        text(stringValue(planTurn->plan, "explanation"));
-    if (!explanation.isEmpty())
-      planLayout->addWidget(makeMarkdownLabel(explanation));
-    const nlohmann::json steps =
-        planTurn->plan.value("steps", nlohmann::json::array());
-    for (const auto &step : steps) {
-      auto *row = new QFrame;
-      row->setProperty("kind", "summary");
-      auto *rowLayout = new QVBoxLayout(row);
-      rowLayout->setContentsMargins(9, 7, 9, 7);
-      rowLayout->addWidget(makeLabel(text(stringValue(step, "step"))));
-      rowLayout->addWidget(
-          makeLabel(displayStatus(stringValue(step, "status")), "meta"));
-      planLayout->addWidget(row);
-    }
-  } else if (planItem) {
-    const QString planText = text(stringValue(planItem->raw, "text"));
-    if (planText.isEmpty())
-      planLayout->addWidget(
-          makeLabel(QStringLiteral("Plan is being prepared."), "muted"));
-    else
-      planLayout->addWidget(makeMarkdownLabel(planText));
-  } else {
-    planLayout->addWidget(
-        makeLabel(QStringLiteral("No plan for this thread."), "muted"));
-  }
-  planLayout->addStretch();
-
-  std::size_t agentCount = 0;
-  for (const std::string &agentId : thread->agentOrder) {
-    const auto agent = thread->agents.find(agentId);
-    if (agent == thread->agents.end())
-      continue;
-    agentsLayout->addWidget(agentFrame(agent->second));
-    ++agentCount;
-  }
-  if (agentCount == 0)
-    agentsLayout->addWidget(makeLabel(
-        QStringLiteral("No agent activity for this thread."), "muted"));
-  agentsLayout->addStretch();
-
-  std::size_t changeCount = 0;
-  for (const std::string &turnId : thread->turnOrder) {
-    const auto turn = thread->turns.find(turnId);
-    if (turn == thread->turns.end())
-      continue;
-    for (const std::string &itemId : turn->second.itemOrder) {
-      const auto item = turn->second.items.find(itemId);
-      if (item == turn->second.items.end() ||
-          stringValue(item->second.raw, "type") != "fileChange")
-        continue;
-      auto *frame = new QFrame;
-      frame->setProperty("kind", "summary");
-      auto *layout = new QVBoxLayout(frame);
-      layout->setContentsMargins(9, 7, 9, 7);
-      layout->setSpacing(5);
-      layout->addWidget(makeLabel(QStringLiteral("File changes"), "title"));
-      layout->addWidget(makeLabel(
-          displayStatus(stringValue(item->second.raw, "status")), "meta"));
-      const nlohmann::json changes =
-          item->second.raw.value("changes", nlohmann::json::array());
-      if (changes.is_array()) {
-        for (const auto &change : changes) {
-          QString path = text(stringValue(change, "path"));
-          if (path.isEmpty())
-            path = text(stringValue(change, "filePath"));
-          const QString changeKind = text(stringValue(change, "kind"));
-          if (!path.isEmpty())
-            layout->addWidget(makeLabel(
-                changeKind.isEmpty()
-                    ? path
-                    : QStringLiteral("%1  |  %2").arg(path, changeKind),
-                "meta"));
+      for (auto itemId = turn->second.itemOrder.rbegin();
+           itemId != turn->second.itemOrder.rend(); ++itemId) {
+        const auto item = turn->second.items.find(*itemId);
+        if (item != turn->second.items.end() &&
+            stringValue(item->second.raw, "type") == "plan") {
+          planItem = &item->second;
+          break;
         }
       }
-      changesLayout->addWidget(frame);
-      ++changeCount;
+      if (planItem)
+        break;
     }
+    if (planTurn) {
+      const QString explanation =
+          text(stringValue(planTurn->plan, "explanation"));
+      if (!explanation.isEmpty())
+        planLayout->addWidget(makeMarkdownLabel(explanation));
+      const nlohmann::json steps =
+          planTurn->plan.value("steps", nlohmann::json::array());
+      for (const auto &step : steps) {
+        auto *row = new QFrame;
+        row->setProperty("kind", "summary");
+        auto *rowLayout = new QVBoxLayout(row);
+        rowLayout->setContentsMargins(9, 7, 9, 7);
+        rowLayout->addWidget(makeLabel(text(stringValue(step, "step"))));
+        rowLayout->addWidget(
+            makeLabel(displayStatus(stringValue(step, "status")), "meta"));
+        planLayout->addWidget(row);
+      }
+    } else if (planItem) {
+      const QString planText = text(stringValue(planItem->raw, "text"));
+      if (planText.isEmpty())
+        planLayout->addWidget(
+            makeLabel(QStringLiteral("Plan is being prepared."), "muted"));
+      else
+        planLayout->addWidget(makeMarkdownLabel(planText));
+    } else {
+      planLayout->addWidget(
+          makeLabel(QStringLiteral("No plan for this thread."), "muted"));
+    }
+    planLayout->addStretch();
+    return;
   }
-  if (changeCount == 0)
-    changesLayout->addWidget(
-        makeLabel(QStringLiteral("No file changes for this thread."), "muted"));
-  changesLayout->addStretch();
+
+  if (activeTab == 1) {
+    std::size_t agentCount = 0;
+    for (const std::string &agentId : thread->agentOrder) {
+      const auto agent = thread->agents.find(agentId);
+      if (agent == thread->agents.end())
+        continue;
+      agentsLayout->addWidget(agentFrame(agent->second));
+      ++agentCount;
+    }
+    if (agentCount == 0)
+      agentsLayout->addWidget(makeLabel(
+          QStringLiteral("No agent activity for this thread."), "muted"));
+    agentsLayout->addStretch();
+    return;
+  }
+
+  if (activeTab == 2) {
+    std::size_t changeCount = 0;
+    for (const std::string &turnId : thread->turnOrder) {
+      const auto turn = thread->turns.find(turnId);
+      if (turn == thread->turns.end())
+        continue;
+      for (const std::string &itemId : turn->second.itemOrder) {
+        const auto item = turn->second.items.find(itemId);
+        if (item == turn->second.items.end() ||
+            stringValue(item->second.raw, "type") != "fileChange")
+          continue;
+        auto *frame = new QFrame;
+        frame->setProperty("kind", "summary");
+        auto *layout = new QVBoxLayout(frame);
+        layout->setContentsMargins(9, 7, 9, 7);
+        layout->setSpacing(5);
+        layout->addWidget(makeLabel(QStringLiteral("File changes"), "title"));
+        layout->addWidget(makeLabel(
+            displayStatus(stringValue(item->second.raw, "status")), "meta"));
+        const nlohmann::json changes =
+            item->second.raw.value("changes", nlohmann::json::array());
+        if (changes.is_array()) {
+          for (const auto &change : changes) {
+            QString path = text(stringValue(change, "path"));
+            if (path.isEmpty())
+              path = text(stringValue(change, "filePath"));
+            const QString changeKind = text(stringValue(change, "kind"));
+            if (!path.isEmpty())
+              layout->addWidget(makeLabel(
+                  changeKind.isEmpty()
+                      ? path
+                      : QStringLiteral("%1  |  %2").arg(path, changeKind),
+                  "meta"));
+          }
+        }
+        changesLayout->addWidget(frame);
+        ++changeCount;
+      }
+    }
+    if (changeCount == 0)
+      changesLayout->addWidget(makeLabel(
+          QStringLiteral("No file changes for this thread."), "muted"));
+    changesLayout->addStretch();
+    return;
+  }
 
   std::size_t requestCount = 0;
   for (const auto &[id, request] : model.pendingRequestPresentations()) {
@@ -1283,7 +1504,8 @@ void ShellWidget::refreshStatus() {
 }
 
 void ShellWidget::refreshStateInspector() {
-  if (!stateView)
+  if (!stateView || !infoTabs || inspectorTabs->currentIndex() != 4 ||
+      infoTabs->currentIndex() != 0)
     return;
   nlohmann::json domains = nlohmann::json::object();
   for (const auto &[name, value] : model.globalDomains())
@@ -1299,49 +1521,40 @@ void ShellWidget::refreshStateInspector() {
   const nlohmann::json state{{"models", model.modelCatalog()},
                              {"pendingRequests", std::move(pending)},
                              {"domains", std::move(domains)}};
-  stateView->setPlainText(text(state.dump(2)));
+  std::string rendered = state.dump(2);
+  constexpr std::size_t MaximumRenderedStateBytes = 32U * 1024U;
+  if (rendered.size() > MaximumRenderedStateBytes) {
+    const std::size_t totalBytes = rendered.size();
+    rendered.resize(MaximumRenderedStateBytes);
+    rendered += "\n\n[State display truncated at 32 KiB; retained bytes: " +
+                std::to_string(totalBytes) + "]";
+  }
+  stateView->setPlainText(text(rendered));
 }
 
 void ShellWidget::selectThread(std::string threadId) {
+  if (threadId != selectedThreadId)
+    conversationItemLimit = 80;
   selectedThreadId = std::move(threadId);
   localNewThreadIntent = false;
+  conversationRebuildPending = true;
   readSelectedThread();
-  refresh();
+  scheduleRefresh();
 }
 
 void ShellWidget::beginNewThread() {
   selectedThreadId.clear();
   localNewThreadIntent = true;
+  conversationItemLimit = 80;
+  conversationRebuildPending = true;
   threadList->clearSelection();
   promptEditor->setFocus();
-  refresh();
+  scheduleRefresh();
 }
 
 void ShellWidget::requestThreads() { session.listThreads(); }
 
 void ShellWidget::requestModels() { session.listModels(); }
-
-void ShellWidget::requestEnvironment() {
-  if (environmentRequested)
-    return;
-  environmentRequested = true;
-  const std::string cwd = QDir::currentPath().toStdString();
-  requestModels();
-  session.readModelProviderCapabilities();
-  session.readAccount({{"refreshToken", false}});
-  session.readAccountRateLimits();
-  session.readAccountTokenUsage();
-  session.readConfig({{"cwd", cwd}, {"includeLayers", true}});
-  session.listPermissionProfiles({{"cwd", cwd}});
-  session.listExperimentalFeatures();
-  session.listSkills(
-      {{"cwds", nlohmann::json::array({cwd})}, {"forceReload", false}});
-  session.listHooks({{"cwds", nlohmann::json::array({cwd})}});
-  session.listPlugins(
-      {{"cwds", nlohmann::json::array({cwd})}, {"forceRefetch", false}});
-  session.listApps();
-  session.listMcpServers();
-}
 
 void ShellWidget::readSelectedThread() {
   if (selectedThreadId.empty())
@@ -1438,6 +1651,8 @@ void ShellWidget::submitPrompt() {
           return;
         selectedThreadId = threadId;
         localNewThreadIntent = false;
+        conversationItemLimit = 80;
+        conversationRebuildPending = true;
         submitPromptToThread(threadId, prompt, std::move(turnOptions));
         scheduleRefresh();
       });

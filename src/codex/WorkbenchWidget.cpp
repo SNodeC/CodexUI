@@ -65,6 +65,8 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
   auto *label = new QLabel(std::move(value));
   label->setProperty("kind", kind);
   label->setWordWrap(true);
+  label->setMinimumWidth(0);
+  label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse);
   return label;
 }
@@ -150,6 +152,9 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
       auto *commandView = new QPlainTextEdit(command);
       commandView->setReadOnly(true);
       commandView->setMaximumHeight(90);
+      commandView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+      commandView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+      commandView->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
       commandView->setProperty("kind", "command");
       layout->addWidget(commandView);
     }
@@ -158,6 +163,9 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
       auto *outputView = new QPlainTextEdit(output);
       outputView->setReadOnly(true);
       outputView->setMaximumHeight(220);
+      outputView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+      outputView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+      outputView->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
       layout->addWidget(outputView);
     }
     QStringList metadata;
@@ -343,7 +351,11 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
 
   conversationScroll = new QScrollArea;
   conversationScroll->setWidgetResizable(true);
+  conversationScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   conversationContent = new QWidget;
+  conversationContent->setMinimumWidth(0);
+  conversationContent->setSizePolicy(QSizePolicy::Ignored,
+                                     QSizePolicy::Preferred);
   conversationLayout = new QVBoxLayout(conversationContent);
   conversationLayout->setContentsMargins(4, 6, 4, 6);
   conversationLayout->setSpacing(8);
@@ -408,12 +420,15 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   requestsLayout->setSpacing(8);
   auto *planScroll = new QScrollArea;
   planScroll->setWidgetResizable(true);
+  planScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   planScroll->setWidget(planContent);
   auto *agentsScroll = new QScrollArea;
   agentsScroll->setWidgetResizable(true);
+  agentsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   agentsScroll->setWidget(agentsContent);
   auto *requestsScroll = new QScrollArea;
   requestsScroll->setWidgetResizable(true);
+  requestsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   requestsScroll->setWidget(requestsContent);
   auto *protocolContent = new QWidget;
   auto *protocolLayout = new QVBoxLayout(protocolContent);
@@ -422,7 +437,8 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   protocolStats = makeLabel({}, "meta");
   protocolLog = new QPlainTextEdit;
   protocolLog->setReadOnly(true);
-  protocolLog->setLineWrapMode(QPlainTextEdit::NoWrap);
+  protocolLog->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+  protocolLog->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   protocolLog->document()->setMaximumBlockCount(2000);
   protocolLayout->addWidget(protocolStats);
   protocolLayout->addWidget(protocolLog, 1);
@@ -431,7 +447,8 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   stateLayout->setContentsMargins(8, 8, 8, 8);
   stateView = new QPlainTextEdit;
   stateView->setReadOnly(true);
-  stateView->setLineWrapMode(QPlainTextEdit::NoWrap);
+  stateView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+  stateView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   stateLayout->addWidget(stateView);
   inspectorTabs->addTab(planScroll, QStringLiteral("Plan"));
   inspectorTabs->addTab(agentsScroll, QStringLiteral("Agents"));

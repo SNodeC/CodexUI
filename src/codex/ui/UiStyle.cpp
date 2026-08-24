@@ -105,13 +105,83 @@ QString applicationStyleSheet()
         }
         QCheckBox, QRadioButton { spacing: 8px; }
         QDialog { background: #ffffff; }
-        QScrollArea { background: transparent; border: 0; }
+        QScrollArea { background: #f6f8fb; border: 0; }
+        QTabWidget QScrollArea { background: #fbfcfe; }
+        QDialog QScrollArea { background: #ffffff; }
         QScrollArea > QWidget > QWidget { background: transparent; }
-        QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
-        QScrollBar::handle:vertical { background: #b9c4d2; min-height: 28px; border-radius: 3px; }
+        QAbstractScrollArea::corner { background: transparent; border: 0; }
+        QScrollBar:vertical {
+            background: transparent;
+            border: 0;
+            width: 8px;
+            margin: 2px;
+        }
+        QScrollBar::handle:vertical {
+            background: #b9c4d2;
+            min-height: 28px;
+            border-radius: 3px;
+        }
         QScrollBar::handle:vertical:hover { background: #98a2b3; }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+        QScrollBar::add-line:vertical {
+            background: transparent;
+            border: 0;
+            height: 0;
+            subcontrol-position: bottom;
+            subcontrol-origin: margin;
+        }
+        QScrollBar::sub-line:vertical {
+            background: transparent;
+            border: 0;
+            height: 0;
+            subcontrol-position: top;
+            subcontrol-origin: margin;
+        }
+        QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical {
+            background: none;
+            border: 0;
+            width: 0;
+            height: 0;
+        }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            background: none;
+            border: 0;
+        }
+        QScrollBar:horizontal {
+            background: transparent;
+            border: 0;
+            height: 8px;
+            margin: 2px;
+        }
+        QScrollBar::handle:horizontal {
+            background: #b9c4d2;
+            min-width: 28px;
+            border-radius: 3px;
+        }
+        QScrollBar::handle:horizontal:hover { background: #98a2b3; }
+        QScrollBar::add-line:horizontal {
+            background: transparent;
+            border: 0;
+            width: 0;
+            subcontrol-position: right;
+            subcontrol-origin: margin;
+        }
+        QScrollBar::sub-line:horizontal {
+            background: transparent;
+            border: 0;
+            width: 0;
+            subcontrol-position: left;
+            subcontrol-origin: margin;
+        }
+        QScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal {
+            background: none;
+            border: 0;
+            width: 0;
+            height: 0;
+        }
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+            background: none;
+            border: 0;
+        }
         QSplitter::handle { background: #d7dee8; }
         QSplitter::handle:horizontal { width: 8px; }
         QTabBar { background: transparent; }

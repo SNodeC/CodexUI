@@ -37,6 +37,8 @@ QLabel *wrapped(QString value, const char *kind = "body") {
   auto *label = new QLabel(std::move(value));
   label->setProperty("kind", kind);
   label->setWordWrap(true);
+  label->setMinimumWidth(0);
+  label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse |
                                  Qt::LinksAccessibleByMouse);
   label->setOpenExternalLinks(true);
@@ -108,6 +110,7 @@ PendingRequestDialog::present(const PendingRequestPresentation &request,
 
   auto *scroll = new QScrollArea;
   scroll->setWidgetResizable(true);
+  scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   auto *content = new QWidget;
   auto *contentLayout = new QVBoxLayout(content);
   contentLayout->setContentsMargins(0, 0, 8, 0);
@@ -228,6 +231,8 @@ PendingRequestDialog::present(const PendingRequestPresentation &request,
           QStringLiteral("Structured response (JSON object)"), "title"));
       structuredContent = new QPlainTextEdit(QStringLiteral("{}"));
       structuredContent->setMinimumHeight(150);
+      structuredContent->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+      structuredContent->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
       structuredContent->setStyleSheet(QStringLiteral(
           "background:#f8fafc;border:1px solid #d7dee8;border-radius:6px;"
           "padding:7px;font-family:monospace;"));
