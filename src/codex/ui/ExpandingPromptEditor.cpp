@@ -23,8 +23,9 @@ ExpandingPromptEditor::ExpandingPromptEditor(QWidget* parent)
     setLineWrapMode(QPlainTextEdit::WidgetWidth);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    maximumEditorHeight = fontMetrics().lineSpacing() * maximumVisibleLineCount() + 10;
     setMinimumHeight(compactHeight());
-    setMaximumHeight(maximumContentHeight());
+    setMaximumHeight(maximumEditorHeight);
     setFixedHeight(compactHeight());
     setStyleSheet(QStringLiteral(
         "QPlainTextEdit{background:transparent;color:#1d2633;border:0;padding:3px 2px;font-size:13px;}"));
@@ -83,9 +84,9 @@ void ExpandingPromptEditor::remeasure()
     for (QTextBlock block = document()->begin(); block.isValid(); block = block.next())
         laidOutHeight += documentLayout->blockBoundingRect(block).height();
     const int documentHeight = static_cast<int>(std::ceil(laidOutHeight)) + 10;
-    const int wanted = std::clamp(documentHeight, compactHeight(), maximumContentHeight());
-    setVerticalScrollBarPolicy(wanted >= maximumContentHeight() ? Qt::ScrollBarAsNeeded
-                                                                : Qt::ScrollBarAlwaysOff);
+    const int wanted = std::clamp(documentHeight, compactHeight(), maximumEditorHeight);
+    setVerticalScrollBarPolicy(wanted >= maximumEditorHeight ? Qt::ScrollBarAsNeeded
+                                                             : Qt::ScrollBarAlwaysOff);
     if (wanted == currentContentHeight)
         return;
     currentContentHeight = wanted;

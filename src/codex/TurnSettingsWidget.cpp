@@ -25,6 +25,9 @@ namespace codexui::codex {
 namespace {
 
 constexpr auto DefaultValue = "default";
+constexpr int SettingControlHeight = 32;
+constexpr int SettingLabelHeight = 14;
+constexpr int SettingLabelSpacing = 5;
 
 void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
                  bool highlighted) {
@@ -126,7 +129,7 @@ QComboBox *compactCombo(const char *name) {
   auto *combo = new CompactComboBox;
   combo->setObjectName(QString::fromLatin1(name));
   combo->setProperty("codexChevron", true);
-  combo->setFixedHeight(32);
+  combo->setFixedHeight(SettingControlHeight);
   combo->setMinimumContentsLength(4);
   combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
   return combo;
@@ -136,16 +139,17 @@ QWidget *labelled(const QString &caption, QWidget *control) {
   auto *surface = new QFrame;
   auto *layout = new QVBoxLayout(surface);
   layout->setContentsMargins(0, 0, 0, 0);
-  layout->setSpacing(2);
+  layout->setSpacing(SettingLabelSpacing);
   auto *label = new QLabel(caption);
   label->setStyleSheet(
       QStringLiteral("color:#667085;font-size:10px;font-weight:600;"));
-  label->setFixedHeight(13);
+  label->setFixedHeight(SettingLabelHeight);
   label->setBuddy(control);
   control->setAccessibleName(caption);
   layout->addWidget(label);
   layout->addWidget(control);
-  surface->setFixedHeight(49);
+  surface->setFixedHeight(SettingLabelHeight + SettingLabelSpacing +
+                          SettingControlHeight);
   surface->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
   return surface;
 }
@@ -204,12 +208,12 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   setObjectName(QStringLiteral("codexTurnSettings"));
   setStyleSheet(QStringLiteral(
       "QWidget#codexTurnSettings{background:#ffffff;border-top:1px solid "
-      "#d7dee8;} QComboBox,QLineEdit{background:#ffffff;border:1px solid "
-      "#d7dee8;border-radius:6px;padding:3px 7px;}"));
+      "#d7dee8;}"));
+  setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
   auto *root = new QGridLayout(this);
-  root->setContentsMargins(10, 7, 10, 7);
+  root->setContentsMargins(10, 8, 10, 8);
   root->setHorizontalSpacing(8);
-  root->setVerticalSpacing(0);
+  root->setVerticalSpacing(8);
 
   model = compactCombo("codexModel");
   model->setEditable(true);
@@ -218,13 +222,13 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   network = compactCombo("codexNetwork");
   cwd = new QLineEdit;
   cwd->setObjectName(QStringLiteral("codexWorkspace"));
-  cwd->setFixedHeight(32);
+  cwd->setFixedHeight(SettingControlHeight);
   cwd->setPlaceholderText(QStringLiteral("Codex default workspace"));
   approval = compactCombo("codexApproval");
   personality = compactCombo("codexPersonality");
   more = new ChevronMenuButton(QStringLiteral("More"));
   more->setProperty("codexChevron", true);
-  more->setFixedHeight(32);
+  more->setFixedHeight(SettingControlHeight);
 
   root->addWidget(labelled(QStringLiteral("Model"), model), 0, 0);
   root->addWidget(labelled(QStringLiteral("Reasoning"), effort), 0, 1);

@@ -17,6 +17,7 @@
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
+#include <QEvent>
 #include <QFontMetrics>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -43,6 +44,60 @@
 
 namespace codexui::codex {
 namespace {
+
+constexpr int UpcomingControlHeight = 32;
+
+class BottomOverlayDock final : public QWidget {
+public:
+  explicit BottomOverlayDock(QWidget *anchor)
+      : QWidget(anchor), anchor(anchor) {
+    anchor->installEventFilter(this);
+  }
+
+  void synchronizeGeometry() {
+    if (!layout())
+      return;
+    layout()->activate();
+    constexpr int HorizontalInset = 24;
+    constexpr int BottomInset = 12;
+    const int availableHeight = std::max(0, anchor->height() - BottomInset);
+    const int wantedHeight = std::min(sizeHint().height(), availableHeight);
+    setGeometry(HorizontalInset, availableHeight - wantedHeight,
+                std::max(0, anchor->width() - 2 * HorizontalInset),
+                wantedHeight);
+    raise();
+  }
+
+protected:
+  bool event(QEvent *event) override {
+    const bool accepted = QWidget::event(event);
+    if (event->type() == QEvent::LayoutRequest || event->type() == QEvent::Show)
+      scheduleSynchronization();
+    return accepted;
+  }
+
+  bool eventFilter(QObject *watched, QEvent *event) override {
+    if (watched == anchor &&
+        (event->type() == QEvent::Resize || event->type() == QEvent::Show ||
+         event->type() == QEvent::LayoutRequest))
+      scheduleSynchronization();
+    return QWidget::eventFilter(watched, event);
+  }
+
+private:
+  void scheduleSynchronization() {
+    if (synchronizationPending)
+      return;
+    synchronizationPending = true;
+    QTimer::singleShot(0, this, [this] {
+      synchronizationPending = false;
+      synchronizeGeometry();
+    });
+  }
+
+  QWidget *anchor = nullptr;
+  bool synchronizationPending = false;
+};
 
 QString text(const std::string &value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -611,6 +666,15 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   conversationScroll->setWidget(conversationContent);
   centerLayout->addWidget(conversationScroll, 1);
 
+  auto *composerReserve = new QWidget;
+  composerReserve->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+  centerLayout->addWidget(composerReserve);
+
+  auto *composerDock = new BottomOverlayDock(center);
+  auto *composerDockLayout = new QVBoxLayout(composerDock);
+  composerDockLayout->setContentsMargins(0, 0, 0, 0);
+  composerDockLayout->setSpacing(0);
+
   auto *attention = new QFrame;
   attention->setProperty("kind", "amberBadge");
   auto *attentionLayout = new QHBoxLayout(attention);
@@ -626,10 +690,11 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
           [this] { respondToFirstPending(true); });
   connect(denyButton, &QPushButton::clicked, this,
           [this] { respondToFirstPending(false); });
-  centerLayout->addWidget(attention);
+  attention->hide();
+  composerDockLayout->addWidget(attention);
 
   turnSettings = new TurnSettingsWidget;
-  centerLayout->addWidget(turnSettings);
+  composerDockLayout->addWidget(turnSettings);
 
   auto *composer = new QFrame;
   composer->setProperty("kind", "composer");
@@ -650,18 +715,28 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   composerRow->setSpacing(8);
   attachmentButton = new QPushButton(QStringLiteral("Attach"));
   attachmentButton->setProperty("kind", "subtle");
-  attachmentButton->setFixedHeight(34);
+  attachmentButton->setFixedHeight(UpcomingControlHeight);
   promptEditor = new codexui::ExpandingPromptEditor;
   sendButton = new QPushButton(QStringLiteral("Send"));
   sendButton->setProperty("kind", "primary");
+  sendButton->setFixedHeight(UpcomingControlHeight);
   interruptButton = new QPushButton(QStringLiteral("Stop"));
   interruptButton->setProperty("kind", "stop");
+  interruptButton->setFixedHeight(UpcomingControlHeight);
   composerRow->addWidget(attachmentButton);
   composerRow->addWidget(promptEditor, 1);
   composerRow->addWidget(interruptButton);
   composerRow->addWidget(sendButton);
   composerLayout->addLayout(composerRow);
-  centerLayout->addWidget(composer);
+  composerDockLayout->addWidget(composer);
+  connect(promptEditor, &codexui::ExpandingPromptEditor::editorHeightChanged,
+          composerDock,
+          [composerDock] { composerDock->synchronizeGeometry(); });
+  QTimer::singleShot(0, composerDock, [composerDock, composerReserve] {
+    composerDock->layout()->activate();
+    composerReserve->setFixedHeight(composerDock->sizeHint().height());
+    composerDock->synchronizeGeometry();
+  });
   connect(sendButton, &QPushButton::clicked, this, [this] { submitPrompt(); });
   connect(promptEditor, &codexui::ExpandingPromptEditor::submitRequested, this,
           [this] { submitPrompt(); });

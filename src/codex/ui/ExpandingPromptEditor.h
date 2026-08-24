@@ -20,8 +20,8 @@ class ExpandingPromptEditor final : public QPlainTextEdit
 public:
     explicit ExpandingPromptEditor(QWidget* parent = nullptr);
 
-    [[nodiscard]] static constexpr int compactHeight() noexcept { return 30; }
-    [[nodiscard]] static constexpr int maximumContentHeight() noexcept { return 200; }
+    [[nodiscard]] static constexpr int compactHeight() noexcept { return 32; }
+    [[nodiscard]] static constexpr int maximumVisibleLineCount() noexcept { return 20; }
 
 signals:
     void submitRequested();
@@ -38,6 +38,7 @@ private:
     void scheduleRemeasure();
     void remeasure();
 
+    int maximumEditorHeight = compactHeight();
     int currentContentHeight = compactHeight();
     bool remeasureScheduled = false;
 };
