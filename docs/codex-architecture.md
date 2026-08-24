@@ -407,11 +407,13 @@ turn ID.
 Switching threads or inspector tabs while turns, plans, commands, agents, or
 requests are changing must not stop, reset, or reorder those lifecycles.
 
-Selecting a thread with materialized turns renders its retained per-thread
-projection directly. CodexUI does not issue another automatic `thread.read` for
-that selection because a provider reconstruction can omit live-only Plan,
-Agent, or Changes details. An unmaterialized thread is read on first selection;
-Reload is the explicit fresh-read operation.
+Selecting a thread hydrates it once per bridge connection, including when the
+thread-list projection already reports materialized or active turns. The
+`thread.read` result is merge-authoritative: it fills reconstruction data but
+does not erase retained live-only Plan, Agent, or Changes details that the
+provider omits. This explicit hydration state prevents a partial discovery
+projection from being mistaken for an operation-ready thread. Reload is the
+explicit forced fresh-read operation.
 
 ### 7.1 Upcoming-Turn Settings
 
@@ -501,25 +503,40 @@ Prompt admission and app-server acknowledgment are separate states. On Send or
 Steer, CodexUI immediately appends a client-local pending user card to the
 destination thread. The card uses a muted blue user-prompt treatment and a
 Qt-painted highlight sweeping left and right until the correlated app-server
-result arrives. Pending cards are
+result arrives. A fast successful result retains a short accepted sweep, so the
+acknowledgment transition is visible even when it completes before the first
+pending frame could be painted. Pending cards are
 keyed by stable thread ID and client-local submission ID, survive thread
 switching, and become normal authoritative user messages when the corresponding
-app-server item materializes. Failure produces a retained error card.
+app-server item materializes. The pending and authoritative forms share one
+visual anchor during replacement. Failure produces a retained error card.
 
 The composer remains enabled while acknowledgments are outstanding. Multiple
 prompts may be admitted, but CodexUI dispatches them sequentially per thread so
 each operation observes the turn state established by the preceding result.
 Queues for different threads are independent. New-thread prompts remain bound
 to the explicit creation draft until `thread.create` returns its stable ID.
+Dispatch waits for explicit connection-generation thread hydration. A
+provider-marked `notLoaded` thread is resumed first, and a transient
+thread-not-found submission result permits exactly one resume-and-retry before
+becoming a terminal error.
 
 The conversation smoothly follows new content only while its vertical scrollbar
 is at the bottom. Geometry bursts retarget a short monotonic animation to the
 latest maximum. Manual upward scrolling interrupts that animation immediately
-and pauses following until the user returns to the bottom. While paused, the
+and pauses following until the user returns to the bottom. Programmatic Qt
+range clamps from card reflow do not change this user-owned state. While paused, the
 first visible stable card and its viewport offset anchor the reading position
 across appends, card reflow, and reconstruction. Wheel and touchpad events over
 non-scrollable center-pane chrome and splitter handles are forwarded to the
 conversation; nested scrollable controls retain their own wheel handling.
+
+The update pipeline fingerprints only each card's visible projection.
+Protocol-only changes cannot trigger widget replacement. All visible item
+changes coalesced into one refresh are measured and replaced inside one
+paint-suppressed layout transaction, followed by one scroll settlement. This
+is especially important for Command execution cards, whose streaming output
+and bounded nested viewer alter geometry.
 
 The bottom composer overlay has a canonical in-layout reservation. As multiline
 input, attachments, settings, or attention controls grow beyond that height,
@@ -933,8 +950,10 @@ consumer differs. Neither executable has a privileged transport or state path.
 The current build links the codex AISuite frontend library as
 `AISuite::OpenAICodex`, Qt Widgets, Threads, and the selected SNode.C client
 modules. CodexUI CI consumes AISuite from `master`/HEAD and does not pin a
-particular AISuite revision. The canonical AISuite replacement must therefore
-be merged before the dependent CodexUI change.
+particular AISuite revision. The canonical AISuite change must therefore be
+merged before the dependent CodexUI change. The AISuite dependency build is
+limited to two compiler jobs because its generated protocol translation units
+can otherwise exceed the hosted runner's aggregate memory.
 
 ### 17.4 Shell settings and pending-request APIs
 
@@ -1285,6 +1304,11 @@ contract requires a separately reviewed change.
     and user-interruptible; its paused state preserves a stable visual anchor.
 19. Composer growth overlays the unchanged message viewport and adds equal
     trailing content space without automatically moving existing messages.
+20. Thread selection hydrates once per bridge connection; prompt dispatch waits
+    for readiness and permits at most one resume-and-retry after a transient
+    thread-not-found result.
+21. Nonvisual item updates do not reconstruct cards; one coalesced refresh uses
+    one hidden layout transaction and one scroll settlement.
 
 ## 22. Resolved Presentation Decisions
 

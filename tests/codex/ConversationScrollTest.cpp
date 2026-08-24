@@ -8,7 +8,11 @@
 
 #include <QAbstractSlider>
 #include <QApplication>
+#include <QDateTime>
 #include <QEventLoop>
+#include <QFrame>
+#include <QImage>
+#include <QLabel>
 #include <QLayoutItem>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -88,6 +92,21 @@ public:
     result &= expect(!shell.conversationFollowsLatest,
                      "paused late range change remains paused");
 
+    shell.conversationPausedAnchor = shell.captureConversationScrollAnchor();
+    shell.conversationPausedAnchorValid = true;
+    for (int index = 16; index >= 7; --index) {
+      QWidget *removed = card(shell, QStringLiteral("card:%1").arg(index));
+      shell.conversationLayout->removeWidget(removed);
+      delete removed;
+    }
+    shell.conversationLayout->invalidate();
+    shell.conversationContent->updateGeometry();
+    spinEvents(80);
+    result &= expect(!shell.conversationFollowsLatest,
+                     "a layout range clamp cannot re-enable following");
+
+    populate(shell, 17, 84, 73);
+
     scrollBar->setValue(scrollBar->maximum());
     shell.conversationFollowsLatest = true;
     const int formerMaximum = scrollBar->maximum();
@@ -118,6 +137,51 @@ public:
     spinEvents(300);
     result &= expect(scrollBar->value() == interruptedValue,
                      "interrupted following does not resume or jump");
+
+    ItemPresentation emptyOutput;
+    emptyOutput.raw = {{"type", "commandExecution"},
+                       {"command", "true"},
+                       {"status", "inProgress"},
+                       {"cwd", "/workspace"},
+                       {"aggregatedOutput", ""}};
+    ItemPresentation whitespaceOutput = emptyOutput;
+    whitespaceOutput.raw["aggregatedOutput"] = " \n\t";
+    whitespaceOutput.raw["nonVisualProtocolMetadata"] = 7;
+    result &= expect(shell.conversationItemFingerprint(emptyOutput) ==
+                         shell.conversationItemFingerprint(whitespaceOutput),
+                     "nonvisual command updates do not invalidate a card");
+    whitespaceOutput.raw["aggregatedOutput"] = "visible\n";
+    result &= expect(shell.conversationItemFingerprint(emptyOutput) !=
+                         shell.conversationItemFingerprint(whitespaceOutput),
+                     "visible command output invalidates its card");
+
+    shell.localNewThreadIntent = true;
+    ShellWidget::PendingPrompt acknowledged;
+    acknowledged.id = 91;
+    acknowledged.prompt = QStringLiteral("Fast acknowledgment");
+    acknowledged.status = ShellWidget::PendingPromptStatus::Acknowledged;
+    acknowledged.acknowledgedAtMilliseconds =
+        QDateTime::currentMSecsSinceEpoch();
+    shell.newThreadPendingPrompts.push_back(std::move(acknowledged));
+    shell.refreshConversation();
+    spinEvents(60);
+    QFrame *pendingCard =
+        shell.findChild<QFrame *>(QStringLiteral("pendingPromptCard"));
+    bool acceptedLabelFound = false;
+    if (pendingCard) {
+      for (QLabel *label : pendingCard->findChildren<QLabel *>())
+        acceptedLabelFound |=
+            label->text().contains(QStringLiteral("Accepted by app-server"));
+    }
+    const QImage firstFrame =
+        pendingCard ? pendingCard->grab().toImage() : QImage{};
+    spinEvents(120);
+    const QImage secondFrame =
+        pendingCard ? pendingCard->grab().toImage() : QImage{};
+    result &= expect(pendingCard && acceptedLabelFound,
+                     "fast acknowledgment retains a visible transition card");
+    result &= expect(!firstFrame.isNull() && firstFrame != secondFrame,
+                     "acknowledgment transition visibly animates");
 
     return result;
   }

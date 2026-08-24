@@ -14,10 +14,11 @@ presentation, input, selection, and scroll state.
   captures the workspace, optional name, instructions, and ephemeral state.
 - Background thread activity, list refreshes, reconnects, and creation by
   another frontend never change the user's selected thread.
-- Selecting a thread that already has materialized turns reuses its retained
-  per-thread presentation, including Plan, Agents, and Changes. Automatic
-  `thread.read` is reserved for an unmaterialized thread; Reload remains the
-  explicit fresh-read action.
+- Selecting a thread hydrates it once per bridge connection even when the
+  discovery result already contains an active turn. The full read is merged
+  into the retained per-thread presentation, so live Plan, Agents, and Changes
+  state cannot be erased by an incomplete reconstruction. Reload remains the
+  explicit forced fresh-read action.
 
 ## Prompt submission and acknowledgment
 
@@ -28,11 +29,13 @@ right across it until the app-server acknowledges the operation.
 
 Pending prompt state is keyed by thread ID and a client-local submission ID. It
 therefore remains visible when the user switches threads and returns. On
-successful acknowledgment, animation stops and the card becomes a normal user
-message as soon as the authoritative app-server item is materialized. Matching
-uses stable item identity and prompt content so an older identical prompt is not
-mistaken for the submitted item. A failed submission remains visible with an
-explicit error state.
+successful acknowledgment, the card shows a short accepted sweep before it
+becomes a normal user message. If the authoritative app-server item arrives
+during that transition, it inherits the pending card's stable visual anchor and
+replaces it after the transition completes. Matching uses stable item identity
+and prompt content so an older identical prompt is not mistaken for the
+submitted item. A failed submission remains visible with an explicit error
+state.
 
 The composer is cleared immediately after local admission and remains enabled.
 Users may enter additional prompts while earlier prompts await acknowledgment.
@@ -40,6 +43,12 @@ CodexUI queues submissions per thread and dispatches them in order: only one
 unacknowledged prompt operation is in flight for a thread. After each result,
 the next queued prompt is sent using the app-server state produced by the
 preceding acknowledgment. Different threads remain independent.
+
+Submission waits until the destination thread has completed its connection-
+generation hydration. A provider-marked `notLoaded` thread is resumed before
+the turn operation. If a submission still receives a transient thread-not-found
+result, CodexUI performs one bounded resume-and-retry; a repeated failure is
+shown on the pending card rather than retried indefinitely.
 
 For an explicit new-thread draft, prompts entered while `thread.create` is in
 flight remain attached to that draft. When creation succeeds, all pending
@@ -61,11 +70,16 @@ While following is paused, CodexUI anchors the first visible card and its pixel
 offset. Appends below the viewport keep the scrollbar value unchanged; card
 reflow or reconstruction restores that visual anchor after Qt completes layout.
 Incoming data therefore cannot move the user's reading position merely because
-content above or below it changed size.
+content above or below it changed size. Protocol updates that do not change a
+card's visible projection do not rebuild that card. Multiple visible card
+changes from one refresh are applied as one paint-suppressed layout transaction
+with one anchor restoration, including streaming Command execution updates.
 
-Reaching the current bottom re-enables following regardless of how it happens.
-This includes direct user scrolling and the range clamp that can occur when a
-composer contraction removes trailing scroll space.
+User scrolling to the current bottom re-enables following. A generic Qt range
+clamp caused by card reflow does not count as user intent and cannot silently
+re-enable following. Composer contraction is the explicit exception: after its
+trailing space is removed, CodexUI recomputes whether the resulting clamped
+position is the new bottom.
 
 The complete center region is wheel- and touchpad-scroll sensitive. Wheel
 events over non-scrollable center chrome and the horizontal splitter handles
