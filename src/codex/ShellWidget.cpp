@@ -505,7 +505,7 @@ QFrame *itemFrame(
       layout->addWidget(commandView);
     }
     const QString output = text(stringValue(item, "aggregatedOutput"));
-    if (!output.isEmpty()) {
+    if (!output.trimmed().isEmpty()) {
       layout->addWidget(new CommandOutputView(output, outputScrollState));
     }
     QStringList metadata;

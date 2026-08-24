@@ -25,6 +25,7 @@
 | Composer | Prompt shrinks | Trailing space is removed; Qt may clamp the scroll position to the reduced range. |
 | Composer | Shrink clamps to conversation bottom | Bottom-follow is reactivated for subsequent incoming content. |
 | Composer | Maximum prompt height | Editor stops growing and scrolls internally. |
+| Command execution | No visible output | No output box is shown. |
 | Shell output | Fits below 220 px | Box grows to content without a minimum blank area. |
 | Shell output | Exceeds 220 px at bottom | Scrollbar appears and appended output follows the bottom. |
 | Shell output | User scrolled upward | Output following pauses until its scrollbar returns to the bottom. |

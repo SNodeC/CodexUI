@@ -533,11 +533,12 @@ following for later content.
 
 ### 7.6 Nested Output and Info Viewers
 
-Shell-output controls grow from zero content height to a 220-pixel maximum.
-Beyond that maximum they use the shared styled vertical scrollbar. Each output
-control follows appended output only while already at its bottom; manual upward
-scrolling pauses following, and the state is retained when its conversation
-card is rebuilt.
+Shell-output controls exist only for non-whitespace output that can be presented
+to the user. A shown control grows from zero content height to a 220-pixel
+maximum. Beyond that maximum it uses the shared styled vertical scrollbar. Each
+output control follows appended output only while already at its bottom; manual
+upward scrolling pauses following, and the state is retained when its
+conversation card is rebuilt.
 
 The Info tab's State and Protocol viewers use the same scrollbar styling and
 show vertical scrollbars only when required. The Protocol log owns the tab's

@@ -160,7 +160,7 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
       layout->addWidget(commandView);
     }
     const QString output = text(stringValue(item, "aggregatedOutput"));
-    if (!output.isEmpty()) {
+    if (!output.trimmed().isEmpty()) {
       auto *outputView = new QPlainTextEdit(output);
       outputView->setReadOnly(true);
       outputView->setMaximumHeight(220);

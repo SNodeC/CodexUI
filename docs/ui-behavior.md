@@ -85,8 +85,10 @@ which the normal viewport state and bottom-follow policy apply again.
 
 ## Shell-output cards
 
-Shell-output boxes have no non-content minimum height. They grow from zero to a
-maximum of 220 pixels and expose a styled vertical scrollbar only when content
+Shell-output boxes are created only when command output contains visible,
+non-whitespace text; commands without presentable output have no empty output
+surface. A shown box has no non-content minimum height, grows from zero to a
+maximum of 220 pixels, and exposes a styled vertical scrollbar only when content
 exceeds that limit. Output follows its bottom while already at the bottom. A
 manual upward scroll pauses following until the user returns to the bottom.
 Each output card retains its own follow/pause position across conversation-card
