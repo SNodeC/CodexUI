@@ -19,9 +19,6 @@ event loop, selected transport, `AISuite::OpenAICodex` frontend proxy SDK,
 native protocol normalization, and connection/controller telemetry. They
 exchange only bounded `codexui.presentation` JSONL commands and events.
 
-The previous stateful implementation is preserved on the dedicated
-`legacy-codex` Git branch. It is not part of the canonical source tree or build.
-
 ## Applications
 
 - `codex-ui`: the normal visual application.
@@ -42,7 +39,13 @@ cmake -S . -B "${BUILD_DIR}" -G Ninja \
   -DCMAKE_PREFIX_PATH="/path/to/aisuite;/path/to/snodec"
 cmake --build "${BUILD_DIR}" --parallel 8
 ctest --test-dir "${BUILD_DIR}" --output-on-failure --parallel 8
+cmake --install "${BUILD_DIR}"
 ```
+
+Installation includes the `codex-ui` executable, desktop entry, and SVG icon.
+The executable name, application ID, `StartupWMClass`, desktop entry, and icon
+name intentionally match so Linux launchers and taskbars associate the window
+with the installed CodexUI application.
 
 ## Architecture
 
@@ -50,6 +53,11 @@ The complete thread model, presentation protocol, authority rules, normalized
 event vocabulary, public APIs, shell behavior, implementation report, and test
 boundaries are documented in
 [`docs/codex-architecture.md`](docs/codex-architecture.md).
+
+Current message routing, pending-prompt acknowledgment, scrolling, composer
+geometry, shell-output, Inspector, and desktop-integration decisions are
+documented in
+[`docs/ui-behavior.md`](docs/ui-behavior.md).
 
 ## License
 
