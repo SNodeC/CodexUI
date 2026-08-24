@@ -44,6 +44,14 @@ int main() {
                           {"role", "observer"}});
   normalizer.bridgeEvent({{"kind", "bridge.controller"},
                           {"controllerConnectionId", "frontend-test"}});
+  normalizer.connectionSettings(
+      {{"selected", "ipv6"},
+       {"available", nlohmann::json::array({{{"key", "ipv6"},
+                                             {"label", "IPv6"},
+                                             {"kind", "network"},
+                                             {"host", "::1"},
+                                             {"port", 4500},
+                                             {"tls", false}}})}});
 
   normalizer.operationResult(
       "threads.list", "list-1", nlohmann::json::object(),
@@ -110,6 +118,11 @@ int main() {
                                    {"status", "completed"},
                                    {"aggregatedOutput", "PIPELINE_OK\n"},
                                    {"exitCode", 0}}}});
+  normalizer.serverNotification(
+      "turn/diff/updated",
+      {{"threadId", "thread-1"},
+       {"turnId", "turn-2"},
+       {"diff", "diff --git a/README.md b/README.md\n+PIPELINE_OK\n"}});
   normalizer.serverNotification("turn/completed",
                                 {{"threadId", "thread-1"},
                                  {"turn",
@@ -142,10 +155,12 @@ int main() {
   bool passed = true;
   passed &= expect(validFrames,
                    "normalizer emits ordered versioned generation frames");
-  passed &= expect(model.connection().connected &&
-                       model.connection().connectionId == "frontend-test" &&
-                       model.connection().role == "controller",
-                   "connection and controller events form coherent state");
+  passed &= expect(
+      model.connection().connected &&
+          model.connection().connectionId == "frontend-test" &&
+          model.connection().role == "controller" &&
+          stringMember(model.connection().settings, "selected") == "ipv6",
+      "connection, controller, and transport settings form coherent state");
   passed &= expect(thread != nullptr && thread->turnOrder.size() == 2 &&
                        thread->cwd == "/workspace",
                    "list, full read, and live events retain one stable thread");
@@ -159,6 +174,11 @@ int main() {
           item->raw.value("exitCode", -1) == 0 &&
           stringMember(item->raw, "status") == "completed",
       "command lifecycle retains its authoritative result");
+  passed &=
+      expect(turn != nullptr &&
+                 stringMember(turn->domains.at("turn.diff.changed"), "diff") ==
+                     "diff --git a/README.md b/README.md\n+PIPELINE_OK\n",
+             "live turn diff is retained in its authoritative turn scope");
   passed &= expect(!model.activeTurnId("thread-1").has_value(),
                    "completed stream leaves no active turn");
   return passed ? 0 : 1;
