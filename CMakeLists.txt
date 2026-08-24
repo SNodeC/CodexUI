@@ -58,6 +58,8 @@ set(
     src/codex/main.cpp
     src/codex/ui/ExpandingPromptEditor.cpp
     src/codex/ui/ExpandingPromptEditor.h
+    src/codex/ui/BrandMark.cpp
+    src/codex/ui/BrandMark.h
     src/codex/ui/UiStyle.cpp
     src/codex/ui/UiStyle.h
 )
@@ -185,4 +187,12 @@ install(
     TARGETS codex-ui codex-ui-harness
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     BUNDLE DESTINATION .
+)
+install(
+    FILES resources/icons/codex-ui.svg
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps
+)
+install(
+    FILES resources/applications/codex-ui.desktop
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications
 )

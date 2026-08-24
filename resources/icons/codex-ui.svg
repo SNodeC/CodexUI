@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: LGPL-3.0-or-later OR MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36">
+  <rect x="1" y="1" width="34" height="34" rx="9" fill="#2f6feb"/>
+  <path d="M15 10.5 9.5 18 15 25.5"
+        fill="none" stroke="#ffffff" stroke-width="2.7"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M21 10.5 26.5 18 21 25.5"
+        fill="none" stroke="#ffffff" stroke-width="2.7"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M15.5 18h5"
+        fill="none" stroke="#63d5a5" stroke-width="3.2"
+        stroke-linecap="round"/>
+</svg>

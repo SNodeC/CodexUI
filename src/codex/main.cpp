@@ -34,6 +34,9 @@ int main(int argc, char *argv[]) {
   auto *configuration =
       utils::Config::configRoot.newSubCommand<codexui::codex::Configuration>();
   QApplication application(argc, argv);
+  QGuiApplication::setDesktopFileName(QStringLiteral("codex-ui"));
+  QCoreApplication::setApplicationName(QStringLiteral("CodexUI"));
+  QGuiApplication::setApplicationDisplayName(QStringLiteral("CodexUI"));
   core::SNodeC::init(argc, argv);
 
   codexui::codex::FrontendSession session(*configuration);

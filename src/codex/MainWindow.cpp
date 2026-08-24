@@ -7,10 +7,10 @@
 #else
 #include "codex/ShellWidget.h"
 #endif
+#include "codex/ui/BrandMark.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
-#include <QFont>
 
 namespace codexui::codex {
 
@@ -24,9 +24,9 @@ MainWindow::MainWindow(FrontendSession &session, QWidget *parent)
   setMinimumSize(1100, 700);
   resize(1536, 960);
 
-  QFont font(QStringLiteral("Inter"));
-  font.setPixelSize(12);
-  qApp->setFont(font);
+  const QIcon applicationIcon = codexui::BrandMark::icon();
+  qApp->setWindowIcon(applicationIcon);
+  setWindowIcon(applicationIcon);
   qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
 #ifdef CODEXUI_DEVELOPMENT_HARNESS
   setCentralWidget(new WorkbenchWidget(session, this));
