@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.20)
 project(CodexUI LANGUAGES CXX)
 
 include(GNUInstallDirs)
+include(CTest)
 
 set(CMAKE_AUTOMOC ON)
 
@@ -112,6 +113,64 @@ if(TARGET snodec::http-client AND TARGET snodec::websocket-client)
         target_compile_definitions(${target} PRIVATE CODEXUI_CODEX2_FRONTEND_WEBSOCKET=1)
         target_link_libraries(${target} PRIVATE snodec::http-client snodec::websocket-client)
     endforeach()
+endif()
+
+if(BUILD_TESTING)
+    add_executable(
+        codexui-codex2-socketpair-contract-test
+        tests/codex2/SocketPairContractTest.cpp
+        src/codex2/ipc/QtSocketPairEndpoint.cpp
+        src/codex2/ipc/QtSocketPairEndpoint.h
+        src/codex2/ipc/SNodeSocketPairEndpoint.cpp
+        src/codex2/ipc/SNodeSocketPairEndpoint.h
+        src/codex2/ipc/SocketPair.cpp
+        src/codex2/ipc/SocketPair.h
+    )
+    target_compile_features(
+        codexui-codex2-socketpair-contract-test PRIVATE cxx_std_20
+    )
+    target_include_directories(
+        codexui-codex2-socketpair-contract-test PRIVATE src
+    )
+    target_link_libraries(
+        codexui-codex2-socketpair-contract-test
+        PRIVATE Qt6::Core Threads::Threads snodec::net-un-stream-legacy
+    )
+    add_test(
+        NAME codexui-codex2-socketpair-contract
+        COMMAND codexui-codex2-socketpair-contract-test
+    )
+    set_tests_properties(
+        codexui-codex2-socketpair-contract PROPERTIES TIMEOUT 10
+    )
+
+    add_executable(
+        codexui-codex2-presentation-pipeline-test
+        tests/codex2/PresentationPipelineTest.cpp
+        src/codex2/PresentationModel.cpp
+        src/codex2/PresentationModel.h
+        src/codex2/PresentationProtocol.cpp
+        src/codex2/PresentationProtocol.h
+        src/codex2/ProtocolNormalizer.cpp
+        src/codex2/ProtocolNormalizer.h
+    )
+    target_compile_features(
+        codexui-codex2-presentation-pipeline-test PRIVATE cxx_std_20
+    )
+    target_include_directories(
+        codexui-codex2-presentation-pipeline-test PRIVATE src
+    )
+    target_link_libraries(
+        codexui-codex2-presentation-pipeline-test
+        PRIVATE AISuite::OpenAICodex2
+    )
+    add_test(
+        NAME codexui-codex2-presentation-pipeline
+        COMMAND codexui-codex2-presentation-pipeline-test
+    )
+    set_tests_properties(
+        codexui-codex2-presentation-pipeline PROPERTIES TIMEOUT 10
+    )
 endif()
 
 install(

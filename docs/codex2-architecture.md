@@ -715,7 +715,7 @@ The implementation is divided into the following concrete components:
 | `Configuration` | CodexUI `utils::SubCommand`; adds only CodexUI-specific frame-size and WebSocket-path options |
 | `SocketPair` | Movable RAII owner for the unnamed nonblocking `AF_UNIX` socketpair |
 | `QtSocketPairEndpoint` | Qt-thread descriptor adapter using `QSocketNotifier`, bounded reads, and bounded writes |
-| `SNodeSocketPairEndpoint` | SNode.C-thread descriptor adapter using `core::socket::Socket`, bounded reads, and bounded writes |
+| `SNodeSocketPairEndpoint` | SNode.C-thread descriptor adapter using `ReadEventReceiver` and `WriteEventReceiver`, bounded reads, and bounded writes |
 | `FrontendSession` | Qt-side asynchronous command facade, correlation registry, lifecycle owner, and socketpair JSONL endpoint |
 | `ClientRuntime` | SNode.C-thread application graph, selected transport, frontend proxy SDK dispatch, reconnect, and shutdown |
 | `ProtocolNormalizer` | Native app-server/bridge input to `codexui.presentation` result/event conversion |
@@ -838,6 +838,112 @@ into `FrontendSession` calls. Agent messages, plan text, reasoning summaries,
 and agent results pass through `QTextDocument::setMarkdown()` with
 `MarkdownNoHTML`; user prompts, commands, and command output remain literal.
 
+### 17.5 Essential Automated Architecture Tests
+
+The permanent automated-test policy protects architectural boundaries rather
+than individual fixes, widget details, or lines of implementation. A defect
+correction does not automatically justify another test. A test belongs in the
+codex2 suite only when it validates a boundary whose failure would undermine
+the application architecture independently of the particular symptom that
+revealed it.
+
+Two standalone CTest executables form the initial essential suite. They use
+production classes directly and are built from the canonical `build-codex2`
+directory when standard CMake `BUILD_TESTING` is enabled. CTest enables that
+option by default; disabling it remains the conventional packaging choice and
+does not select a different runtime implementation.
+
+#### Socketpair Contract
+
+`codexui-codex2-socketpair-contract-test` exercises the actual two-thread IPC
+mechanism:
+
+```text
+QCoreApplication / Qt event loop
+    -> QtSocketPairEndpoint
+    -> nonblocking AF_UNIX SOCK_STREAM socketpair
+    -> SNodeSocketPairEndpoint
+    -> SNode.C event loop on its worker thread
+```
+
+The test constructs the production `SocketPair`, gives one descriptor to the
+production Qt endpoint and the other to the production SNode.C endpoint, and
+runs both framework event loops. Multiple newline-delimited records travel in
+both directions as separately queued writes. The test establishes that byte
+ordering is preserved across partial/coalesced stream delivery, both endpoint
+queue bounds reject an oversized write without replacing the bound with an
+unbounded buffer, and closing the Qt endpoint produces orderly closure on the
+SNode.C side without a transport error. It also requires the SNode.C event loop
+to terminate cleanly. The test does not introduce another IPC implementation,
+polling loop, mock event loop, or synchronous cross-thread method call.
+
+This test deliberately treats the socketpair as an ordered byte stream. JSONL
+framing and semantic interpretation remain above this boundary; duplicating
+the AISuite `JsonLineFramer` tests here would test another project rather than
+CodexUI's thread boundary.
+
+#### Presentation Pipeline
+
+`codexui-codex2-presentation-pipeline-test` exercises the production semantic
+path without a bridge substitute:
+
+```text
+representative native app-server and bridge records
+    -> ProtocolNormalizer
+    -> codexui.presentation v1 frames
+    -> PresentationModel::applyEvent()
+    -> coherent Qt-owned presentation state
+```
+
+The representative lifecycle includes connection and controller publication,
+thread discovery, an authoritative full thread read, a later live turn,
+command start, command output, command completion, and turn completion. The
+test verifies the contract at architectural granularity: every emitted frame
+has the expected protocol version, monotonic sequence, and connection
+generation; list/read/live updates converge on stable thread, turn, and item
+identities; and the completed model contains one coherent command result with
+no active turn left behind. It does not enumerate every generated app-server
+method, every presentation field, or every historical correction.
+
+The normalizer sink is connected directly to the reducer because the
+socketpair itself is independently covered by the first test. This keeps a
+failure attributable to either inter-thread transport or semantic reduction
+instead of repeating both mechanisms in every case.
+
+#### Explicit Exclusions
+
+The permanent automated suite does not include:
+
+- a fake or scripted codex-bridge;
+- a fake app-server or synthetic network server;
+- GUI mouse/keyboard automation or pixel-level styling assertions;
+- one test per fixed issue, setting, request family, widget, or source branch;
+- the Unix/IPv4/IPv6/TLS/WebSocket/RFCOMM transport matrix already owned by
+  AISuite and SNode.C;
+- authenticated model execution, approval interaction, or assumptions about
+  nondeterministic model output.
+
+A real app-server-to-bridge-to-CodexUI turn remains a manual live acceptance
+procedure. It depends on external authentication, service availability,
+credits, approval policy, and model behavior, so presenting it as a
+deterministic CI test would be misleading. The persistent live topology and
+independent bridge observer provide that evidence without introducing a fake
+bridge into the CodexUI repository.
+
+The two focused tests can be run without building or executing legacy tests:
+
+```sh
+cmake --build build-codex2 --parallel 8 \
+  --target codexui-codex2-socketpair-contract-test \
+           codexui-codex2-presentation-pipeline-test
+ctest --test-dir build-codex2 --output-on-failure \
+  -R '^codexui-codex2-(socketpair-contract|presentation-pipeline)$'
+```
+
+Each test has a ten-second CTest ceiling. Normal successful execution is
+substantially shorter and requires no network listener, credentials, isolated
+Codex home, or user interaction.
+
 ## 18. Live Harness Validation
 
 The harness was exercised against one persistent real topology:
@@ -918,8 +1024,9 @@ cache.
 This live run proves the implemented paths exercised by the scenario; it is
 not a claim that every generated operation or every optional transport has
 received equivalent live coverage. The canonical build and `git diff --check`
-completed successfully. No automated CodexUI codex2 tests are part of this
-milestone.
+completed successfully. Automated coverage is intentionally limited to the
+socketpair contract and presentation pipeline described in Section 17.5; the
+real authenticated topology remains the manual live acceptance boundary.
 
 ## 19. Provider Limitations Observed Live
 
