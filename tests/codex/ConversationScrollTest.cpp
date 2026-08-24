@@ -4,6 +4,7 @@
 
 #include "codex/Configuration.h"
 #include "codex/FrontendSession.h"
+#include "codex/PresentationProtocol.h"
 #include "codex/ShellWidget.h"
 
 #include <QAbstractSlider>
@@ -14,12 +15,14 @@
 #include <QImage>
 #include <QLabel>
 #include <QLayoutItem>
+#include <QPlainTextEdit>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QThread>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 #include <iostream>
 
 namespace codexui::codex {
@@ -43,10 +46,12 @@ public:
     const int pausedOffset = anchorOffset(shell, pausedAnchor.key);
     const int pausedValue = scrollBar->value();
 
-    insertCard(shell, 14, 84);
-    spinEvents(50);
+    const bool appendKeptViewportHeight = observeViewportHeight(
+        shell, [&shell] { insertCard(shell, 14, 84); }, 50);
     bool result = expect(scrollBar->value() == pausedValue,
                          "paused bottom append preserves scrollbar value");
+    result &= expect(appendKeptViewportHeight,
+                     "card insertion never changes viewport height");
     result &= expect(anchorOffset(shell, pausedAnchor.key) == pausedOffset,
                      "paused bottom append preserves the visible card");
     result &= expect(!shell.conversationFollowsLatest,
@@ -155,7 +160,104 @@ public:
                          shell.conversationItemFingerprint(whitespaceOutput),
                      "visible command output invalidates its card");
 
+    const nlohmann::json commandItems =
+        nlohmann::json::array({{{"id", "empty"},
+                                {"type", "commandExecution"},
+                                {"command", "true"},
+                                {"status", "completed"},
+                                {"aggregatedOutput", ""}},
+                               {{"id", "whitespace"},
+                                {"type", "commandExecution"},
+                                {"command", "printf whitespace"},
+                                {"status", "completed"},
+                                {"aggregatedOutput", " \n\t"}},
+                               {{"id", "control"},
+                                {"type", "commandExecution"},
+                                {"command", "printf control"},
+                                {"status", "completed"},
+                                {"aggregatedOutput", "\x1b[0m\x1b]0;\x07"}},
+                               {{"id", "visible"},
+                                {"type", "commandExecution"},
+                                {"command", "printf visible"},
+                                {"status", "completed"},
+                                {"aggregatedOutput", "visible\n"}}});
+    const nlohmann::json hydratedThread = {
+        {"id", "output-visibility"},
+        {"status", {{"type", "idle"}}},
+        {"turns", nlohmann::json::array({{{"id", "output-turn"},
+                                          {"status", "completed"},
+                                          {"items", commandItems}}})}};
+    shell.model.applyEvent(presentation::result(
+        1, 1, "thread.read", "read-output-visibility", true,
+        {{"thread", hydratedThread}}, presentation::Authority::Merge,
+        {{"threadId", "output-visibility"}}));
+    shell.selectedThreadId = "output-visibility";
+    shell.refreshConversation();
+    spinEvents(80);
+    const auto outputSurfaceCount = [&shell](const std::string &itemId) {
+      const std::string key = std::string("output-turn\x1f") + itemId;
+      const auto card = shell.conversationCards.find(key);
+      if (card == shell.conversationCards.end())
+        return 0;
+      const QList<QPlainTextEdit *> views =
+          card->second->findChildren<QPlainTextEdit *>();
+      return static_cast<int>(
+          std::count_if(views.begin(), views.end(), [](QPlainTextEdit *view) {
+            return view->property("kind").toString() == QStringLiteral("code");
+          }));
+    };
+    result &= expect(outputSurfaceCount("empty") == 0 &&
+                         outputSurfaceCount("whitespace") == 0 &&
+                         outputSurfaceCount("control") == 0,
+                     "non-presentable command output creates no black box");
+    result &= expect(outputSurfaceCount("visible") == 1,
+                     "presentable command output creates one black box");
+
+    const std::string emptyCommandKey =
+        std::string("output-turn") + '\x1f' + "empty";
+    const std::string insertedCommandKey =
+        std::string("output-turn") + '\x1f' + "inserted";
+    QWidget *retainedEmptyCard = shell.conversationCards.at(emptyCommandKey);
+    const nlohmann::json insertedCommand = {{"id", "inserted"},
+                                            {"type", "commandExecution"},
+                                            {"command", "printf inserted"},
+                                            {"status", "inProgress"},
+                                            {"aggregatedOutput", "inserted\n"}};
+    shell.model.applyEvent(presentation::event(
+        2, 1, "conversation.item.upsert", {{"item", insertedCommand}},
+        presentation::Authority::Merge,
+        {{"threadId", "output-visibility"},
+         {"turnId", "output-turn"},
+         {"itemId", "inserted"}}));
+    shell.dirtyConversationItems[insertedCommandKey] = {"output-turn",
+                                                        "inserted"};
+    const bool incrementalInsertKeptViewportHeight = observeViewportHeight(
+        shell, [&shell] { shell.refreshConversationItems(); }, 80);
+    result &= expect(
+        shell.conversationCards.contains(insertedCommandKey) &&
+            shell.conversationCards.at(emptyCommandKey) == retainedEmptyCard,
+        "new command card inserts without reconstructing retained cards");
+    result &= expect(incrementalInsertKeptViewportHeight,
+                     "new command insertion keeps viewport geometry fixed");
+
+    nlohmann::json updatedCommand = insertedCommand;
+    updatedCommand["aggregatedOutput"] =
+        "inserted\nwith a second visible line\n";
+    shell.model.applyEvent(presentation::event(
+        3, 1, "conversation.item.upsert", {{"item", updatedCommand}},
+        presentation::Authority::Merge,
+        {{"threadId", "output-visibility"},
+         {"turnId", "output-turn"},
+         {"itemId", "inserted"}}));
+    shell.dirtyConversationItems[insertedCommandKey] = {"output-turn",
+                                                        "inserted"};
+    const bool commandUpdateKeptViewportHeight = observeViewportHeight(
+        shell, [&shell] { shell.refreshConversationItems(); }, 80);
+    result &= expect(commandUpdateKeptViewportHeight,
+                     "command update keeps viewport geometry fixed");
+
     shell.localNewThreadIntent = true;
+    shell.selectedThreadId.clear();
     ShellWidget::PendingPrompt acknowledged;
     acknowledged.id = 91;
     acknowledged.prompt = QStringLiteral("Fast acknowledgment");
@@ -193,6 +295,23 @@ private:
       QThread::msleep(2);
     }
     QApplication::processEvents(QEventLoop::AllEvents);
+  }
+
+  static bool observeViewportHeight(ShellWidget &shell,
+                                    const std::function<void()> &operation,
+                                    int milliseconds) {
+    const int expectedHeight = shell.conversationScroll->viewport()->height();
+    bool stable = true;
+    operation();
+    for (int elapsed = 0; elapsed < milliseconds; elapsed += 2) {
+      QApplication::processEvents(QEventLoop::AllEvents, 2);
+      stable &=
+          shell.conversationScroll->viewport()->height() == expectedHeight;
+      QThread::msleep(2);
+    }
+    QApplication::processEvents(QEventLoop::AllEvents);
+    return stable &&
+           shell.conversationScroll->viewport()->height() == expectedHeight;
   }
 
   static bool expect(bool condition, const char *message) {

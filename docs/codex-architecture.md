@@ -536,7 +536,9 @@ Protocol-only changes cannot trigger widget replacement. All visible item
 changes coalesced into one refresh are measured and replaced inside one
 paint-suppressed layout transaction, followed by one scroll settlement. This
 is especially important for Command execution cards, whose streaming output
-and bounded nested viewer alter geometry.
+and bounded nested viewer alter geometry. New authoritative items are inserted
+at their server-ordered layout position without rebuilding retained cards. A
+full visible history window evicts its oldest card within the same transaction.
 
 The bottom composer overlay has a canonical in-layout reservation. As multiline
 input, attachments, settings, or attention controls grow beyond that height,
@@ -554,12 +556,15 @@ following for later content.
 
 ### 7.6 Nested Output and Info Viewers
 
-Shell-output controls exist only for non-whitespace output that can be presented
-to the user. A shown control grows from zero content height to a 220-pixel
-maximum. Beyond that maximum it uses the shared styled vertical scrollbar. Each
-output control follows appended output only while already at its bottom; manual
-upward scrolling pauses following, and the state is retained when its
-conversation card is rebuilt.
+Shell-output controls exist only for printable, non-whitespace output after
+terminal control sequences are ignored. Empty, whitespace-only, and
+ANSI/control-only results create no black output surface. A shown control grows
+from zero content height to a 220-pixel maximum. Its width-dependent content
+height is measured synchronously inside the conversation update transaction.
+Beyond the maximum it uses the shared styled vertical scrollbar. Each output
+control follows appended output only while already at its bottom; manual upward
+scrolling pauses following, and the state is retained when its conversation
+card is rebuilt.
 
 The Info tab's State and Protocol viewers use the same scrollbar styling and
 show vertical scrollbars only when required. The Protocol log owns the tab's

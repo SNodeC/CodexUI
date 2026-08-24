@@ -74,6 +74,9 @@ content above or below it changed size. Protocol updates that do not change a
 card's visible projection do not rebuild that card. Multiple visible card
 changes from one refresh are applied as one paint-suppressed layout transaction
 with one anchor restoration, including streaming Command execution updates.
+New authoritative cards are inserted at their server-ordered position without
+reconstructing retained cards. When the visible history window is full, its
+oldest card is evicted within that same transaction.
 
 User scrolling to the current bottom re-enables following. A generic Qt range
 clamp caused by card reflow does not count as user intent and cannot silently
@@ -107,13 +110,15 @@ which the normal viewport state and bottom-follow policy apply again.
 
 ## Shell-output cards
 
-Shell-output boxes are created only when command output contains visible,
-non-whitespace text; commands without presentable output have no empty output
-surface. A shown box has no non-content minimum height, grows from zero to a
-maximum of 220 pixels, and exposes a styled vertical scrollbar only when content
-exceeds that limit. Output follows its bottom while already at the bottom. A
-manual upward scroll pauses following until the user returns to the bottom.
-Each output card retains its own follow/pause position across conversation-card
+Shell-output boxes are created only when command output contains printable,
+non-whitespace text after terminal control sequences are ignored; empty,
+whitespace-only, and ANSI/control-only output has no output surface. A shown box
+has no non-content minimum height, grows from zero to a maximum of 220 pixels,
+and exposes a styled vertical scrollbar only when content exceeds that limit.
+Its content height is measured synchronously during the outer layout
+transaction. Output follows its bottom while already at the bottom. A manual
+upward scroll pauses following until the user returns to the bottom. Each output
+card retains its own follow/pause position across conversation-card
 reconstruction.
 
 ## Inspector and Info presentation

@@ -70,6 +70,44 @@ using CommandOutputScrollState = std::pair<bool, int>;
 
 QLabel *makeLabel(QString value, const char *kind = "body");
 
+bool commandOutputIsVisible(QStringView output) {
+  for (qsizetype index = 0; index < output.size(); ++index) {
+    const ushort code = output[index].unicode();
+    if (code == 0x1b && index + 1 < output.size()) {
+      const ushort introducer = output[index + 1].unicode();
+      if (introducer == '[') {
+        index += 2;
+        while (index < output.size()) {
+          const ushort candidate = output[index].unicode();
+          if (candidate >= 0x40 && candidate <= 0x7e)
+            break;
+          ++index;
+        }
+        continue;
+      }
+      if (introducer == ']') {
+        index += 2;
+        while (index < output.size()) {
+          if (output[index].unicode() == 0x07)
+            break;
+          if (output[index].unicode() == 0x1b && index + 1 < output.size() &&
+              output[index + 1].unicode() == '\\') {
+            ++index;
+            break;
+          }
+          ++index;
+        }
+        continue;
+      }
+      ++index;
+      continue;
+    }
+    if (output[index].isPrint() && !output[index].isSpace())
+      return true;
+  }
+  return false;
+}
+
 class PendingPromptCard final : public QFrame {
 public:
   PendingPromptCard(const QString &prompt, int attachmentCount, bool awaiting,
@@ -247,11 +285,14 @@ public:
 protected:
   void resizeEvent(QResizeEvent *event) override {
     QPlainTextEdit::resizeEvent(event);
-    QTimer::singleShot(0, this, [this] { remeasure(); });
+    remeasure();
   }
 
 private:
   void remeasure() {
+    if (remeasuring)
+      return;
+    remeasuring = true;
     const int contentHeight = static_cast<int>(
         std::ceil(document()->documentLayout()->documentSize().height()));
     const int wantedHeight = std::clamp(contentHeight + 2 * frameWidth() + 14,
@@ -261,6 +302,7 @@ private:
       updateGeometry();
     }
     scheduleScrollSettlement();
+    remeasuring = false;
   }
 
   void scheduleScrollSettlement() {
@@ -284,6 +326,7 @@ private:
 
   bool followsLatest = true;
   bool adjustingScroll = false;
+  bool remeasuring = false;
   bool scrollSettlementPending = false;
   int preservedScrollValue = 0;
   int preferredHeight = 0;
@@ -549,7 +592,7 @@ QFrame *itemFrame(
       layout->addWidget(commandView);
     }
     const QString output = text(stringValue(item, "aggregatedOutput"));
-    if (!output.trimmed().isEmpty()) {
+    if (commandOutputIsVisible(output)) {
       layout->addWidget(new CommandOutputView(output, outputScrollState));
     }
     QStringList metadata;
@@ -1587,7 +1630,7 @@ std::string ShellWidget::conversationItemFingerprint(
     projected["command"] = stringValue(item, "command");
     const QString output = text(stringValue(item, "aggregatedOutput"));
     projected["output"] =
-        output.trimmed().isEmpty() ? std::string{} : output.toStdString();
+        commandOutputIsVisible(output) ? output.toStdString() : std::string{};
     projected["status"] = stringValue(item, "status");
     projected["cwd"] = stringValue(item, "cwd");
     if (item.contains("exitCode") && item["exitCode"].is_number_integer())
@@ -2154,10 +2197,13 @@ void ShellWidget::refreshConversation() {
         new QPushButton(QStringLiteral("Load %1 more activities")
                             .arg(static_cast<qulonglong>(page)));
     loadEarlier->setProperty("kind", "history");
+    loadEarlier->setProperty("historyPage", static_cast<qulonglong>(page));
     loadEarlier->setFixedHeight(UpcomingControlHeight);
     loadEarlier->setToolTip(QStringLiteral("%1 earlier activities are retained")
                                 .arg(static_cast<qulonglong>(first)));
-    connect(loadEarlier, &QPushButton::clicked, this, [this, page] {
+    connect(loadEarlier, &QPushButton::clicked, this, [this, loadEarlier] {
+      const std::size_t page = static_cast<std::size_t>(
+          loadEarlier->property("historyPage").toULongLong());
       conversationItemLimit += page;
       conversationRebuildPending = true;
       scheduleRefresh(RefreshConversation);
@@ -2220,10 +2266,9 @@ void ShellWidget::refreshConversationItems() {
   for (const auto &[key, identity] : dirtyConversationItems) {
     if (requiresRebuild)
       break;
-    const auto card = conversationCards.find(key);
     const auto turn = thread->turns.find(identity.first);
     requiresRebuild =
-        card == conversationCards.end() || turn == thread->turns.end() ||
+        turn == thread->turns.end() ||
         turn->second.items.find(identity.second) == turn->second.items.end();
   }
   if (requiresRebuild) {
@@ -2265,8 +2310,6 @@ bool ShellWidget::refreshConversationItem(const std::string &key,
                                           bool &changed) {
   changed = false;
   const auto existing = conversationCards.find(key);
-  if (existing == conversationCards.end())
-    return false;
   const ThreadPresentation *thread = model.thread(selectedThreadId);
   if (!thread)
     return false;
@@ -2277,6 +2320,166 @@ bool ShellWidget::refreshConversationItem(const std::string &key,
   if (item == turn->second.items.end())
     return false;
   const std::string fingerprint = conversationItemFingerprint(item->second);
+  if (existing == conversationCards.end()) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (const auto prompts = pendingPrompts.find(selectedThreadId);
+        prompts != pendingPrompts.end()) {
+      const bool representedByTransition = std::any_of(
+          prompts->second.begin(), prompts->second.end(),
+          [&key, now](const PendingPrompt &submission) {
+            return submission.materializedIdentity == key &&
+                   submission.status == PendingPromptStatus::Acknowledged &&
+                   now - submission.acknowledgedAtMilliseconds <
+                       AcknowledgementTransitionMilliseconds;
+          });
+      if (representedByTransition)
+        return true;
+    }
+
+    bool evictedCard = false;
+    if (conversationFollowsLatest &&
+        conversationCards.size() >= conversationItemLimit) {
+      for (const std::string &orderedTurnId : thread->turnOrder) {
+        const auto orderedTurn = thread->turns.find(orderedTurnId);
+        if (orderedTurn == thread->turns.end())
+          continue;
+        for (const std::string &orderedItemId : orderedTurn->second.itemOrder) {
+          const std::string oldestKey = orderedTurnId + '\x1f' + orderedItemId;
+          const auto oldest = conversationCards.find(oldestKey);
+          if (oldest == conversationCards.end())
+            continue;
+          if (const auto state = commandOutputScrollState(oldest->second))
+            commandOutputScrollStates[oldestKey] = *state;
+          conversationLayout->removeWidget(oldest->second);
+          oldest->second->hide();
+          oldest->second->deleteLater();
+          conversationCards.erase(oldest);
+          conversationCardFingerprints.erase(oldestKey);
+          evictedCard = true;
+          break;
+        }
+        if (evictedCard)
+          break;
+      }
+    }
+
+    QWidget *replacement = itemFrame(item->second, std::nullopt);
+    const auto mappedAnchor = promptAnchorKeys.find(key);
+    const QString anchorKey = mappedAnchor == promptAnchorKeys.end()
+                                  ? text(key)
+                                  : mappedAnchor->second;
+    replacement->setProperty(ConversationAnchorProperty, anchorKey);
+
+    bool replacedPendingCard = false;
+    for (int index = 0; index < conversationLayout->count(); ++index) {
+      QWidget *candidate = conversationLayout->itemAt(index)->widget();
+      if (!candidate ||
+          candidate->property(ConversationAnchorProperty).toString() !=
+              anchorKey)
+        continue;
+      QLayoutItem *replaced =
+          conversationLayout->replaceWidget(candidate, replacement);
+      if (!replaced) {
+        replacement->deleteLater();
+        return false;
+      }
+      delete replaced;
+      candidate->hide();
+      candidate->deleteLater();
+      replacedPendingCard = true;
+      break;
+    }
+    if (!replacedPendingCard) {
+      int insertionIndex = -1;
+      bool afterTarget = false;
+      for (const std::string &orderedTurnId : thread->turnOrder) {
+        const auto orderedTurn = thread->turns.find(orderedTurnId);
+        if (orderedTurn == thread->turns.end())
+          continue;
+        for (const std::string &orderedItemId : orderedTurn->second.itemOrder) {
+          const std::string orderedKey = orderedTurnId + '\x1f' + orderedItemId;
+          if (orderedKey == key) {
+            afterTarget = true;
+            continue;
+          }
+          if (!afterTarget)
+            continue;
+          const auto following = conversationCards.find(orderedKey);
+          if (following == conversationCards.end())
+            continue;
+          insertionIndex = conversationLayout->indexOf(following->second);
+          break;
+        }
+        if (insertionIndex >= 0)
+          break;
+      }
+      if (insertionIndex < 0) {
+        insertionIndex = conversationLayout->count();
+        for (int index = 0; index < conversationLayout->count(); ++index) {
+          QWidget *candidate = conversationLayout->itemAt(index)->widget();
+          if (!candidate)
+            continue;
+          const QString candidateAnchor =
+              candidate->property(ConversationAnchorProperty).toString();
+          if (candidate == conversationTrailingSpace ||
+              candidateAnchor.startsWith(QStringLiteral("prompt:")) ||
+              candidateAnchor.startsWith(QStringLiteral("pending:"))) {
+            insertionIndex = index;
+            break;
+          }
+        }
+      }
+      conversationLayout->insertWidget(insertionIndex, replacement);
+    }
+    conversationCards[key] = replacement;
+    conversationCardFingerprints[key] = fingerprint;
+
+    if (evictedCard) {
+      QPushButton *historyButton = nullptr;
+      for (int index = 0; index < conversationLayout->count(); ++index) {
+        auto *candidate = qobject_cast<QPushButton *>(
+            conversationLayout->itemAt(index)->widget());
+        if (candidate && candidate->property("kind").toString() ==
+                             QStringLiteral("history")) {
+          historyButton = candidate;
+          break;
+        }
+      }
+      std::size_t totalItems = 0;
+      for (const auto &[orderedTurnId, orderedTurn] : thread->turns) {
+        static_cast<void>(orderedTurnId);
+        totalItems += orderedTurn.itemOrder.size();
+      }
+      const std::size_t hiddenItems =
+          totalItems > conversationCards.size()
+              ? totalItems - conversationCards.size()
+              : 0;
+      const std::size_t page =
+          std::min<std::size_t>(conversationItemLimit, hiddenItems);
+      if (!historyButton) {
+        historyButton = new QPushButton;
+        historyButton->setProperty("kind", "history");
+        historyButton->setFixedHeight(UpcomingControlHeight);
+        connect(historyButton, &QPushButton::clicked, this,
+                [this, historyButton] {
+                  const std::size_t page = static_cast<std::size_t>(
+                      historyButton->property("historyPage").toULongLong());
+                  conversationItemLimit += page;
+                  conversationRebuildPending = true;
+                  scheduleRefresh(RefreshConversation);
+                });
+        conversationLayout->insertWidget(0, historyButton, 0, Qt::AlignHCenter);
+      }
+      historyButton->setText(QStringLiteral("Load %1 more activities")
+                                 .arg(static_cast<qulonglong>(page)));
+      historyButton->setProperty("historyPage", static_cast<qulonglong>(page));
+      historyButton->setToolTip(
+          QStringLiteral("%1 earlier activities are retained")
+              .arg(static_cast<qulonglong>(hiddenItems)));
+    }
+    changed = true;
+    return true;
+  }
   const auto previousFingerprint = conversationCardFingerprints.find(key);
   if (previousFingerprint != conversationCardFingerprints.end() &&
       previousFingerprint->second == fingerprint)
