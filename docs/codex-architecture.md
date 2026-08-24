@@ -215,7 +215,10 @@ The v1 command catalog used by the application is:
 | Action | Result | Meaning |
 | --- | --- | --- |
 | `runtime.shutdown` | no | Orderly SNode.C runtime shutdown |
+| `connection.connect` | no | Connect the selected configured frontend transport |
+| `connection.disconnect` | no | Explicitly disconnect the selected frontend transport |
 | `connection.reconnect` | no | Explicit bridge transport reconnect |
+| `connection.configure` | yes | Apply a transient endpoint selection and connect it |
 | `controller.claim` | no | Request controller ownership |
 | `controller.release` | no | Release controller ownership |
 | `threads.list` | yes | Discover threads without deletion authority |
@@ -433,6 +436,58 @@ explicit local fallback. Settings are disabled while steering because
 persisted by CodexUI or treated as canonical before the app-server publishes
 it.
 
+### 7.2 Thread Creation and Per-Thread Actions
+
+New thread creation starts with a canonical custom dialog. It captures the
+workspace, optional thread name, optional base and developer instructions, and
+the native ephemeral flag. The dialog creates only a transient draft. CodexUI
+does not create an empty provider thread until the user submits the first
+prompt, so canceling or switching away cannot leave a phantom app-server
+thread. Model, reasoning, access, permission, style, service-tier, reviewer,
+and collaboration choices remain in the shared upcoming-turn controls rather
+than being duplicated in the dialog.
+
+Workspace selection uses the shared custom file browser in directory-only
+mode. It validates that the selected directory exists and returns an absolute
+local path. The accepted workspace is encoded as the native `thread/start`
+`cwd`; CodexUI does not persist it as an application preference.
+
+The visual shell's thread sidebar has no global More menu. A right-click
+context menu is created for the stable thread ID under the pointer and exposes
+Reload, Rename, Fork, Archive/Unarchive, and Delete. Read-only Reload remains
+available to an observer; mutations require the connected controller role.
+Opening or invoking the menu does not select the row or disturb the thread
+currently being reviewed. The permanent development harness may retain compact
+diagnostic controls that are not part of the product UI/UX.
+
+### 7.3 Message Attachments
+
+The composer opens the same custom file browser in multi-file mode. It supports
+up to sixteen unique files, reports detected MIME type and size, preserves the
+draft if submission fails, and clears it only after the corresponding
+`turn/start` or `turn/steer` succeeds. Images become native `localImage` input,
+audio becomes `localAudio`, and other files become native `mention` input.
+
+These are app-server local-path references, not bytes uploaded through
+`codex-bridge`. The provider must be able to access the selected path. This is
+correct for a local CodexUI/app-server workspace and remains explicit for a
+remote bridge topology; adding remote file transfer would require a separate
+bounded protocol and security design.
+
+### 7.4 Changes and Diff Presentation
+
+The Changes inspector uses a dedicated diff viewer. It prefers the latest
+authoritative `turn.diff.changed` domain for the selected thread. When that
+live domain is absent after reconstruction, it may display diffs explicitly
+retained in app-server `fileChange` items and labels that source as a fallback.
+It never invents a patch by comparing local files.
+
+Unified diffs are separated by file, counted for additions and deletions, and
+rendered read-only with fixed-width text and addition, deletion, header, and
+hunk highlighting. A user can select a file, copy its patch, or open an
+expanded viewer. The file list and patch view retain canonical CodexUI sizing,
+colors, controls, and scrollbars.
+
 ## 8. Plans and Agents
 
 ### 8.1 Plans
@@ -539,6 +594,11 @@ disabled or produce a precise role error while CodexUI is an observer. A local
 policy may request initial control explicitly, but role assignment remains a
 bridge decision reported through telemetry.
 
+Connection controls sit immediately to the left of Claim/Release control
+because transport lifecycle and controller ownership are distinct operations.
+The menu exposes Configure, Connect, Disconnect, and Reconnect. It never claims
+control as a side effect.
+
 ## 11. Recovery, History, and No-Cache Policy
 
 CodexUI does not request or reconstruct an AISuite-owned snapshot because
@@ -590,6 +650,21 @@ CodexUI-specific configuration class is a `utils::SubCommand`. Existing SNode.C
 instance options remain authoritative for addresses, Unix paths, IPv4/IPv6,
 TLS certificates, WebSocket setup, reconnect behavior, timeouts, and queue
 limits; CodexUI must not duplicate those semantics.
+
+The connection dialog reads the effective SNode.C client configurations to
+enumerate compiled transports and provide current endpoint defaults. A user may
+override the selected Unix path, IP host/port, WebSocket path, or RFCOMM
+address/channel for the running CodexUI session. TLS certificate and
+verification configuration remains in the corresponding SNode.C config
+object. Runtime overrides are intentionally transient and are not written to a
+CodexUI data file.
+
+Changing transport uses one asynchronous lifecycle: disconnect the attached
+frontend SDK, terminate the selected SNode.C flow, wait for both to detach,
+apply the new selection, then connect once. Repeated logical connect requests
+cannot create parallel flows or reuse an attached SDK. Local disconnect,
+reconnect, and transport-switch reasons remain distinguishable from remote
+closure in normalized diagnostics.
 
 Quiet Codex sessions are normal, so transport inactivity read/write timeouts
 default to zero (unlimited). Frame bounds, write-queue bounds, connect errors,
@@ -725,6 +800,10 @@ The implementation is divided into the following concrete components:
 | `WorkbenchWidget` | Permanent development harness and user-intent adapter |
 | `ShellWidget` | Normal externally designed CodexUI shell over the same model and command API |
 | `TurnSettingsWidget` | Codex-native transient settings draft and native thread/turn option encoder |
+| `NewThreadDialog` | Transient native thread-start draft with workspace selection and instructions |
+| `FileSelectionDialog` | Canonical directory or bounded multi-file browser shared by workspace and attachments |
+| `ConnectionDialog` | Session-only selector over effective compiled SNode.C client configurations |
+| `DiffViewer` | Authoritative live or retained-provider unified-diff presentation |
 | `PendingRequestDialog` | Typed, generation-preserving UI for app-server server-request families |
 | `MainWindow` | Top-level Qt window ownership only |
 
@@ -733,7 +812,8 @@ The implementation is divided into the following concrete components:
 `FrontendSession` is the normal Qt-side entry point. It provides asynchronous
 methods for thread discovery/read/create/resume/fork/rename/archive/delete,
 model and environment discovery, turn start/steer/interrupt, controller
-claim/release, reconnect, raw diagnostic send, and typed server-request
+claim/release, transport connect/disconnect/reconnect/configure, raw diagnostic
+send, and typed server-request
 resolution. Every correlated method returns a presentation correlation ID and
 optionally invokes a Qt-thread response callback. It never blocks the GUI
 thread or exposes a transport socket.
@@ -749,7 +829,7 @@ request(std::string operation,
 supports the complete generated AISuite operation catalog without adding one
 Qt facade method per rarely used operation. Frequently used UI actions have
 narrow named methods such as `listThreads()`, `readThread()`, `startTurn()`,
-`steerTurn()`, and `respondToServerRequest()`.
+`steerTurn()`, `configureConnection()`, and `respondToServerRequest()`.
 
 Lifecycle is explicit: `start()` creates the endpoint/runtime graph,
 `shutdown()` requests orderly asynchronous termination, and `wait()` joins the
@@ -840,6 +920,11 @@ composer, settings, controller, thread-management, and request-review actions
 into `FrontendSession` calls. Agent messages, plan text, reasoning summaries,
 and agent results pass through `QTextDocument::setMarkdown()` with
 `MarkdownNoHTML`; user prompts, commands, and command output remain literal.
+Its custom dialogs return transient value objects and never mutate the
+presentation model directly. The composer owns attachment drafts; the
+connection dialog edits only the SNode.C runtime selection; and `DiffViewer`
+is a read-only consumer of normalized model domains and retained provider
+items.
 
 ### 17.5 Essential Automated Architecture Tests
 
@@ -899,14 +984,16 @@ representative native app-server and bridge records
 ```
 
 The representative lifecycle includes connection and controller publication,
-thread discovery, an authoritative full thread read, a later live turn,
-command start, command output, command completion, and turn completion. The
+effective transport-settings publication, thread discovery, an authoritative
+full thread read, a later live turn, command start, command output, command
+completion, authoritative turn-diff publication, and turn completion. The
 test verifies the contract at architectural granularity: every emitted frame
 has the expected protocol version, monotonic sequence, and connection
-generation; list/read/live updates converge on stable thread, turn, and item
-identities; and the completed model contains one coherent command result with
-no active turn left behind. It does not enumerate every generated app-server
-method, every presentation field, or every historical correction.
+generation; connection settings reduce coherently; list/read/live updates
+converge on stable thread, turn, and item identities; and the completed model
+contains one coherent command result and scoped diff with no active turn left
+behind. It does not enumerate every generated app-server method, every
+presentation field, or every historical correction.
 
 The normalizer sink is connected directly to the reducer because the
 socketpair itself is independently covered by the first test. This keeps a
@@ -1088,8 +1175,10 @@ the final visual design.
 The implemented shell contains the 56-pixel top bar, hideable work sidebar,
 thread list, conversation timeline and composer, hideable inspector, Plan,
 Agents, Changes, Requests, and Info surfaces, explicit controller control,
-connection/request status, complete upcoming-turn settings, and the 40-pixel
-status bar. Agent messages, plans, reasoning summaries, and agent results are
+connection lifecycle/configuration, canonical new-thread/workspace/attachment
+dialogs, per-thread context actions, complete upcoming-turn settings, a
+first-class diff viewer, request status, and the 40-pixel status bar. Agent
+messages, plans, reasoning summaries, and agent results are
 rendered with Qt Markdown parsing while embedded HTML is disabled. User text,
 commands, and command output remain literal. State and Protocol diagnostics
 remain nested under Info rather than dominating normal use.
@@ -1147,3 +1236,7 @@ No architectural decision remains open in the canonical CodexUI implementation.
 Interactive visual validation covered settings, Markdown, plans, pending
 requests, and live agent lifecycle. Provider-omitted history remains visible as
 an explicit reconstruction boundary rather than being hidden by client state.
+The first functionally complete CodexUI milestone is reached when the final
+focused build/tests and live visual acceptance of the thread, attachment,
+connection, and diff surfaces pass; no semantic cache or legacy frontend State
+is required for that milestone.
