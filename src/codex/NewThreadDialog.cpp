@@ -122,7 +122,7 @@ NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
   auto *footer = new QHBoxLayout;
   footer->addStretch();
   auto *cancel = new QPushButton(QStringLiteral("Cancel"));
-  cancel->setProperty("kind", "subtle");
+  cancel->setProperty("kind", "cancel");
   cancel->setFixedHeight(34);
   auto *create = new QPushButton(QStringLiteral("Continue"));
   create->setProperty("kind", "primary");

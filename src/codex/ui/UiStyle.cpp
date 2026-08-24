@@ -45,6 +45,8 @@ QString applicationStyleSheet() {
         QPushButton[kind="primary"]:hover { background: #285fca; border-color: #285fca; }
         QPushButton[kind="steer"] { background: #ffffff; border-color: #2f6feb; color: #2f6feb; }
         QPushButton[kind="steer"]:hover { background: #e5eeff; border-color: #285fca; color: #285fca; }
+        QPushButton[kind="cancel"] { background: #eef1f5; border-color: #c8d0dc; color: #475467; }
+        QPushButton[kind="cancel"]:hover { background: #e3e8ef; border-color: #aeb8c6; }
         QPushButton[kind="subtle"], QToolButton[kind="subtle"] {
             color: #667085;
             background: transparent;
