@@ -169,13 +169,10 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
   const std::string typeName = stringValue(item, "type");
   auto *frame = new QFrame;
   frame->setProperty("kind", "raised");
-  if (typeName == "userMessage") {
-    frame->setStyleSheet(QStringLiteral(
-        "background:#eaf2ff;border:1px solid #bfd3f9;border-radius:8px;"));
-  } else if (typeName == "agentMessage") {
-    frame->setStyleSheet(
-        QStringLiteral("background:#ffffff;border:0;border-radius:8px;"));
-  }
+  if (typeName == "userMessage")
+    frame->setProperty("messageRole", "user");
+  else if (typeName == "agentMessage")
+    frame->setProperty("messageRole", "agent");
   auto *layout = new QVBoxLayout(frame);
   layout->setContentsMargins(12, 10, 12, 10);
   layout->setSpacing(6);

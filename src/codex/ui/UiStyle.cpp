@@ -60,6 +60,8 @@ QString applicationStyleSheet() {
         }
         QFrame[kind="panel"] { background: #ffffff; }
         QFrame[kind="raised"] { background: #ffffff; border: 1px solid #d7dee8; border-radius: 10px; }
+        QFrame[messageRole="user"] { background: #eaf2ff; border: 1px solid #bfd3f9; border-radius: 8px; }
+        QFrame[messageRole="agent"] { background: #ffffff; border: 0; border-radius: 8px; }
         QFrame[kind="summary"] { background: #f8fafc; border: 1px solid #d7dee8; border-radius: 7px; }
         QFrame[kind="greenBadge"] { background: #e9f7f0; border-radius: 6px; }
         QFrame[kind="blueBadge"] { background: #e5eeff; border-radius: 5px; }
