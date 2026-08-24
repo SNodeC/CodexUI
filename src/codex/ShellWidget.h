@@ -48,6 +48,19 @@ protected:
   bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+  enum class PendingPromptStatus { Awaiting, Acknowledged, Failed };
+
+  struct PendingPrompt {
+    std::uint64_t id = 0;
+    QString prompt;
+    std::vector<AttachmentDraft> attachments;
+    nlohmann::json turnOptions = nlohmann::json::object();
+    PendingPromptStatus status = PendingPromptStatus::Awaiting;
+    bool dispatched = false;
+    QString error;
+    std::unordered_set<std::string> knownUserMessageIds;
+  };
+
   enum RefreshArea : std::uint32_t {
     RefreshNone = 0,
     RefreshThreads = 1U << 0U,
@@ -74,6 +87,12 @@ private:
   void showProtocolTail();
   void refreshStatus();
   void refreshTurnSettings();
+  [[nodiscard]] std::string visiblySelectedThreadId() const;
+  void addConversationTrailingSpace();
+  void updateComposerDockHeight(int height);
+  void scheduleConversationFollowLatest();
+  void scrollConversationToLatest();
+  void settleConversationScroll(bool followLatest, int preservedValue);
   void appendProtocolFrame(const nlohmann::json &frame);
   void hydrateHistoricalAgents();
   void showNotice(QString message, bool error = true);
@@ -90,10 +109,19 @@ private:
   void toggleThreadArchive(const std::string &threadId);
   void deleteThread(const std::string &threadId);
   void submitPrompt();
-  void submitPromptToThread(std::string threadId, std::string prompt,
-                            nlohmann::json options,
-                            std::vector<AttachmentDraft> attachments,
-                            std::uint64_t attachmentRevision);
+  void submitPromptToThread(std::string threadId, std::uint64_t submissionId,
+                            std::string prompt, nlohmann::json options,
+                            std::vector<AttachmentDraft> attachments);
+  void dispatchNextPrompt(const std::string &threadId);
+  void startThreadForPendingPrompts();
+  void resetComposer();
+  void refreshComposerEnabledState();
+  void completePromptSubmission(const std::string &threadId,
+                                std::uint64_t submissionId,
+                                const nlohmann::json &result);
+  void reconcileAcknowledgedPrompts(const std::string &threadId);
+  [[nodiscard]] std::unordered_set<std::string>
+  materializedUserMessageIds(const std::string &threadId) const;
   void chooseAttachments();
   void refreshAttachments();
   void scheduleComposerLayout();
@@ -112,6 +140,12 @@ private:
   QString newThreadDraftWorkspace;
   std::vector<AttachmentDraft> attachmentDrafts;
   std::uint64_t attachmentRevision = 0;
+  std::unordered_map<std::string, std::deque<PendingPrompt>> pendingPrompts;
+  std::deque<PendingPrompt> newThreadPendingPrompts;
+  std::unordered_map<std::string, std::unordered_set<std::string>>
+      materializedPromptItemIds;
+  std::uint64_t nextPendingPromptId = 1;
+  bool newThreadCreationInFlight = false;
 
   QLabel *controllerLabel = nullptr;
   QLabel *workspaceBreadcrumb = nullptr;
@@ -124,10 +158,13 @@ private:
   QFrame *connectionStatusDot = nullptr;
   QFrame *noticeBar = nullptr;
   QFrame *sidebar = nullptr;
+  QFrame *conversationRegion = nullptr;
   QFrame *inspector = nullptr;
   QSplitter *splitter = nullptr;
   QListWidget *threadList = nullptr;
   QWidget *conversationContent = nullptr;
+  QWidget *conversationTrailingSpace = nullptr;
+  QWidget *composerReserve = nullptr;
   QVBoxLayout *conversationLayout = nullptr;
   QScrollArea *conversationScroll = nullptr;
   QTabWidget *inspectorTabs = nullptr;
@@ -153,7 +190,7 @@ private:
   QVBoxLayout *attachmentListLayout = nullptr;
   QPushButton *interruptButton = nullptr;
   QPushButton *controllerButton = nullptr;
-  QPushButton *attentionButton = nullptr;
+  QPushButton *requestButton = nullptr;
   QToolButton *connectionButton = nullptr;
   QAction *connectAction = nullptr;
   QAction *disconnectAction = nullptr;
@@ -168,9 +205,19 @@ private:
   bool composerExpanded = false;
   bool composerActive = false;
   bool composerLayoutRefreshPending = false;
+  bool conversationFollowsLatest = true;
+  bool conversationScrollRebuilding = false;
+  bool conversationScrollProgrammatic = false;
+  bool conversationSpacerAdjusting = false;
+  bool conversationFollowScrollPending = false;
+  int composerCanonicalHeight = 0;
+  int conversationTrailingSpaceHeight = 0;
+  std::uint64_t conversationSpacerRevision = 0;
   std::size_t conversationItemLimit = 80;
   bool conversationRebuildPending = true;
   std::unordered_map<std::string, QWidget *> conversationCards;
+  std::unordered_map<std::string, std::pair<bool, int>>
+      commandOutputScrollStates;
   std::unordered_map<std::string, std::pair<std::string, std::string>>
       dirtyConversationItems;
   std::deque<QString> protocolLines;

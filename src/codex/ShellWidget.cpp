@@ -9,12 +9,16 @@
 #include "codex/NewThreadDialog.h"
 #include "codex/PendingRequestDialog.h"
 #include "codex/TurnSettingsWidget.h"
+#include "codex/ui/BrandMark.h"
 #include "codex/ui/ExpandingPromptEditor.h"
 
 #include <QAbstractItemView>
+#include <QAbstractScrollArea>
+#include <QAbstractTextDocumentLayout>
 #include <QAction>
 #include <QApplication>
 #include <QColor>
+#include <QConicalGradient>
 #include <QDateTime>
 #include <QDir>
 #include <QEvent>
@@ -28,6 +32,8 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPaintEvent>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
@@ -40,18 +46,233 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QVariant>
+#include <QWheelEvent>
 
 #include <algorithm>
+#include <cmath>
+#include <functional>
+#include <iterator>
+#include <optional>
 
 namespace codexui::codex {
 namespace {
 
 constexpr int UpcomingControlHeight = 32;
+constexpr int MaximumCommandOutputHeight = 220;
+
+using CommandOutputScrollState = std::pair<bool, int>;
+
+QLabel *makeLabel(QString value, const char *kind = "body");
+
+class PendingPromptCard final : public QFrame {
+public:
+  PendingPromptCard(const QString &prompt, int attachmentCount, bool awaiting,
+                    bool failed, const QString &error) {
+    setObjectName(QStringLiteral("pendingPromptCard"));
+    setStyleSheet(QStringLiteral(
+        "QFrame#pendingPromptCard{background:transparent;border:0;}"));
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(12, 10, 12, 10);
+    layout->setSpacing(6);
+
+    const QString foreground = awaiting ? QStringLiteral("#7b8798")
+                               : failed ? QStringLiteral("#9b2c2c")
+                                        : QStringLiteral("#1d2633");
+    auto *title = makeLabel(QStringLiteral("You"), "title");
+    title->setStyleSheet(
+        QStringLiteral("background:transparent;color:%1;").arg(foreground));
+    layout->addWidget(title);
+    auto *body = makeLabel(prompt);
+    body->setStyleSheet(
+        QStringLiteral("background:transparent;color:%1;").arg(foreground));
+    layout->addWidget(body);
+
+    QString status;
+    if (awaiting)
+      status = QStringLiteral("Waiting for app-server acknowledgment");
+    else if (failed)
+      status = error.isEmpty() ? QStringLiteral("Not sent")
+                               : QStringLiteral("Not sent: %1").arg(error);
+    if (attachmentCount > 0) {
+      const QString attachments =
+          QStringLiteral("%1 attachment%2")
+              .arg(attachmentCount)
+              .arg(attachmentCount == 1 ? QString{} : QStringLiteral("s"));
+      status = status.isEmpty()
+                   ? attachments
+                   : status + QStringLiteral("  |  ") + attachments;
+    }
+    if (!status.isEmpty()) {
+      auto *metadata = makeLabel(status, "meta");
+      metadata->setStyleSheet(
+          QStringLiteral("background:transparent;color:%1;").arg(foreground));
+      layout->addWidget(metadata);
+    }
+
+    if (awaiting) {
+      animationTimer.setInterval(55);
+      connect(&animationTimer, &QTimer::timeout, this, [this] {
+        animationAngle = (animationAngle + 7) % 360;
+        update();
+      });
+      animationTimer.start();
+    }
+    isAwaiting = awaiting;
+    hasFailed = failed;
+  }
+
+protected:
+  void paintEvent(QPaintEvent *event) override {
+    QFrame::paintEvent(event);
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QRectF bounds = QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5);
+    const QColor background = isAwaiting  ? QColor(QStringLiteral("#f1f4f8"))
+                              : hasFailed ? QColor(QStringLiteral("#fff1f1"))
+                                          : QColor(QStringLiteral("#eaf2ff"));
+    const QColor border = isAwaiting  ? QColor(QStringLiteral("#c8d0dc"))
+                          : hasFailed ? QColor(QStringLiteral("#e5a3a3"))
+                                      : QColor(QStringLiteral("#bfd3f9"));
+    painter.setBrush(background);
+    painter.setPen(QPen(border, 1.0));
+    painter.drawRoundedRect(bounds, 8.0, 8.0);
+
+    if (!isAwaiting)
+      return;
+    QConicalGradient highlight(bounds.center(), animationAngle);
+    highlight.setColorAt(0.00, QColor(QStringLiteral("#c8d0dc")));
+    highlight.setColorAt(0.67, QColor(QStringLiteral("#c8d0dc")));
+    highlight.setColorAt(0.80, QColor(QStringLiteral("#2f6feb")));
+    highlight.setColorAt(0.91, QColor(QStringLiteral("#75a0ef")));
+    highlight.setColorAt(1.00, QColor(QStringLiteral("#c8d0dc")));
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QBrush(highlight), 2.5));
+    painter.drawRoundedRect(bounds, 8.0, 8.0);
+  }
+
+private:
+  QTimer animationTimer;
+  int animationAngle = 0;
+  bool isAwaiting = false;
+  bool hasFailed = false;
+};
+
+class CommandOutputView final : public QPlainTextEdit {
+public:
+  explicit CommandOutputView(
+      const QString &output,
+      std::optional<CommandOutputScrollState> restoredState = std::nullopt)
+      : followsLatest(restoredState ? restoredState->first : true),
+        preservedScrollValue(restoredState ? restoredState->second : 0) {
+    setReadOnly(true);
+    setMinimumHeight(0);
+    setMaximumHeight(MaximumCommandOutputHeight);
+    setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    setProperty("kind", "code");
+    setStyleSheet(QStringLiteral(
+        "background:#111827;color:#e5e7eb;border-radius:6px;padding:7px;"
+        "font-family:monospace;"));
+    setPlainText(output);
+
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this,
+            [this](int value) {
+              if (adjustingScroll)
+                return;
+              preservedScrollValue = value;
+              followsLatest = value >= verticalScrollBar()->maximum() - 1;
+            });
+    connect(verticalScrollBar(), &QScrollBar::rangeChanged, this,
+            [this](int, int) { scheduleScrollSettlement(); });
+    connect(document()->documentLayout(),
+            &QAbstractTextDocumentLayout::documentSizeChanged, this,
+            [this](const QSizeF &) { remeasure(); });
+    // Establish a content-derived height before the card enters the
+    // conversation layout. Otherwise it first appears at zero height and then
+    // changes the outer scroll range in a visibly separate pass.
+    remeasure();
+    QTimer::singleShot(0, this, [this] { settleScroll(); });
+  }
+
+  [[nodiscard]] CommandOutputScrollState scrollState() const {
+    return {followsLatest, verticalScrollBar()->value()};
+  }
+
+  QSize sizeHint() const override {
+    QSize result = QPlainTextEdit::sizeHint();
+    result.setHeight(preferredHeight);
+    return result;
+  }
+
+  QSize minimumSizeHint() const override {
+    QSize result = QPlainTextEdit::minimumSizeHint();
+    result.setHeight(0);
+    return result;
+  }
+
+protected:
+  void resizeEvent(QResizeEvent *event) override {
+    QPlainTextEdit::resizeEvent(event);
+    QTimer::singleShot(0, this, [this] { remeasure(); });
+  }
+
+private:
+  void remeasure() {
+    const int contentHeight = static_cast<int>(
+        std::ceil(document()->documentLayout()->documentSize().height()));
+    const int wantedHeight = std::clamp(contentHeight + 2 * frameWidth() + 14,
+                                        0, MaximumCommandOutputHeight);
+    if (wantedHeight != preferredHeight) {
+      preferredHeight = wantedHeight;
+      updateGeometry();
+    }
+    scheduleScrollSettlement();
+  }
+
+  void scheduleScrollSettlement() {
+    if (scrollSettlementPending)
+      return;
+    scrollSettlementPending = true;
+    QTimer::singleShot(0, this, [this] {
+      scrollSettlementPending = false;
+      settleScroll();
+    });
+  }
+
+  void settleScroll() {
+    adjustingScroll = true;
+    QScrollBar *scrollBar = verticalScrollBar();
+    scrollBar->setValue(
+        followsLatest ? scrollBar->maximum()
+                      : std::min(preservedScrollValue, scrollBar->maximum()));
+    adjustingScroll = false;
+  }
+
+  bool followsLatest = true;
+  bool adjustingScroll = false;
+  bool scrollSettlementPending = false;
+  int preservedScrollValue = 0;
+  int preferredHeight = 0;
+};
+
+std::optional<CommandOutputScrollState>
+commandOutputScrollState(QWidget *card) {
+  if (!card)
+    return std::nullopt;
+  for (QPlainTextEdit *editor : card->findChildren<QPlainTextEdit *>()) {
+    if (auto *output = dynamic_cast<CommandOutputView *>(editor))
+      return output->scrollState();
+  }
+  return std::nullopt;
+}
 
 class BottomOverlayDock final : public QWidget {
 public:
-  explicit BottomOverlayDock(QWidget *anchor)
-      : QWidget(anchor), anchor(anchor) {
+  BottomOverlayDock(QWidget *anchor, std::function<void(int)> heightChanged)
+      : QWidget(anchor), anchor(anchor),
+        heightChanged(std::move(heightChanged)) {
     anchor->installEventFilter(this);
   }
 
@@ -63,6 +284,11 @@ public:
     constexpr int BottomInset = 12;
     const int availableHeight = std::max(0, anchor->height() - BottomInset);
     const int wantedHeight = std::min(sizeHint().height(), availableHeight);
+    if (wantedHeight != reportedHeight) {
+      reportedHeight = wantedHeight;
+      if (heightChanged)
+        heightChanged(wantedHeight);
+    }
     setGeometry(HorizontalInset, availableHeight - wantedHeight,
                 std::max(0, anchor->width() - 2 * HorizontalInset),
                 wantedHeight);
@@ -97,6 +323,8 @@ private:
   }
 
   QWidget *anchor = nullptr;
+  std::function<void(int)> heightChanged;
+  int reportedHeight = -1;
   bool synchronizationPending = false;
 };
 
@@ -125,7 +353,7 @@ QString displayStatus(const std::string &status) {
   return text(status);
 }
 
-QLabel *makeLabel(QString value, const char *kind = "body") {
+QLabel *makeLabel(QString value, const char *kind) {
   auto *label = new QLabel(std::move(value));
   label->setProperty("kind", kind);
   label->setTextFormat(Qt::PlainText);
@@ -220,7 +448,9 @@ std::string safeMessage(const nlohmann::json &value) {
              : std::string{};
 }
 
-QFrame *itemFrame(const ItemPresentation &presentation) {
+QFrame *itemFrame(
+    const ItemPresentation &presentation,
+    std::optional<CommandOutputScrollState> outputScrollState = std::nullopt) {
   const nlohmann::json &item = presentation.raw;
   const std::string typeName = stringValue(item, "type");
   auto *frame = new QFrame;
@@ -241,7 +471,7 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
                 ? QStringLiteral("Codex")
                 : QStringLiteral("Codex activity");
   else if (typeName == "commandExecution")
-    title = QStringLiteral("Shell command");
+    title = QStringLiteral("Command execution");
   else if (typeName == "collabAgentToolCall" || typeName == "subAgentActivity")
     title = QStringLiteral("Agent activity");
   else if (typeName == "reasoning")
@@ -271,21 +501,12 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
       commandView->setProperty("kind", "command");
       commandView->setStyleSheet(QStringLiteral(
           "background:#f8fafc;border:1px solid #d7dee8;border-radius:6px;"
-          "padding:7px;font-family:monospace;font-size:11px;"));
+          "padding:7px;font-family:monospace;"));
       layout->addWidget(commandView);
     }
     const QString output = text(stringValue(item, "aggregatedOutput"));
     if (!output.isEmpty()) {
-      auto *outputView = new QPlainTextEdit(output);
-      outputView->setReadOnly(true);
-      outputView->setMaximumHeight(220);
-      outputView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-      outputView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-      outputView->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-      outputView->setStyleSheet(QStringLiteral(
-          "background:#111827;color:#e5e7eb;border-radius:6px;padding:7px;"
-          "font-family:monospace;font-size:11px;"));
-      layout->addWidget(outputView);
+      layout->addWidget(new CommandOutputView(output, outputScrollState));
     }
     QStringList metadata;
     metadata << displayStatus(stringValue(item, "status"));
@@ -407,13 +628,32 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   top->setObjectName(QStringLiteral("topBar"));
   top->setStyleSheet(QStringLiteral(
       "QFrame#topBar{background:#ffffff;border-bottom:1px solid #d7dee8;}"));
-  top->setFixedHeight(56);
+  top->setFixedHeight(64);
   auto *topLayout = new QHBoxLayout(top);
-  topLayout->setContentsMargins(20, 0, 18, 0);
+  topLayout->setContentsMargins(18, 0, 18, 0);
   topLayout->setSpacing(12);
-  auto *brand = makeLabel(QStringLiteral("CODEX WORKBENCH"), "title");
-  brand->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;"));
-  topLayout->addWidget(brand);
+  auto *brandLockup = new QWidget;
+  auto *brandLayout = new QHBoxLayout(brandLockup);
+  brandLayout->setContentsMargins(0, 0, 0, 0);
+  brandLayout->setSpacing(10);
+  brandLayout->addWidget(new codexui::BrandMark);
+  auto *brandCopy = new QVBoxLayout;
+  brandCopy->setContentsMargins(0, 0, 0, 0);
+  brandCopy->setSpacing(0);
+  auto *applicationTitle =
+      makeLabel(QStringLiteral("CodexUI"), "applicationTitle");
+  applicationTitle->setWordWrap(false);
+  applicationTitle->setSizePolicy(QSizePolicy::Preferred,
+                                  QSizePolicy::Preferred);
+  auto *applicationSubtitle =
+      makeLabel(QStringLiteral("Codex agent workspace"), "meta");
+  applicationSubtitle->setWordWrap(false);
+  applicationSubtitle->setSizePolicy(QSizePolicy::Preferred,
+                                     QSizePolicy::Preferred);
+  brandCopy->addWidget(applicationTitle);
+  brandCopy->addWidget(applicationSubtitle);
+  brandLayout->addLayout(brandCopy);
+  topLayout->addWidget(brandLockup);
   restoreSidebarButton = new QPushButton(QStringLiteral("Show threads"));
   restoreSidebarButton->setProperty("kind", "subtle");
   restoreSidebarButton->setFixedHeight(32);
@@ -425,11 +665,18 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   workspaceBreadcrumb->setWordWrap(false);
   workspaceBreadcrumb->setMaximumWidth(280);
   workspaceBreadcrumb->setStyleSheet(
-      QStringLiteral("color:#667085;font-size:12px;font-weight:500;"));
+      QStringLiteral("color:#667085;font-weight:500;"));
   topLayout->addWidget(workspaceBreadcrumb);
+  requestButton = new QPushButton;
+  requestButton->setProperty("kind", "request");
+  requestButton->setFixedHeight(32);
+  requestButton->hide();
+  connect(requestButton, &QPushButton::clicked, this, [this] {
+    inspector->show();
+    restoreInspectorButton->hide();
+    inspectorTabs->setCurrentIndex(3);
+  });
   topLayout->addStretch();
-  attentionButton = new QPushButton(QStringLiteral("0 requests"));
-  attentionButton->setFixedSize(106, 32);
   connectionStatusDot = makeStatusDot();
   connectionStatusDot->setToolTip(QStringLiteral("Not connected"));
   connectionButton = new QToolButton;
@@ -481,7 +728,9 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
     else
       this->session.claimController();
   });
-  topLayout->addWidget(attentionButton);
+  topLayout->addWidget(restoreInspectorButton);
+  topLayout->addWidget(requestButton);
+  topLayout->addWidget(controllerButton);
   auto *connectionControl = new QWidget;
   auto *connectionLayout = new QHBoxLayout(connectionControl);
   connectionLayout->setContentsMargins(0, 0, 0, 0);
@@ -489,8 +738,6 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   connectionLayout->addWidget(connectionButton);
   connectionLayout->addWidget(connectionStatusDot);
   topLayout->addWidget(connectionControl);
-  topLayout->addWidget(controllerButton);
-  topLayout->addWidget(restoreInspectorButton);
   root->addWidget(top);
 
   splitter = new QSplitter(Qt::Horizontal);
@@ -559,10 +806,11 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
     sidebar->show();
     restoreSidebarButton->hide();
   });
-  connect(threadList, &QListWidget::itemClicked, this,
-          [this](QListWidgetItem *item) {
-            selectThread(item->data(Qt::UserRole).toString().toStdString());
-          });
+  connect(threadList, &QListWidget::itemSelectionChanged, this, [this] {
+    const std::string threadId = visiblySelectedThreadId();
+    if (!threadId.empty() && threadId != selectedThreadId)
+      selectThread(threadId);
+  });
   connect(threadList, &QListWidget::customContextMenuRequested, this,
           [this](const QPoint &position) {
             QListWidgetItem *item = threadList->itemAt(position);
@@ -600,21 +848,21 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
           });
   splitter->addWidget(sidebar);
 
-  auto *center = new QFrame;
-  center->setObjectName(QStringLiteral("conversation"));
-  center->setStyleSheet(
+  conversationRegion = new QFrame;
+  conversationRegion->setObjectName(QStringLiteral("conversation"));
+  conversationRegion->setStyleSheet(
       QStringLiteral("QFrame#conversation{background:#f6f8fb;}"));
-  center->setMinimumWidth(480);
-  auto *centerLayout = new QVBoxLayout(center);
+  conversationRegion->setMinimumWidth(480);
+  auto *centerLayout = new QVBoxLayout(conversationRegion);
   centerLayout->setContentsMargins(24, 14, 24, 12);
   centerLayout->setSpacing(0);
   auto *context = new QHBoxLayout;
   auto *threadBadge = makeLabel(QStringLiteral("THREAD"), "small");
   threadBadge->setAlignment(Qt::AlignCenter);
-  threadBadge->setFixedSize(54, 18);
+  threadBadge->setFixedSize(58, 20);
   threadBadge->setStyleSheet(
       QStringLiteral("background:#e5eeff;color:#2f6feb;border-radius:5px;"
-                     "font-size:9px;font-weight:600;"));
+                     "font-weight:600;"));
   context->addWidget(threadBadge);
   context->addStretch();
   centerLayout->addLayout(context);
@@ -635,10 +883,10 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   auto *noticeLayout = new QHBoxLayout(noticeBar);
   noticeLayout->setContentsMargins(10, 6, 8, 6);
   noticeLabel = makeLabel({}, "meta");
-  noticeLabel->setStyleSheet(QStringLiteral("color:#9d2e2e;font-size:11px;"));
+  noticeLabel->setStyleSheet(QStringLiteral("color:#9d2e2e;"));
   auto *dismissNotice = new QPushButton(QStringLiteral("Dismiss"));
   dismissNotice->setProperty("kind", "subtle");
-  dismissNotice->setFixedSize(62, 24);
+  dismissNotice->setFixedHeight(28);
   noticeLayout->addWidget(noticeLabel, 1);
   noticeLayout->addWidget(dismissNotice);
   noticeBar->hide();
@@ -658,17 +906,38 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   emptyConversation =
       makeLabel(QStringLiteral("Conversation activity appears here."), "muted");
   conversationLayout->addWidget(emptyConversation);
+  addConversationTrailingSpace();
   conversationLayout->addStretch();
   conversationScroll->setWidget(conversationContent);
+  QScrollBar *conversationScrollBar = conversationScroll->verticalScrollBar();
+  connect(conversationScrollBar, &QScrollBar::valueChanged, this,
+          [this, conversationScrollBar](int value) {
+            if (conversationScrollRebuilding ||
+                conversationScrollProgrammatic || conversationSpacerAdjusting)
+              return;
+            conversationFollowsLatest =
+                value >= conversationScrollBar->maximum() - 1;
+          });
+  connect(conversationScrollBar, &QScrollBar::rangeChanged, this,
+          [this](int, int) {
+            if (conversationScrollRebuilding || conversationSpacerAdjusting)
+              return;
+            if (conversationFollowsLatest)
+              scheduleConversationFollowLatest();
+          });
   centerLayout->addWidget(conversationScroll, 1);
 
-  auto *composerReserve = new QWidget;
+  composerReserve = new QWidget;
   composerReserve->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+  composerReserve->setFixedHeight(0);
   centerLayout->addWidget(composerReserve);
 
-  auto *composerDock = new BottomOverlayDock(center);
+  auto *composerDock =
+      new BottomOverlayDock(conversationRegion, [this](int height) {
+        updateComposerDockHeight(height);
+      });
   auto *composerDockLayout = new QVBoxLayout(composerDock);
-  composerDockLayout->setContentsMargins(0, 0, 0, 0);
+  composerDockLayout->setContentsMargins(0, 8, 0, 0);
   composerDockLayout->setSpacing(0);
 
   auto *attention = new QFrame;
@@ -746,9 +1015,8 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   connect(promptEditor, &codexui::ExpandingPromptEditor::editorHeightChanged,
           composerDock,
           [composerDock] { composerDock->synchronizeGeometry(); });
-  QTimer::singleShot(0, composerDock, [composerDock, composerReserve] {
+  QTimer::singleShot(0, composerDock, [composerDock] {
     composerDock->layout()->activate();
-    composerReserve->setFixedHeight(composerDock->sizeHint().height());
     composerDock->synchronizeGeometry();
   });
   connect(sendButton, &QPushButton::clicked, this, [this] { submitPrompt(); });
@@ -760,7 +1028,7 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
           [this] { interruptActiveTurn(); });
   connect(attachmentButton, &QPushButton::clicked, this,
           [this] { chooseAttachments(); });
-  splitter->addWidget(center);
+  splitter->addWidget(conversationRegion);
 
   inspector = new QFrame;
   inspector->setObjectName(QStringLiteral("inspector"));
@@ -813,19 +1081,25 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   protocolLayout->setSpacing(6);
   protocolStats = makeLabel({}, "meta");
   protocolLog = new QPlainTextEdit;
+  protocolLog->setProperty("kind", "infoViewer");
   protocolLog->setReadOnly(true);
   protocolLog->setLineWrapMode(QPlainTextEdit::WidgetWidth);
   protocolLog->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  protocolLog->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+  protocolLog->verticalScrollBar()->setProperty("kind", "infoViewer");
   protocolLog->document()->setMaximumBlockCount(200);
-  protocolLayout->addWidget(protocolStats);
   protocolLayout->addWidget(protocolLog, 1);
+  protocolLayout->addWidget(protocolStats);
   auto *stateContent = new QWidget;
   auto *stateLayout = new QVBoxLayout(stateContent);
   stateLayout->setContentsMargins(8, 8, 8, 8);
   stateView = new QPlainTextEdit;
+  stateView->setProperty("kind", "infoViewer");
   stateView->setReadOnly(true);
   stateView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
   stateView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  stateView->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+  stateView->verticalScrollBar()->setProperty("kind", "infoViewer");
   stateLayout->addWidget(stateView);
   infoTabs = new QTabWidget;
   infoTabs->setDocumentMode(true);
@@ -860,16 +1134,12 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
     inspector->show();
     restoreInspectorButton->hide();
   });
-  connect(attentionButton, &QPushButton::clicked, this, [this] {
-    inspector->show();
-    restoreInspectorButton->hide();
-    inspectorTabs->setCurrentIndex(3);
-  });
   splitter->addWidget(inspector);
   splitter->setStretchFactor(0, 0);
   splitter->setStretchFactor(1, 1);
   splitter->setStretchFactor(2, 0);
   splitter->setSizes({282, 834, 404});
+  qApp->installEventFilter(this);
   root->addWidget(splitter, 1);
 
   auto *statusBar = new QFrame;
@@ -902,6 +1172,43 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
 }
 
 bool ShellWidget::eventFilter(QObject *watched, QEvent *event) {
+  if (event->type() == QEvent::Wheel && conversationRegion &&
+      conversationScroll) {
+    auto *target = qobject_cast<QWidget *>(watched);
+    const bool inConversationRegion =
+        target && (target == conversationRegion ||
+                   conversationRegion->isAncestorOf(target));
+    const bool onSplitterHandle =
+        target && splitter &&
+        (target == splitter->handle(1) || target == splitter->handle(2));
+    if (inConversationRegion || onSplitterHandle) {
+      bool insideScrollableChild = false;
+      if (inConversationRegion) {
+        for (QWidget *ancestor = target;
+             ancestor && ancestor != conversationRegion;
+             ancestor = ancestor->parentWidget()) {
+          if (qobject_cast<QAbstractScrollArea *>(ancestor)) {
+            insideScrollableChild = true;
+            break;
+          }
+        }
+      }
+      if (!insideScrollableChild) {
+        auto *wheel = static_cast<QWheelEvent *>(event);
+        QWidget *viewport = conversationScroll->viewport();
+        const QPointF localPosition =
+            viewport->mapFromGlobal(wheel->globalPosition().toPoint());
+        QWheelEvent forwarded(localPosition, wheel->globalPosition(),
+                              wheel->pixelDelta(), wheel->angleDelta(),
+                              wheel->buttons(), wheel->modifiers(),
+                              wheel->phase(), wheel->inverted(),
+                              wheel->source(), wheel->pointingDevice());
+        QApplication::sendEvent(viewport, &forwarded);
+        event->accept();
+        return true;
+      }
+    }
+  }
   if (watched == composerBody &&
       (event->type() == QEvent::Resize || event->type() == QEvent::Show ||
        event->type() == QEvent::LayoutRequest))
@@ -997,13 +1304,21 @@ void ShellWidget::handleEvent(const nlohmann::json &event) {
 
   hydrateHistoricalAgents();
 
-  if (!selectedThreadId.empty() && !model.thread(selectedThreadId))
+  if (!selectedThreadId.empty() && !model.thread(selectedThreadId)) {
     selectedThreadId.clear();
+    resetComposer();
+  }
 
   const nlohmann::json scope = event.value("scope", nlohmann::json::object());
   const std::string eventThreadId = stringValue(scope, "threadId");
   const std::string turnId = stringValue(scope, "turnId");
   const std::string itemId = stringValue(scope, "itemId");
+  if (type == "thread.removed" && !eventThreadId.empty()) {
+    pendingPrompts.erase(eventThreadId);
+    materializedPromptItemIds.erase(eventThreadId);
+  } else if (!eventThreadId.empty()) {
+    reconcileAcknowledgedPrompts(eventThreadId);
+  }
   if (eventThreadId == selectedThreadId && !turnId.empty() && !itemId.empty() &&
       (type == "conversation.item.upsert" ||
        type == "conversation.item.append" ||
@@ -1136,9 +1451,8 @@ void ShellWidget::showNotice(QString message, bool error) {
                              "border-radius:6px;")
             : QStringLiteral("background:#fff8e8;border:1px solid #e5c77d;"
                              "border-radius:6px;"));
-  noticeLabel->setStyleSheet(
-      error ? QStringLiteral("color:#9d2e2e;font-size:11px;")
-            : QStringLiteral("color:#8a5a00;font-size:11px;"));
+  noticeLabel->setStyleSheet(error ? QStringLiteral("color:#9d2e2e;")
+                                   : QStringLiteral("color:#8a5a00;"));
   noticeBar->show();
 }
 
@@ -1207,6 +1521,133 @@ void ShellWidget::refreshTurnSettings() {
     permissionProfiles = profiles->second;
   turnSettings->setContext(identity, canonical, model.modelCatalog(),
                            permissionProfiles);
+}
+
+std::string ShellWidget::visiblySelectedThreadId() const {
+  if (!threadList)
+    return {};
+  const QList<QListWidgetItem *> selected = threadList->selectedItems();
+  if (selected.size() != 1 || !selected.front())
+    return {};
+  return selected.front()->data(Qt::UserRole).toString().toStdString();
+}
+
+void ShellWidget::addConversationTrailingSpace() {
+  // The spacer belongs to the scroll-area content so QScrollArea derives its
+  // extended range from normal layout geometry. It is recreated with the
+  // conversation and never replaces the canonical composer reservation.
+  conversationTrailingSpace = new QWidget;
+  conversationTrailingSpace->setObjectName(
+      QStringLiteral("conversationTrailingSpace"));
+  conversationTrailingSpace->setSizePolicy(QSizePolicy::Preferred,
+                                           QSizePolicy::Fixed);
+  conversationTrailingSpace->setFixedHeight(conversationTrailingSpaceHeight);
+  conversationLayout->addWidget(conversationTrailingSpace);
+}
+
+void ShellWidget::updateComposerDockHeight(int height) {
+  if (!composerReserve || !conversationScroll || !conversationContent ||
+      height <= 0)
+    return;
+
+  if (composerCanonicalHeight == 0) {
+    // Only the compact surface participates in the center layout. Later
+    // growth remains an overlay and is represented by trailing scroll space.
+    composerCanonicalHeight = height;
+    composerReserve->setFixedHeight(composerCanonicalHeight);
+    return;
+  }
+
+  const int trailingHeight = std::max(0, height - composerCanonicalHeight);
+  if (trailingHeight == conversationTrailingSpaceHeight)
+    return;
+
+  QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
+  const int preservedValue = scrollBar->value();
+  const bool spacerGrew = trailingHeight > conversationTrailingSpaceHeight;
+  conversationTrailingSpaceHeight = trailingHeight;
+  const std::uint64_t revision = ++conversationSpacerRevision;
+  conversationSpacerAdjusting = true;
+  // A larger range must not pull content toward the newly exposed bottom. The
+  // user explicitly reaching that bottom will restore follow-latest below.
+  if (spacerGrew)
+    conversationFollowsLatest = false;
+
+  if (conversationTrailingSpace)
+    conversationTrailingSpace->setFixedHeight(trailingHeight);
+  conversationLayout->invalidate();
+  conversationContent->updateGeometry();
+
+  const auto settle = [this, revision, preservedValue] {
+    if (revision != conversationSpacerRevision)
+      return;
+    QScrollBar *currentScrollBar = conversationScroll->verticalScrollBar();
+    conversationScrollProgrammatic = true;
+    currentScrollBar->setValue(
+        std::min(preservedValue, currentScrollBar->maximum()));
+    conversationScrollProgrammatic = false;
+  };
+  QTimer::singleShot(0, this, [this, revision, settle] {
+    if (revision != conversationSpacerRevision)
+      return;
+    settle();
+    QTimer::singleShot(0, this, [this, revision, settle] {
+      if (revision != conversationSpacerRevision)
+        return;
+      settle();
+      conversationSpacerAdjusting = false;
+      QScrollBar *currentScrollBar = conversationScroll->verticalScrollBar();
+      conversationFollowsLatest =
+          currentScrollBar->value() >= currentScrollBar->maximum() - 1;
+    });
+  });
+}
+
+void ShellWidget::scrollConversationToLatest() {
+  if (!conversationScroll)
+    return;
+  QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
+  conversationScrollProgrammatic = true;
+  scrollBar->setValue(scrollBar->maximum());
+  conversationScrollProgrammatic = false;
+}
+
+void ShellWidget::scheduleConversationFollowLatest() {
+  if (conversationFollowScrollPending)
+    return;
+  conversationFollowScrollPending = true;
+  // Shell-output documents and wrapping labels can report several closely
+  // spaced geometry changes while a new card is admitted. Follow once after
+  // that burst instead of moving the viewport for every intermediate range.
+  QTimer::singleShot(16, this, [this] {
+    conversationFollowScrollPending = false;
+    if (conversationFollowsLatest && !conversationScrollRebuilding &&
+        !conversationSpacerAdjusting)
+      scrollConversationToLatest();
+  });
+}
+
+void ShellWidget::settleConversationScroll(bool followLatest,
+                                           int preservedValue) {
+  QTimer::singleShot(0, this, [this, followLatest, preservedValue] {
+    QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
+    conversationScrollProgrammatic = true;
+    scrollBar->setValue(followLatest
+                            ? scrollBar->maximum()
+                            : std::min(preservedValue, scrollBar->maximum()));
+    conversationScrollProgrammatic = false;
+    QTimer::singleShot(0, this, [this, followLatest, preservedValue] {
+      QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
+      conversationScrollProgrammatic = true;
+      scrollBar->setValue(followLatest
+                              ? scrollBar->maximum()
+                              : std::min(preservedValue, scrollBar->maximum()));
+      conversationScrollProgrammatic = false;
+      conversationScrollRebuilding = false;
+      conversationFollowsLatest =
+          scrollBar->value() >= scrollBar->maximum() - 1;
+    });
+  });
 }
 
 void ShellWidget::appendProtocolFrame(const nlohmann::json &frame) {
@@ -1290,7 +1731,7 @@ void ShellWidget::refreshThreads() {
     if (model.pendingRequestCount(threadId) != 0)
       title.prepend(QStringLiteral("! "));
     auto *item = new QListWidgetItem(threadList);
-    item->setSizeHint(QSize(0, 44));
+    item->setSizeHint(QSize(0, 48));
     item->setData(Qt::UserRole, text(threadId));
     item->setToolTip(text(thread->cwd));
     auto *row = new QWidget;
@@ -1314,10 +1755,9 @@ void ShellWidget::refreshThreads() {
     copy->setContentsMargins(0, 0, 0, 0);
     copy->setSpacing(1);
     auto *titleLabel = makeLabel(title, "title");
-    titleLabel->setStyleSheet(
-        QStringLiteral("font-size:11px;font-weight:500;"));
+    titleLabel->setStyleSheet(QStringLiteral("font-weight:500;"));
     copy->addWidget(titleLabel);
-    copy->addWidget(makeLabel(displayStatus(thread->status), "small"));
+    copy->addWidget(makeLabel(displayStatus(thread->status), "meta"));
     rowLayout->addLayout(copy, 1);
     threadList->setItemWidget(item, row);
     if (threadId == selectedThreadId)
@@ -1327,11 +1767,18 @@ void ShellWidget::refreshThreads() {
 }
 
 void ShellWidget::refreshConversation() {
-  const int previousMaximum =
-      conversationScroll->verticalScrollBar()->maximum();
-  const bool followLatest =
-      conversationScroll->verticalScrollBar()->value() >= previousMaximum - 12;
+  QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
+  const bool followLatest = conversationFollowsLatest;
+  const int preservedValue = scrollBar->value();
+  ++conversationSpacerRevision;
+  conversationSpacerAdjusting = false;
+  conversationScrollRebuilding = true;
+  for (const auto &[key, card] : conversationCards) {
+    if (const auto state = commandOutputScrollState(card))
+      commandOutputScrollStates[key] = *state;
+  }
   conversationCards.clear();
+  conversationTrailingSpace = nullptr;
   clearLayout(conversationLayout);
 
   const ThreadPresentation *thread = model.thread(selectedThreadId);
@@ -1341,16 +1788,29 @@ void ShellWidget::refreshConversation() {
                                    : QStringLiteral("Select a thread"));
     conversationMeta->setText(localNewThreadIntent ? QDir::currentPath()
                                                    : QString{});
-    emptyConversation =
-        makeLabel(localNewThreadIntent
-                      ? QStringLiteral("Send a message to create this thread.")
-                      : QStringLiteral("Conversation activity appears here."),
-                  "muted");
-    conversationLayout->addWidget(emptyConversation);
+    if (localNewThreadIntent && !newThreadPendingPrompts.empty()) {
+      emptyConversation = nullptr;
+      for (const PendingPrompt &pending : newThreadPendingPrompts) {
+        conversationLayout->addWidget(new PendingPromptCard(
+            pending.prompt, static_cast<int>(pending.attachments.size()),
+            pending.status == PendingPromptStatus::Awaiting,
+            pending.status == PendingPromptStatus::Failed, pending.error));
+      }
+    } else {
+      emptyConversation = makeLabel(
+          localNewThreadIntent
+              ? QStringLiteral("Send a message to create this thread.")
+              : QStringLiteral("Conversation activity appears here."),
+          "muted");
+      conversationLayout->addWidget(emptyConversation);
+    }
+    addConversationTrailingSpace();
     conversationLayout->addStretch();
+    settleConversationScroll(followLatest, preservedValue);
     return;
   }
 
+  reconcileAcknowledgedPrompts(selectedThreadId);
   conversationTitle->setText(text(thread->title));
   conversationMeta->setText(text(thread->cwd) + QStringLiteral("  |  ") +
                             displayStatus(thread->status));
@@ -1375,33 +1835,45 @@ void ShellWidget::refreshConversation() {
                                 : 0;
   if (first != 0) {
     const std::size_t page = std::min<std::size_t>(80, first);
-    auto *loadEarlier = new QPushButton(
-        QStringLiteral("Load %1 earlier activities (%2 retained)")
-            .arg(static_cast<qulonglong>(page))
-            .arg(static_cast<qulonglong>(first)));
-    loadEarlier->setProperty("kind", "subtle");
-    loadEarlier->setFixedHeight(30);
+    auto *loadEarlier =
+        new QPushButton(QStringLiteral("Load %1 more activities")
+                            .arg(static_cast<qulonglong>(page)));
+    loadEarlier->setProperty("kind", "history");
+    loadEarlier->setFixedHeight(UpcomingControlHeight);
+    loadEarlier->setToolTip(QStringLiteral("%1 earlier activities are retained")
+                                .arg(static_cast<qulonglong>(first)));
     connect(loadEarlier, &QPushButton::clicked, this, [this, page] {
       conversationItemLimit += page;
       conversationRebuildPending = true;
       scheduleRefresh(RefreshConversation);
     });
-    conversationLayout->addWidget(loadEarlier);
+    conversationLayout->addWidget(loadEarlier, 0, Qt::AlignHCenter);
   }
   for (std::size_t index = first; index < items.size(); ++index) {
-    QWidget *card = itemFrame(*items[index].item);
+    std::optional<CommandOutputScrollState> outputScrollState;
+    if (const auto retained = commandOutputScrollStates.find(items[index].key);
+        retained != commandOutputScrollStates.end())
+      outputScrollState = retained->second;
+    QWidget *card = itemFrame(*items[index].item, outputScrollState);
     conversationCards[items[index].key] = card;
     conversationLayout->addWidget(card);
   }
-  if (items.empty())
+  const auto pending = pendingPrompts.find(selectedThreadId);
+  if (items.empty() &&
+      (pending == pendingPrompts.end() || pending->second.empty()))
     conversationLayout->addWidget(
         makeLabel(QStringLiteral("No materialized activity."), "muted"));
+  if (pending != pendingPrompts.end()) {
+    for (const PendingPrompt &submission : pending->second) {
+      conversationLayout->addWidget(new PendingPromptCard(
+          submission.prompt, static_cast<int>(submission.attachments.size()),
+          submission.status == PendingPromptStatus::Awaiting,
+          submission.status == PendingPromptStatus::Failed, submission.error));
+    }
+  }
+  addConversationTrailingSpace();
   conversationLayout->addStretch();
-  if (followLatest)
-    QTimer::singleShot(0, conversationScroll, [scroll = conversationScroll] {
-      scroll->verticalScrollBar()->setValue(
-          scroll->verticalScrollBar()->maximum());
-    });
+  settleConversationScroll(followLatest, preservedValue);
 }
 
 bool ShellWidget::refreshConversationItem(const std::string &key,
@@ -1420,9 +1892,12 @@ bool ShellWidget::refreshConversationItem(const std::string &key,
   if (item == turn->second.items.end())
     return false;
 
-  QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
-  const bool followLatest = scrollBar->value() >= scrollBar->maximum() - 12;
-  QWidget *replacement = itemFrame(item->second);
+  const bool followLatest = conversationFollowsLatest;
+  std::optional<CommandOutputScrollState> outputScrollState =
+      commandOutputScrollState(existing->second);
+  if (outputScrollState)
+    commandOutputScrollStates[key] = *outputScrollState;
+  QWidget *replacement = itemFrame(item->second, outputScrollState);
   QLayoutItem *replaced =
       conversationLayout->replaceWidget(existing->second, replacement);
   if (!replaced) {
@@ -1433,10 +1908,7 @@ bool ShellWidget::refreshConversationItem(const std::string &key,
   existing->second->deleteLater();
   existing->second = replacement;
   if (followLatest)
-    QTimer::singleShot(0, conversationScroll, [scroll = conversationScroll] {
-      scroll->verticalScrollBar()->setValue(
-          scroll->verticalScrollBar()->maximum());
-    });
+    scheduleConversationFollowLatest();
   return true;
 }
 
@@ -1501,7 +1973,7 @@ void ShellWidget::refreshInspector() {
     return;
 
   clearLayout(activeLayout);
-  if (!thread) {
+  if (!thread && activeTab != 3) {
     activeLayout->addWidget(
         makeLabel(QStringLiteral("No selected thread."), "muted"));
     activeLayout->addStretch();
@@ -1583,16 +2055,20 @@ void ShellWidget::refreshInspector() {
 
   std::size_t requestCount = 0;
   for (const auto &[id, request] : model.pendingRequestPresentations()) {
-    if (request.threadId != selectedThreadId)
-      continue;
     auto *frame = new QFrame;
     frame->setProperty("kind", "summary");
     auto *layout = new QVBoxLayout(frame);
     layout->setContentsMargins(9, 7, 9, 7);
     layout->setSpacing(5);
     layout->addWidget(makeLabel(text(request.kind), "title"));
+    QString threadContext = text(request.threadId);
+    if (const ThreadPresentation *requestThread =
+            model.thread(request.threadId);
+        requestThread && !requestThread->title.empty())
+      threadContext = text(requestThread->title);
     layout->addWidget(
-        makeLabel(QStringLiteral("generation %1  |  request %2")
+        makeLabel(QStringLiteral("thread %1  |  generation %2  |  request %3")
+                      .arg(threadContext)
                       .arg(static_cast<qulonglong>(request.generation))
                       .arg(text(id)),
                   "meta"));
@@ -1632,21 +2108,145 @@ void ShellWidget::refreshInspector() {
     ++requestCount;
   }
   if (requestCount == 0)
-    requestsLayout->addWidget(makeLabel(
-        QStringLiteral("No pending requests for this thread."), "muted"));
+    requestsLayout->addWidget(
+        makeLabel(QStringLiteral("No pending requests."), "muted"));
   requestsLayout->addStretch();
+}
+
+void ShellWidget::resetComposer() {
+  promptEditor->clear();
+  attachmentDrafts.clear();
+  ++attachmentRevision;
+  refreshAttachments();
+  refreshComposerEnabledState();
+}
+
+void ShellWidget::refreshComposerEnabledState() {
+  if (!promptEditor || !sendButton || !attachmentButton)
+    return;
+  const ConnectionPresentation &connection = model.connection();
+  const bool canSubmit =
+      connection.connected && connection.role == "controller";
+  promptEditor->setEnabled(true);
+  sendButton->setEnabled(canSubmit);
+  attachmentButton->setEnabled(canSubmit);
+  for (QPushButton *button : attachmentPanel->findChildren<QPushButton *>())
+    button->setEnabled(true);
+}
+
+void ShellWidget::completePromptSubmission(const std::string &threadId,
+                                           std::uint64_t submissionId,
+                                           const nlohmann::json &result) {
+  const auto prompts = pendingPrompts.find(threadId);
+  if (prompts == pendingPrompts.end())
+    return;
+  const auto submission =
+      std::find_if(prompts->second.begin(), prompts->second.end(),
+                   [submissionId](const PendingPrompt &candidate) {
+                     return candidate.id == submissionId;
+                   });
+  if (submission == prompts->second.end())
+    return;
+  if (result.value("ok", false))
+    submission->status = PendingPromptStatus::Acknowledged;
+  else {
+    submission->status = PendingPromptStatus::Failed;
+    const nlohmann::json error =
+        result.value("error", nlohmann::json::object());
+    const std::string message = safeMessage(error);
+    submission->error =
+        text(message.empty() ? std::string("Submission failed") : message);
+    showNotice(text(message.empty() ? std::string("Turn submission failed")
+                                    : message));
+  }
+  conversationRebuildPending = true;
+  scheduleRefresh(RefreshConversation | RefreshStatus);
+  QTimer::singleShot(0, this,
+                     [this, threadId] { dispatchNextPrompt(threadId); });
+}
+
+std::unordered_set<std::string>
+ShellWidget::materializedUserMessageIds(const std::string &threadId) const {
+  std::unordered_set<std::string> result;
+  const ThreadPresentation *thread = model.thread(threadId);
+  if (!thread)
+    return result;
+  for (const std::string &turnId : thread->turnOrder) {
+    const auto turn = thread->turns.find(turnId);
+    if (turn == thread->turns.end())
+      continue;
+    for (const std::string &itemId : turn->second.itemOrder) {
+      const auto item = turn->second.items.find(itemId);
+      if (item != turn->second.items.end() &&
+          stringValue(item->second.raw, "type") == "userMessage")
+        result.insert(turnId + '\x1f' + itemId);
+    }
+  }
+  return result;
+}
+
+void ShellWidget::reconcileAcknowledgedPrompts(const std::string &threadId) {
+  const auto prompts = pendingPrompts.find(threadId);
+  const ThreadPresentation *thread = model.thread(threadId);
+  if (prompts == pendingPrompts.end() || !thread)
+    return;
+  auto &claimed = materializedPromptItemIds[threadId];
+  for (auto submission = prompts->second.begin();
+       submission != prompts->second.end();) {
+    if (submission->status != PendingPromptStatus::Acknowledged) {
+      ++submission;
+      continue;
+    }
+    std::string matchedId;
+    for (const std::string &turnId : thread->turnOrder) {
+      const auto turn = thread->turns.find(turnId);
+      if (turn == thread->turns.end())
+        continue;
+      for (const std::string &itemId : turn->second.itemOrder) {
+        const auto item = turn->second.items.find(itemId);
+        if (item == turn->second.items.end() ||
+            stringValue(item->second.raw, "type") != "userMessage")
+          continue;
+        const std::string identity = turnId + '\x1f' + itemId;
+        if (claimed.contains(identity) ||
+            submission->knownUserMessageIds.contains(identity))
+          continue;
+        if (messageText(item->second.raw).trimmed() ==
+            submission->prompt.trimmed()) {
+          matchedId = identity;
+          break;
+        }
+      }
+      if (!matchedId.empty())
+        break;
+    }
+    if (matchedId.empty()) {
+      ++submission;
+      continue;
+    }
+    claimed.insert(matchedId);
+    submission = prompts->second.erase(submission);
+  }
+  if (prompts->second.empty())
+    pendingPrompts.erase(prompts);
 }
 
 void ShellWidget::refreshStatus() {
   const ConnectionPresentation &connection = model.connection();
-  const QString dotStyle =
-      connection.connected
-          ? QStringLiteral("background:#23845a;border-radius:4px;")
-          : QStringLiteral("background:#98a2b3;border-radius:4px;");
+  QString dotStyle;
+  QString dotToolTip;
+  if (connection.connected) {
+    dotStyle = QStringLiteral("background:#23845a;border-radius:4px;");
+    dotToolTip = QStringLiteral("Connected");
+  } else if (connection.retrying) {
+    dotStyle = QStringLiteral("background:#d98e1c;border-radius:4px;");
+    dotToolTip = QStringLiteral("Disconnected, retrying");
+  } else {
+    dotStyle = QStringLiteral("background:#b83a3a;border-radius:4px;");
+    dotToolTip = QStringLiteral("Disconnected");
+  }
   connectionStatusDot->setStyleSheet(dotStyle);
-  connectionStatusDot->setToolTip(connection.connected
-                                      ? QStringLiteral("Connected")
-                                      : QStringLiteral("Not connected"));
+  connectionStatusDot->setToolTip(dotToolTip);
   QString selectedTransport;
   const std::string selectedKey = stringValue(connection.settings, "selected");
   const nlohmann::json available =
@@ -1676,12 +2276,9 @@ void ShellWidget::refreshStatus() {
   controllerButton->setEnabled(connection.connected);
   const std::size_t pending = model.pendingRequestCount(selectedThreadId);
   const std::size_t totalPending = model.pendingRequestCount();
-  attentionButton->setText(
-      QStringLiteral("%1 requests").arg(static_cast<qulonglong>(totalPending)));
-  attentionButton->setStyleSheet(
-      totalPending == 0 ? QString{}
-                        : QStringLiteral("background:#fff6df;color:#8a5a00;"
-                                         "border:1px solid #e5c77d;"));
+  requestButton->setText(QStringLiteral("Requests (%1)")
+                             .arg(static_cast<qulonglong>(totalPending)));
+  requestButton->setVisible(totalPending != 0);
   approveButton->parentWidget()->setVisible(pending != 0);
 
   const ThreadPresentation *thread = model.thread(selectedThreadId);
@@ -1731,10 +2328,7 @@ void ShellWidget::refreshStatus() {
     sendButton->style()->polish(sendButton);
   }
   scheduleComposerLayout();
-  sendButton->setEnabled(connection.connected &&
-                         connection.role == "controller");
-  attachmentButton->setEnabled(connection.connected &&
-                               connection.role == "controller");
+  refreshComposerEnabledState();
   turnSettings->setControlsEnabled(connection.connected &&
                                    connection.role == "controller" && !active);
 }
@@ -1777,16 +2371,25 @@ void ShellWidget::selectThread(std::string threadId) {
   newThreadDraftName.clear();
   newThreadDraftWorkspace.clear();
   conversationRebuildPending = true;
-  readThread(selectedThreadId);
+  resetComposer();
+  const ThreadPresentation *thread = model.thread(selectedThreadId);
+  if (!thread || thread->turnOrder.empty())
+    readThread(selectedThreadId);
   scheduleRefresh();
 }
 
 void ShellWidget::beginNewThread() {
+  if (newThreadCreationInFlight) {
+    showNotice(QStringLiteral("The current new thread is still being created."),
+               false);
+    return;
+  }
   NewThreadDialog dialog(
       text(turnSettings->workspace(QDir::currentPath().toStdString())), this);
   if (dialog.exec() != QDialog::Accepted)
     return;
   const NewThreadDraft draft = dialog.draft();
+  newThreadPendingPrompts.clear();
   selectedThreadId.clear();
   localNewThreadIntent = true;
   newThreadDraftName = draft.name;
@@ -1804,6 +2407,7 @@ void ShellWidget::beginNewThread() {
   conversationItemLimit = 80;
   conversationRebuildPending = true;
   threadList->clearSelection();
+  resetComposer();
   promptEditor->setFocus();
   scheduleRefresh();
 }
@@ -1873,46 +2477,109 @@ void ShellWidget::submitPrompt() {
   const QString promptValue = promptEditor->toPlainText().trimmed();
   if (promptValue.isEmpty())
     return;
-  const std::string prompt = promptValue.toStdString();
-  promptEditor->clear();
+  const std::string visibleThreadId = visiblySelectedThreadId();
+  if (!visibleThreadId.empty() && visibleThreadId != selectedThreadId) {
+    if (!model.thread(visibleThreadId)) {
+      showNotice(QStringLiteral("The visibly selected thread is no longer "
+                                "available. Your message was not sent."));
+      return;
+    }
+    selectThread(visibleThreadId);
+  }
+
+  PendingPrompt submission;
+  submission.id = nextPendingPromptId++;
+  submission.prompt = promptValue;
+  submission.attachments = attachmentDrafts;
+  submission.turnOptions = turnSettings->turnStartOptions();
 
   if (!selectedThreadId.empty()) {
-    submitPromptToThread(selectedThreadId, prompt,
-                         turnSettings->turnStartOptions(), attachmentDrafts,
-                         attachmentRevision);
+    submission.knownUserMessageIds =
+        materializedUserMessageIds(selectedThreadId);
+    const std::string destination = selectedThreadId;
+    pendingPrompts[destination].push_back(std::move(submission));
+    resetComposer();
+    conversationRebuildPending = true;
+    scheduleRefresh(RefreshConversation);
+    dispatchNextPrompt(destination);
     return;
   }
-  localNewThreadIntent = true;
+  if (!localNewThreadIntent) {
+    showNotice(QStringLiteral("No destination thread is selected. Your "
+                              "message was not sent; select a thread or use "
+                              "New thread."));
+    promptEditor->setFocus();
+    return;
+  }
+  newThreadPendingPrompts.push_back(std::move(submission));
+  resetComposer();
+  conversationRebuildPending = true;
+  scheduleRefresh(RefreshConversation);
+  startThreadForPendingPrompts();
+}
+
+void ShellWidget::startThreadForPendingPrompts() {
+  if (newThreadCreationInFlight || newThreadPendingPrompts.empty())
+    return;
+  newThreadCreationInFlight = true;
   nlohmann::json threadOptions = turnSettings->threadStartOptions();
   threadOptions.update(newThreadDraftOptions);
   threadOptions["cwd"] =
       turnSettings->workspace(QDir::currentPath().toStdString());
-  nlohmann::json turnOptions = turnSettings->turnStartOptions();
-  const std::vector<AttachmentDraft> submittedAttachments = attachmentDrafts;
-  const std::uint64_t submittedAttachmentRevision = attachmentRevision;
   const QString requestedName = newThreadDraftName;
   session.createThread(
       std::move(threadOptions),
-      [this, prompt, requestedName, submittedAttachments,
-       submittedAttachmentRevision, turnOptions = std::move(turnOptions)](
-          const nlohmann::json &result) mutable {
+      [this, requestedName](const nlohmann::json &result) {
+        newThreadCreationInFlight = false;
         if (!result.value("ok", false)) {
           const nlohmann::json error =
               result.value("error", nlohmann::json::object());
           const std::string message = safeMessage(error);
+          const QString displayedError =
+              text(message.empty() ? std::string("Thread creation failed")
+                                   : message);
+          for (PendingPrompt &pending : newThreadPendingPrompts) {
+            if (pending.status == PendingPromptStatus::Awaiting) {
+              pending.status = PendingPromptStatus::Failed;
+              pending.error = displayedError;
+            }
+          }
           showNotice(text(message.empty()
                               ? std::string("Thread creation failed")
                               : message));
+          conversationRebuildPending = true;
+          scheduleRefresh(RefreshConversation);
           return;
         }
         const std::string threadId =
             stringValue(result.value("data", nlohmann::json::object())
                             .value("thread", nlohmann::json::object()),
                         "id");
-        if (threadId.empty())
+        if (threadId.empty()) {
+          for (PendingPrompt &pending : newThreadPendingPrompts) {
+            if (pending.status == PendingPromptStatus::Awaiting) {
+              pending.status = PendingPromptStatus::Failed;
+              pending.error = QStringLiteral(
+                  "Thread creation returned no thread identifier");
+            }
+          }
+          showNotice(QStringLiteral("Thread creation returned no thread."));
+          conversationRebuildPending = true;
+          scheduleRefresh(RefreshConversation);
           return;
-        selectedThreadId = threadId;
-        localNewThreadIntent = false;
+        }
+        auto &threadPrompts = pendingPrompts[threadId];
+        threadPrompts.insert(
+            threadPrompts.end(),
+            std::make_move_iterator(newThreadPendingPrompts.begin()),
+            std::make_move_iterator(newThreadPendingPrompts.end()));
+        newThreadPendingPrompts.clear();
+        const bool viewingNewThreadDraft =
+            selectedThreadId.empty() && localNewThreadIntent;
+        if (viewingNewThreadDraft) {
+          selectedThreadId = threadId;
+          localNewThreadIntent = false;
+        }
         newThreadDraftOptions = nlohmann::json::object();
         newThreadDraftName.clear();
         newThreadDraftWorkspace.clear();
@@ -1920,16 +2587,38 @@ void ShellWidget::submitPrompt() {
         conversationRebuildPending = true;
         if (!requestedName.isEmpty())
           session.renameThread(threadId, requestedName.toStdString());
-        submitPromptToThread(threadId, prompt, std::move(turnOptions),
-                             submittedAttachments, submittedAttachmentRevision);
         scheduleRefresh();
+        QTimer::singleShot(0, this,
+                           [this, threadId] { dispatchNextPrompt(threadId); });
       });
 }
 
-void ShellWidget::submitPromptToThread(std::string threadId, std::string prompt,
-                                       nlohmann::json options,
-                                       std::vector<AttachmentDraft> attachments,
-                                       std::uint64_t submittedRevision) {
+void ShellWidget::dispatchNextPrompt(const std::string &threadId) {
+  const auto prompts = pendingPrompts.find(threadId);
+  if (prompts == pendingPrompts.end())
+    return;
+  if (std::any_of(prompts->second.begin(), prompts->second.end(),
+                  [](const PendingPrompt &candidate) {
+                    return candidate.status == PendingPromptStatus::Awaiting &&
+                           candidate.dispatched;
+                  }))
+    return;
+  const auto next =
+      std::find_if(prompts->second.begin(), prompts->second.end(),
+                   [](const PendingPrompt &candidate) {
+                     return candidate.status == PendingPromptStatus::Awaiting &&
+                            !candidate.dispatched;
+                   });
+  if (next == prompts->second.end())
+    return;
+  next->dispatched = true;
+  submitPromptToThread(threadId, next->id, next->prompt.toStdString(),
+                       next->turnOptions, next->attachments);
+}
+
+void ShellWidget::submitPromptToThread(
+    std::string threadId, std::uint64_t submissionId, std::string prompt,
+    nlohmann::json options, std::vector<AttachmentDraft> attachments) {
   nlohmann::json input =
       nlohmann::json::array({{{"type", "text"},
                               {"text", std::move(prompt)},
@@ -1947,28 +2636,33 @@ void ShellWidget::submitPromptToThread(std::string threadId, std::string prompt,
                        {"path", attachment.path.toStdString()}});
     }
   }
-  const auto completed = [this,
-                          submittedRevision](const nlohmann::json &result) {
-    if (!result.value("ok", false)) {
-      const nlohmann::json error =
-          result.value("error", nlohmann::json::object());
-      const std::string message = safeMessage(error);
-      showNotice(text(message.empty() ? std::string("Turn submission failed")
-                                      : message));
-      return;
-    }
-    if (attachmentRevision == submittedRevision) {
-      attachmentDrafts.clear();
-      ++attachmentRevision;
-      refreshAttachments();
-    }
+  const auto completed = [this, threadId,
+                          submissionId](const nlohmann::json &result) {
+    completePromptSubmission(threadId, submissionId, result);
   };
   const auto activeTurn = model.activeTurnId(threadId);
   if (activeTurn) {
     session.steerTurn(threadId, *activeTurn, std::move(input), completed);
   } else {
-    session.startTurn(threadId, std::move(input), std::move(options),
-                      completed);
+    auto startTurn = [this, threadId, input = std::move(input),
+                      options = std::move(options), completed]() mutable {
+      session.startTurn(threadId, std::move(input), std::move(options),
+                        completed);
+    };
+    const ThreadPresentation *thread = model.thread(threadId);
+    if (thread && thread->status == "notLoaded") {
+      session.resumeThread(threadId, nlohmann::json::object(),
+                           [startTurn = std::move(startTurn),
+                            completed](const nlohmann::json &result) mutable {
+                             if (!result.value("ok", false)) {
+                               completed(result);
+                               return;
+                             }
+                             startTurn();
+                           });
+    } else {
+      startTurn();
+    }
   }
 }
 
@@ -2007,7 +2701,7 @@ void ShellWidget::refreshAttachments() {
     remove->setFixedSize(18, 18);
     remove->setStyleSheet(
         QStringLiteral("QPushButton{background:#b83a3a;color:#ffffff;border:0;"
-                       "border-radius:4px;padding:0;font-size:9px;"
+                       "border-radius:4px;padding:0;"
                        "font-weight:700;}"
                        "QPushButton:hover{background:#9f2f2f;}"
                        "QPushButton:pressed{background:#842626;}"));

@@ -31,7 +31,6 @@ namespace {
 
 constexpr auto DefaultValue = "default";
 constexpr int SettingControlHeight = 32;
-constexpr int SettingLabelHeight = 14;
 constexpr int SettingLabelSpacing = 5;
 
 void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
@@ -147,14 +146,14 @@ QWidget *labelled(const QString &caption, QWidget *control,
   layout->setContentsMargins(0, 0, 0, 0);
   layout->setSpacing(SettingLabelSpacing);
   auto *label = new QLabel(caption);
-  label->setStyleSheet(
-      QStringLiteral("color:#667085;font-size:10px;font-weight:600;"));
-  label->setFixedHeight(SettingLabelHeight);
+  label->setStyleSheet(QStringLiteral("color:#667085;font-weight:600;"));
+  const int labelHeight = label->fontMetrics().height();
+  label->setFixedHeight(labelHeight);
   label->setBuddy(buddy ? buddy : control);
   control->setAccessibleName(caption);
   layout->addWidget(label);
   layout->addWidget(control);
-  surface->setFixedHeight(SettingLabelHeight + SettingLabelSpacing +
+  surface->setFixedHeight(labelHeight + SettingLabelSpacing +
                           SettingControlHeight);
   surface->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
   return surface;

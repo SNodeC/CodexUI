@@ -3,6 +3,7 @@
 #include "codex/WorkbenchWidget.h"
 
 #include "codex/FrontendSession.h"
+#include "codex/ui/BrandMark.h"
 #include "codex/ui/ExpandingPromptEditor.h"
 
 #include <QAbstractItemView>
@@ -131,7 +132,7 @@ QFrame *itemFrame(const ItemPresentation &presentation) {
                 ? QStringLiteral("Codex")
                 : QStringLiteral("Codex activity");
   else if (typeName == "commandExecution")
-    title = QStringLiteral("Shell command");
+    title = QStringLiteral("Command execution");
   else if (typeName == "collabAgentToolCall" || typeName == "subAgentActivity")
     title = QStringLiteral("Agent activity");
   else if (typeName == "reasoning")
@@ -267,9 +268,31 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
 
   auto *top = new QFrame;
   top->setProperty("kind", "panel");
+  top->setFixedHeight(64);
   auto *topLayout = new QHBoxLayout(top);
-  topLayout->setContentsMargins(14, 8, 14, 8);
-  topLayout->addWidget(makeLabel(QStringLiteral("Codex"), "heading"));
+  topLayout->setContentsMargins(18, 0, 18, 0);
+  auto *brandLockup = new QWidget;
+  auto *brandLayout = new QHBoxLayout(brandLockup);
+  brandLayout->setContentsMargins(0, 0, 0, 0);
+  brandLayout->setSpacing(10);
+  brandLayout->addWidget(new codexui::BrandMark);
+  auto *brandCopy = new QVBoxLayout;
+  brandCopy->setContentsMargins(0, 0, 0, 0);
+  brandCopy->setSpacing(0);
+  auto *applicationTitle =
+      makeLabel(QStringLiteral("CodexUI"), "applicationTitle");
+  applicationTitle->setWordWrap(false);
+  applicationTitle->setSizePolicy(QSizePolicy::Preferred,
+                                  QSizePolicy::Preferred);
+  auto *applicationSubtitle =
+      makeLabel(QStringLiteral("Codex agent workspace"), "meta");
+  applicationSubtitle->setWordWrap(false);
+  applicationSubtitle->setSizePolicy(QSizePolicy::Preferred,
+                                     QSizePolicy::Preferred);
+  brandCopy->addWidget(applicationTitle);
+  brandCopy->addWidget(applicationSubtitle);
+  brandLayout->addLayout(brandCopy);
+  topLayout->addWidget(brandLockup);
   topLayout->addStretch();
   attentionLabel = makeLabel({}, "attentionSection");
   connectionLabel = makeLabel(QStringLiteral("Disconnected"), "meta");
@@ -436,6 +459,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   protocolLayout->setSpacing(6);
   protocolStats = makeLabel({}, "meta");
   protocolLog = new QPlainTextEdit;
+  protocolLog->setProperty("kind", "code");
   protocolLog->setReadOnly(true);
   protocolLog->setLineWrapMode(QPlainTextEdit::WidgetWidth);
   protocolLog->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -446,6 +470,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   auto *stateLayout = new QVBoxLayout(stateContent);
   stateLayout->setContentsMargins(8, 8, 8, 8);
   stateView = new QPlainTextEdit;
+  stateView->setProperty("kind", "code");
   stateView->setReadOnly(true);
   stateView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
   stateView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
