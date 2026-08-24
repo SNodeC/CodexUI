@@ -486,8 +486,8 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   auto *connectionLayout = new QHBoxLayout(connectionControl);
   connectionLayout->setContentsMargins(0, 0, 0, 0);
   connectionLayout->setSpacing(6);
-  connectionLayout->addWidget(connectionStatusDot);
   connectionLayout->addWidget(connectionButton);
+  connectionLayout->addWidget(connectionStatusDot);
   topLayout->addWidget(connectionControl);
   topLayout->addWidget(controllerButton);
   topLayout->addWidget(restoreInspectorButton);
