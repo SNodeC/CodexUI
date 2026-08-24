@@ -116,10 +116,11 @@ whitespace-only, and ANSI/control-only output has no output surface. A shown box
 has no non-content minimum height, grows from zero to a maximum of 220 pixels,
 and exposes a styled vertical scrollbar only when content exceeds that limit.
 Its content height is measured synchronously during the outer layout
-transaction. Output follows its bottom while already at the bottom. A manual
-upward scroll pauses following until the user returns to the bottom. Each output
-card retains its own follow/pause position across conversation-card
-reconstruction.
+transaction. Streaming output, completion status, and metadata update the
+retained outer Command execution card in place; they do not replace it. Output
+follows its bottom while already at the bottom. A manual upward scroll pauses
+following until the user returns to the bottom. Each output card retains its
+own follow/pause position across conversation-card reconstruction.
 
 ## Inspector and Info presentation
 

@@ -251,10 +251,51 @@ public:
          {"itemId", "inserted"}}));
     shell.dirtyConversationItems[insertedCommandKey] = {"output-turn",
                                                         "inserted"};
+    QWidget *insertedCard = shell.conversationCards.at(insertedCommandKey);
     const bool commandUpdateKeptViewportHeight = observeViewportHeight(
         shell, [&shell] { shell.refreshConversationItems(); }, 80);
-    result &= expect(commandUpdateKeptViewportHeight,
-                     "command update keeps viewport geometry fixed");
+    result &= expect(commandUpdateKeptViewportHeight &&
+                         shell.conversationCards.at(insertedCommandKey) ==
+                             insertedCard,
+                     "command update mutates in place with fixed viewport");
+
+    nlohmann::json completedCommand = updatedCommand;
+    completedCommand["status"] = "completed";
+    completedCommand["exitCode"] = 0;
+    shell.model.applyEvent(presentation::event(
+        4, 1, "conversation.item.upsert", {{"item", completedCommand}},
+        presentation::Authority::Merge,
+        {{"threadId", "output-visibility"},
+         {"turnId", "output-turn"},
+         {"itemId", "inserted"}}));
+    shell.dirtyConversationItems[insertedCommandKey] = {"output-turn",
+                                                        "inserted"};
+    const bool completionKeptViewportHeight = observeViewportHeight(
+        shell, [&shell] { shell.refreshConversationItems(); }, 80);
+    result &= expect(completionKeptViewportHeight &&
+                         shell.conversationCards.at(insertedCommandKey) ==
+                             insertedCard,
+                     "command completion mutates the retained card in place");
+
+    nlohmann::json nonvisualCommand = completedCommand;
+    nonvisualCommand["nonVisualProtocolMetadata"] = "ignored";
+    shell.model.applyEvent(presentation::event(
+        5, 1, "conversation.item.upsert", {{"item", nonvisualCommand}},
+        presentation::Authority::Merge,
+        {{"threadId", "output-visibility"},
+         {"turnId", "output-turn"},
+         {"itemId", "inserted"}}));
+    shell.dirtyConversationItems[insertedCommandKey] = {"output-turn",
+                                                        "inserted"};
+    const int valueBeforeNonvisualUpdate =
+        shell.conversationScroll->verticalScrollBar()->value();
+    shell.refreshConversationItems();
+    spinEvents(80);
+    result &= expect(
+        shell.conversationCards.at(insertedCommandKey) == insertedCard &&
+            shell.conversationScroll->verticalScrollBar()->value() ==
+                valueBeforeNonvisualUpdate,
+        "nonvisual command completion data does not touch card or scroll");
 
     shell.localNewThreadIntent = true;
     shell.selectedThreadId.clear();

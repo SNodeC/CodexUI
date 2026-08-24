@@ -242,6 +242,7 @@ public:
     setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     setProperty("kind", "code");
+    setObjectName(QStringLiteral("commandOutputView"));
     setStyleSheet(QStringLiteral(
         "background:#111827;color:#e5e7eb;border-radius:6px;padding:7px;"
         "font-family:monospace;"));
@@ -268,6 +269,14 @@ public:
 
   [[nodiscard]] CommandOutputScrollState scrollState() const {
     return {followsLatest, verticalScrollBar()->value()};
+  }
+
+  void setOutput(QString output) {
+    if (toPlainText() == output)
+      return;
+    setPlainText(std::move(output));
+    remeasure();
+    settleScroll();
   }
 
   QSize sizeHint() const override {
@@ -428,6 +437,17 @@ QString displayStatus(const std::string &status) {
   return text(status);
 }
 
+QString commandExecutionMetadata(const nlohmann::json &item) {
+  QStringList metadata;
+  metadata << displayStatus(stringValue(item, "status"));
+  if (item.contains("exitCode") && item["exitCode"].is_number_integer())
+    metadata << QStringLiteral("exit %1").arg(item["exitCode"].get<int>());
+  const QString cwd = text(stringValue(item, "cwd"));
+  if (!cwd.isEmpty())
+    metadata << cwd;
+  return metadata.join(QStringLiteral("  |  "));
+}
+
 QLabel *makeLabel(QString value, const char *kind) {
   auto *label = new QLabel(std::move(value));
   label->setProperty("kind", kind);
@@ -586,6 +606,7 @@ QFrame *itemFrame(
       commandView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
       commandView->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
       commandView->setProperty("kind", "command");
+      commandView->setObjectName(QStringLiteral("commandTextView"));
       commandView->setStyleSheet(QStringLiteral(
           "background:#f8fafc;border:1px solid #d7dee8;border-radius:6px;"
           "padding:7px;font-family:monospace;"));
@@ -595,15 +616,9 @@ QFrame *itemFrame(
     if (commandOutputIsVisible(output)) {
       layout->addWidget(new CommandOutputView(output, outputScrollState));
     }
-    QStringList metadata;
-    metadata << displayStatus(stringValue(item, "status"));
-    if (item.contains("exitCode") && item["exitCode"].is_number_integer())
-      metadata << QStringLiteral("exit %1").arg(item["exitCode"].get<int>());
-    const QString cwd = text(stringValue(item, "cwd"));
-    if (!cwd.isEmpty())
-      metadata << cwd;
-    layout->addWidget(
-        makeLabel(metadata.join(QStringLiteral("  |  ")), "meta"));
+    auto *metadata = makeLabel(commandExecutionMetadata(item), "meta");
+    metadata->setObjectName(QStringLiteral("commandMetadata"));
+    layout->addWidget(metadata);
   } else if (typeName == "collabAgentToolCall" ||
              typeName == "subAgentActivity") {
     QStringList metadata;
@@ -645,6 +660,48 @@ QFrame *itemFrame(
     layout->addWidget(makeLabel(text(item.dump(2)), "meta"));
   }
   return frame;
+}
+
+bool updateCommandExecutionFrame(QWidget *frame,
+                                 const ItemPresentation &presentation) {
+  if (!frame || stringValue(presentation.raw, "type") != "commandExecution")
+    return false;
+  auto *layout = qobject_cast<QVBoxLayout *>(frame->layout());
+  auto *metadata =
+      frame->findChild<QLabel *>(QStringLiteral("commandMetadata"));
+  if (!layout || !metadata)
+    return false;
+
+  const QString command = text(stringValue(presentation.raw, "command"));
+  auto *commandView =
+      frame->findChild<QPlainTextEdit *>(QStringLiteral("commandTextView"));
+  if (commandView && !command.isEmpty() &&
+      commandView->toPlainText() != command)
+    commandView->setPlainText(command);
+  else if ((!commandView && !command.isEmpty()) ||
+           (commandView && command.isEmpty()))
+    return false;
+
+  const QString output =
+      text(stringValue(presentation.raw, "aggregatedOutput"));
+  auto *outputView = dynamic_cast<CommandOutputView *>(
+      frame->findChild<QPlainTextEdit *>(QStringLiteral("commandOutputView")));
+  if (commandOutputIsVisible(output)) {
+    if (outputView) {
+      outputView->setOutput(output);
+    } else {
+      outputView = new CommandOutputView(output);
+      const int metadataIndex = layout->indexOf(metadata);
+      layout->insertWidget(std::max(0, metadataIndex), outputView);
+    }
+  } else if (outputView) {
+    layout->removeWidget(outputView);
+    outputView->hide();
+    outputView->deleteLater();
+  }
+  metadata->setText(commandExecutionMetadata(presentation.raw));
+  frame->updateGeometry();
+  return true;
 }
 
 QFrame *agentFrame(const AgentPresentation &agent) {
@@ -2484,6 +2541,12 @@ bool ShellWidget::refreshConversationItem(const std::string &key,
   if (previousFingerprint != conversationCardFingerprints.end() &&
       previousFingerprint->second == fingerprint)
     return true;
+  if (stringValue(item->second.raw, "type") == "commandExecution" &&
+      updateCommandExecutionFrame(existing->second, item->second)) {
+    conversationCardFingerprints[key] = fingerprint;
+    changed = true;
+    return true;
+  }
   std::optional<CommandOutputScrollState> outputScrollState =
       commandOutputScrollState(existing->second);
   if (outputScrollState)

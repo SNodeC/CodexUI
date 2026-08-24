@@ -561,10 +561,12 @@ terminal control sequences are ignored. Empty, whitespace-only, and
 ANSI/control-only results create no black output surface. A shown control grows
 from zero content height to a 220-pixel maximum. Its width-dependent content
 height is measured synchronously inside the conversation update transaction.
-Beyond the maximum it uses the shared styled vertical scrollbar. Each output
-control follows appended output only while already at its bottom; manual upward
-scrolling pauses following, and the state is retained when its conversation
-card is rebuilt.
+Streaming output and command completion mutate the retained outer card in
+place; a protocol update with an unchanged visible fingerprint touches neither
+the widget nor scroll state. Beyond the maximum the output control uses the
+shared styled vertical scrollbar. It follows appended output only while already
+at its bottom; manual upward scrolling pauses following, and the state is
+retained when its conversation card is rebuilt.
 
 The Info tab's State and Protocol viewers use the same scrollbar styling and
 show vertical scrollbars only when required. The Protocol log owns the tab's
