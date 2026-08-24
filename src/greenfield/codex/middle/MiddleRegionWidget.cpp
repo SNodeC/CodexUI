@@ -1,0 +1,260 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
+
+#include "codex/middle/MiddleRegionWidget.h"
+
+#include "codex/middle/ComposerPane.h"
+#include "codex/middle/ConversationView.h"
+#include "codex/middle/InspectorPane.h"
+#include "codex/middle/ThreadPane.h"
+
+#include <QAbstractScrollArea>
+#include <QEvent>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QScrollBar>
+#include <QSplitter>
+#include <QVBoxLayout>
+#include <QWheelEvent>
+
+#include <utility>
+
+namespace codexui::codex::middle {
+namespace {
+
+QLabel *makeLabel(QString value, const char *kind = "body") {
+  auto *label = new QLabel(std::move(value));
+  label->setProperty("kind", kind);
+  label->setTextFormat(Qt::PlainText);
+  label->setWordWrap(true);
+  label->setMinimumWidth(0);
+  label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  return label;
+}
+
+QFrame *divider() {
+  auto *line = new QFrame;
+  line->setFixedHeight(1);
+  line->setStyleSheet(QStringLiteral("background:#d7dee8;"));
+  return line;
+}
+
+int verticalIntent(const QWheelEvent *event) {
+  if (!event->pixelDelta().isNull())
+    return event->pixelDelta().y();
+  return event->angleDelta().y();
+}
+
+bool canConsume(const QAbstractScrollArea *area, int delta) {
+  if (!area)
+    return false;
+  const QScrollBar *bar = area->verticalScrollBar();
+  if (!bar || bar->maximum() <= bar->minimum())
+    return false;
+  if (delta > 0)
+    return bar->value() > bar->minimum();
+  if (delta < 0)
+    return bar->value() < bar->maximum();
+  return false;
+}
+
+} // namespace
+
+MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
+  auto *root = new QVBoxLayout(this);
+  root->setContentsMargins(0, 0, 0, 0);
+  root->setSpacing(0);
+
+  splitter = new QSplitter(Qt::Horizontal);
+  splitter->setChildrenCollapsible(false);
+  splitter->setHandleWidth(8);
+
+  threadPane = new ThreadPane;
+  splitter->addWidget(threadPane);
+
+  conversationRegion = new QFrame;
+  conversationRegion->setObjectName(QStringLiteral("conversation"));
+  conversationRegion->setStyleSheet(
+      QStringLiteral("QFrame#conversation{background:#f6f8fb;}"));
+  conversationRegion->setMinimumWidth(480);
+  auto *center = new QVBoxLayout(conversationRegion);
+  center->setContentsMargins(24, 14, 24, 12);
+  center->setSpacing(0);
+  auto *context = new QHBoxLayout;
+  auto *badge = makeLabel(QStringLiteral("THREAD"), "small");
+  badge->setAlignment(Qt::AlignCenter);
+  badge->setFixedSize(58, 20);
+  badge->setStyleSheet(QStringLiteral(
+      "background:#e5eeff;color:#2f6feb;border-radius:5px;font-weight:600;"));
+  context->addWidget(badge);
+  context->addStretch();
+  center->addLayout(context);
+  center->addSpacing(2);
+  conversationTitle =
+      makeLabel(QStringLiteral("No synchronized thread"), "heading");
+  conversationMetadata = makeLabel({}, "meta");
+  center->addWidget(conversationTitle);
+  center->addSpacing(2);
+  center->addWidget(conversationMetadata);
+  center->addSpacing(7);
+  center->addWidget(divider());
+  center->addSpacing(7);
+
+  noticeBar = new QFrame;
+  noticeBar->setStyleSheet(QStringLiteral(
+      "background:#fff4f2;border:1px solid #efc2bc;border-radius:6px;"));
+  auto *noticeLayout = new QHBoxLayout(noticeBar);
+  noticeLayout->setContentsMargins(10, 6, 8, 6);
+  noticeLabel = makeLabel({}, "meta");
+  noticeLabel->setStyleSheet(QStringLiteral("color:#9d2e2e;"));
+  auto *dismiss = new QPushButton(QStringLiteral("Dismiss"));
+  dismiss->setProperty("kind", "subtle");
+  dismiss->setFixedHeight(28);
+  noticeLayout->addWidget(noticeLabel, 1);
+  noticeLayout->addWidget(dismiss);
+  noticeBar->hide();
+  connect(dismiss, &QPushButton::clicked, noticeBar, &QWidget::hide);
+  center->addWidget(noticeBar);
+
+  conversationView = new ConversationView;
+  center->addWidget(conversationView, 1);
+  composerPane = new ComposerPane(conversationRegion);
+  composerPane->setExtraOverlayHeightAction(
+      [this](int height) { conversationView->setTrailingSpaceHeight(height); });
+  center->addWidget(composerPane->canonicalReserve());
+  splitter->addWidget(conversationRegion);
+
+  inspectorPane = new InspectorPane;
+  splitter->addWidget(inspectorPane);
+  splitter->setStretchFactor(0, 0);
+  splitter->setStretchFactor(1, 1);
+  splitter->setStretchFactor(2, 0);
+  splitter->setSizes({282, 834, 404});
+  root->addWidget(splitter);
+
+  inspectorPane->setHideAction([this] { showInspector(false); });
+}
+
+ThreadPane &MiddleRegionWidget::threads() const noexcept { return *threadPane; }
+
+ConversationView &MiddleRegionWidget::conversation() const noexcept {
+  return *conversationView;
+}
+
+ComposerPane &MiddleRegionWidget::composer() const noexcept {
+  return *composerPane;
+}
+
+InspectorPane &MiddleRegionWidget::inspector() const noexcept {
+  return *inspectorPane;
+}
+
+QSplitter *MiddleRegionWidget::splitterWidget() const noexcept {
+  return splitter;
+}
+
+void MiddleRegionWidget::setThreadHeading(QString title, QString metadata) {
+  if (conversationTitle->text() != title)
+    conversationTitle->setText(std::move(title));
+  if (conversationMetadata->text() != metadata)
+    conversationMetadata->setText(std::move(metadata));
+}
+
+void MiddleRegionWidget::showNotice(QString message, bool error) {
+  if (message.trimmed().isEmpty())
+    return;
+  noticeLabel->setText(std::move(message));
+  noticeBar->setStyleSheet(
+      error ? QStringLiteral("background:#fff4f2;border:1px solid #efc2bc;"
+                             "border-radius:6px;")
+            : QStringLiteral("background:#fff8e8;border:1px solid #e5c77d;"
+                             "border-radius:6px;"));
+  noticeLabel->setStyleSheet(error ? QStringLiteral("color:#9d2e2e;")
+                                   : QStringLiteral("color:#8a5a00;"));
+  noticeBar->show();
+}
+
+void MiddleRegionWidget::showSidebar(bool visible) {
+  if (threadPane->isVisible() == visible)
+    return;
+  threadPane->setVisible(visible);
+  if (paneVisibilityAction)
+    paneVisibilityAction(sidebarVisible(), inspectorVisible());
+}
+
+void MiddleRegionWidget::showInspector(bool visible) {
+  if (inspectorPane->isVisible() == visible)
+    return;
+  inspectorPane->setVisible(visible);
+  if (paneVisibilityAction)
+    paneVisibilityAction(sidebarVisible(), inspectorVisible());
+}
+
+bool MiddleRegionWidget::sidebarVisible() const noexcept {
+  return threadPane->isVisible();
+}
+
+bool MiddleRegionWidget::inspectorVisible() const noexcept {
+  return inspectorPane->isVisible();
+}
+
+void MiddleRegionWidget::setPaneVisibilityAction(
+    std::function<void(bool, bool)> action) {
+  paneVisibilityAction = std::move(action);
+}
+
+bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
+  if (!event || event->type() != QEvent::Wheel)
+    return false;
+  auto *target = qobject_cast<QWidget *>(watched);
+  if (!target)
+    return false;
+  // Native delivery from ConversationView to its scrollbar must finish at
+  // that scrollbar. Re-routing it would recursively re-enter applyWheel().
+  if (conversationView->dispatchingNativeWheel())
+    return false;
+  const bool inCenter =
+      target == conversationRegion || conversationRegion->isAncestorOf(target);
+  const bool onHandle =
+      target == splitter->handle(1) || target == splitter->handle(2);
+  if (!inCenter && !onHandle)
+    return false;
+
+  auto *wheel = static_cast<QWheelEvent *>(event);
+  if (inCenter) {
+    if (target == conversationView || target == conversationView->viewport() ||
+        conversationView->isAncestorOf(target)) {
+      // Cards and the outer viewport naturally route to ConversationView;
+      // nested editors below are handled by the edge test.
+      for (QWidget *ancestor = target; ancestor && ancestor != conversationView;
+           ancestor = ancestor->parentWidget()) {
+        if (auto *nested = qobject_cast<QAbstractScrollArea *>(ancestor);
+            nested && nested != conversationView) {
+          if (canConsume(nested, verticalIntent(wheel)))
+            return false;
+          break;
+        }
+      }
+      if (target == conversationView || target == conversationView->viewport())
+        return false;
+    } else {
+      for (QWidget *ancestor = target;
+           ancestor && ancestor != conversationRegion;
+           ancestor = ancestor->parentWidget()) {
+        if (auto *nested = qobject_cast<QAbstractScrollArea *>(ancestor)) {
+          if (canConsume(nested, verticalIntent(wheel)))
+            return false;
+          break;
+        }
+      }
+    }
+  }
+  const bool consumed = conversationView->forwardWheelEvent(wheel);
+  if (consumed)
+    event->accept();
+  return consumed;
+}
+
+} // namespace codexui::codex::middle
