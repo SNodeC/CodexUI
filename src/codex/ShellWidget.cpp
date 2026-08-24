@@ -20,6 +20,7 @@
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
+#include <QEasingCurve>
 #include <QEvent>
 #include <QFontMetrics>
 #include <QFrame>
@@ -47,6 +48,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QVariant>
+#include <QVariantAnimation>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -60,6 +62,7 @@ namespace {
 
 constexpr int UpcomingControlHeight = 32;
 constexpr int MaximumCommandOutputHeight = 220;
+constexpr auto ConversationAnchorProperty = "conversationAnchorKey";
 
 using CommandOutputScrollState = std::pair<bool, int>;
 
@@ -902,6 +905,28 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   conversationLayout->addStretch();
   conversationScroll->setWidget(conversationContent);
   QScrollBar *conversationScrollBar = conversationScroll->verticalScrollBar();
+  conversationScrollAnimation = new QVariantAnimation(this);
+  conversationScrollAnimation->setEasingCurve(QEasingCurve::OutCubic);
+  connect(conversationScrollAnimation, &QVariantAnimation::valueChanged, this,
+          [this, conversationScrollBar](const QVariant &value) {
+            if (!conversationFollowsLatest || conversationScrollRebuilding ||
+                conversationSpacerAdjusting) {
+              conversationScrollAnimation->stop();
+              return;
+            }
+            conversationScrollProgrammatic = true;
+            conversationScrollBar->setValue(
+                std::max(value.toInt(), conversationSmoothScrollFloor));
+            conversationScrollProgrammatic = false;
+          });
+  const auto stopSmoothFollowForUser = [this] {
+    stopConversationScrollAnimation();
+    conversationSmoothScrollFloor = 0;
+  };
+  connect(conversationScrollBar, &QScrollBar::actionTriggered, this,
+          [stopSmoothFollowForUser](int) { stopSmoothFollowForUser(); });
+  connect(conversationScrollBar, &QScrollBar::sliderPressed, this,
+          stopSmoothFollowForUser);
   connect(conversationScrollBar, &QScrollBar::valueChanged, this,
           [this, conversationScrollBar](int value) {
             if (conversationScrollRebuilding ||
@@ -909,6 +934,13 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
               return;
             conversationFollowsLatest =
                 value >= conversationScrollBar->maximum() - 1;
+            if (!conversationFollowsLatest) {
+              conversationSmoothScrollFloor = 0;
+              conversationPausedAnchor = captureConversationScrollAnchor();
+              conversationPausedAnchorValid = true;
+            } else {
+              conversationPausedAnchorValid = false;
+            }
           });
   connect(conversationScrollBar, &QScrollBar::rangeChanged, this,
           [this](int, int) {
@@ -916,6 +948,8 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
               return;
             if (conversationFollowsLatest)
               scheduleConversationFollowLatest();
+            else
+              scheduleConversationPausedAnchorRestore();
           });
   centerLayout->addWidget(conversationScroll, 1);
 
@@ -1320,6 +1354,7 @@ void ShellWidget::handleEvent(const nlohmann::json &event) {
        type == "conversation.mcp.progress")) {
     const std::string key = turnId + '\x1f' + itemId;
     dirtyConversationItems[key] = {turnId, itemId};
+    conversationSmoothFollowRequested = true;
   }
 
   const std::string action = stringValue(event, "action");
@@ -1418,6 +1453,8 @@ void ShellWidget::refresh() {
       }
       if (requiresRebuild)
         refreshConversation();
+      else
+        conversationSmoothFollowRequested = false;
     }
     dirtyConversationItems.clear();
     conversationRebuildPending = false;
@@ -1555,6 +1592,8 @@ void ShellWidget::updateComposerDockHeight(int height) {
     return;
 
   QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
+  stopConversationScrollAnimation();
+  conversationSmoothScrollFloor = 0;
   const int preservedValue = scrollBar->value();
   const bool spacerGrew = trailingHeight > conversationTrailingSpaceHeight;
   conversationTrailingSpaceHeight = trailingHeight;
@@ -1595,51 +1634,150 @@ void ShellWidget::updateComposerDockHeight(int height) {
   });
 }
 
-void ShellWidget::scrollConversationToLatest() {
+void ShellWidget::stopConversationScrollAnimation() {
+  if (conversationScrollAnimation)
+    conversationScrollAnimation->stop();
+}
+
+ShellWidget::ConversationScrollAnchor
+ShellWidget::captureConversationScrollAnchor() const {
+  ConversationScrollAnchor anchor;
+  if (!conversationScroll || !conversationLayout)
+    return anchor;
+  anchor.absoluteValue = conversationScroll->verticalScrollBar()->value();
+  for (int index = 0; index < conversationLayout->count(); ++index) {
+    QWidget *widget = conversationLayout->itemAt(index)->widget();
+    if (!widget)
+      continue;
+    const QString key = widget->property(ConversationAnchorProperty).toString();
+    if (key.isEmpty() || widget->geometry().bottom() < anchor.absoluteValue)
+      continue;
+    anchor.key = key;
+    anchor.viewportOffset = widget->geometry().top() - anchor.absoluteValue;
+    break;
+  }
+  return anchor;
+}
+
+void ShellWidget::restoreConversationScrollAnchor(
+    const ConversationScrollAnchor &anchor) {
+  if (!conversationScroll || !conversationLayout)
+    return;
+  int value = anchor.absoluteValue;
+  if (!anchor.key.isEmpty()) {
+    for (int index = 0; index < conversationLayout->count(); ++index) {
+      QWidget *widget = conversationLayout->itemAt(index)->widget();
+      if (!widget ||
+          widget->property(ConversationAnchorProperty).toString() != anchor.key)
+        continue;
+      value = widget->geometry().top() - anchor.viewportOffset;
+      break;
+    }
+  }
+  QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
+  conversationScrollProgrammatic = true;
+  scrollBar->setValue(
+      std::clamp(value, scrollBar->minimum(), scrollBar->maximum()));
+  conversationScrollProgrammatic = false;
+}
+
+void ShellWidget::scheduleConversationPausedAnchorRestore() {
+  if (!conversationPausedAnchorValid || conversationPausedAnchorRestorePending)
+    return;
+  conversationPausedAnchorRestorePending = true;
+  QTimer::singleShot(0, this, [this] {
+    conversationPausedAnchorRestorePending = false;
+    if (conversationFollowsLatest || conversationScrollRebuilding ||
+        conversationSpacerAdjusting || !conversationPausedAnchorValid)
+      return;
+    conversationLayout->activate();
+    restoreConversationScrollAnchor(conversationPausedAnchor);
+  });
+}
+
+void ShellWidget::scrollConversationToLatest(bool smoothly) {
   if (!conversationScroll)
     return;
   QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
+  const int destination = scrollBar->maximum();
+  stopConversationScrollAnimation();
+  const int start = std::max(
+      scrollBar->value(), std::min(conversationSmoothScrollFloor, destination));
   conversationScrollProgrammatic = true;
-  scrollBar->setValue(scrollBar->maximum());
+  scrollBar->setValue(start);
   conversationScrollProgrammatic = false;
+  const int distance = destination - start;
+  if (!smoothly || distance <= 3 || !conversationScrollAnimation) {
+    conversationScrollProgrammatic = true;
+    scrollBar->setValue(destination);
+    conversationScrollProgrammatic = false;
+    return;
+  }
+  conversationScrollAnimation->setDuration(
+      std::clamp(110 + distance / 3, 130, 260));
+  conversationScrollAnimation->setStartValue(start);
+  conversationScrollAnimation->setEndValue(destination);
+  conversationScrollAnimation->start();
 }
 
 void ShellWidget::scheduleConversationFollowLatest() {
   if (conversationFollowScrollPending)
     return;
   conversationFollowScrollPending = true;
-  // Shell-output documents and wrapping labels can report several closely
-  // spaced geometry changes while a new card is admitted. Follow once after
-  // that burst instead of moving the viewport for every intermediate range.
+  // Wrapping labels and command output can report several closely spaced
+  // geometry changes. Retarget one animation after the burst instead of
+  // moving the viewport for every intermediate range.
   QTimer::singleShot(16, this, [this] {
     conversationFollowScrollPending = false;
     if (conversationFollowsLatest && !conversationScrollRebuilding &&
         !conversationSpacerAdjusting)
-      scrollConversationToLatest();
+      scrollConversationToLatest(true);
   });
 }
 
 void ShellWidget::settleConversationScroll(bool followLatest,
-                                           int preservedValue) {
-  QTimer::singleShot(0, this, [this, followLatest, preservedValue] {
-    QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
-    conversationScrollProgrammatic = true;
-    scrollBar->setValue(followLatest
-                            ? scrollBar->maximum()
-                            : std::min(preservedValue, scrollBar->maximum()));
-    conversationScrollProgrammatic = false;
-    QTimer::singleShot(0, this, [this, followLatest, preservedValue] {
+                                           ConversationScrollAnchor anchor,
+                                           bool smoothly) {
+  conversationSmoothScrollFloor =
+      followLatest
+          ? std::max(conversationSmoothScrollFloor, anchor.absoluteValue)
+          : 0;
+  const std::uint64_t revision = ++conversationScrollSettlementRevision;
+  const auto settle = [this, revision, followLatest, anchor] {
+    if (revision != conversationScrollSettlementRevision)
+      return false;
+    conversationLayout->activate();
+    if (followLatest) {
       QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
       conversationScrollProgrammatic = true;
-      scrollBar->setValue(followLatest
-                              ? scrollBar->maximum()
-                              : std::min(preservedValue, scrollBar->maximum()));
+      scrollBar->setValue(std::min(anchor.absoluteValue, scrollBar->maximum()));
       conversationScrollProgrammatic = false;
-      conversationScrollRebuilding = false;
-      conversationFollowsLatest =
-          scrollBar->value() >= scrollBar->maximum() - 1;
-    });
-  });
+    } else {
+      restoreConversationScrollAnchor(anchor);
+    }
+    return true;
+  };
+  QTimer::singleShot(
+      0, this, [this, revision, followLatest, anchor, smoothly, settle] {
+        if (!settle())
+          return;
+        QTimer::singleShot(
+            0, this, [this, revision, followLatest, anchor, smoothly, settle] {
+              if (!settle())
+                return;
+              conversationScrollRebuilding = false;
+              if (followLatest) {
+                conversationFollowsLatest = true;
+                scrollConversationToLatest(smoothly);
+              } else {
+                QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
+                conversationFollowsLatest =
+                    scrollBar->value() >= scrollBar->maximum() - 1;
+                conversationPausedAnchor = anchor;
+                conversationPausedAnchorValid = !conversationFollowsLatest;
+              }
+            });
+      });
 }
 
 void ShellWidget::appendProtocolFrame(const nlohmann::json &frame) {
@@ -1759,9 +1897,11 @@ void ShellWidget::refreshThreads() {
 }
 
 void ShellWidget::refreshConversation() {
-  QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
   const bool followLatest = conversationFollowsLatest;
-  const int preservedValue = scrollBar->value();
+  const ConversationScrollAnchor anchor = captureConversationScrollAnchor();
+  const bool smoothly = conversationSmoothFollowRequested;
+  conversationSmoothFollowRequested = false;
+  stopConversationScrollAnimation();
   ++conversationSpacerRevision;
   conversationSpacerAdjusting = false;
   conversationScrollRebuilding = true;
@@ -1783,10 +1923,13 @@ void ShellWidget::refreshConversation() {
     if (localNewThreadIntent && !newThreadPendingPrompts.empty()) {
       emptyConversation = nullptr;
       for (const PendingPrompt &pending : newThreadPendingPrompts) {
-        conversationLayout->addWidget(new PendingPromptCard(
+        auto *card = new PendingPromptCard(
             pending.prompt, static_cast<int>(pending.attachments.size()),
             pending.status == PendingPromptStatus::Awaiting,
-            pending.status == PendingPromptStatus::Failed, pending.error));
+            pending.status == PendingPromptStatus::Failed, pending.error);
+        card->setProperty(ConversationAnchorProperty,
+                          QStringLiteral("pending:new:%1").arg(pending.id));
+        conversationLayout->addWidget(card);
       }
     } else {
       emptyConversation = makeLabel(
@@ -1798,7 +1941,7 @@ void ShellWidget::refreshConversation() {
     }
     addConversationTrailingSpace();
     conversationLayout->addStretch();
-    settleConversationScroll(followLatest, preservedValue);
+    settleConversationScroll(followLatest, anchor, smoothly);
     return;
   }
 
@@ -1847,6 +1990,7 @@ void ShellWidget::refreshConversation() {
         retained != commandOutputScrollStates.end())
       outputScrollState = retained->second;
     QWidget *card = itemFrame(*items[index].item, outputScrollState);
+    card->setProperty(ConversationAnchorProperty, text(items[index].key));
     conversationCards[items[index].key] = card;
     conversationLayout->addWidget(card);
   }
@@ -1857,15 +2001,20 @@ void ShellWidget::refreshConversation() {
         makeLabel(QStringLiteral("No materialized activity."), "muted"));
   if (pending != pendingPrompts.end()) {
     for (const PendingPrompt &submission : pending->second) {
-      conversationLayout->addWidget(new PendingPromptCard(
+      auto *card = new PendingPromptCard(
           submission.prompt, static_cast<int>(submission.attachments.size()),
           submission.status == PendingPromptStatus::Awaiting,
-          submission.status == PendingPromptStatus::Failed, submission.error));
+          submission.status == PendingPromptStatus::Failed, submission.error);
+      card->setProperty(ConversationAnchorProperty,
+                        QStringLiteral("pending:%1:%2")
+                            .arg(text(selectedThreadId))
+                            .arg(submission.id));
+      conversationLayout->addWidget(card);
     }
   }
   addConversationTrailingSpace();
   conversationLayout->addStretch();
-  settleConversationScroll(followLatest, preservedValue);
+  settleConversationScroll(followLatest, anchor, smoothly);
 }
 
 bool ShellWidget::refreshConversationItem(const std::string &key,
@@ -1885,22 +2034,26 @@ bool ShellWidget::refreshConversationItem(const std::string &key,
     return false;
 
   const bool followLatest = conversationFollowsLatest;
+  const ConversationScrollAnchor anchor = captureConversationScrollAnchor();
   std::optional<CommandOutputScrollState> outputScrollState =
       commandOutputScrollState(existing->second);
   if (outputScrollState)
     commandOutputScrollStates[key] = *outputScrollState;
   QWidget *replacement = itemFrame(item->second, outputScrollState);
+  replacement->setProperty(ConversationAnchorProperty, text(key));
+  stopConversationScrollAnimation();
+  conversationScrollRebuilding = true;
   QLayoutItem *replaced =
       conversationLayout->replaceWidget(existing->second, replacement);
   if (!replaced) {
     replacement->deleteLater();
+    conversationScrollRebuilding = false;
     return false;
   }
   delete replaced;
   existing->second->deleteLater();
   existing->second = replacement;
-  if (followLatest)
-    scheduleConversationFollowLatest();
+  settleConversationScroll(followLatest, anchor, followLatest);
   return true;
 }
 
@@ -2151,6 +2304,8 @@ void ShellWidget::completePromptSubmission(const std::string &threadId,
     showNotice(text(message.empty() ? std::string("Turn submission failed")
                                     : message));
   }
+  if (threadId == selectedThreadId)
+    conversationSmoothFollowRequested = true;
   conversationRebuildPending = true;
   scheduleRefresh(RefreshConversation | RefreshStatus);
   QTimer::singleShot(0, this,
@@ -2355,6 +2510,11 @@ void ShellWidget::refreshStateInspector() {
 }
 
 void ShellWidget::selectThread(std::string threadId) {
+  stopConversationScrollAnimation();
+  conversationSmoothScrollFloor = 0;
+  conversationPausedAnchorValid = false;
+  ++conversationScrollSettlementRevision;
+  conversationSmoothFollowRequested = false;
   if (threadId != selectedThreadId)
     conversationItemLimit = 80;
   selectedThreadId = std::move(threadId);
@@ -2491,6 +2651,7 @@ void ShellWidget::submitPrompt() {
     const std::string destination = selectedThreadId;
     pendingPrompts[destination].push_back(std::move(submission));
     resetComposer();
+    conversationSmoothFollowRequested = true;
     conversationRebuildPending = true;
     scheduleRefresh(RefreshConversation);
     dispatchNextPrompt(destination);
@@ -2505,6 +2666,7 @@ void ShellWidget::submitPrompt() {
   }
   newThreadPendingPrompts.push_back(std::move(submission));
   resetComposer();
+  conversationSmoothFollowRequested = true;
   conversationRebuildPending = true;
   scheduleRefresh(RefreshConversation);
   startThreadForPendingPrompts();

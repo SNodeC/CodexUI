@@ -47,13 +47,21 @@ prompts move to the returned stable thread ID and are dispatched in order.
 
 ## Conversation scrolling
 
-The message view follows incoming content only while it is already at the
-bottom. If the user scrolls upward, automatic following pauses so the current
-text can be read. Returning to the bottom re-enables following.
+The message view smoothly follows incoming content only while it is already at
+the bottom. Consecutive geometry changes retarget one short, monotonic animation
+to the newest bottom. If the user scrolls upward, the animation stops
+immediately and automatic following pauses so the current text can be read.
+Returning to the bottom re-enables following.
 
 This policy applies to new messages, streaming updates, pending prompt cards,
 and card reconstruction. It is based on the scroll bar's actual bottom state,
 not on turn activity.
+
+While following is paused, CodexUI anchors the first visible card and its pixel
+offset. Appends below the viewport keep the scrollbar value unchanged; card
+reflow or reconstruction restores that visual anchor after Qt completes layout.
+Incoming data therefore cannot move the user's reading position merely because
+content above or below it changed size.
 
 Reaching the current bottom re-enables following regardless of how it happens.
 This includes direct user scrolling and the range clamp that can occur when a

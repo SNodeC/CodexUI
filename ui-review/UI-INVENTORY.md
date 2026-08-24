@@ -27,11 +27,12 @@
   highlight sweeping left and right.
 - Windowed materialization of long conversations with an explicit Load More
   control.
-- Bottom-follow only while the user remains at the bottom.
+- Short, interruptible smooth bottom-follow only while the user remains at the
+  bottom; paused reading uses a stable visible-card/pixel-offset anchor.
 - Wheel and touchpad forwarding from surrounding center chrome and splitter
   handles.
 
-## Shell-command output
+## Command-execution output
 
 - Read-only monospace output with zero content minimum height.
 - Automatic growth to 220 pixels.

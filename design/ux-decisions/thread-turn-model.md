@@ -124,5 +124,7 @@ to scroll the final message above the overlay with the normal visual gap.
 Composer growth preserves the current reading position even when it was at the
 old bottom. Reaching the extended range's new bottom enables automatic
 following again. Composer contraction removes the spacer; a Qt range clamp at
-the former bottom is accepted. Incoming content follows only while the
-conversation is at its current bottom.
+the former bottom is accepted. Incoming content follows with a short,
+interruptible animation only while the conversation is at its current bottom.
+While following is paused, the first visible stable card and its pixel offset
+anchor the reading position across appends, card reflow, and reconstruction.

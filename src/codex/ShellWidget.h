@@ -28,6 +28,7 @@ class QSplitter;
 class QTabWidget;
 class QTimer;
 class QToolButton;
+class QVariantAnimation;
 class QVBoxLayout;
 
 namespace codexui {
@@ -38,6 +39,7 @@ namespace codexui::codex {
 
 class FrontendSession;
 class DiffViewer;
+class ShellWidgetScrollTest;
 class TurnSettingsWidget;
 
 class ShellWidget final : public QWidget {
@@ -48,6 +50,8 @@ protected:
   bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+  friend class ShellWidgetScrollTest;
+
   enum class PendingPromptStatus { Awaiting, Acknowledged, Failed };
 
   struct PendingPrompt {
@@ -59,6 +63,12 @@ private:
     bool dispatched = false;
     QString error;
     std::unordered_set<std::string> knownUserMessageIds;
+  };
+
+  struct ConversationScrollAnchor {
+    QString key;
+    int viewportOffset = 0;
+    int absoluteValue = 0;
   };
 
   enum RefreshArea : std::uint32_t {
@@ -91,8 +101,14 @@ private:
   void addConversationTrailingSpace();
   void updateComposerDockHeight(int height);
   void scheduleConversationFollowLatest();
-  void scrollConversationToLatest();
-  void settleConversationScroll(bool followLatest, int preservedValue);
+  void scrollConversationToLatest(bool smoothly = true);
+  void stopConversationScrollAnimation();
+  [[nodiscard]] ConversationScrollAnchor
+  captureConversationScrollAnchor() const;
+  void restoreConversationScrollAnchor(const ConversationScrollAnchor &anchor);
+  void scheduleConversationPausedAnchorRestore();
+  void settleConversationScroll(bool followLatest,
+                                ConversationScrollAnchor anchor, bool smoothly);
   void appendProtocolFrame(const nlohmann::json &frame);
   void hydrateHistoricalAgents();
   void showNotice(QString message, bool error = true);
@@ -200,6 +216,7 @@ private:
   QPushButton *approveButton = nullptr;
   QPushButton *denyButton = nullptr;
   QTimer *refreshTimer = nullptr;
+  QVariantAnimation *conversationScrollAnimation = nullptr;
   std::uint64_t observedPresentationSequence = 0;
   std::uint32_t pendingRefreshAreas = RefreshAll;
   bool composerExpanded = false;
@@ -210,9 +227,15 @@ private:
   bool conversationScrollProgrammatic = false;
   bool conversationSpacerAdjusting = false;
   bool conversationFollowScrollPending = false;
+  bool conversationSmoothFollowRequested = false;
+  int conversationSmoothScrollFloor = 0;
+  ConversationScrollAnchor conversationPausedAnchor;
+  bool conversationPausedAnchorValid = false;
+  bool conversationPausedAnchorRestorePending = false;
   int composerCanonicalHeight = 0;
   int conversationTrailingSpaceHeight = 0;
   std::uint64_t conversationSpacerRevision = 0;
+  std::uint64_t conversationScrollSettlementRevision = 0;
   std::size_t conversationItemLimit = 80;
   bool conversationRebuildPending = true;
   std::unordered_map<std::string, QWidget *> conversationCards;

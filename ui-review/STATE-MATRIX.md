@@ -16,8 +16,9 @@
 | Navigation | Switch away from pending prompt | Pending card and queue remain associated with their stable thread ID. |
 | Navigation | Return before acknowledgment | The same animated pending card is displayed. |
 | Navigation | Return to materialized running thread | Retained Plan, Agents, Changes, and other per-thread presentation reappear without an automatic destructive read. |
-| Conversation | At bottom | New cards and stream updates follow the bottom. |
-| Conversation | User scrolled upward | Automatic following pauses and the reading position is preserved. |
+| Conversation | At bottom | New cards and stream updates smoothly follow the bottom with a short retargetable animation. |
+| Conversation | User scrolls during smooth follow | The animation stops immediately and automatic following pauses. |
+| Conversation | User scrolled upward | Automatic following pauses; a visible-card/pixel-offset anchor preserves the reading position through appends, reflow, and reconstruction. |
 | Conversation | User returns to bottom | Automatic following resumes. |
 | Composer | Short prompt | One-line compact height. |
 | Composer | Multiline prompt | Editor overlays the unchanged message viewport; matching trailing scroll space is added without moving existing messages. |

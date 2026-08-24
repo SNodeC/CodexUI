@@ -512,11 +512,14 @@ each operation observes the turn state established by the preceding result.
 Queues for different threads are independent. New-thread prompts remain bound
 to the explicit creation draft until `thread.create` returns its stable ID.
 
-The conversation follows new content only while its vertical scrollbar is at
-the bottom. Manual upward scrolling pauses following until the user returns to
-the bottom. Wheel and touchpad events over non-scrollable center-pane chrome and
-splitter handles are forwarded to the conversation; nested scrollable controls
-retain their own wheel handling.
+The conversation smoothly follows new content only while its vertical scrollbar
+is at the bottom. Geometry bursts retarget a short monotonic animation to the
+latest maximum. Manual upward scrolling interrupts that animation immediately
+and pauses following until the user returns to the bottom. While paused, the
+first visible stable card and its viewport offset anchor the reading position
+across appends, card reflow, and reconstruction. Wheel and touchpad events over
+non-scrollable center-pane chrome and splitter handles are forwarded to the
+conversation; nested scrollable controls retain their own wheel handling.
 
 The bottom composer overlay has a canonical in-layout reservation. As multiline
 input, attachments, settings, or attention controls grow beyond that height,
@@ -1278,7 +1281,8 @@ contract requires a separately reviewed change.
 17. Pending prompts are presentation state until acknowledged and are
     dispatched sequentially per thread without disabling the composer.
 18. Conversation and nested-output following is enabled exactly while the
-    corresponding scrollbar is at its bottom.
+    corresponding scrollbar is at its bottom. Conversation following is smooth
+    and user-interruptible; its paused state preserves a stable visual anchor.
 19. Composer growth overlays the unchanged message viewport and adds equal
     trailing content space without automatically moving existing messages.
 
@@ -1287,7 +1291,7 @@ contract requires a separately reviewed change.
 The remaining presentation-level choices are implemented as follows:
 
 - every incoming frame is reduced immediately, while widget reconstruction is
-  coalesced by one 16-millisecond single-shot Qt timer;
+  coalesced by one 32-millisecond single-shot Qt timer;
 - the Info/Protocol view retains at most 2,000 text blocks and the presentation
   model retains at most 256 authority-free telemetry records; the protocol
   statistics summary is below the expanding log;
@@ -1295,6 +1299,8 @@ The remaining presentation-level choices are implemented as follows:
   application-wide busy state or composer lock;
 - reaching the conversation bottom re-enables automatic following, including
   after scrolling through composer-added trailing space or a contraction clamp;
+- paused conversation updates preserve the first visible stable card and its
+  pixel offset through appends, reflow, and reconstruction;
 - typed operation errors and provider notices use a dismissible latest-notice
   banner, while unknown/malformed protocol input remains visible in bounded
   diagnostics and never mutates retained presentation state.

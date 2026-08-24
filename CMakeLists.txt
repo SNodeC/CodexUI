@@ -181,6 +181,34 @@ if(BUILD_TESTING)
     set_tests_properties(
         codexui-presentation-pipeline PROPERTIES TIMEOUT 10
     )
+
+    set(CODEXUI_SCROLL_TEST_SOURCES ${CODEXUI_CODEX_COMMON_SOURCES})
+    list(
+        REMOVE_ITEM CODEXUI_SCROLL_TEST_SOURCES
+        src/codex/main.cpp
+        src/codex/MainWindow.cpp
+        src/codex/MainWindow.h
+    )
+    qt_add_executable(
+        codexui-conversation-scroll-test
+        tests/codex/ConversationScrollTest.cpp
+        ${CODEXUI_SCROLL_TEST_SOURCES}
+        src/codex/ShellWidget.cpp
+        src/codex/ShellWidget.h
+        src/codex/PendingRequestDialog.cpp
+        src/codex/PendingRequestDialog.h
+        src/codex/TurnSettingsWidget.cpp
+        src/codex/TurnSettingsWidget.h
+    )
+    configure_codexui_target(codexui-conversation-scroll-test)
+    add_test(
+        NAME codexui-conversation-scroll
+        COMMAND codexui-conversation-scroll-test
+    )
+    set_tests_properties(
+        codexui-conversation-scroll
+        PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
 endif()
 
 install(

@@ -25,9 +25,11 @@ scrollable controls consume their own wheel events.
 
 ## Conversation following
 
-The message view follows appended or streamed content only while already at
-the bottom. Manual upward scrolling pauses following. Returning to the bottom
-restores it. Card reconstruction retains this state.
+The message view smoothly follows appended or streamed content only while
+already at the bottom. Geometry bursts retarget one short monotonic animation.
+Manual upward scrolling interrupts it and pauses following. Returning to the
+bottom restores it. While paused, a visible-card/pixel-offset anchor preserves
+the reading position across appends, card reflow, and reconstruction.
 
 ## Composer
 
@@ -41,8 +43,8 @@ composer removes the spacer and restores the canonical geometry.
 
 ## Pending prompt presentation
 
-Local admission creates a gray prompt card immediately. A Qt-painted moving
-highlight travels around its rounded border until app-server acknowledgment.
+Local admission creates a muted-blue prompt card immediately. A brighter blue
+highlight sweeps left and right until app-server acknowledgment.
 The card belongs to its destination thread and persists through navigation.
 Acknowledgment replaces it with normal message presentation; failure produces
 an explicit error state.
