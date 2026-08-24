@@ -2,10 +2,13 @@
 
 #include "codex/TurnSettingsWidget.h"
 
+#include "codex/FileSelectionDialog.h"
+
 #include <QComboBox>
 #include <QDir>
 #include <QFrame>
 #include <QGridLayout>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -14,8 +17,10 @@
 #include <QPainterPath>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QStyle>
 #include <QStyleOptionButton>
 #include <QStyleOptionComboBox>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidgetAction>
 
@@ -135,7 +140,8 @@ QComboBox *compactCombo(const char *name) {
   return combo;
 }
 
-QWidget *labelled(const QString &caption, QWidget *control) {
+QWidget *labelled(const QString &caption, QWidget *control,
+                  QWidget *buddy = nullptr) {
   auto *surface = new QFrame;
   auto *layout = new QVBoxLayout(surface);
   layout->setContentsMargins(0, 0, 0, 0);
@@ -144,7 +150,7 @@ QWidget *labelled(const QString &caption, QWidget *control) {
   label->setStyleSheet(
       QStringLiteral("color:#667085;font-size:10px;font-weight:600;"));
   label->setFixedHeight(SettingLabelHeight);
-  label->setBuddy(control);
+  label->setBuddy(buddy ? buddy : control);
   control->setAccessibleName(caption);
   layout->addWidget(label);
   layout->addWidget(control);
@@ -223,7 +229,21 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   cwd = new QLineEdit;
   cwd->setObjectName(QStringLiteral("codexWorkspace"));
   cwd->setFixedHeight(SettingControlHeight);
+  cwd->setStyleSheet(
+      QStringLiteral("QLineEdit#codexWorkspace{min-height:30px;}"));
   cwd->setPlaceholderText(QStringLiteral("Codex default workspace"));
+  auto *workspacePicker = new QWidget;
+  workspacePicker->setFixedHeight(SettingControlHeight);
+  auto *workspaceLayout = new QHBoxLayout(workspacePicker);
+  workspaceLayout->setContentsMargins(0, 0, 0, 0);
+  workspaceLayout->setSpacing(6);
+  auto *browseWorkspace = new QToolButton;
+  browseWorkspace->setIcon(style()->standardIcon(QStyle::SP_DirOpenIcon));
+  browseWorkspace->setToolTip(QStringLiteral("Select workspace"));
+  browseWorkspace->setAccessibleName(QStringLiteral("Select workspace"));
+  browseWorkspace->setFixedSize(SettingControlHeight, SettingControlHeight);
+  workspaceLayout->addWidget(cwd, 1);
+  workspaceLayout->addWidget(browseWorkspace);
   approval = compactCombo("codexApproval");
   personality = compactCombo("codexPersonality");
   more = new ChevronMenuButton(QStringLiteral("More"));
@@ -234,7 +254,8 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   root->addWidget(labelled(QStringLiteral("Reasoning"), effort), 0, 1);
   root->addWidget(labelled(QStringLiteral("Access"), sandbox), 0, 2);
   root->addWidget(labelled(QStringLiteral("Network"), network), 0, 3);
-  root->addWidget(labelled(QStringLiteral("Workspace"), cwd), 1, 0);
+  root->addWidget(labelled(QStringLiteral("Workspace"), workspacePicker, cwd),
+                  1, 0);
   root->addWidget(labelled(QStringLiteral("Approval"), approval), 1, 1);
   root->addWidget(labelled(QStringLiteral("Style"), personality), 1, 2);
   root->addWidget(labelled(QStringLiteral("Additional"), more), 1, 3);
@@ -334,6 +355,16 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   connectCombo(collaboration, Field::Collaboration);
   connect(cwd, &QLineEdit::textEdited, this,
           [this] { markTouched(Field::Workspace); });
+  connect(browseWorkspace, &QToolButton::clicked, this, [this] {
+    const QString initialDirectory =
+        cwd->text().trimmed().isEmpty()
+            ? QDir::homePath()
+            : QDir::fromNativeSeparators(cwd->text().trimmed());
+    FileSelectionDialog dialog(FileSelectionDialog::Mode::Workspace,
+                               initialDirectory, {}, this);
+    if (dialog.exec() == QDialog::Accepted)
+      setWorkspace(dialog.selectedDirectory());
+  });
   connect(model, &QComboBox::currentIndexChanged, this,
           [this] { refreshModelOptions(); });
   connect(sandbox, &QComboBox::currentIndexChanged, this,

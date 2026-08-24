@@ -701,33 +701,43 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   auto *composerLayout = new QVBoxLayout(composer);
   composerLayout->setContentsMargins(10, 8, 8, 8);
   composerLayout->setSpacing(6);
-  auto *attachmentRow = new QHBoxLayout;
-  attachmentSummary = makeLabel({}, "meta");
-  attachmentSummary->hide();
-  clearAttachmentsButton = new QPushButton(QStringLiteral("Clear"));
-  clearAttachmentsButton->setProperty("kind", "subtle");
-  clearAttachmentsButton->setFixedHeight(24);
-  clearAttachmentsButton->hide();
-  attachmentRow->addWidget(attachmentSummary, 1);
-  attachmentRow->addWidget(clearAttachmentsButton);
-  composerLayout->addLayout(attachmentRow);
-  auto *composerRow = new QHBoxLayout;
-  composerRow->setSpacing(8);
+  attachmentPanel = new QFrame;
+  attachmentPanel->setProperty("kind", "summary");
+  auto *attachmentPanelLayout = new QVBoxLayout(attachmentPanel);
+  attachmentPanelLayout->setContentsMargins(6, 6, 6, 6);
+  attachmentPanelLayout->setSpacing(4);
+  attachmentListScroll = new QScrollArea;
+  attachmentListScroll->setWidgetResizable(true);
+  attachmentListScroll->setFrameShape(QFrame::NoFrame);
+  attachmentListScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  auto *attachmentListContent = new QWidget;
+  attachmentListLayout = new QVBoxLayout(attachmentListContent);
+  attachmentListLayout->setContentsMargins(0, 0, 0, 0);
+  attachmentListLayout->setSpacing(4);
+  attachmentListScroll->setWidget(attachmentListContent);
+  attachmentPanelLayout->addWidget(attachmentListScroll);
+  attachmentPanel->hide();
+  composerLayout->addWidget(attachmentPanel);
+
+  promptEditor = new codexui::ExpandingPromptEditor;
+  composerLayout->addWidget(promptEditor);
+
+  auto *composerActions = new QHBoxLayout;
+  composerActions->setSpacing(8);
   attachmentButton = new QPushButton(QStringLiteral("Attach"));
   attachmentButton->setProperty("kind", "subtle");
   attachmentButton->setFixedHeight(UpcomingControlHeight);
-  promptEditor = new codexui::ExpandingPromptEditor;
   sendButton = new QPushButton(QStringLiteral("Send"));
   sendButton->setProperty("kind", "primary");
   sendButton->setFixedHeight(UpcomingControlHeight);
   interruptButton = new QPushButton(QStringLiteral("Stop"));
   interruptButton->setProperty("kind", "stop");
   interruptButton->setFixedHeight(UpcomingControlHeight);
-  composerRow->addWidget(attachmentButton);
-  composerRow->addWidget(promptEditor, 1);
-  composerRow->addWidget(interruptButton);
-  composerRow->addWidget(sendButton);
-  composerLayout->addLayout(composerRow);
+  composerActions->addWidget(attachmentButton);
+  composerActions->addStretch();
+  composerActions->addWidget(interruptButton);
+  composerActions->addWidget(sendButton);
+  composerLayout->addLayout(composerActions);
   composerDockLayout->addWidget(composer);
   connect(promptEditor, &codexui::ExpandingPromptEditor::editorHeightChanged,
           composerDock,
@@ -744,11 +754,6 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
           [this] { interruptActiveTurn(); });
   connect(attachmentButton, &QPushButton::clicked, this,
           [this] { chooseAttachments(); });
-  connect(clearAttachmentsButton, &QPushButton::clicked, this, [this] {
-    attachmentDrafts.clear();
-    ++attachmentRevision;
-    refreshAttachments();
-  });
   splitter->addWidget(center);
 
   inspector = new QFrame;
@@ -1917,21 +1922,50 @@ void ShellWidget::chooseAttachments() {
 
 void ShellWidget::refreshAttachments() {
   const bool hasAttachments = !attachmentDrafts.empty();
-  attachmentSummary->setVisible(hasAttachments);
-  clearAttachmentsButton->setVisible(hasAttachments);
+  attachmentPanel->setVisible(hasAttachments);
+  clearLayout(attachmentListLayout);
   if (!hasAttachments) {
-    attachmentSummary->clear();
-    attachmentSummary->setToolTip({});
+    attachmentListScroll->setFixedHeight(0);
     return;
   }
-  QStringList names;
-  for (const AttachmentDraft &attachment : attachmentDrafts)
-    names.push_back(attachment.name);
-  attachmentSummary->setText(
-      attachmentDrafts.size() == 1
-          ? QStringLiteral("1 attachment: %1").arg(names.front())
-          : QStringLiteral("%1 attachments").arg(attachmentDrafts.size()));
-  attachmentSummary->setToolTip(names.join(QStringLiteral("\n")));
+  constexpr int AttachmentRowHeight = 28;
+  constexpr int MaximumVisibleAttachments = 4;
+  for (std::size_t index = 0; index < attachmentDrafts.size(); ++index) {
+    const AttachmentDraft &attachment = attachmentDrafts[index];
+    auto *row = new QFrame;
+    row->setStyleSheet(
+        QStringLiteral("QFrame{background:#ffffff;border:1px solid #d7dee8;"
+                       "border-radius:6px;}"));
+    row->setFixedHeight(AttachmentRowHeight);
+    auto *rowLayout = new QHBoxLayout(row);
+    rowLayout->setContentsMargins(8, 1, 1, 1);
+    rowLayout->setSpacing(6);
+    auto *name = makeLabel(attachment.name, "meta");
+    name->setToolTip(QDir::toNativeSeparators(attachment.path));
+    name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    rowLayout->addWidget(name, 1);
+    auto *remove = new QPushButton(QStringLiteral("X"));
+    remove->setAccessibleName(QStringLiteral("Remove %1").arg(attachment.name));
+    remove->setToolTip(QStringLiteral("Remove attachment"));
+    remove->setFixedSize(26, 26);
+    remove->setStyleSheet(
+        QStringLiteral("QPushButton{background:#b83a3a;color:#ffffff;border:0;"
+                       "border-radius:5px;padding:0;font-weight:700;}"
+                       "QPushButton:hover{background:#9f2f2f;}"
+                       "QPushButton:pressed{background:#842626;}"));
+    connect(remove, &QPushButton::clicked, this, [this, index] {
+      attachmentDrafts.erase(attachmentDrafts.begin() +
+                             static_cast<std::ptrdiff_t>(index));
+      ++attachmentRevision;
+      refreshAttachments();
+    });
+    rowLayout->addWidget(remove);
+    attachmentListLayout->addWidget(row);
+  }
+  const int visibleRows = std::min<int>(
+      static_cast<int>(attachmentDrafts.size()), MaximumVisibleAttachments);
+  attachmentListScroll->setFixedHeight(visibleRows * AttachmentRowHeight +
+                                       (visibleRows - 1) * 4);
 }
 
 void ShellWidget::interruptActiveTurn() {

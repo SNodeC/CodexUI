@@ -141,8 +141,9 @@ private:
   TurnSettingsWidget *turnSettings = nullptr;
   QPushButton *sendButton = nullptr;
   QPushButton *attachmentButton = nullptr;
-  QPushButton *clearAttachmentsButton = nullptr;
-  QLabel *attachmentSummary = nullptr;
+  QFrame *attachmentPanel = nullptr;
+  QScrollArea *attachmentListScroll = nullptr;
+  QVBoxLayout *attachmentListLayout = nullptr;
   QPushButton *interruptButton = nullptr;
   QPushButton *controllerButton = nullptr;
   QPushButton *attentionButton = nullptr;
