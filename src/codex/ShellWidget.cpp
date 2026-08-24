@@ -2004,10 +2004,10 @@ void ShellWidget::refreshAttachments() {
     auto *remove = new QPushButton(QStringLiteral("X"));
     remove->setAccessibleName(QStringLiteral("Remove %1").arg(attachment.name));
     remove->setToolTip(QStringLiteral("Remove attachment"));
-    remove->setFixedSize(20, 20);
+    remove->setFixedSize(18, 18);
     remove->setStyleSheet(
         QStringLiteral("QPushButton{background:#b83a3a;color:#ffffff;border:0;"
-                       "border-radius:4px;padding:0;font-size:10px;"
+                       "border-radius:4px;padding:0;font-size:9px;"
                        "font-weight:700;}"
                        "QPushButton:hover{background:#9f2f2f;}"
                        "QPushButton:pressed{background:#842626;}"));
@@ -2017,7 +2017,6 @@ void ShellWidget::refreshAttachments() {
       ++attachmentRevision;
       refreshAttachments();
     });
-    rowLayout->addWidget(remove, 0, Qt::AlignVCenter);
     auto *fileBox = new QFrame;
     fileBox->setObjectName(QStringLiteral("attachmentFileBox"));
     fileBox->setStyleSheet(
@@ -2030,6 +2029,7 @@ void ShellWidget::refreshAttachments() {
     name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     fileLayout->addWidget(name);
     rowLayout->addWidget(fileBox, 1);
+    rowLayout->addWidget(remove, 0, Qt::AlignVCenter);
     attachmentListLayout->addWidget(row);
   }
   const int visibleRows = std::min<int>(
