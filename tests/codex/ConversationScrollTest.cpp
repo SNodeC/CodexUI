@@ -5,6 +5,7 @@
 #include "codex/Configuration.h"
 #include "codex/FrontendSession.h"
 #include "codex/PresentationProtocol.h"
+#include "codex/ProtocolNormalizer.h"
 #include "codex/ShellWidget.h"
 
 #include <QAbstractSlider>
@@ -296,6 +297,48 @@ public:
             shell.conversationScroll->verticalScrollBar()->value() ==
                 valueBeforeNonvisualUpdate,
         "nonvisual command completion data does not touch card or scroll");
+
+    const std::string streamedAgentKey =
+        std::string("output-turn") + '\x1f' + "streamed-agent";
+    const nlohmann::json startedAgent = {{"id", "streamed-agent"},
+                                         {"type", "agentMessage"},
+                                         {"phase", "commentary"},
+                                         {"text", ""}};
+    nlohmann::json normalizedStart;
+    ProtocolNormalizer normalizer(
+        [&normalizedStart](const nlohmann::json &frame) {
+          normalizedStart = frame;
+          return true;
+        });
+    normalizer.serverNotification("item/started",
+                                  {{"threadId", "output-visibility"},
+                                   {"turnId", "output-turn"},
+                                   {"item", startedAgent}});
+    result &= expect(
+        normalizedStart.value("scope", nlohmann::json::object())
+                .value("itemId", std::string{}) == "streamed-agent",
+        "item start derives stable scope identity from the item payload");
+    normalizedStart["sequence"] = 6;
+    normalizedStart["generation"] = 1;
+    shell.handleEvent(normalizedStart);
+    shell.handleEvent(
+        presentation::event(7, 1, "conversation.item.append",
+                            {{"field", "text"}, {"text", "streamed reply"}},
+                            presentation::Authority::Merge,
+                            {{"threadId", "output-visibility"},
+                             {"turnId", "output-turn"},
+                             {"itemId", "streamed-agent"}}));
+    spinEvents(100);
+    bool streamedTextVisible = false;
+    const auto streamedCard = shell.conversationCards.find(streamedAgentKey);
+    if (streamedCard != shell.conversationCards.end()) {
+      for (QLabel *label : streamedCard->second->findChildren<QLabel *>())
+        streamedTextVisible |=
+            label->text().contains(QStringLiteral("streamed reply"));
+    }
+    result &= expect(streamedCard != shell.conversationCards.end() &&
+                         streamedTextVisible,
+                     "streamed agent card appears without another prompt");
 
     shell.localNewThreadIntent = true;
     shell.selectedThreadId.clear();

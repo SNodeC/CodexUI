@@ -291,18 +291,22 @@ void ProtocolNormalizer::serverNotification(std::string_view method,
               Authority::Replace, scope);
   } else if (method == "item/started" || method == "item/completed") {
     const nlohmann::json item = params.value("item", nlohmann::json::object());
+    nlohmann::json itemScope = scope;
+    if (!itemScope.contains("itemId") && item.contains("id") &&
+        !item["id"].is_null())
+      itemScope["itemId"] = item["id"];
     emitEvent(
         "conversation.item.upsert",
         {{"lifecycle", method == "item/started" ? "started" : "completed"},
          {"item", item}},
-        Authority::Merge, scope);
+        Authority::Merge, itemScope);
     const std::string itemType = item.value("type", std::string{});
     if (itemType == "collabAgentToolCall" || itemType == "subAgentActivity") {
       emitEvent(
           "agents.activity.upsert",
           {{"lifecycle", method == "item/started" ? "started" : "completed"},
            {"activity", item}},
-          Authority::Merge, scope);
+          Authority::Merge, itemScope);
     }
   } else if (method == "item/agentMessage/delta" ||
              method == "item/plan/delta" ||
