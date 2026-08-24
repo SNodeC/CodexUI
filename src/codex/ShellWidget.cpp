@@ -1996,19 +1996,11 @@ void ShellWidget::refreshAttachments() {
   constexpr int MaximumVisibleAttachments = 4;
   for (std::size_t index = 0; index < attachmentDrafts.size(); ++index) {
     const AttachmentDraft &attachment = attachmentDrafts[index];
-    auto *row = new QFrame;
-    row->setObjectName(QStringLiteral("attachmentRow"));
-    row->setStyleSheet(
-        QStringLiteral("QFrame#attachmentRow{background:#ffffff;"
-                       "border:1px solid #d7dee8;border-radius:6px;}"));
+    auto *row = new QWidget;
     row->setFixedHeight(AttachmentRowHeight);
     auto *rowLayout = new QHBoxLayout(row);
-    rowLayout->setContentsMargins(8, 2, 3, 2);
-    rowLayout->setSpacing(6);
-    auto *name = makeLabel(attachment.name, "meta");
-    name->setToolTip(QDir::toNativeSeparators(attachment.path));
-    name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    rowLayout->addWidget(name, 1);
+    rowLayout->setContentsMargins(0, 2, 0, 2);
+    rowLayout->setSpacing(5);
     auto *remove = new QPushButton(QStringLiteral("X"));
     remove->setAccessibleName(QStringLiteral("Remove %1").arg(attachment.name));
     remove->setToolTip(QStringLiteral("Remove attachment"));
@@ -2026,6 +2018,18 @@ void ShellWidget::refreshAttachments() {
       refreshAttachments();
     });
     rowLayout->addWidget(remove, 0, Qt::AlignVCenter);
+    auto *fileBox = new QFrame;
+    fileBox->setObjectName(QStringLiteral("attachmentFileBox"));
+    fileBox->setStyleSheet(
+        QStringLiteral("QFrame#attachmentFileBox{background:#ffffff;"
+                       "border:1px solid #d7dee8;border-radius:6px;}"));
+    auto *fileLayout = new QHBoxLayout(fileBox);
+    fileLayout->setContentsMargins(8, 1, 8, 1);
+    auto *name = makeLabel(attachment.name, "meta");
+    name->setToolTip(QDir::toNativeSeparators(attachment.path));
+    name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    fileLayout->addWidget(name);
+    rowLayout->addWidget(fileBox, 1);
     attachmentListLayout->addWidget(row);
   }
   const int visibleRows = std::min<int>(
