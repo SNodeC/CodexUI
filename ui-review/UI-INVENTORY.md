@@ -2,7 +2,9 @@
 
 ## Top bar
 
-- CodexUI brand mark, application name, and workspace breadcrumb.
+- One-line CodexUI lockup: 36-pixel brand mark, equally high application title,
+  and current-size "Codex agent workspace" subtitle on the title baseline.
+- Workspace breadcrumb.
 - Inspector visibility, pending-request attention, controller ownership, and
   connection controls.
 - Stable desktop identity through the `codex-ui` application ID and icon.
@@ -21,7 +23,8 @@
 - Thread title, workspace, and status context.
 - Ordered user, Codex, plan, reasoning, command, file-change, and collaboration
   cards from `PresentationModel`.
-- Per-thread pending prompt cards with gray content and animated borders.
+- Per-thread pending prompt cards with muted blue content and a brighter blue
+  highlight sweeping left and right.
 - Windowed materialization of long conversations with an explicit Load More
   control.
 - Bottom-follow only while the user remains at the bottom.

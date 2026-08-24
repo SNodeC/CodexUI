@@ -22,9 +22,9 @@ presentation, input, selection, and scroll state.
 ## Prompt submission and acknowledgment
 
 Submitting a prompt creates a client-local pending prompt card at the bottom of
-the destination thread immediately. The card is gray and its rounded border has
-a moving highlight painted by Qt until the app-server acknowledges the
-operation.
+the destination thread immediately. The card uses a muted version of the normal
+blue user-card treatment, with a brighter blue highlight sweeping left and
+right across it until the app-server acknowledges the operation.
 
 Pending prompt state is keyed by thread ID and a client-local submission ID. It
 therefore remains visible when the user switches threads and returns. On

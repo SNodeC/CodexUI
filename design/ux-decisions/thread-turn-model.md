@@ -66,7 +66,7 @@ Clicking Send or Steer performs local admission immediately:
 3. leave the composer enabled for more input;
 4. dispatch the operation when it reaches the front of that thread's queue.
 
-A pending card is gray and has a moving border highlight. Its identity is the
+A pending card is muted blue and has a brighter left-to-right highlight sweep. Its identity is the
 stable thread ID plus a client-local submission ID. Thread switching does not
 remove or relocate it.
 

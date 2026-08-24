@@ -499,8 +499,9 @@ colors, controls, and scrollbars.
 
 Prompt admission and app-server acknowledgment are separate states. On Send or
 Steer, CodexUI immediately appends a client-local pending user card to the
-destination thread. The card uses gray content and a Qt-painted moving border
-highlight until the correlated app-server result arrives. Pending cards are
+destination thread. The card uses a muted blue user-prompt treatment and a
+Qt-painted highlight sweeping left and right until the correlated app-server
+result arrives. Pending cards are
 keyed by stable thread ID and client-local submission ID, survive thread
 switching, and become normal authoritative user messages when the corresponding
 app-server item materializes. Failure produces a retained error card.

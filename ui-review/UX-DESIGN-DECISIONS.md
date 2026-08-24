@@ -71,6 +71,6 @@ desktop identity.
 ## Long-operation feedback
 
 Progress feedback is scoped to the operation it represents. Prompt
-acknowledgment uses the pending card's animated border. Thread creation and long
+acknowledgment uses the pending card's animated highlight sweep. Thread creation and long
 thread loading may receive dedicated scoped indicators, but no global spinner
 or application-wide input lock is defined.

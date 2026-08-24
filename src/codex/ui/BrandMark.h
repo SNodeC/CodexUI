@@ -12,6 +12,7 @@ class BrandMark final : public QWidget {
 public:
   explicit BrandMark(QWidget *parent = nullptr);
   [[nodiscard]] static QIcon icon();
+  [[nodiscard]] static QWidget *createLockup(QWidget *parent = nullptr);
 
 protected:
   void paintEvent(QPaintEvent *event) override;

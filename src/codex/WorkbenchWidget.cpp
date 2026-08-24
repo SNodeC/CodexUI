@@ -271,28 +271,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   top->setFixedHeight(64);
   auto *topLayout = new QHBoxLayout(top);
   topLayout->setContentsMargins(18, 0, 18, 0);
-  auto *brandLockup = new QWidget;
-  auto *brandLayout = new QHBoxLayout(brandLockup);
-  brandLayout->setContentsMargins(0, 0, 0, 0);
-  brandLayout->setSpacing(10);
-  brandLayout->addWidget(new codexui::BrandMark);
-  auto *brandCopy = new QVBoxLayout;
-  brandCopy->setContentsMargins(0, 0, 0, 0);
-  brandCopy->setSpacing(0);
-  auto *applicationTitle =
-      makeLabel(QStringLiteral("CodexUI"), "applicationTitle");
-  applicationTitle->setWordWrap(false);
-  applicationTitle->setSizePolicy(QSizePolicy::Preferred,
-                                  QSizePolicy::Preferred);
-  auto *applicationSubtitle =
-      makeLabel(QStringLiteral("Codex agent workspace"), "meta");
-  applicationSubtitle->setWordWrap(false);
-  applicationSubtitle->setSizePolicy(QSizePolicy::Preferred,
-                                     QSizePolicy::Preferred);
-  brandCopy->addWidget(applicationTitle);
-  brandCopy->addWidget(applicationSubtitle);
-  brandLayout->addLayout(brandCopy);
-  topLayout->addWidget(brandLockup);
+  topLayout->addWidget(codexui::BrandMark::createLockup());
   topLayout->addStretch();
   attentionLabel = makeLabel({}, "attentionSection");
   connectionLabel = makeLabel(QStringLiteral("Disconnected"), "meta");

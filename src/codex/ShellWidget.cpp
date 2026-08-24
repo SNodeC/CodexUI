@@ -18,7 +18,6 @@
 #include <QAction>
 #include <QApplication>
 #include <QColor>
-#include <QConicalGradient>
 #include <QDateTime>
 #include <QDir>
 #include <QEvent>
@@ -29,11 +28,13 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLinearGradient>
 #include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPaintEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
@@ -75,7 +76,7 @@ public:
     layout->setContentsMargins(12, 10, 12, 10);
     layout->setSpacing(6);
 
-    const QString foreground = awaiting ? QStringLiteral("#7b8798")
+    const QString foreground = awaiting ? QStringLiteral("#536b8f")
                                : failed ? QStringLiteral("#9b2c2c")
                                         : QStringLiteral("#1d2633");
     auto *title = makeLabel(QStringLiteral("You"), "title");
@@ -110,11 +111,9 @@ public:
     }
 
     if (awaiting) {
-      animationTimer.setInterval(55);
-      connect(&animationTimer, &QTimer::timeout, this, [this] {
-        animationAngle = (animationAngle + 7) % 360;
-        update();
-      });
+      animationTimer.setInterval(32);
+      connect(&animationTimer, &QTimer::timeout, this,
+              qOverload<>(&PendingPromptCard::update));
       animationTimer.start();
     }
     isAwaiting = awaiting;
@@ -127,10 +126,10 @@ protected:
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     const QRectF bounds = QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5);
-    const QColor background = isAwaiting  ? QColor(QStringLiteral("#f1f4f8"))
+    const QColor background = isAwaiting  ? QColor(QStringLiteral("#dbe7f8"))
                               : hasFailed ? QColor(QStringLiteral("#fff1f1"))
                                           : QColor(QStringLiteral("#eaf2ff"));
-    const QColor border = isAwaiting  ? QColor(QStringLiteral("#c8d0dc"))
+    const QColor border = isAwaiting  ? QColor(QStringLiteral("#9eb9df"))
                           : hasFailed ? QColor(QStringLiteral("#e5a3a3"))
                                       : QColor(QStringLiteral("#bfd3f9"));
     painter.setBrush(background);
@@ -139,20 +138,34 @@ protected:
 
     if (!isAwaiting)
       return;
-    QConicalGradient highlight(bounds.center(), animationAngle);
-    highlight.setColorAt(0.00, QColor(QStringLiteral("#c8d0dc")));
-    highlight.setColorAt(0.67, QColor(QStringLiteral("#c8d0dc")));
-    highlight.setColorAt(0.80, QColor(QStringLiteral("#2f6feb")));
-    highlight.setColorAt(0.91, QColor(QStringLiteral("#75a0ef")));
-    highlight.setColorAt(1.00, QColor(QStringLiteral("#c8d0dc")));
+    constexpr qreal HalfSweepWidth = 0.24;
+    constexpr qint64 HalfCycleMilliseconds = 850;
+    const qint64 phase =
+        QDateTime::currentMSecsSinceEpoch() % (2 * HalfCycleMilliseconds);
+    const qreal progress =
+        phase <= HalfCycleMilliseconds
+            ? qreal(phase) / HalfCycleMilliseconds
+            : qreal(2 * HalfCycleMilliseconds - phase) / HalfCycleMilliseconds;
+    const qreal center = bounds.left() + progress * bounds.width();
+    const qreal radius = std::max(28.0, bounds.width() * HalfSweepWidth);
+    QLinearGradient sweep(center - radius, 0.0, center + radius, 0.0);
+    sweep.setColorAt(0.0, QColor(47, 111, 235, 0));
+    sweep.setColorAt(0.5, QColor(117, 160, 239, 105));
+    sweep.setColorAt(1.0, QColor(47, 111, 235, 0));
+    QPainterPath clip;
+    clip.addRoundedRect(bounds, 8.0, 8.0);
+    painter.save();
+    painter.setClipPath(clip);
+    painter.fillRect(bounds, sweep);
+    painter.restore();
+
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QBrush(highlight), 2.5));
+    painter.setPen(QPen(QColor(QStringLiteral("#79a0d7")), 1.5));
     painter.drawRoundedRect(bounds, 8.0, 8.0);
   }
 
 private:
   QTimer animationTimer;
-  int animationAngle = 0;
   bool isAwaiting = false;
   bool hasFailed = false;
 };
@@ -632,28 +645,7 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   auto *topLayout = new QHBoxLayout(top);
   topLayout->setContentsMargins(18, 0, 18, 0);
   topLayout->setSpacing(12);
-  auto *brandLockup = new QWidget;
-  auto *brandLayout = new QHBoxLayout(brandLockup);
-  brandLayout->setContentsMargins(0, 0, 0, 0);
-  brandLayout->setSpacing(10);
-  brandLayout->addWidget(new codexui::BrandMark);
-  auto *brandCopy = new QVBoxLayout;
-  brandCopy->setContentsMargins(0, 0, 0, 0);
-  brandCopy->setSpacing(0);
-  auto *applicationTitle =
-      makeLabel(QStringLiteral("CodexUI"), "applicationTitle");
-  applicationTitle->setWordWrap(false);
-  applicationTitle->setSizePolicy(QSizePolicy::Preferred,
-                                  QSizePolicy::Preferred);
-  auto *applicationSubtitle =
-      makeLabel(QStringLiteral("Codex agent workspace"), "meta");
-  applicationSubtitle->setWordWrap(false);
-  applicationSubtitle->setSizePolicy(QSizePolicy::Preferred,
-                                     QSizePolicy::Preferred);
-  brandCopy->addWidget(applicationTitle);
-  brandCopy->addWidget(applicationSubtitle);
-  brandLayout->addLayout(brandCopy);
-  topLayout->addWidget(brandLockup);
+  topLayout->addWidget(codexui::BrandMark::createLockup());
   restoreSidebarButton = new QPushButton(QStringLiteral("Show threads"));
   restoreSidebarButton->setProperty("kind", "subtle");
   restoreSidebarButton->setFixedHeight(32);

@@ -12,12 +12,11 @@ namespace codexui::UiStyle {
 QString applicationStyleSheet() {
   const qreal configuredSize = QFontInfo(QApplication::font()).pointSizeF();
   const qreal baseSize = configuredSize > 0.0 ? configuredSize : 10.0;
-  const QString compact = QString::number(std::max(1.0, baseSize - 1.0), 'f', 1);
+  const QString compact =
+      QString::number(std::max(1.0, baseSize - 1.0), 'f', 1);
   const QString standard = QString::number(baseSize, 'f', 1);
   const QString section = QString::number(baseSize + 1.0, 'f', 1);
   const QString heading = QString::number(baseSize + 3.0, 'f', 1);
-  const QString applicationTitle =
-      QString::number(baseSize + 5.0, 'f', 1);
 
   return QStringLiteral(R"QSS(
         * {
@@ -38,7 +37,7 @@ QString applicationStyleSheet() {
             font-weight: 600;
         }
         QLabel[kind="heading"] { font-size: %4pt; font-weight: 600; }
-        QLabel[kind="applicationTitle"] { font-size: %5pt; font-weight: 700; }
+        QLabel[kind="applicationTitle"] { font-weight: 700; }
         QLabel[kind="brand"] { font-size: %3pt; font-weight: 600; }
         QLabel[kind="title"] { font-size: %2pt; font-weight: 600; }
         QLabel[kind="body"] { font-size: %2pt; }
@@ -342,7 +341,7 @@ QString applicationStyleSheet() {
         QMenu::separator { height: 1px; background: #d7dee8; margin: 5px 8px; }
         QToolTip { background: #ffffff; color: #1d2633; border: 1px solid #b9c4d2; padding: 5px; }
     )QSS")
-      .arg(compact, standard, section, heading, applicationTitle);
+      .arg(compact, standard, section, heading);
 }
 
 } // namespace codexui::UiStyle
