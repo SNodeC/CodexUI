@@ -90,7 +90,7 @@ jobs:
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/snodec" \
             -DAISUITE_BUILD_CODEX_TESTS=OFF \
             -DAISUITE_BUILD_APPS=ON
-          cmake --build _build/aisuite --target all
+          cmake --build _build/aisuite --target all --parallel 2
           cmake --install _build/aisuite
 
       - name: Configure CodexUI
