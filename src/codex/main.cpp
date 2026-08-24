@@ -37,15 +37,15 @@ int main(int argc, char *argv[]) {
   core::SNodeC::init(argc, argv);
 
   codexui::codex::FrontendSession session(*configuration);
-  codexui::codex::MainWindow window(session);
-  session.setRuntimeStoppedHandler([&application] { application.quit(); });
-  session.start(!configurationOnly);
-
   if (configurationOnly) {
+    session.start(false);
     session.wait();
     return 0;
   }
 
+  codexui::codex::MainWindow window(session);
+  session.setRuntimeStoppedHandler([&application] { application.quit(); });
+  session.start(true);
   window.show();
   const int result = application.exec();
   session.shutdown();
