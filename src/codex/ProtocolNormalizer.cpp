@@ -393,7 +393,7 @@ void ProtocolNormalizer::operationResult(std::string action,
       const nlohmann::json thread =
           value.value("thread", nlohmann::json::object());
       data = {{"thread", thread}};
-      authority = Authority::Replace;
+      authority = Authority::Merge;
       const std::string threadId = presentation::stringMember(thread, "id");
       if (!threadId.empty())
         scope["threadId"] = threadId;

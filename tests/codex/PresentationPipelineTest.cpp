@@ -123,12 +123,30 @@ int main() {
       {{"threadId", "thread-1"},
        {"turnId", "turn-2"},
        {"diff", "diff --git a/README.md b/README.md\n+PIPELINE_OK\n"}});
+  normalizer.serverNotification(
+      "turn/plan/updated",
+      {{"threadId", "thread-1"},
+       {"turnId", "turn-2"},
+       {"explanation", "Keep live inspector state"},
+       {"plan", nlohmann::json::array({{{"step", "Retain the plan"},
+                                        {"status", "completed"}}})}});
   normalizer.serverNotification("turn/completed",
                                 {{"threadId", "thread-1"},
                                  {"turn",
                                   {{"id", "turn-2"},
                                    {"status", "completed"},
                                    {"items", nlohmann::json::array()}}}});
+
+  normalizer.operationResult("thread.read", "read-2",
+                             {{"threadId", "thread-1"}},
+                             {{"id", "read-2"},
+                              {"result",
+                               {{"thread",
+                                 {{"id", "thread-1"},
+                                  {"preview", "Architecture pipeline"},
+                                  {"cwd", "/workspace"},
+                                  {"status", {{"type", "idle"}}},
+                                  {"turns", nlohmann::json::array()}}}}}});
 
   bool validFrames = !frames.empty();
   std::uint64_t expectedSequence = 1;
@@ -179,6 +197,12 @@ int main() {
                  stringMember(turn->domains.at("turn.diff.changed"), "diff") ==
                      "diff --git a/README.md b/README.md\n+PIPELINE_OK\n",
              "live turn diff is retained in its authoritative turn scope");
+  passed &=
+      expect(turn != nullptr &&
+                 stringMember(turn->plan, "explanation") ==
+                     "Keep live inspector state" &&
+                 turn->plan.value("steps", nlohmann::json::array()).size() == 1,
+             "incomplete thread reads preserve live plan and inspector state");
   passed &= expect(!model.activeTurnId("thread-1").has_value(),
                    "completed stream leaves no active turn");
   return passed ? 0 : 1;
