@@ -55,6 +55,7 @@
 #include <cmath>
 #include <functional>
 #include <iterator>
+#include <memory>
 #include <optional>
 
 namespace codexui::codex {
@@ -62,6 +63,7 @@ namespace {
 
 constexpr int UpcomingControlHeight = 32;
 constexpr int MaximumCommandOutputHeight = 220;
+constexpr int AcknowledgementTransitionMilliseconds = 500;
 constexpr auto ConversationAnchorProperty = "conversationAnchorKey";
 
 using CommandOutputScrollState = std::pair<bool, int>;
@@ -71,6 +73,7 @@ QLabel *makeLabel(QString value, const char *kind = "body");
 class PendingPromptCard final : public QFrame {
 public:
   PendingPromptCard(const QString &prompt, int attachmentCount, bool awaiting,
+                    bool acknowledgedTransition, qint64 acknowledgedAt,
                     bool failed, const QString &error) {
     setObjectName(QStringLiteral("pendingPromptCard"));
     setStyleSheet(QStringLiteral(
@@ -79,7 +82,8 @@ public:
     layout->setContentsMargins(12, 10, 12, 10);
     layout->setSpacing(6);
 
-    const QString foreground = awaiting ? QStringLiteral("#536b8f")
+    const QString foreground = awaiting || acknowledgedTransition
+                                   ? QStringLiteral("#536b8f")
                                : failed ? QStringLiteral("#9b2c2c")
                                         : QStringLiteral("#1d2633");
     auto *title = makeLabel(QStringLiteral("You"), "title");
@@ -94,6 +98,8 @@ public:
     QString status;
     if (awaiting)
       status = QStringLiteral("Waiting for app-server acknowledgment");
+    else if (acknowledgedTransition)
+      status = QStringLiteral("Accepted by app-server");
     else if (failed)
       status = error.isEmpty() ? QStringLiteral("Not sent")
                                : QStringLiteral("Not sent: %1").arg(error);
@@ -113,13 +119,15 @@ public:
       layout->addWidget(metadata);
     }
 
-    if (awaiting) {
+    if (awaiting || acknowledgedTransition) {
       animationTimer.setInterval(32);
       connect(&animationTimer, &QTimer::timeout, this,
               qOverload<>(&PendingPromptCard::update));
       animationTimer.start();
     }
     isAwaiting = awaiting;
+    isAcknowledgedTransition = acknowledgedTransition;
+    acknowledgedAtMilliseconds = acknowledgedAt;
     hasFailed = failed;
   }
 
@@ -129,26 +137,32 @@ protected:
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     const QRectF bounds = QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5);
-    const QColor background = isAwaiting  ? QColor(QStringLiteral("#dbe7f8"))
+    const QColor background = isAwaiting || isAcknowledgedTransition
+                                  ? QColor(QStringLiteral("#dbe7f8"))
                               : hasFailed ? QColor(QStringLiteral("#fff1f1"))
                                           : QColor(QStringLiteral("#eaf2ff"));
-    const QColor border = isAwaiting  ? QColor(QStringLiteral("#9eb9df"))
+    const QColor border = isAwaiting || isAcknowledgedTransition
+                              ? QColor(QStringLiteral("#9eb9df"))
                           : hasFailed ? QColor(QStringLiteral("#e5a3a3"))
                                       : QColor(QStringLiteral("#bfd3f9"));
     painter.setBrush(background);
     painter.setPen(QPen(border, 1.0));
     painter.drawRoundedRect(bounds, 8.0, 8.0);
 
-    if (!isAwaiting)
+    if (!isAwaiting && !isAcknowledgedTransition)
       return;
     constexpr qreal HalfSweepWidth = 0.24;
     constexpr qint64 HalfCycleMilliseconds = 850;
-    const qint64 phase =
-        QDateTime::currentMSecsSinceEpoch() % (2 * HalfCycleMilliseconds);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 phase = now % (2 * HalfCycleMilliseconds);
     const qreal progress =
-        phase <= HalfCycleMilliseconds
-            ? qreal(phase) / HalfCycleMilliseconds
-            : qreal(2 * HalfCycleMilliseconds - phase) / HalfCycleMilliseconds;
+        isAwaiting ? phase <= HalfCycleMilliseconds
+                         ? qreal(phase) / HalfCycleMilliseconds
+                         : qreal(2 * HalfCycleMilliseconds - phase) /
+                               HalfCycleMilliseconds
+                   : std::clamp(qreal(now - acknowledgedAtMilliseconds) /
+                                    AcknowledgementTransitionMilliseconds,
+                                0.0, 1.0);
     const qreal center = bounds.left() + progress * bounds.width();
     const qreal radius = std::max(28.0, bounds.width() * HalfSweepWidth);
     QLinearGradient sweep(center - radius, 0.0, center + radius, 0.0);
@@ -170,6 +184,8 @@ protected:
 private:
   QTimer animationTimer;
   bool isAwaiting = false;
+  bool isAcknowledgedTransition = false;
+  qint64 acknowledgedAtMilliseconds = 0;
   bool hasFailed = false;
 };
 
@@ -411,8 +427,10 @@ QFrame *makeStatusDot() {
 
 void clearLayout(QLayout *layout) {
   while (QLayoutItem *item = layout->takeAt(0)) {
-    if (QWidget *widget = item->widget())
+    if (QWidget *widget = item->widget()) {
+      widget->hide();
       widget->deleteLater();
+    }
     if (QLayout *child = item->layout()) {
       clearLayout(child);
       delete child;
@@ -462,6 +480,16 @@ std::string safeMessage(const nlohmann::json &value) {
   return error != value.end() && error->is_object()
              ? stringValue(*error, "message")
              : std::string{};
+}
+
+bool isThreadNotFoundResult(const nlohmann::json &result) {
+  if (result.value("ok", false))
+    return false;
+  const QString message =
+      text(safeMessage(result.value("error", nlohmann::json::object())))
+          .toLower();
+  return message.contains(QStringLiteral("thread")) &&
+         message.contains(QStringLiteral("not found"));
 }
 
 QFrame *itemFrame(
@@ -891,6 +919,7 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   conversationScroll = new QScrollArea;
   conversationScroll->setWidgetResizable(true);
   conversationScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  conversationScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
   conversationContent = new QWidget;
   conversationContent->setMinimumWidth(0);
   conversationContent->setSizePolicy(QSizePolicy::Ignored,
@@ -924,14 +953,35 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
     conversationSmoothScrollFloor = 0;
   };
   connect(conversationScrollBar, &QScrollBar::actionTriggered, this,
-          [stopSmoothFollowForUser](int) { stopSmoothFollowForUser(); });
+          [this, stopSmoothFollowForUser](int) {
+            conversationUserScrollPending = true;
+            stopSmoothFollowForUser();
+          });
   connect(conversationScrollBar, &QScrollBar::sliderPressed, this,
-          stopSmoothFollowForUser);
+          [this, stopSmoothFollowForUser] {
+            conversationUserScrollInteraction = true;
+            stopSmoothFollowForUser();
+          });
+  connect(conversationScrollBar, &QScrollBar::sliderReleased, this, [this] {
+    conversationUserScrollInteraction = false;
+    conversationUserScrollPending = false;
+  });
   connect(conversationScrollBar, &QScrollBar::valueChanged, this,
           [this, conversationScrollBar](int value) {
             if (conversationScrollRebuilding ||
                 conversationScrollProgrammatic || conversationSpacerAdjusting)
               return;
+            const bool userInitiated = conversationUserScrollPending ||
+                                       conversationUserScrollInteraction;
+            if (!conversationUserScrollInteraction)
+              conversationUserScrollPending = false;
+            if (!userInitiated) {
+              if (conversationFollowsLatest)
+                scheduleConversationFollowLatest();
+              else
+                scheduleConversationPausedAnchorRestore();
+              return;
+            }
             conversationFollowsLatest =
                 value >= conversationScrollBar->maximum() - 1;
             if (!conversationFollowsLatest) {
@@ -1291,11 +1341,36 @@ void ShellWidget::refreshComposerLayout() {
 
 void ShellWidget::handleEvent(const nlohmann::json &event) {
   appendProtocolFrame(event);
+  const std::string incomingKind = stringValue(event, "kind");
+  const std::string incomingType = stringValue(event, "type");
+  const nlohmann::json incomingData =
+      event.value("data", nlohmann::json::object());
+  if (incomingKind == "event" && incomingType == "connection.lifecycle" &&
+      stringValue(incomingData, "state") == "connected") {
+    threadHydration.clear();
+    operationReadyThreads.clear();
+  }
   model.applyEvent(event);
   const std::string kind = stringValue(event, "kind");
   const std::string type = stringValue(event, "type");
   const nlohmann::json data = event.value("data", nlohmann::json::object());
-  if (kind == "result" && !event.value("ok", false)) {
+  const nlohmann::json incomingScope =
+      event.value("scope", nlohmann::json::object());
+  const std::string incomingThreadId = stringValue(incomingScope, "threadId");
+  bool recoveringThreadNotFound = false;
+  if (isThreadNotFoundResult(event)) {
+    const auto prompts = pendingPrompts.find(incomingThreadId);
+    recoveringThreadNotFound =
+        prompts != pendingPrompts.end() &&
+        std::any_of(prompts->second.begin(), prompts->second.end(),
+                    [](const PendingPrompt &candidate) {
+                      return candidate.status ==
+                                 PendingPromptStatus::Awaiting &&
+                             candidate.readinessRetryAttempted;
+                    });
+  }
+  if (kind == "result" && !event.value("ok", false) &&
+      !recoveringThreadNotFound) {
     const nlohmann::json error = event.value("error", nlohmann::json::object());
     const std::string message = safeMessage(error);
     showNotice(text(message.empty() ? std::string("Codex operation failed")
@@ -1324,6 +1399,7 @@ void ShellWidget::handleEvent(const nlohmann::json &event) {
               .value("state", std::string{}) == "opened") {
     requestThreads();
     requestModels();
+    ensureThreadHydrated(selectedThreadId);
     session.listPermissionProfiles(
         {{"cwd", QDir::currentPath().toStdString()}});
   }
@@ -1342,6 +1418,8 @@ void ShellWidget::handleEvent(const nlohmann::json &event) {
   if (type == "thread.removed" && !eventThreadId.empty()) {
     pendingPrompts.erase(eventThreadId);
     materializedPromptItemIds.erase(eventThreadId);
+    threadHydration.erase(eventThreadId);
+    operationReadyThreads.erase(eventThreadId);
   } else if (!eventThreadId.empty()) {
     reconcileAcknowledgedPrompts(eventThreadId);
   }
@@ -1358,6 +1436,40 @@ void ShellWidget::handleEvent(const nlohmann::json &event) {
   }
 
   const std::string action = stringValue(event, "action");
+  if (kind == "result" && !eventThreadId.empty() && action == "thread.read") {
+    const bool readSucceeded = event.value("ok", false);
+    threadHydration[eventThreadId] = readSucceeded
+                                         ? ThreadHydrationState::Hydrated
+                                         : ThreadHydrationState::NotHydrated;
+    if (readSucceeded) {
+      if (!threadRequiresResume(eventThreadId))
+        operationReadyThreads.insert(eventThreadId);
+      QTimer::singleShot(0, this, [this, eventThreadId] {
+        dispatchNextPrompt(eventThreadId);
+      });
+    } else {
+      const auto prompts = pendingPrompts.find(eventThreadId);
+      if (prompts != pendingPrompts.end()) {
+        const auto waiting = std::find_if(
+            prompts->second.begin(), prompts->second.end(),
+            [](const PendingPrompt &candidate) {
+              return candidate.status == PendingPromptStatus::Awaiting &&
+                     !candidate.dispatched;
+            });
+        if (waiting != prompts->second.end()) {
+          const std::uint64_t submissionId = waiting->id;
+          QTimer::singleShot(
+              0, this, [this, eventThreadId, submissionId, event] {
+                completePromptSubmission(eventThreadId, submissionId, event);
+              });
+        }
+      }
+    }
+  } else if (kind == "result" && !eventThreadId.empty() &&
+             action == "thread.resume" && event.value("ok", false)) {
+    threadHydration[eventThreadId] = ThreadHydrationState::Hydrated;
+    operationReadyThreads.insert(eventThreadId);
+  }
   if ((event.value("kind", std::string{}) == "result" &&
        action == "thread.read" && eventThreadId == selectedThreadId) ||
       type == "thread.removed") {
@@ -1441,21 +1553,10 @@ void ShellWidget::refresh() {
   if ((areas & RefreshThreads) != 0)
     refreshThreads();
   if ((areas & RefreshConversation) != 0) {
-    if (conversationRebuildPending) {
+    if (conversationRebuildPending)
       refreshConversation();
-    } else {
-      bool requiresRebuild = false;
-      for (const auto &[key, identity] : dirtyConversationItems) {
-        if (!refreshConversationItem(key, identity.first, identity.second)) {
-          requiresRebuild = true;
-          break;
-        }
-      }
-      if (requiresRebuild)
-        refreshConversation();
-      else
-        conversationSmoothFollowRequested = false;
-    }
+    else
+      refreshConversationItems();
     dirtyConversationItems.clear();
     conversationRebuildPending = false;
   }
@@ -1469,6 +1570,50 @@ void ShellWidget::refresh() {
     refreshTurnSettings();
   if ((areas & RefreshStatus) != 0)
     refreshStatus();
+}
+
+std::string ShellWidget::conversationItemFingerprint(
+    const ItemPresentation &presentation) const {
+  const nlohmann::json &item = presentation.raw;
+  const std::string typeName = stringValue(item, "type");
+  nlohmann::json projected{{"type", typeName}};
+  if (typeName == "agentMessage")
+    projected["phase"] = stringValue(item, "phase");
+  const QString body = messageText(item);
+  if (!body.isEmpty())
+    projected["body"] = body.toStdString();
+
+  if (typeName == "commandExecution") {
+    projected["command"] = stringValue(item, "command");
+    const QString output = text(stringValue(item, "aggregatedOutput"));
+    projected["output"] =
+        output.trimmed().isEmpty() ? std::string{} : output.toStdString();
+    projected["status"] = stringValue(item, "status");
+    projected["cwd"] = stringValue(item, "cwd");
+    if (item.contains("exitCode") && item["exitCode"].is_number_integer())
+      projected["exitCode"] = item["exitCode"];
+  } else if (typeName == "collabAgentToolCall" ||
+             typeName == "subAgentActivity") {
+    projected["tool"] = stringValue(item, "tool");
+    projected["status"] = stringValue(item, "status");
+    projected["kind"] = stringValue(item, "kind");
+    projected["receivers"] =
+        item.value("receiverThreadIds", nlohmann::json::array());
+    projected["prompt"] = stringValue(item, "prompt");
+    projected["resultText"] = stringValue(item, "resultText");
+  } else if (typeName == "reasoning") {
+    projected["summary"] =
+        joinedStrings(item.value("summary", nlohmann::json::array()))
+            .toStdString();
+  } else if (typeName == "fileChange") {
+    projected["status"] = stringValue(item, "status");
+    const nlohmann::json changes =
+        item.value("changes", nlohmann::json::array());
+    projected["pathCount"] = changes.is_array() ? changes.size() : 0U;
+  } else if (body.isEmpty()) {
+    projected["raw"] = item;
+  }
+  return projected.dump();
 }
 
 void ShellWidget::showNotice(QString message, bool error) {
@@ -1757,6 +1902,9 @@ void ShellWidget::settleConversationScroll(bool followLatest,
     }
     return true;
   };
+  // Restore the stable coordinate before returning to the event loop. Painting
+  // remains disabled until the two deferred Qt layout passes settle.
+  settle();
   QTimer::singleShot(
       0, this, [this, revision, followLatest, anchor, smoothly, settle] {
         if (!settle())
@@ -1770,12 +1918,12 @@ void ShellWidget::settleConversationScroll(bool followLatest,
                 conversationFollowsLatest = true;
                 scrollConversationToLatest(smoothly);
               } else {
-                QScrollBar *scrollBar = conversationScroll->verticalScrollBar();
-                conversationFollowsLatest =
-                    scrollBar->value() >= scrollBar->maximum() - 1;
+                conversationFollowsLatest = false;
                 conversationPausedAnchor = anchor;
-                conversationPausedAnchorValid = !conversationFollowsLatest;
+                conversationPausedAnchorValid = true;
               }
+              conversationScroll->viewport()->setUpdatesEnabled(true);
+              conversationScroll->viewport()->update();
             });
       });
 }
@@ -1905,11 +2053,13 @@ void ShellWidget::refreshConversation() {
   ++conversationSpacerRevision;
   conversationSpacerAdjusting = false;
   conversationScrollRebuilding = true;
+  conversationScroll->viewport()->setUpdatesEnabled(false);
   for (const auto &[key, card] : conversationCards) {
     if (const auto state = commandOutputScrollState(card))
       commandOutputScrollStates[key] = *state;
   }
   conversationCards.clear();
+  conversationCardFingerprints.clear();
   conversationTrailingSpace = nullptr;
   clearLayout(conversationLayout);
 
@@ -1923,9 +2073,15 @@ void ShellWidget::refreshConversation() {
     if (localNewThreadIntent && !newThreadPendingPrompts.empty()) {
       emptyConversation = nullptr;
       for (const PendingPrompt &pending : newThreadPendingPrompts) {
+        const bool acknowledged =
+            pending.status == PendingPromptStatus::Acknowledged &&
+            QDateTime::currentMSecsSinceEpoch() -
+                    pending.acknowledgedAtMilliseconds <
+                AcknowledgementTransitionMilliseconds;
         auto *card = new PendingPromptCard(
             pending.prompt, static_cast<int>(pending.attachments.size()),
-            pending.status == PendingPromptStatus::Awaiting,
+            pending.status == PendingPromptStatus::Awaiting, acknowledged,
+            pending.acknowledgedAtMilliseconds,
             pending.status == PendingPromptStatus::Failed, pending.error);
         card->setProperty(ConversationAnchorProperty,
                           QStringLiteral("pending:new:%1").arg(pending.id));
@@ -1965,9 +2121,33 @@ void ShellWidget::refreshConversation() {
       items.push_back({turnId + '\x1f' + itemId, &item->second});
     }
   }
-  const std::size_t first = items.size() > conversationItemLimit
-                                ? items.size() - conversationItemLimit
-                                : 0;
+  std::unordered_set<std::string> transitioningMaterializedItems;
+  if (const auto submissions = pendingPrompts.find(selectedThreadId);
+      submissions != pendingPrompts.end()) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (const PendingPrompt &submission : submissions->second) {
+      if (!submission.materializedIdentity.empty() &&
+          submission.status == PendingPromptStatus::Acknowledged &&
+          now - submission.acknowledgedAtMilliseconds <
+              AcknowledgementTransitionMilliseconds)
+        transitioningMaterializedItems.insert(submission.materializedIdentity);
+    }
+  }
+  std::size_t first = items.size() > conversationItemLimit
+                          ? items.size() - conversationItemLimit
+                          : 0;
+  if (!followLatest && !anchor.key.isEmpty()) {
+    const auto anchored = std::find_if(
+        items.begin(), items.end(), [this, &anchor](const VisibleItem &item) {
+          const auto mapped = promptAnchorKeys.find(item.key);
+          const QString key = mapped == promptAnchorKeys.end() ? text(item.key)
+                                                               : mapped->second;
+          return key == anchor.key;
+        });
+    if (anchored != items.end())
+      first =
+          std::min(first, static_cast<std::size_t>(anchored - items.begin()));
+  }
   if (first != 0) {
     const std::size_t page = std::min<std::size_t>(80, first);
     auto *loadEarlier =
@@ -1985,13 +2165,21 @@ void ShellWidget::refreshConversation() {
     conversationLayout->addWidget(loadEarlier, 0, Qt::AlignHCenter);
   }
   for (std::size_t index = first; index < items.size(); ++index) {
+    if (transitioningMaterializedItems.contains(items[index].key))
+      continue;
     std::optional<CommandOutputScrollState> outputScrollState;
     if (const auto retained = commandOutputScrollStates.find(items[index].key);
         retained != commandOutputScrollStates.end())
       outputScrollState = retained->second;
     QWidget *card = itemFrame(*items[index].item, outputScrollState);
-    card->setProperty(ConversationAnchorProperty, text(items[index].key));
+    const auto mappedAnchor = promptAnchorKeys.find(items[index].key);
+    card->setProperty(ConversationAnchorProperty,
+                      mappedAnchor == promptAnchorKeys.end()
+                          ? text(items[index].key)
+                          : mappedAnchor->second);
     conversationCards[items[index].key] = card;
+    conversationCardFingerprints[items[index].key] =
+        conversationItemFingerprint(*items[index].item);
     conversationLayout->addWidget(card);
   }
   const auto pending = pendingPrompts.find(selectedThreadId);
@@ -2001,14 +2189,19 @@ void ShellWidget::refreshConversation() {
         makeLabel(QStringLiteral("No materialized activity."), "muted"));
   if (pending != pendingPrompts.end()) {
     for (const PendingPrompt &submission : pending->second) {
+      const bool acknowledged =
+          submission.status == PendingPromptStatus::Acknowledged &&
+          QDateTime::currentMSecsSinceEpoch() -
+                  submission.acknowledgedAtMilliseconds <
+              AcknowledgementTransitionMilliseconds;
       auto *card = new PendingPromptCard(
           submission.prompt, static_cast<int>(submission.attachments.size()),
-          submission.status == PendingPromptStatus::Awaiting,
+          submission.status == PendingPromptStatus::Awaiting, acknowledged,
+          submission.acknowledgedAtMilliseconds,
           submission.status == PendingPromptStatus::Failed, submission.error);
-      card->setProperty(ConversationAnchorProperty,
-                        QStringLiteral("pending:%1:%2")
-                            .arg(text(selectedThreadId))
-                            .arg(submission.id));
+      card->setProperty(
+          ConversationAnchorProperty,
+          pendingPromptAnchorKey(selectedThreadId, submission.id));
       conversationLayout->addWidget(card);
     }
   }
@@ -2017,9 +2210,60 @@ void ShellWidget::refreshConversation() {
   settleConversationScroll(followLatest, anchor, smoothly);
 }
 
+void ShellWidget::refreshConversationItems() {
+  if (dirtyConversationItems.empty()) {
+    conversationSmoothFollowRequested = false;
+    return;
+  }
+  const ThreadPresentation *thread = model.thread(selectedThreadId);
+  bool requiresRebuild = !thread;
+  for (const auto &[key, identity] : dirtyConversationItems) {
+    if (requiresRebuild)
+      break;
+    const auto card = conversationCards.find(key);
+    const auto turn = thread->turns.find(identity.first);
+    requiresRebuild =
+        card == conversationCards.end() || turn == thread->turns.end() ||
+        turn->second.items.find(identity.second) == turn->second.items.end();
+  }
+  if (requiresRebuild) {
+    refreshConversation();
+    return;
+  }
+
+  const bool followLatest = conversationFollowsLatest;
+  const ConversationScrollAnchor anchor = captureConversationScrollAnchor();
+  stopConversationScrollAnimation();
+  conversationScrollRebuilding = true;
+  conversationScroll->viewport()->setUpdatesEnabled(false);
+  bool changed = false;
+  for (const auto &[key, identity] : dirtyConversationItems) {
+    bool itemChanged = false;
+    if (!refreshConversationItem(key, identity.first, identity.second,
+                                 itemChanged)) {
+      conversationScroll->viewport()->setUpdatesEnabled(true);
+      conversationScrollRebuilding = false;
+      refreshConversation();
+      return;
+    }
+    changed = changed || itemChanged;
+  }
+  conversationSmoothFollowRequested = false;
+  if (!changed) {
+    conversationScrollRebuilding = false;
+    conversationScroll->viewport()->setUpdatesEnabled(true);
+    return;
+  }
+  conversationLayout->activate();
+  conversationContent->updateGeometry();
+  settleConversationScroll(followLatest, anchor, followLatest);
+}
+
 bool ShellWidget::refreshConversationItem(const std::string &key,
                                           const std::string &turnId,
-                                          const std::string &itemId) {
+                                          const std::string &itemId,
+                                          bool &changed) {
+  changed = false;
   const auto existing = conversationCards.find(key);
   if (existing == conversationCards.end())
     return false;
@@ -2032,28 +2276,33 @@ bool ShellWidget::refreshConversationItem(const std::string &key,
   const auto item = turn->second.items.find(itemId);
   if (item == turn->second.items.end())
     return false;
-
-  const bool followLatest = conversationFollowsLatest;
-  const ConversationScrollAnchor anchor = captureConversationScrollAnchor();
+  const std::string fingerprint = conversationItemFingerprint(item->second);
+  const auto previousFingerprint = conversationCardFingerprints.find(key);
+  if (previousFingerprint != conversationCardFingerprints.end() &&
+      previousFingerprint->second == fingerprint)
+    return true;
   std::optional<CommandOutputScrollState> outputScrollState =
       commandOutputScrollState(existing->second);
   if (outputScrollState)
     commandOutputScrollStates[key] = *outputScrollState;
   QWidget *replacement = itemFrame(item->second, outputScrollState);
-  replacement->setProperty(ConversationAnchorProperty, text(key));
-  stopConversationScrollAnimation();
-  conversationScrollRebuilding = true;
+  const auto mappedAnchor = promptAnchorKeys.find(key);
+  replacement->setProperty(ConversationAnchorProperty,
+                           mappedAnchor == promptAnchorKeys.end()
+                               ? text(key)
+                               : mappedAnchor->second);
   QLayoutItem *replaced =
       conversationLayout->replaceWidget(existing->second, replacement);
   if (!replaced) {
     replacement->deleteLater();
-    conversationScrollRebuilding = false;
     return false;
   }
   delete replaced;
+  existing->second->hide();
   existing->second->deleteLater();
   existing->second = replacement;
-  settleConversationScroll(followLatest, anchor, followLatest);
+  conversationCardFingerprints[key] = fingerprint;
+  changed = true;
   return true;
 }
 
@@ -2292,9 +2541,13 @@ void ShellWidget::completePromptSubmission(const std::string &threadId,
                    });
   if (submission == prompts->second.end())
     return;
-  if (result.value("ok", false))
+  if (result.value("ok", false)) {
+    operationReadyThreads.insert(threadId);
     submission->status = PendingPromptStatus::Acknowledged;
-  else {
+    submission->acknowledgedAtMilliseconds =
+        QDateTime::currentMSecsSinceEpoch();
+    scheduleAcknowledgementCompletion(threadId, *submission);
+  } else {
     submission->status = PendingPromptStatus::Failed;
     const nlohmann::json error =
         result.value("error", nlohmann::json::object());
@@ -2310,6 +2563,43 @@ void ShellWidget::completePromptSubmission(const std::string &threadId,
   scheduleRefresh(RefreshConversation | RefreshStatus);
   QTimer::singleShot(0, this,
                      [this, threadId] { dispatchNextPrompt(threadId); });
+}
+
+QString ShellWidget::pendingPromptAnchorKey(const std::string &threadId,
+                                            std::uint64_t submissionId) const {
+  return QStringLiteral("prompt:%1:%2")
+      .arg(text(threadId.empty() ? std::string("new") : threadId))
+      .arg(submissionId);
+}
+
+void ShellWidget::scheduleAcknowledgementCompletion(const std::string &threadId,
+                                                    PendingPrompt &submission) {
+  if (submission.completionRefreshScheduled ||
+      submission.status != PendingPromptStatus::Acknowledged)
+    return;
+  const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() -
+                         submission.acknowledgedAtMilliseconds;
+  const int remaining = static_cast<int>(
+      std::max<qint64>(0, AcknowledgementTransitionMilliseconds - elapsed));
+  submission.completionRefreshScheduled = true;
+  const std::uint64_t submissionId = submission.id;
+  QTimer::singleShot(remaining, this, [this, threadId, submissionId] {
+    const auto prompts = pendingPrompts.find(threadId);
+    if (prompts == pendingPrompts.end())
+      return;
+    const auto pending =
+        std::find_if(prompts->second.begin(), prompts->second.end(),
+                     [submissionId](const PendingPrompt &candidate) {
+                       return candidate.id == submissionId;
+                     });
+    if (pending == prompts->second.end())
+      return;
+    pending->completionRefreshScheduled = false;
+    if (threadId == selectedThreadId) {
+      conversationRebuildPending = true;
+      scheduleRefresh(RefreshConversation);
+    }
+  });
 }
 
 std::unordered_set<std::string>
@@ -2338,14 +2628,17 @@ void ShellWidget::reconcileAcknowledgedPrompts(const std::string &threadId) {
   if (prompts == pendingPrompts.end() || !thread)
     return;
   auto &claimed = materializedPromptItemIds[threadId];
+  const qint64 now = QDateTime::currentMSecsSinceEpoch();
   for (auto submission = prompts->second.begin();
        submission != prompts->second.end();) {
     if (submission->status != PendingPromptStatus::Acknowledged) {
       ++submission;
       continue;
     }
-    std::string matchedId;
+    std::string matchedId = submission->materializedIdentity;
     for (const std::string &turnId : thread->turnOrder) {
+      if (!matchedId.empty())
+        break;
       const auto turn = thread->turns.find(turnId);
       if (turn == thread->turns.end())
         continue;
@@ -2372,6 +2665,15 @@ void ShellWidget::reconcileAcknowledgedPrompts(const std::string &threadId) {
       continue;
     }
     claimed.insert(matchedId);
+    submission->materializedIdentity = matchedId;
+    promptAnchorKeys[matchedId] =
+        pendingPromptAnchorKey(threadId, submission->id);
+    if (now - submission->acknowledgedAtMilliseconds <
+        AcknowledgementTransitionMilliseconds) {
+      scheduleAcknowledgementCompletion(threadId, *submission);
+      ++submission;
+      continue;
+    }
     submission = prompts->second.erase(submission);
   }
   if (prompts->second.empty())
@@ -2524,9 +2826,7 @@ void ShellWidget::selectThread(std::string threadId) {
   newThreadDraftWorkspace.clear();
   conversationRebuildPending = true;
   resetComposer();
-  const ThreadPresentation *thread = model.thread(selectedThreadId);
-  if (!thread || thread->turnOrder.empty())
-    readThread(selectedThreadId);
+  ensureThreadHydrated(selectedThreadId);
   scheduleRefresh();
 }
 
@@ -2571,7 +2871,31 @@ void ShellWidget::requestModels() { session.listModels(); }
 void ShellWidget::readThread(const std::string &threadId) {
   if (threadId.empty())
     return;
+  threadHydration[threadId] = ThreadHydrationState::ReadInFlight;
   session.readThread(threadId);
+}
+
+void ShellWidget::ensureThreadHydrated(const std::string &threadId) {
+  if (threadId.empty() || threadIsHydrated(threadId))
+    return;
+  const auto state = threadHydration.find(threadId);
+  if (state != threadHydration.end() &&
+      state->second == ThreadHydrationState::ReadInFlight)
+    return;
+  readThread(threadId);
+}
+
+bool ShellWidget::threadIsHydrated(const std::string &threadId) const {
+  const auto state = threadHydration.find(threadId);
+  return state != threadHydration.end() &&
+         state->second == ThreadHydrationState::Hydrated;
+}
+
+bool ShellWidget::threadRequiresResume(const std::string &threadId) const {
+  if (operationReadyThreads.contains(threadId))
+    return false;
+  const ThreadPresentation *thread = model.thread(threadId);
+  return thread && thread->status == "notLoaded";
 }
 
 void ShellWidget::renameThread(const std::string &threadId) {
@@ -2641,6 +2965,7 @@ void ShellWidget::submitPrompt() {
 
   PendingPrompt submission;
   submission.id = nextPendingPromptId++;
+  submission.admittedAtMilliseconds = QDateTime::currentMSecsSinceEpoch();
   submission.prompt = promptValue;
   submission.attachments = attachmentDrafts;
   submission.turnOptions = turnSettings->turnStartOptions();
@@ -2728,6 +3053,8 @@ void ShellWidget::startThreadForPendingPrompts() {
             std::make_move_iterator(newThreadPendingPrompts.begin()),
             std::make_move_iterator(newThreadPendingPrompts.end()));
         newThreadPendingPrompts.clear();
+        threadHydration[threadId] = ThreadHydrationState::Hydrated;
+        operationReadyThreads.insert(threadId);
         const bool viewingNewThreadDraft =
             selectedThreadId.empty() && localNewThreadIntent;
         if (viewingNewThreadDraft) {
@@ -2751,6 +3078,10 @@ void ShellWidget::dispatchNextPrompt(const std::string &threadId) {
   const auto prompts = pendingPrompts.find(threadId);
   if (prompts == pendingPrompts.end())
     return;
+  if (!threadIsHydrated(threadId)) {
+    ensureThreadHydrated(threadId);
+    return;
+  }
   if (std::any_of(prompts->second.begin(), prompts->second.end(),
                   [](const PendingPrompt &candidate) {
                     return candidate.status == PendingPromptStatus::Awaiting &&
@@ -2792,32 +3123,86 @@ void ShellWidget::submitPromptToThread(
   }
   const auto completed = [this, threadId,
                           submissionId](const nlohmann::json &result) {
+    if (attemptPromptThreadRecovery(threadId, submissionId, result))
+      return;
     completePromptSubmission(threadId, submissionId, result);
   };
-  const auto activeTurn = model.activeTurnId(threadId);
-  if (activeTurn) {
-    session.steerTurn(threadId, *activeTurn, std::move(input), completed);
-  } else {
-    auto startTurn = [this, threadId, input = std::move(input),
-                      options = std::move(options), completed]() mutable {
+  auto sendPrompt = std::make_shared<std::function<void()>>();
+  *sendPrompt = [this, threadId, input = std::move(input),
+                 options = std::move(options), completed]() mutable {
+    const auto activeTurn = model.activeTurnId(threadId);
+    if (activeTurn) {
+      session.steerTurn(threadId, *activeTurn, std::move(input), completed);
+    } else {
       session.startTurn(threadId, std::move(input), std::move(options),
                         completed);
-    };
-    const ThreadPresentation *thread = model.thread(threadId);
-    if (thread && thread->status == "notLoaded") {
-      session.resumeThread(threadId, nlohmann::json::object(),
-                           [startTurn = std::move(startTurn),
-                            completed](const nlohmann::json &result) mutable {
-                             if (!result.value("ok", false)) {
-                               completed(result);
-                               return;
-                             }
-                             startTurn();
-                           });
-    } else {
-      startTurn();
     }
+  };
+  if (threadRequiresResume(threadId)) {
+    session.resumeThread(
+        threadId, nlohmann::json::object(),
+        [this, threadId, sendPrompt,
+         completed](const nlohmann::json &result) mutable {
+          if (!result.value("ok", false)) {
+            completed(result);
+            return;
+          }
+          QTimer::singleShot(0, this, [this, threadId, sendPrompt] {
+            threadHydration[threadId] = ThreadHydrationState::Hydrated;
+            operationReadyThreads.insert(threadId);
+            (*sendPrompt)();
+          });
+        });
+  } else {
+    (*sendPrompt)();
   }
+}
+
+bool ShellWidget::attemptPromptThreadRecovery(const std::string &threadId,
+                                              std::uint64_t submissionId,
+                                              const nlohmann::json &result) {
+  if (!isThreadNotFoundResult(result))
+    return false;
+  const auto prompts = pendingPrompts.find(threadId);
+  if (prompts == pendingPrompts.end())
+    return false;
+  const auto submission =
+      std::find_if(prompts->second.begin(), prompts->second.end(),
+                   [submissionId](const PendingPrompt &candidate) {
+                     return candidate.id == submissionId;
+                   });
+  if (submission == prompts->second.end() ||
+      submission->readinessRetryAttempted)
+    return false;
+
+  submission->readinessRetryAttempted = true;
+  threadHydration[threadId] = ThreadHydrationState::NotHydrated;
+  operationReadyThreads.erase(threadId);
+  session.resumeThread(
+      threadId, nlohmann::json::object(),
+      [this, threadId, submissionId](const nlohmann::json &resumeResult) {
+        if (!resumeResult.value("ok", false)) {
+          completePromptSubmission(threadId, submissionId, resumeResult);
+          return;
+        }
+        QTimer::singleShot(0, this, [this, threadId, submissionId] {
+          threadHydration[threadId] = ThreadHydrationState::Hydrated;
+          operationReadyThreads.insert(threadId);
+          const auto prompts = pendingPrompts.find(threadId);
+          if (prompts == pendingPrompts.end())
+            return;
+          const auto submission =
+              std::find_if(prompts->second.begin(), prompts->second.end(),
+                           [submissionId](const PendingPrompt &candidate) {
+                             return candidate.id == submissionId;
+                           });
+          if (submission == prompts->second.end())
+            return;
+          submission->dispatched = false;
+          dispatchNextPrompt(threadId);
+        });
+      });
+  return true;
 }
 
 void ShellWidget::chooseAttachments() {
