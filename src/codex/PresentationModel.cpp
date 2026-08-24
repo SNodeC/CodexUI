@@ -209,9 +209,19 @@ void PresentationModel::applyEvent(const nlohmann::json &event) {
     const std::string lifecycle = stringValue(data, "state");
     if (lifecycle == "connected") {
       connectionState.connected = true;
+      connectionState.retrying = false;
       connectionState.detail.clear();
+    } else if (lifecycle == "connecting" || lifecycle == "retrying") {
+      connectionState.connected = false;
+      connectionState.retrying = true;
+      connectionState.connectionId.clear();
+      connectionState.role.clear();
+      connectionState.controllerConnectionId.clear();
+      connectionState.detail = stringValue(data, "detail");
+      pendingRequests.clear();
     } else if (lifecycle == "disconnected" || lifecycle == "failure") {
       connectionState.connected = false;
+      connectionState.retrying = false;
       connectionState.connectionId.clear();
       connectionState.role.clear();
       connectionState.controllerConnectionId.clear();

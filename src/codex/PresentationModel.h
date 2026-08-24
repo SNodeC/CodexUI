@@ -64,6 +64,7 @@ struct PendingRequestPresentation {
 
 struct ConnectionPresentation {
   bool connected = false;
+  bool retrying = false;
   std::uint64_t generation = 0;
   std::string connectionId;
   std::string role;

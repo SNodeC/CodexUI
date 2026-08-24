@@ -111,15 +111,19 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   std::function<void()> requestShutdown;
 
   std::string expectedDisconnectReason;
+  bool desiredConnected = connectBridge;
   client::ClientConnection connection(
       sdk, client::ClientConnectionCallbacks{
                .onConnected =
                    [&normalizer] { normalizer.transportEvent("connected"); },
                .onDisconnected =
-                   [&normalizer, &expectedDisconnectReason] {
+                   [&normalizer, &expectedDisconnectReason,
+                    &desiredConnected] {
+                     std::string reason =
+                         std::exchange(expectedDisconnectReason, {});
                      normalizer.transportEvent(
-                         "disconnected",
-                         std::exchange(expectedDisconnectReason, {}));
+                         desiredConnected ? "retrying" : "disconnected",
+                         std::move(reason));
                    },
                .onFailure =
                    [&normalizer](std::string reason) {
@@ -255,7 +259,6 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   std::string selectedTransport;
   std::string selectedTransportLabel;
   bool transitionPending = false;
-  bool desiredConnected = connectBridge;
   bool shutdownRequested = false;
   bool eventLoopRunning = false;
   std::function<void()> continueTransition;
@@ -274,6 +277,8 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     selectedTransportLabel = std::move(label);
     const std::string connectionLabel = selectedTransportLabel;
     connectSelected = [&, clientHandle, flow, connectionLabel] {
+      normalizer.transportEvent("retrying",
+                                "Connecting using " + connectionLabel);
       clientHandle->connect([&, flow, connectionLabel](
                                 const auto &, core::socket::State state) {
         if (state == core::socket::State::OK ||
