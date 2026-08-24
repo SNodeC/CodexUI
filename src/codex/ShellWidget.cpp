@@ -21,6 +21,7 @@
 #include <QFontMetrics>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
@@ -429,6 +430,8 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   topLayout->addStretch();
   attentionButton = new QPushButton(QStringLiteral("0 requests"));
   attentionButton->setFixedSize(106, 32);
+  connectionStatusDot = makeStatusDot();
+  connectionStatusDot->setToolTip(QStringLiteral("Not connected"));
   connectionButton = new QToolButton;
   connectionButton->setText(QStringLiteral("Connection"));
   connectionButton->setProperty("kind", "subtle");
@@ -479,7 +482,13 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
       this->session.claimController();
   });
   topLayout->addWidget(attentionButton);
-  topLayout->addWidget(connectionButton);
+  auto *connectionControl = new QWidget;
+  auto *connectionLayout = new QHBoxLayout(connectionControl);
+  connectionLayout->setContentsMargins(0, 0, 0, 0);
+  connectionLayout->setSpacing(6);
+  connectionLayout->addWidget(connectionStatusDot);
+  connectionLayout->addWidget(connectionButton);
+  topLayout->addWidget(connectionControl);
   topLayout->addWidget(controllerButton);
   topLayout->addWidget(restoreInspectorButton);
   root->addWidget(top);
@@ -539,19 +548,6 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
       "QListWidget#threadList::item:selected{background:#e5eeff;"
       "color:#1d2633;font-weight:600;}"));
   sidebarLayout->addWidget(threadList);
-  sidebarLayout->addWidget(makeDivider());
-  sidebarLayout->addSpacing(18);
-  auto *serverRow = new QHBoxLayout;
-  serverRow->setContentsMargins(8, 0, 0, 0);
-  serverRow->setSpacing(10);
-  connectionStatusDot = makeStatusDot();
-  serverRow->addWidget(connectionStatusDot);
-  connectionLabel = makeLabel(QStringLiteral("Not connected"), "meta");
-  connectionLabel->setStyleSheet(
-      QStringLiteral("color:#1d2633;font-size:11px;font-weight:500;"));
-  serverRow->addWidget(connectionLabel);
-  serverRow->addStretch();
-  sidebarLayout->addLayout(serverRow);
   connect(refreshButton, &QPushButton::clicked, this,
           [this] { requestThreads(); });
   connect(newButton, &QPushButton::clicked, this, [this] { beginNewThread(); });
@@ -719,25 +715,33 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   attachmentPanel->hide();
   composerLayout->addWidget(attachmentPanel);
 
-  promptEditor = new codexui::ExpandingPromptEditor;
-  composerLayout->addWidget(promptEditor);
+  composerBody = new QWidget;
+  composerBody->installEventFilter(this);
+  composerGrid = new QGridLayout(composerBody);
+  composerGrid->setContentsMargins(0, 0, 0, 0);
+  composerGrid->setHorizontalSpacing(8);
+  composerGrid->setVerticalSpacing(6);
+  composerGrid->setColumnStretch(1, 1);
 
-  auto *composerActions = new QHBoxLayout;
-  composerActions->setSpacing(8);
-  attachmentButton = new QPushButton(QStringLiteral("Attach"));
-  attachmentButton->setProperty("kind", "subtle");
-  attachmentButton->setFixedHeight(UpcomingControlHeight);
+  attachmentButton = new QToolButton;
+  attachmentButton->setProperty("kind", "composerAction");
+  attachmentButton->setIcon(QIcon::fromTheme(QIcon::ThemeIcon::MailAttachment));
+  attachmentButton->setIconSize(QSize(16, 16));
+  attachmentButton->setToolTip(QStringLiteral("Attach files"));
+  attachmentButton->setAccessibleName(QStringLiteral("Attach files"));
+  attachmentButton->setFixedSize(UpcomingControlHeight, UpcomingControlHeight);
+  promptEditor = new codexui::ExpandingPromptEditor;
   sendButton = new QPushButton(QStringLiteral("Send"));
   sendButton->setProperty("kind", "primary");
-  sendButton->setFixedHeight(UpcomingControlHeight);
+  sendButton->setFixedSize(62, UpcomingControlHeight);
   interruptButton = new QPushButton(QStringLiteral("Stop"));
   interruptButton->setProperty("kind", "stop");
-  interruptButton->setFixedHeight(UpcomingControlHeight);
-  composerActions->addWidget(attachmentButton);
-  composerActions->addStretch();
-  composerActions->addWidget(interruptButton);
-  composerActions->addWidget(sendButton);
-  composerLayout->addLayout(composerActions);
+  interruptButton->setFixedSize(54, UpcomingControlHeight);
+  interruptButton->hide();
+  composerGrid->addWidget(attachmentButton, 0, 0);
+  composerGrid->addWidget(promptEditor, 0, 1);
+  composerGrid->addWidget(sendButton, 0, 2);
+  composerLayout->addWidget(composerBody);
   composerDockLayout->addWidget(composer);
   connect(promptEditor, &codexui::ExpandingPromptEditor::editorHeightChanged,
           composerDock,
@@ -750,6 +754,8 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   connect(sendButton, &QPushButton::clicked, this, [this] { submitPrompt(); });
   connect(promptEditor, &codexui::ExpandingPromptEditor::submitRequested, this,
           [this] { submitPrompt(); });
+  connect(promptEditor, &QPlainTextEdit::textChanged, this,
+          [this] { scheduleComposerLayout(); });
   connect(interruptButton, &QPushButton::clicked, this,
           [this] { interruptActiveTurn(); });
   connect(attachmentButton, &QPushButton::clicked, this,
@@ -875,10 +881,6 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   auto *statusLayout = new QHBoxLayout(statusBar);
   statusLayout->setContentsMargins(18, 0, 24, 0);
   statusLayout->setSpacing(8);
-  bottomConnectionStatusDot = makeStatusDot();
-  statusLayout->addWidget(bottomConnectionStatusDot);
-  statusLayout->addWidget(makeLabel(QStringLiteral("Codex"), "meta"));
-  statusLayout->addSpacing(42);
   threadContextStatus = makeLabel(QStringLiteral("No thread context"), "meta");
   statusLayout->addWidget(threadContextStatus);
   statusLayout->addSpacing(42);
@@ -897,6 +899,61 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   session.setEventHandler(
       [this](const nlohmann::json &event) { handleEvent(event); });
   refresh();
+}
+
+bool ShellWidget::eventFilter(QObject *watched, QEvent *event) {
+  if (watched == composerBody &&
+      (event->type() == QEvent::Resize || event->type() == QEvent::Show ||
+       event->type() == QEvent::LayoutRequest))
+    scheduleComposerLayout();
+  return QWidget::eventFilter(watched, event);
+}
+
+void ShellWidget::scheduleComposerLayout() {
+  if (composerLayoutRefreshPending)
+    return;
+  composerLayoutRefreshPending = true;
+  QTimer::singleShot(0, this, [this] {
+    composerLayoutRefreshPending = false;
+    refreshComposerLayout();
+  });
+}
+
+void ShellWidget::refreshComposerLayout() {
+  if (!composerBody || !composerGrid || composerBody->width() <= 0)
+    return;
+
+  const bool active = interruptButton->isVisible();
+  const int visibleControls = active ? 3 : 2;
+  const int controlsWidth = attachmentButton->width() + sendButton->width() +
+                            (active ? interruptButton->width() : 0);
+  const int compactEditorWidth =
+      composerBody->contentsRect().width() - controlsWidth -
+      (visibleControls * composerGrid->horizontalSpacing());
+  const bool expand = promptEditor->requiresExpandedLayout(compactEditorWidth);
+  if (expand == composerExpanded && active == composerActive)
+    return;
+
+  composerExpanded = expand;
+  composerActive = active;
+  composerGrid->removeWidget(attachmentButton);
+  composerGrid->removeWidget(promptEditor);
+  composerGrid->removeWidget(sendButton);
+  composerGrid->removeWidget(interruptButton);
+  if (composerExpanded) {
+    composerGrid->addWidget(promptEditor, 0, 0, 1, 4);
+    composerGrid->addWidget(attachmentButton, 1, 0);
+    composerGrid->addWidget(sendButton, 1, 2);
+    if (active)
+      composerGrid->addWidget(interruptButton, 1, 3);
+  } else {
+    composerGrid->addWidget(attachmentButton, 0, 0);
+    composerGrid->addWidget(promptEditor, 0, 1);
+    composerGrid->addWidget(sendButton, 0, 2);
+    if (active)
+      composerGrid->addWidget(interruptButton, 0, 3);
+  }
+  composerGrid->invalidate();
 }
 
 void ShellWidget::handleEvent(const nlohmann::json &event) {
@@ -1582,15 +1639,14 @@ void ShellWidget::refreshInspector() {
 
 void ShellWidget::refreshStatus() {
   const ConnectionPresentation &connection = model.connection();
-  connectionLabel->setText(connection.connected
-                               ? QStringLiteral("Connected")
-                               : QStringLiteral("Not connected"));
   const QString dotStyle =
       connection.connected
           ? QStringLiteral("background:#23845a;border-radius:4px;")
           : QStringLiteral("background:#98a2b3;border-radius:4px;");
   connectionStatusDot->setStyleSheet(dotStyle);
-  bottomConnectionStatusDot->setStyleSheet(dotStyle);
+  connectionStatusDot->setToolTip(connection.connected
+                                      ? QStringLiteral("Connected")
+                                      : QStringLiteral("Not connected"));
   QString selectedTransport;
   const std::string selectedKey = stringValue(connection.settings, "selected");
   const nlohmann::json available =
@@ -1667,6 +1723,14 @@ void ShellWidget::refreshStatus() {
   interruptButton->setVisible(active);
   sendButton->setText(active ? QStringLiteral("Steer")
                              : QStringLiteral("Send"));
+  const QString actionKind =
+      active ? QStringLiteral("steer") : QStringLiteral("primary");
+  if (sendButton->property("kind").toString() != actionKind) {
+    sendButton->setProperty("kind", actionKind);
+    sendButton->style()->unpolish(sendButton);
+    sendButton->style()->polish(sendButton);
+  }
+  scheduleComposerLayout();
   sendButton->setEnabled(connection.connected &&
                          connection.role == "controller");
   attachmentButton->setEnabled(connection.connected &&
@@ -1933,12 +1997,13 @@ void ShellWidget::refreshAttachments() {
   for (std::size_t index = 0; index < attachmentDrafts.size(); ++index) {
     const AttachmentDraft &attachment = attachmentDrafts[index];
     auto *row = new QFrame;
+    row->setObjectName(QStringLiteral("attachmentRow"));
     row->setStyleSheet(
-        QStringLiteral("QFrame{background:#ffffff;border:1px solid #d7dee8;"
-                       "border-radius:6px;}"));
+        QStringLiteral("QFrame#attachmentRow{background:#ffffff;"
+                       "border:1px solid #d7dee8;border-radius:6px;}"));
     row->setFixedHeight(AttachmentRowHeight);
     auto *rowLayout = new QHBoxLayout(row);
-    rowLayout->setContentsMargins(8, 1, 1, 1);
+    rowLayout->setContentsMargins(8, 2, 3, 2);
     rowLayout->setSpacing(6);
     auto *name = makeLabel(attachment.name, "meta");
     name->setToolTip(QDir::toNativeSeparators(attachment.path));
@@ -1947,10 +2012,11 @@ void ShellWidget::refreshAttachments() {
     auto *remove = new QPushButton(QStringLiteral("X"));
     remove->setAccessibleName(QStringLiteral("Remove %1").arg(attachment.name));
     remove->setToolTip(QStringLiteral("Remove attachment"));
-    remove->setFixedSize(26, 26);
+    remove->setFixedSize(20, 20);
     remove->setStyleSheet(
         QStringLiteral("QPushButton{background:#b83a3a;color:#ffffff;border:0;"
-                       "border-radius:5px;padding:0;font-weight:700;}"
+                       "border-radius:4px;padding:0;font-size:10px;"
+                       "font-weight:700;}"
                        "QPushButton:hover{background:#9f2f2f;}"
                        "QPushButton:pressed{background:#842626;}"));
     connect(remove, &QPushButton::clicked, this, [this, index] {
@@ -1959,7 +2025,7 @@ void ShellWidget::refreshAttachments() {
       ++attachmentRevision;
       refreshAttachments();
     });
-    rowLayout->addWidget(remove);
+    rowLayout->addWidget(remove, 0, Qt::AlignVCenter);
     attachmentListLayout->addWidget(row);
   }
   const int visibleRows = std::min<int>(

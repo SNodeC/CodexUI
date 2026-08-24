@@ -22,6 +22,7 @@ public:
 
     [[nodiscard]] static constexpr int compactHeight() noexcept { return 32; }
     [[nodiscard]] static constexpr int maximumVisibleLineCount() noexcept { return 20; }
+    [[nodiscard]] bool requiresExpandedLayout(int widgetWidth) const;
 
 signals:
     void submitRequested();

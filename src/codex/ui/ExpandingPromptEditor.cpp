@@ -8,6 +8,7 @@
 #include <QResizeEvent>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QTextLayout>
 #include <QTimer>
 
 #include <algorithm>
@@ -31,6 +32,27 @@ ExpandingPromptEditor::ExpandingPromptEditor(QWidget* parent)
         "QPlainTextEdit{background:transparent;color:#1d2633;border:0;padding:3px 2px;font-size:13px;}"));
 
     connect(this, &QPlainTextEdit::textChanged, this, &ExpandingPromptEditor::remeasure);
+}
+
+bool ExpandingPromptEditor::requiresExpandedLayout(int widgetWidth) const
+{
+    const QString content = toPlainText();
+    if (content.isEmpty())
+        return false;
+    if (content.contains(QLatin1Char('\n')))
+        return true;
+
+    const int viewportReduction = std::max(0, width() - viewport()->width());
+    const qreal lineWidth = std::max(1, widgetWidth - viewportReduction);
+    QTextLayout layout(content, font());
+    layout.setTextOption(document()->defaultTextOption());
+    layout.beginLayout();
+    QTextLine firstLine = layout.createLine();
+    if (firstLine.isValid())
+        firstLine.setLineWidth(lineWidth);
+    const bool wraps = layout.createLine().isValid();
+    layout.endLayout();
+    return wraps;
 }
 
 void ExpandingPromptEditor::focusInEvent(QFocusEvent* event)

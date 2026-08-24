@@ -17,6 +17,8 @@
 
 class QFrame;
 class QAction;
+class QEvent;
+class QGridLayout;
 class QLabel;
 class QListWidget;
 class QPlainTextEdit;
@@ -41,6 +43,9 @@ class TurnSettingsWidget;
 class ShellWidget final : public QWidget {
 public:
   explicit ShellWidget(FrontendSession &session, QWidget *parent = nullptr);
+
+protected:
+  bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
   enum RefreshArea : std::uint32_t {
@@ -91,6 +96,8 @@ private:
                             std::uint64_t attachmentRevision);
   void chooseAttachments();
   void refreshAttachments();
+  void scheduleComposerLayout();
+  void refreshComposerLayout();
   void interruptActiveTurn();
   void respondToFirstPending(bool approve);
   void reviewPending(const std::string &requestKey);
@@ -106,7 +113,6 @@ private:
   std::vector<AttachmentDraft> attachmentDrafts;
   std::uint64_t attachmentRevision = 0;
 
-  QLabel *connectionLabel = nullptr;
   QLabel *controllerLabel = nullptr;
   QLabel *workspaceBreadcrumb = nullptr;
   QLabel *threadContextStatus = nullptr;
@@ -116,7 +122,6 @@ private:
   QLabel *emptyConversation = nullptr;
   QLabel *noticeLabel = nullptr;
   QFrame *connectionStatusDot = nullptr;
-  QFrame *bottomConnectionStatusDot = nullptr;
   QFrame *noticeBar = nullptr;
   QFrame *sidebar = nullptr;
   QFrame *inspector = nullptr;
@@ -139,8 +144,10 @@ private:
   QPlainTextEdit *stateView = nullptr;
   codexui::ExpandingPromptEditor *promptEditor = nullptr;
   TurnSettingsWidget *turnSettings = nullptr;
+  QWidget *composerBody = nullptr;
+  QGridLayout *composerGrid = nullptr;
   QPushButton *sendButton = nullptr;
-  QPushButton *attachmentButton = nullptr;
+  QToolButton *attachmentButton = nullptr;
   QFrame *attachmentPanel = nullptr;
   QScrollArea *attachmentListScroll = nullptr;
   QVBoxLayout *attachmentListLayout = nullptr;
@@ -158,6 +165,9 @@ private:
   QTimer *refreshTimer = nullptr;
   std::uint64_t observedPresentationSequence = 0;
   std::uint32_t pendingRefreshAreas = RefreshAll;
+  bool composerExpanded = false;
+  bool composerActive = false;
+  bool composerLayoutRefreshPending = false;
   std::size_t conversationItemLimit = 80;
   bool conversationRebuildPending = true;
   std::unordered_map<std::string, QWidget *> conversationCards;

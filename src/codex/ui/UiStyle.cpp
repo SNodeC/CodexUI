@@ -43,11 +43,20 @@ QString applicationStyleSheet() {
         QPushButton:disabled, QToolButton:disabled { color: #98a2b3; background: #f6f8fb; border-color: #d7dee8; }
         QPushButton[kind="primary"] { background: #2f6feb; border-color: #2f6feb; color: white; }
         QPushButton[kind="primary"]:hover { background: #285fca; border-color: #285fca; }
+        QPushButton[kind="steer"] { background: #ffffff; border-color: #2f6feb; color: #2f6feb; }
+        QPushButton[kind="steer"]:hover { background: #e5eeff; border-color: #285fca; color: #285fca; }
         QPushButton[kind="subtle"], QToolButton[kind="subtle"] {
             color: #667085;
             background: transparent;
             border-color: transparent;
         }
+        QToolButton[kind="composerAction"] {
+            background: #ffffff;
+            border: 1px solid #d7dee8;
+            color: #667085;
+            padding: 0;
+        }
+        QToolButton[kind="composerAction"]:hover { background: #f1f5fb; border-color: #b9c4d2; }
         QPushButton[kind="agentLink"] { background: #e5eeff; border-color: #bfd3f9; color: #2f6feb; text-align: left; }
         QPushButton[kind="stop"] { background: #ffffff; border-color: #b83a3a; color: #b83a3a; }
         QPushButton[kind="stop"]:hover { background: #fff1f1; }
