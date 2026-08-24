@@ -792,6 +792,9 @@ consumer differs. Neither executable has a privileged transport or state path.
 The current build links the codex AISuite frontend library as
 `AISuite::OpenAICodex`, Qt Widgets, Threads, and the selected SNode.C client
 modules. The canonical incremental build directory is `build-codex`.
+CodexUI CI consumes AISuite from `master`/HEAD and does not pin a particular
+AISuite revision. The canonical AISuite replacement must therefore be merged
+before the dependent CodexUI change.
 
 ### 17.4 Shell settings and pending-request APIs
 
