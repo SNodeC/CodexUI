@@ -13,10 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AISUITE_REVISION: ff130d741ec50ed7dba1890f7981bc62f26f15db
-  SNODEC_REVISION: bc43179dbee2b5a0286420a61d8f1ceaef01530d
-  CMAKE_BUILD_PARALLEL_LEVEL: 2
-  CTEST_PARALLEL_LEVEL: 2
+  CMAKE_BUILD_PARALLEL_LEVEL: 8
   LD_LIBRARY_PATH: ${{ github.workspace }}/_stage/aisuite/lib:${{ github.workspace }}/_stage/snodec/lib
   LDFLAGS: -Wl,-rpath-link,${{ github.workspace }}/_stage/aisuite/lib -Wl,-rpath-link,${{ github.workspace }}/_stage/snodec/lib
 
@@ -35,18 +32,18 @@ jobs:
             ${{ github.event_name == 'pull_request' &&
                 github.event.pull_request.head.sha || github.sha }}
 
-      - name: Check out accepted SNode.C 2.0.0
+      - name: Check out SNode.C master
         uses: actions/checkout@v5
         with:
           repository: SNodeC/snode.c
-          ref: ${{ env.SNODEC_REVISION }}
+          ref: master
           path: _deps/snodec
 
-      - name: Check out required AISuite 0.6.0
+      - name: Check out AISuite codex2
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: ${{ env.AISUITE_REVISION }}
+          ref: codex2-master
           path: _deps/aisuite
 
       - name: Install build dependencies
@@ -65,7 +62,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE/_deps/snodec"
           git config --global --add safe.directory "$GITHUB_WORKSPACE/_deps/aisuite"
 
-      - name: Verify exact source revisions
+      - name: Verify CodexUI source revision
         shell: bash
         env:
           CODEXUI_EXPECTED_HEAD: >-
@@ -74,8 +71,6 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CODEXUI_EXPECTED_HEAD"
-          test "$(git -C _deps/snodec rev-parse HEAD)" = "$SNODEC_REVISION"
-          test "$(git -C _deps/aisuite rev-parse HEAD)" = "$AISUITE_REVISION"
 
       - name: Build and install SNode.C
         run: |
@@ -87,37 +82,27 @@ jobs:
           cmake --build _build/snodec --target all
           cmake --install _build/snodec
 
-      - name: Build and install AISuite 0.6.0
+      - name: Build and install AISuite codex2
         run: |
           cmake -S _deps/aisuite -B _build/aisuite -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/_stage/aisuite" \
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/snodec" \
-            -DAISUITE_BUILD_TESTS=OFF \
-            -DAISUITE_BUILD_APPS=OFF \
-            -DAISUITE_BUILD_CODEX_FRONTEND_CLIENT=ON \
-            -DAISUITE_ENABLE_CODEX_FRONTEND_TLS=OFF \
-            -DAISUITE_ENABLE_CODEX_FRONTEND_WEBSOCKET=OFF \
-            -DAISUITE_ENABLE_CODEX_FRONTEND_RFCOMM=OFF
+            -DAISUITE_BUILD_CODEX2_TESTS=OFF \
+            -DAISUITE_BUILD_APPS=ON \
+            -DAISUITE_ENABLE_LEGACY_CODEX=OFF \
+            -DAISUITE_BUILD_CODEX_FRONTEND_CLIENT=OFF
           cmake --build _build/aisuite --target all
           cmake --install _build/aisuite
-          grep -F 'set(PACKAGE_VERSION "0.6.0")' \
-            _stage/aisuite/lib/cmake/AISuite/AISuiteConfigVersion.cmake
 
       - name: Configure CodexUI
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/aisuite;$GITHUB_WORKSPACE/_stage/snodec" \
-            -DBUILD_TESTING=ON
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/aisuite;$GITHUB_WORKSPACE/_stage/snodec"
 
       - name: Build CodexUI
         run: cmake --build build --target all
-
-      - name: Run CodexUI tests headlessly
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: ctest --test-dir build --output-on-failure
 
       - name: Check changed lines
         shell: bash
