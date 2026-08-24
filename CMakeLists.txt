@@ -26,49 +26,49 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 find_package(Threads REQUIRED)
 
 set(
-    CODEXUI_CODEX2_COMMON_SOURCES
-    src/codex2/ClientRuntime.cpp
-    src/codex2/ClientRuntime.h
-    src/codex2/Configuration.cpp
-    src/codex2/Configuration.h
-    src/codex2/FrontendSession.cpp
-    src/codex2/FrontendSession.h
-    src/codex2/MainWindow.cpp
-    src/codex2/MainWindow.h
-    src/codex2/PresentationModel.cpp
-    src/codex2/PresentationModel.h
-    src/codex2/PresentationProtocol.cpp
-    src/codex2/PresentationProtocol.h
-    src/codex2/ProtocolNormalizer.cpp
-    src/codex2/ProtocolNormalizer.h
-    src/codex2/ipc/QtSocketPairEndpoint.cpp
-    src/codex2/ipc/QtSocketPairEndpoint.h
-    src/codex2/ipc/SNodeSocketPairEndpoint.cpp
-    src/codex2/ipc/SNodeSocketPairEndpoint.h
-    src/codex2/ipc/SocketPair.cpp
-    src/codex2/ipc/SocketPair.h
-    src/codex2/main.cpp
-    src/ui/ExpandingPromptEditor.cpp
-    src/ui/ExpandingPromptEditor.h
-    src/ui/UiStyle.cpp
-    src/ui/UiStyle.h
+    CODEXUI_CODEX_COMMON_SOURCES
+    src/codex/ClientRuntime.cpp
+    src/codex/ClientRuntime.h
+    src/codex/Configuration.cpp
+    src/codex/Configuration.h
+    src/codex/FrontendSession.cpp
+    src/codex/FrontendSession.h
+    src/codex/MainWindow.cpp
+    src/codex/MainWindow.h
+    src/codex/PresentationModel.cpp
+    src/codex/PresentationModel.h
+    src/codex/PresentationProtocol.cpp
+    src/codex/PresentationProtocol.h
+    src/codex/ProtocolNormalizer.cpp
+    src/codex/ProtocolNormalizer.h
+    src/codex/ipc/QtSocketPairEndpoint.cpp
+    src/codex/ipc/QtSocketPairEndpoint.h
+    src/codex/ipc/SNodeSocketPairEndpoint.cpp
+    src/codex/ipc/SNodeSocketPairEndpoint.h
+    src/codex/ipc/SocketPair.cpp
+    src/codex/ipc/SocketPair.h
+    src/codex/main.cpp
+    src/codex/ui/ExpandingPromptEditor.cpp
+    src/codex/ui/ExpandingPromptEditor.h
+    src/codex/ui/UiStyle.cpp
+    src/codex/ui/UiStyle.h
 )
 
 qt_add_executable(
     codex-ui
-    ${CODEXUI_CODEX2_COMMON_SOURCES}
-    src/codex2/ShellWidget.cpp
-    src/codex2/ShellWidget.h
-    src/codex2/PendingRequestDialog.cpp
-    src/codex2/PendingRequestDialog.h
-    src/codex2/TurnSettingsWidget.cpp
-    src/codex2/TurnSettingsWidget.h
+    ${CODEXUI_CODEX_COMMON_SOURCES}
+    src/codex/ShellWidget.cpp
+    src/codex/ShellWidget.h
+    src/codex/PendingRequestDialog.cpp
+    src/codex/PendingRequestDialog.h
+    src/codex/TurnSettingsWidget.cpp
+    src/codex/TurnSettingsWidget.h
 )
 qt_add_executable(
     codex-ui-harness
-    ${CODEXUI_CODEX2_COMMON_SOURCES}
-    src/codex2/WorkbenchWidget.cpp
-    src/codex2/WorkbenchWidget.h
+    ${CODEXUI_CODEX_COMMON_SOURCES}
+    src/codex/WorkbenchWidget.cpp
+    src/codex/WorkbenchWidget.h
 )
 
 function(configure_codexui_target target)
@@ -77,7 +77,7 @@ function(configure_codexui_target target)
     target_link_libraries(
         ${target}
         PRIVATE
-            AISuite::OpenAICodex2
+            AISuite::OpenAICodex
             Qt6::Widgets
             Threads::Threads
             snodec::net-un-stream-legacy
@@ -92,7 +92,7 @@ target_compile_definitions(codex-ui-harness PRIVATE CODEXUI_DEVELOPMENT_HARNESS=
 
 if(TARGET snodec::net-in-stream-tls AND TARGET snodec::net-in6-stream-tls)
     foreach(target codex-ui codex-ui-harness)
-        target_compile_definitions(${target} PRIVATE CODEXUI_CODEX2_FRONTEND_TLS=1)
+        target_compile_definitions(${target} PRIVATE CODEXUI_CODEX_FRONTEND_TLS=1)
         target_link_libraries(
             ${target} PRIVATE snodec::net-in-stream-tls snodec::net-in6-stream-tls
         )
@@ -101,7 +101,7 @@ endif()
 
 if(TARGET snodec::net-rc-stream-legacy AND TARGET snodec::net-rc-stream-tls)
     foreach(target codex-ui codex-ui-harness)
-        target_compile_definitions(${target} PRIVATE CODEXUI_CODEX2_FRONTEND_RFCOMM=1)
+        target_compile_definitions(${target} PRIVATE CODEXUI_CODEX_FRONTEND_RFCOMM=1)
         target_link_libraries(
             ${target} PRIVATE snodec::net-rc-stream-legacy snodec::net-rc-stream-tls
         )
@@ -110,66 +110,66 @@ endif()
 
 if(TARGET snodec::http-client AND TARGET snodec::websocket-client)
     foreach(target codex-ui codex-ui-harness)
-        target_compile_definitions(${target} PRIVATE CODEXUI_CODEX2_FRONTEND_WEBSOCKET=1)
+        target_compile_definitions(${target} PRIVATE CODEXUI_CODEX_FRONTEND_WEBSOCKET=1)
         target_link_libraries(${target} PRIVATE snodec::http-client snodec::websocket-client)
     endforeach()
 endif()
 
 if(BUILD_TESTING)
     add_executable(
-        codexui-codex2-socketpair-contract-test
-        tests/codex2/SocketPairContractTest.cpp
-        src/codex2/ipc/QtSocketPairEndpoint.cpp
-        src/codex2/ipc/QtSocketPairEndpoint.h
-        src/codex2/ipc/SNodeSocketPairEndpoint.cpp
-        src/codex2/ipc/SNodeSocketPairEndpoint.h
-        src/codex2/ipc/SocketPair.cpp
-        src/codex2/ipc/SocketPair.h
+        codexui-socketpair-contract-test
+        tests/codex/SocketPairContractTest.cpp
+        src/codex/ipc/QtSocketPairEndpoint.cpp
+        src/codex/ipc/QtSocketPairEndpoint.h
+        src/codex/ipc/SNodeSocketPairEndpoint.cpp
+        src/codex/ipc/SNodeSocketPairEndpoint.h
+        src/codex/ipc/SocketPair.cpp
+        src/codex/ipc/SocketPair.h
     )
     target_compile_features(
-        codexui-codex2-socketpair-contract-test PRIVATE cxx_std_20
+        codexui-socketpair-contract-test PRIVATE cxx_std_20
     )
     target_include_directories(
-        codexui-codex2-socketpair-contract-test PRIVATE src
+        codexui-socketpair-contract-test PRIVATE src
     )
     target_link_libraries(
-        codexui-codex2-socketpair-contract-test
+        codexui-socketpair-contract-test
         PRIVATE Qt6::Core Threads::Threads snodec::net-un-stream-legacy
     )
     add_test(
-        NAME codexui-codex2-socketpair-contract
-        COMMAND codexui-codex2-socketpair-contract-test
+        NAME codexui-socketpair-contract
+        COMMAND codexui-socketpair-contract-test
     )
     set_tests_properties(
-        codexui-codex2-socketpair-contract PROPERTIES TIMEOUT 10
+        codexui-socketpair-contract PROPERTIES TIMEOUT 10
     )
 
     add_executable(
-        codexui-codex2-presentation-pipeline-test
-        tests/codex2/PresentationPipelineTest.cpp
-        src/codex2/PresentationModel.cpp
-        src/codex2/PresentationModel.h
-        src/codex2/PresentationProtocol.cpp
-        src/codex2/PresentationProtocol.h
-        src/codex2/ProtocolNormalizer.cpp
-        src/codex2/ProtocolNormalizer.h
+        codexui-presentation-pipeline-test
+        tests/codex/PresentationPipelineTest.cpp
+        src/codex/PresentationModel.cpp
+        src/codex/PresentationModel.h
+        src/codex/PresentationProtocol.cpp
+        src/codex/PresentationProtocol.h
+        src/codex/ProtocolNormalizer.cpp
+        src/codex/ProtocolNormalizer.h
     )
     target_compile_features(
-        codexui-codex2-presentation-pipeline-test PRIVATE cxx_std_20
+        codexui-presentation-pipeline-test PRIVATE cxx_std_20
     )
     target_include_directories(
-        codexui-codex2-presentation-pipeline-test PRIVATE src
+        codexui-presentation-pipeline-test PRIVATE src
     )
     target_link_libraries(
-        codexui-codex2-presentation-pipeline-test
-        PRIVATE AISuite::OpenAICodex2
+        codexui-presentation-pipeline-test
+        PRIVATE AISuite::OpenAICodex
     )
     add_test(
-        NAME codexui-codex2-presentation-pipeline
-        COMMAND codexui-codex2-presentation-pipeline-test
+        NAME codexui-presentation-pipeline
+        COMMAND codexui-presentation-pipeline-test
     )
     set_tests_properties(
-        codexui-codex2-presentation-pipeline PROPERTIES TIMEOUT 10
+        codexui-presentation-pipeline PROPERTIES TIMEOUT 10
     )
 endif()
 

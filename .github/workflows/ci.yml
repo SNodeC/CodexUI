@@ -39,11 +39,11 @@ jobs:
           ref: master
           path: _deps/snodec
 
-      - name: Check out AISuite codex2
+      - name: Check out canonical AISuite Codex
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: codex2-master
+          ref: f129948c9236af941b5b231bf72fa43cb7e55b8f
           path: _deps/aisuite
 
       - name: Install build dependencies
@@ -82,16 +82,14 @@ jobs:
           cmake --build _build/snodec --target all
           cmake --install _build/snodec
 
-      - name: Build and install AISuite codex2
+      - name: Build and install canonical AISuite Codex
         run: |
           cmake -S _deps/aisuite -B _build/aisuite -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/_stage/aisuite" \
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/snodec" \
-            -DAISUITE_BUILD_CODEX2_TESTS=OFF \
-            -DAISUITE_BUILD_APPS=ON \
-            -DAISUITE_ENABLE_LEGACY_CODEX=OFF \
-            -DAISUITE_BUILD_CODEX_FRONTEND_CLIENT=OFF
+            -DAISUITE_BUILD_CODEX_TESTS=OFF \
+            -DAISUITE_BUILD_APPS=ON
           cmake --build _build/aisuite --target all
           cmake --install _build/aisuite
 

@@ -1,58 +1,55 @@
 # CodexUI
 
-CodexUI is a native Qt 6 Widgets graphical Codex client built on AISuite's
-public Codex frontend C++ SDK. The UI shell implements the Figma v2 workbench
-([node 4:2](https://www.figma.com/design/IScmS9lHPduDueN2sVEsiO/Codex-UI-Prototype-v0.1?node-id=4-2)).
+CodexUI is a native Qt 6 Widgets frontend for the AISuite `codex-bridge`.
+It presents the Codex app-server protocol without introducing another backend,
+semantic cache, snapshot store, or persistence authority.
+
+The canonical process has two threads:
 
 ```text
-CodexUI
-    |
-    | AISuite public frontend C++ SDK
-    v
-codex-backend
-    |
-    v
-codex app-server
+Qt GUI thread
+    <-> bounded nonblocking Unix socketpair
+SNode.C client thread
+    <-> codex-bridge
+    <-> Codex app-server
 ```
 
-CodexUI connects automatically to the local `codex-backend` Unix frontend
-socket through Qt and delegates authentication, protocol handling, and state
-synchronization to AISuite's public frontend SDK. The sidebar displays real
-synchronized threads, and the center work area renders the selected thread's
-real turns, messages, semantic items, activity, token usage, and failures from
-the current immutable frontend State. The composer can lazily acquire
-controller ownership, create a thread, start or continue a real turn, and
-interrupt the selected active turn. Live output continues to arrive entirely
-through AISuite's immutable State projection.
+The Qt thread owns widgets and `PresentationModel`. The SNode.C thread owns the
+event loop, selected transport, `AISuite::OpenAICodex` frontend proxy SDK,
+native protocol normalization, and connection/controller telemetry. They
+exchange only bounded `codexui.presentation` JSONL commands and events.
 
-Sending on a persisted thread automatically resumes it in the running Codex
-App Server before starting the turn; selecting a thread still performs only the
-read-side synchronization needed to render it.
+The previous stateful implementation is preserved on the dedicated
+`legacy-codex` Git branch. It is not part of the canonical source tree or build.
 
-CodexUI also presents real command and file-change approvals and typed
-user-input requests from AISuite's canonical pending-request collection. A real
-attention count opens the compact request dialog, responses acquire controller
-ownership only when submitted, and requests remain visible until a subsequent
-immutable State update removes or changes them.
+## Applications
 
-The Inspector follows the selected thread and renders its latest plan,
-subagent/collaboration activity, reported file changes, and compact factual
-thread/turn/synchronization information from public typed AISuite projections.
-Unavailable or truncated fields remain visibly absent rather than being
-reconstructed from protocol JSON or the local filesystem.
+- `codex-ui`: the normal visual application.
+- `codex-ui-harness`: the permanent protocol and reducer development harness.
 
-Attachments, advanced thread management, and settings/persistence remain
-outside the current interactive core.
+Both applications use the same transport, socketpair, normalization,
+presentation protocol, and model implementation. Only their top-level Qt
+consumer differs.
 
 ## Build
 
-Qt 6 Widgets, Qt 6 Network, and an installed AISuite package that exports its
-public Codex frontend client are required.
+Qt 6 Widgets, Threads, SNode.C `master`/HEAD, and an installed canonical
+AISuite package exporting `AISuite::OpenAICodex` are required.
 
 ```sh
-cmake -S . -B build -G Ninja
-cmake --build build --parallel 28
+cmake -S . -B build-codex -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_PREFIX_PATH="/path/to/aisuite;/path/to/snodec"
+cmake --build build-codex --parallel 8
+ctest --test-dir build-codex --output-on-failure --parallel 8
 ```
+
+## Architecture
+
+The complete thread model, presentation protocol, authority rules, normalized
+event vocabulary, public APIs, shell behavior, implementation report, and test
+boundaries are documented in
+[`docs/codex-architecture.md`](docs/codex-architecture.md).
 
 ## License
 
