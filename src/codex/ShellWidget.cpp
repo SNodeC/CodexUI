@@ -2476,11 +2476,7 @@ bool ShellWidget::refreshConversationItem(const std::string &key,
           QWidget *candidate = conversationLayout->itemAt(index)->widget();
           if (!candidate)
             continue;
-          const QString candidateAnchor =
-              candidate->property(ConversationAnchorProperty).toString();
-          if (candidate == conversationTrailingSpace ||
-              candidateAnchor.startsWith(QStringLiteral("prompt:")) ||
-              candidateAnchor.startsWith(QStringLiteral("pending:"))) {
+          if (candidate == conversationTrailingSpace) {
             insertionIndex = index;
             break;
           }

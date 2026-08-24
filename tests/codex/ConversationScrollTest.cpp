@@ -340,6 +340,49 @@ public:
                          streamedTextVisible,
                      "streamed agent card appears without another prompt");
 
+    ShellWidget::PendingPrompt awaiting;
+    awaiting.id = 90;
+    awaiting.prompt = QStringLiteral("Prompt before streamed output");
+    shell.pendingPrompts["output-visibility"].push_back(std::move(awaiting));
+    shell.refreshConversation();
+    spinEvents(80);
+    const QString pendingAnchor =
+        shell.pendingPromptAnchorKey("output-visibility", 90);
+    QWidget *pendingBeforeOutput = nullptr;
+    for (int index = 0; index < shell.conversationLayout->count(); ++index) {
+      QWidget *candidate = shell.conversationLayout->itemAt(index)->widget();
+      if (candidate &&
+          candidate->property("conversationAnchorKey").toString() ==
+              pendingAnchor) {
+        pendingBeforeOutput = candidate;
+        break;
+      }
+    }
+    const std::string laterAgentKey =
+        std::string("output-turn") + '\x1f' + "later-agent";
+    const nlohmann::json laterAgent = {{"id", "later-agent"},
+                                       {"type", "agentMessage"},
+                                       {"phase", "commentary"},
+                                       {"text", "later reply"}};
+    shell.model.applyEvent(presentation::event(
+        8, 1, "conversation.item.upsert", {{"item", laterAgent}},
+        presentation::Authority::Merge,
+        {{"threadId", "output-visibility"},
+         {"turnId", "output-turn"},
+         {"itemId", "later-agent"}}));
+    shell.dirtyConversationItems[laterAgentKey] = {"output-turn",
+                                                   "later-agent"};
+    const bool orderedInsertKeptViewportHeight = observeViewportHeight(
+        shell, [&shell] { shell.refreshConversationItems(); }, 80);
+    QWidget *laterAgentCard = shell.conversationCards.at(laterAgentKey);
+    result &=
+        expect(pendingBeforeOutput &&
+                   shell.conversationLayout->indexOf(pendingBeforeOutput) <
+                       shell.conversationLayout->indexOf(laterAgentCard),
+               "new streamed cards remain after the locally admitted prompt");
+    result &= expect(orderedInsertKeptViewportHeight,
+                     "post-prompt insertion keeps viewport geometry fixed");
+
     shell.localNewThreadIntent = true;
     shell.selectedThreadId.clear();
     ShellWidget::PendingPrompt acknowledged;
@@ -351,8 +394,16 @@ public:
     shell.newThreadPendingPrompts.push_back(std::move(acknowledged));
     shell.refreshConversation();
     spinEvents(60);
-    QFrame *pendingCard =
-        shell.findChild<QFrame *>(QStringLiteral("pendingPromptCard"));
+    QFrame *pendingCard = nullptr;
+    for (int index = 0; index < shell.conversationLayout->count(); ++index) {
+      QWidget *candidate = shell.conversationLayout->itemAt(index)->widget();
+      if (candidate &&
+          candidate->property("conversationAnchorKey").toString() ==
+              QStringLiteral("pending:new:91")) {
+        pendingCard = qobject_cast<QFrame *>(candidate);
+        break;
+      }
+    }
     bool acceptedLabelFound = false;
     if (pendingCard) {
       for (QLabel *label : pendingCard->findChildren<QLabel *>())
