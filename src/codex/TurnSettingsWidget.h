@@ -25,6 +25,7 @@ public:
                   const nlohmann::json &models,
                   const nlohmann::json &permissionProfiles);
   void setControlsEnabled(bool enabled);
+  void setWorkspace(QString path);
 
   [[nodiscard]] std::string workspace(const std::string &fallback) const;
   [[nodiscard]] nlohmann::json threadStartOptions() const;

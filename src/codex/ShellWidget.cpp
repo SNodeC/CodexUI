@@ -2,7 +2,11 @@
 
 #include "codex/ShellWidget.h"
 
+#include "codex/ConnectionDialog.h"
+#include "codex/DiffViewer.h"
+#include "codex/FileSelectionDialog.h"
 #include "codex/FrontendSession.h"
+#include "codex/NewThreadDialog.h"
 #include "codex/PendingRequestDialog.h"
 #include "codex/TurnSettingsWidget.h"
 #include "codex/ui/ExpandingPromptEditor.h"
@@ -371,11 +375,45 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
       QStringLiteral("color:#667085;font-size:12px;font-weight:500;"));
   topLayout->addWidget(workspaceBreadcrumb);
   topLayout->addStretch();
-  reconnectButton = new QPushButton(QStringLiteral("Reconnect"));
-  reconnectButton->setProperty("kind", "subtle");
-  reconnectButton->setFixedHeight(32);
   attentionButton = new QPushButton(QStringLiteral("0 requests"));
   attentionButton->setFixedSize(106, 32);
+  connectionButton = new QToolButton;
+  connectionButton->setText(QStringLiteral("Connection"));
+  connectionButton->setProperty("kind", "subtle");
+  connectionButton->setPopupMode(QToolButton::InstantPopup);
+  connectionButton->setFixedHeight(32);
+  auto *connectionMenu = new QMenu(connectionButton);
+  connectionMenu->addAction(QStringLiteral("Configure..."), this, [this] {
+    if (!model.connection().settings.is_object() ||
+        model.connection().settings.empty()) {
+      showNotice(QStringLiteral("Connection settings are not available yet."));
+      return;
+    }
+    ConnectionDialog dialog(model.connection().settings, this);
+    if (dialog.exec() != QDialog::Accepted)
+      return;
+    this->session.configureConnection(
+        dialog.selection(), [this](const nlohmann::json &result) {
+          if (result.value("ok", false))
+            return;
+          const std::string message =
+              safeMessage(result.value("error", nlohmann::json::object()));
+          showNotice(text(message.empty()
+                              ? std::string("Connection configuration failed")
+                              : message));
+        });
+  });
+  connectionMenu->addSeparator();
+  connectAction =
+      connectionMenu->addAction(QStringLiteral("Connect"), this,
+                                [this] { this->session.connectTransport(); });
+  disconnectAction =
+      connectionMenu->addAction(QStringLiteral("Disconnect"), this, [this] {
+        this->session.disconnectTransport();
+      });
+  reconnectAction = connectionMenu->addAction(
+      QStringLiteral("Reconnect"), this, [this] { this->session.reconnect(); });
+  connectionButton->setMenu(connectionMenu);
   controllerButton = new QPushButton(QStringLiteral("Claim control"));
   controllerButton->setFixedHeight(32);
   restoreInspectorButton = new QPushButton(QStringLiteral("Show inspector"));
@@ -388,10 +426,8 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
     else
       this->session.claimController();
   });
-  connect(reconnectButton, &QPushButton::clicked, this,
-          [this] { this->session.reconnect(); });
-  topLayout->addWidget(reconnectButton);
   topLayout->addWidget(attentionButton);
+  topLayout->addWidget(connectionButton);
   topLayout->addWidget(controllerButton);
   topLayout->addWidget(restoreInspectorButton);
   root->addWidget(top);
@@ -434,31 +470,13 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   auto *refreshButton = new QPushButton(QStringLiteral("Refresh"));
   refreshButton->setProperty("kind", "subtle");
   refreshButton->setFixedHeight(28);
-  threadActionsButton = new QToolButton;
-  threadActionsButton->setText(QStringLiteral("More"));
-  threadActionsButton->setProperty("kind", "subtle");
-  threadActionsButton->setFixedHeight(28);
-  threadActionsButton->setPopupMode(QToolButton::InstantPopup);
-  auto *threadActions = new QMenu(threadActionsButton);
-  threadActions->addAction(QStringLiteral("Reload"), this,
-                           [this] { readSelectedThread(); });
-  threadActions->addAction(QStringLiteral("Rename"), this,
-                           [this] { renameSelectedThread(); });
-  threadActions->addAction(QStringLiteral("Fork"), this,
-                           [this] { forkSelectedThread(); });
-  threadActions->addAction(QStringLiteral("Archive / unarchive"), this,
-                           [this] { toggleSelectedThreadArchive(); });
-  threadActions->addSeparator();
-  threadActions->addAction(QStringLiteral("Delete"), this,
-                           [this] { deleteSelectedThread(); });
-  threadActionsButton->setMenu(threadActions);
   threadToolbar->addWidget(refreshButton);
   threadToolbar->addStretch();
-  threadToolbar->addWidget(threadActionsButton);
   sidebarLayout->addLayout(threadToolbar);
   threadList = new QListWidget;
   threadList->setObjectName(QStringLiteral("threadList"));
   threadList->setSelectionMode(QAbstractItemView::SingleSelection);
+  threadList->setContextMenuPolicy(Qt::CustomContextMenu);
   threadList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   threadList->setTextElideMode(Qt::ElideRight);
   threadList->setStyleSheet(QStringLiteral(
@@ -496,6 +514,41 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   connect(threadList, &QListWidget::itemClicked, this,
           [this](QListWidgetItem *item) {
             selectThread(item->data(Qt::UserRole).toString().toStdString());
+          });
+  connect(threadList, &QListWidget::customContextMenuRequested, this,
+          [this](const QPoint &position) {
+            QListWidgetItem *item = threadList->itemAt(position);
+            if (!item)
+              return;
+            const std::string threadId =
+                item->data(Qt::UserRole).toString().toStdString();
+            const ThreadPresentation *thread = model.thread(threadId);
+            if (!thread)
+              return;
+            QMenu menu(threadList);
+            menu.addAction(QStringLiteral("Reload"), this,
+                           [this, threadId] { readThread(threadId); });
+            const bool canControl = model.connection().connected &&
+                                    model.connection().role == "controller";
+            QAction *rename =
+                menu.addAction(QStringLiteral("Rename"), this,
+                               [this, threadId] { renameThread(threadId); });
+            QAction *fork =
+                menu.addAction(QStringLiteral("Fork"), this,
+                               [this, threadId] { forkThread(threadId); });
+            QAction *archive = menu.addAction(
+                thread->archived ? QStringLiteral("Unarchive")
+                                 : QStringLiteral("Archive"),
+                this, [this, threadId] { toggleThreadArchive(threadId); });
+            menu.addSeparator();
+            QAction *remove =
+                menu.addAction(QStringLiteral("Delete"), this,
+                               [this, threadId] { deleteThread(threadId); });
+            rename->setEnabled(canControl);
+            fork->setEnabled(canControl);
+            archive->setEnabled(canControl);
+            remove->setEnabled(canControl);
+            menu.exec(threadList->viewport()->mapToGlobal(position));
           });
   splitter->addWidget(sidebar);
 
@@ -583,22 +636,47 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
 
   auto *composer = new QFrame;
   composer->setProperty("kind", "composer");
-  auto *composerLayout = new QHBoxLayout(composer);
+  auto *composerLayout = new QVBoxLayout(composer);
   composerLayout->setContentsMargins(10, 8, 8, 8);
+  composerLayout->setSpacing(6);
+  auto *attachmentRow = new QHBoxLayout;
+  attachmentSummary = makeLabel({}, "meta");
+  attachmentSummary->hide();
+  clearAttachmentsButton = new QPushButton(QStringLiteral("Clear"));
+  clearAttachmentsButton->setProperty("kind", "subtle");
+  clearAttachmentsButton->setFixedHeight(24);
+  clearAttachmentsButton->hide();
+  attachmentRow->addWidget(attachmentSummary, 1);
+  attachmentRow->addWidget(clearAttachmentsButton);
+  composerLayout->addLayout(attachmentRow);
+  auto *composerRow = new QHBoxLayout;
+  composerRow->setSpacing(8);
+  attachmentButton = new QPushButton(QStringLiteral("Attach"));
+  attachmentButton->setProperty("kind", "subtle");
+  attachmentButton->setFixedHeight(34);
   promptEditor = new codexui::ExpandingPromptEditor;
   sendButton = new QPushButton(QStringLiteral("Send"));
   sendButton->setProperty("kind", "primary");
   interruptButton = new QPushButton(QStringLiteral("Stop"));
   interruptButton->setProperty("kind", "stop");
-  composerLayout->addWidget(promptEditor, 1);
-  composerLayout->addWidget(interruptButton);
-  composerLayout->addWidget(sendButton);
+  composerRow->addWidget(attachmentButton);
+  composerRow->addWidget(promptEditor, 1);
+  composerRow->addWidget(interruptButton);
+  composerRow->addWidget(sendButton);
+  composerLayout->addLayout(composerRow);
   centerLayout->addWidget(composer);
   connect(sendButton, &QPushButton::clicked, this, [this] { submitPrompt(); });
   connect(promptEditor, &codexui::ExpandingPromptEditor::submitRequested, this,
           [this] { submitPrompt(); });
   connect(interruptButton, &QPushButton::clicked, this,
           [this] { interruptActiveTurn(); });
+  connect(attachmentButton, &QPushButton::clicked, this,
+          [this] { chooseAttachments(); });
+  connect(clearAttachmentsButton, &QPushButton::clicked, this, [this] {
+    attachmentDrafts.clear();
+    ++attachmentRevision;
+    refreshAttachments();
+  });
   splitter->addWidget(center);
 
   inspector = new QFrame;
@@ -629,10 +707,7 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   agentsLayout = new QVBoxLayout(agentsContent);
   agentsLayout->setContentsMargins(12, 12, 12, 12);
   agentsLayout->setSpacing(8);
-  changesContent = new QWidget;
-  changesLayout = new QVBoxLayout(changesContent);
-  changesLayout->setContentsMargins(12, 12, 12, 12);
-  changesLayout->setSpacing(8);
+  diffViewer = new DiffViewer;
   requestsContent = new QWidget;
   requestsLayout = new QVBoxLayout(requestsContent);
   requestsLayout->setContentsMargins(12, 12, 12, 12);
@@ -645,10 +720,6 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   agentsScroll->setWidgetResizable(true);
   agentsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   agentsScroll->setWidget(agentsContent);
-  auto *changesScroll = new QScrollArea;
-  changesScroll->setWidgetResizable(true);
-  changesScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-  changesScroll->setWidget(changesContent);
   auto *requestsScroll = new QScrollArea;
   requestsScroll->setWidgetResizable(true);
   requestsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -687,7 +758,7 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   });
   inspectorTabs->addTab(planScroll, QStringLiteral("Plan"));
   inspectorTabs->addTab(agentsScroll, QStringLiteral("Agents"));
-  inspectorTabs->addTab(changesScroll, QStringLiteral("Changes"));
+  inspectorTabs->addTab(diffViewer, QStringLiteral("Changes"));
   inspectorTabs->addTab(requestsScroll, QStringLiteral("Requests"));
   inspectorTabs->addTab(infoTabs, QStringLiteral("Info"));
   connect(inspectorTabs, &QTabWidget::currentChanged, this, [this](int index) {
@@ -776,8 +847,9 @@ void ShellWidget::handleEvent(const nlohmann::json &event) {
              (stringValue(data, "state") == "failure" ||
               stringValue(data, "state") == "disconnected")) {
     const std::string detail = stringValue(data, "detail");
-    showNotice(detail.empty() ? QStringLiteral("Codex bridge disconnected")
-                              : text(detail));
+    if (!detail.starts_with("local-"))
+      showNotice(detail.empty() ? QStringLiteral("Codex bridge disconnected")
+                                : text(detail));
   }
   if (event.value("kind", std::string{}) == "event" &&
       event.value("type", std::string{}) == "connection.bridge" &&
@@ -987,7 +1059,11 @@ void ShellWidget::refreshTurnSettings() {
       canonical.merge_patch(update);
     }
   } else {
-    canonical["cwd"] = QDir::currentPath().toStdString();
+    canonical["cwd"] =
+        (localNewThreadIntent && !newThreadDraftWorkspace.isEmpty()
+             ? newThreadDraftWorkspace
+             : QDir::currentPath())
+            .toStdString();
   }
 
   nlohmann::json permissionProfiles = nlohmann::json::array();
@@ -1237,15 +1313,60 @@ void ShellWidget::refreshInspector() {
     activeLayout = planLayout;
   else if (activeTab == 1)
     activeLayout = agentsLayout;
-  else if (activeTab == 2)
-    activeLayout = changesLayout;
   else if (activeTab == 3)
     activeLayout = requestsLayout;
+  const ThreadPresentation *thread = model.thread(selectedThreadId);
+  if (activeTab == 2) {
+    QString liveDiff;
+    std::vector<DiffFilePresentation> retained;
+    if (thread) {
+      for (auto turnId = thread->turnOrder.rbegin();
+           turnId != thread->turnOrder.rend() && liveDiff.isEmpty(); ++turnId) {
+        const auto turn = thread->turns.find(*turnId);
+        if (turn == thread->turns.end())
+          continue;
+        const auto domain = turn->second.domains.find("turn.diff.changed");
+        if (domain != turn->second.domains.end())
+          liveDiff = text(stringValue(domain->second, "diff"));
+      }
+      if (liveDiff.isEmpty()) {
+        for (auto turnId = thread->turnOrder.rbegin();
+             turnId != thread->turnOrder.rend() && retained.empty(); ++turnId) {
+          const auto turn = thread->turns.find(*turnId);
+          if (turn == thread->turns.end())
+            continue;
+          for (auto itemId = turn->second.itemOrder.rbegin();
+               itemId != turn->second.itemOrder.rend(); ++itemId) {
+            const auto item = turn->second.items.find(*itemId);
+            if (item == turn->second.items.end() ||
+                stringValue(item->second.raw, "type") != "fileChange")
+              continue;
+            const nlohmann::json changes =
+                item->second.raw.value("changes", nlohmann::json::array());
+            if (!changes.is_array())
+              continue;
+            for (const auto &change : changes) {
+              QString kind = text(stringValue(change, "kind"));
+              if (kind.isEmpty() && change.contains("kind") &&
+                  change["kind"].is_object())
+                kind = text(stringValue(change["kind"], "type"));
+              retained.push_back({text(stringValue(change, "path")),
+                                  std::move(kind),
+                                  text(stringValue(change, "diff"))});
+            }
+            if (!retained.empty())
+              break;
+          }
+        }
+      }
+    }
+    diffViewer->setChanges(std::move(liveDiff), std::move(retained));
+    return;
+  }
   if (!activeLayout)
     return;
 
   clearLayout(activeLayout);
-  const ThreadPresentation *thread = model.thread(selectedThreadId);
   if (!thread) {
     activeLayout->addWidget(
         makeLabel(QStringLiteral("No selected thread."), "muted"));
@@ -1326,52 +1447,6 @@ void ShellWidget::refreshInspector() {
     return;
   }
 
-  if (activeTab == 2) {
-    std::size_t changeCount = 0;
-    for (const std::string &turnId : thread->turnOrder) {
-      const auto turn = thread->turns.find(turnId);
-      if (turn == thread->turns.end())
-        continue;
-      for (const std::string &itemId : turn->second.itemOrder) {
-        const auto item = turn->second.items.find(itemId);
-        if (item == turn->second.items.end() ||
-            stringValue(item->second.raw, "type") != "fileChange")
-          continue;
-        auto *frame = new QFrame;
-        frame->setProperty("kind", "summary");
-        auto *layout = new QVBoxLayout(frame);
-        layout->setContentsMargins(9, 7, 9, 7);
-        layout->setSpacing(5);
-        layout->addWidget(makeLabel(QStringLiteral("File changes"), "title"));
-        layout->addWidget(makeLabel(
-            displayStatus(stringValue(item->second.raw, "status")), "meta"));
-        const nlohmann::json changes =
-            item->second.raw.value("changes", nlohmann::json::array());
-        if (changes.is_array()) {
-          for (const auto &change : changes) {
-            QString path = text(stringValue(change, "path"));
-            if (path.isEmpty())
-              path = text(stringValue(change, "filePath"));
-            const QString changeKind = text(stringValue(change, "kind"));
-            if (!path.isEmpty())
-              layout->addWidget(makeLabel(
-                  changeKind.isEmpty()
-                      ? path
-                      : QStringLiteral("%1  |  %2").arg(path, changeKind),
-                  "meta"));
-          }
-        }
-        changesLayout->addWidget(frame);
-        ++changeCount;
-      }
-    }
-    if (changeCount == 0)
-      changesLayout->addWidget(makeLabel(
-          QStringLiteral("No file changes for this thread."), "muted"));
-    changesLayout->addStretch();
-    return;
-  }
-
   std::size_t requestCount = 0;
   for (const auto &[id, request] : model.pendingRequestPresentations()) {
     if (request.threadId != selectedThreadId)
@@ -1439,7 +1514,27 @@ void ShellWidget::refreshStatus() {
           : QStringLiteral("background:#98a2b3;border-radius:4px;");
   connectionStatusDot->setStyleSheet(dotStyle);
   bottomConnectionStatusDot->setStyleSheet(dotStyle);
-  reconnectButton->setVisible(!connection.connected);
+  QString selectedTransport;
+  const std::string selectedKey = stringValue(connection.settings, "selected");
+  const nlohmann::json available =
+      connection.settings.value("available", nlohmann::json::array());
+  if (available.is_array()) {
+    for (const auto &entry : available) {
+      if (stringValue(entry, "key") == selectedKey) {
+        selectedTransport = text(stringValue(entry, "label"));
+        break;
+      }
+    }
+  }
+  connectionButton->setText(selectedTransport.isEmpty()
+                                ? QStringLiteral("Connection")
+                                : selectedTransport);
+  connectionButton->setToolTip(
+      connection.connected ? QStringLiteral("Connected bridge transport")
+                           : QStringLiteral("Disconnected bridge transport"));
+  connectAction->setEnabled(!connection.connected);
+  disconnectAction->setEnabled(connection.connected);
+  reconnectAction->setEnabled(connection.connected);
   controllerLabel->setText(connection.role.empty() ? QStringLiteral("No role")
                                                    : text(connection.role));
   controllerButton->setText(connection.role == "controller"
@@ -1479,9 +1574,10 @@ void ShellWidget::refreshStatus() {
                   .arg(static_cast<qulonglong>(thread->agents.size()))
                   .arg(static_cast<qulonglong>(runningAgents)));
   } else {
-    const QString workspace = localNewThreadIntent
-                                  ? QDir::currentPath()
-                                  : QStringLiteral("No workspace");
+    const QString workspace =
+        localNewThreadIntent
+            ? text(turnSettings->workspace(QDir::currentPath().toStdString()))
+            : QStringLiteral("No workspace");
     workspaceBreadcrumb->setToolTip(workspace);
     workspaceBreadcrumb->setText(workspaceBreadcrumb->fontMetrics().elidedText(
         workspace, Qt::ElideMiddle, workspaceBreadcrumb->maximumWidth()));
@@ -1496,11 +1592,10 @@ void ShellWidget::refreshStatus() {
                              : QStringLiteral("Send"));
   sendButton->setEnabled(connection.connected &&
                          connection.role == "controller");
+  attachmentButton->setEnabled(connection.connected &&
+                               connection.role == "controller");
   turnSettings->setControlsEnabled(connection.connected &&
                                    connection.role == "controller" && !active);
-  threadActionsButton->setEnabled(!selectedThreadId.empty() &&
-                                  connection.connected &&
-                                  connection.role == "controller");
 }
 
 void ShellWidget::refreshStateInspector() {
@@ -1537,14 +1632,34 @@ void ShellWidget::selectThread(std::string threadId) {
     conversationItemLimit = 80;
   selectedThreadId = std::move(threadId);
   localNewThreadIntent = false;
+  newThreadDraftOptions = nlohmann::json::object();
+  newThreadDraftName.clear();
+  newThreadDraftWorkspace.clear();
   conversationRebuildPending = true;
-  readSelectedThread();
+  readThread(selectedThreadId);
   scheduleRefresh();
 }
 
 void ShellWidget::beginNewThread() {
+  NewThreadDialog dialog(
+      text(turnSettings->workspace(QDir::currentPath().toStdString())), this);
+  if (dialog.exec() != QDialog::Accepted)
+    return;
+  const NewThreadDraft draft = dialog.draft();
   selectedThreadId.clear();
   localNewThreadIntent = true;
+  newThreadDraftName = draft.name;
+  newThreadDraftWorkspace = draft.workspace;
+  newThreadDraftOptions = nlohmann::json::object();
+  if (!draft.baseInstructions.isEmpty())
+    newThreadDraftOptions["baseInstructions"] =
+        draft.baseInstructions.toStdString();
+  if (!draft.developerInstructions.isEmpty())
+    newThreadDraftOptions["developerInstructions"] =
+        draft.developerInstructions.toStdString();
+  if (draft.ephemeral)
+    newThreadDraftOptions["ephemeral"] = true;
+  turnSettings->setWorkspace(draft.workspace);
   conversationItemLimit = 80;
   conversationRebuildPending = true;
   threadList->clearSelection();
@@ -1556,14 +1671,14 @@ void ShellWidget::requestThreads() { session.listThreads(); }
 
 void ShellWidget::requestModels() { session.listModels(); }
 
-void ShellWidget::readSelectedThread() {
-  if (selectedThreadId.empty())
+void ShellWidget::readThread(const std::string &threadId) {
+  if (threadId.empty())
     return;
-  session.readThread(selectedThreadId);
+  session.readThread(threadId);
 }
 
-void ShellWidget::renameSelectedThread() {
-  const ThreadPresentation *thread = model.thread(selectedThreadId);
+void ShellWidget::renameThread(const std::string &threadId) {
+  const ThreadPresentation *thread = model.thread(threadId);
   if (!thread)
     return;
   bool accepted = false;
@@ -1573,43 +1688,43 @@ void ShellWidget::renameSelectedThread() {
                             text(thread->title), &accepted)
           .trimmed();
   if (accepted && !name.isEmpty())
-    session.renameThread(selectedThreadId, name.toStdString());
+    session.renameThread(threadId, name.toStdString());
 }
 
-void ShellWidget::forkSelectedThread() {
-  if (selectedThreadId.empty())
+void ShellWidget::forkThread(const std::string &threadId) {
+  if (threadId.empty())
     return;
-  session.forkThread(selectedThreadId, nlohmann::json::object(),
-                     [this](const nlohmann::json &result) {
-                       if (!result.value("ok", false))
-                         return;
-                       const std::string threadId = stringValue(
-                           result.value("data", nlohmann::json::object())
-                               .value("thread", nlohmann::json::object()),
-                           "id");
-                       if (!threadId.empty())
-                         selectThread(threadId);
-                     });
+  session.forkThread(
+      threadId, nlohmann::json::object(), [this](const nlohmann::json &result) {
+        if (!result.value("ok", false))
+          return;
+        const std::string threadId =
+            stringValue(result.value("data", nlohmann::json::object())
+                            .value("thread", nlohmann::json::object()),
+                        "id");
+        if (!threadId.empty())
+          selectThread(threadId);
+      });
 }
 
-void ShellWidget::toggleSelectedThreadArchive() {
-  const ThreadPresentation *thread = model.thread(selectedThreadId);
+void ShellWidget::toggleThreadArchive(const std::string &threadId) {
+  const ThreadPresentation *thread = model.thread(threadId);
   if (!thread)
     return;
   if (thread->archived)
-    session.unarchiveThread(selectedThreadId);
+    session.unarchiveThread(threadId);
   else
-    session.archiveThread(selectedThreadId);
+    session.archiveThread(threadId);
 }
 
-void ShellWidget::deleteSelectedThread() {
-  if (selectedThreadId.empty())
+void ShellWidget::deleteThread(const std::string &threadId) {
+  if (threadId.empty())
     return;
   if (QMessageBox::question(this, QStringLiteral("Delete thread"),
                             QStringLiteral("Delete the selected thread?"),
                             QMessageBox::Yes | QMessageBox::Cancel,
                             QMessageBox::Cancel) == QMessageBox::Yes) {
-    session.deleteThread(selectedThreadId);
+    session.deleteThread(threadId);
   }
 }
 
@@ -1622,17 +1737,23 @@ void ShellWidget::submitPrompt() {
 
   if (!selectedThreadId.empty()) {
     submitPromptToThread(selectedThreadId, prompt,
-                         turnSettings->turnStartOptions());
+                         turnSettings->turnStartOptions(), attachmentDrafts,
+                         attachmentRevision);
     return;
   }
   localNewThreadIntent = true;
   nlohmann::json threadOptions = turnSettings->threadStartOptions();
+  threadOptions.update(newThreadDraftOptions);
   threadOptions["cwd"] =
       turnSettings->workspace(QDir::currentPath().toStdString());
   nlohmann::json turnOptions = turnSettings->turnStartOptions();
+  const std::vector<AttachmentDraft> submittedAttachments = attachmentDrafts;
+  const std::uint64_t submittedAttachmentRevision = attachmentRevision;
+  const QString requestedName = newThreadDraftName;
   session.createThread(
       std::move(threadOptions),
-      [this, prompt, turnOptions = std::move(turnOptions)](
+      [this, prompt, requestedName, submittedAttachments,
+       submittedAttachmentRevision, turnOptions = std::move(turnOptions)](
           const nlohmann::json &result) mutable {
         if (!result.value("ok", false)) {
           const nlohmann::json error =
@@ -1651,35 +1772,94 @@ void ShellWidget::submitPrompt() {
           return;
         selectedThreadId = threadId;
         localNewThreadIntent = false;
+        newThreadDraftOptions = nlohmann::json::object();
+        newThreadDraftName.clear();
+        newThreadDraftWorkspace.clear();
         conversationItemLimit = 80;
         conversationRebuildPending = true;
-        submitPromptToThread(threadId, prompt, std::move(turnOptions));
+        if (!requestedName.isEmpty())
+          session.renameThread(threadId, requestedName.toStdString());
+        submitPromptToThread(threadId, prompt, std::move(turnOptions),
+                             submittedAttachments, submittedAttachmentRevision);
         scheduleRefresh();
       });
 }
 
 void ShellWidget::submitPromptToThread(std::string threadId, std::string prompt,
-                                       nlohmann::json options) {
-  const nlohmann::json input =
+                                       nlohmann::json options,
+                                       std::vector<AttachmentDraft> attachments,
+                                       std::uint64_t submittedRevision) {
+  nlohmann::json input =
       nlohmann::json::array({{{"type", "text"},
                               {"text", std::move(prompt)},
                               {"text_elements", nlohmann::json::array()}}});
+  for (const AttachmentDraft &attachment : attachments) {
+    if (attachment.mimeType.startsWith(QStringLiteral("image/"))) {
+      input.push_back(
+          {{"type", "localImage"}, {"path", attachment.path.toStdString()}});
+    } else if (attachment.mimeType.startsWith(QStringLiteral("audio/"))) {
+      input.push_back(
+          {{"type", "localAudio"}, {"path", attachment.path.toStdString()}});
+    } else {
+      input.push_back({{"type", "mention"},
+                       {"name", attachment.name.toStdString()},
+                       {"path", attachment.path.toStdString()}});
+    }
+  }
+  const auto completed = [this,
+                          submittedRevision](const nlohmann::json &result) {
+    if (!result.value("ok", false)) {
+      const nlohmann::json error =
+          result.value("error", nlohmann::json::object());
+      const std::string message = safeMessage(error);
+      showNotice(text(message.empty() ? std::string("Turn submission failed")
+                                      : message));
+      return;
+    }
+    if (attachmentRevision == submittedRevision) {
+      attachmentDrafts.clear();
+      ++attachmentRevision;
+      refreshAttachments();
+    }
+  };
   const auto activeTurn = model.activeTurnId(threadId);
   if (activeTurn) {
-    session.steerTurn(threadId, *activeTurn, input);
+    session.steerTurn(threadId, *activeTurn, std::move(input), completed);
   } else {
-    session.startTurn(threadId, input, std::move(options),
-                      [this](const nlohmann::json &result) {
-                        if (result.value("ok", false))
-                          return;
-                        const nlohmann::json error =
-                            result.value("error", nlohmann::json::object());
-                        const std::string message = safeMessage(error);
-                        showNotice(text(message.empty()
-                                            ? std::string("Turn start failed")
-                                            : message));
-                      });
+    session.startTurn(threadId, std::move(input), std::move(options),
+                      completed);
   }
+}
+
+void ShellWidget::chooseAttachments() {
+  const QString initialDirectory =
+      text(turnSettings->workspace(QDir::currentPath().toStdString()));
+  FileSelectionDialog dialog(FileSelectionDialog::Mode::Attachments,
+                             initialDirectory, attachmentDrafts, this);
+  if (dialog.exec() != QDialog::Accepted)
+    return;
+  attachmentDrafts = dialog.selectedAttachments();
+  ++attachmentRevision;
+  refreshAttachments();
+}
+
+void ShellWidget::refreshAttachments() {
+  const bool hasAttachments = !attachmentDrafts.empty();
+  attachmentSummary->setVisible(hasAttachments);
+  clearAttachmentsButton->setVisible(hasAttachments);
+  if (!hasAttachments) {
+    attachmentSummary->clear();
+    attachmentSummary->setToolTip({});
+    return;
+  }
+  QStringList names;
+  for (const AttachmentDraft &attachment : attachmentDrafts)
+    names.push_back(attachment.name);
+  attachmentSummary->setText(
+      attachmentDrafts.size() == 1
+          ? QStringLiteral("1 attachment: %1").arg(names.front())
+          : QStringLiteral("%1 attachments").arg(attachmentDrafts.size()));
+  attachmentSummary->setToolTip(names.join(QStringLiteral("\n")));
 }
 
 void ShellWidget::interruptActiveTurn() {

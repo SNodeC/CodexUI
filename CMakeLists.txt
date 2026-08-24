@@ -31,10 +31,18 @@ set(
     src/codex/ClientRuntime.h
     src/codex/Configuration.cpp
     src/codex/Configuration.h
+    src/codex/ConnectionDialog.cpp
+    src/codex/ConnectionDialog.h
+    src/codex/DiffViewer.cpp
+    src/codex/DiffViewer.h
     src/codex/FrontendSession.cpp
     src/codex/FrontendSession.h
+    src/codex/FileSelectionDialog.cpp
+    src/codex/FileSelectionDialog.h
     src/codex/MainWindow.cpp
     src/codex/MainWindow.h
+    src/codex/NewThreadDialog.cpp
+    src/codex/NewThreadDialog.h
     src/codex/PresentationModel.cpp
     src/codex/PresentationModel.h
     src/codex/PresentationProtocol.cpp

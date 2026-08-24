@@ -110,12 +110,17 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   std::function<void()> requestReconnect;
   std::function<void()> requestShutdown;
 
+  std::string expectedDisconnectReason;
   client::ClientConnection connection(
       sdk, client::ClientConnectionCallbacks{
                .onConnected =
                    [&normalizer] { normalizer.transportEvent("connected"); },
                .onDisconnected =
-                   [&normalizer] { normalizer.transportEvent("disconnected"); },
+                   [&normalizer, &expectedDisconnectReason] {
+                     normalizer.transportEvent(
+                         "disconnected",
+                         std::exchange(expectedDisconnectReason, {}));
+                   },
                .onFailure =
                    [&normalizer](std::string reason) {
                      normalizer.transportEvent("failure", std::move(reason));
@@ -132,10 +137,10 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
 
 #define CODEXUI_REGISTER_SERVER_REQUEST(OperationName, methodName)             \
   sdk.on##OperationName(                                                       \
-      [&normalizer](codex::generated::server_requests::OperationName::Params  \
-                        &request) {                                            \
+      [&normalizer](                                                           \
+          codex::generated::server_requests::OperationName::Params &request) { \
         normalizer.serverRequest(                                              \
-            codex::generated::server_requests::OperationName::method,         \
+            codex::generated::server_requests::OperationName::method,          \
             request.jsonRpcId(), request.getPayload());                        \
       });
   AI_OPENAI_CODEX_SERVER_REQUESTS(CODEXUI_REGISTER_SERVER_REQUEST)
@@ -144,10 +149,10 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
 #define CODEXUI_REGISTER_SERVER_NOTIFICATION(OperationName, methodName)        \
   sdk.on##OperationName(                                                       \
       [&normalizer](                                                           \
-          codex::generated::server_notifications::OperationName::Params       \
+          codex::generated::server_notifications::OperationName::Params        \
               &notification) {                                                 \
         normalizer.serverNotification(                                         \
-            codex::generated::server_notifications::OperationName::method,    \
+            codex::generated::server_notifications::OperationName::method,     \
             notification.getPayload());                                        \
       });
   AI_OPENAI_CODEX_SERVER_NOTIFICATIONS(CODEXUI_REGISTER_SERVER_NOTIFICATION)
@@ -155,22 +160,19 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
 
   net::un::stream::legacy::SocketClient<StreamFactory,
                                         client::ClientConnection &, std::size_t>
-      unixClient("codex-ui-unix", connection,
-                 std::size_t(maximumFrameBytes));
+      unixClient("codex-ui-unix", connection, std::size_t(maximumFrameBytes));
   unixClient.getConfig()->Remote::setSunPath("/tmp/codex-bridge.sock");
   configureStreamClient(unixClient, false);
 
   net::in::stream::legacy::SocketClient<StreamFactory,
                                         client::ClientConnection &, std::size_t>
-      ipv4Client("codex-ui-ipv4", connection,
-                 std::size_t(maximumFrameBytes));
+      ipv4Client("codex-ui-ipv4", connection, std::size_t(maximumFrameBytes));
   configureStreamClient(ipv4Client, true);
   ipv4Client.getConfig()->Remote::setHost("127.0.0.1");
 
   net::in6::stream::legacy::SocketClient<
       StreamFactory, client::ClientConnection &, std::size_t>
-      ipv6Client("codex-ui-ipv6", connection,
-                 std::size_t(maximumFrameBytes));
+      ipv6Client("codex-ui-ipv6", connection, std::size_t(maximumFrameBytes));
   configureStreamClient(ipv6Client, true);
   ipv6Client.getConfig()->Remote::setHost("::1");
 
@@ -206,13 +208,13 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
 
 #if defined(CODEXUI_CODEX_FRONTEND_WEBSOCKET)
   client::linkWebSocketClient();
+  std::string currentWebSocketEndpoint = configuration.webSocketEndpoint();
   auto webSocketBinding =
       std::make_shared<client::WebSocketBinding>(connection, maximumFrameBytes);
   const auto beginWebSocket =
-      [webSocketBinding, &configuration](
+      [webSocketBinding, &currentWebSocketEndpoint](
           const std::shared_ptr<web::http::client::MasterRequest> &request) {
-        webSocketBinding->beginUpgrade(request,
-                                       configuration.webSocketEndpoint());
+        webSocketBinding->beginUpgrade(request, currentWebSocketEndpoint);
       };
   const auto endWebSocket =
       [webSocketBinding](
@@ -234,8 +236,7 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
 
 #if defined(CODEXUI_CODEX_FRONTEND_TLS)
   client::WebSocketHttpClient<net::in::stream::tls::SocketClient> wssIpv4Client(
-      "codex-ui-wss-ipv4", beginWebSocket, endWebSocket,
-      webSocketBinding);
+      "codex-ui-wss-ipv4", beginWebSocket, endWebSocket, webSocketBinding);
   configureStreamClient(wssIpv4Client, true);
   wssIpv4Client.getConfig()->Remote::setHost("127.0.0.1");
 
@@ -250,23 +251,36 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   std::function<void()> connectSelected;
   std::function<void()> terminateSelected;
   std::function<bool()> selectedFlowTerminated;
+  std::function<void()> disableSelected;
   std::string selectedTransport;
-  bool reconnectPending = false;
+  std::string selectedTransportLabel;
+  bool transitionPending = false;
+  bool desiredConnected = connectBridge;
   bool shutdownRequested = false;
   bool eventLoopRunning = false;
-  std::function<void()> continueReconnect;
+  std::function<void()> continueTransition;
+  std::function<bool()> terminatingFlowTerminated;
+  std::function<void()> pendingSelection;
 
-  const auto selectClient = [&](auto &configuredClient, std::string transport) {
+  const auto selectClient = [&](auto &configuredClient, std::string transport,
+                                std::string label) {
+    if (disableSelected)
+      disableSelected();
+    configuredClient.getConfig()->Instance::setDisabled(false);
     auto *const clientHandle = &configuredClient;
     auto *const flow = configuredClient.getFlowController();
+    auto *const config = configuredClient.getConfig();
     selectedTransport = std::move(transport);
-    connectSelected = [&, clientHandle, flow] {
-      clientHandle->connect([&, flow](const auto &, core::socket::State state) {
+    selectedTransportLabel = std::move(label);
+    const std::string connectionLabel = selectedTransportLabel;
+    connectSelected = [&, clientHandle, flow, connectionLabel] {
+      clientHandle->connect([&, flow, connectionLabel](
+                                const auto &, core::socket::State state) {
         if (state == core::socket::State::OK ||
             state == core::socket::State::DISABLED)
           return;
-        const std::string failure = "failed to connect using " +
-                                    selectedTransport + ": " + state.what();
+        const std::string failure =
+            "failed to connect using " + connectionLabel + ": " + state.what();
         core::EventReceiver::atNextTick([&, flow, failure] {
           if (eventLoopRunning && !shutdownRequested && flow->isTerminated())
             normalizer.transportEvent("failure", failure);
@@ -275,35 +289,146 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     };
     terminateSelected = [flow] { static_cast<void>(flow->terminateFlow()); };
     selectedFlowTerminated = [flow] { return flow->isTerminated(); };
+    disableSelected = [config] { config->Instance::setDisabled(true); };
   };
 
-  continueReconnect = [&] {
-    if (shutdownRequested || !reconnectPending)
+  const auto connectionSettings = [&] {
+    nlohmann::json available = nlohmann::json::array();
+    available.push_back({{"key", "unix"},
+                         {"label", "Unix socket"},
+                         {"kind", "unix"},
+                         {"path", unixClient.getConfig()->Remote::getSunPath()},
+                         {"tls", false}});
+    const auto addNetwork = [&available](const auto &configuredClient,
+                                         const char *key, const char *label,
+                                         const char *kind, bool tls,
+                                         std::string webSocketPath = {}) {
+      nlohmann::json entry{
+          {"key", key},
+          {"label", label},
+          {"kind", kind},
+          {"host", configuredClient.getConfig()->Remote::getHost()},
+          {"port", configuredClient.getConfig()->Remote::getPort()},
+          {"tls", tls}};
+      if (!webSocketPath.empty())
+        entry["webSocketPath"] = std::move(webSocketPath);
+      available.push_back(std::move(entry));
+    };
+    addNetwork(ipv4Client, "ipv4", "IPv4", "network", false);
+    addNetwork(ipv6Client, "ipv6", "IPv6", "network", false);
+#if defined(CODEXUI_CODEX_FRONTEND_TLS)
+    addNetwork(tlsIpv4Client, "tls-ipv4", "IPv4 TLS", "network", true);
+    addNetwork(tlsIpv6Client, "tls-ipv6", "IPv6 TLS", "network", true);
+#endif
+#if defined(CODEXUI_CODEX_FRONTEND_RFCOMM)
+    available.push_back(
+        {{"key", "rfcomm"},
+         {"label", "RFCOMM"},
+         {"kind", "rfcomm"},
+         {"address", rfcommClient.getConfig()->Remote::getBtAddress()},
+         {"channel", rfcommClient.getConfig()->Remote::getChannel()},
+         {"tls", false}});
+    available.push_back(
+        {{"key", "rfcomm-tls"},
+         {"label", "RFCOMM TLS"},
+         {"kind", "rfcomm"},
+         {"address", rfcommTlsClient.getConfig()->Remote::getBtAddress()},
+         {"channel", rfcommTlsClient.getConfig()->Remote::getChannel()},
+         {"tls", true}});
+#endif
+#if defined(CODEXUI_CODEX_FRONTEND_WEBSOCKET)
+    addNetwork(webSocketIpv4Client, "websocket-ipv4", "WebSocket IPv4",
+               "websocket", false, currentWebSocketEndpoint);
+    addNetwork(webSocketIpv6Client, "websocket-ipv6", "WebSocket IPv6",
+               "websocket", false, currentWebSocketEndpoint);
+#if defined(CODEXUI_CODEX_FRONTEND_TLS)
+    addNetwork(wssIpv4Client, "wss-ipv4", "WSS IPv4", "websocket", true,
+               currentWebSocketEndpoint);
+    addNetwork(wssIpv6Client, "wss-ipv6", "WSS IPv6", "websocket", true,
+               currentWebSocketEndpoint);
+#endif
+#endif
+    return nlohmann::json{{"selected", selectedTransport},
+                          {"available", std::move(available)}};
+  };
+
+  const auto publishConnectionSettings = [&] {
+    normalizer.connectionSettings(connectionSettings());
+  };
+
+  continueTransition = [&] {
+    if (shutdownRequested || !transitionPending)
       return;
-    if (!selectedFlowTerminated || !selectedFlowTerminated() ||
+    if ((terminatingFlowTerminated && !terminatingFlowTerminated()) ||
         connection.attached()) {
-      core::EventReceiver::atNextTick(continueReconnect);
+      core::EventReceiver::atNextTick(continueTransition);
       return;
     }
-    reconnectPending = false;
-    if (connectSelected)
+    transitionPending = false;
+    terminatingFlowTerminated = {};
+    if (pendingSelection) {
+      std::function<void()> selection = std::move(pendingSelection);
+      pendingSelection = {};
+      selection();
+      publishConnectionSettings();
+    }
+    if (desiredConnected && connectSelected)
       connectSelected();
   };
 
-  requestReconnect = [&] {
-    if (shutdownRequested || reconnectPending || !terminateSelected)
+  const auto beginTransition = [&](bool connectAfterwards,
+                                   std::function<void()> selection = {},
+                                   std::string disconnectReason = {}) {
+    if (shutdownRequested || transitionPending)
       return;
-    reconnectPending = true;
-    connection.disconnect("CodexUI reconnect");
+    desiredConnected = connectAfterwards;
+    pendingSelection = std::move(selection);
+    terminatingFlowTerminated = selectedFlowTerminated;
+    if (!terminateSelected ||
+        ((!terminatingFlowTerminated || terminatingFlowTerminated()) &&
+         !connection.attached())) {
+      if (pendingSelection) {
+        std::function<void()> selected = std::move(pendingSelection);
+        pendingSelection = {};
+        selected();
+        publishConnectionSettings();
+      }
+      if (desiredConnected && connectSelected)
+        connectSelected();
+      return;
+    }
+    transitionPending = true;
+    expectedDisconnectReason =
+        connection.attached() ? std::move(disconnectReason) : std::string{};
+    connection.disconnect("CodexUI connection transition");
     terminateSelected();
-    core::EventReceiver::atNextTick(continueReconnect);
+    core::EventReceiver::atNextTick(continueTransition);
+  };
+
+  requestReconnect = [&] { beginTransition(true, {}, "local-user-reconnect"); };
+
+  const auto requestConnect = [&] {
+    if (shutdownRequested)
+      return;
+    desiredConnected = true;
+    if (transitionPending || connection.attached())
+      return;
+    if (!selectedFlowTerminated || selectedFlowTerminated()) {
+      if (connectSelected)
+        connectSelected();
+    }
+  };
+
+  const auto requestDisconnect = [&] {
+    beginTransition(false, {}, "local-user-disconnect");
   };
 
   requestShutdown = [&] {
     if (shutdownRequested)
       return;
     shutdownRequested = true;
-    reconnectPending = false;
+    transitionPending = false;
+    desiredConnected = false;
     connection.shutdown();
     if (terminateSelected)
       terminateSelected();
@@ -331,6 +456,165 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     }
     if (action == "connection.reconnect") {
       requestReconnect();
+      return;
+    }
+    if (action == "connection.connect") {
+      requestConnect();
+      return;
+    }
+    if (action == "connection.disconnect") {
+      requestDisconnect();
+      return;
+    }
+    if (action == "connection.configure") {
+      if (transitionPending) {
+        normalizer.localOperationResult(
+            action, correlationId, false,
+            {{"code", -32000},
+             {"message", "connection transition in progress"}});
+        return;
+      }
+      const std::string transport =
+          presentation::stringMember(parameters, "transport");
+      std::function<void()> selection;
+      const auto networkEndpoint =
+          [&]() -> std::optional<std::pair<std::string, std::uint16_t>> {
+        const std::string host = presentation::stringMember(parameters, "host");
+        const auto port = parameters.find("port");
+        if (host.empty() || port == parameters.end() ||
+            !port->is_number_integer())
+          return std::nullopt;
+        const std::int64_t value = port->get<std::int64_t>();
+        if (value <= 0 || value > 65535)
+          return std::nullopt;
+        return std::pair{host, static_cast<std::uint16_t>(value)};
+      };
+      if (transport == "unix") {
+        const std::string path = presentation::stringMember(parameters, "path");
+        if (!path.empty())
+          selection = [&, path] {
+            unixClient.getConfig()->Remote::setSunPath(path);
+            selectClient(unixClient, "unix", "Unix socket");
+          };
+      } else if (transport == "ipv4") {
+        if (const auto endpoint = networkEndpoint())
+          selection = [&, endpoint] {
+            ipv4Client.getConfig()
+                ->Remote::setHost(endpoint->first)
+                ->setPort(endpoint->second);
+            selectClient(ipv4Client, "ipv4", "IPv4");
+          };
+      } else if (transport == "ipv6") {
+        if (const auto endpoint = networkEndpoint())
+          selection = [&, endpoint] {
+            ipv6Client.getConfig()
+                ->Remote::setHost(endpoint->first)
+                ->setPort(endpoint->second);
+            selectClient(ipv6Client, "ipv6", "IPv6");
+          };
+#if defined(CODEXUI_CODEX_FRONTEND_TLS)
+      } else if (transport == "tls-ipv4") {
+        if (const auto endpoint = networkEndpoint())
+          selection = [&, endpoint] {
+            tlsIpv4Client.getConfig()
+                ->Remote::setHost(endpoint->first)
+                ->setPort(endpoint->second);
+            selectClient(tlsIpv4Client, "tls-ipv4", "IPv4 TLS");
+          };
+      } else if (transport == "tls-ipv6") {
+        if (const auto endpoint = networkEndpoint())
+          selection = [&, endpoint] {
+            tlsIpv6Client.getConfig()
+                ->Remote::setHost(endpoint->first)
+                ->setPort(endpoint->second);
+            selectClient(tlsIpv6Client, "tls-ipv6", "IPv6 TLS");
+          };
+#endif
+#if defined(CODEXUI_CODEX_FRONTEND_RFCOMM)
+      } else if (transport == "rfcomm" || transport == "rfcomm-tls") {
+        const std::string address =
+            presentation::stringMember(parameters, "address");
+        const auto channel = parameters.find("channel");
+        if (!address.empty() && channel != parameters.end() &&
+            channel->is_number_integer() && channel->get<int>() > 0 &&
+            channel->get<int>() <= 30) {
+          const auto value = static_cast<std::uint8_t>(channel->get<int>());
+          if (transport == "rfcomm") {
+            selection = [&, address, value] {
+              rfcommClient.getConfig()
+                  ->Remote::setBtAddress(address)
+                  ->setChannel(value);
+              selectClient(rfcommClient, "rfcomm", "RFCOMM");
+            };
+          } else {
+            selection = [&, address, value] {
+              rfcommTlsClient.getConfig()
+                  ->Remote::setBtAddress(address)
+                  ->setChannel(value);
+              selectClient(rfcommTlsClient, "rfcomm-tls", "RFCOMM TLS");
+            };
+          }
+        }
+#endif
+#if defined(CODEXUI_CODEX_FRONTEND_WEBSOCKET)
+      } else if (transport == "websocket-ipv4" || transport == "websocket-ipv6"
+#if defined(CODEXUI_CODEX_FRONTEND_TLS)
+                 || transport == "wss-ipv4" || transport == "wss-ipv6"
+#endif
+      ) {
+        const auto endpoint = networkEndpoint();
+        const std::string path =
+            presentation::stringMember(parameters, "webSocketPath");
+        if (endpoint && !path.empty() && path.front() == '/') {
+          if (transport == "websocket-ipv4") {
+            selection = [&, endpoint, path] {
+              currentWebSocketEndpoint = path;
+              webSocketIpv4Client.getConfig()
+                  ->Remote::setHost(endpoint->first)
+                  ->setPort(endpoint->second);
+              selectClient(webSocketIpv4Client, "websocket-ipv4",
+                           "WebSocket IPv4");
+            };
+          } else if (transport == "websocket-ipv6") {
+            selection = [&, endpoint, path] {
+              currentWebSocketEndpoint = path;
+              webSocketIpv6Client.getConfig()
+                  ->Remote::setHost(endpoint->first)
+                  ->setPort(endpoint->second);
+              selectClient(webSocketIpv6Client, "websocket-ipv6",
+                           "WebSocket IPv6");
+            };
+#if defined(CODEXUI_CODEX_FRONTEND_TLS)
+          } else if (transport == "wss-ipv4") {
+            selection = [&, endpoint, path] {
+              currentWebSocketEndpoint = path;
+              wssIpv4Client.getConfig()
+                  ->Remote::setHost(endpoint->first)
+                  ->setPort(endpoint->second);
+              selectClient(wssIpv4Client, "wss-ipv4", "WSS IPv4");
+            };
+          } else {
+            selection = [&, endpoint, path] {
+              currentWebSocketEndpoint = path;
+              wssIpv6Client.getConfig()
+                  ->Remote::setHost(endpoint->first)
+                  ->setPort(endpoint->second);
+              selectClient(wssIpv6Client, "wss-ipv6", "WSS IPv6");
+            };
+#endif
+          }
+        }
+#endif
+      }
+      if (!selection) {
+        normalizer.localOperationResult(
+            action, correlationId, false,
+            {{"code", -32602}, {"message", "invalid connection settings"}});
+        return;
+      }
+      beginTransition(true, std::move(selection), "local-transport-switch");
+      normalizer.localOperationResult(action, correlationId, true,
+                                      {{"accepted", true}});
       return;
     }
     if (action == "controller.claim") {
@@ -585,74 +869,74 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   });
 
   eventLoopRunning = true;
-  if (connectBridge)
-    core::EventReceiver::atNextTick([&] {
-      normalizer.transportEvent("runtime-started");
-      const std::array disabled{
-          unixClient.getConfig()->Instance::getDisabled(),
-          ipv4Client.getConfig()->Instance::getDisabled(),
-          ipv6Client.getConfig()->Instance::getDisabled(),
+  core::EventReceiver::atNextTick([&] {
+    normalizer.transportEvent("runtime-started");
+    const std::array disabled{
+        unixClient.getConfig()->Instance::getDisabled(),
+        ipv4Client.getConfig()->Instance::getDisabled(),
+        ipv6Client.getConfig()->Instance::getDisabled(),
 #if defined(CODEXUI_CODEX_FRONTEND_TLS)
-          tlsIpv4Client.getConfig()->Instance::getDisabled(),
-          tlsIpv6Client.getConfig()->Instance::getDisabled(),
+        tlsIpv4Client.getConfig()->Instance::getDisabled(),
+        tlsIpv6Client.getConfig()->Instance::getDisabled(),
 #endif
 #if defined(CODEXUI_CODEX_FRONTEND_RFCOMM)
-          rfcommClient.getConfig()->Instance::getDisabled(),
-          rfcommTlsClient.getConfig()->Instance::getDisabled(),
+        rfcommClient.getConfig()->Instance::getDisabled(),
+        rfcommTlsClient.getConfig()->Instance::getDisabled(),
 #endif
 #if defined(CODEXUI_CODEX_FRONTEND_WEBSOCKET)
-          webSocketIpv4Client.getConfig()->Instance::getDisabled(),
-          webSocketIpv6Client.getConfig()->Instance::getDisabled(),
+        webSocketIpv4Client.getConfig()->Instance::getDisabled(),
+        webSocketIpv6Client.getConfig()->Instance::getDisabled(),
 #if defined(CODEXUI_CODEX_FRONTEND_TLS)
-          wssIpv4Client.getConfig()->Instance::getDisabled(),
-          wssIpv6Client.getConfig()->Instance::getDisabled(),
+        wssIpv4Client.getConfig()->Instance::getDisabled(),
+        wssIpv6Client.getConfig()->Instance::getDisabled(),
 #endif
 #endif
-      };
-      const std::size_t enabled = static_cast<std::size_t>(
-          std::count(disabled.begin(), disabled.end(), false));
-      if (enabled != 1) {
-        normalizer.transportEvent(
-            "failure",
-            "exactly one outgoing bridge transport must be enabled; found " +
-                std::to_string(enabled));
-        requestShutdown();
-        return;
-      }
+    };
+    const std::size_t enabled = static_cast<std::size_t>(
+        std::count(disabled.begin(), disabled.end(), false));
+    if (enabled != 1) {
+      normalizer.transportEvent(
+          "failure",
+          "exactly one outgoing bridge transport must be enabled; found " +
+              std::to_string(enabled));
+      requestShutdown();
+      return;
+    }
 
-      if (!unixClient.getConfig()->Instance::getDisabled())
-        selectClient(unixClient, "Unix JSONL");
-      else if (!ipv4Client.getConfig()->Instance::getDisabled())
-        selectClient(ipv4Client, "IPv4 JSONL");
-      else if (!ipv6Client.getConfig()->Instance::getDisabled())
-        selectClient(ipv6Client, "IPv6 JSONL");
+    if (!unixClient.getConfig()->Instance::getDisabled())
+      selectClient(unixClient, "unix", "Unix socket");
+    else if (!ipv4Client.getConfig()->Instance::getDisabled())
+      selectClient(ipv4Client, "ipv4", "IPv4");
+    else if (!ipv6Client.getConfig()->Instance::getDisabled())
+      selectClient(ipv6Client, "ipv6", "IPv6");
 #if defined(CODEXUI_CODEX_FRONTEND_TLS)
-      else if (!tlsIpv4Client.getConfig()->Instance::getDisabled())
-        selectClient(tlsIpv4Client, "IPv4 TLS JSONL");
-      else if (!tlsIpv6Client.getConfig()->Instance::getDisabled())
-        selectClient(tlsIpv6Client, "IPv6 TLS JSONL");
+    else if (!tlsIpv4Client.getConfig()->Instance::getDisabled())
+      selectClient(tlsIpv4Client, "tls-ipv4", "IPv4 TLS");
+    else if (!tlsIpv6Client.getConfig()->Instance::getDisabled())
+      selectClient(tlsIpv6Client, "tls-ipv6", "IPv6 TLS");
 #endif
 #if defined(CODEXUI_CODEX_FRONTEND_RFCOMM)
-      else if (!rfcommClient.getConfig()->Instance::getDisabled())
-        selectClient(rfcommClient, "RFCOMM JSONL");
-      else if (!rfcommTlsClient.getConfig()->Instance::getDisabled())
-        selectClient(rfcommTlsClient, "RFCOMM TLS JSONL");
+    else if (!rfcommClient.getConfig()->Instance::getDisabled())
+      selectClient(rfcommClient, "rfcomm", "RFCOMM");
+    else if (!rfcommTlsClient.getConfig()->Instance::getDisabled())
+      selectClient(rfcommTlsClient, "rfcomm-tls", "RFCOMM TLS");
 #endif
 #if defined(CODEXUI_CODEX_FRONTEND_WEBSOCKET)
-      else if (!webSocketIpv4Client.getConfig()->Instance::getDisabled())
-        selectClient(webSocketIpv4Client, "WebSocket IPv4");
-      else if (!webSocketIpv6Client.getConfig()->Instance::getDisabled())
-        selectClient(webSocketIpv6Client, "WebSocket IPv6");
+    else if (!webSocketIpv4Client.getConfig()->Instance::getDisabled())
+      selectClient(webSocketIpv4Client, "websocket-ipv4", "WebSocket IPv4");
+    else if (!webSocketIpv6Client.getConfig()->Instance::getDisabled())
+      selectClient(webSocketIpv6Client, "websocket-ipv6", "WebSocket IPv6");
 #if defined(CODEXUI_CODEX_FRONTEND_TLS)
-      else if (!wssIpv4Client.getConfig()->Instance::getDisabled())
-        selectClient(wssIpv4Client, "WSS IPv4");
-      else if (!wssIpv6Client.getConfig()->Instance::getDisabled())
-        selectClient(wssIpv6Client, "WSS IPv6");
+    else if (!wssIpv4Client.getConfig()->Instance::getDisabled())
+      selectClient(wssIpv4Client, "wss-ipv4", "WSS IPv4");
+    else if (!wssIpv6Client.getConfig()->Instance::getDisabled())
+      selectClient(wssIpv6Client, "wss-ipv6", "WSS IPv6");
 #endif
 #endif
-      if (connectSelected)
-        connectSelected();
-    });
+    publishConnectionSettings();
+    if (connectBridge && connectSelected)
+      connectSelected();
+  });
 
   const int result = core::SNodeC::start();
   eventLoopRunning = false;

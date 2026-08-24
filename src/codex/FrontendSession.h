@@ -99,6 +99,10 @@ public:
                               nlohmann::json error = nullptr);
   bool sendRaw(nlohmann::json appServerMessage);
   bool reconnect();
+  bool connectTransport();
+  bool disconnectTransport();
+  std::string configureConnection(nlohmann::json settings,
+                                  ResponseHandler handler = {});
   bool claimController();
   bool releaseController();
 

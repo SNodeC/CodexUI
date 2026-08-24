@@ -216,6 +216,19 @@ void ProtocolNormalizer::transportEvent(std::string_view eventName,
   emitEvent("connection.lifecycle", std::move(data));
 }
 
+void ProtocolNormalizer::connectionSettings(nlohmann::json settings) {
+  emitEvent("connection.settings.changed", std::move(settings),
+            Authority::Replace);
+}
+
+void ProtocolNormalizer::localOperationResult(std::string action,
+                                              std::string correlationId,
+                                              bool ok, nlohmann::json data) {
+  emit(presentation::result(nextSequence++, connectionGeneration,
+                            std::move(action), std::move(correlationId), ok,
+                            std::move(data)));
+}
+
 void ProtocolNormalizer::bridgeEvent(const nlohmann::json &value) {
   const std::string kind = presentation::stringMember(value, "kind");
   if (kind == "bridge.connection") {
@@ -455,12 +468,12 @@ void ProtocolNormalizer::diagnostic(std::string source, std::string code,
 bool ProtocolNormalizer::knownServerMethod(std::string_view method) const {
 #define CODEXUI_MATCH_SERVER_REQUEST(OperationName, methodName)                \
   if (method ==                                                                \
-      ai::openai::codex::generated::server_requests::OperationName::method)   \
+      ai::openai::codex::generated::server_requests::OperationName::method)    \
     return true;
   AI_OPENAI_CODEX_SERVER_REQUESTS(CODEXUI_MATCH_SERVER_REQUEST)
 #undef CODEXUI_MATCH_SERVER_REQUEST
 #define CODEXUI_MATCH_SERVER_NOTIFICATION(OperationName, methodName)           \
-  if (method == ai::openai::codex::generated::server_notifications::          \
+  if (method == ai::openai::codex::generated::server_notifications::           \
                     OperationName::method)                                     \
     return true;
   AI_OPENAI_CODEX_SERVER_NOTIFICATIONS(CODEXUI_MATCH_SERVER_NOTIFICATION)

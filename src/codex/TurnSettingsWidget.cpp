@@ -3,6 +3,7 @@
 #include "codex/TurnSettingsWidget.h"
 
 #include <QComboBox>
+#include <QDir>
 #include <QFrame>
 #include <QGridLayout>
 #include <QLabel>
@@ -13,6 +14,7 @@
 #include <QPainterPath>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QStyleOptionButton>
 #include <QStyleOptionComboBox>
 #include <QVBoxLayout>
 #include <QWidgetAction>
@@ -24,6 +26,29 @@ namespace {
 
 constexpr auto DefaultValue = "default";
 
+void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
+                 bool highlighted) {
+  if (!indicator.isValid() || indicator.isEmpty())
+    return;
+  const QPointF center = indicator.center();
+  QPainterPath chevron;
+  chevron.moveTo(center.x() - 3.5, center.y() - 1.5);
+  chevron.lineTo(center.x(), center.y() + 2.0);
+  chevron.lineTo(center.x() + 3.5, center.y() - 1.5);
+
+  QColor color(QStringLiteral("#667085"));
+  if (!enabled)
+    color = QColor(QStringLiteral("#98a2b3"));
+  else if (highlighted)
+    color = QColor(QStringLiteral("#1d2633"));
+
+  QPainter painter(widget);
+  painter.setRenderHint(QPainter::Antialiasing, true);
+  painter.setPen(QPen(color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  painter.setBrush(Qt::NoBrush);
+  painter.drawPath(chevron);
+}
+
 class CompactComboBox final : public QComboBox {
 protected:
   void paintEvent(QPaintEvent *event) override {
@@ -33,27 +58,31 @@ protected:
     initStyleOption(&option);
     const QRect indicator = style()->subControlRect(
         QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxArrow, this);
-    if (!indicator.isValid() || indicator.isEmpty())
-      return;
+    drawChevron(this, indicator, option.state & QStyle::State_Enabled,
+                option.state &
+                    (QStyle::State_MouseOver | QStyle::State_HasFocus));
+  }
+};
 
-    const QPointF center = indicator.center();
-    QPainterPath chevron;
-    chevron.moveTo(center.x() - 3.5, center.y() - 1.5);
-    chevron.lineTo(center.x(), center.y() + 2.0);
-    chevron.lineTo(center.x() + 3.5, center.y() - 1.5);
+class ChevronMenuButton final : public QPushButton {
+public:
+  using QPushButton::QPushButton;
 
-    QColor color(QStringLiteral("#667085"));
-    if (!(option.state & QStyle::State_Enabled))
-      color = QColor(QStringLiteral("#98a2b3"));
-    else if (option.state & (QStyle::State_MouseOver | QStyle::State_HasFocus))
-      color = QColor(QStringLiteral("#1d2633"));
-
-    QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setPen(
-        QPen(color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawPath(chevron);
+protected:
+  void paintEvent(QPaintEvent *event) override {
+    QPushButton::paintEvent(event);
+    QStyleOptionButton option;
+    initStyleOption(&option);
+    const QRect contents =
+        style()->subElementRect(QStyle::SE_PushButtonContents, &option, this);
+    const int indicatorWidth =
+        style()->pixelMetric(QStyle::PM_MenuButtonIndicator, &option, this);
+    QRect indicator(contents.right() - std::max(12, indicatorWidth),
+                    contents.top(), std::max(12, indicatorWidth),
+                    contents.height());
+    drawChevron(this, indicator, option.state & QStyle::State_Enabled,
+                option.state &
+                    (QStyle::State_MouseOver | QStyle::State_HasFocus));
   }
 };
 
@@ -193,7 +222,8 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   cwd->setPlaceholderText(QStringLiteral("Codex default workspace"));
   approval = compactCombo("codexApproval");
   personality = compactCombo("codexPersonality");
-  more = new QPushButton(QStringLiteral("More"));
+  more = new ChevronMenuButton(QStringLiteral("More"));
+  more->setProperty("codexChevron", true);
   more->setFixedHeight(32);
 
   root->addWidget(labelled(QStringLiteral("Model"), model), 0, 0);
@@ -328,6 +358,11 @@ void TurnSettingsWidget::setControlsEnabled(bool enabled) {
   setEnabled(enabled);
   setToolTip(enabled ? QString{}
                      : QStringLiteral("Settings apply when starting a turn"));
+}
+
+void TurnSettingsWidget::setWorkspace(QString path) {
+  cwd->setText(QDir::toNativeSeparators(std::move(path)));
+  markTouched(Field::Workspace);
 }
 
 std::string TurnSettingsWidget::workspace(const std::string &fallback) const {
@@ -660,10 +695,9 @@ void TurnSettingsWidget::refreshMoreIndicator() {
                        touched(Field::ServiceTier) || touched(Field::Summary) ||
                        touched(Field::Collaboration);
   more->setProperty("changed", changed);
-  more->setStyleSheet(
-      changed ? QStringLiteral("background:#e5eeff;color:#2f6feb;border:1px "
-                               "solid #2f6feb;border-radius:6px;")
-              : QString{});
+  more->style()->unpolish(more);
+  more->style()->polish(more);
+  more->update();
 }
 
 bool TurnSettingsWidget::touched(Field field) const noexcept {

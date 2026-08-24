@@ -235,6 +235,10 @@ void PresentationModel::applyEvent(const nlohmann::json &event) {
               : "observer";
     return;
   }
+  if (type == "connection.settings.changed") {
+    connectionState.settings = data;
+    return;
+  }
   if (type == "thread.upsert") {
     upsertThread(data.value("thread", nlohmann::json::object()), false);
     return;

@@ -69,6 +69,7 @@ struct ConnectionPresentation {
   std::string role;
   std::string controllerConnectionId;
   std::string detail;
+  nlohmann::json settings = nlohmann::json::object();
 };
 
 struct TelemetryPresentation {

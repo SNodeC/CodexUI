@@ -20,6 +20,9 @@ public:
   explicit ProtocolNormalizer(Sink sink);
 
   void transportEvent(std::string_view event, std::string detail = {});
+  void connectionSettings(nlohmann::json settings);
+  void localOperationResult(std::string action, std::string correlationId,
+                            bool ok, nlohmann::json data);
   void bridgeEvent(const nlohmann::json &event);
   void serverNotification(std::string_view method,
                           const nlohmann::json &params);

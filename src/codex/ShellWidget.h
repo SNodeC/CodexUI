@@ -3,6 +3,7 @@
 #ifndef CODEXUI_CODEX_SHELLWIDGET_H
 #define CODEXUI_CODEX_SHELLWIDGET_H
 
+#include "codex/FileSelectionDialog.h"
 #include "codex/PresentationModel.h"
 
 #include <QWidget>
@@ -15,6 +16,7 @@
 #include <utility>
 
 class QFrame;
+class QAction;
 class QLabel;
 class QListWidget;
 class QPlainTextEdit;
@@ -33,6 +35,7 @@ class ExpandingPromptEditor;
 namespace codexui::codex {
 
 class FrontendSession;
+class DiffViewer;
 class TurnSettingsWidget;
 
 class ShellWidget final : public QWidget {
@@ -76,14 +79,18 @@ private:
   void beginNewThread();
   void requestThreads();
   void requestModels();
-  void readSelectedThread();
-  void renameSelectedThread();
-  void forkSelectedThread();
-  void toggleSelectedThreadArchive();
-  void deleteSelectedThread();
+  void readThread(const std::string &threadId);
+  void renameThread(const std::string &threadId);
+  void forkThread(const std::string &threadId);
+  void toggleThreadArchive(const std::string &threadId);
+  void deleteThread(const std::string &threadId);
   void submitPrompt();
   void submitPromptToThread(std::string threadId, std::string prompt,
-                            nlohmann::json options = nlohmann::json::object());
+                            nlohmann::json options,
+                            std::vector<AttachmentDraft> attachments,
+                            std::uint64_t attachmentRevision);
+  void chooseAttachments();
+  void refreshAttachments();
   void interruptActiveTurn();
   void respondToFirstPending(bool approve);
   void reviewPending(const std::string &requestKey);
@@ -93,6 +100,11 @@ private:
   PresentationModel model;
   std::string selectedThreadId;
   bool localNewThreadIntent = false;
+  nlohmann::json newThreadDraftOptions = nlohmann::json::object();
+  QString newThreadDraftName;
+  QString newThreadDraftWorkspace;
+  std::vector<AttachmentDraft> attachmentDrafts;
+  std::uint64_t attachmentRevision = 0;
 
   QLabel *connectionLabel = nullptr;
   QLabel *controllerLabel = nullptr;
@@ -119,8 +131,7 @@ private:
   QVBoxLayout *planLayout = nullptr;
   QWidget *agentsContent = nullptr;
   QVBoxLayout *agentsLayout = nullptr;
-  QWidget *changesContent = nullptr;
-  QVBoxLayout *changesLayout = nullptr;
+  DiffViewer *diffViewer = nullptr;
   QWidget *requestsContent = nullptr;
   QVBoxLayout *requestsLayout = nullptr;
   QLabel *protocolStats = nullptr;
@@ -129,13 +140,18 @@ private:
   codexui::ExpandingPromptEditor *promptEditor = nullptr;
   TurnSettingsWidget *turnSettings = nullptr;
   QPushButton *sendButton = nullptr;
+  QPushButton *attachmentButton = nullptr;
+  QPushButton *clearAttachmentsButton = nullptr;
+  QLabel *attachmentSummary = nullptr;
   QPushButton *interruptButton = nullptr;
   QPushButton *controllerButton = nullptr;
   QPushButton *attentionButton = nullptr;
-  QPushButton *reconnectButton = nullptr;
+  QToolButton *connectionButton = nullptr;
+  QAction *connectAction = nullptr;
+  QAction *disconnectAction = nullptr;
+  QAction *reconnectAction = nullptr;
   QPushButton *restoreSidebarButton = nullptr;
   QPushButton *restoreInspectorButton = nullptr;
-  QToolButton *threadActionsButton = nullptr;
   QPushButton *approveButton = nullptr;
   QPushButton *denyButton = nullptr;
   QTimer *refreshTimer = nullptr;

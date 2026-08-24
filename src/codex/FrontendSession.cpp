@@ -298,6 +298,20 @@ bool FrontendSession::reconnect() {
   return sendMessage(presentation::command("connection.reconnect"));
 }
 
+bool FrontendSession::connectTransport() {
+  return sendMessage(presentation::command("connection.connect"));
+}
+
+bool FrontendSession::disconnectTransport() {
+  return sendMessage(presentation::command("connection.disconnect"));
+}
+
+std::string FrontendSession::configureConnection(nlohmann::json settings,
+                                                 ResponseHandler handler) {
+  return request("connection.configure", std::move(settings),
+                 std::move(handler));
+}
+
 bool FrontendSession::claimController() {
   return sendMessage(presentation::command("controller.claim"));
 }

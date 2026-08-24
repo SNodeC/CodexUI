@@ -4,9 +4,8 @@
 
 namespace codexui::UiStyle {
 
-QString applicationStyleSheet()
-{
-    return QStringLiteral(R"QSS(
+QString applicationStyleSheet() {
+  return QStringLiteral(R"QSS(
         * {
             color: #1d2633;
             font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
@@ -44,10 +43,21 @@ QString applicationStyleSheet()
         QPushButton:disabled, QToolButton:disabled { color: #98a2b3; background: #f6f8fb; border-color: #d7dee8; }
         QPushButton[kind="primary"] { background: #2f6feb; border-color: #2f6feb; color: white; }
         QPushButton[kind="primary"]:hover { background: #285fca; border-color: #285fca; }
-        QPushButton[kind="subtle"] { color: #667085; background: transparent; border-color: transparent; }
+        QPushButton[kind="subtle"], QToolButton[kind="subtle"] {
+            color: #667085;
+            background: transparent;
+            border-color: transparent;
+        }
         QPushButton[kind="agentLink"] { background: #e5eeff; border-color: #bfd3f9; color: #2f6feb; text-align: left; }
         QPushButton[kind="stop"] { background: #ffffff; border-color: #b83a3a; color: #b83a3a; }
         QPushButton[kind="stop"]:hover { background: #fff1f1; }
+        QPushButton[codexChevron="true"] { padding-right: 26px; }
+        QPushButton[codexChevron="true"]::menu-indicator { image: none; width: 0; }
+        QPushButton[changed="true"] {
+            background: #e5eeff;
+            color: #2f6feb;
+            border-color: #2f6feb;
+        }
         QFrame[kind="panel"] { background: #ffffff; }
         QFrame[kind="raised"] { background: #ffffff; border: 1px solid #d7dee8; border-radius: 10px; }
         QFrame[kind="summary"] { background: #f8fafc; border: 1px solid #d7dee8; border-radius: 7px; }
@@ -66,6 +76,13 @@ QString applicationStyleSheet()
             selection-color: #1d2633;
         }
         QPlainTextEdit[empty="true"] { color: #98a2b3; }
+        QPlainTextEdit[kind="dialogEditor"] {
+            background: #ffffff;
+            border: 1px solid #d7dee8;
+            border-radius: 7px;
+            padding: 8px;
+        }
+        QPlainTextEdit[kind="dialogEditor"]:focus { border-color: #2f6feb; }
         QLineEdit {
             background: #ffffff;
             border: 1px solid #d7dee8;
@@ -102,6 +119,55 @@ QString applicationStyleSheet()
             border: 1px solid #d7dee8;
             selection-background-color: #e5eeff;
             selection-color: #1d2633;
+        }
+        QTreeView#codexFileBrowser, QListWidget#codexAttachmentList {
+            background: #ffffff;
+            alternate-background-color: #f8fafc;
+            border: 1px solid #d7dee8;
+            border-radius: 7px;
+            outline: 0;
+        }
+        QListWidget#codexDiffFiles {
+            background: #ffffff;
+            border: 1px solid #d7dee8;
+            border-radius: 7px;
+            outline: 0;
+        }
+        QListWidget#codexDiffFiles::item {
+            min-height: 27px;
+            padding: 3px 7px;
+        }
+        QListWidget#codexDiffFiles::item:hover { background: #f1f5fb; }
+        QListWidget#codexDiffFiles::item:selected {
+            background: #e5eeff;
+            color: #1d2633;
+        }
+        QPlainTextEdit#codexDiffText {
+            background: #ffffff;
+            border: 1px solid #d7dee8;
+            border-radius: 7px;
+            padding: 7px;
+            font-size: 11px;
+        }
+        QTreeView#codexFileBrowser::item, QListWidget#codexAttachmentList::item {
+            min-height: 28px;
+            padding: 3px 7px;
+        }
+        QTreeView#codexFileBrowser::item:hover,
+        QListWidget#codexAttachmentList::item:hover { background: #f1f5fb; }
+        QTreeView#codexFileBrowser::item:selected,
+        QListWidget#codexAttachmentList::item:selected {
+            background: #e5eeff;
+            color: #1d2633;
+        }
+        QHeaderView::section {
+            background: #f8fafc;
+            color: #667085;
+            border: 0;
+            border-bottom: 1px solid #d7dee8;
+            padding: 7px;
+            font-size: 10px;
+            font-weight: 600;
         }
         QCheckBox, QRadioButton { spacing: 8px; }
         QDialog { background: #ffffff; }
