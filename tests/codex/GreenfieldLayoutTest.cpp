@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
+#include "codex/GitDiffProvider.h"
 #include "codex/PresentationModel.h"
 #include "codex/PresentationProtocol.h"
 #include "codex/middle/ComposerPane.h"
@@ -14,6 +15,7 @@
 #include <QCoreApplication>
 #include <QContextMenuEvent>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
@@ -25,9 +27,12 @@
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QTabWidget>
+#include <QTemporaryDir>
 #include <QThread>
 #include <QToolButton>
 #include <QWheelEvent>
+
+#include <git2.h>
 
 #include <iostream>
 #include <optional>
@@ -647,6 +652,87 @@ bool testInspectorDetailParity() {
   return result;
 }
 
+bool testGitDiffScopes() {
+  QTemporaryDir repositoryDirectory;
+  if (!expect(repositoryDirectory.isValid(),
+              "Git diff test creates a temporary workspace"))
+    return false;
+  GitDiffProvider provider;
+  git_repository *repository = nullptr;
+  if (!expect(git_repository_init(&repository,
+                                  repositoryDirectory.path().toUtf8().constData(),
+                                  0) == 0,
+              "Git diff test initializes an in-process repository"))
+    return false;
+  QFile file(repositoryDirectory.filePath(QStringLiteral("notes.txt")));
+  if (!expect(file.open(QIODevice::WriteOnly | QIODevice::Truncate),
+              "Git diff test creates an untracked file")) {
+    git_repository_free(repository);
+    return false;
+  }
+  file.write("first line\nsecond line\n");
+  file.close();
+
+  GitDiffSnapshot received;
+  bool ready = false;
+  QObject::connect(&provider, &GitDiffProvider::snapshotReady,
+                   [&received, &ready](const GitDiffSnapshot &snapshot) {
+                     received = snapshot;
+                     ready = true;
+                   });
+  const auto request = [&](GitDiffScope scope) {
+    ready = false;
+    provider.request(repositoryDirectory.path(), scope,
+                     GitDiffContext::Compact);
+    QElapsedTimer timeout;
+    timeout.start();
+    while (!ready && timeout.elapsed() < 3000)
+      spin(1);
+    return ready;
+  };
+
+  bool result = expect(request(GitDiffScope::Unstaged) &&
+                           received.repository && received.error.isEmpty() &&
+                           received.files.size() == 1 &&
+                           received.files.front().status ==
+                               QStringLiteral("Untracked") &&
+                           received.files.front().patch.contains(
+                               QStringLiteral("+first line")),
+                       "Unstaged scope includes untracked file content");
+
+  git_index *index = nullptr;
+  if (git_repository_index(&index, repository) == 0) {
+    git_index_add_bypath(index, "notes.txt");
+    git_index_write(index);
+    git_index_free(index);
+  }
+  result &= expect(request(GitDiffScope::Staged) &&
+                       received.files.size() == 1 &&
+                       received.files.front().status ==
+                           QStringLiteral("Added"),
+                   "Staged scope compares the index with HEAD");
+  result &= expect(request(GitDiffScope::Uncommitted) &&
+                       received.files.size() == 1 &&
+                       received.files.front().patch.contains(
+                           QStringLiteral("+second line")),
+                   "Since-HEAD scope combines index and worktree state");
+
+  QTemporaryDir ordinaryDirectory;
+  ready = false;
+  provider.request(ordinaryDirectory.path(), GitDiffScope::Unstaged,
+                   GitDiffContext::Compact);
+  QElapsedTimer timeout;
+  timeout.start();
+  while (!ready && timeout.elapsed() < 3000)
+    spin(1);
+  result &= expect(ordinaryDirectory.isValid() && ready &&
+                       !received.repository &&
+                       received.error.contains(QStringLiteral("Git repository")),
+                   "ordinary folders expose an explicit non-repository state");
+  git_repository_free(repository);
+  return result;
+}
+
 } // namespace
 } // namespace codexui::codex::middle
 
@@ -663,6 +749,7 @@ int main(int argc, char **argv) {
   result &= testNestedCommandScrollOwnership();
   result &= testInfoViewerLayout();
   result &= testInspectorDetailParity();
+  result &= testGitDiffScopes();
   if (result)
     std::cout << "Greenfield layout tests passed\n";
   return result ? 0 : 1;

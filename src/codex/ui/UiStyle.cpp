@@ -111,6 +111,18 @@ QString applicationStyleSheet() {
         }
         QPushButton[kind="infoChoice"]:hover { background: #f8fafc; border-color: #b9c4d2; }
         QPushButton[kind="infoChoice"]:pressed { background: #f1f5fb; border-color: #9eabbc; }
+        QPushButton[kind="segment"] {
+          background: #ffffff;
+          border-color: #d7dee8;
+          border-radius: 7px;
+          padding: 0 10px;
+        }
+        QPushButton[kind="segment"]:checked {
+          background: #e5eeff;
+          border-color: #bfd3f9;
+          color: #1d2633;
+        }
+        QPushButton[kind="segment"]:hover:!checked { background: #f1f5fb; }
         QToolButton[kind="composerAction"] {
             background: #ffffff;
             border: 1px solid #d7dee8;

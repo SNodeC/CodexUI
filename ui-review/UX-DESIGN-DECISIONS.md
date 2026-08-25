@@ -103,8 +103,15 @@ Plan steps, agents, and pending requests are peer records and therefore use the
 same raised card surface, border, radius, and internal spacing. Summary surfaces
 are reserved for subordinate content within a record. Inspector scroll areas
 are frameless and transparent so the panel background remains continuous.
-Plan, Agents, Changes, and Requests retain their last visible per-thread
-presentation across thread and tab navigation.
+Plan, Agents, and Requests retain their last visible per-thread presentation
+across thread and tab navigation.
+
+Changes reflects the local Git worktree containing the selected thread's
+workspace, never a patch reconstructed from conversation messages. Its compact
+Inspector surface contains scope, file summary/list, and a unified preview.
+Copy and Open review belong to the selected-file preview; double-clicking a file
+also opens review. The modeless review window provides Unified or Side by side
+layout and Compact or Expanded context without blocking conversation use.
 
 ## Desktop integration
 

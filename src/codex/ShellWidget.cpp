@@ -2579,50 +2579,8 @@ void ShellWidget::refreshInspector() {
     activeLayout = requestsLayout;
   const ThreadPresentation *thread = model.thread(selectedThreadId);
   if (activeTab == 2) {
-    QString liveDiff;
-    std::vector<DiffFilePresentation> retained;
-    if (thread) {
-      for (auto turnId = thread->turnOrder.rbegin();
-           turnId != thread->turnOrder.rend() && liveDiff.isEmpty(); ++turnId) {
-        const auto turn = thread->turns.find(*turnId);
-        if (turn == thread->turns.end())
-          continue;
-        const auto domain = turn->second.domains.find("turn.diff.changed");
-        if (domain != turn->second.domains.end())
-          liveDiff = text(stringValue(domain->second, "diff"));
-      }
-      if (liveDiff.isEmpty()) {
-        for (auto turnId = thread->turnOrder.rbegin();
-             turnId != thread->turnOrder.rend() && retained.empty(); ++turnId) {
-          const auto turn = thread->turns.find(*turnId);
-          if (turn == thread->turns.end())
-            continue;
-          for (auto itemId = turn->second.itemOrder.rbegin();
-               itemId != turn->second.itemOrder.rend(); ++itemId) {
-            const auto item = turn->second.items.find(*itemId);
-            if (item == turn->second.items.end() ||
-                stringValue(item->second.raw, "type") != "fileChange")
-              continue;
-            const nlohmann::json changes =
-                item->second.raw.value("changes", nlohmann::json::array());
-            if (!changes.is_array())
-              continue;
-            for (const auto &change : changes) {
-              QString kind = text(stringValue(change, "kind"));
-              if (kind.isEmpty() && change.contains("kind") &&
-                  change["kind"].is_object())
-                kind = text(stringValue(change["kind"], "type"));
-              retained.push_back({text(stringValue(change, "path")),
-                                  std::move(kind),
-                                  text(stringValue(change, "diff"))});
-            }
-            if (!retained.empty())
-              break;
-          }
-        }
-      }
-    }
-    diffViewer->setChanges(std::move(liveDiff), std::move(retained));
+    diffViewer->setWorkspace(thread ? text(thread->cwd) : QString{});
+    diffViewer->refreshRepository();
     return;
   }
   if (!activeLayout)

@@ -287,7 +287,7 @@ reduced result payloads are:
 - `threads.list`: `threads`, `nextCursor`, and `backwardsCursor`, with `merge`;
 - `thread.read`: returned `thread`, with `replace` when no newer presentation
   event arrived after the read began, otherwise `merge` so a late snapshot
-  cannot erase newer live Plan, Agent, command, or Changes detail;
+  cannot erase newer live Plan, Agent, command, or turn-diff domain detail;
 - `thread.create`, `thread.resume`, and `thread.fork`: returned `thread`, with
   `merge`;
 - `thread.rename`, `thread.archive`, `thread.unarchive`, and `thread.delete`:
@@ -429,8 +429,8 @@ requests are changing must not stop, reset, or reorder those lifecycles.
 Selecting a thread hydrates it once per bridge connection, including when the
 thread-list projection already reports materialized or active turns. The
 `thread.read` result is merge-authoritative: it fills reconstruction data but
-does not erase retained live-only Plan, Agent, or Changes details that the
-provider omits. This explicit hydration state prevents a partial discovery
+does not erase retained live-only Plan, Agent, or turn-diff domain details that
+the provider omits. This explicit hydration state prevents a partial discovery
 projection from being mistaken for an operation-ready thread. Reload is the
 explicit forced fresh-read operation.
 
@@ -504,17 +504,22 @@ bounded protocol and security design.
 
 ### 7.4 Changes and Diff Presentation
 
-The Changes inspector uses a dedicated diff viewer. It prefers the latest
-authoritative `turn.diff.changed` domain for the selected thread. When that
-live domain is absent after reconstruction, it may display diffs explicitly
-retained in app-server `fileChange` items and labels that source as a fallback.
-It never invents a patch by comparing local files.
+The Changes inspector is authoritative over the local Git worktree containing
+the selected thread's working directory. It does not use app-server
+`turn.diff.changed` or `fileChange` messages as review content. The provider
+uses libgit2 in-process and asynchronously discovers the enclosing repository,
+then exposes Unstaged, Staged, and Since HEAD scopes. Untracked content,
+renames, copies, deletions, type changes, conflicts, and binary metadata come
+from libgit2. A folder outside Git remains a valid Codex workspace, but its
+Changes tab reports that review requires a repository.
 
-Unified diffs are separated by file, counted for additions and deletions, and
-rendered read-only with fixed-width text and addition, deletion, header, and
-hunk highlighting. A user can select a file, copy its patch, or open an
-expanded viewer. The file list and patch view retain canonical CodexUI sizing,
-colors, controls, and scrollbars.
+The Inspector contains a compact unified preview with stable file selection,
+addition/deletion counts, Copy, Open review, and file-double-click review. The
+modeless Change Review window remains usable beside the conversation and offers
+Unified or Side by side layout plus Compact or Expanded context. Preferences
+persist across threads. Repository collection runs outside the UI thread,
+superseded results are discarded, and rendered diff content is bounded to 16
+MiB with an explicit truncation state.
 
 ### 7.5 Conversation Projection and Prompt Admission
 
@@ -617,9 +622,9 @@ retained across in-place output updates.
 The Info tab's State and Protocol viewers use the same scrollbar styling and
 show vertical scrollbars only when required. The Protocol log owns the tab's
 expanding region and its statistics summary is placed below the log. Inspector
-content is read from retained per-thread presentation snapshots; selecting an
-already materialized thread does not temporarily clear Plan, Agents, Changes,
-or Requests while unrelated frames are processed.
+Plan, Agents, and Requests content is read from retained per-thread
+presentation snapshots. Changes is instead refreshed from the selected
+thread's local Git worktree and is independent of protocol-frame retention.
 
 ## 8. Plans and Agents
 
@@ -941,12 +946,13 @@ The implementation is divided into the following concrete components:
 | `ConversationCard` implementations | In-place typed card presentation, including pending prompts and bounded Command execution output |
 | `PromptCoordinator` | Per-thread prompt admission queues, callback-only acknowledgment, and authoritative-item correlation |
 | `ComposerPane` | Bottom-anchored upcoming-turn controls, attachments, prompt editor, and overlay-height reporting |
-| `InspectorPane` | Retained Plan, Agents, Changes, Requests, State, and Protocol presentation |
+| `InspectorPane` | Retained Plan, Agents, Requests, State, and Protocol presentation plus selected-workspace Git review |
 | `TurnSettingsWidget` | Codex-native transient settings draft and native thread/turn option encoder |
 | `NewThreadDialog` | Transient native thread-start draft with workspace selection and instructions |
 | `FileSelectionDialog` | Canonical directory or bounded multi-file browser shared by workspace and attachments |
 | `ConnectionDialog` | Session-only selector over effective compiled SNode.C client configurations |
-| `DiffViewer` | Authoritative live or retained-provider unified-diff presentation |
+| `GitDiffProvider` | Asynchronous in-process libgit2 repository discovery and scoped diff snapshots |
+| `DiffViewer` | Compact repository summary/preview and modeless unified or side-by-side review |
 | `PendingRequestDialog` | Typed, generation-preserving UI for app-server server-request families |
 | `MainWindow` | Top-level Qt window ownership only |
 | `BrandMark` and desktop resources | Shared visual mark and the consistent `codex-ui` executable/application/window/icon identity |
@@ -1014,12 +1020,14 @@ normalizer, protocol, and presentation-model sources. Only the top-level Qt
 consumer differs. Neither executable has a privileged transport or state path.
 
 The current build links the codex AISuite frontend library as
-`AISuite::OpenAICodex`, Qt Widgets, Threads, and the selected SNode.C client
-modules. CodexUI CI consumes AISuite from `master`/HEAD and does not pin a
-particular AISuite revision. The canonical AISuite change must therefore be
-merged before the dependent CodexUI change. The AISuite dependency build is
-limited to two compiler jobs because its generated protocol translation units
-can otherwise exceed the hosted runner's aggregate memory.
+`AISuite::OpenAICodex`, Qt Widgets, Threads, libgit2 through pkg-config, and the
+selected SNode.C client modules. Git review is performed through libgit2; the
+application never launches a Git process. CodexUI CI consumes AISuite from
+`master`/HEAD and does not pin a particular AISuite revision. The canonical
+AISuite change must therefore be merged before the dependent CodexUI change.
+The AISuite dependency build is limited to two compiler jobs because its
+generated protocol translation units can otherwise exceed the hosted runner's
+aggregate memory.
 
 ### 17.4 Shell settings and pending-request APIs
 

@@ -63,8 +63,8 @@ bottom or is owned by the user.
   another frontend never change the user's selected thread.
 - Selecting a thread hydrates it once per bridge connection even when the
   discovery result already contains an active turn. The full read is merged
-  into the retained per-thread presentation, so live Plan, Agents, and Changes
-  state cannot be erased by an incomplete reconstruction. Reload remains the
+  into the retained per-thread presentation, so live Plan and Agents state
+  cannot be erased by an incomplete reconstruction. Reload remains the
   explicit forced fresh-read action.
 
 ## Prompt submission and acknowledgment
@@ -193,9 +193,16 @@ The State and Protocol viewers use the common CodexUI scrollbar styling and
 show vertical scrollbars only when needed. The Protocol log occupies the
 expanding area of its tab; protocol statistics are displayed below the log.
 Protocol and State data are diagnostic presentation only and do not create
-domain authority. Plan, Agents, Changes, and Requests use retained per-thread
-presentation snapshots, so revisiting a materialized thread does not clear or
-flash those surfaces while unrelated frames arrive.
+domain authority. Plan, Agents, and Requests use retained per-thread
+presentation snapshots. Changes instead discovers the local Git worktree from
+the selected thread's working directory and refreshes it asynchronously through
+libgit2. It offers Unstaged, Staged, and Since HEAD scopes; a non-repository
+folder shows an explanatory unavailable state without preventing normal work.
+
+The Inspector shows a compact unified preview. Open review and double-clicking
+a changed file open a modeless review window with Unified or Side by side
+layout and Compact or Expanded context. These view preferences persist across
+threads.
 
 ## Desktop identity
 

@@ -23,6 +23,8 @@ find_package(
     COMPONENTS net-rc-stream-legacy net-rc-stream-tls
 )
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBGIT2 REQUIRED IMPORTED_TARGET libgit2)
 find_package(Threads REQUIRED)
 
 set(
@@ -37,6 +39,8 @@ set(
     src/codex/DiffViewer.h
     src/codex/FrontendSession.cpp
     src/codex/FrontendSession.h
+    src/codex/GitDiffProvider.cpp
+    src/codex/GitDiffProvider.h
     src/codex/FileSelectionDialog.cpp
     src/codex/FileSelectionDialog.h
     src/codex/MainWindow.cpp
@@ -111,6 +115,7 @@ function(configure_codexui_target target)
         ${target}
         PRIVATE
             AISuite::OpenAICodex
+            PkgConfig::LIBGIT2
             Qt6::Widgets
             Threads::Threads
             snodec::net-un-stream-legacy
@@ -266,6 +271,8 @@ if(BUILD_TESTING)
         tests/codex/GreenfieldLayoutTest.cpp
         src/codex/DiffViewer.cpp
         src/codex/DiffViewer.h
+        src/codex/GitDiffProvider.cpp
+        src/codex/GitDiffProvider.h
         src/codex/FileSelectionDialog.cpp
         src/codex/FileSelectionDialog.h
         src/codex/PresentationModel.cpp
@@ -300,7 +307,8 @@ if(BUILD_TESTING)
         codexui-greenfield-layout-test BEFORE PRIVATE src/greenfield src
     )
     target_link_libraries(
-        codexui-greenfield-layout-test PRIVATE AISuite::OpenAICodex Qt6::Widgets
+        codexui-greenfield-layout-test
+        PRIVATE AISuite::OpenAICodex PkgConfig::LIBGIT2 Qt6::Widgets
     )
     add_test(
         NAME codexui-greenfield-layout

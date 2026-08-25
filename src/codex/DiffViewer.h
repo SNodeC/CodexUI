@@ -3,52 +3,50 @@
 #ifndef CODEXUI_CODEX_DIFFVIEWER_H
 #define CODEXUI_CODEX_DIFFVIEWER_H
 
-#include <QString>
+#include "codex/GitDiffProvider.h"
+
+#include <QPointer>
 #include <QWidget>
 
-#include <vector>
-
+class QComboBox;
 class QLabel;
 class QListWidget;
 class QPlainTextEdit;
 class QPushButton;
+class QTimer;
 
 namespace codexui::codex {
 
-struct DiffFilePresentation {
-  QString path;
-  QString kind;
-  QString diff;
-};
+class GitDiffReviewWindow;
 
 class DiffViewer final : public QWidget {
 public:
   explicit DiffViewer(QWidget *parent = nullptr);
 
-  void setChanges(QString liveDiff,
-                  std::vector<DiffFilePresentation> retainedChanges);
+  void setWorkspace(QString workspace);
+  void refreshRepository();
 
 private:
-  struct FileDiff {
-    QString path;
-    QString kind;
-    QString content;
-    int additions = 0;
-    int deletions = 0;
-  };
-
-  static std::vector<FileDiff> parseUnifiedDiff(const QString &diff);
+  void applySnapshot(const GitDiffSnapshot &snapshot);
   void showSelectedFile();
-  void showExpanded();
+  void openReview();
+  [[nodiscard]] QString selectedPath() const;
 
+  GitDiffProvider *provider = nullptr;
+  QTimer *refreshTimer = nullptr;
+  QTimer *repositoryTimer = nullptr;
+  QString workspace;
+  GitDiffSnapshot snapshot;
+  QByteArray snapshotFingerprint;
+  QComboBox *scope = nullptr;
   QLabel *summary = nullptr;
   QLabel *authority = nullptr;
+  QLabel *selectedFile = nullptr;
   QListWidget *files = nullptr;
   QPlainTextEdit *diff = nullptr;
   QPushButton *copyButton = nullptr;
-  QPushButton *expandButton = nullptr;
-  std::vector<FileDiff> fileDiffs;
-  QByteArray contentFingerprint;
+  QPushButton *reviewButton = nullptr;
+  QPointer<GitDiffReviewWindow> reviewWindow;
 };
 
 } // namespace codexui::codex

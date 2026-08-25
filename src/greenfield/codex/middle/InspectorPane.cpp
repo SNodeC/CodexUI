@@ -535,57 +535,8 @@ void InspectorPane::refreshAgents() {
 
 void InspectorPane::refreshChanges() {
   const ThreadPresentation *thread = currentModel->thread(currentThreadId);
-  QString liveDiff;
-  std::vector<DiffFilePresentation> retained;
-  if (thread) {
-    for (auto id = thread->turnOrder.rbegin();
-         id != thread->turnOrder.rend() && liveDiff.isEmpty(); ++id) {
-      const auto turn = thread->turns.find(*id);
-      if (turn == thread->turns.end())
-        continue;
-      const auto domain = turn->second.domains.find("turn.diff.changed");
-      if (domain != turn->second.domains.end())
-        liveDiff = text(stringValue(domain->second, "diff"));
-    }
-    if (liveDiff.isEmpty()) {
-      for (auto id = thread->turnOrder.rbegin();
-           id != thread->turnOrder.rend() && retained.empty(); ++id) {
-        const auto turn = thread->turns.find(*id);
-        if (turn == thread->turns.end())
-          continue;
-        for (auto itemId = turn->second.itemOrder.rbegin();
-             itemId != turn->second.itemOrder.rend(); ++itemId) {
-          const auto item = turn->second.items.find(*itemId);
-          if (item == turn->second.items.end() ||
-              stringValue(item->second.raw, "type") != "fileChange")
-            continue;
-          for (const auto &change :
-               item->second.raw.value("changes", nlohmann::json::array())) {
-            QString kind = text(stringValue(change, "kind"));
-            if (kind.isEmpty() && change.contains("kind") &&
-                change["kind"].is_object())
-              kind = text(stringValue(change["kind"], "type"));
-            retained.push_back({text(stringValue(change, "path")),
-                                std::move(kind),
-                                text(stringValue(change, "diff"))});
-          }
-          if (!retained.empty())
-            break;
-        }
-      }
-    }
-  }
-  nlohmann::json signature{{"threadId", currentThreadId},
-                           {"live", liveDiff.toStdString()}};
-  for (const auto &change : retained)
-    signature["retained"].push_back({change.path.toStdString(),
-                                     change.kind.toStdString(),
-                                     change.diff.toStdString()});
-  const QByteArray next = bytes(signature);
-  if (next == changesSnapshot)
-    return;
-  changesSnapshot = next;
-  diffViewer->setChanges(std::move(liveDiff), std::move(retained));
+  diffViewer->setWorkspace(thread ? text(thread->cwd) : QString{});
+  diffViewer->refreshRepository();
 }
 
 void InspectorPane::refreshRequests() {

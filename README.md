@@ -30,8 +30,10 @@ consumer differs.
 
 ## Build
 
-Qt 6 Widgets, Threads, SNode.C `master`/HEAD, and an installed canonical
-AISuite package exporting `AISuite::OpenAICodex` are required.
+Qt 6 Widgets, Threads, libgit2 development files (discoverable as `libgit2`
+through pkg-config), SNode.C `master`/HEAD, and an installed canonical AISuite
+package exporting `AISuite::OpenAICodex` are required. On Debian and Ubuntu,
+the libgit2 package is `libgit2-dev`.
 
 ```sh
 cmake -S . -B "${BUILD_DIR}" -G Ninja \

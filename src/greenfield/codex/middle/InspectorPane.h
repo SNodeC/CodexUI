@@ -76,7 +76,6 @@ private:
 
   QByteArray planSnapshot;
   QByteArray agentsSnapshot;
-  QByteArray changesSnapshot;
   QByteArray requestsSnapshot;
   QByteArray stateSnapshot;
   QByteArray protocolStatsSnapshot;
