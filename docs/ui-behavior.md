@@ -4,6 +4,11 @@ This document defines the current CodexUI interaction contract. AISuite and the
 Codex app-server own protocol and domain semantics; CodexUI owns only local
 presentation, input, selection, and scroll state.
 
+All Qt popup and context menus share one application-level visual contract,
+including menus created automatically by text widgets. They use a compact
+white rounded surface, neutral border, 30-pixel actions, neutral hover,
+blue-tinted checked actions, muted disabled actions, and inset separators.
+
 ## Conversation source and structure
 
 `PresentationModel` is the sole retained authoritative store for normalized UI

@@ -362,11 +362,35 @@ QString applicationStyleSheet() {
         QTabBar::tab:selected { background: #e5eeff; color: #1d2633; font-weight: 600; }
         QTabBar::tab:hover:!selected { background: #f1f5fb; color: #1d2633; }
         QTabBar::tab:focus { border: 1px solid #2f6feb; }
-        QMenu { background: #ffffff; color: #1d2633; border: 1px solid #d7dee8; padding: 5px; }
-        QMenu::item { padding: 7px 28px 7px 10px; border-radius: 4px; }
-        QMenu::item:selected { background: #e5eeff; color: #1d2633; }
+        QMenu {
+            background: #ffffff;
+            color: #1d2633;
+            border: 1px solid #d7dee8;
+            border-radius: 8px;
+            padding: 4px;
+        }
+        QMenu::item {
+            min-height: 30px;
+            padding: 0 24px 0 10px;
+            border-radius: 5px;
+            font-weight: 400;
+        }
+        QMenu::item:selected {
+            background: #f1f5fb;
+            color: #1d2633;
+        }
+        QMenu::item:checked {
+            background: #e5eeff;
+            color: #285fca;
+        }
+        QMenu::item:checked:selected { background: #d8e7ff; }
         QMenu::item:disabled { color: #98a2b3; }
-        QMenu::separator { height: 1px; background: #d7dee8; margin: 5px 8px; }
+        QMenu::item:disabled:selected { background: transparent; }
+        QMenu::separator {
+            height: 1px;
+            background: #d7dee8;
+            margin: 4px 8px;
+        }
         QToolTip { background: #ffffff; color: #1d2633; border: 1px solid #b9c4d2; padding: 5px; }
     )QSS")
       .arg(compact, standard, section, heading);
