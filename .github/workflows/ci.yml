@@ -32,18 +32,18 @@ jobs:
             ${{ github.event_name == 'pull_request' &&
                 github.event.pull_request.head.sha || github.sha }}
 
-      - name: Check out SNode.C master
+      - name: Check out pinned SNode.C
         uses: actions/checkout@v5
         with:
           repository: SNodeC/snode.c
-          ref: master
+          ref: 212bd4f8a16637405ab850a52adb9da8555dca3d
           path: _deps/snodec
 
-      - name: Check out canonical AISuite Codex
+      - name: Check out paired AISuite Codex
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: master
+          ref: aece50a5ad2e498b4c6a1035a2cb3da293c1fbd1
           path: _deps/aisuite
 
       - name: Install build dependencies
@@ -82,15 +82,16 @@ jobs:
           cmake --build _build/snodec --target all
           cmake --install _build/snodec
 
-      - name: Build and install canonical AISuite Codex
+      - name: Build, test, and install paired AISuite Codex
         run: |
           cmake -S _deps/aisuite -B _build/aisuite -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/_stage/aisuite" \
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/snodec" \
-            -DAISUITE_BUILD_CODEX_TESTS=OFF \
+            -DAISUITE_BUILD_CODEX_TESTS=ON \
             -DAISUITE_BUILD_APPS=ON
           cmake --build _build/aisuite --target all --parallel 2
+          ctest --test-dir _build/aisuite --output-on-failure
           cmake --install _build/aisuite
 
       - name: Configure CodexUI
@@ -101,6 +102,9 @@ jobs:
 
       - name: Build CodexUI
         run: cmake --build build --target all
+
+      - name: Test CodexUI
+        run: ctest --test-dir build --output-on-failure
 
       - name: Check changed lines
         shell: bash
