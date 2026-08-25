@@ -22,6 +22,18 @@ This document records the implemented CodexUI visual and interaction contract.
 | Orange | `#a85d0c` | `#8e4d09` | `#743e07` | `#fff6df` | `#e5c77d` | `#8a5208` |
 | Red | `#c43d4d` | `#aa3342` | `#8f2b38` | `#fff0f2` | `#efb8c0` | `#982f3d` |
 
+Neutral separators and borders use three canonical intensity steps:
+
+| Intensity | Color | Role |
+|---|---|---|
+| Soft | `#eef1f5` | Subordinate internal separation |
+| Standard | `#d7dee8` | Ordinary dividers and card/control borders |
+| Strong | `#b9c4d2` | Hover, emphasis, and stronger structural separation |
+
+Ordinary one-pixel lines use Standard. Soft is reserved for deliberately
+subordinate structure, while Strong must communicate interaction or hierarchy
+rather than decorate a normal boundary.
+
 Filled semantic buttons use white text and the primary, hover, and pressed
 steps without opacity changes. Their primary contrast against white ranges
 from 4.55:1 to 5.09:1. Blue denotes primary action or active work, green
@@ -118,7 +130,11 @@ conversation use. Manual filesystem changes use the same libgit2 authority as
 Codex changes; filesystem watches and a short safety refresh remove clean files
 and discover new untracked files. The compact and review scrollbars provide an
 overview ruler: canonical green marks additions, red marks deletions, and blue
-marks hunk boundaries.
+marks hunk boundaries. The file list owns a compact muted footer with semantic
+addition/deletion totals, followed by a standard gray divider before the selected
+file preview. The divider spans the full tab page and aligns with the tab
+underline, while adjacent content retains its normal inset. Repository and
+scope are not repeated outside their controls.
 
 ## Desktop integration
 

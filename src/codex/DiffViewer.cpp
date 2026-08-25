@@ -13,6 +13,7 @@
 #include <QFileInfo>
 #include <QFileSystemWatcher>
 #include <QFontDatabase>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
@@ -584,35 +585,28 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   repositoryTimer->start();
 
   auto *root = new QVBoxLayout(this);
-  root->setContentsMargins(10, 10, 10, 10);
+  root->setContentsMargins(0, 0, 0, 0);
   root->setSpacing(8);
-  summary = label(QStringLiteral("No file changes"), "title");
-  authority = label({}, "meta");
-  auto *headerText = new QVBoxLayout;
-  headerText->setSpacing(1);
-  headerText->addWidget(summary);
-  headerText->addWidget(authority);
-  root->addLayout(headerText);
   auto *filters = new QHBoxLayout;
-  filters->addStretch();
+  filters->setContentsMargins(10, 10, 10, 0);
+  filters->setSpacing(8);
   repositories = new ChevronComboBox;
   repositories->setObjectName(QStringLiteral("codexDiffRepository"));
   repositories->setProperty("codexChevron", true);
   repositories->addItem(QStringLiteral("Repository"), QString{});
-  repositories->setFixedHeight(30);
-  repositories->setMinimumWidth(130);
-  filters->addWidget(repositories);
+  repositories->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+  filters->addWidget(repositories, 1);
   hiddenRepositories = new QPushButton(QStringLiteral("Hidden"));
   hiddenRepositories->setObjectName(
       QStringLiteral("codexDiffHiddenRepositories"));
   hiddenRepositories->setProperty("kind", "segment");
+  hiddenRepositories->setProperty("comboPeer", true);
   hiddenRepositories->setCheckable(true);
   hiddenRepositories->setChecked(
       QSettings().value(QStringLiteral("diff/includeHiddenRepositories"), false)
           .toBool());
   hiddenRepositories->setToolTip(
       QStringLiteral("Also include hidden repositories"));
-  hiddenRepositories->setFixedHeight(30);
   filters->addWidget(hiddenRepositories);
   scope = new ChevronComboBox;
   scope->setObjectName(QStringLiteral("codexDiffScope"));
@@ -623,34 +617,63 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
                  static_cast<int>(GitDiffScope::Staged));
   scope->addItem(QStringLiteral("Since HEAD"),
                  static_cast<int>(GitDiffScope::Uncommitted));
-  scope->setFixedHeight(30);
   const int savedScope =
       QSettings().value(QStringLiteral("diff/scope"), 0).toInt();
   scope->setCurrentIndex(std::clamp(savedScope, 0, scope->count() - 1));
-  filters->addWidget(scope);
+  scope->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+  filters->addWidget(scope, 1);
   root->addLayout(filters);
 
   files = new QListWidget;
   files->setObjectName(QStringLiteral("codexDiffFiles"));
   files->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   files->setMaximumHeight(170);
-  root->addWidget(files);
+  auto *fileList = new QVBoxLayout;
+  fileList->setContentsMargins(10, 0, 10, 0);
+  fileList->addWidget(files);
+  root->addLayout(fileList);
+
+  auto *fileSummary = new QHBoxLayout;
+  fileSummary->setContentsMargins(10, 0, 10, 0);
+  fileSummary->setSpacing(8);
+  summary = label(QStringLiteral("No changes"), "meta");
+  authority = label({}, "meta");
+  authority->setWordWrap(false);
+  authority->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  truncationSummary = label({}, "attentionSection");
+  additionSummary = label({}, "diffAdditionMeta");
+  deletionSummary = label({}, "diffDeletionMeta");
+  fileSummary->addWidget(summary);
+  fileSummary->addWidget(authority, 1);
+  fileSummary->addWidget(truncationSummary);
+  fileSummary->addWidget(additionSummary);
+  fileSummary->addWidget(deletionSummary);
+  root->addLayout(fileSummary);
+
+  auto *previewDivider = new QFrame;
+  previewDivider->setProperty("kind", "standardDivider");
+  previewDivider->setFixedHeight(1);
+  root->addWidget(previewDivider);
 
   auto *previewHeader = new QHBoxLayout;
+  previewHeader->setContentsMargins(10, 0, 10, 0);
   selectedFile = label(QStringLiteral("Select a changed file"), "title");
   previewHeader->addWidget(selectedFile, 1);
   copyButton = new QPushButton(QStringLiteral("Copy"));
   copyButton->setProperty("kind", "subtle");
   copyButton->setFixedHeight(28);
   reviewButton = new QPushButton(QStringLiteral("Open review"));
-  reviewButton->setFixedHeight(28);
+  reviewButton->setProperty("comboPeer", true);
   previewHeader->addWidget(copyButton);
   previewHeader->addWidget(reviewButton);
   root->addLayout(previewHeader);
 
   diff = diffView(QStringLiteral("codexDiffText"));
   diff->setPlaceholderText(QStringLiteral("Select a changed file."));
-  root->addWidget(diff, 1);
+  auto *diffArea = new QVBoxLayout;
+  diffArea->setContentsMargins(10, 0, 10, 10);
+  diffArea->addWidget(diff);
+  root->addLayout(diffArea, 1);
 
   connect(refreshTimer, &QTimer::timeout, this, [this] {
     provider->request(workspace, repositoryCandidates(), changedPaths,
@@ -822,19 +845,28 @@ void DiffViewer::applySnapshot(const GitDiffSnapshot &value) {
   if (!value.error.isEmpty()) {
     summary->setText(QStringLiteral("Changes unavailable"));
     authority->setText(value.error);
+    authority->setToolTip(value.error);
+    truncationSummary->clear();
+    additionSummary->clear();
+    deletionSummary->clear();
   } else {
-    summary->setText(value.files.empty()
-                         ? QStringLiteral("No file changes")
-                         : QStringLiteral("%1 files   +%2  −%3")
-                               .arg(value.files.size())
-                               .arg(additions)
-                               .arg(deletions));
-    authority->setText(
-        value.truncated
-            ? QStringLiteral("%1  |  display truncated  |  %2")
-                  .arg(scopeName(value.scope), repositorySummary(value))
-            : QStringLiteral("%1  |  %2")
-                  .arg(scopeName(value.scope), repositorySummary(value)));
+    summary->setText(
+        value.files.empty()
+            ? QStringLiteral("No changes")
+            : value.files.size() == 1
+                  ? QStringLiteral("1 changed file")
+                  : QStringLiteral("%1 changed files").arg(value.files.size()));
+    authority->clear();
+    authority->setToolTip(QString{});
+    truncationSummary->setText(value.truncated
+                                   ? QStringLiteral("Display truncated")
+                                   : QString{});
+    additionSummary->setText(value.files.empty()
+                                 ? QString{}
+                                 : QStringLiteral("+%1").arg(additions));
+    deletionSummary->setText(value.files.empty()
+                                 ? QString{}
+                                 : QStringLiteral("−%1").arg(deletions));
   }
   if (!value.files.empty()) {
     files->setCurrentRow(selected >= 0 ? selected : 0);

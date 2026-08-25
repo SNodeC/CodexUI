@@ -75,6 +75,8 @@ QString applicationStyleSheet() {
         QLabel[kind="body"] { font-size: %2pt; }
         QLabel[kind="meta"] { color: #667085; font-size: %1pt; }
         QLabel[kind="small"] { color: #667085; font-size: %1pt; }
+        QLabel[kind="diffAdditionMeta"] { color: #176b45; font-size: %1pt; font-weight: 600; }
+        QLabel[kind="diffDeletionMeta"] { color: #982f3d; font-size: %1pt; font-weight: 600; }
         QPushButton, QToolButton {
             background: #ffffff;
             border: 1px solid #d7dee8;
@@ -83,6 +85,7 @@ QString applicationStyleSheet() {
             font-size: %1pt;
             font-weight: 600;
         }
+        QPushButton[comboPeer="true"] { min-height: 30px; max-height: 30px; }
         QPushButton:hover, QToolButton:hover { background: #f1f5fb; border-color: #b9c4d2; }
         QPushButton:pressed, QToolButton:pressed { background: #e5eeff; border-color: #bfd3f9; }
         QPushButton:focus, QToolButton:focus { border: 2px solid #2f6feb; }
@@ -154,6 +157,7 @@ QString applicationStyleSheet() {
         QFrame[messageRole="user"] { background: #eaf2ff; border: 1px solid #bfd3f9; border-radius: 8px; }
         QFrame[messageRole="agent"] { background: #ffffff; border: 0; border-radius: 8px; }
         QFrame[kind="summary"] { background: #f8fafc; border: 1px solid #d7dee8; border-radius: 7px; }
+        QFrame[kind="standardDivider"] { background: #d7dee8; border: none; }
         QFrame[kind="greenBadge"] { background: #e9f7f0; border: 1px solid #a9d8c1; border-radius: 6px; }
         QFrame[kind="blueBadge"] { background: #e5eeff; border-radius: 5px; }
         QFrame[kind="orangeBadge"] { background: #fff6df; border: 1px solid #e5c77d; border-radius: 7px; }

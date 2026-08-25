@@ -56,6 +56,9 @@ private:
   QPushButton *hiddenRepositories = nullptr;
   QLabel *summary = nullptr;
   QLabel *authority = nullptr;
+  QLabel *truncationSummary = nullptr;
+  QLabel *additionSummary = nullptr;
+  QLabel *deletionSummary = nullptr;
   QLabel *selectedFile = nullptr;
   QListWidget *files = nullptr;
   QPlainTextEdit *diff = nullptr;

@@ -210,9 +210,11 @@ work. Manual and Codex-created changes are treated identically.
 The Inspector shows a compact unified preview. Open review and double-clicking
 a changed file open a modeless review window with Unified or Side by side
 layout and Compact or Expanded context. These view preferences persist across
-threads. Diff scrollbars show proportional overview marks using canonical
-green for additions, red for deletions, and blue for hunk boundaries. Existing
-changed files and their parent directories are watched;
+threads. The changed-file list ends with a compact footer containing the file
+count and semantic green/red totals; a standard gray divider separates that
+selection area from the preview. Diff scrollbars show proportional overview
+marks using canonical green for additions, red for deletions, and blue for hunk
+boundaries. Existing changed files and their parent directories are watched;
 reverted or restored files disappear after libgit2 confirms they are clean,
 while a short visible-only refresh discovers new untracked files and catches
 index-only changes.
