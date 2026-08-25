@@ -59,6 +59,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "$GITHUB_WORKSPACE/_deps/snodec"
           git config --global --add safe.directory "$GITHUB_WORKSPACE/_deps/aisuite"
+          getent group snodec >/dev/null || groupadd --system snodec
 
       - name: Verify CodexUI source revision
         shell: bash
@@ -89,6 +90,10 @@ jobs:
             -DAISUITE_BUILD_CODEX_TESTS=ON \
             -DAISUITE_BUILD_APPS=ON
           cmake --build _build/aisuite --target all --parallel 2
+          install -d -m 0770 -g snodec \
+            /etc/snode.c \
+            /var/log/snode.c \
+            /var/run/snode.c
           LD_LIBRARY_PATH="$GITHUB_WORKSPACE/_stage/snodec/lib" \
             ctest --test-dir _build/aisuite --output-on-failure
           cmake --install _build/aisuite
