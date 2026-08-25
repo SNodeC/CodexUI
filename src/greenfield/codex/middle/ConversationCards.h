@@ -56,6 +56,7 @@ private:
   bool settlingScroll_ = false;
   int preservedScrollValue_ = 0;
   int preferredHeight_ = 0;
+  QString currentOutput_;
 };
 
 class ConversationCard : public QFrame {

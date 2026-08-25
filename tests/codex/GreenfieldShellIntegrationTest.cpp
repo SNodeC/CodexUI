@@ -60,6 +60,7 @@ bool expect(bool condition, const char *message) {
 }
 
 void spin(int milliseconds = 0) {
+  milliseconds = std::max(milliseconds, 20);
   QElapsedTimer timer;
   timer.start();
   do {

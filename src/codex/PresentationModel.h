@@ -70,6 +70,9 @@ struct ConnectionPresentation {
   std::string role;
   std::string controllerConnectionId;
   std::string detail;
+  std::uint64_t providerGeneration = 0;
+  std::string providerState;
+  std::string providerDetail;
   nlohmann::json settings = nlohmann::json::object();
 };
 
@@ -83,7 +86,7 @@ struct TelemetryPresentation {
 
 class PresentationModel final {
 public:
-  void applyEvent(const nlohmann::json &event);
+  void applyEvent(const nlohmann::json &event) noexcept;
 
   [[nodiscard]] const std::vector<std::string> &threadOrder() const noexcept;
   [[nodiscard]] const ThreadPresentation *
@@ -104,6 +107,7 @@ public:
   pendingRequestPresentations() const noexcept;
 
 private:
+  void applyValidatedEvent(const nlohmann::json &event);
   void mergeThreadList(const nlohmann::json &listedThreads);
   ThreadPresentation &upsertThread(const nlohmann::json &raw,
                                    bool replaceTurns);
@@ -117,6 +121,7 @@ private:
                            const nlohmann::json &activity, bool live = true);
   void correlateAgentThread(const std::string &childThreadId);
   void removeThread(const std::string &threadId);
+  void clearProviderState();
   void retainDomainEvent(const std::string &type, const nlohmann::json &data,
                          const nlohmann::json &scope,
                          const std::string &authority);

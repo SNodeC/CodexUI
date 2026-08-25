@@ -168,6 +168,7 @@ struct ShellWidget::Impl final {
   void buildUi();
   void connectUi();
   void handleEvent(const nlohmann::json &event);
+  void scheduleRender();
   void render();
   void renderConversation();
   void refreshSettings();
@@ -229,8 +230,10 @@ struct ShellWidget::Impl final {
   std::unordered_set<std::string> promptRecoveryAttempted;
   std::unordered_map<std::string, HistoryWindow> historyWindows;
   std::uint64_t observedConnectionGeneration = 0;
+  std::uint64_t observedProviderGeneration = 0;
   QByteArray settingsSnapshot;
   QByteArray statusSnapshot;
+  bool renderScheduled = false;
 
   middle::MiddleRegionWidget *middleRegion = nullptr;
   QPushButton *restoreSidebarButton = nullptr;
@@ -455,11 +458,25 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
     operationReadyThreads.clear();
     dispatchScheduledThreads.clear();
   }
+  if (connection.providerGeneration != observedProviderGeneration) {
+    observedProviderGeneration = connection.providerGeneration;
+    hydration.clear();
+    readRevisions.clear();
+    operationReadyThreads.clear();
+    dispatchScheduledThreads.clear();
+  }
 
   const std::string type = stringValue(event, "type");
   const nlohmann::json data = event.value("data", nlohmann::json::object());
   const nlohmann::json scope = event.value("scope", nlohmann::json::object());
   const std::string eventThreadId = stringValue(scope, "threadId");
+  if (kind == "event" && type == "connection.provider" &&
+      stringValue(data, "state") == "disconnected") {
+    hydration.clear();
+    readRevisions.clear();
+    operationReadyThreads.clear();
+    dispatchScheduledThreads.clear();
+  }
 
   if (kind == "result" && !event.value("ok", false) && action != "turn.start" &&
       action != "turn.steer" && action != "thread.read" &&
@@ -522,10 +539,31 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
       prompts.compactResolved(eventThreadId,
                               QDateTime::currentMSecsSinceEpoch());
     }
+  } else if (kind == "event" && type == "connection.provider" &&
+             stringValue(data, "state") == "ready") {
+    session.listThreads();
+    session.listModels();
+    readThread(selectedThreadId, true);
   }
 
   hydrateHistoricalAgents();
-  render();
+  scheduleRender();
+}
+
+void ShellWidget::Impl::scheduleRender() {
+  if (renderScheduled)
+    return;
+  renderScheduled = true;
+  const auto token = alive;
+  // A streamed response may deliver many deltas in one display interval.
+  // Reconcile once per frame instead of rebuilding rich text and layout for
+  // every transport chunk.
+  QTimer::singleShot(16, Qt::PreciseTimer, owner, [this, token] {
+    if (!*token)
+      return;
+    renderScheduled = false;
+    render();
+  });
 }
 
 void ShellWidget::Impl::render() {

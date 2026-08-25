@@ -206,6 +206,11 @@ std::optional<EventDescriptor> remainingNotification(std::string_view method) {
 
 ProtocolNormalizer::ProtocolNormalizer(Sink sink) : sink(std::move(sink)) {}
 
+void ProtocolNormalizer::setDeliveryFailureHandler(
+    std::function<void()> handler) {
+  deliveryFailureHandler = std::move(handler);
+}
+
 void ProtocolNormalizer::transportEvent(std::string_view eventName,
                                         std::string detail) {
   if (eventName == "connected")
@@ -233,9 +238,9 @@ void ProtocolNormalizer::bridgeEvent(const nlohmann::json &value) {
   const std::string kind = presentation::stringMember(value, "kind");
   if (kind == "bridge.connection") {
     emitEvent("connection.bridge",
-              {{"state", value.value("event", std::string{})},
-               {"connectionId", value.value("connectionId", std::string{})},
-               {"role", value.value("role", std::string{})}});
+              {{"state", presentation::stringMember(value, "event")},
+               {"connectionId", presentation::stringMember(value, "connectionId")},
+               {"role", presentation::stringMember(value, "role")}});
     return;
   }
   if (kind == "bridge.controller") {
@@ -245,10 +250,25 @@ void ProtocolNormalizer::bridgeEvent(const nlohmann::json &value) {
               Authority::Replace);
     return;
   }
+  if (kind == "bridge.provider") {
+    const auto generation = value.find("providerGeneration");
+    if (generation == value.end() || !generation->is_number_unsigned()) {
+      diagnostic("bridge", "invalid-provider-event",
+                 "provider event has no unsigned generation", value);
+      return;
+    }
+    nlohmann::json data{{"state", presentation::stringMember(value, "state")},
+                        {"generation", generation->get<std::uint64_t>()}};
+    const std::string reason = presentation::stringMember(value, "reason");
+    if (!reason.empty())
+      data["reason"] = reason;
+    emitEvent("connection.provider", std::move(data), Authority::Replace);
+    return;
+  }
   if (kind == "bridge.diagnostic") {
-    diagnostic("bridge", value.value("code", std::string{}),
-               value.value("message", std::string{}),
-               value.value("details", nlohmann::json::object()));
+    diagnostic("bridge", presentation::stringMember(value, "code"),
+               presentation::stringMember(value, "message"),
+               presentation::member(value, "details", nlohmann::json::object()));
     return;
   }
   diagnostic("bridge", "unknown-event", kind, value);
@@ -259,7 +279,8 @@ void ProtocolNormalizer::serverNotification(std::string_view method,
   const nlohmann::json scope = stableScope(params);
   if (method == "thread/started") {
     emitEvent("thread.upsert",
-              {{"thread", params.value("thread", nlohmann::json::object())}},
+              {{"thread", presentation::member(
+                              params, "thread", nlohmann::json::object())}},
               Authority::Merge);
   } else if (method == "thread/status/changed") {
     emitEvent("thread.status.changed",
@@ -282,15 +303,18 @@ void ProtocolNormalizer::serverNotification(std::string_view method,
     emitEvent(
         "turn.upsert",
         {{"lifecycle", method == "turn/started" ? "started" : "completed"},
-         {"turn", params.value("turn", nlohmann::json::object())}},
+         {"turn", presentation::member(params, "turn",
+                                        nlohmann::json::object())}},
         Authority::Merge, scope);
   } else if (method == "turn/plan/updated") {
     emitEvent("plan.replaced",
               {{"explanation", presentation::member(params, "explanation")},
-               {"steps", params.value("plan", nlohmann::json::array())}},
+               {"steps", presentation::member(
+                             params, "plan", nlohmann::json::array())}},
               Authority::Replace, scope);
   } else if (method == "item/started" || method == "item/completed") {
-    const nlohmann::json item = params.value("item", nlohmann::json::object());
+    const nlohmann::json item =
+        presentation::member(params, "item", nlohmann::json::object());
     nlohmann::json itemScope = scope;
     if (!itemScope.contains("itemId") && item.contains("id") &&
         !item["id"].is_null())
@@ -300,7 +324,7 @@ void ProtocolNormalizer::serverNotification(std::string_view method,
         {{"lifecycle", method == "item/started" ? "started" : "completed"},
          {"item", item}},
         Authority::Merge, itemScope);
-    const std::string itemType = item.value("type", std::string{});
+    const std::string itemType = presentation::stringMember(item, "type");
     if (itemType == "collabAgentToolCall" || itemType == "subAgentActivity") {
       emitEvent(
           "agents.activity.upsert",
@@ -321,7 +345,7 @@ void ProtocolNormalizer::serverNotification(std::string_view method,
     else if (method == "item/reasoning/textDelta")
       field = "content";
     nlohmann::json data{{"field", std::move(field)},
-                        {"text", params.value("delta", std::string{})}};
+                        {"text", presentation::stringMember(params, "delta")}};
     if (params.contains("summaryIndex"))
       data["summaryIndex"] = params["summaryIndex"];
     if (params.contains("contentIndex"))
@@ -341,7 +365,8 @@ void ProtocolNormalizer::serverNotification(std::string_view method,
   } else if (method == "thread/tokenUsage/updated") {
     emitEvent(
         "thread.token-usage.changed",
-        {{"tokenUsage", params.value("tokenUsage", nlohmann::json::object())}},
+        {{"tokenUsage", presentation::member(
+                            params, "tokenUsage", nlohmann::json::object())}},
         Authority::Replace, scope);
   } else if (method == "account/updated") {
     emitEvent("account.changed", {{"account", params}}, Authority::Replace);
@@ -380,7 +405,9 @@ void ProtocolNormalizer::observeRawInbound(const nlohmann::json &message) {
 void ProtocolNormalizer::operationResult(std::string action,
                                          std::string correlationId,
                                          nlohmann::json context,
-                                         const nlohmann::json &response) {
+                                         const nlohmann::json &response,
+                                         std::optional<std::uint64_t>
+                                             startedAtSequence) {
   const bool ok = response.is_object() && response.contains("result");
   nlohmann::json data;
   Authority authority = Authority::None;
@@ -389,24 +416,29 @@ void ProtocolNormalizer::operationResult(std::string action,
     const nlohmann::json &value = response["result"];
     if (action == "threads.list") {
       data = {
-          {"threads", value.value("data", nlohmann::json::array())},
+          {"threads", presentation::member(value, "data",
+                                             nlohmann::json::array())},
           {"nextCursor", presentation::member(value, "nextCursor")},
           {"backwardsCursor", presentation::member(value, "backwardsCursor")}};
       authority = Authority::Merge;
     } else if (action == "thread.read") {
       const nlohmann::json thread =
-          value.value("thread", nlohmann::json::object());
+          presentation::member(value, "thread", nlohmann::json::object());
       data = {{"thread", thread}};
-      authority = Authority::Merge;
+      authority = startedAtSequence && *startedAtSequence == nextSequence
+                      ? Authority::Replace
+                      : Authority::Merge;
       const std::string threadId = presentation::stringMember(thread, "id");
       if (!threadId.empty())
         scope["threadId"] = threadId;
     } else if (action == "thread.create" || action == "thread.resume" ||
                action == "thread.fork") {
-      data = {{"thread", value.value("thread", nlohmann::json::object())}};
+      data = {{"thread", presentation::member(
+                             value, "thread", nlohmann::json::object())}};
       authority = Authority::Merge;
     } else if (action == "models.list") {
-      data = {{"models", value.value("data", nlohmann::json::array())},
+      data = {{"models", presentation::member(value, "data",
+                                                nlohmann::json::array())},
               {"nextCursor", presentation::member(value, "nextCursor")}};
       authority = Authority::Replace;
     } else if (action == "model-provider-capabilities.read" ||
@@ -428,7 +460,8 @@ void ProtocolNormalizer::operationResult(std::string action,
       data = value;
       authority = Authority::Replace;
     } else if (action == "turn.start") {
-      data = {{"turn", value.value("turn", nlohmann::json::object())}};
+      data = {{"turn", presentation::member(
+                           value, "turn", nlohmann::json::object())}};
       authority = Authority::Merge;
     } else {
       data = value;
@@ -449,8 +482,15 @@ void ProtocolNormalizer::operationRejected(std::string action,
                             {{"code", code}, {"message", std::move(message)}}));
 }
 
-bool ProtocolNormalizer::emit(nlohmann::json frame) const {
-  return sink && sink(frame);
+bool ProtocolNormalizer::emit(nlohmann::json frame) {
+  if (deliveryFailed)
+    return false;
+  if (sink && sink(frame))
+    return true;
+  deliveryFailed = true;
+  if (deliveryFailureHandler)
+    deliveryFailureHandler();
+  return false;
 }
 
 bool ProtocolNormalizer::emitEvent(std::string type, nlohmann::json data,
@@ -483,6 +523,10 @@ bool ProtocolNormalizer::knownServerMethod(std::string_view method) const {
   AI_OPENAI_CODEX_SERVER_NOTIFICATIONS(CODEXUI_MATCH_SERVER_NOTIFICATION)
 #undef CODEXUI_MATCH_SERVER_NOTIFICATION
   return false;
+}
+
+std::uint64_t ProtocolNormalizer::sequence() const noexcept {
+  return nextSequence;
 }
 
 } // namespace codexui::codex

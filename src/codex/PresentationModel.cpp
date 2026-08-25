@@ -29,6 +29,16 @@ nlohmann::json memberValue(const nlohmann::json &object, const char *key,
   return iterator == object.end() ? std::move(fallback) : *iterator;
 }
 
+bool boolValue(const nlohmann::json &object, const char *key,
+               bool fallback = false) {
+  if (!object.is_object())
+    return fallback;
+  const auto iterator = object.find(key);
+  return iterator != object.end() && iterator->is_boolean()
+             ? iterator->get<bool>()
+             : fallback;
+}
+
 std::string statusValue(const nlohmann::json &value) {
   if (value.is_string())
     return value.get<std::string>();
@@ -97,9 +107,11 @@ void appendText(nlohmann::json &item, const char *field,
   const std::string delta = stringValue(params, "delta");
   if (delta.empty())
     return;
-  std::string existing = stringValue(item, field);
+  nlohmann::json &stored = item[field];
+  if (!stored.is_string())
+    stored = "";
+  std::string &existing = stored.get_ref<std::string &>();
   existing += delta;
-  item[field] = std::move(existing);
 }
 
 void appendIndexedText(nlohmann::json &item, const char *field,
@@ -120,7 +132,8 @@ void appendIndexedText(nlohmann::json &item, const char *field,
   std::string delta = stringValue(params, "delta");
   if (delta.empty())
     delta = stringValue(params, "text");
-  parts[position] = parts[position].get<std::string>() + delta;
+  std::string &existing = parts[position].get_ref<std::string &>();
+  existing += delta;
 }
 
 void applyDomainAuthority(
@@ -142,48 +155,74 @@ void applyDomainAuthority(
 
 } // namespace
 
-void PresentationModel::applyEvent(const nlohmann::json &event) {
+void PresentationModel::applyEvent(const nlohmann::json &event) noexcept {
+  try {
+    applyValidatedEvent(event);
+  } catch (...) {
+    // Presentation mutation is an untrusted-data boundary. No malformed event
+    // may escape through Qt dispatch.
+  }
+}
+
+void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
   if (!presentation::isPresentationFrame(event))
     return;
 
-  const std::uint64_t sequence = event.value("sequence", 0ULL);
+  const std::string kind = presentation::stringMember(event, "kind");
+  const auto generationMember = event.find("generation");
+  const std::uint64_t generation =
+      generationMember != event.end() && generationMember->is_number_unsigned()
+          ? generationMember->get<std::uint64_t>()
+          : 0;
+  if (connectionState.generation != 0 && generation != 0 &&
+      generation < connectionState.generation)
+    return;
+  if (generation > connectionState.generation) {
+    connectionState.generation = generation;
+    lastSequence = 0;
+    pendingRequests.clear();
+  }
+  const auto sequenceMember = event.find("sequence");
+  const std::uint64_t sequence =
+      sequenceMember != event.end() && sequenceMember->is_number_unsigned()
+          ? sequenceMember->get<std::uint64_t>()
+          : 0;
   if (sequence != 0) {
     if (sequence <= lastSequence)
       return;
     lastSequence = sequence;
   }
-
-  const std::string kind = presentation::stringMember(event, "kind");
   const nlohmann::json data =
       presentation::member(event, "data", nlohmann::json::object());
   const nlohmann::json scope =
       presentation::member(event, "scope", nlohmann::json::object());
   if (kind == "result") {
-    if (!event.value("ok", false))
+    if (!boolValue(event, "ok"))
       return;
     const std::string action = presentation::stringMember(event, "action");
     if (action == "threads.list") {
       const nlohmann::json threads =
-          data.value("threads", nlohmann::json::array());
+          memberValue(data, "threads", nlohmann::json::array());
       mergeThreadList(threads);
     } else if (action == "thread.read") {
       const nlohmann::json thread =
-          data.value("thread", nlohmann::json::object());
+          memberValue(data, "thread", nlohmann::json::object());
       ThreadPresentation &hydrated =
           upsertThread(thread, stringValue(event, "authority") == "replace");
       correlateAgentThread(hydrated.id);
     } else if (action == "thread.create" || action == "thread.resume" ||
                action == "thread.fork") {
-      upsertThread(data.value("thread", nlohmann::json::object()), false);
+      upsertThread(memberValue(data, "thread", nlohmann::json::object()),
+                   false);
     } else if (action == "turn.start") {
       const std::string threadId = stringValue(scope, "threadId");
       const auto thread = threads.find(threadId);
       if (thread != threads.end())
-        upsertTurn(thread->second, data.value("turn", nlohmann::json::object()),
-                   false);
+        upsertTurn(thread->second,
+                   memberValue(data, "turn", nlohmann::json::object()), false);
     } else if (action == "models.list") {
       const nlohmann::json listedModels =
-          data.value("models", nlohmann::json::array());
+          memberValue(data, "models", nlohmann::json::array());
       if (listedModels.is_array())
         models = listedModels;
     } else {
@@ -201,11 +240,11 @@ void PresentationModel::applyEvent(const nlohmann::json &event) {
     if (retainedTelemetry.size() == MaximumRetainedTelemetry)
       retainedTelemetry.erase(retainedTelemetry.begin());
     retainedTelemetry.push_back(TelemetryPresentation{
-        sequence, event.value("generation", 0ULL), type, data, scope});
+        sequence, generation, type, data, scope});
   }
   if (type == "connection.lifecycle") {
     connectionState.generation =
-        event.value("generation", connectionState.generation);
+        generation;
     const std::string lifecycle = stringValue(data, "state");
     if (lifecycle == "connected") {
       connectionState.connected = true;
@@ -245,12 +284,30 @@ void PresentationModel::applyEvent(const nlohmann::json &event) {
               : "observer";
     return;
   }
+  if (type == "connection.provider") {
+    const auto providerGeneration = data.find("generation");
+    if (providerGeneration == data.end() ||
+        !providerGeneration->is_number_unsigned())
+      return;
+    const std::uint64_t incoming = providerGeneration->get<std::uint64_t>();
+    if (incoming < connectionState.providerGeneration)
+      return;
+    const std::string state = stringValue(data, "state");
+    if ((connectionState.providerGeneration != 0 &&
+         incoming > connectionState.providerGeneration) ||
+        state == "disconnected")
+      clearProviderState();
+    connectionState.providerGeneration = incoming;
+    connectionState.providerState = state;
+    connectionState.providerDetail = stringValue(data, "reason");
+    return;
+  }
   if (type == "connection.settings.changed") {
     connectionState.settings = data;
     return;
   }
   if (type == "thread.upsert") {
-    upsertThread(data.value("thread", nlohmann::json::object()), false);
+    upsertThread(memberValue(data, "thread", nlohmann::json::object()), false);
     return;
   }
   if (type == "thread.name.changed") {
@@ -296,7 +353,7 @@ void PresentationModel::applyEvent(const nlohmann::json &event) {
     const std::string key = requestKey(*id);
     pendingRequests[key] = PendingRequestPresentation{
         key, stringValue(data, "category"), stringValue(scope, "threadId"),
-        event.value("generation", 0ULL), memberValue(data, "request")};
+        generation, memberValue(data, "request")};
     return;
   }
   if (type == "pending-request.removed") {
@@ -326,7 +383,8 @@ void PresentationModel::applyEvent(const nlohmann::json &event) {
                     presentation::stringMember(event, "authority"));
 
   if (type == "turn.upsert") {
-    upsertTurn(thread, data.value("turn", nlohmann::json::object()), false);
+    upsertTurn(thread, memberValue(data, "turn", nlohmann::json::object()),
+               false);
     correlateAgentThread(threadId);
     return;
   }
@@ -334,8 +392,9 @@ void PresentationModel::applyEvent(const nlohmann::json &event) {
     const std::string turnId = stringValue(scope, "turnId");
     nlohmann::json minimalTurn{{"id", turnId}};
     TurnPresentation &turn = upsertTurn(thread, minimalTurn, false);
-    turn.plan = {{"explanation", memberValue(data, "explanation")},
-                 {"steps", data.value("steps", nlohmann::json::array())}};
+    turn.plan = {
+        {"explanation", memberValue(data, "explanation")},
+        {"steps", memberValue(data, "steps", nlohmann::json::array())}};
     return;
   }
   if (type == "conversation.item.upsert") {
@@ -349,8 +408,9 @@ void PresentationModel::applyEvent(const nlohmann::json &event) {
     return;
   }
   if (type == "agents.activity.upsert") {
-    upsertAgentActivity(thread, scope,
-                        data.value("activity", nlohmann::json::object()));
+    upsertAgentActivity(
+        thread, scope,
+        memberValue(data, "activity", nlohmann::json::object()));
     return;
   }
   if (type == "conversation.reasoning.part-added") {
@@ -395,7 +455,7 @@ void PresentationModel::applyEvent(const nlohmann::json &event) {
     return;
 
   nlohmann::json identity = scope;
-  identity["delta"] = data.value("text", std::string{});
+  identity["delta"] = stringValue(data, "text");
   ItemPresentation *item = findItem(identity);
   if (!item)
     return;
@@ -525,7 +585,7 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
   const auto status = raw.find("status");
   if (status != raw.end())
     result.status = statusValue(*status);
-  result.archived = raw.value("archived", result.archived);
+  result.archived = boolValue(raw, "archived", result.archived);
 
   const auto turns = raw.find("turns");
   if (turns != raw.end() && turns->is_array()) {
@@ -712,6 +772,14 @@ void PresentationModel::correlateAgentThread(const std::string &childThreadId) {
 void PresentationModel::removeThread(const std::string &threadId) {
   threads.erase(threadId);
   std::erase(orderedThreads, threadId);
+}
+
+void PresentationModel::clearProviderState() {
+  orderedThreads.clear();
+  threads.clear();
+  pendingRequests.clear();
+  models = nlohmann::json::array();
+  retainedGlobalDomains.clear();
 }
 
 void PresentationModel::retainDomainEvent(const std::string &type,

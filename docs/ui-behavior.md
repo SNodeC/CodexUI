@@ -111,6 +111,9 @@ content above or below it changed size. Protocol updates that do not change a
 card's visible projection do not rebuild that card. Multiple visible card
 changes from one refresh are applied as one paint-suppressed layout transaction
 with one anchor restoration, including streaming Command execution updates.
+Incoming deltas are coalesced to at most one reconcile per display interval;
+growing text and Command execution output are appended in place instead of
+being recopied and rebuilt for every delta.
 New authoritative cards are inserted at their server-ordered position without
 reconstructing retained cards. While following is paused, the effective history
 window expands with incoming cards so its visible anchor is not evicted; the
