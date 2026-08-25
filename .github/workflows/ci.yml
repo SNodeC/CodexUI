@@ -14,8 +14,6 @@ concurrency:
 
 env:
   CMAKE_BUILD_PARALLEL_LEVEL: 8
-  LD_LIBRARY_PATH: ${{ github.workspace }}/_stage/aisuite/lib:${{ github.workspace }}/_stage/snodec/lib
-  LDFLAGS: -Wl,-rpath-link,${{ github.workspace }}/_stage/aisuite/lib -Wl,-rpath-link,${{ github.workspace }}/_stage/snodec/lib
 
 jobs:
   gcc-15-debug:
@@ -91,7 +89,8 @@ jobs:
             -DAISUITE_BUILD_CODEX_TESTS=ON \
             -DAISUITE_BUILD_APPS=ON
           cmake --build _build/aisuite --target all --parallel 2
-          ctest --test-dir _build/aisuite --output-on-failure
+          LD_LIBRARY_PATH="$GITHUB_WORKSPACE/_stage/snodec/lib" \
+            ctest --test-dir _build/aisuite --output-on-failure
           cmake --install _build/aisuite
 
       - name: Configure CodexUI
@@ -104,7 +103,9 @@ jobs:
         run: cmake --build build --target all
 
       - name: Test CodexUI
-        run: ctest --test-dir build --output-on-failure
+        run: |
+          LD_LIBRARY_PATH="$GITHUB_WORKSPACE/_stage/aisuite/lib:$GITHUB_WORKSPACE/_stage/snodec/lib" \
+            ctest --test-dir build --output-on-failure
 
       - name: Check changed lines
         shell: bash
