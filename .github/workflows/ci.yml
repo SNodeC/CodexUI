@@ -43,7 +43,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: aece50a5ad2e498b4c6a1035a2cb3da293c1fbd1
+          ref: 60c81c7f1fb7938e03725cdea4a87e617efae57e
           path: _deps/aisuite
 
       - name: Install build dependencies
