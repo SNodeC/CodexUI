@@ -14,9 +14,11 @@
 #include <ai/openai/codex/frontend/client/WebSocketClient.h>
 #endif
 #include <ai/openai/codex/protocol/JsonLineFramer.h>
+#include <ai/openai/codex/protocol/RuntimePaths.h>
 #include <core/EventReceiver.h>
 #include <core/SNodeC.h>
 #include <core/socket/State.h>
+#include <core/timer/Timer.h>
 #include <net/in/stream/legacy/SocketClient.h>
 #include <net/in6/stream/legacy/SocketClient.h>
 #include <net/un/stream/legacy/SocketClient.h>
@@ -36,6 +38,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -66,13 +69,15 @@ void dispatchRequest(codex::frontend::CodexBridge &sdk,
                      const nlohmann::json &parameters, std::string action,
                      std::string correlationId,
                      ProtocolNormalizer &normalizer) {
+  const std::uint64_t startedAtSequence = normalizer.sequence();
   sdk.request<Operation>(
       typename Operation::Params{parameters},
       [action = std::move(action), correlationId = std::move(correlationId),
-       context = parameters,
+       context = parameters, startedAtSequence,
        &normalizer](typename Operation::Response &response) mutable {
         normalizer.operationResult(std::move(action), std::move(correlationId),
-                                   std::move(context), response.getRaw());
+                                   std::move(context), response.getRaw(),
+                                   startedAtSequence);
       });
 }
 
@@ -109,6 +114,10 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
 
   std::function<void()> requestReconnect;
   std::function<void()> requestShutdown;
+  normalizer.setDeliveryFailureHandler([&requestShutdown] {
+    if (requestShutdown)
+      requestShutdown();
+  });
 
   std::string expectedDisconnectReason;
   bool desiredConnected = connectBridge;
@@ -165,7 +174,8 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   net::un::stream::legacy::SocketClient<StreamFactory,
                                         client::ClientConnection &, std::size_t>
       unixClient("codex-ui-unix", connection, std::size_t(maximumFrameBytes));
-  unixClient.getConfig()->Remote::setSunPath("/tmp/codex-bridge.sock");
+  unixClient.getConfig()->Remote::setSunPath(
+      codex::protocol::defaultFrontendSocketPath());
   configureStreamClient(unixClient, false);
 
   net::in::stream::legacy::SocketClient<StreamFactory,
@@ -260,10 +270,14 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   std::string selectedTransportLabel;
   bool transitionPending = false;
   bool shutdownRequested = false;
+  bool shutdownDraining = false;
   bool eventLoopRunning = false;
   std::function<void()> continueTransition;
   std::function<bool()> terminatingFlowTerminated;
   std::function<void()> pendingSelection;
+  std::chrono::steady_clock::time_point transitionDeadline;
+  std::chrono::steady_clock::time_point shutdownDrainDeadline;
+  std::function<void()> finishShutdownAfterDrain;
 
   const auto selectClient = [&](auto &configuredClient, std::string transport,
                                 std::string label) {
@@ -366,7 +380,13 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
       return;
     if ((terminatingFlowTerminated && !terminatingFlowTerminated()) ||
         connection.attached()) {
-      core::EventReceiver::atNextTick(continueTransition);
+      if (std::chrono::steady_clock::now() >= transitionDeadline) {
+        normalizer.transportEvent("failure", "connection transition timed out");
+        requestShutdown();
+        return;
+      }
+      static_cast<void>(core::timer::Timer::singleshotTimer(
+          continueTransition, utils::Timeval({0, 10000})));
       return;
     }
     transitionPending = false;
@@ -403,11 +423,14 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
       return;
     }
     transitionPending = true;
+    transitionDeadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
     expectedDisconnectReason =
         connection.attached() ? std::move(disconnectReason) : std::string{};
     connection.disconnect("CodexUI connection transition");
     terminateSelected();
-    core::EventReceiver::atNextTick(continueTransition);
+    static_cast<void>(core::timer::Timer::singleshotTimer(
+        continueTransition, utils::Timeval({0, 10000})));
   };
 
   requestReconnect = [&] { beginTransition(true, {}, "local-user-reconnect"); };
@@ -437,8 +460,22 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     connection.shutdown();
     if (terminateSelected)
       terminateSelected();
+    if (ipcEndpoint)
+      ipcEndpoint->close();
     if (eventLoopRunning)
       core::SNodeC::stop();
+  };
+
+  finishShutdownAfterDrain = [&] {
+    if (shutdownRequested)
+      return;
+    if (ipcEndpoint && ipcEndpoint->queuedBytes() != 0 &&
+        std::chrono::steady_clock::now() < shutdownDrainDeadline) {
+      static_cast<void>(core::timer::Timer::singleshotTimer(
+          finishShutdownAfterDrain, utils::Timeval({0, 10000})));
+      return;
+    }
+    requestShutdown();
   };
 
   const auto dispatchCommand = [&](nlohmann::json command) {
@@ -455,8 +492,21 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     const nlohmann::json parameters =
         presentation::member(command, "data", nlohmann::json::object());
 
+    if (!parameters.is_object()) {
+      normalizer.operationRejected(action, correlationId, -32602,
+                                   "presentation command data must be an object");
+      return;
+    }
+
     if (action == "runtime.shutdown") {
-      requestShutdown();
+      if (!shutdownDraining) {
+        shutdownDraining = true;
+        normalizer.localOperationResult(action, correlationId, true,
+                                        nlohmann::json::object());
+        shutdownDrainDeadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        finishShutdownAfterDrain();
+      }
       return;
     }
     if (action == "connection.reconnect") {
@@ -648,8 +698,8 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
       if (parameters.contains("error"))
         response["error"] = parameters["error"];
       else
-        response["result"] =
-            parameters.value("result", nlohmann::json::object());
+        response["result"] = presentation::member(
+            parameters, "result", nlohmann::json::object());
       if (requestId.is_null() || !sdk.sendRawJson(response))
         normalizer.transportEvent("failure",
                                   "server-request response was rejected");
@@ -854,14 +904,25 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   };
 
   ipcEndpoint->setOnData([&](const char *data, std::size_t size) {
-    const bool accepted = ipcFramer.consume(
-        std::string_view(data, size), dispatchCommand,
-        [&normalizer, &requestShutdown](std::string message) {
-          normalizer.transportEvent("failure", std::move(message));
-          requestShutdown();
-        });
-    if (!accepted)
+    try {
+      const bool accepted = ipcFramer.consume(
+          std::string_view(data, size), dispatchCommand,
+          [&normalizer, &requestShutdown](std::string message) {
+            normalizer.transportEvent("failure", std::move(message));
+            requestShutdown();
+          });
+      if (!accepted)
+        requestShutdown();
+    } catch (const std::exception &exception) {
+      normalizer.transportEvent(
+          "failure", std::string("presentation command dispatch failed: ") +
+                         exception.what());
       requestShutdown();
+    } catch (...) {
+      normalizer.transportEvent("failure",
+                                "presentation command dispatch failed");
+      requestShutdown();
+    }
   });
   ipcEndpoint->setOnError([&normalizer, &requestShutdown](int errorNumber) {
     normalizer.transportEvent("failure", std::string("socketpair failure: ") +

@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace ai::openai::codex::protocol {
 class JsonLineFramer;
@@ -113,6 +114,9 @@ private:
   bool sendMessage(const nlohmann::json &message);
   void receiveMessage(nlohmann::json message);
   void reportLocalError(std::string message);
+  void terminalFailure(std::string message);
+  void failAllPending(int code, std::string message) noexcept;
+  void notifyRuntimeStopped() noexcept;
 
   std::unique_ptr<ipc::QtSocketPairEndpoint> endpoint;
   std::unique_ptr<ai::openai::codex::protocol::JsonLineFramer> framer;
@@ -120,10 +124,16 @@ private:
   int clientDescriptor = -1;
   std::uint64_t nextOperation = 1;
   std::unordered_map<std::string, ResponseHandler> pending;
+  std::unordered_set<std::string> outstanding;
   EventHandler eventHandler;
   RuntimeStoppedHandler runtimeStoppedHandler;
   bool started = false;
   bool stopping = false;
+  bool terminal = false;
+  bool runtimeStopReported = false;
+  std::uint64_t activeGeneration = 0;
+  std::uint64_t providerGeneration = 0;
+  std::uint64_t lastSequenceReceived = 0;
   Configuration &configuration;
 };
 

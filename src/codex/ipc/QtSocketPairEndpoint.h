@@ -6,6 +6,7 @@
 #include <QObject>
 
 #include <cstddef>
+#include <deque>
 #include <functional>
 #include <string>
 
@@ -20,6 +21,10 @@ public:
   using ClosedHandler = std::function<void()>;
 
   explicit QtSocketPairEndpoint(int descriptor, std::size_t maximumQueuedBytes,
+                                std::size_t maximumReadBytesPerActivation =
+                                    256U * 1024U,
+                                std::size_t maximumWriteBytesPerActivation =
+                                    256U * 1024U,
                                 QObject *parent = nullptr);
   ~QtSocketPairEndpoint() override;
 
@@ -29,6 +34,7 @@ public:
   [[nodiscard]] bool send(const char *data, std::size_t size);
   [[nodiscard]] bool send(const std::string &data);
   [[nodiscard]] std::size_t queuedBytes() const noexcept;
+  [[nodiscard]] std::size_t retainedWriteBytes() const noexcept;
   [[nodiscard]] bool isOpen() const noexcept;
 
   void setOnData(DataHandler handler);
@@ -40,17 +46,22 @@ private:
   void readReady();
   void writeReady();
   void fail(int errorNumber) noexcept;
+  void closeTransport() noexcept;
 
   int descriptor = -1;
   std::size_t maximumQueuedBytes;
-  std::string writeBuffer;
-  std::size_t writeOffset = 0;
+  std::size_t maximumReadBytesPerActivation;
+  std::size_t maximumWriteBytesPerActivation;
+  std::deque<std::string> writeChunks;
+  std::size_t firstChunkOffset = 0;
+  std::size_t queuedWriteBytes = 0;
   QSocketNotifier *readNotifier = nullptr;
   QSocketNotifier *writeNotifier = nullptr;
   DataHandler onData;
   ErrorHandler onError;
   ClosedHandler onClosed;
   bool closing = false;
+  bool destroying = false;
 };
 
 } // namespace codexui::codex::ipc
