@@ -9,6 +9,11 @@
 
 #include <ai/openai/codex/protocol/JsonLineFramer.h>
 
+#include <QCoreApplication>
+#include <QEventLoop>
+#include <QThread>
+#include <QTimer>
+
 #include <cerrno>
 #include <cstring>
 #include <stdexcept>
@@ -37,20 +42,35 @@ FrontendSession::FrontendSession(Configuration &configuration)
       pair.releaseFirstEndpoint(), MaximumWriteQueueBytes);
   clientDescriptor = pair.releaseSecondEndpoint();
   endpoint->setOnData([this](const char *data, std::size_t size) {
-    framer->consume(
-        std::string_view(data, size),
-        [this](nlohmann::json message) { receiveMessage(std::move(message)); },
-        [this](std::string message) { reportLocalError(std::move(message)); });
+    std::string framingError;
+    try {
+      const bool accepted = framer->consume(
+          std::string_view(data, size),
+          [this](nlohmann::json message) { receiveMessage(std::move(message)); },
+          [&framingError](std::string message) {
+            framingError = std::move(message);
+          });
+      if (!accepted)
+        terminalFailure(framingError.empty() ? "CodexUI IPC framing failed"
+                                             : std::move(framingError));
+    } catch (const std::exception &exception) {
+      terminalFailure(std::string("CodexUI IPC dispatch failed: ") +
+                      exception.what());
+    } catch (...) {
+      terminalFailure("CodexUI IPC dispatch failed with an unknown exception");
+    }
   });
   endpoint->setOnError([this](int errorNumber) {
-    reportLocalError(std::string("Qt socketpair failure: ") +
-                     std::strerror(errorNumber));
+    terminalFailure(std::string("Qt socketpair failure: ") +
+                    std::strerror(errorNumber));
   });
   endpoint->setOnClosed([this] {
+    failAllPending(-32020, stopping ? "CodexUI is shutting down"
+                                    : "SNode.C client thread disconnected");
     if (!stopping) {
-      reportLocalError("SNode.C client thread disconnected");
-      if (runtimeStoppedHandler)
-        runtimeStoppedHandler();
+      if (!terminal)
+        reportLocalError("SNode.C client thread disconnected");
+      notifyRuntimeStopped();
     }
   });
 }
@@ -76,9 +96,25 @@ void FrontendSession::wait() {
 void FrontendSession::shutdown() {
   if (stopping)
     return;
-  if (started)
+  if (started && endpoint && endpoint->isOpen() &&
+      QCoreApplication::instance() &&
+      endpoint->thread() == QThread::currentThread()) {
+    QEventLoop acknowledgementLoop;
+    const std::string requestId =
+        request("runtime.shutdown", nlohmann::json::object(),
+                [&acknowledgementLoop](const nlohmann::json &) {
+                  acknowledgementLoop.quit();
+                });
+    QTimer::singleShot(750, &acknowledgementLoop, &QEventLoop::quit);
+    acknowledgementLoop.exec();
+    // A timeout must not leave a callback capturing the completed nested loop.
+    pending.erase(requestId);
+    outstanding.erase(requestId);
+  } else if (started) {
     static_cast<void>(sendMessage(presentation::command("runtime.shutdown")));
+  }
   stopping = true;
+  failAllPending(-32800, "CodexUI is shutting down");
   if (endpoint)
     endpoint->close();
   if (clientDescriptor >= 0) {
@@ -86,7 +122,6 @@ void FrontendSession::shutdown() {
     clientDescriptor = -1;
   }
   wait();
-  pending.clear();
 }
 
 void FrontendSession::setEventHandler(EventHandler handler) {
@@ -101,6 +136,7 @@ std::string FrontendSession::request(std::string operation,
                                      nlohmann::json parameters,
                                      ResponseHandler handler) {
   const std::string requestId = "ui-request-" + std::to_string(nextOperation++);
+  outstanding.insert(requestId);
   if (handler)
     pending.emplace(requestId, std::move(handler));
   if (!sendMessage(presentation::command(std::move(operation),
@@ -109,15 +145,19 @@ std::string FrontendSession::request(std::string operation,
     if (iterator != pending.end()) {
       ResponseHandler failed = std::move(iterator->second);
       pending.erase(iterator);
-      failed({{"protocol", presentation::ProtocolName},
-              {"version", presentation::ProtocolVersion},
-              {"kind", "result"},
-              {"correlationId", requestId},
-              {"ok", false},
-              {"error",
-               {{"code", -32020},
-                {"message", "CodexUI IPC rejected operation"}}}});
+      try {
+        failed({{"protocol", presentation::ProtocolName},
+                {"version", presentation::ProtocolVersion},
+                {"kind", "result"},
+                {"correlationId", requestId},
+                {"ok", false},
+                {"error",
+                 {{"code", -32020},
+                  {"message", "CodexUI IPC rejected operation"}}}});
+      } catch (...) {
+      }
     }
+    outstanding.erase(requestId);
   }
   return requestId;
 }
@@ -338,27 +378,138 @@ void FrontendSession::receiveMessage(nlohmann::json message) {
         "SNode.C client emitted an incompatible presentation frame");
     return;
   }
+  const auto generation = message.find("generation");
+  if (generation != message.end()) {
+    if (!generation->is_number_unsigned()) {
+      terminalFailure("presentation frame has an invalid generation");
+      return;
+    }
+    const std::uint64_t incoming = generation->get<std::uint64_t>();
+    if (activeGeneration != 0 && incoming < activeGeneration)
+      return;
+    if (activeGeneration != 0 && incoming > activeGeneration) {
+      failAllPending(-32020, "bridge connection generation changed");
+      lastSequenceReceived = 0;
+    }
+    activeGeneration = incoming;
+  }
+  const auto sequence = message.find("sequence");
+  if (sequence != message.end()) {
+    if (!sequence->is_number_unsigned()) {
+      terminalFailure("presentation frame has an invalid sequence");
+      return;
+    }
+    const std::uint64_t incoming = sequence->get<std::uint64_t>();
+    if (incoming != 0 && lastSequenceReceived != 0 &&
+        incoming != lastSequenceReceived + 1) {
+      terminalFailure("presentation frame sequence gap detected");
+      return;
+    }
+    if (incoming != 0)
+      lastSequenceReceived = incoming;
+  }
   if (presentation::stringMember(message, "kind") == "result") {
     const std::string requestId =
         presentation::stringMember(message, "correlationId");
+    if (outstanding.erase(requestId) == 0)
+      return;
     const auto iterator = pending.find(requestId);
     if (iterator != pending.end()) {
       ResponseHandler handler = std::move(iterator->second);
       pending.erase(iterator);
-      if (handler)
-        handler(message);
+      if (handler) {
+        try {
+          handler(message);
+        } catch (...) {
+        }
+      }
     }
   }
-  if (eventHandler)
-    eventHandler(message);
+  if (presentation::stringMember(message, "kind") == "event") {
+    const std::string type = presentation::stringMember(message, "type");
+    const nlohmann::json data = presentation::member(
+        message, "data", nlohmann::json::object());
+    if (type == "connection.lifecycle") {
+      const std::string state = presentation::stringMember(data, "state");
+      if (state == "disconnected" || state == "failure")
+        failAllPending(-32020, "bridge connection was lost");
+    } else if (type == "connection.provider") {
+      const auto provider = data.find("generation");
+      if (provider == data.end() || !provider->is_number_unsigned()) {
+        terminalFailure("provider lifecycle event has an invalid generation");
+        return;
+      }
+      const std::uint64_t incoming = provider->get<std::uint64_t>();
+      if (incoming < providerGeneration)
+        return;
+      if (providerGeneration != 0 && incoming > providerGeneration)
+        failAllPending(-32002, "app-server provider generation changed");
+      providerGeneration = incoming;
+      if (presentation::stringMember(data, "state") == "disconnected")
+        failAllPending(-32002, "app-server provider was restarted");
+    }
+  }
+  if (eventHandler) {
+    try {
+      eventHandler(message);
+    } catch (...) {
+    }
+  }
 }
 
 void FrontendSession::reportLocalError(std::string message) {
-  if (eventHandler)
-    eventHandler(presentation::event(0, 0, "system.local-diagnostic",
-                                     {{"source", "qt"},
-                                      {"code", "local-ipc-error"},
-                                      {"message", std::move(message)}}));
+  if (eventHandler) {
+    try {
+      eventHandler(presentation::event(0, activeGeneration,
+                                       "system.local-diagnostic",
+                                       {{"source", "qt"},
+                                        {"code", "local-ipc-error"},
+                                        {"message", std::move(message)}}));
+    } catch (...) {
+    }
+  }
+}
+
+void FrontendSession::terminalFailure(std::string message) {
+  if (terminal || stopping)
+    return;
+  terminal = true;
+  failAllPending(-32020, message);
+  reportLocalError(std::move(message));
+  if (endpoint && endpoint->isOpen())
+    endpoint->close();
+  notifyRuntimeStopped();
+}
+
+void FrontendSession::failAllPending(int code, std::string message) noexcept {
+  outstanding.clear();
+  auto failed = std::move(pending);
+  pending.clear();
+  for (auto &[correlationId, handler] : failed) {
+    if (!handler)
+      continue;
+    try {
+      handler({{"protocol", presentation::ProtocolName},
+               {"version", presentation::ProtocolVersion},
+               {"kind", "result"},
+               {"correlationId", correlationId},
+               {"ok", false},
+               {"error", {{"code", code}, {"message", message}}}});
+    } catch (...) {
+    }
+  }
+}
+
+void FrontendSession::notifyRuntimeStopped() noexcept {
+  if (runtimeStopReported)
+    return;
+  runtimeStopReported = true;
+  if (runtimeStoppedHandler) {
+    try {
+      runtimeStoppedHandler();
+    } catch (...) {
+    }
+  }
 }
 
 } // namespace codexui::codex

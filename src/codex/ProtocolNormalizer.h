@@ -8,6 +8,7 @@
 #include "codex/PresentationProtocol.h"
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -18,6 +19,7 @@ public:
   using Sink = std::function<bool(const nlohmann::json &)>;
 
   explicit ProtocolNormalizer(Sink sink);
+  void setDeliveryFailureHandler(std::function<void()> handler);
 
   void transportEvent(std::string_view event, std::string detail = {});
   void connectionSettings(nlohmann::json settings);
@@ -31,12 +33,15 @@ public:
   void observeRawInbound(const nlohmann::json &message);
 
   void operationResult(std::string action, std::string correlationId,
-                       nlohmann::json context, const nlohmann::json &response);
+                       nlohmann::json context, const nlohmann::json &response,
+                       std::optional<std::uint64_t> startedAtSequence =
+                           std::nullopt);
   void operationRejected(std::string action, std::string correlationId,
                          int code, std::string message);
+  [[nodiscard]] std::uint64_t sequence() const noexcept;
 
 private:
-  bool emit(nlohmann::json frame) const;
+  bool emit(nlohmann::json frame);
   bool
   emitEvent(std::string type, nlohmann::json data = nlohmann::json::object(),
             presentation::Authority authority = presentation::Authority::None,
@@ -46,6 +51,8 @@ private:
   bool knownServerMethod(std::string_view method) const;
 
   Sink sink;
+  std::function<void()> deliveryFailureHandler;
+  bool deliveryFailed = false;
   std::uint64_t connectionGeneration = 0;
   std::uint64_t nextSequence = 1;
 };

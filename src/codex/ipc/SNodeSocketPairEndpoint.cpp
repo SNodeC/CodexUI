@@ -42,12 +42,16 @@ SNodeSocketPairEndpoint::create(int descriptor, std::size_t maximumQueuedBytes,
   const bool writeEnabled =
       readEnabled && endpoint->WriteEventReceiver::enable(descriptor);
   if (!readEnabled || !writeEnabled) {
-    if (readEnabled)
-      endpoint->ReadEventReceiver::disable();
-    if (writeEnabled)
-      endpoint->WriteEventReceiver::disable();
+    endpoint->closing = true;
     endpoint->closeDescriptor();
-    delete endpoint;
+    if (!readEnabled) {
+      delete endpoint;
+    } else {
+      // disable() is deferred by SNode.C. Once the registered read receiver is
+      // actually unobserved, unobservedEvent() owns destruction.
+      endpoint->initializing = false;
+      endpoint->ReadEventReceiver::disable();
+    }
     return nullptr;
   }
 
@@ -132,8 +136,14 @@ void SNodeSocketPairEndpoint::readEvent() {
     if (result > 0) {
       const std::size_t size = static_cast<std::size_t>(result);
       totalRead += size;
-      if (onData)
-        onData(chunk.data(), size);
+      if (onData) {
+        try {
+          onData(chunk.data(), size);
+        } catch (...) {
+          reportError(EPROTO);
+          return;
+        }
+      }
       continue;
     }
     if (result == 0) {
@@ -184,8 +194,12 @@ void SNodeSocketPairEndpoint::unobservedEvent() {
   if (initializing)
     return;
   closeDescriptor();
-  if (onClosed)
-    onClosed();
+  if (onClosed) {
+    try {
+      onClosed();
+    } catch (...) {
+    }
+  }
   delete this;
 }
 
@@ -206,8 +220,14 @@ void SNodeSocketPairEndpoint::closeDescriptor() noexcept {
 }
 
 void SNodeSocketPairEndpoint::reportError(int errorNumber) {
-  if (onError)
-    onError(errorNumber);
+  ErrorHandler error = std::move(onError);
+  onError = {};
+  if (error) {
+    try {
+      error(errorNumber);
+    } catch (...) {
+    }
+  }
   close();
 }
 

@@ -205,5 +205,19 @@ int main() {
              "incomplete thread reads preserve live plan and inspector state");
   passed &= expect(!model.activeTurnId("thread-1").has_value(),
                    "completed stream leaves no active turn");
+  normalizer.bridgeEvent({{"kind", "bridge.provider"},
+                          {"state", "disconnected"},
+                          {"providerGeneration", std::uint64_t{1}},
+                          {"reason", "test provider restart"}});
+  passed &= expect(model.thread("thread-1") == nullptr &&
+                       model.connection().providerGeneration == 1 &&
+                       model.connection().providerState == "disconnected",
+                   "provider loss clears provider-scoped presentation state");
+  normalizer.bridgeEvent({{"kind", "bridge.provider"},
+                          {"state", "ready"},
+                          {"providerGeneration", std::uint64_t{2}}});
+  passed &= expect(model.connection().providerGeneration == 2 &&
+                       model.connection().providerState == "ready",
+                   "a new provider generation is accepted for rehydration");
   return passed ? 0 : 1;
 }

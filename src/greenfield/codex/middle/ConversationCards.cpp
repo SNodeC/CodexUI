@@ -11,6 +11,7 @@
 #include <QPainterPath>
 #include <QResizeEvent>
 #include <QScrollBar>
+#include <QTextCursor>
 #include <QTextDocument>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -213,13 +214,22 @@ bool CommandOutputView::followsLatest() const noexcept {
 }
 
 bool CommandOutputView::setOutput(const QString &output) {
-  if (toPlainText() == output)
+  if (currentOutput_ == output)
     return false;
 
   const bool retainedFollow = followsLatest_;
   const int retainedValue = preservedScrollValue_;
+  const bool appendOnly = !currentOutput_.isEmpty() &&
+                          output.startsWith(currentOutput_);
   programmaticScroll_ = true;
-  setPlainText(output);
+  if (appendOnly) {
+    QTextCursor cursor = textCursor();
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(output.sliced(currentOutput_.size()));
+  } else {
+    setPlainText(output);
+  }
+  currentOutput_ = output;
   followsLatest_ = retainedFollow;
   preservedScrollValue_ = retainedValue;
   programmaticScroll_ = false;

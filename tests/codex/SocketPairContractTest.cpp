@@ -13,12 +13,15 @@
 #include <QTimer>
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <future>
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 
 namespace {
 
@@ -33,11 +36,49 @@ bool expect(bool condition, const char *message) {
   return condition;
 }
 
+bool qtPartialWritesRetainOnlyQueuedBytes() {
+  constexpr std::size_t QueueLimit = 32U * 1024U;
+  codexui::codex::ipc::SocketPair pair;
+  if (!pair.isValid())
+    return false;
+  const int qtDescriptor = pair.releaseFirstEndpoint();
+  const int peerDescriptor = pair.releaseSecondEndpoint();
+  int socketBytes = 4096;
+  static_cast<void>(::setsockopt(qtDescriptor, SOL_SOCKET, SO_SNDBUF,
+                                &socketBytes, sizeof(socketBytes)));
+  codexui::codex::ipc::QtSocketPairEndpoint endpoint(
+      qtDescriptor, QueueLimit, 64U * 1024U, 257);
+  const std::string chunk(2048, 'q');
+  std::array<char, 4096> drain{};
+  bool bounded = true;
+  for (int round = 0; round < 512; ++round) {
+    if (!endpoint.send(chunk)) {
+      while (::recv(peerDescriptor, drain.data(), drain.size(), MSG_DONTWAIT) >
+             0) {
+      }
+      QCoreApplication::processEvents();
+      static_cast<void>(endpoint.send(chunk));
+    }
+    bounded &= endpoint.retainedWriteBytes() <= QueueLimit + chunk.size();
+    if (round % 4 == 0) {
+      static_cast<void>(
+          ::recv(peerDescriptor, drain.data(), drain.size(), MSG_DONTWAIT));
+      QCoreApplication::processEvents();
+    }
+  }
+  endpoint.close();
+  ::close(peerDescriptor);
+  return bounded;
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
   QCoreApplication application(argc, argv);
   core::SNodeC::init(argc, argv);
+
+  bool passed = expect(qtPartialWritesRetainOnlyQueuedBytes(),
+                       "Qt partial writes retain only bounded queued bytes");
 
   codexui::codex::ipc::SocketPair pair;
   if (!expect(pair.isValid(), "nonblocking Unix socketpair is created"))
@@ -132,7 +173,6 @@ int main(int argc, char *argv[]) {
     qtEndpoint.close();
   snodeThread.join();
 
-  bool passed = true;
   passed &= expect(snodeCreated, "SNode.C endpoint is created");
   passed &= expect(qtBounded && snodeBounded,
                    "both endpoints reject writes beyond their queue bound");

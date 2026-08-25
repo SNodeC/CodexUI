@@ -14,13 +14,13 @@ concurrency:
 
 env:
   CMAKE_BUILD_PARALLEL_LEVEL: 8
-  LD_LIBRARY_PATH: ${{ github.workspace }}/_stage/aisuite/lib:${{ github.workspace }}/_stage/snodec/lib
-  LDFLAGS: -Wl,-rpath-link,${{ github.workspace }}/_stage/aisuite/lib -Wl,-rpath-link,${{ github.workspace }}/_stage/snodec/lib
 
 jobs:
   gcc-15-debug:
     runs-on: ubuntu-24.04
-    container: gcc:15.3.0-trixie
+    container:
+      image: gcc:15.3.0-trixie
+      options: --cap-add=NET_ADMIN --sysctl net.ipv6.conf.all.disable_ipv6=0
     timeout-minutes: 45
 
     steps:
@@ -32,18 +32,18 @@ jobs:
             ${{ github.event_name == 'pull_request' &&
                 github.event.pull_request.head.sha || github.sha }}
 
-      - name: Check out SNode.C master
+      - name: Check out pinned SNode.C
         uses: actions/checkout@v5
         with:
           repository: SNodeC/snode.c
-          ref: master
+          ref: 212bd4f8a16637405ab850a52adb9da8555dca3d
           path: _deps/snodec
 
-      - name: Check out canonical AISuite Codex
+      - name: Check out paired AISuite Codex
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: master
+          ref: 60c81c7f1fb7938e03725cdea4a87e617efae57e
           path: _deps/aisuite
 
       - name: Install build dependencies
@@ -51,6 +51,7 @@ jobs:
           apt-get update
           apt-get install -y \
             cmake \
+            iproute2 \
             libbluetooth-dev \
             libmagic-dev \
             libssl-dev \
@@ -61,6 +62,15 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "$GITHUB_WORKSPACE/_deps/snodec"
           git config --global --add safe.directory "$GITHUB_WORKSPACE/_deps/aisuite"
+          getent group snodec >/dev/null || groupadd --system snodec
+
+      - name: Enable IPv6 transport coverage
+        run: |
+          ip link add codexui-ci-v6 type dummy
+          ip link set codexui-ci-v6 up
+          ip -6 address add fd00::1/128 dev codexui-ci-v6
+          ip -6 address show dev codexui-ci-v6
+          getent ahostsv6 ::1
 
       - name: Verify CodexUI source revision
         shell: bash
@@ -82,15 +92,21 @@ jobs:
           cmake --build _build/snodec --target all
           cmake --install _build/snodec
 
-      - name: Build and install canonical AISuite Codex
+      - name: Build, test, and install paired AISuite Codex
         run: |
           cmake -S _deps/aisuite -B _build/aisuite -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/_stage/aisuite" \
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/snodec" \
-            -DAISUITE_BUILD_CODEX_TESTS=OFF \
+            -DAISUITE_BUILD_CODEX_TESTS=ON \
             -DAISUITE_BUILD_APPS=ON
           cmake --build _build/aisuite --target all --parallel 2
+          install -d -m 0770 -g snodec \
+            /etc/snode.c \
+            /var/log/snode.c \
+            /var/run/snode.c
+          LD_LIBRARY_PATH="$GITHUB_WORKSPACE/_stage/snodec/lib" \
+            ctest --test-dir _build/aisuite --output-on-failure
           cmake --install _build/aisuite
 
       - name: Configure CodexUI
@@ -101,6 +117,11 @@ jobs:
 
       - name: Build CodexUI
         run: cmake --build build --target all
+
+      - name: Test CodexUI
+        run: |
+          LD_LIBRARY_PATH="$GITHUB_WORKSPACE/_stage/aisuite/lib:$GITHUB_WORKSPACE/_stage/snodec/lib" \
+            ctest --test-dir build --output-on-failure
 
       - name: Check changed lines
         shell: bash

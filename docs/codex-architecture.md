@@ -113,6 +113,17 @@ generated experimental feature types and typed list/enablement operations
 available through the frontend proxy SDK. CodexUI does not perform a second
 provider initialization.
 
+Without endpoint configuration, CodexUI selects AISuite's shared per-user
+runtime path (`XDG_RUNTIME_DIR` when private, otherwise
+`/tmp/codex-bridge-<uid>/codex-bridge.sock`), so it discovers a default
+`codex-bridge` instance without a configuration file.
+
+Bridge provider lifecycle is normalized as `connection.provider` with an
+independent provider generation. Disconnect or generation change completes all
+outstanding UI operations exactly once, clears provider-scoped presentation
+state, and rehydrates the selected thread after the new provider reports
+`ready`. Late results from a retired generation are ignored.
+
 ## 4. Inter-Thread Socketpair
 
 One unnamed full-duplex Unix socketpair is the only cross-thread transport:
@@ -131,6 +142,10 @@ The implementation uses:
 - bounded JSONL frames in both directions;
 - bounded socket and application write queues;
 - exclusive endpoint ownership and deterministic close behavior.
+
+The Qt endpoint retains queued output as independently owned chunks, releases
+each consumed chunk immediately, and limits read and write work per notifier
+activation. Both endpoints treat framing or dispatch failure as terminal.
 
 The socket buffers are both the bounded queues and the readiness mechanism. No
 parallel in-memory queue, condition variable, eventfd, or other wakeup
@@ -215,7 +230,7 @@ The v1 command catalog used by the application is:
 
 | Action | Result | Meaning |
 | --- | --- | --- |
-| `runtime.shutdown` | no | Orderly SNode.C runtime shutdown |
+| `runtime.shutdown` | yes | Acknowledge and drain, then stop the SNode.C runtime |
 | `connection.connect` | no | Connect the selected configured frontend transport |
 | `connection.disconnect` | no | Explicitly disconnect the selected frontend transport |
 | `connection.reconnect` | no | Explicit bridge transport reconnect |
@@ -270,8 +285,9 @@ Results preserve their originating `action` and `correlationId`. The currently
 reduced result payloads are:
 
 - `threads.list`: `threads`, `nextCursor`, and `backwardsCursor`, with `merge`;
-- `thread.read`: returned `thread`, with `merge` because the current app-server
-  read projection can omit live-only Plan, Agent, command, and Changes detail;
+- `thread.read`: returned `thread`, with `replace` when no newer presentation
+  event arrived after the read began, otherwise `merge` so a late snapshot
+  cannot erase newer live Plan, Agent, command, or Changes detail;
 - `thread.create`, `thread.resume`, and `thread.fork`: returned `thread`, with
   `merge`;
 - `thread.rename`, `thread.archive`, `thread.unarchive`, and `thread.delete`:
