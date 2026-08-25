@@ -143,7 +143,7 @@ FileSelectionDialog::FileSelectionDialog(
   }
 
   errorLabel = dialogLabel({}, "meta");
-  errorLabel->setStyleSheet(QStringLiteral("color:#b83a3a;"));
+  errorLabel->setStyleSheet(QStringLiteral("color:#982f3d;"));
   errorLabel->hide();
   root->addWidget(errorLabel);
 

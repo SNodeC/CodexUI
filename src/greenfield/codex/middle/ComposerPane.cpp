@@ -73,7 +73,7 @@ ComposerPane::ComposerPane(QWidget *anchor)
   root->setSpacing(0);
 
   attention_ = new QFrame(this);
-  attention_->setProperty("kind", "amberBadge");
+  attention_->setProperty("kind", "orangeBadge");
   auto *attentionLayout = new QHBoxLayout(attention_);
   attentionLayout->setContentsMargins(10, 6, 10, 6);
   attentionLayout->addWidget(makeLabel(
@@ -336,11 +336,7 @@ void ComposerPane::refreshAttachments() {
     remove->setAccessibleName(QStringLiteral("Remove %1").arg(attachment.name));
     remove->setToolTip(QStringLiteral("Remove attachment"));
     remove->setFixedSize(18, 18);
-    remove->setStyleSheet(
-        QStringLiteral("QPushButton{background:#b83a3a;color:#ffffff;border:0;"
-                       "border-radius:4px;padding:0;font-weight:700;}"
-                       "QPushButton:hover{background:#9f2f2f;}"
-                       "QPushButton:pressed{background:#842626;}"));
+    remove->setProperty("kind", "destructiveCompact");
     connect(remove, &QPushButton::clicked, this, [this, index] {
       if (index >= attachments_.size())
         return;

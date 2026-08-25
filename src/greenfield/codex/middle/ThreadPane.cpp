@@ -105,7 +105,7 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
 QFrame *statusDot() {
   auto *dot = new QFrame;
   dot->setObjectName(QStringLiteral("threadStatusDot"));
-  dot->setFixedSize(8, 8);
+  dot->setFixedSize(10, 10);
   return dot;
 }
 
@@ -121,15 +121,15 @@ void updateRow(QWidget *row, const ThreadPresentation &thread,
     titleText.prepend(QStringLiteral("! "));
   title->setText(titleText);
   status->setText(displayStatus(thread.status));
-  QString color = QStringLiteral("#98a2b3");
+  QString color = QStringLiteral("#cacccf");
   if (requestCount != 0)
-    color = QStringLiteral("#a76812");
+    color = QStringLiteral("#a85d0c");
   else if (thread.status == "active" || thread.status == "inProgress")
     color = QStringLiteral("#2f6feb");
   else if (thread.status == "failed" || thread.status == "systemError")
-    color = QStringLiteral("#b83a3a");
+    color = QStringLiteral("#c43d4d");
   dot->setStyleSheet(
-      QStringLiteral("background:%1;border-radius:4px;").arg(color));
+      QStringLiteral("background:%1;border-radius:5px;").arg(color));
 }
 
 QWidget *createRow() {

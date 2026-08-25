@@ -4,14 +4,33 @@ This document records the implemented CodexUI visual and interaction contract.
 
 ## Visual system
 
-- CodexUI uses a light theme with neutral application surfaces and restrained
-  blue, green, amber, and red state colors.
+- CodexUI uses a light theme with neutral application surfaces and four opaque
+  semantic color families. Blue remains the unchanged primary-action reference;
+  green, orange, and red use matching interaction steps and comparable
+  white-text contrast.
 - Hover, focus, selection, disabled, warning, error, pending, and active states
   remain visually distinct.
 - User messages are blue-tinted cards. Codex narrative is visually lighter.
   Commands, tool activity, files, and collaboration activity use raised cards.
 - Scrollbars use one compact application style across conversation, nested
   output, State, Protocol, and Inspector surfaces.
+
+| Family | Primary | Hover | Pressed | Soft surface | Border | Surface text |
+|---|---|---|---|---|---|---|
+| Blue | `#2f6feb` | `#285fca` | existing blue behavior | `#e5eeff` | `#bfd3f9` | `#285fca` |
+| Green | `#18865e` | `#14734f` | `#105f41` | `#e9f7f0` | `#a9d8c1` | `#176b45` |
+| Orange | `#a85d0c` | `#8e4d09` | `#743e07` | `#fff6df` | `#e5c77d` | `#8a5208` |
+| Red | `#c43d4d` | `#aa3342` | `#8f2b38` | `#fff0f2` | `#efb8c0` | `#982f3d` |
+
+Filled semantic buttons use white text and the primary, hover, and pressed
+steps without opacity changes. Their primary contrast against white ranges
+from 4.55:1 to 5.09:1. Blue denotes primary action or active work, green
+denotes success or connection, orange denotes warning or attention, and red
+denotes failure, stop, removal, or another destructive action. Activity dots
+use the same primary colors at 10 pixels so their state remains legible without
+creating a separate indicator palette. The existing gray palette is unchanged;
+only inactive thread dots use the lighter, less saturated `#cacccf` so active
+blue threads retain clear visual priority.
 
 ## Application layout
 

@@ -369,7 +369,7 @@ WorkbenchWidget::WorkbenchWidget(FrontendSession &session, QWidget *parent)
   centerLayout->addWidget(conversationScroll, 1);
 
   auto *attention = new QFrame;
-  attention->setProperty("kind", "amberBadge");
+  attention->setProperty("kind", "orangeBadge");
   auto *attentionLayout = new QHBoxLayout(attention);
   attentionLayout->setContentsMargins(10, 6, 10, 6);
   attentionLayout->addWidget(makeLabel(
@@ -621,7 +621,7 @@ void WorkbenchWidget::refreshThreads() {
       title.prepend(QStringLiteral("! "));
     auto *item = new QListWidgetItem(title, threadList);
     if (model.pendingRequestCount(threadId) != 0)
-      item->setForeground(QColor(QStringLiteral("#8a5a00")));
+      item->setForeground(QColor(QStringLiteral("#8a5208")));
     item->setData(Qt::UserRole, text(threadId));
     item->setToolTip(text(thread->cwd));
     if (threadId == selectedThreadId)

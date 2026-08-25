@@ -125,8 +125,8 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
 
 QFrame *statusDot() {
   auto *dot = new QFrame;
-  dot->setFixedSize(8, 8);
-  dot->setStyleSheet(QStringLiteral("background:#98a2b3;border-radius:4px;"));
+  dot->setFixedSize(10, 10);
+  dot->setStyleSheet(QStringLiteral("background:#98a2b3;border-radius:5px;"));
   return dot;
 }
 
@@ -712,13 +712,13 @@ void ShellWidget::Impl::refreshStatus() {
   QString dotStyle;
   QString dotTip;
   if (connection.connected) {
-    dotStyle = QStringLiteral("background:#23845a;border-radius:4px;");
+    dotStyle = QStringLiteral("background:#18865e;border-radius:5px;");
     dotTip = QStringLiteral("Connected");
   } else if (connection.retrying) {
-    dotStyle = QStringLiteral("background:#d98e1c;border-radius:4px;");
+    dotStyle = QStringLiteral("background:#a85d0c;border-radius:5px;");
     dotTip = QStringLiteral("Disconnected, retrying");
   } else {
-    dotStyle = QStringLiteral("background:#b83a3a;border-radius:4px;");
+    dotStyle = QStringLiteral("background:#c43d4d;border-radius:5px;");
     dotTip = QStringLiteral("Disconnected");
   }
   connectionStatusDot->setStyleSheet(dotStyle);

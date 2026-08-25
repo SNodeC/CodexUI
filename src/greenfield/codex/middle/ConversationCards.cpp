@@ -534,7 +534,7 @@ public:
     const bool failed = prompt->state == PromptState::Failed;
     const QString foreground = waiting || transitioning
                                    ? QStringLiteral("#536b8f")
-                               : failed ? QStringLiteral("#9b2c2c")
+                               : failed ? QStringLiteral("#982f3d")
                                         : QStringLiteral("#1d2633");
     const QString style =
         QStringLiteral("background:transparent;color:%1;").arg(foreground);
@@ -638,11 +638,11 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
   const bool failed = prompt->state == PromptState::Failed;
   const QColor background = waiting || transitioning
                                 ? QColor(QStringLiteral("#dbe7f8"))
-                            : failed ? QColor(QStringLiteral("#fff1f1"))
+                            : failed ? QColor(QStringLiteral("#fff0f2"))
                                      : QColor(QStringLiteral("#eaf2ff"));
   const QColor border = waiting || transitioning
                             ? QColor(QStringLiteral("#9eb9df"))
-                        : failed ? QColor(QStringLiteral("#e5a3a3"))
+                        : failed ? QColor(QStringLiteral("#efb8c0"))
                                  : QColor(QStringLiteral("#bfd3f9"));
   painter.setBrush(background);
   painter.setPen(QPen(border, 1.0));

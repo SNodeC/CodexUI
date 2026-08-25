@@ -122,7 +122,7 @@ public:
 
     const QString foreground = awaiting || acknowledgedTransition
                                    ? QStringLiteral("#536b8f")
-                               : failed ? QStringLiteral("#9b2c2c")
+                               : failed ? QStringLiteral("#982f3d")
                                         : QStringLiteral("#1d2633");
     auto *title = makeLabel(QStringLiteral("You"), "title");
     title->setStyleSheet(
@@ -177,11 +177,11 @@ protected:
     const QRectF bounds = QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5);
     const QColor background = isAwaiting || isAcknowledgedTransition
                                   ? QColor(QStringLiteral("#dbe7f8"))
-                              : hasFailed ? QColor(QStringLiteral("#fff1f1"))
+                              : hasFailed ? QColor(QStringLiteral("#fff0f2"))
                                           : QColor(QStringLiteral("#eaf2ff"));
     const QColor border = isAwaiting || isAcknowledgedTransition
                               ? QColor(QStringLiteral("#9eb9df"))
-                          : hasFailed ? QColor(QStringLiteral("#e5a3a3"))
+                          : hasFailed ? QColor(QStringLiteral("#efb8c0"))
                                       : QColor(QStringLiteral("#bfd3f9"));
     painter.setBrush(background);
     painter.setPen(QPen(border, 1.0));
@@ -483,8 +483,8 @@ QFrame *makeDivider() {
 
 QFrame *makeStatusDot() {
   auto *dot = new QFrame;
-  dot->setFixedSize(8, 8);
-  dot->setStyleSheet(QStringLiteral("background:#98a2b3;border-radius:4px;"));
+  dot->setFixedSize(10, 10);
+  dot->setStyleSheet(QStringLiteral("background:#98a2b3;border-radius:5px;"));
   return dot;
 }
 
@@ -1002,11 +1002,11 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
 
   noticeBar = new QFrame;
   noticeBar->setStyleSheet(QStringLiteral(
-      "background:#fff4f2;border:1px solid #efc2bc;border-radius:6px;"));
+      "background:#fff0f2;border:1px solid #efb8c0;border-radius:6px;"));
   auto *noticeLayout = new QHBoxLayout(noticeBar);
   noticeLayout->setContentsMargins(10, 6, 8, 6);
   noticeLabel = makeLabel({}, "meta");
-  noticeLabel->setStyleSheet(QStringLiteral("color:#9d2e2e;"));
+  noticeLabel->setStyleSheet(QStringLiteral("color:#982f3d;"));
   auto *dismissNotice = new QPushButton(QStringLiteral("Dismiss"));
   dismissNotice->setProperty("kind", "subtle");
   dismissNotice->setFixedHeight(28);
@@ -1117,7 +1117,7 @@ ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)
   composerDockLayout->setSpacing(0);
 
   auto *attention = new QFrame;
-  attention->setProperty("kind", "amberBadge");
+  attention->setProperty("kind", "orangeBadge");
   auto *attentionLayout = new QHBoxLayout(attention);
   attentionLayout->setContentsMargins(10, 6, 10, 6);
   attentionLayout->addWidget(makeLabel(
@@ -1721,12 +1721,12 @@ void ShellWidget::showNotice(QString message, bool error) {
     return;
   noticeLabel->setText(std::move(message));
   noticeBar->setStyleSheet(
-      error ? QStringLiteral("background:#fff4f2;border:1px solid #efc2bc;"
+      error ? QStringLiteral("background:#fff0f2;border:1px solid #efb8c0;"
                              "border-radius:6px;")
-            : QStringLiteral("background:#fff8e8;border:1px solid #e5c77d;"
+            : QStringLiteral("background:#fff6df;border:1px solid #e5c77d;"
                              "border-radius:6px;"));
-  noticeLabel->setStyleSheet(error ? QStringLiteral("color:#9d2e2e;")
-                                   : QStringLiteral("color:#8a5a00;"));
+  noticeLabel->setStyleSheet(error ? QStringLiteral("color:#982f3d;")
+                                   : QStringLiteral("color:#8a5208;"));
   noticeBar->show();
 }
 
@@ -2121,13 +2121,13 @@ void ShellWidget::refreshThreads() {
     auto *dot = makeStatusDot();
     QString dotColor = QStringLiteral("#98a2b3");
     if (model.pendingRequestCount(threadId) != 0)
-      dotColor = QStringLiteral("#a76812");
+      dotColor = QStringLiteral("#a85d0c");
     else if (thread->status == "active" || thread->status == "inProgress")
       dotColor = QStringLiteral("#2f6feb");
     else if (thread->status == "failed" || thread->status == "systemError")
-      dotColor = QStringLiteral("#b83a3a");
+      dotColor = QStringLiteral("#c43d4d");
     dot->setStyleSheet(
-        QStringLiteral("background:%1;border-radius:4px;").arg(dotColor));
+        QStringLiteral("background:%1;border-radius:5px;").arg(dotColor));
     rowLayout->addWidget(dot);
     auto *copy = new QVBoxLayout;
     copy->setContentsMargins(0, 0, 0, 0);
@@ -2947,13 +2947,13 @@ void ShellWidget::refreshStatus() {
   QString dotStyle;
   QString dotToolTip;
   if (connection.connected) {
-    dotStyle = QStringLiteral("background:#23845a;border-radius:4px;");
+    dotStyle = QStringLiteral("background:#18865e;border-radius:5px;");
     dotToolTip = QStringLiteral("Connected");
   } else if (connection.retrying) {
-    dotStyle = QStringLiteral("background:#d98e1c;border-radius:4px;");
+    dotStyle = QStringLiteral("background:#a85d0c;border-radius:5px;");
     dotToolTip = QStringLiteral("Disconnected, retrying");
   } else {
-    dotStyle = QStringLiteral("background:#b83a3a;border-radius:4px;");
+    dotStyle = QStringLiteral("background:#c43d4d;border-radius:5px;");
     dotToolTip = QStringLiteral("Disconnected");
   }
   connectionStatusDot->setStyleSheet(dotStyle);
@@ -3500,12 +3500,7 @@ void ShellWidget::refreshAttachments() {
     remove->setAccessibleName(QStringLiteral("Remove %1").arg(attachment.name));
     remove->setToolTip(QStringLiteral("Remove attachment"));
     remove->setFixedSize(18, 18);
-    remove->setStyleSheet(
-        QStringLiteral("QPushButton{background:#b83a3a;color:#ffffff;border:0;"
-                       "border-radius:4px;padding:0;"
-                       "font-weight:700;}"
-                       "QPushButton:hover{background:#9f2f2f;}"
-                       "QPushButton:pressed{background:#842626;}"));
+    remove->setProperty("kind", "destructiveCompact");
     connect(remove, &QPushButton::clicked, this, [this, index] {
       attachmentDrafts.erase(attachmentDrafts.begin() +
                              static_cast<std::ptrdiff_t>(index));

@@ -243,7 +243,8 @@ bool testThreadSelectionProjection() {
       selected && selected->sizeHint().height() == 54 && rowLayout &&
           rowLayout->contentsMargins() == QMargins(5, 2, 5, 2) &&
           rowLayout->spacing() == 8 && title && status && dot &&
-          rowLayout->indexOf(dot) >= 0 && sortButton &&
+          dot->size() == QSize(10, 10) && rowLayout->indexOf(dot) >= 0 &&
+          sortButton &&
           sortButton->property("codexChevron").toBool() &&
           title->property("kind").toString() == QStringLiteral("title") &&
           status->property("kind").toString() == QStringLiteral("meta") &&

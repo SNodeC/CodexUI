@@ -104,11 +104,11 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
 
   noticeBar = new QFrame;
   noticeBar->setStyleSheet(QStringLiteral(
-      "background:#fff4f2;border:1px solid #efc2bc;border-radius:6px;"));
+      "background:#fff0f2;border:1px solid #efb8c0;border-radius:6px;"));
   auto *noticeLayout = new QHBoxLayout(noticeBar);
   noticeLayout->setContentsMargins(10, 6, 8, 6);
   noticeLabel = makeLabel({}, "meta");
-  noticeLabel->setStyleSheet(QStringLiteral("color:#9d2e2e;"));
+  noticeLabel->setStyleSheet(QStringLiteral("color:#982f3d;"));
   auto *dismiss = new QPushButton(QStringLiteral("Dismiss"));
   dismiss->setProperty("kind", "subtle");
   dismiss->setFixedHeight(28);
@@ -167,12 +167,12 @@ void MiddleRegionWidget::showNotice(QString message, bool error) {
     return;
   noticeLabel->setText(std::move(message));
   noticeBar->setStyleSheet(
-      error ? QStringLiteral("background:#fff4f2;border:1px solid #efc2bc;"
+      error ? QStringLiteral("background:#fff0f2;border:1px solid #efb8c0;"
                              "border-radius:6px;")
-            : QStringLiteral("background:#fff8e8;border:1px solid #e5c77d;"
+            : QStringLiteral("background:#fff6df;border:1px solid #e5c77d;"
                              "border-radius:6px;"));
-  noticeLabel->setStyleSheet(error ? QStringLiteral("color:#9d2e2e;")
-                                   : QStringLiteral("color:#8a5a00;"));
+  noticeLabel->setStyleSheet(error ? QStringLiteral("color:#982f3d;")
+                                   : QStringLiteral("color:#8a5208;"));
   noticeBar->show();
 }
 

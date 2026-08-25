@@ -37,8 +37,8 @@ protected:
       format.setBackground(QColor(QStringLiteral("#e9f7f0")));
     } else if (text.startsWith(QLatin1Char('-')) &&
                !text.startsWith(QStringLiteral("---"))) {
-      format.setForeground(QColor(QStringLiteral("#9d2e2e")));
-      format.setBackground(QColor(QStringLiteral("#fff1f1")));
+      format.setForeground(QColor(QStringLiteral("#982f3d")));
+      format.setBackground(QColor(QStringLiteral("#fff0f2")));
     } else if (text.startsWith(QStringLiteral("diff --git")) ||
                text.startsWith(QStringLiteral("---")) ||
                text.startsWith(QStringLiteral("+++"))) {
