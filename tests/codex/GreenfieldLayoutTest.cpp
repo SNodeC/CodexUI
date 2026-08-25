@@ -20,8 +20,10 @@
 #include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QPushButton>
 #include <QScrollBar>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QTabWidget>
 #include <QThread>
 #include <QToolButton>
@@ -498,19 +500,21 @@ bool testInfoViewerLayout() {
   PresentationModel model;
   inspector.refresh(model, {});
   inspector.tabs()->setCurrentIndex(4);
-  auto *infoTabs =
-      inspector.findChild<QTabWidget *>(QStringLiteral("infoTabs"));
+  auto *infoStack =
+      inspector.findChild<QStackedWidget *>(QStringLiteral("infoStack"));
+  auto *protocolChoice = inspector.findChild<QPushButton *>(
+      QStringLiteral("protocolInfoChoice"));
   auto *protocol =
       inspector.findChild<QPlainTextEdit *>(QStringLiteral("protocolInfoLog"));
   auto *state =
       inspector.findChild<QPlainTextEdit *>(QStringLiteral("stateInfoView"));
   auto *statistics =
       inspector.findChild<QLabel *>(QStringLiteral("protocolInfoStats"));
-  bool result = expect(infoTabs && protocol && state && statistics,
-                       "Info tab exposes retained State and Protocol viewers");
-  if (!infoTabs || !protocol || !state || !statistics)
+  bool result = expect(infoStack && protocolChoice && protocol && state && statistics,
+                       "Info exposes State and Protocol through choice navigation");
+  if (!infoStack || !protocolChoice || !protocol || !state || !statistics)
     return false;
-  infoTabs->setCurrentIndex(1);
+  protocolChoice->click();
   inspector.appendProtocolFrame(
       {{"kind", "event"},
        {"type", "conversation.item.upsert"},
@@ -567,13 +571,13 @@ bool testInfoViewerLayout() {
   result &=
       expect(protocolScroll->value() == pausedValue,
              "a visible Protocol append preserves a user-paused position");
-  infoTabs->setCurrentIndex(0);
+  infoStack->setCurrentIndex(0);
   inspector.appendProtocolFrame({{"kind", "event"},
                                  {"type", "protocol.test.hidden-append"},
                                  {"sequence", 92},
                                  {"generation", 1},
                                  {"authority", "app-server"}});
-  infoTabs->setCurrentIndex(1);
+  protocolChoice->click();
   spin(20);
   result &=
       expect(protocolScroll->value() == pausedValue,

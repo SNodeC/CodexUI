@@ -13,14 +13,20 @@
 namespace codexui::UiStyle {
 
 void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
-                 bool highlighted) {
+                 bool highlighted, ChevronDirection direction) {
   if (!indicator.isValid() || indicator.isEmpty())
     return;
   const QPointF center = indicator.center();
   QPainterPath chevron;
-  chevron.moveTo(center.x() - 3.5, center.y() - 1.5);
-  chevron.lineTo(center.x(), center.y() + 2.0);
-  chevron.lineTo(center.x() + 3.5, center.y() - 1.5);
+  if (direction == ChevronDirection::Right) {
+    chevron.moveTo(center.x() - 1.5, center.y() - 3.5);
+    chevron.lineTo(center.x() + 2.0, center.y());
+    chevron.lineTo(center.x() - 1.5, center.y() + 3.5);
+  } else {
+    chevron.moveTo(center.x() - 3.5, center.y() - 1.5);
+    chevron.lineTo(center.x(), center.y() + 2.0);
+    chevron.lineTo(center.x() + 3.5, center.y() - 1.5);
+  }
 
   QColor color(QStringLiteral("#667085"));
   if (!enabled)
@@ -96,6 +102,15 @@ QString applicationStyleSheet() {
             background: transparent;
             border-color: transparent;
         }
+        QPushButton[kind="infoChoice"] {
+          background: #ffffff;
+          border: 1px solid #d7dee8;
+          border-radius: 10px;
+          padding: 0;
+          text-align: left;
+        }
+        QPushButton[kind="infoChoice"]:hover { background: #f8fafc; border-color: #b9c4d2; }
+        QPushButton[kind="infoChoice"]:pressed { background: #f1f5fb; border-color: #9eabbc; }
         QToolButton[kind="composerAction"] {
             background: #ffffff;
             border: 1px solid #d7dee8;
@@ -250,6 +265,11 @@ QString applicationStyleSheet() {
         QDialog { background: #ffffff; }
         QScrollArea { background: #f6f8fb; border: 0; }
         QTabWidget QScrollArea { background: #fbfcfe; }
+        QScrollArea[kind="inspectorScroll"],
+        QScrollArea[kind="inspectorScroll"] > QWidget > QWidget {
+          background: transparent;
+          border: 0;
+        }
         QDialog QScrollArea { background: #ffffff; }
         QScrollArea > QWidget > QWidget { background: transparent; }
         QAbstractScrollArea::corner { background: transparent; border: 0; }

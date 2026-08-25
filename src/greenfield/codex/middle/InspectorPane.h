@@ -16,6 +16,7 @@
 
 class QLabel;
 class QPlainTextEdit;
+class QStackedWidget;
 class QTabWidget;
 class QVBoxLayout;
 
@@ -61,7 +62,7 @@ private:
   std::function<void()> hideAction;
 
   QTabWidget *inspectorTabs = nullptr;
-  QTabWidget *infoTabs = nullptr;
+  QStackedWidget *infoStack = nullptr;
   QWidget *planContent = nullptr;
   QVBoxLayout *planLayout = nullptr;
   QWidget *agentsContent = nullptr;

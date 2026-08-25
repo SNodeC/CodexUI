@@ -91,11 +91,20 @@ pauses when the user scrolls upward.
 
 ## Inspector
 
-The Inspector contains Plan, Agents, Changes, Requests, and Info. Info contains
-State and Protocol viewers. Both use application scrollbars. In Protocol, the
-log expands above a statistics summary placed at the bottom. Plan, Agents,
-Changes, and Requests retain their last visible per-thread presentation across
-thread and tab navigation.
+The Inspector contains the peer primary tabs Plan, Agents, Changes, Requests,
+and Info. Primary tabs use the shared full-size application typography and are
+never nested. Info presents State and Protocol as raised choice rows with
+chevrons; selecting one drills into its viewer, with an explicit back action to
+the choices. This expresses hierarchy through navigation rather than smaller
+text. Both viewers use application scrollbars. In Protocol, the log expands
+above a statistics summary placed at the bottom.
+
+Plan steps, agents, and pending requests are peer records and therefore use the
+same raised card surface, border, radius, and internal spacing. Summary surfaces
+are reserved for subordinate content within a record. Inspector scroll areas
+are frameless and transparent so the panel background remains continuous.
+Plan, Agents, Changes, and Requests retain their last visible per-thread
+presentation across thread and tab navigation.
 
 ## Desktop integration
 

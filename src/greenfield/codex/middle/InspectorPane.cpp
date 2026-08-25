@@ -4,6 +4,7 @@
 
 #include "codex/DiffViewer.h"
 #include "codex/PresentationModel.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QDateTime>
 #include <QHBoxLayout>
@@ -12,6 +13,8 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QStackedWidget>
+#include <QStyleOptionButton>
 #include <QTabWidget>
 #include <QTextDocument>
 #include <QTimer>
@@ -26,6 +29,9 @@ namespace codexui::codex::middle {
 namespace {
 
 constexpr int MaximumProtocolLines = 2000;
+constexpr int InfoChoicePage = 0;
+constexpr int StatePage = 1;
+constexpr int ProtocolPage = 2;
 
 QString text(const std::string &value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -104,6 +110,23 @@ QByteArray bytes(const nlohmann::json &value) {
                     static_cast<qsizetype>(serialized.size()));
 }
 
+class InfoChoiceButton final : public QPushButton {
+protected:
+  void paintEvent(QPaintEvent *event) override {
+    QPushButton::paintEvent(event);
+    QStyleOptionButton option;
+    initStyleOption(&option);
+    const QRect contents = style()->subElementRect(
+        QStyle::SE_PushButtonContents, &option, this);
+    const QRect indicator(contents.right() - 18, contents.top(), 18,
+                          contents.height());
+    UiStyle::drawChevron(
+        this, indicator, option.state & QStyle::State_Enabled,
+        option.state & (QStyle::State_MouseOver | QStyle::State_HasFocus),
+        UiStyle::ChevronDirection::Right);
+  }
+};
+
 QFrame *agentFrame(const AgentPresentation &agent) {
   auto *frame = new QFrame;
   frame->setProperty("kind", "raised");
@@ -143,6 +166,47 @@ QFrame *agentFrame(const AgentPresentation &agent) {
     layout->addWidget(
         makeLabel(identities.join(QStringLiteral("  |  ")), "meta"));
   return frame;
+}
+
+QPushButton *infoChoice(const QString &title, const QString &description) {
+  auto *button = new InfoChoiceButton;
+  button->setProperty("kind", "infoChoice");
+  button->setMinimumHeight(64);
+  button->setCursor(Qt::PointingHandCursor);
+
+  auto *layout = new QHBoxLayout(button);
+  layout->setContentsMargins(12, 9, 30, 9);
+  layout->setSpacing(8);
+  auto *copy = new QVBoxLayout;
+  copy->setSpacing(2);
+  auto *titleLabel = makeLabel(title, "title");
+  auto *descriptionLabel = makeLabel(description, "meta");
+  titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+  descriptionLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+  titleLabel->setTextInteractionFlags(Qt::NoTextInteraction);
+  descriptionLabel->setTextInteractionFlags(Qt::NoTextInteraction);
+  copy->addWidget(titleLabel);
+  copy->addWidget(descriptionLabel);
+  layout->addLayout(copy, 1);
+  return button;
+}
+
+QWidget *infoDetail(const QString &title, QWidget *content,
+                    QPushButton **backButton) {
+  auto *page = new QWidget;
+  auto *layout = new QVBoxLayout(page);
+  layout->setContentsMargins(8, 8, 8, 8);
+  layout->setSpacing(8);
+  auto *heading = new QHBoxLayout;
+  *backButton = new QPushButton(QStringLiteral("‹  Info"));
+  (*backButton)->setProperty("kind", "subtle");
+  (*backButton)->setFixedHeight(28);
+  heading->addWidget(*backButton);
+  heading->addStretch();
+  heading->addWidget(makeLabel(title, "title"));
+  layout->addLayout(heading);
+  layout->addWidget(content, 1);
+  return page;
 }
 
 struct ScrollPosition {
@@ -204,15 +268,14 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
 
   const auto makeScroll = [](QWidget *content) {
     auto *scroll = new QScrollArea;
+    scroll->setProperty("kind", "inspectorScroll");
+    scroll->setFrameShape(QFrame::NoFrame);
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setWidget(content);
     return scroll;
   };
 
-  auto *stateContent = new QWidget;
-  auto *stateLayout = new QVBoxLayout(stateContent);
-  stateLayout->setContentsMargins(8, 8, 8, 8);
   stateView = new QPlainTextEdit;
   stateView->setObjectName(QStringLiteral("stateInfoView"));
   stateView->setProperty("kind", "infoViewer");
@@ -221,11 +284,9 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   stateView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   stateView->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
   stateView->verticalScrollBar()->setProperty("kind", "infoViewer");
-  stateLayout->addWidget(stateView);
-
   auto *protocolContent = new QWidget;
   auto *protocolLayout = new QVBoxLayout(protocolContent);
-  protocolLayout->setContentsMargins(8, 8, 8, 8);
+  protocolLayout->setContentsMargins(0, 0, 0, 0);
   protocolLayout->setSpacing(6);
   protocolLog = new QPlainTextEdit;
   protocolLog->setObjectName(QStringLiteral("protocolInfoLog"));
@@ -250,27 +311,54 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   protocolLayout->addWidget(protocolLog, 1);
   protocolLayout->addWidget(protocolStats);
 
-  infoTabs = new QTabWidget;
-  infoTabs->setObjectName(QStringLiteral("infoTabs"));
-  infoTabs->setDocumentMode(true);
-  infoTabs->addTab(stateContent, QStringLiteral("State"));
-  infoTabs->addTab(protocolContent, QStringLiteral("Protocol"));
+  infoStack = new QStackedWidget;
+  infoStack->setObjectName(QStringLiteral("infoStack"));
+  auto *choices = new QWidget;
+  auto *choicesLayout = new QVBoxLayout(choices);
+  choicesLayout->setContentsMargins(8, 8, 8, 8);
+  choicesLayout->setSpacing(8);
+  auto *stateChoice = infoChoice(
+      QStringLiteral("State"), QStringLiteral("Current application state"));
+  stateChoice->setObjectName(QStringLiteral("stateInfoChoice"));
+  auto *protocolChoice = infoChoice(
+      QStringLiteral("Protocol"), QStringLiteral("App-server protocol messages"));
+  protocolChoice->setObjectName(QStringLiteral("protocolInfoChoice"));
+  choicesLayout->addWidget(stateChoice);
+  choicesLayout->addWidget(protocolChoice);
+  choicesLayout->addStretch();
+
+  QPushButton *stateBack = nullptr;
+  QPushButton *protocolBack = nullptr;
+  infoStack->addWidget(choices);
+  infoStack->addWidget(infoDetail(QStringLiteral("State"), stateView,
+                                  &stateBack));
+  infoStack->addWidget(infoDetail(QStringLiteral("Protocol"), protocolContent,
+                                  &protocolBack));
+  connect(stateChoice, &QPushButton::clicked, this, [this] {
+    infoStack->setCurrentIndex(StatePage);
+    refreshCurrentTab();
+  });
+  connect(protocolChoice, &QPushButton::clicked, this, [this] {
+    infoStack->setCurrentIndex(ProtocolPage);
+    showProtocolTail();
+    refreshCurrentTab();
+  });
+  const auto showInfoChoices = [this] {
+    infoStack->setCurrentIndex(InfoChoicePage);
+  };
+  connect(stateBack, &QPushButton::clicked, this, showInfoChoices);
+  connect(protocolBack, &QPushButton::clicked, this, showInfoChoices);
 
   inspectorTabs->addTab(makeScroll(planContent), QStringLiteral("Plan"));
   inspectorTabs->addTab(makeScroll(agentsContent), QStringLiteral("Agents"));
   inspectorTabs->addTab(diffViewer, QStringLiteral("Changes"));
   inspectorTabs->addTab(makeScroll(requestsContent),
                         QStringLiteral("Requests"));
-  inspectorTabs->addTab(infoTabs, QStringLiteral("Info"));
+  inspectorTabs->addTab(infoStack, QStringLiteral("Info"));
   outer->addWidget(inspectorTabs, 1);
 
   connect(inspectorTabs, &QTabWidget::currentChanged, this,
           [this](int) { refreshCurrentTab(); });
-  connect(infoTabs, &QTabWidget::currentChanged, this, [this](int index) {
-    if (index == 1)
-      showProtocolTail();
-    refreshCurrentTab();
-  });
 }
 
 void InspectorPane::setHideAction(std::function<void()> hide) {
@@ -307,9 +395,9 @@ void InspectorPane::refreshCurrentTab() {
     refreshRequests();
     break;
   case 4:
-    if (infoTabs->currentIndex() == 0)
+    if (infoStack->currentIndex() == StatePage)
       refreshState();
-    else {
+    else if (infoStack->currentIndex() == ProtocolPage) {
       showProtocolTail();
       refreshProtocolStats();
     }
@@ -374,9 +462,10 @@ void InspectorPane::refreshPlan() {
     for (const auto &step :
          planTurn->plan.value("steps", nlohmann::json::array())) {
       auto *row = new QFrame;
-      row->setProperty("kind", "summary");
+      row->setProperty("kind", "raised");
       auto *layout = new QVBoxLayout(row);
-      layout->setContentsMargins(9, 7, 9, 7);
+      layout->setContentsMargins(12, 10, 12, 10);
+      layout->setSpacing(6);
       layout->addWidget(makeLabel(text(stringValue(step, "step"))));
       layout->addWidget(
           makeLabel(displayStatus(stringValue(step, "status")), "meta"));
@@ -524,10 +613,10 @@ void InspectorPane::refreshRequests() {
   for (const auto &[id, request] :
        currentModel->pendingRequestPresentations()) {
     auto *frame = new QFrame;
-    frame->setProperty("kind", "summary");
+    frame->setProperty("kind", "raised");
     auto *layout = new QVBoxLayout(frame);
-    layout->setContentsMargins(9, 7, 9, 7);
-    layout->setSpacing(5);
+    layout->setContentsMargins(12, 10, 12, 10);
+    layout->setSpacing(6);
     layout->addWidget(makeLabel(text(request.kind), "title"));
     QString threadContext = text(request.threadId);
     if (const ThreadPresentation *thread =
