@@ -245,7 +245,11 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   outer->setContentsMargins(18, 14, 20, 0);
   outer->setSpacing(0);
   auto *heading = new QHBoxLayout;
-  heading->addWidget(makeLabel(QStringLiteral("INSPECTOR"), "section"));
+  heading->addStrut(24);
+  auto *sectionTitle = makeLabel(QStringLiteral("INSPECTOR"), "panelHeader");
+  sectionTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  sectionTitle->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+  heading->addWidget(sectionTitle);
   heading->addStretch();
   auto *hide = new QPushButton(QStringLiteral("Hide"));
   hide->setProperty("kind", "subtle");
@@ -256,7 +260,11 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   });
   heading->addWidget(hide);
   outer->addLayout(heading);
-  outer->addSpacing(7);
+  auto *headerDivider = new QFrame;
+  headerDivider->setProperty("kind", "standardDivider");
+  headerDivider->setFixedHeight(1);
+  outer->addWidget(headerDivider);
+  outer->addSpacing(8);
 
   inspectorTabs = new QTabWidget;
   inspectorTabs->setDocumentMode(true);

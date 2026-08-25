@@ -48,6 +48,7 @@ QString applicationStyleSheet() {
       QString::number(std::max(1.0, baseSize - 1.0), 'f', 1);
   const QString standard = QString::number(baseSize, 'f', 1);
   const QString section = QString::number(baseSize + 1.0, 'f', 1);
+  const QString panelHeader = QString::number(baseSize + 1.0, 'f', 1);
   const QString heading = QString::number(baseSize + 3.0, 'f', 1);
 
   return QStringLiteral(R"QSS(
@@ -62,6 +63,11 @@ QString applicationStyleSheet() {
             color: #667085;
             font-size: %3pt;
             font-weight: 600;
+        }
+        QLabel[kind="panelHeader"] {
+            color: #475467;
+            font-size: %5pt;
+            font-weight: 700;
         }
         QLabel[kind="attentionSection"] {
             color: #a85d0c;
@@ -436,7 +442,7 @@ QString applicationStyleSheet() {
         }
         QToolTip { background: #ffffff; color: #1d2633; border: 1px solid #b9c4d2; padding: 5px; }
     )QSS")
-      .arg(compact, standard, section, heading);
+      .arg(compact, standard, section, heading, panelHeader);
 }
 
 } // namespace codexui::UiStyle

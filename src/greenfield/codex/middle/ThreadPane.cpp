@@ -174,8 +174,12 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   layout->setContentsMargins(10, 14, 10, 17);
   layout->setSpacing(0);
   auto *header = new QHBoxLayout;
-  header->setContentsMargins(8, 0, 6, 8);
-  header->addWidget(makeLabel(QStringLiteral("WORK"), "section"));
+  header->setContentsMargins(8, 0, 6, 0);
+  header->addStrut(24);
+  auto *sectionTitle = makeLabel(QStringLiteral("THREADS"), "panelHeader");
+  sectionTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  sectionTitle->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+  header->addWidget(sectionTitle);
   header->addStretch();
   auto *hide = new QPushButton(QStringLiteral("Hide"));
   hide->setProperty("kind", "subtle");
@@ -186,6 +190,11 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   });
   header->addWidget(hide);
   layout->addLayout(header);
+  auto *headerDivider = new QFrame;
+  headerDivider->setProperty("kind", "standardDivider");
+  headerDivider->setFixedHeight(1);
+  layout->addWidget(headerDivider);
+  layout->addSpacing(8);
 
   auto *create = new QPushButton(QStringLiteral("+  New thread"));
   create->setFixedHeight(36);

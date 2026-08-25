@@ -83,15 +83,16 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   center->setContentsMargins(24, 14, 24, 12);
   center->setSpacing(0);
   auto *context = new QHBoxLayout;
-  auto *badge = makeLabel(QStringLiteral("THREAD"), "small");
-  badge->setAlignment(Qt::AlignCenter);
-  badge->setFixedSize(58, 20);
-  badge->setStyleSheet(QStringLiteral(
-      "background:#e5eeff;color:#2f6feb;border-radius:5px;font-weight:600;"));
-  context->addWidget(badge);
+  context->addStrut(24);
+  auto *sectionTitle =
+      makeLabel(QStringLiteral("CONVERSATION"), "panelHeader");
+  sectionTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  sectionTitle->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+  context->addWidget(sectionTitle);
   context->addStretch();
   center->addLayout(context);
-  center->addSpacing(2);
+  center->addWidget(divider());
+  center->addSpacing(8);
   conversationTitle =
       makeLabel(QStringLiteral("No synchronized thread"), "heading");
   conversationMetadata = makeLabel({}, "meta");

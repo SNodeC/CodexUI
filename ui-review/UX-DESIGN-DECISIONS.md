@@ -14,6 +14,30 @@ This document records the implemented CodexUI visual and interaction contract.
   Commands, tool activity, files, and collaboration activity use raised cards.
 - Scrollbars use one compact application style across conversation, nested
   output, State, Protocol, and Inspector surfaces.
+- The three primary panels use one prominent neutral 24 px header row:
+  `THREADS`, `CONVERSATION`, and `INSPECTOR`, followed by a standard-intensity
+  divider and an 8 px content gap. Accent-filled labels are reserved for
+  interactive or selected states. Panel headers are one typographic level
+  below the active thread title so structure never competes with content.
+
+Canonical application typography is derived from the platform/application
+base font size `B`; fixed absolute point sizes are not used for UI chrome.
+
+| Level | Size | Canonical roles |
+|---|---:|---|
+| Compact | `B - 1 pt` | Metadata, tabs, buttons, table headers, code and diff text |
+| Standard | `B` | Body text, controls, editors, list content |
+| Structural | `B + 1 pt` | Panel headers, section labels, subordinate brand labels |
+| Content heading | `B + 3 pt` | Active thread title and primary in-panel headings |
+
+Weight and color may distinguish roles that share a size. In particular,
+uppercase panel headers use Structural size with bold weight and a stronger
+neutral color; the mixed-case active thread title uses Content heading size
+with semibold weight.
+
+Markdown is authored content rather than application chrome. Its semantic
+heading levels intentionally retain Qt's native relative rich-text sizes and
+are not mapped to the canonical application scale.
 
 | Family | Primary | Hover | Pressed | Soft surface | Border | Surface text |
 |---|---|---|---|---|---|---|
