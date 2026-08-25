@@ -18,7 +18,9 @@ env:
 jobs:
   gcc-15-debug:
     runs-on: ubuntu-24.04
-    container: gcc:15.3.0-trixie
+    container:
+      image: gcc:15.3.0-trixie
+      options: --cap-add=NET_ADMIN --sysctl net.ipv6.conf.all.disable_ipv6=0
     timeout-minutes: 45
 
     steps:
@@ -49,6 +51,7 @@ jobs:
           apt-get update
           apt-get install -y \
             cmake \
+            iproute2 \
             libbluetooth-dev \
             libmagic-dev \
             libssl-dev \
@@ -60,6 +63,14 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE/_deps/snodec"
           git config --global --add safe.directory "$GITHUB_WORKSPACE/_deps/aisuite"
           getent group snodec >/dev/null || groupadd --system snodec
+
+      - name: Enable IPv6 transport coverage
+        run: |
+          ip link add codexui-ci-v6 type dummy
+          ip link set codexui-ci-v6 up
+          ip -6 address add fd00::1/128 dev codexui-ci-v6
+          ip -6 address show dev codexui-ci-v6
+          getent ahostsv6 ::1
 
       - name: Verify CodexUI source revision
         shell: bash
