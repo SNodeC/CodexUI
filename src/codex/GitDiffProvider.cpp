@@ -5,6 +5,8 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QHash>
 #include <QMetaObject>
 #include <QPointer>
 #include <QThreadPool>
@@ -31,9 +33,7 @@ using GitPointer = std::unique_ptr<Type, decltype(Free)>;
 
 QString gitError(const QString &fallback) {
   const git_error *error = git_error_last();
-  return error && error->message
-             ? QString::fromUtf8(error->message)
-             : fallback;
+  return error && error->message ? QString::fromUtf8(error->message) : fallback;
 }
 
 QString text(const char *value) {
@@ -63,6 +63,31 @@ QString statusName(git_delta_t status) {
   }
 }
 
+QString discoverRoot(const QString &directory) {
+  if (directory.isEmpty())
+    return {};
+  QString start = directory;
+  if (QFileInfo(start).isFile())
+    start = QFileInfo(start).absolutePath();
+  git_buf discovered = GIT_BUF_INIT;
+  const QByteArray encoded = QFile::encodeName(start);
+  if (git_repository_discover(&discovered, encoded.constData(), 0, nullptr) <
+      0) {
+    git_buf_dispose(&discovered);
+    return {};
+  }
+  git_repository *raw = nullptr;
+  const int opened = git_repository_open(&raw, discovered.ptr);
+  git_buf_dispose(&discovered);
+  if (opened < 0)
+    return {};
+  GitPointer<git_repository, git_repository_free> repository(raw,
+                                                              git_repository_free);
+  if (git_repository_is_bare(repository.get()))
+    return {};
+  return QDir::cleanPath(text(git_repository_workdir(repository.get())));
+}
+
 GitPointer<git_tree, git_tree_free> headTree(git_repository *repository,
                                              QString &error) {
   git_reference *rawReference = nullptr;
@@ -83,51 +108,86 @@ GitPointer<git_tree, git_tree_free> headTree(git_repository *repository,
   return {reinterpret_cast<git_tree *>(rawObject), git_tree_free};
 }
 
-GitDiffSnapshot collect(QString workspace, GitDiffScope scope,
-                        GitDiffContext context,
-                        const std::shared_ptr<std::atomic<std::uint64_t>> &clock,
-                        std::uint64_t generation) {
-  GitDiffSnapshot snapshot;
-  snapshot.workspace = QDir::cleanPath(std::move(workspace));
-  snapshot.scope = scope;
-  snapshot.context = context;
-  if (snapshot.workspace.isEmpty()) {
-    snapshot.error = QStringLiteral("Select a thread to inspect changes.");
-    return snapshot;
-  }
+QString normalizedHint(QString path) {
+  path = QDir::fromNativeSeparators(std::move(path));
+  if (path.startsWith(QStringLiteral("a/")) ||
+      path.startsWith(QStringLiteral("b/")))
+    path.remove(0, 2);
+  return QDir::cleanPath(path);
+}
 
-  git_buf discovered = GIT_BUF_INIT;
-  const QByteArray start = QFile::encodeName(snapshot.workspace);
-  if (git_repository_discover(&discovered, start.constData(), 0, nullptr) < 0) {
-    snapshot.error = QStringLiteral("Change review requires a Git repository.");
-    git_buf_dispose(&discovered);
-    return snapshot;
+bool containsHiddenDirectory(const QString &path) {
+  const QStringList parts = QDir::fromNativeSeparators(path).split(
+      QLatin1Char('/'), Qt::SkipEmptyParts);
+  return std::any_of(parts.begin(), parts.end(), [](const QString &part) {
+    return part.size() > 1 && part.startsWith(QLatin1Char('.'));
+  });
+}
+
+int repositoryPathScore(git_repository *repository, const QString &root,
+                        QString path) {
+  path = normalizedHint(std::move(path));
+  if (QDir::isAbsolutePath(path)) {
+    path = QDir(root).relativeFilePath(path);
+    if (path == QStringLiteral("..") || path.startsWith(QStringLiteral("../")))
+      return 0;
   }
-  const QString repositoryPath =
-      QDir::cleanPath(QString::fromUtf8(discovered.ptr,
-                                        static_cast<qsizetype>(discovered.size)));
+  const QByteArray encoded = QFile::encodeName(path);
+  unsigned int status = 0;
+  if (git_status_file(&status, repository, encoded.constData()) == 0)
+    return status == GIT_STATUS_CURRENT ? 1 : 2;
+  git_index *rawIndex = nullptr;
+  if (git_repository_index(&rawIndex, repository) == 0) {
+    GitPointer<git_index, git_index_free> index(rawIndex, git_index_free);
+    if (git_index_get_bypath(index.get(), encoded.constData(), 0))
+      return 1;
+  }
+  QString error;
+  GitPointer<git_tree, git_tree_free> tree = headTree(repository, error);
+  if (!tree)
+    return 0;
+  git_tree_entry *entry = nullptr;
+  const bool found =
+      git_tree_entry_bypath(&entry, tree.get(), encoded.constData()) == 0;
+  git_tree_entry_free(entry);
+  return found ? 1 : 0;
+}
+
+std::vector<int> rootHintScores(const QString &root,
+                                const QStringList &directories,
+                                const QStringList &paths) {
+  std::vector<int> scores(static_cast<std::size_t>(paths.size()), 0);
+  git_repository *raw = nullptr;
+  const QByteArray encodedRoot = QFile::encodeName(root);
+  if (git_repository_open(&raw, encodedRoot.constData()) < 0)
+    return scores;
+  GitPointer<git_repository, git_repository_free> repository(raw,
+                                                              git_repository_free);
+  for (qsizetype index = 0; index < paths.size(); ++index) {
+    const QString &path = paths[index];
+    int score = repositoryPathScore(repository.get(), root, path);
+    for (const QString &directory : directories) {
+      if (score == 2)
+        break;
+      const QString absolute = QDir(directory).absoluteFilePath(path);
+      score = std::max(
+          score, repositoryPathScore(repository.get(), root, absolute));
+    }
+    scores[static_cast<std::size_t>(index)] = score;
+  }
+  return scores;
+}
+
+bool appendRepository(GitDiffSnapshot &snapshot, const QString &root,
+                      GitDiffScope scope, GitDiffContext context,
+                      const std::shared_ptr<std::atomic<std::uint64_t>> &clock,
+                      std::uint64_t generation, std::size_t &retainedBytes) {
   git_repository *rawRepository = nullptr;
-  const QByteArray encodedRepository = QFile::encodeName(repositoryPath);
-  const int openResult =
-      git_repository_open(&rawRepository, encodedRepository.constData());
-  git_buf_dispose(&discovered);
-  if (openResult < 0) {
-    snapshot.error = gitError(QStringLiteral("Unable to open Git repository."));
-    return snapshot;
-  }
+  const QByteArray encodedRoot = QFile::encodeName(root);
+  if (git_repository_open(&rawRepository, encodedRoot.constData()) < 0)
+    return false;
   GitPointer<git_repository, git_repository_free> repository(rawRepository,
                                                               git_repository_free);
-  snapshot.repository = true;
-  snapshot.repositoryRoot =
-      QDir::cleanPath(text(git_repository_workdir(repository.get())));
-  if (git_repository_is_bare(repository.get())) {
-    snapshot.error = QStringLiteral("Change review requires a working tree.");
-    return snapshot;
-  }
-
-  if (clock->load() != generation)
-    return snapshot;
-
   git_diff_options options = GIT_DIFF_OPTIONS_INIT;
   options.flags = GIT_DIFF_INCLUDE_UNTRACKED |
                   GIT_DIFF_RECURSE_UNTRACKED_DIRS |
@@ -146,52 +206,48 @@ GitDiffSnapshot collect(QString workspace, GitDiffScope scope,
       headTree(repository.get(), treeError);
   if (!treeError.isEmpty()) {
     snapshot.error = treeError;
-    return snapshot;
+    return false;
   }
-
   git_diff *rawDiff = nullptr;
-  int diffResult = 0;
-  if (scope == GitDiffScope::Unstaged) {
-    diffResult = git_diff_index_to_workdir(&rawDiff, repository.get(), nullptr,
-                                            &options);
-  } else if (scope == GitDiffScope::Staged) {
-    diffResult = git_diff_tree_to_index(&rawDiff, repository.get(), tree.get(),
-                                         nullptr, &options);
-  } else {
-    diffResult = git_diff_tree_to_workdir_with_index(
+  int result = 0;
+  if (scope == GitDiffScope::Unstaged)
+    result = git_diff_index_to_workdir(&rawDiff, repository.get(), nullptr,
+                                        &options);
+  else if (scope == GitDiffScope::Staged)
+    result = git_diff_tree_to_index(&rawDiff, repository.get(), tree.get(),
+                                     nullptr, &options);
+  else
+    result = git_diff_tree_to_workdir_with_index(
         &rawDiff, repository.get(), tree.get(), &options);
-  }
-  if (diffResult < 0) {
+  if (result < 0) {
     snapshot.error = gitError(QStringLiteral("Unable to calculate Git changes."));
-    return snapshot;
+    return false;
   }
   GitPointer<git_diff, git_diff_free> diff(rawDiff, git_diff_free);
-
   git_diff_find_options findOptions = GIT_DIFF_FIND_OPTIONS_INIT;
   findOptions.flags = GIT_DIFF_FIND_RENAMES | GIT_DIFF_FIND_COPIES |
                       GIT_DIFF_FIND_FOR_UNTRACKED;
   git_diff_find_similar(diff.get(), &findOptions);
 
-  std::size_t retainedBytes = 0;
   const std::size_t count = git_diff_num_deltas(diff.get());
-  snapshot.files.reserve(count);
   for (std::size_t index = 0; index < count; ++index) {
     if (clock->load() != generation)
-      return snapshot;
+      return false;
     const git_diff_delta *delta = git_diff_get_delta(diff.get(), index);
     if (!delta || delta->status == GIT_DELTA_UNMODIFIED ||
         delta->status == GIT_DELTA_IGNORED)
       continue;
     GitDiffFile file;
+    file.repositoryRoot = root;
     file.path = text(delta->new_file.path);
     if (file.path.isEmpty())
       file.path = text(delta->old_file.path);
+    file.absolutePath = QDir(root).absoluteFilePath(file.path);
     file.previousPath = text(delta->old_file.path);
     if (file.previousPath == file.path)
       file.previousPath.clear();
     file.status = statusName(delta->status);
     file.binary = (delta->flags & GIT_DIFF_FLAG_BINARY) != 0;
-
     git_patch *rawPatch = nullptr;
     const int patchResult = git_patch_from_diff(&rawPatch, diff.get(), index);
     GitPointer<git_patch, git_patch_free> patch(rawPatch, git_patch_free);
@@ -219,8 +275,94 @@ GitDiffSnapshot collect(QString workspace, GitDiffScope scope,
     }
     snapshot.files.push_back(std::move(file));
   }
+  return true;
+}
+
+GitDiffSnapshot collect(QString workspace, QStringList directories,
+                        QStringList paths, QString selectedRepository,
+                        bool includeHiddenRepositories, GitDiffScope scope,
+                        GitDiffContext context,
+                        const std::shared_ptr<std::atomic<std::uint64_t>> &clock,
+                        std::uint64_t generation) {
+  GitDiffSnapshot snapshot;
+  snapshot.workspace = workspace.isEmpty()
+                           ? QString{}
+                           : QDir::cleanPath(std::move(workspace));
+  snapshot.scope = scope;
+  snapshot.context = context;
+  if (!snapshot.workspace.isEmpty())
+    directories.prepend(snapshot.workspace);
+  directories.removeDuplicates();
+
+  QStringList roots;
+  QHash<QString, QStringList> rootDirectories;
+  for (const QString &directory : directories) {
+    if (clock->load() != generation)
+      return snapshot;
+    if (!includeHiddenRepositories && containsHiddenDirectory(directory))
+      continue;
+    const QString root = discoverRoot(directory);
+    if (root.isEmpty() ||
+        (!includeHiddenRepositories && containsHiddenDirectory(root)))
+      continue;
+    rootDirectories[root].push_back(directory);
+    if (!roots.contains(root))
+      roots.push_back(root);
+  }
+  if (roots.isEmpty()) {
+    snapshot.error = snapshot.workspace.isEmpty()
+                         ? QStringLiteral("Select a thread to inspect changes.")
+                         : QStringLiteral("Change review requires a Git repository.");
+    return snapshot;
+  }
+
+  QStringList matched;
+  QHash<QString, std::vector<int>> hintScores;
+  for (const QString &root : roots)
+    hintScores.insert(root,
+                      rootHintScores(root, rootDirectories[root], paths));
+  for (qsizetype pathIndex = 0; pathIndex < paths.size(); ++pathIndex) {
+    QStringList pathMatches;
+    int bestScore = 0;
+    for (const QString &root : roots) {
+      const int score =
+          hintScores[root][static_cast<std::size_t>(pathIndex)];
+      if (score > bestScore) {
+        bestScore = score;
+        pathMatches.clear();
+      }
+      if (score != 0 && score == bestScore)
+        pathMatches.push_back(root);
+    }
+    for (const QString &root : pathMatches) {
+      if (!matched.contains(root))
+        matched.push_back(root);
+    }
+  }
+  if (!matched.isEmpty())
+    roots = std::move(matched);
+  std::sort(roots.begin(), roots.end(), [](const QString &left,
+                                           const QString &right) {
+    return QString::localeAwareCompare(left, right) < 0;
+  });
+  snapshot.repositoryRoots = roots;
+  snapshot.repository = true;
+
+  if (!selectedRepository.isEmpty() && roots.contains(selectedRepository))
+    roots = {selectedRepository};
+  snapshot.repositoryRoot = roots.size() == 1 ? roots.front() : QString{};
+  std::size_t retainedBytes = 0;
+  for (const QString &root : roots) {
+    if (clock->load() != generation)
+      return snapshot;
+    appendRepository(snapshot, root, scope, context, clock, generation,
+                     retainedBytes);
+  }
   std::sort(snapshot.files.begin(), snapshot.files.end(),
             [](const GitDiffFile &left, const GitDiffFile &right) {
+              if (left.repositoryRoot != right.repositoryRoot)
+                return QString::localeAwareCompare(left.repositoryRoot,
+                                                    right.repositoryRoot) < 0;
               return QString::localeAwareCompare(left.path, right.path) < 0;
             });
   return snapshot;
@@ -241,17 +383,28 @@ void GitDiffProvider::cancel() {
   emit loadingChanged(false);
 }
 
-void GitDiffProvider::request(QString workspace, GitDiffScope scope,
+void GitDiffProvider::request(QString workspace,
+                              QStringList candidateDirectories,
+                              QStringList changedPaths,
+                              QString selectedRepository,
+                              bool includeHiddenRepositories,
+                              GitDiffScope scope,
                               GitDiffContext context) {
   const std::uint64_t requested = generation->fetch_add(1) + 1;
   const auto clock = generation;
   const QPointer<GitDiffProvider> receiver(this);
   emit loadingChanged(true);
   QThreadPool::globalInstance()->start(
-      [receiver, clock, requested, workspace = std::move(workspace), scope,
+      [receiver, clock, requested, workspace = std::move(workspace),
+       candidateDirectories = std::move(candidateDirectories),
+       changedPaths = std::move(changedPaths),
+       selectedRepository = std::move(selectedRepository),
+       includeHiddenRepositories, scope,
        context]() mutable {
-        GitDiffSnapshot snapshot =
-            collect(std::move(workspace), scope, context, clock, requested);
+        GitDiffSnapshot snapshot = collect(
+            std::move(workspace), std::move(candidateDirectories),
+            std::move(changedPaths), std::move(selectedRepository),
+            includeHiddenRepositories, scope, context, clock, requested);
         if (clock->load() != requested)
           return;
         QMetaObject::invokeMethod(

@@ -205,6 +205,44 @@ int main() {
              "incomplete thread reads preserve live plan and inspector state");
   passed &= expect(!model.activeTurnId("thread-1").has_value(),
                    "completed stream leaves no active turn");
+
+  PresentationModel hydratedModel;
+  ProtocolNormalizer hydratedNormalizer(
+      [&](const nlohmann::json &frame) {
+        hydratedModel.applyEvent(frame);
+        return true;
+      });
+  hydratedNormalizer.transportEvent("connected");
+  hydratedNormalizer.operationResult(
+      "thread.read", "repository-hints", {{"threadId", "repository-thread"}},
+      {{"id", "repository-hints"},
+       {"result",
+        {{"thread",
+          {{"id", "repository-thread"},
+           {"cwd", "/workspace"},
+           {"turns",
+            nlohmann::json::array(
+                {{{"id", "repository-turn"},
+                  {"items",
+                   nlohmann::json::array(
+                       {{{"id", "repository-command"},
+                         {"type", "commandExecution"},
+                         {"cwd", "/workspace/project/src"}},
+                        {{"id", "repository-change"},
+                         {"type", "fileChange"},
+                         {"changes",
+                          nlohmann::json::array(
+                              {{{"path", "lib/example.cpp"}},
+                               {{"path", "removed.txt"}}})}}})}}})}}}}}});
+  const auto *repositoryThread = hydratedModel.thread("repository-thread");
+  passed &= expect(
+      repositoryThread != nullptr &&
+          repositoryThread->commandCwds ==
+              std::vector<std::string>{"/workspace/project/src"} &&
+          repositoryThread->changedPaths ==
+              std::vector<std::string>{"lib/example.cpp", "removed.txt"},
+      "authoritative thread hydration retains compact repository hints");
+
   normalizer.bridgeEvent({{"kind", "bridge.provider"},
                           {"state", "disconnected"},
                           {"providerGeneration", std::uint64_t{1}},

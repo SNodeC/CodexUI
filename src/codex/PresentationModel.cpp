@@ -60,6 +60,30 @@ std::string requestKey(const nlohmann::json &value) {
   return value.is_null() ? std::string{} : value.dump();
 }
 
+void appendUnique(std::vector<std::string> &values, const std::string &value,
+                  std::size_t maximum) {
+  if (value.empty() ||
+      std::find(values.begin(), values.end(), value) != values.end())
+    return;
+  if (values.size() == maximum)
+    values.erase(values.begin());
+  values.push_back(value);
+}
+
+void retainRepositoryHints(ThreadPresentation &thread,
+                           const nlohmann::json &item) {
+  const std::string type = stringValue(item, "type");
+  if (type == "commandExecution")
+    appendUnique(thread.commandCwds, stringValue(item, "cwd"), 64);
+  if (type != "fileChange")
+    return;
+  const auto changes = item.find("changes");
+  if (changes == item.end() || !changes->is_array())
+    return;
+  for (const auto &change : *changes)
+    appendUnique(thread.changedPaths, stringValue(change, "path"), 512);
+}
+
 bool isSpawnActivity(const nlohmann::json &activity) {
   const std::string type = stringValue(activity, "type");
   if (type == "subAgentActivity")
@@ -445,9 +469,11 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
     return;
   }
   if (type == "conversation.file-change.patch-replaced") {
-    if (ItemPresentation *item = findItem(scope))
+    if (ItemPresentation *item = findItem(scope)) {
       item->raw["changes"] =
           memberValue(data, "changes", nlohmann::json::array());
+      retainRepositoryHints(thread, item->raw);
+    }
     return;
   }
   if (type == "conversation.mcp.progress") {
@@ -606,6 +632,8 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
       result.turns.clear();
       result.agentOrder.clear();
       result.agents.clear();
+      result.commandCwds.clear();
+      result.changedPaths.clear();
     }
     for (const auto &turn : *turns)
       upsertTurn(result, turn, replaceTurns);
@@ -667,6 +695,7 @@ ItemPresentation &PresentationModel::upsertItem(ThreadPresentation &thread,
     mergePreservingCompleteness(result.raw, raw);
   }
   const std::string type = stringValue(result.raw, "type");
+  retainRepositoryHints(thread, result.raw);
   if (type == "subAgentActivity" || type == "collabAgentToolCall") {
     upsertAgentActivity(
         thread,

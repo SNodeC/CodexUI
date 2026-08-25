@@ -5,6 +5,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
 #include <atomic>
 #include <cstdint>
@@ -17,7 +18,9 @@ enum class GitDiffScope { Unstaged, Staged, Uncommitted };
 enum class GitDiffContext { Compact, Expanded };
 
 struct GitDiffFile {
+  QString repositoryRoot;
   QString path;
+  QString absolutePath;
   QString previousPath;
   QString status;
   QString patch;
@@ -29,6 +32,7 @@ struct GitDiffFile {
 struct GitDiffSnapshot {
   QString workspace;
   QString repositoryRoot;
+  QStringList repositoryRoots;
   QString error;
   GitDiffScope scope = GitDiffScope::Unstaged;
   GitDiffContext context = GitDiffContext::Compact;
@@ -44,7 +48,9 @@ public:
   explicit GitDiffProvider(QObject *parent = nullptr);
   ~GitDiffProvider() override;
 
-  void request(QString workspace, GitDiffScope scope,
+  void request(QString workspace, QStringList candidateDirectories,
+               QStringList changedPaths, QString selectedRepository,
+               bool includeHiddenRepositories, GitDiffScope scope,
                GitDiffContext context);
   void cancel();
 

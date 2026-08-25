@@ -47,6 +47,8 @@ struct ThreadPresentation {
   std::optional<std::int64_t> createdAt;
   std::optional<std::int64_t> updatedAt;
   std::optional<std::int64_t> recencyAt;
+  std::vector<std::string> commandCwds;
+  std::vector<std::string> changedPaths;
   std::vector<std::string> turnOrder;
   std::unordered_map<std::string, TurnPresentation> turns;
   nlohmann::json raw = nlohmann::json::object();

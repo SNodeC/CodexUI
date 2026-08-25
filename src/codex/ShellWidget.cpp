@@ -2579,7 +2579,17 @@ void ShellWidget::refreshInspector() {
     activeLayout = requestsLayout;
   const ThreadPresentation *thread = model.thread(selectedThreadId);
   if (activeTab == 2) {
-    diffViewer->setWorkspace(thread ? text(thread->cwd) : QString{});
+    QStringList commandCwds;
+    QStringList changedPaths;
+    if (thread) {
+      for (const std::string &value : thread->commandCwds)
+        commandCwds.push_back(text(value));
+      for (const std::string &value : thread->changedPaths)
+        changedPaths.push_back(text(value));
+    }
+    diffViewer->setRepositoryContext(
+        text(selectedThreadId), thread ? text(thread->cwd) : QString{},
+        std::move(commandCwds), std::move(changedPaths));
     diffViewer->refreshRepository();
     return;
   }

@@ -49,6 +49,43 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
+bool commitPath(git_repository *repository, const char *path) {
+  git_index *index = nullptr;
+  if (git_repository_index(&index, repository) < 0)
+    return false;
+  const bool indexed = git_index_add_bypath(index, path) == 0 &&
+                       git_index_write(index) == 0;
+  git_oid treeId{};
+  const bool wroteTree = indexed && git_index_write_tree(&treeId, index) == 0;
+  git_index_free(index);
+  if (!wroteTree)
+    return false;
+  git_tree *tree = nullptr;
+  git_signature *signature = nullptr;
+  if (git_tree_lookup(&tree, repository, &treeId) < 0 ||
+      git_signature_now(&signature, "CodexUI Test", "codexui@example.invalid") <
+          0) {
+    git_tree_free(tree);
+    git_signature_free(signature);
+    return false;
+  }
+  git_oid commitId{};
+  git_reference *head = nullptr;
+  git_commit *parent = nullptr;
+  if (git_repository_head(&head, repository) == 0)
+    git_commit_lookup(&parent, repository, git_reference_target(head));
+  const git_commit *parents[] = {parent};
+  const bool committed =
+      git_commit_create(&commitId, repository, "HEAD", signature, signature,
+                        nullptr, "path baseline", tree, parent ? 1 : 0,
+                        parent ? parents : nullptr) == 0;
+  git_commit_free(parent);
+  git_reference_free(head);
+  git_signature_free(signature);
+  git_tree_free(tree);
+  return committed;
+}
+
 bool hasLabelContaining(const QWidget &root, const QString &text) {
   for (const QLabel *label : root.findChildren<QLabel *>()) {
     if (label->text().contains(text))
@@ -680,10 +717,15 @@ bool testGitDiffScopes() {
                      received = snapshot;
                      ready = true;
                    });
-  const auto request = [&](GitDiffScope scope) {
+  const auto request = [&](const QString &workspace,
+                           const QStringList &directories,
+                           const QStringList &paths,
+                           const QString &selectedRepository,
+                           GitDiffScope scope,
+                           bool includeHiddenRepositories = false) {
     ready = false;
-    provider.request(repositoryDirectory.path(), scope,
-                     GitDiffContext::Compact);
+    provider.request(workspace, directories, paths, selectedRepository,
+                     includeHiddenRepositories, scope, GitDiffContext::Compact);
     QElapsedTimer timeout;
     timeout.start();
     while (!ready && timeout.elapsed() < 3000)
@@ -691,7 +733,8 @@ bool testGitDiffScopes() {
     return ready;
   };
 
-  bool result = expect(request(GitDiffScope::Unstaged) &&
+  bool result = expect(request(repositoryDirectory.path(), {}, {}, {},
+                              GitDiffScope::Unstaged) &&
                            received.repository && received.error.isEmpty() &&
                            received.files.size() == 1 &&
                            received.files.front().status ==
@@ -706,29 +749,147 @@ bool testGitDiffScopes() {
     git_index_write(index);
     git_index_free(index);
   }
-  result &= expect(request(GitDiffScope::Staged) &&
+  result &= expect(request(repositoryDirectory.path(), {}, {}, {},
+                           GitDiffScope::Staged) &&
                        received.files.size() == 1 &&
                        received.files.front().status ==
                            QStringLiteral("Added"),
                    "Staged scope compares the index with HEAD");
-  result &= expect(request(GitDiffScope::Uncommitted) &&
+  result &= expect(request(repositoryDirectory.path(), {}, {}, {},
+                           GitDiffScope::Uncommitted) &&
                        received.files.size() == 1 &&
                        received.files.front().patch.contains(
                            QStringLiteral("+second line")),
                    "Since-HEAD scope combines index and worktree state");
 
   QTemporaryDir ordinaryDirectory;
-  ready = false;
-  provider.request(ordinaryDirectory.path(), GitDiffScope::Unstaged,
-                   GitDiffContext::Compact);
-  QElapsedTimer timeout;
-  timeout.start();
-  while (!ready && timeout.elapsed() < 3000)
-    spin(1);
-  result &= expect(ordinaryDirectory.isValid() && ready &&
+  result &= expect(ordinaryDirectory.isValid() &&
+                       request(ordinaryDirectory.path(), {}, {}, {},
+                               GitDiffScope::Unstaged) &&
                        !received.repository &&
                        received.error.contains(QStringLiteral("Git repository")),
                    "ordinary folders expose an explicit non-repository state");
+
+  QTemporaryDir multiWorkspace;
+  const QString firstRoot = multiWorkspace.filePath(QStringLiteral("first"));
+  const QString secondRoot = multiWorkspace.filePath(QStringLiteral("second"));
+  const QString hiddenRoot =
+      multiWorkspace.filePath(QStringLiteral(".hidden/repository"));
+  git_repository *firstRepository = nullptr;
+  git_repository *secondRepository = nullptr;
+  git_repository *hiddenRepository = nullptr;
+  git_repository_init(&firstRepository, firstRoot.toUtf8().constData(), 0);
+  git_repository_init(&secondRepository, secondRoot.toUtf8().constData(), 0);
+  QDir().mkpath(hiddenRoot);
+  git_repository_init(&hiddenRepository, hiddenRoot.toUtf8().constData(), 0);
+  for (const QString &root : {firstRoot, secondRoot, hiddenRoot}) {
+    QFile shared(QDir(root).filePath(QStringLiteral("shared.txt")));
+    if (shared.open(QIODevice::WriteOnly | QIODevice::Truncate))
+      shared.write("shared path\n");
+  }
+  QFile firstOnly(QDir(firstRoot).filePath(QStringLiteral("first-only.txt")));
+  if (firstOnly.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    firstOnly.write("first repository\n");
+  firstOnly.close();
+  result &= expect(
+      request(multiWorkspace.path(),
+              {firstRoot, firstRoot, hiddenRoot, secondRoot},
+              {QStringLiteral("shared.txt")}, {}, GitDiffScope::Unstaged) &&
+          received.repositoryRoots.size() == 2 && received.files.size() == 3 &&
+          !received.repositoryRoots.contains(QDir::cleanPath(hiddenRoot)),
+      "duplicate directories are deduplicated, hidden roots are excluded, and ambiguous paths retain visible matches");
+  result &= expect(
+      request(multiWorkspace.path(), {firstRoot, secondRoot, hiddenRoot},
+              {QStringLiteral("shared.txt")}, {}, GitDiffScope::Unstaged,
+              true) &&
+          received.repositoryRoots.size() == 3 && received.files.size() == 4 &&
+          received.repositoryRoots.contains(QDir::cleanPath(hiddenRoot)),
+      "the explicit hidden-repository option includes hidden candidates");
+  result &= expect(
+      request(multiWorkspace.path(), {firstRoot, secondRoot},
+              {QStringLiteral("shared.txt")}, firstRoot,
+              GitDiffScope::Unstaged) &&
+          received.repositoryRoots.size() == 2 && received.files.size() == 2 &&
+          received.files.front().repositoryRoot == QDir::cleanPath(firstRoot),
+      "repository selection filters files without losing the candidate set");
+  result &= expect(
+      request(multiWorkspace.path(), {firstRoot, secondRoot},
+              {QStringLiteral("first-only.txt")}, {},
+              GitDiffScope::Unstaged) &&
+          received.repositoryRoots == QStringList{QDir::cleanPath(firstRoot)} &&
+          received.files.size() == 2,
+      "a unique relative path resolves one repository and includes all of its changes");
+  result &= expect(
+      request(multiWorkspace.path(), {firstRoot, secondRoot},
+              {QDir(secondRoot).filePath(QStringLiteral("shared.txt"))}, {},
+              GitDiffScope::Unstaged) &&
+          received.repositoryRoots ==
+              QStringList{QDir::cleanPath(secondRoot)} &&
+          received.files.size() == 1,
+      "an absolute path resolves only its owning repository");
+  result &= expect(
+      request(multiWorkspace.path(), {firstRoot, secondRoot},
+              {QStringLiteral("not-applied-yet.txt")},
+              QStringLiteral("/stale/repository"), GitDiffScope::Unstaged) &&
+          received.repositoryRoots.size() == 2 && received.files.size() == 3,
+      "an unmatched early path and stale selection safely fall back to all candidate repositories");
+  const QString priorityPath = QStringLiteral("priority.txt");
+  QFile firstPriority(QDir(firstRoot).filePath(priorityPath));
+  QFile secondPriority(QDir(secondRoot).filePath(priorityPath));
+  const bool priorityFiles =
+      firstPriority.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+      firstPriority.write("baseline\n") > 0;
+  firstPriority.close();
+  const bool secondPriorityFile =
+      secondPriority.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+      secondPriority.write("baseline\n") > 0;
+  secondPriority.close();
+  const bool priorityCommitted =
+      priorityFiles && secondPriorityFile &&
+      commitPath(firstRepository, "priority.txt") &&
+      commitPath(secondRepository, "priority.txt");
+  if (firstPriority.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    firstPriority.write("changed\n");
+  firstPriority.close();
+  result &= expect(
+      priorityCommitted &&
+          request(multiWorkspace.path(), {firstRoot, secondRoot},
+                  {priorityPath}, {}, GitDiffScope::Unstaged) &&
+          received.repositoryRoots == QStringList{QDir::cleanPath(firstRoot)} &&
+          received.files.size() == 3 &&
+          std::any_of(received.files.begin(), received.files.end(),
+                      [&](const GitDiffFile &file) {
+                        return file.path == priorityPath &&
+                               file.status == QStringLiteral("Modified");
+                      }),
+      "a currently changed path is preferred over the same clean tracked path");
+  const QString secondCleanPath = QStringLiteral("second-clean.txt");
+  QFile secondClean(QDir(secondRoot).filePath(secondCleanPath));
+  const bool secondCleanCreated =
+      secondClean.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+      secondClean.write("clean unique path\n") > 0;
+  secondClean.close();
+  result &= expect(
+      secondCleanCreated && commitPath(secondRepository, "second-clean.txt") &&
+          request(multiWorkspace.path(), {firstRoot, secondRoot},
+                  {priorityPath, secondCleanPath}, {},
+                  GitDiffScope::Unstaged) &&
+          received.repositoryRoots.size() == 2 && received.files.size() == 4,
+      "changed-file preference is applied independently for every hinted path");
+  QFile::remove(QDir(firstRoot).filePath(priorityPath));
+  result &= expect(
+      request(multiWorkspace.path(), {firstRoot, secondRoot}, {priorityPath},
+              {}, GitDiffScope::Unstaged) &&
+          received.repositoryRoots == QStringList{QDir::cleanPath(firstRoot)} &&
+          std::any_of(received.files.begin(), received.files.end(),
+                      [&](const GitDiffFile &file) {
+                        return file.path == priorityPath &&
+                               file.status == QStringLiteral("Deleted");
+                      }),
+      "a deleted path is resolved from Git state and preferred over a clean tracked match");
+  git_repository_free(firstRepository);
+  git_repository_free(secondRepository);
+  git_repository_free(hiddenRepository);
   git_repository_free(repository);
   return result;
 }

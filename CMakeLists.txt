@@ -319,6 +319,30 @@ if(BUILD_TESTING)
         PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 
+    qt_add_executable(
+        codexui-git-changes-live-test
+        tests/codex/GitChangesLiveTest.cpp
+        src/codex/DiffViewer.cpp
+        src/codex/DiffViewer.h
+        src/codex/GitDiffProvider.cpp
+        src/codex/GitDiffProvider.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
+    )
+    target_compile_features(codexui-git-changes-live-test PRIVATE cxx_std_20)
+    target_include_directories(codexui-git-changes-live-test PRIVATE src)
+    target_link_libraries(
+        codexui-git-changes-live-test PRIVATE PkgConfig::LIBGIT2 Qt6::Widgets
+    )
+    add_test(
+        NAME codexui-git-changes-live
+        COMMAND codexui-git-changes-live-test
+    )
+    set_tests_properties(
+        codexui-git-changes-live
+        PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+
     set(CODEXUI_GREENFIELD_SHELL_TEST_SOURCES ${CODEXUI_CODEX_COMMON_SOURCES})
     list(
         REMOVE_ITEM CODEXUI_GREENFIELD_SHELL_TEST_SOURCES

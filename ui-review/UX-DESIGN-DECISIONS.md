@@ -106,12 +106,19 @@ are frameless and transparent so the panel background remains continuous.
 Plan, Agents, and Requests retain their last visible per-thread presentation
 across thread and tab navigation.
 
-Changes reflects the local Git worktree containing the selected thread's
-workspace, never a patch reconstructed from conversation messages. Its compact
-Inspector surface contains scope, file summary/list, and a unified preview.
-Copy and Open review belong to the selected-file preview; double-clicking a file
-also opens review. The modeless review window provides Unified or Side by side
-layout and Compact or Expanded context without blocking conversation use.
+Changes reflects the local Git worktrees resolved from the selected thread's
+retained command directories, never a patch reconstructed from conversation
+messages. When several repositories match, the compact Inspector surface
+defaults to All repositories and offers a repository selector beside scope,
+file summary/list, and unified preview. Repository-qualified file labels remove
+ambiguity. Copy and Open review belong to the selected-file preview;
+double-clicking a file also opens review. The modeless review window provides
+Unified or Side by side layout and Compact or Expanded context without blocking
+conversation use. Manual filesystem changes use the same libgit2 authority as
+Codex changes; filesystem watches and a short safety refresh remove clean files
+and discover new untracked files. The compact and review scrollbars provide an
+overview ruler: canonical green marks additions, red marks deletions, and blue
+marks hunk boundaries.
 
 ## Desktop integration
 

@@ -194,15 +194,28 @@ show vertical scrollbars only when needed. The Protocol log occupies the
 expanding area of its tab; protocol statistics are displayed below the log.
 Protocol and State data are diagnostic presentation only and do not create
 domain authority. Plan, Agents, and Requests use retained per-thread
-presentation snapshots. Changes instead discovers the local Git worktree from
-the selected thread's working directory and refreshes it asynchronously through
-libgit2. It offers Unstaged, Staged, and Since HEAD scopes; a non-repository
-folder shows an explanatory unavailable state without preventing normal work.
+presentation snapshots. Changes instead resolves local Git repositories upward
+from the selected thread's retained command working directories and refreshes
+them asynchronously through libgit2. When several repositories match, All
+repositories is the default and a selector can narrow the view. Resolution
+considers only repositories reached through visible directory paths by
+default. The persistent Hidden option also includes paths containing
+dot-prefixed directories. When identical hinted paths occur in several
+repositories, repositories where the path is currently changed are preferred
+over clean tracked matches. Changes offers Unstaged, Staged, and Since HEAD
+scopes; a thread without a resolvable
+repository shows an explanatory unavailable state without preventing normal
+work. Manual and Codex-created changes are treated identically.
 
 The Inspector shows a compact unified preview. Open review and double-clicking
 a changed file open a modeless review window with Unified or Side by side
 layout and Compact or Expanded context. These view preferences persist across
-threads.
+threads. Diff scrollbars show proportional overview marks using canonical
+green for additions, red for deletions, and blue for hunk boundaries. Existing
+changed files and their parent directories are watched;
+reverted or restored files disappear after libgit2 confirms they are clean,
+while a short visible-only refresh discovers new untracked files and catches
+index-only changes.
 
 ## Desktop identity
 

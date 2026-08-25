@@ -504,14 +504,30 @@ bounded protocol and security design.
 
 ### 7.4 Changes and Diff Presentation
 
-The Changes inspector is authoritative over the local Git worktree containing
-the selected thread's working directory. It does not use app-server
-`turn.diff.changed` or `fileChange` messages as review content. The provider
-uses libgit2 in-process and asynchronously discovers the enclosing repository,
-then exposes Unstaged, Staged, and Since HEAD scopes. Untracked content,
-renames, copies, deletions, type changes, conflicts, and binary metadata come
-from libgit2. A folder outside Git remains a valid Codex workspace, but its
-Changes tab reports that review requires a repository.
+The Changes inspector is authoritative over the local Git worktrees associated
+with the selected thread. It does not use app-server `turn.diff.changed` or
+`fileChange` messages as review content. `ThreadPresentation` retains bounded,
+deduplicated command working directories and changed-path hints from the
+thread's authoritative items. The provider resolves each directory upward with
+libgit2, deduplicates repository roots, validates ambiguous paths against the
+worktree, index, and HEAD, and persists the resolved roots per thread. A path
+that is currently changed ranks above the same clean tracked path; equal-rank
+matches remain available together. It never performs a recursive downward
+workspace search.
+
+Resolved roots are synchronously persisted in QSettings and loaded from either
+the native string-list representation or the scalar representation used by the
+INI backend for a single root. Consequently, restart hydration does not depend
+on historical command items being present in `thread.read`.
+
+The repository selector defaults to All repositories when several candidates
+match. Candidate paths containing a dot-prefixed directory are excluded by
+default; the persistent Hidden option explicitly includes them. The provider
+exposes Unstaged, Staged, and Since HEAD scopes. Untracked
+content—including files created outside CodexUI—renames, copies, deletions,
+type changes, conflicts, and binary metadata come from libgit2. A folder
+outside Git remains a valid Codex workspace, but its Changes tab reports that
+review requires a repository.
 
 The Inspector contains a compact unified preview with stable file selection,
 addition/deletion counts, Copy, Open review, and file-double-click review. The
@@ -519,7 +535,14 @@ modeless Change Review window remains usable beside the conversation and offers
 Unified or Side by side layout plus Compact or Expanded context. Preferences
 persist across threads. Repository collection runs outside the UI thread,
 superseded results are discarded, and rendered diff content is bounded to 16
-MiB with an explicit truncation state.
+MiB with an explicit truncation state. Every returned file carries its resolved
+absolute pathname. CodexUI watches existing changed files and their parent
+directories, then debounces filesystem events into a fresh libgit2 snapshot.
+Parent-directory watches keep deletion, recreation, rename, and atomic file
+replacement consistent. A visible-only two-second refresh remains the safety
+net for newly created files in previously unwatched nested directories and for
+index-only changes. Files disappear from selection as soon as libgit2 reports
+that they are clean again.
 
 ### 7.5 Conversation Projection and Prompt Admission
 
@@ -1089,7 +1112,7 @@ codex suite only when it validates a boundary whose failure would undermine
 the application architecture independently of the particular symptom that
 revealed it.
 
-Six focused CTest executables form the essential suite. They use production
+Seven focused CTest executables form the essential suite. They use production
 classes directly and are built when standard CMake `BUILD_TESTING` is enabled.
 CTest enables that option by default; disabling it remains the conventional
 packaging choice and does not select a different runtime implementation.
@@ -1186,6 +1209,19 @@ acknowledgment, background completion, retained Plan/Agents state, monotonic
 hydration across reconnect, terminal callbacks, failed-hydration draft
 retention, bounded child-thread reads, and one-shot thread-not-found recovery.
 
+#### Git Changes Integration
+
+`codexui-git-changes-live-test` uses production `DiffViewer`,
+`GitDiffProvider`, QFileSystemWatcher, and libgit2 against a temporary real Git
+repository. It performs filesystem writes rather than UI interaction. The test
+verifies polling discovery of a manually created nested untracked file and
+native watcher refresh after removal, content reversion, deletion restoration,
+and atomic replacement. `codexui-greenfield-layout-test` complements it with
+in-process repository-resolution coverage for all scopes, duplicate candidates,
+ambiguous and absolute paths, All and individual repository selection, hidden
+repository exclusion/inclusion, stale hints/selections, and preference for an
+actually changed path over an identical clean tracked path.
+
 #### Explicit Exclusions
 
 The permanent automated suite does not include:
@@ -1207,7 +1243,7 @@ deterministic CI test would be misleading. The persistent live topology and
 independent bridge observer provide that evidence without introducing a fake
 bridge into the CodexUI repository.
 
-The six focused tests can be built and run directly:
+The seven focused tests can be built and run directly:
 
 ```sh
 cmake --build "${BUILD_DIR}" --parallel 8 \
@@ -1216,12 +1252,13 @@ cmake --build "${BUILD_DIR}" --parallel 8 \
            codexui-greenfield-projection-test \
            codexui-greenfield-middle-test \
            codexui-greenfield-layout-test \
+           codexui-git-changes-live-test \
            codexui-greenfield-shell-test
 ctest --test-dir "${BUILD_DIR}" --output-on-failure \
-  -R '^codexui-(socketpair-contract|presentation-pipeline|greenfield-(projection|middle|layout|shell))$'
+  -R '^codexui-(socketpair-contract|presentation-pipeline|git-changes-live|greenfield-(projection|middle|layout|shell))$'
 ```
 
-Each test has a 10-to-20-second CTest ceiling. Normal successful execution is
+Each test has a 10-to-30-second CTest ceiling. Normal successful execution is
 substantially shorter and requires no network listener, credentials, isolated
 Codex home, or user interaction.
 

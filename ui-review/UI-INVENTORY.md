@@ -69,7 +69,8 @@
 
 - **Plan:** structured current plan or authoritative textual plan fallback.
 - **Agents:** identified collaboration and subagent activity.
-- **Changes:** per-file unified diff with addition/deletion counts, copy, and
+- **Changes:** multi-repository selector, per-file unified diff with
+  addition/deletion counts, live filesystem refresh, copy, and
   expanded viewing.
 - **Requests:** typed approval and input requests with explicit resolution.
 - **Info / State:** retained normalized presentation domains.

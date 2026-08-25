@@ -10,19 +10,25 @@
 #include <QCryptographicHash>
 #include <QDialog>
 #include <QDir>
+#include <QFileInfo>
+#include <QFileSystemWatcher>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStyleOptionComboBox>
+#include <QStyleOptionSlider>
 #include <QSyntaxHighlighter>
+#include <QTextBlock>
 #include <QTextCharFormat>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -35,6 +41,48 @@ namespace {
 
 constexpr int RepositoryRefreshDelayMs = 120;
 constexpr int RepositoryPollingIntervalMs = 2000;
+
+struct DiffMark {
+  qreal position = 0;
+  QColor color;
+};
+
+class DiffScrollBar final : public QScrollBar {
+public:
+  explicit DiffScrollBar(QWidget *parent = nullptr)
+      : QScrollBar(Qt::Vertical, parent) {}
+
+  void setMarks(std::vector<DiffMark> nextMarks) {
+    marks = std::move(nextMarks);
+    update();
+  }
+
+protected:
+  void paintEvent(QPaintEvent *event) override {
+    QScrollBar::paintEvent(event);
+    if (marks.empty())
+      return;
+    QStyleOptionSlider option;
+    initStyleOption(&option);
+    const QRect groove = style()->subControlRect(
+        QStyle::CC_ScrollBar, &option, QStyle::SC_ScrollBarGroove, this);
+    if (!groove.isValid())
+      return;
+    QPainter painter(this);
+    painter.setPen(Qt::NoPen);
+    const int width = std::min(4, groove.width());
+    for (const DiffMark &mark : marks) {
+      painter.setBrush(mark.color);
+      const int y = groove.top() + qRound(
+                                      mark.position *
+                                      std::max(0, groove.height() - 2));
+      painter.drawRoundedRect(groove.right() - width + 1, y, width, 2, 1, 1);
+    }
+  }
+
+private:
+  std::vector<DiffMark> marks;
+};
 
 class ChevronComboBox final : public QComboBox {
 protected:
@@ -99,8 +147,37 @@ QPlainTextEdit *diffView(const QString &objectName) {
   view->setReadOnly(true);
   view->setLineWrapMode(QPlainTextEdit::NoWrap);
   view->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+  auto *scrollBar = new DiffScrollBar(view);
+  view->setVerticalScrollBar(scrollBar);
   view->verticalScrollBar()->setProperty("kind", "infoViewer");
   new DiffHighlighter(view->document());
+  QObject::connect(view, &QPlainTextEdit::textChanged, view,
+                   [view, scrollBar] {
+                     std::vector<DiffMark> marks;
+                     const int blockCount = view->document()->blockCount();
+                     for (QTextBlock block = view->document()->begin();
+                          block.isValid(); block = block.next()) {
+                       const QString text = block.text();
+                       QColor color;
+                       if (text.startsWith(QStringLiteral("@@")))
+                         color = QColor(QStringLiteral("#2f6feb"));
+                       else if (text.startsWith(QLatin1Char('+')) &&
+                                !text.startsWith(QStringLiteral("+++")))
+                         color = QColor(QStringLiteral("#18865e"));
+                       else if (text.startsWith(QLatin1Char('-')) &&
+                                !text.startsWith(QStringLiteral("---")))
+                         color = QColor(QStringLiteral("#c43d4d"));
+                       if (!color.isValid())
+                         continue;
+                       const qreal position =
+                           blockCount > 1
+                               ? static_cast<qreal>(block.blockNumber()) /
+                                     static_cast<qreal>(blockCount - 1)
+                               : 0;
+                       marks.push_back({position, color});
+                     }
+                     scrollBar->setMarks(std::move(marks));
+                   });
   return view;
 }
 
@@ -119,10 +196,48 @@ QString scopeName(GitDiffScope scope) {
   }
 }
 
-QString fileTitle(const GitDiffFile &file) {
-  return !file.previousPath.isEmpty() && file.previousPath != file.path
-             ? QStringLiteral("%1  →  %2").arg(file.previousPath, file.path)
-             : file.path;
+QString repositoryName(const QString &root) {
+  const QString name = QFileInfo(QDir::cleanPath(root)).fileName();
+  return name.isEmpty() ? root : name;
+}
+
+QString fileTitle(const GitDiffFile &file, bool includeRepository = false) {
+  QString result =
+      !file.previousPath.isEmpty() && file.previousPath != file.path
+          ? QStringLiteral("%1  →  %2").arg(file.previousPath, file.path)
+          : file.path;
+  if (includeRepository)
+    result = QStringLiteral("%1 / %2")
+                 .arg(repositoryName(file.repositoryRoot), result);
+  return result;
+}
+
+QString repositorySummary(const GitDiffSnapshot &snapshot) {
+  return snapshot.repositoryRoots.size() > 1
+             ? QStringLiteral("%1 repositories")
+                   .arg(snapshot.repositoryRoots.size())
+             : snapshot.repositoryRoots.isEmpty()
+                   ? QString{}
+                   : snapshot.repositoryRoots.front();
+}
+
+QString settingsBase(const QString &threadId) {
+  return QStringLiteral("diff/threads/%1")
+      .arg(QString::fromLatin1(QCryptographicHash::hash(
+                                   threadId.toUtf8(), QCryptographicHash::Sha256)
+                                   .toHex()));
+}
+
+QStringList stringListSetting(const QString &key) {
+  const QVariant stored = QSettings().value(key);
+  QStringList result = stored.toStringList();
+  if (result.isEmpty()) {
+    const QString scalar = stored.toString();
+    if (!scalar.isEmpty())
+      result.push_back(scalar);
+  }
+  result.removeDuplicates();
+  return result;
 }
 
 QByteArray fingerprint(const GitDiffSnapshot &snapshot) {
@@ -135,7 +250,11 @@ QByteArray fingerprint(const GitDiffSnapshot &snapshot) {
   value += snapshot.truncated ? '\1' : '\0';
   for (const GitDiffFile &file : snapshot.files) {
     value += '\0';
+    value += file.repositoryRoot.toUtf8();
+    value += '\0';
     value += file.path.toUtf8();
+    value += '\0';
+    value += file.absolutePath.toUtf8();
     value += '\0';
     value += file.previousPath.toUtf8();
     value += '\0';
@@ -352,16 +471,26 @@ public:
     context = full ? GitDiffContext::Expanded : GitDiffContext::Compact;
   }
 
-  void setSource(QString nextWorkspace, GitDiffScope nextScope,
-                 QString preferredPath) {
+  void setSource(QString nextWorkspace, QStringList nextDirectories,
+                 QStringList nextPaths, QString nextRepository,
+                 bool nextIncludeHiddenRepositories,
+                 GitDiffScope nextScope, QString preferredPath) {
     workspace = std::move(nextWorkspace);
+    commandDirectories = std::move(nextDirectories);
+    changedPaths = std::move(nextPaths);
+    selectedRepository = std::move(nextRepository);
+    includeHiddenRepositories = nextIncludeHiddenRepositories;
     scope = nextScope;
     requestedPath = std::move(preferredPath);
     reload();
   }
 
 private:
-  void reload() { provider->request(workspace, scope, context); }
+  void reload() {
+    provider->request(workspace, commandDirectories, changedPaths,
+                      selectedRepository, includeHiddenRepositories, scope,
+                      context);
+  }
 
   void apply(const GitDiffSnapshot &value) {
     const QByteArray nextFingerprint = fingerprint(value);
@@ -372,7 +501,7 @@ private:
     subtitle->setText(value.error.isEmpty()
                           ? QStringLiteral("%1  |  %2")
                                 .arg(scopeName(value.scope),
-                                     value.repositoryRoot)
+                                     repositorySummary(value))
                           : value.error);
     reviewFiles->clear();
     int selected = -1;
@@ -380,12 +509,13 @@ private:
       const GitDiffFile &file = value.files[index];
       auto *item = new QListWidgetItem(
           QStringLiteral("%1\n%2   +%3  −%4")
-              .arg(fileTitle(file), file.status)
+              .arg(fileTitle(file, value.repositoryRoots.size() > 1),
+                   file.status)
               .arg(file.additions)
               .arg(file.deletions));
-      item->setToolTip(file.path);
+      item->setToolTip(file.absolutePath);
       reviewFiles->addItem(item);
-      if (file.path == requestedPath)
+      if (file.absolutePath == requestedPath)
         selected = static_cast<int>(index);
     }
     if (!value.files.empty())
@@ -404,8 +534,8 @@ private:
     if (index < 0 || static_cast<std::size_t>(index) >= snapshot.files.size())
       return;
     const GitDiffFile &file = snapshot.files[static_cast<std::size_t>(index)];
-    requestedPath = file.path;
-    title->setText(fileTitle(file));
+    requestedPath = file.absolutePath;
+    title->setText(fileTitle(file, snapshot.repositoryRoots.size() > 1));
     const QString content = file.patch.isEmpty()
                                 ? QStringLiteral("No textual patch is available for this file.")
                                 : file.patch;
@@ -421,6 +551,10 @@ private:
   GitDiffProvider *provider = nullptr;
   GitDiffSnapshot snapshot;
   QString workspace;
+  QStringList commandDirectories;
+  QStringList changedPaths;
+  QString selectedRepository;
+  bool includeHiddenRepositories = false;
   QString requestedPath;
   GitDiffScope scope = GitDiffScope::Unstaged;
   GitDiffContext context = GitDiffContext::Compact;
@@ -441,6 +575,7 @@ private:
 
 DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   provider = new GitDiffProvider(this);
+  fileWatcher = new QFileSystemWatcher(this);
   refreshTimer = new QTimer(this);
   refreshTimer->setSingleShot(true);
   refreshTimer->setInterval(RepositoryRefreshDelayMs);
@@ -451,14 +586,34 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   auto *root = new QVBoxLayout(this);
   root->setContentsMargins(10, 10, 10, 10);
   root->setSpacing(8);
-  auto *header = new QHBoxLayout;
   summary = label(QStringLiteral("No file changes"), "title");
   authority = label({}, "meta");
   auto *headerText = new QVBoxLayout;
   headerText->setSpacing(1);
   headerText->addWidget(summary);
   headerText->addWidget(authority);
-  header->addLayout(headerText, 1);
+  root->addLayout(headerText);
+  auto *filters = new QHBoxLayout;
+  filters->addStretch();
+  repositories = new ChevronComboBox;
+  repositories->setObjectName(QStringLiteral("codexDiffRepository"));
+  repositories->setProperty("codexChevron", true);
+  repositories->addItem(QStringLiteral("Repository"), QString{});
+  repositories->setFixedHeight(30);
+  repositories->setMinimumWidth(130);
+  filters->addWidget(repositories);
+  hiddenRepositories = new QPushButton(QStringLiteral("Hidden"));
+  hiddenRepositories->setObjectName(
+      QStringLiteral("codexDiffHiddenRepositories"));
+  hiddenRepositories->setProperty("kind", "segment");
+  hiddenRepositories->setCheckable(true);
+  hiddenRepositories->setChecked(
+      QSettings().value(QStringLiteral("diff/includeHiddenRepositories"), false)
+          .toBool());
+  hiddenRepositories->setToolTip(
+      QStringLiteral("Also include hidden repositories"));
+  hiddenRepositories->setFixedHeight(30);
+  filters->addWidget(hiddenRepositories);
   scope = new ChevronComboBox;
   scope->setObjectName(QStringLiteral("codexDiffScope"));
   scope->setProperty("codexChevron", true);
@@ -472,8 +627,8 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   const int savedScope =
       QSettings().value(QStringLiteral("diff/scope"), 0).toInt();
   scope->setCurrentIndex(std::clamp(savedScope, 0, scope->count() - 1));
-  header->addWidget(scope);
-  root->addLayout(header);
+  filters->addWidget(scope);
+  root->addLayout(filters);
 
   files = new QListWidget;
   files->setObjectName(QStringLiteral("codexDiffFiles"));
@@ -498,7 +653,9 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   root->addWidget(diff, 1);
 
   connect(refreshTimer, &QTimer::timeout, this, [this] {
-    provider->request(workspace, scopeValue(scope), GitDiffContext::Compact);
+    provider->request(workspace, repositoryCandidates(), changedPaths,
+                      selectedRepository, hiddenRepositories->isChecked(),
+                      scopeValue(scope), GitDiffContext::Compact);
   });
   connect(provider, &GitDiffProvider::loadingChanged, this, [this](bool loading) {
     if (loading && snapshot.files.empty() && snapshot.error.isEmpty()) {
@@ -507,9 +664,30 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   });
   connect(provider, &GitDiffProvider::snapshotReady, this,
           [this](const GitDiffSnapshot &value) { applySnapshot(value); });
+  connect(fileWatcher, &QFileSystemWatcher::fileChanged, this,
+          [this](const QString &) { refreshRepository(); });
+  connect(fileWatcher, &QFileSystemWatcher::directoryChanged, this,
+          [this](const QString &) { refreshRepository(); });
   connect(repositoryTimer, &QTimer::timeout, this, [this] {
     if (isVisible())
-      provider->request(workspace, scopeValue(scope), GitDiffContext::Compact);
+      provider->request(workspace, repositoryCandidates(), changedPaths,
+                        selectedRepository, hiddenRepositories->isChecked(),
+                        scopeValue(scope),
+                        GitDiffContext::Compact);
+  });
+  connect(repositories, &QComboBox::currentIndexChanged, this,
+          [this](int) {
+            selectedRepository = repositories->currentData().toString();
+            if (!threadId.isEmpty())
+              QSettings().setValue(settingsBase(threadId) +
+                                       QStringLiteral("/selected"),
+                                   selectedRepository);
+            refreshRepository();
+          });
+  connect(hiddenRepositories, &QPushButton::toggled, this, [this](bool value) {
+    QSettings().setValue(QStringLiteral("diff/includeHiddenRepositories"),
+                         value);
+    refreshRepository();
   });
   connect(scope, &QComboBox::currentIndexChanged, this, [this](int index) {
     QSettings().setValue(QStringLiteral("diff/scope"), index);
@@ -529,39 +707,100 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   reviewButton->setEnabled(false);
 }
 
-void DiffViewer::setWorkspace(QString nextWorkspace) {
-  nextWorkspace = QDir::cleanPath(std::move(nextWorkspace));
-  if (workspace == nextWorkspace)
+void DiffViewer::setRepositoryContext(QString nextThreadId,
+                                      QString nextWorkspace,
+                                      QStringList nextCommandDirectories,
+                                      QStringList nextChangedPaths) {
+  if (!nextWorkspace.isEmpty())
+    nextWorkspace = QDir::cleanPath(std::move(nextWorkspace));
+  nextCommandDirectories.removeDuplicates();
+  nextChangedPaths.removeDuplicates();
+  if (threadId == nextThreadId && workspace == nextWorkspace &&
+      commandDirectories == nextCommandDirectories &&
+      changedPaths == nextChangedPaths)
     return;
+  const bool changedThread = threadId != nextThreadId;
+  threadId = std::move(nextThreadId);
   workspace = std::move(nextWorkspace);
+  commandDirectories = std::move(nextCommandDirectories);
+  changedPaths = std::move(nextChangedPaths);
+  if (changedThread) {
+    const QString base = settingsBase(threadId);
+    persistedRepositoryRoots =
+        stringListSetting(base + QStringLiteral("/roots"));
+    selectedRepository =
+        QSettings().value(base + QStringLiteral("/selected")).toString();
+  }
   snapshot = {};
+  updateFileWatches();
   snapshotFingerprint.clear();
   files->clear();
   diff->clear();
   refreshRepository();
 }
 
+const GitDiffSnapshot &DiffViewer::currentSnapshot() const noexcept {
+  return snapshot;
+}
+
 void DiffViewer::refreshRepository() {
   refreshTimer->start();
   if (reviewWindow)
-    reviewWindow->setSource(workspace, scopeValue(scope), selectedPath());
+    reviewWindow->setSource(workspace, repositoryCandidates(), changedPaths,
+                            selectedRepository,
+                            hiddenRepositories->isChecked(), scopeValue(scope),
+                            selectedPath());
+}
+
+QStringList DiffViewer::repositoryCandidates() const {
+  QStringList result = commandDirectories;
+  result.append(persistedRepositoryRoots);
+  result.removeDuplicates();
+  return result;
 }
 
 QString DiffViewer::selectedPath() const {
   const int index = files->currentRow();
   return index >= 0 && static_cast<std::size_t>(index) < snapshot.files.size()
-             ? snapshot.files[static_cast<std::size_t>(index)].path
+             ? snapshot.files[static_cast<std::size_t>(index)].absolutePath
              : QString{};
 }
 
 void DiffViewer::applySnapshot(const GitDiffSnapshot &value) {
   const QByteArray nextFingerprint = fingerprint(value);
-  if (nextFingerprint == snapshotFingerprint)
+  if (nextFingerprint == snapshotFingerprint) {
+    snapshot = value;
+    updateFileWatches();
     return;
+  }
   snapshotFingerprint = nextFingerprint;
   const QString previous = selectedPath();
   const int previousScroll = diff->verticalScrollBar()->value();
   snapshot = value;
+  updateFileWatches();
+  if (!threadId.isEmpty() && !value.repositoryRoots.isEmpty()) {
+    persistedRepositoryRoots = value.repositoryRoots;
+    QSettings settings;
+    settings.setValue(settingsBase(threadId) + QStringLiteral("/roots"),
+                      persistedRepositoryRoots);
+    settings.sync();
+  }
+  {
+    const QSignalBlocker blocked(repositories);
+    repositories->clear();
+    if (value.repositoryRoots.size() > 1)
+      repositories->addItem(QStringLiteral("All repositories"), QString{});
+    for (const QString &root : value.repositoryRoots) {
+      repositories->addItem(repositoryName(root), root);
+      repositories->setItemData(repositories->count() - 1, root,
+                                Qt::ToolTipRole);
+    }
+    int selectedIndex = repositories->findData(selectedRepository);
+    if (selectedIndex < 0)
+      selectedIndex = 0;
+    repositories->setCurrentIndex(selectedIndex);
+    selectedRepository = repositories->currentData().toString();
+  }
   files->clear();
   int additions = 0;
   int deletions = 0;
@@ -572,12 +811,12 @@ void DiffViewer::applySnapshot(const GitDiffSnapshot &value) {
     deletions += file.deletions;
     auto *item = new QListWidgetItem(
         QStringLiteral("%1   %2   +%3  −%4")
-            .arg(fileTitle(file), file.status)
+            .arg(fileTitle(file, value.repositoryRoots.size() > 1), file.status)
             .arg(file.additions)
             .arg(file.deletions));
-    item->setToolTip(file.path);
+    item->setToolTip(file.absolutePath);
     files->addItem(item);
-    if (file.path == previous)
+    if (file.absolutePath == previous)
       selected = static_cast<int>(index);
   }
   if (!value.error.isEmpty()) {
@@ -593,9 +832,9 @@ void DiffViewer::applySnapshot(const GitDiffSnapshot &value) {
     authority->setText(
         value.truncated
             ? QStringLiteral("%1  |  display truncated  |  %2")
-                  .arg(scopeName(value.scope), value.repositoryRoot)
+                  .arg(scopeName(value.scope), repositorySummary(value))
             : QStringLiteral("%1  |  %2")
-                  .arg(scopeName(value.scope), value.repositoryRoot));
+                  .arg(scopeName(value.scope), repositorySummary(value)));
   }
   if (!value.files.empty()) {
     files->setCurrentRow(selected >= 0 ? selected : 0);
@@ -609,6 +848,34 @@ void DiffViewer::applySnapshot(const GitDiffSnapshot &value) {
   reviewButton->setEnabled(!value.files.empty());
 }
 
+void DiffViewer::updateFileWatches() {
+  QStringList desired;
+  for (const GitDiffFile &file : snapshot.files) {
+    const QFileInfo info(file.absolutePath);
+    if (info.exists())
+      desired.push_back(info.absoluteFilePath());
+    const QString parent = info.absolutePath();
+    if (!parent.isEmpty() && QFileInfo(parent).isDir())
+      desired.push_back(parent);
+  }
+  desired.removeDuplicates();
+  const QStringList existing = fileWatcher->files() + fileWatcher->directories();
+  QStringList removed;
+  for (const QString &path : existing) {
+    if (!desired.contains(path))
+      removed.push_back(path);
+  }
+  if (!removed.isEmpty())
+    fileWatcher->removePaths(removed);
+  QStringList added;
+  for (const QString &path : desired) {
+    if (!existing.contains(path))
+      added.push_back(path);
+  }
+  if (!added.isEmpty())
+    fileWatcher->addPaths(added);
+}
+
 void DiffViewer::showSelectedFile() {
   const int index = files->currentRow();
   if (index < 0 || static_cast<std::size_t>(index) >= snapshot.files.size()) {
@@ -617,7 +884,8 @@ void DiffViewer::showSelectedFile() {
     return;
   }
   const GitDiffFile &file = snapshot.files[static_cast<std::size_t>(index)];
-  selectedFile->setText(fileTitle(file));
+  selectedFile->setText(
+      fileTitle(file, snapshot.repositoryRoots.size() > 1));
   diff->setPlainText(file.patch.isEmpty()
                          ? QStringLiteral("No textual patch is available for this file.")
                          : file.patch);
@@ -629,7 +897,9 @@ void DiffViewer::openReview() {
     return;
   if (!reviewWindow)
     reviewWindow = new GitDiffReviewWindow(window());
-  reviewWindow->setSource(workspace, scopeValue(scope), selectedPath());
+  reviewWindow->setSource(workspace, repositoryCandidates(), changedPaths,
+                          selectedRepository, hiddenRepositories->isChecked(),
+                          scopeValue(scope), selectedPath());
   reviewWindow->show();
   reviewWindow->raise();
   reviewWindow->activateWindow();

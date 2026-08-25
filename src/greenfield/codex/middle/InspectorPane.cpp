@@ -37,6 +37,14 @@ QString text(const std::string &value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
 }
 
+QStringList texts(const std::vector<std::string> &values) {
+  QStringList result;
+  result.reserve(static_cast<qsizetype>(values.size()));
+  for (const std::string &value : values)
+    result.push_back(text(value));
+  return result;
+}
+
 QString joinedStrings(const nlohmann::json &value) {
   if (!value.is_array())
     return {};
@@ -535,7 +543,10 @@ void InspectorPane::refreshAgents() {
 
 void InspectorPane::refreshChanges() {
   const ThreadPresentation *thread = currentModel->thread(currentThreadId);
-  diffViewer->setWorkspace(thread ? text(thread->cwd) : QString{});
+  diffViewer->setRepositoryContext(
+      text(currentThreadId), thread ? text(thread->cwd) : QString{},
+      thread ? texts(thread->commandCwds) : QStringList{},
+      thread ? texts(thread->changedPaths) : QStringList{});
   diffViewer->refreshRepository();
 }
 
