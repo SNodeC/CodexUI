@@ -39,6 +39,15 @@ bool boolValue(const nlohmann::json &object, const char *key,
              : fallback;
 }
 
+void updateTimestamp(const nlohmann::json &object, const char *key,
+                     std::optional<std::int64_t> &target) {
+  if (!object.is_object())
+    return;
+  const auto iterator = object.find(key);
+  if (iterator != object.end() && iterator->is_number_integer())
+    target = iterator->get<std::int64_t>();
+}
+
 std::string statusValue(const nlohmann::json &value) {
   if (value.is_string())
     return value.get<std::string>();
@@ -585,6 +594,9 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
   const auto status = raw.find("status");
   if (status != raw.end())
     result.status = statusValue(*status);
+  updateTimestamp(raw, "createdAt", result.createdAt);
+  updateTimestamp(raw, "updatedAt", result.updatedAt);
+  updateTimestamp(raw, "recencyAt", result.recencyAt);
   result.archived = boolValue(raw, "archived", result.archived);
 
   const auto turns = raw.find("turns");

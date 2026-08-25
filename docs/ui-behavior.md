@@ -31,8 +31,24 @@ bottom or is owned by the user.
 - The selected thread is identified by its stable app-server thread ID.
 - Once selected, a hydrated thread remains visible in the sidebar for the
   session even when it is outside the ordinary top-level thread ordering; an
-  authoritative removal still removes it, and other rows retain app-server
-  ordering.
+  authoritative removal still removes it.
+- The sidebar sorts all visible rows by a user-selected criterion. `Recent` is
+  the default and uses the app-server's provider-defined `recencyAt` value,
+  newest first. `Created` uses `createdAt` newest first, and `Last changed`
+  uses `updatedAt` newest first. `Alphanumeric` sorts displayed titles
+  case-insensitively with natural number ordering, so 2 precedes 10 and titles
+  beginning with numbers precede other titles. Timestamp values that are not
+  available sort after timestamped threads. The directions are fixed; the UI
+  does not provide a separate ascending/descending control.
+- Each visible thread is presented as a compact card. Its status indicator is
+  part of that card, and hover and selection strengthen the same card surface
+  instead of introducing a separate row treatment. The Sort control uses the
+  same centered chevron treatment as the prompt settings.
+- A left click selects a thread and changes the displayed conversation. A
+  right click opens actions for the pointed-to card without changing the
+  selected thread or displayed conversation. That card retains its hover
+  treatment until the non-blocking menu closes; dismissing the menu does not
+  replay the closing click into another control.
 - Sending always targets the visibly selected thread. CodexUI validates the
   visible selection before dispatch and never creates a thread as an implicit
   fallback for missing or inconsistent selection state.

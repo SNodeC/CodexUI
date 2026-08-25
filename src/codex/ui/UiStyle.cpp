@@ -4,10 +4,36 @@
 
 #include <QApplication>
 #include <QFontInfo>
+#include <QPainter>
+#include <QPainterPath>
+#include <QWidget>
 
 #include <algorithm>
 
 namespace codexui::UiStyle {
+
+void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
+                 bool highlighted) {
+  if (!indicator.isValid() || indicator.isEmpty())
+    return;
+  const QPointF center = indicator.center();
+  QPainterPath chevron;
+  chevron.moveTo(center.x() - 3.5, center.y() - 1.5);
+  chevron.lineTo(center.x(), center.y() + 2.0);
+  chevron.lineTo(center.x() + 3.5, center.y() - 1.5);
+
+  QColor color(QStringLiteral("#667085"));
+  if (!enabled)
+    color = QColor(QStringLiteral("#98a2b3"));
+  else if (highlighted)
+    color = QColor(QStringLiteral("#1d2633"));
+
+  QPainter painter(widget);
+  painter.setRenderHint(QPainter::Antialiasing, true);
+  painter.setPen(QPen(color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  painter.setBrush(Qt::NoBrush);
+  painter.drawPath(chevron);
+}
 
 QString applicationStyleSheet() {
   const qreal configuredSize = QFontInfo(QApplication::font()).pointSizeF();
@@ -82,6 +108,8 @@ QString applicationStyleSheet() {
         QPushButton[kind="stop"]:hover { background: #fff1f1; }
         QPushButton[codexChevron="true"] { padding-right: 26px; }
         QPushButton[codexChevron="true"]::menu-indicator { image: none; width: 0; }
+        QToolButton[codexChevron="true"] { padding-right: 26px; }
+        QToolButton[codexChevron="true"]::menu-indicator { image: none; width: 0; }
         QPushButton[changed="true"] {
             background: #e5eeff;
             color: #2f6feb;

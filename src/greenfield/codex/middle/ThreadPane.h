@@ -13,6 +13,8 @@
 
 class QListWidget;
 class QListWidgetItem;
+class QMenu;
+class QToolButton;
 
 namespace codexui::codex {
 class PresentationModel;
@@ -21,6 +23,8 @@ namespace middle {
 
 class ThreadPane final : public QFrame {
 public:
+  enum class SortCriterion { Alphanumeric, Created, LastChanged, Recency };
+
   struct Actions {
     std::function<void()> newThread;
     std::function<void()> refresh;
@@ -38,16 +42,27 @@ public:
   void setActions(Actions actions);
   void refresh(const PresentationModel &model,
                const std::string &selectedThreadId);
+  void setSortCriterion(SortCriterion criterion);
+  [[nodiscard]] SortCriterion currentSortCriterion() const noexcept;
   [[nodiscard]] std::string visiblySelectedThreadId() const;
 
 private:
+  void updateSortButton();
+  void sortVisibleThreads(std::vector<std::string> &ids,
+                          const PresentationModel &model) const;
+  void setContextHighlight(const std::string &threadId, bool highlighted);
   void showContextMenu(const QPoint &position);
 
   const PresentationModel *currentModel = nullptr;
   Actions actions;
+  SortCriterion sortCriterion = SortCriterion::Recency;
+  QToolButton *sortButton = nullptr;
   QListWidget *list = nullptr;
   std::unordered_map<std::string, QListWidgetItem *> rows;
   std::vector<std::string> retainedVisibleThreads;
+  std::string projectedSelectedThreadId;
+  std::string contextThreadId;
+  QMenu *contextMenu = nullptr;
   QByteArray visibleSnapshot;
 };
 

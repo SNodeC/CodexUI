@@ -276,6 +276,8 @@ if(BUILD_TESTING)
         src/codex/TurnSettingsWidget.h
         src/codex/ui/ExpandingPromptEditor.cpp
         src/codex/ui/ExpandingPromptEditor.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
         src/greenfield/codex/middle/ComposerPane.cpp
         src/greenfield/codex/middle/ComposerPane.h
         src/greenfield/codex/middle/ConversationCards.cpp

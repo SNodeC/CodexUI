@@ -5,6 +5,9 @@
 
 #include <QString>
 
+class QRect;
+class QWidget;
+
 namespace codexui::UiStyle {
 
 inline constexpr auto appBackground = "#f6f8fb";
@@ -29,6 +32,8 @@ inline constexpr auto destructive = "#b83a3a";
 inline constexpr auto purple = "#6941c6";
 
 QString applicationStyleSheet();
+void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
+                 bool highlighted);
 
 } // namespace codexui::UiStyle
 

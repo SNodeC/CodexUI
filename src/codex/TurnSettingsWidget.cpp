@@ -3,6 +3,7 @@
 #include "codex/TurnSettingsWidget.h"
 
 #include "codex/FileSelectionDialog.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QComboBox>
 #include <QDir>
@@ -13,8 +14,6 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QPaintEvent>
-#include <QPainter>
-#include <QPainterPath>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QStyle>
@@ -33,29 +32,6 @@ constexpr auto DefaultValue = "default";
 constexpr int SettingControlHeight = 32;
 constexpr int SettingLabelSpacing = 5;
 
-void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
-                 bool highlighted) {
-  if (!indicator.isValid() || indicator.isEmpty())
-    return;
-  const QPointF center = indicator.center();
-  QPainterPath chevron;
-  chevron.moveTo(center.x() - 3.5, center.y() - 1.5);
-  chevron.lineTo(center.x(), center.y() + 2.0);
-  chevron.lineTo(center.x() + 3.5, center.y() - 1.5);
-
-  QColor color(QStringLiteral("#667085"));
-  if (!enabled)
-    color = QColor(QStringLiteral("#98a2b3"));
-  else if (highlighted)
-    color = QColor(QStringLiteral("#1d2633"));
-
-  QPainter painter(widget);
-  painter.setRenderHint(QPainter::Antialiasing, true);
-  painter.setPen(QPen(color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-  painter.setBrush(Qt::NoBrush);
-  painter.drawPath(chevron);
-}
-
 class CompactComboBox final : public QComboBox {
 protected:
   void paintEvent(QPaintEvent *event) override {
@@ -65,9 +41,9 @@ protected:
     initStyleOption(&option);
     const QRect indicator = style()->subControlRect(
         QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxArrow, this);
-    drawChevron(this, indicator, option.state & QStyle::State_Enabled,
-                option.state &
-                    (QStyle::State_MouseOver | QStyle::State_HasFocus));
+    UiStyle::drawChevron(
+        this, indicator, option.state & QStyle::State_Enabled,
+        option.state & (QStyle::State_MouseOver | QStyle::State_HasFocus));
   }
 };
 
@@ -87,9 +63,9 @@ protected:
     QRect indicator(contents.right() - std::max(12, indicatorWidth),
                     contents.top(), std::max(12, indicatorWidth),
                     contents.height());
-    drawChevron(this, indicator, option.state & QStyle::State_Enabled,
-                option.state &
-                    (QStyle::State_MouseOver | QStyle::State_HasFocus));
+    UiStyle::drawChevron(
+        this, indicator, option.state & QStyle::State_Enabled,
+        option.state & (QStyle::State_MouseOver | QStyle::State_HasFocus));
   }
 };
 

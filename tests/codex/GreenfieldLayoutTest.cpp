@@ -12,21 +12,25 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QContextMenuEvent>
 #include <QElapsedTimer>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
+#include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QScrollBar>
 #include <QSplitter>
 #include <QTabWidget>
 #include <QThread>
+#include <QToolButton>
 #include <QWheelEvent>
 
 #include <iostream>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace codexui::codex::middle {
 namespace {
@@ -86,6 +90,19 @@ QWheelEvent wheelFor(QWidget *target, int pixelDelta) {
   return QWheelEvent(local, target->mapToGlobal(local.toPoint()), QPoint(),
                      QPoint(0, pixelDelta), Qt::NoButton, Qt::NoModifier,
                      Qt::ScrollUpdate, false);
+}
+
+std::vector<std::string> threadOrder(const ThreadPane &pane) {
+  const auto *list =
+      pane.findChild<QListWidget *>(QStringLiteral("threadList"));
+  std::vector<std::string> result;
+  if (!list)
+    return result;
+  result.reserve(static_cast<std::size_t>(list->count()));
+  for (int row = 0; row < list->count(); ++row)
+    result.push_back(
+        list->item(row)->data(Qt::UserRole).toString().toStdString());
+  return result;
 }
 
 bool testOverlayGeometryAndRegionRouting() {
@@ -216,16 +233,24 @@ bool testThreadSelectionProjection() {
       row ? row->findChild<QLabel *>(QStringLiteral("threadTitle")) : nullptr;
   auto *status =
       row ? row->findChild<QLabel *>(QStringLiteral("threadStatus")) : nullptr;
+  auto *dot =
+      row ? row->findChild<QFrame *>(QStringLiteral("threadStatusDot"))
+          : nullptr;
   auto *rowLayout = row ? qobject_cast<QHBoxLayout *>(row->layout()) : nullptr;
+  auto *sortButton =
+      pane.findChild<QToolButton *>(QStringLiteral("threadSortButton"));
   result &= expect(
-      selected && selected->sizeHint().height() == 48 && rowLayout &&
+      selected && selected->sizeHint().height() == 54 && rowLayout &&
           rowLayout->contentsMargins() == QMargins(5, 2, 5, 2) &&
-          rowLayout->spacing() == 8 && title && status &&
+          rowLayout->spacing() == 8 && title && status && dot &&
+          rowLayout->indexOf(dot) >= 0 && sortButton &&
+          sortButton->property("codexChevron").toBool() &&
           title->property("kind").toString() == QStringLiteral("title") &&
           status->property("kind").toString() == QStringLiteral("meta") &&
           title->textInteractionFlags().testFlag(Qt::TextSelectableByMouse) &&
           status->textInteractionFlags().testFlag(Qt::TextSelectableByMouse),
-      "thread row typography and 48-pixel card geometry match the UI contract");
+      "thread cards keep their status dot and shared chevron styling inside "
+      "the UI contract");
   pane.refresh(model, "thread-a");
   bool retainedSupplement = false;
   if (list) {
@@ -254,6 +279,85 @@ bool testThreadSelectionProjection() {
   return result;
 }
 
+bool testThreadAlphanumericSort() {
+  PresentationModel model;
+  model.applyEvent(presentation::result(
+      1, 1, "threads.list", "alpha-threads", true,
+      {{"threads",
+        nlohmann::json::array({{{"id", "alpha"}, {"name", "Alpha"}},
+                               {{"id", "ten"}, {"name", "10 Release"}},
+                               {{"id", "two"}, {"name", "2 Review"}},
+                               {{"id", "one"}, {"name", "1 Setup"}},
+                               {{"id", "beta"}, {"name", "beta"}}})}},
+      presentation::Authority::Merge));
+  ThreadPane pane;
+  pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
+  pane.refresh(model, "two");
+  return expect(threadOrder(pane) ==
+                        std::vector<std::string>(
+                            {"one", "two", "ten", "alpha", "beta"}) &&
+                    pane.visiblySelectedThreadId() == "two",
+                "Alphanumeric sorting is natural and preserves selection");
+}
+
+bool testThreadCreatedSort() {
+  PresentationModel model;
+  model.applyEvent(presentation::result(
+      1, 1, "threads.list", "created-threads", true,
+      {{"threads",
+        nlohmann::json::array({{{"id", "old"}, {"createdAt", 10}},
+                               {{"id", "missing"}},
+                               {{"id", "new"}, {"createdAt", 30}},
+                               {{"id", "middle"}, {"createdAt", 20}}})}},
+      presentation::Authority::Merge));
+  ThreadPane pane;
+  pane.setSortCriterion(ThreadPane::SortCriterion::Created);
+  pane.refresh(model, {});
+  return expect(threadOrder(pane) == std::vector<std::string>(
+                                         {"new", "middle", "old", "missing"}),
+                "Created sorting is newest first with missing values last");
+}
+
+bool testThreadLastChangedSort() {
+  PresentationModel model;
+  model.applyEvent(presentation::result(
+      1, 1, "threads.list", "changed-threads", true,
+      {{"threads",
+        nlohmann::json::array({{{"id", "first"}, {"updatedAt", 20}},
+                               {{"id", "second"}, {"updatedAt", 10}},
+                               {{"id", "third"}, {"updatedAt", 30}}})}},
+      presentation::Authority::Merge));
+  model.applyEvent(presentation::event(
+      2, 1, "thread.upsert",
+      {{"thread", {{"id", "first"}, {"name", "Renamed"}}}},
+      presentation::Authority::Merge, {{"threadId", "first"}}));
+  ThreadPane pane;
+  pane.setSortCriterion(ThreadPane::SortCriterion::LastChanged);
+  pane.refresh(model, {});
+  return expect(threadOrder(pane) ==
+                    std::vector<std::string>({"third", "first", "second"}),
+                "Last changed sorting uses retained updated timestamps");
+}
+
+bool testThreadRecencySort() {
+  PresentationModel model;
+  model.applyEvent(presentation::result(
+      1, 1, "threads.list", "recent-threads", true,
+      {{"threads",
+        nlohmann::json::array({{{"id", "older"}, {"recencyAt", 10}},
+                               {{"id", "recent"}, {"recencyAt", 30}},
+                               {{"id", "middle"}, {"recencyAt", 20}}})}},
+      presentation::Authority::Merge));
+  ThreadPane pane;
+  pane.refresh(model, "older");
+  return expect(
+      pane.currentSortCriterion() == ThreadPane::SortCriterion::Recency &&
+          threadOrder(pane) ==
+              std::vector<std::string>({"recent", "middle", "older"}) &&
+          pane.visiblySelectedThreadId() == "older",
+      "Recent is the default and preserves selection");
+}
+
 bool testThreadRowReorderOwnership() {
   PresentationModel model;
   model.applyEvent(presentation::event(
@@ -264,35 +368,62 @@ bool testThreadRowReorderOwnership() {
       presentation::Authority::Merge, {{"threadId", "thread-b"}}));
 
   ThreadPane pane;
+  int selectedByUser = 0;
+  ThreadPane::Actions actions;
+  actions.select = [&](const std::string &) { ++selectedByUser; };
+  pane.setActions(std::move(actions));
+  pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
   pane.resize(320, 500);
   pane.show();
   pane.refresh(model, "thread-a");
   spin(20);
   auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
   QListWidgetItem *threadA = nullptr;
+  QListWidgetItem *threadB = nullptr;
   if (list) {
     for (int row = 0; row < list->count(); ++row) {
       if (list->item(row)->data(Qt::UserRole).toString() ==
           QStringLiteral("thread-a")) {
         threadA = list->item(row);
-        break;
+      } else if (list->item(row)->data(Qt::UserRole).toString() ==
+                 QStringLiteral("thread-b")) {
+        threadB = list->item(row);
       }
     }
   }
-  bool result = expect(list && threadA,
+  bool result = expect(list && threadA && threadB,
                        "the stable thread row exists before list reordering");
-  if (!list || !threadA)
+  if (!list || !threadA || !threadB)
     return false;
-  QPointer<QWidget> originalRow = list->itemWidget(threadA);
+  const QPoint rightClickPosition = list->visualItemRect(threadB).center();
+  QMouseEvent rightClick(QEvent::MouseButtonPress, rightClickPosition,
+                         list->viewport()->mapToGlobal(rightClickPosition),
+                         Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+  QApplication::sendEvent(list->viewport(), &rightClick);
+  QContextMenuEvent contextMenuEvent(
+      QContextMenuEvent::Mouse, rightClickPosition,
+      list->viewport()->mapToGlobal(rightClickPosition));
+  QApplication::sendEvent(list->viewport(), &contextMenuEvent);
+  result &= expect(pane.visiblySelectedThreadId() == "thread-a" &&
+                       selectedByUser == 0 &&
+                       threadB->data(Qt::UserRole + 1).toBool(),
+                   "right-click highlights row actions without selecting a "
+                   "thread");
+  if (QWidget *popup = QApplication::activePopupWidget())
+    popup->close();
+  spin();
+  result &= expect(!threadB->data(Qt::UserRole + 1).toBool(),
+                   "closing row actions clears the native context hover");
+  QPointer<QWidget> originalRow = list->itemWidget(threadB);
 
   model.applyEvent(presentation::result(
       3, 1, "threads.list", "reordered-threads", true,
       {{"threads",
-        nlohmann::json::array({{{"id", "thread-a"}, {"name", "A"}},
+        nlohmann::json::array({{{"id", "thread-a"}, {"name", "Z"}},
                                {{"id", "thread-b"}, {"name", "B"}}})}},
       presentation::Authority::Replace));
   pane.refresh(model, "thread-a");
-  QPointer<QWidget> movedRow = list->itemWidget(threadA);
+  QPointer<QWidget> movedRow = list->itemWidget(threadB);
   result &= expect(originalRow && movedRow && originalRow != movedRow,
                    "moving an item never reattaches its deferred-delete row");
   if (!originalRow || !movedRow || originalRow == movedRow)
@@ -301,7 +432,7 @@ bool testThreadRowReorderOwnership() {
   QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
   spin(20);
   result &= expect(originalRow.isNull() && movedRow &&
-                       list->itemWidget(threadA) == movedRow,
+                       list->itemWidget(threadB) == movedRow,
                    "deferred deletion cannot invalidate the moved thread row");
   list->setCurrentItem(threadA);
   list->viewport()->repaint();
@@ -519,6 +650,10 @@ int main(int argc, char **argv) {
   using namespace codexui::codex::middle;
   bool result = testOverlayGeometryAndRegionRouting();
   result &= testThreadSelectionProjection();
+  result &= testThreadAlphanumericSort();
+  result &= testThreadCreatedSort();
+  result &= testThreadLastChangedSort();
+  result &= testThreadRecencySort();
   result &= testThreadRowReorderOwnership();
   result &= testNestedCommandScrollOwnership();
   result &= testInfoViewerLayout();
