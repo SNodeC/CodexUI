@@ -170,6 +170,7 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   header->addWidget(hide);
   layout->addLayout(header);
   auto *headerDivider = new QFrame;
+  headerDivider->setObjectName(QStringLiteral("threadHeaderDivider"));
   headerDivider->setProperty("kind", "standardDivider");
   headerDivider->setFixedHeight(1);
   layout->addWidget(headerDivider);

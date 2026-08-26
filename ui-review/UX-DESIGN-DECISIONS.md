@@ -87,6 +87,10 @@ with cards in server order. Stable turn/item and local-submission keys drive a
 single reconcile path for both first display and updates. Retained cards mutate
 in place, and identical visible projections do not trigger layout work.
 
+The active thread name and its smaller `workspace | state` metadata form one
+baseline-aligned lockup, following the application brand/titlebar pattern
+without sharing its font size.
+
 ## Conversation following
 
 The message view smoothly follows appended or streamed content only while

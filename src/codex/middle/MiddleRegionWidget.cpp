@@ -35,10 +35,12 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
   return label;
 }
 
-QFrame *divider() {
+QFrame *divider(const char *name = nullptr) {
   auto *line = new QFrame;
+  if (name)
+    line->setObjectName(QString::fromLatin1(name));
+  line->setProperty("kind", "standardDivider");
   line->setFixedHeight(1);
-  line->setStyleSheet(QStringLiteral("background:#d7dee8;"));
   return line;
 }
 
@@ -81,9 +83,10 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
       QStringLiteral("QFrame#conversation{background:#f6f8fb;}"));
   conversationRegion->setMinimumWidth(480);
   auto *center = new QVBoxLayout(conversationRegion);
-  center->setContentsMargins(24, 14, 24, 12);
+  center->setContentsMargins(10, 14, 10, 12);
   center->setSpacing(0);
   auto *context = new QHBoxLayout;
+  context->setContentsMargins(14, 0, 14, 0);
   context->addStrut(24);
   auto *sectionTitle =
       makeLabel(QStringLiteral("CONVERSATION"), "panelHeader");
@@ -92,17 +95,31 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   context->addWidget(sectionTitle);
   context->addStretch();
   center->addLayout(context);
-  center->addWidget(divider());
+  center->addWidget(divider("conversationHeaderDivider"));
   center->addSpacing(8);
+
+  auto *content = new QWidget;
+  auto *contentLayout = new QVBoxLayout(content);
+  contentLayout->setContentsMargins(14, 0, 14, 0);
+  contentLayout->setSpacing(0);
+  auto *threadHeading = new QHBoxLayout;
+  threadHeading->setSpacing(10);
   conversationTitle =
       makeLabel(QStringLiteral("No synchronized thread"), "heading");
+  conversationTitle->setObjectName(QStringLiteral("conversationTitle"));
+  conversationTitle->setWordWrap(false);
+  conversationTitle->setSizePolicy(QSizePolicy::Minimum,
+                                   QSizePolicy::Preferred);
   conversationMetadata = makeLabel({}, "meta");
-  center->addWidget(conversationTitle);
-  center->addSpacing(2);
-  center->addWidget(conversationMetadata);
-  center->addSpacing(7);
-  center->addWidget(divider());
-  center->addSpacing(7);
+  conversationMetadata->setObjectName(
+      QStringLiteral("conversationMetadata"));
+  conversationMetadata->setWordWrap(false);
+  threadHeading->addWidget(conversationTitle, 0, Qt::AlignBaseline);
+  threadHeading->addWidget(conversationMetadata, 1, Qt::AlignBaseline);
+  contentLayout->addLayout(threadHeading);
+  contentLayout->addSpacing(7);
+  contentLayout->addWidget(divider());
+  contentLayout->addSpacing(7);
 
   noticeBar = new QFrame;
   noticeBar->setStyleSheet(QStringLiteral(
@@ -118,14 +135,15 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   noticeLayout->addWidget(dismiss);
   noticeBar->hide();
   connect(dismiss, &QPushButton::clicked, noticeBar, &QWidget::hide);
-  center->addWidget(noticeBar);
+  contentLayout->addWidget(noticeBar);
 
   conversationView = new ConversationView;
-  center->addWidget(conversationView, 1);
+  contentLayout->addWidget(conversationView, 1);
   composerPane = new ComposerPane(conversationRegion);
   composerPane->setExtraOverlayHeightAction(
       [this](int height) { conversationView->setTrailingSpaceHeight(height); });
-  center->addWidget(composerPane->canonicalReserve());
+  contentLayout->addWidget(composerPane->canonicalReserve());
+  center->addWidget(content, 1);
   splitter->addWidget(conversationRegion);
 
   inspectorPane = new InspectorPane;

@@ -173,6 +173,45 @@ bool testOverlayGeometryAndRegionRouting() {
                        splitter->widget(2)->maximumWidth() == 520,
                    "pane width constraints match the visual contract");
 
+  auto *threadHeaderDivider =
+      splitter->widget(0)->findChild<QFrame *>(
+          QStringLiteral("threadHeaderDivider"));
+  auto *conversationHeaderDivider =
+      splitter->widget(1)->findChild<QFrame *>(
+          QStringLiteral("conversationHeaderDivider"));
+  auto *conversationTitle =
+      splitter->widget(1)->findChild<QLabel *>(
+          QStringLiteral("conversationTitle"));
+  auto *conversationMetadata =
+      splitter->widget(1)->findChild<QLabel *>(
+          QStringLiteral("conversationMetadata"));
+  const auto paneRect = [](QWidget *widget, QWidget *pane) {
+    return QRect(widget->mapTo(pane, QPoint()), widget->size());
+  };
+  const QRect threadDividerRect =
+      threadHeaderDivider
+          ? paneRect(threadHeaderDivider, splitter->widget(0))
+          : QRect{};
+  const QRect conversationDividerRect =
+      conversationHeaderDivider
+          ? paneRect(conversationHeaderDivider, splitter->widget(1))
+          : QRect{};
+  result &= expect(
+      threadHeaderDivider && conversationHeaderDivider &&
+          threadDividerRect.left() == 10 &&
+          threadDividerRect.right() == splitter->widget(0)->width() - 11 &&
+          conversationDividerRect.left() == 10 &&
+          conversationDividerRect.right() ==
+              splitter->widget(1)->width() - 11,
+      "Threads and Conversation header dividers share the 10 px inset");
+  result &= expect(
+      conversationTitle && conversationMetadata &&
+          conversationMetadata->geometry().left() >
+              conversationTitle->geometry().right() &&
+          std::abs(conversationMetadata->geometry().bottom() -
+                   conversationTitle->geometry().bottom()) <= 1,
+      "thread title and metadata form one baseline-aligned lockup");
+
   ConversationView &view = region.conversation();
   view.reconcile(longConversation("layout-thread"));
   spin(20);
