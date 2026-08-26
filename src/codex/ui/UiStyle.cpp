@@ -100,6 +100,10 @@ QString applicationStyleSheet() {
         QLabel[kind="body"] { font-size: %2pt; }
         QLabel[kind="meta"] { color: #667085; font-size: %1pt; }
         QLabel[kind="small"] { color: #667085; font-size: %1pt; }
+        QLabel[tone="active"] { color: #285fca; }
+        QLabel[tone="success"] { color: #176b45; }
+        QLabel[tone="warning"] { color: #8a5208; }
+        QLabel[tone="danger"] { color: #982f3d; }
         QLabel[kind="imageThumbnail"] {
           background: #f8fafc;
           border: 1px solid #d7dee8;
@@ -185,6 +189,7 @@ QString applicationStyleSheet() {
         }
         QFrame[kind="panel"] { background: #ffffff; }
         QFrame[kind="raised"] { background: #ffffff; border: 1px solid #d7dee8; border-radius: 10px; }
+        QFrame[kind="raised"][tone="warning"] { background: #fff6df; border-color: #e5c77d; }
         QFrame[messageRole="user"] { background: #eaf2ff; border: 1px solid #bfd3f9; border-radius: 8px; }
         QFrame[messageRole="agent"] { background: #ffffff; border: 0; border-radius: 8px; }
         QFrame[kind="summary"] { background: #f8fafc; border: 1px solid #d7dee8; border-radius: 7px; }
@@ -192,6 +197,8 @@ QString applicationStyleSheet() {
         QFrame[kind="greenBadge"] { background: #e9f7f0; border: 1px solid #a9d8c1; border-radius: 6px; }
         QFrame[kind="blueBadge"] { background: #e5eeff; border-radius: 5px; }
         QFrame[kind="orangeBadge"] { background: #fff6df; border: 1px solid #e5c77d; border-radius: 7px; }
+        QFrame#conversationNoticeBar[tone="warning"] { background: #fff6df; border: 1px solid #e5c77d; border-radius: 7px; }
+        QFrame#conversationNoticeBar[tone="danger"] { background: #fff0f2; border: 1px solid #efb8c0; border-radius: 7px; }
         QWidget#composerOverlay { background: #f6f8fb; }
         QFrame[kind="composer"] { background: #ffffff; border: 1px solid #d7dee8; border-radius: 10px; }
         QFrame[kind="composer"][focused="true"] { border: 2px solid #2f6feb; }

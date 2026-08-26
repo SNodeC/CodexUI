@@ -19,6 +19,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QShowEvent>
+#include <QStyle>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTimer>
@@ -220,16 +221,46 @@ bool setVisibleMarkdown(QLabel *label, const QString &markdown) {
 
 QString displayStatus(const QString &status) {
   if (status == QStringLiteral("inProgress") ||
-      status == QStringLiteral("active"))
+      status == QStringLiteral("active") ||
+      status == QStringLiteral("running") ||
+      status == QStringLiteral("started"))
     return QStringLiteral("Running");
   if (status == QStringLiteral("completed") || status == QStringLiteral("idle"))
     return QStringLiteral("Completed");
   if (status == QStringLiteral("failed") ||
       status == QStringLiteral("systemError"))
     return QStringLiteral("Failed");
+  if (status == QStringLiteral("interrupted"))
+    return QStringLiteral("Interrupted");
   if (status.isEmpty())
     return QStringLiteral("Unknown");
   return status;
+}
+
+QString statusTone(const QString &status) {
+  if (status == QStringLiteral("inProgress") ||
+      status == QStringLiteral("active") ||
+      status == QStringLiteral("running") ||
+      status == QStringLiteral("started"))
+    return QStringLiteral("active");
+  if (status == QStringLiteral("completed") || status == QStringLiteral("idle"))
+    return QStringLiteral("success");
+  if (status == QStringLiteral("failed") ||
+      status == QStringLiteral("systemError"))
+    return QStringLiteral("danger");
+  if (status == QStringLiteral("interrupted"))
+    return QStringLiteral("warning");
+  return {};
+}
+
+void setStatusTone(QLabel *label, const QString &status) {
+  const QString tone = statusTone(status);
+  if (label->property("tone").toString() == tone)
+    return;
+  label->setProperty("tone", tone);
+  label->style()->unpolish(label);
+  label->style()->polish(label);
+  label->update();
 }
 
 QString commandMetadata(const CommandExecutionData &command) {
@@ -660,12 +691,15 @@ public:
         output->restoreScrollState({true, 0});
       }
       metadata->setText(commandMetadata(execution));
+      setStatusTone(metadata, execution.status);
       metadata->show();
       break;
     }
     case CardKind::AgentActivity: {
       const auto &activity = std::get<AgentActivityData>(data.payload);
       metadata->setText(agentMetadata(activity));
+      setStatusTone(metadata, activity.status.isEmpty() ? activity.kind
+                                                        : activity.status);
       metadata->show();
       setVisibleText(body, activity.prompt);
       setVisibleMarkdown(detail, activity.resultText);
@@ -681,6 +715,7 @@ public:
       QStringList values{displayStatus(changes.status)};
       values << QStringLiteral("%1 paths").arg(changes.pathCount);
       metadata->setText(values.join(QStringLiteral("  |  ")));
+      setStatusTone(metadata, changes.status);
       metadata->show();
       break;
     }

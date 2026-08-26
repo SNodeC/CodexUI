@@ -61,13 +61,31 @@ QString text(const std::string &value) {
 }
 
 QString displayStatus(const std::string &status) {
-  if (status == "inProgress" || status == "active")
+  if (status == "inProgress" || status == "active" || status == "running" ||
+      status == "started")
     return QStringLiteral("Running");
   if (status == "completed" || status == "idle")
     return QStringLiteral("Completed");
   if (status == "failed" || status == "systemError")
     return QStringLiteral("Failed");
+  if (status == "interrupted")
+    return QStringLiteral("Interrupted");
   return status.empty() ? QStringLiteral("Unknown") : text(status);
+}
+
+QString statusTone(const std::string &status, std::size_t requestCount) {
+  if (requestCount != 0)
+    return QStringLiteral("warning");
+  if (status == "active" || status == "inProgress" || status == "running" ||
+      status == "started")
+    return QStringLiteral("active");
+  if (status == "completed" || status == "idle")
+    return QStringLiteral("success");
+  if (status == "failed" || status == "systemError")
+    return QStringLiteral("danger");
+  if (status == "interrupted")
+    return QStringLiteral("warning");
+  return {};
 }
 
 QLabel *makeLabel(QString value, const char *kind = "body") {
@@ -100,10 +118,18 @@ void updateRow(QWidget *row, const ThreadPresentation &thread,
     titleText.prepend(QStringLiteral("! "));
   title->setText(titleText);
   status->setText(displayStatus(thread.status));
+  const QString tone = statusTone(thread.status, requestCount);
+  if (status->property("tone").toString() != tone) {
+    status->setProperty("tone", tone);
+    status->style()->unpolish(status);
+    status->style()->polish(status);
+    status->update();
+  }
   QString color = QStringLiteral("#cacccf");
   if (requestCount != 0)
     color = QStringLiteral("#a85d0c");
-  else if (thread.status == "active" || thread.status == "inProgress")
+  else if (thread.status == "active" || thread.status == "inProgress" ||
+           thread.status == "running" || thread.status == "started")
     color = QStringLiteral("#2f6feb");
   else if (thread.status == "failed" || thread.status == "systemError")
     color = QStringLiteral("#c43d4d");

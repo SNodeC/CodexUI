@@ -68,6 +68,14 @@ creating a separate indicator palette. The existing gray palette is unchanged;
 only inactive thread dots use the lighter, less saturated `#cacccf` so active
 blue threads retain clear visual priority.
 
+Semantic color is reserved for state-bearing UI: running status text uses blue,
+successful completion and connection use green, pending requests and warnings
+use orange, and failures, denials, stop, removal, and validation errors use red.
+Thread dots continue to describe activity rather than outcome, so completed or
+otherwise inactive threads retain the canonical light-gray dot. Reasoning prose
+and metadata without an authoritative status remain neutral because their
+content does not provide a reliable success, warning, or failure classification.
+
 ## Application layout
 
 The window consists of a 64-pixel identity/status bar, a hideable thread

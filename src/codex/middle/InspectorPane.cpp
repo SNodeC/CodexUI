@@ -65,13 +65,29 @@ std::string stringValue(const nlohmann::json &object, const char *key) {
 }
 
 QString displayStatus(const std::string &status) {
-  if (status == "inProgress" || status == "active")
+  if (status == "inProgress" || status == "active" || status == "running" ||
+      status == "started")
     return QStringLiteral("Running");
   if (status == "completed" || status == "idle")
     return QStringLiteral("Completed");
   if (status == "failed" || status == "systemError")
     return QStringLiteral("Failed");
+  if (status == "interrupted")
+    return QStringLiteral("Interrupted");
   return status.empty() ? QStringLiteral("Unknown") : text(status);
+}
+
+const char *statusTone(const std::string &status) {
+  if (status == "inProgress" || status == "active" || status == "running" ||
+      status == "started")
+    return "active";
+  if (status == "completed" || status == "idle")
+    return "success";
+  if (status == "failed" || status == "systemError")
+    return "danger";
+  if (status == "interrupted")
+    return "warning";
+  return nullptr;
 }
 
 QLabel *makeLabel(QString value, const char *kind = "body") {
@@ -82,6 +98,13 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
   label->setMinimumWidth(0);
   label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  return label;
+}
+
+QLabel *statusLabel(const std::string &status) {
+  auto *label = makeLabel(displayStatus(status), "meta");
+  if (const char *tone = statusTone(status))
+    label->setProperty("tone", tone);
   return label;
 }
 
@@ -150,13 +173,23 @@ QFrame *agentFrame(const AgentPresentation &agent) {
       : tool.empty()               ? QStringLiteral("Agent activity")
                                    : QStringLiteral("Agent %1").arg(text(tool));
   layout->addWidget(makeLabel(title, "title"));
-  QStringList metadata{displayStatus(agent.status)};
+  QStringList metadata;
   for (const char *key : {"agentPath", "tool", "model", "reasoningEffort"}) {
     const QString value = text(stringValue(agent.raw, key));
     if (!value.isEmpty())
       metadata << value;
   }
-  layout->addWidget(makeLabel(metadata.join(QStringLiteral("  |  ")), "meta"));
+  auto *metadataRow = new QHBoxLayout;
+  metadataRow->setContentsMargins(0, 0, 0, 0);
+  metadataRow->setSpacing(6);
+  metadataRow->addWidget(statusLabel(agent.status));
+  if (!metadata.isEmpty())
+    metadataRow->addWidget(
+        makeLabel(QStringLiteral("|  ") +
+                      metadata.join(QStringLiteral("  |  ")),
+                  "meta"));
+  metadataRow->addStretch();
+  layout->addLayout(metadataRow);
   const QString prompt = text(stringValue(agent.raw, "prompt"));
   if (!prompt.isEmpty())
     layout->addWidget(makeLabel(prompt));
@@ -486,8 +519,7 @@ void InspectorPane::refreshPlan() {
       layout->setContentsMargins(12, 10, 12, 10);
       layout->setSpacing(6);
       layout->addWidget(makeLabel(text(stringValue(step, "step"))));
-      layout->addWidget(
-          makeLabel(displayStatus(stringValue(step, "status")), "meta"));
+      layout->addWidget(statusLabel(stringValue(step, "status")));
       planLayout->addWidget(row);
     }
   } else if (planItem) {
@@ -587,6 +619,7 @@ void InspectorPane::refreshRequests() {
        currentModel->pendingRequestPresentations()) {
     auto *frame = new QFrame;
     frame->setProperty("kind", "raised");
+    frame->setProperty("tone", "warning");
     auto *layout = new QVBoxLayout(frame);
     layout->setContentsMargins(12, 10, 12, 10);
     layout->setSpacing(6);
@@ -622,7 +655,8 @@ void InspectorPane::refreshRequests() {
     actions->setContentsMargins(0, 2, 0, 0);
     auto *deny = new QPushButton(QStringLiteral("Deny"));
     auto *review = new QPushButton(QStringLiteral("Review"));
-    review->setProperty("kind", "primary");
+    deny->setProperty("kind", "destructive");
+    review->setProperty("kind", "request");
     deny->setFixedHeight(28);
     review->setFixedHeight(28);
     connect(deny, &QPushButton::clicked, this, [this, id] {

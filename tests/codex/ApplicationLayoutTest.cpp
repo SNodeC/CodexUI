@@ -292,6 +292,8 @@ bool testOverlayGeometryAndRegionRouting() {
           region.composer().testAttribute(Qt::WA_StyledBackground) &&
           UiStyle::applicationStyleSheet().contains(
               QStringLiteral("QWidget#composerOverlay")) &&
+          UiStyle::applicationStyleSheet().contains(
+              QStringLiteral("QLabel[tone=\"success\"]")) &&
           stableComposerGeometry(),
       "compact composer has an opaque surface and canonical section gaps");
   view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
@@ -422,7 +424,10 @@ bool testThreadSelectionProjection() {
       1, 1, "thread.upsert", {{"thread", {{"id", "thread-a"}, {"name", "A"}}}},
       presentation::Authority::Merge, {{"threadId", "thread-a"}}));
   model.applyEvent(presentation::event(
-      2, 1, "thread.upsert", {{"thread", {{"id", "thread-b"}, {"name", "B"}}}},
+      2, 1, "thread.upsert",
+      {{"thread", {{"id", "thread-b"},
+                    {"name", "B"},
+                    {"status", {{"type", "active"}}}}}},
       presentation::Authority::Merge, {{"threadId", "thread-b"}}));
 
   ThreadPane pane;
@@ -473,6 +478,7 @@ bool testThreadSelectionProjection() {
           sortButton->property("codexChevron").toBool() &&
           title->property("kind").toString() == QStringLiteral("title") &&
           status->property("kind").toString() == QStringLiteral("meta") &&
+          status->property("tone").toString() == QStringLiteral("active") &&
           title->textInteractionFlags().testFlag(Qt::TextSelectableByMouse) &&
           status->textInteractionFlags().testFlag(Qt::TextSelectableByMouse),
       "thread cards keep their status dot and shared chevron styling inside "
@@ -946,10 +952,39 @@ bool testInspectorDetailParity() {
           QStringLiteral("thread child-thread  |  sender sender-thread  |  "
                          "receivers receiver-one, receiver-two")),
       "Agents show child, sender, and receiver thread identities");
+  QLabel *agentStatus = nullptr;
+  for (QLabel *label : inspector.findChildren<QLabel *>()) {
+    if (label->text() == QStringLiteral("Running")) {
+      agentStatus = label;
+      break;
+    }
+  }
+  result &= expect(agentStatus && agentStatus->property("tone") == "active",
+                   "running agent status uses the canonical active tone");
   inspector.tabs()->setCurrentIndex(3);
   spin(20);
   result &= expect(hasLabelContaining(inspector, QStringLiteral("3 questions")),
                    "Requests show their retained question count");
+  QFrame *requestFrame = nullptr;
+  for (QFrame *frame : inspector.findChildren<QFrame *>()) {
+    if (frame->property("tone") == "warning") {
+      requestFrame = frame;
+      break;
+    }
+  }
+  QPushButton *denyButton = nullptr;
+  QPushButton *reviewButton = nullptr;
+  for (QPushButton *button : inspector.findChildren<QPushButton *>()) {
+    if (button->text() == QStringLiteral("Deny"))
+      denyButton = button;
+    else if (button->text() == QStringLiteral("Review"))
+      reviewButton = button;
+  }
+  result &= expect(
+      requestFrame && denyButton && reviewButton &&
+          denyButton->property("kind") == "destructive" &&
+          reviewButton->property("kind") == "request",
+      "pending requests use warning surfaces and semantic actions");
   return result;
 }
 

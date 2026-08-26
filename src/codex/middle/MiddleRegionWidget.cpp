@@ -16,9 +16,11 @@
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSplitter>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
+#include <array>
 #include <utility>
 
 namespace codexui::codex::middle {
@@ -123,13 +125,11 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
 
   noticeBar = new QFrame;
   noticeBar->setObjectName(QStringLiteral("conversationNoticeBar"));
-  noticeBar->setStyleSheet(QStringLiteral(
-      "QFrame#conversationNoticeBar{background:#fff0f2;"
-      "border:1px solid #efb8c0;border-radius:7px;}"));
+  noticeBar->setProperty("tone", "danger");
   auto *noticeLayout = new QHBoxLayout(noticeBar);
   noticeLayout->setContentsMargins(10, 6, 8, 6);
   noticeLabel = makeLabel({}, "meta");
-  noticeLabel->setStyleSheet(QStringLiteral("color:#982f3d;"));
+  noticeLabel->setProperty("tone", "danger");
   auto *dismiss = new QPushButton(QStringLiteral("Dismiss"));
   dismiss->setProperty("kind", "subtle");
   dismiss->setFixedHeight(28);
@@ -188,13 +188,15 @@ void MiddleRegionWidget::showNotice(QString message, bool error) {
   if (message.trimmed().isEmpty())
     return;
   noticeLabel->setText(std::move(message));
-  noticeBar->setStyleSheet(
-      error ? QStringLiteral("QFrame#conversationNoticeBar{background:#fff0f2;"
-                             "border:1px solid #efb8c0;border-radius:7px;}")
-            : QStringLiteral("QFrame#conversationNoticeBar{background:#fff6df;"
-                             "border:1px solid #e5c77d;border-radius:7px;}"));
-  noticeLabel->setStyleSheet(error ? QStringLiteral("color:#982f3d;")
-                                   : QStringLiteral("color:#8a5208;"));
+  const QString tone =
+      error ? QStringLiteral("danger") : QStringLiteral("warning");
+  const std::array<QWidget *, 2> tonedWidgets{noticeBar, noticeLabel};
+  for (QWidget *widget : tonedWidgets) {
+    widget->setProperty("tone", tone);
+    widget->style()->unpolish(widget);
+    widget->style()->polish(widget);
+    widget->update();
+  }
   noticeBar->show();
 }
 

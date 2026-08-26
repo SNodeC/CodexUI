@@ -633,7 +633,8 @@ bool testBottomAnchoredCommandOutputGrowth() {
                                        QStringLiteral("commandOutputView")))
                              : nullptr;
   bool result = expect(commandCard && metadata && output &&
-                           output->isHidden() && view.isAtBottom(),
+                           output->isHidden() && view.isAtBottom() &&
+                           metadata->property("tone") == "active",
                        "live command starts with a hidden zero-line output");
   if (!commandCard || !metadata || !output)
     return false;

@@ -93,6 +93,8 @@ ComposerPane::ComposerPane(QWidget *anchor)
   attentionLayout->addStretch();
   auto *deny = new QPushButton(QStringLiteral("Deny"), attention_);
   auto *review = new QPushButton(QStringLiteral("Review"), attention_);
+  deny->setProperty("kind", "destructive");
+  review->setProperty("kind", "request");
   attentionLayout->addWidget(deny);
   attentionLayout->addWidget(review);
   connect(deny, &QPushButton::clicked, this, [this] {
