@@ -122,8 +122,10 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   contentLayout->addSpacing(7);
 
   noticeBar = new QFrame;
+  noticeBar->setObjectName(QStringLiteral("conversationNoticeBar"));
   noticeBar->setStyleSheet(QStringLiteral(
-      "background:#fff0f2;border:1px solid #efb8c0;border-radius:6px;"));
+      "QFrame#conversationNoticeBar{background:#fff0f2;"
+      "border:1px solid #efb8c0;border-radius:7px;}"));
   auto *noticeLayout = new QHBoxLayout(noticeBar);
   noticeLayout->setContentsMargins(10, 6, 8, 6);
   noticeLabel = makeLabel({}, "meta");
@@ -187,10 +189,10 @@ void MiddleRegionWidget::showNotice(QString message, bool error) {
     return;
   noticeLabel->setText(std::move(message));
   noticeBar->setStyleSheet(
-      error ? QStringLiteral("background:#fff0f2;border:1px solid #efb8c0;"
-                             "border-radius:6px;")
-            : QStringLiteral("background:#fff6df;border:1px solid #e5c77d;"
-                             "border-radius:6px;"));
+      error ? QStringLiteral("QFrame#conversationNoticeBar{background:#fff0f2;"
+                             "border:1px solid #efb8c0;border-radius:7px;}")
+            : QStringLiteral("QFrame#conversationNoticeBar{background:#fff6df;"
+                             "border:1px solid #e5c77d;border-radius:7px;}"));
   noticeLabel->setStyleSheet(error ? QStringLiteral("color:#982f3d;")
                                    : QStringLiteral("color:#8a5208;"));
   noticeBar->show();
