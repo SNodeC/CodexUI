@@ -638,9 +638,13 @@ void ShellWidget::Impl::renderConversation() {
 
 void ShellWidget::Impl::refreshSettings() {
   nlohmann::json canonical = nlohmann::json::object();
+  nlohmann::json settingsUpdate = nlohmann::json::object();
+  std::uint64_t settingsRevision = 0;
   std::string identity = "no-thread";
   if (const ThreadPresentation *thread = model.thread(selectedThreadId)) {
     identity = thread->id;
+    settingsUpdate = thread->latestSettingsUpdate;
+    settingsRevision = thread->settingsRevision;
     canonical = thread->raw;
     const auto settings = thread->domains.find("thread.settings.changed");
     if (settings != thread->domains.end() && settings->second.is_object()) {
@@ -648,6 +652,10 @@ void ShellWidget::Impl::refreshSettings() {
       if (update.contains("threadSettings") &&
           update["threadSettings"].is_object())
         update = update["threadSettings"];
+      if (update.contains("effort"))
+        canonical.erase("reasoningEffort");
+      if (update.contains("sandboxPolicy"))
+        canonical.erase("sandbox");
       canonical.merge_patch(update);
     }
   } else if (newThreadIntent) {
@@ -666,6 +674,7 @@ void ShellWidget::Impl::refreshSettings() {
   const std::string serialized = nlohmann::json{
       {"identity", identity},
       {"canonical", canonical},
+      {"settingsRevision", settingsRevision},
       {"models", model.modelCatalog()},
       {"profiles", profiles}}.dump();
   const QByteArray next(serialized.data(),
@@ -674,7 +683,8 @@ void ShellWidget::Impl::refreshSettings() {
     return;
   settingsSnapshot = next;
   middleRegion->composer().turnSettings()->setContext(
-      identity, canonical, model.modelCatalog(), profiles);
+      identity, canonical, model.modelCatalog(), profiles, settingsRevision,
+      settingsUpdate);
 }
 
 void ShellWidget::Impl::refreshStatus() {

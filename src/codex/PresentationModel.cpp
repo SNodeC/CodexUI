@@ -135,6 +135,21 @@ void mergePreservingCompleteness(nlohmann::json &target,
   }
 }
 
+void mergeExplicitMembers(nlohmann::json &target,
+                          const nlohmann::json &update) {
+  if (!target.is_object() || !update.is_object()) {
+    target = update;
+    return;
+  }
+  for (const auto &[key, value] : update.items()) {
+    auto current = target.find(key);
+    if (current != target.end() && current->is_object() && value.is_object())
+      mergeExplicitMembers(*current, value);
+    else
+      target[key] = value;
+  }
+}
+
 void appendText(nlohmann::json &item, const char *field,
                 const nlohmann::json &params) {
   const std::string delta = stringValue(params, "delta");
@@ -181,6 +196,12 @@ void applyDomainAuthority(
   }
   if (authority == "replace" || !domains.contains(type)) {
     domains[type] = data;
+    return;
+  }
+  if (type == "thread.settings.changed") {
+    // A null setting explicitly restores the app-server default. Preserve it
+    // instead of treating it as an incomplete presentation update.
+    mergeExplicitMembers(domains[type], data);
     return;
   }
   mergePreservingCompleteness(domains[type], data);
@@ -414,6 +435,11 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
 
   retainDomainEvent(type, data, scope,
                     presentation::stringMember(event, "authority"));
+
+  if (type == "thread.settings.changed" && data.is_object()) {
+    thread.latestSettingsUpdate = data.value("threadSettings", data);
+    ++thread.settingsRevision;
+  }
 
   if (type == "turn.upsert") {
     upsertTurn(thread, memberValue(data, "turn", nlohmann::json::object()),

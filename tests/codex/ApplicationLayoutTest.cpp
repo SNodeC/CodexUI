@@ -3,6 +3,7 @@
 #include "codex/GitDiffProvider.h"
 #include "codex/PresentationModel.h"
 #include "codex/PresentationProtocol.h"
+#include "codex/TurnSettingsWidget.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
@@ -15,6 +16,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QContextMenuEvent>
+#include <QComboBox>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QHBoxLayout>
@@ -323,6 +325,62 @@ bool testThreadSelectionProjection() {
   }
   result &= expect(!retainedAfterRemoval,
                    "an authoritative removal drops a retained thread");
+  return result;
+}
+
+bool testIncrementalThreadSettings() {
+  TurnSettingsWidget settings;
+  const nlohmann::json models =
+      nlohmann::json::array({{{"model", "gpt-a"}, {"displayName", "A"}},
+                             {{"model", "gpt-b"}, {"displayName", "B"}}});
+  settings.setContext("thread-a",
+                      {{"model", "gpt-a"}, {"approvalPolicy", "never"}},
+                      models, nlohmann::json::array());
+  auto *model = settings.findChild<QComboBox *>(QStringLiteral("codexModel"));
+  auto *approval =
+      settings.findChild<QComboBox *>(QStringLiteral("codexApproval"));
+  if (!model || !approval)
+    return expect(false, "thread settings controls are discoverable");
+
+  model->setCurrentIndex(model->findData(QStringLiteral("gpt-b")));
+  settings.setContext(
+      "thread-a",
+      {{"model", "gpt-a"}, {"approvalPolicy", "on-request"}}, models,
+      nlohmann::json::array(), 1, {{"approvalPolicy", "on-request"}});
+  bool result = expect(
+      model->currentData().toString() == QStringLiteral("gpt-b") &&
+          approval->currentData().toString() == QStringLiteral("on-request"),
+      "a partial authoritative update preserves unrelated pending settings");
+
+  settings.setContext(
+      "thread-a",
+      {{"model", "gpt-b"}, {"approvalPolicy", "on-request"}}, models,
+      nlohmann::json::array(), 2,
+      {{"model", "gpt-b"}, {"approvalPolicy", "on-request"}});
+  result &= expect(!settings.turnStartOptions().contains("model") &&
+                       !settings.turnStartOptions().contains("approvalPolicy"),
+                   "authoritative settings clear their pending overrides");
+
+  settings.setContext(
+      "thread-b",
+      {{"model", "gpt-a"},
+       {"reasoningEffort", "medium"},
+       {"personality", "friendly"},
+       {"sandboxPolicy",
+        {{"type", "workspaceWrite"}, {"networkAccess", false}}},
+       {"approvalPolicy", "never"},
+       {"approvalsReviewer", "user"},
+       {"cwd", "/workspace"},
+       {"activePermissionProfile", {{"id", "managed"}}},
+       {"serviceTier", "priority"},
+       {"summary", "concise"},
+       {"collaborationMode", {{"mode", "default"}}}},
+      models, nlohmann::json::array());
+  result &= expect(model->currentData().toString() == QStringLiteral("gpt-a"),
+                   "thread selection restores that thread's retained value");
+  result &= expect(settings.turnStartOptions().empty() &&
+                       settings.threadStartOptions().empty(),
+                   "all untouched thread settings produce no overrides");
   return result;
 }
 
@@ -911,6 +969,7 @@ int main(int argc, char **argv) {
   using namespace codexui::codex::middle;
   bool result = testOverlayGeometryAndRegionRouting();
   result &= testThreadSelectionProjection();
+  result &= testIncrementalThreadSettings();
   result &= testThreadAlphanumericSort();
   result &= testThreadCreatedSort();
   result &= testThreadLastChangedSort();

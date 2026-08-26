@@ -433,8 +433,17 @@ void ProtocolNormalizer::operationResult(std::string action,
         scope["threadId"] = threadId;
     } else if (action == "thread.create" || action == "thread.resume" ||
                action == "thread.fork") {
-      data = {{"thread", presentation::member(
-                             value, "thread", nlohmann::json::object())}};
+      nlohmann::json thread =
+          presentation::member(value, "thread", nlohmann::json::object());
+      for (const char *field : {"activePermissionProfile", "approvalPolicy",
+                                "approvalsReviewer", "cwd", "model",
+                                "modelProvider", "reasoningEffort", "sandbox",
+                                "serviceTier"}) {
+        const auto setting = value.find(field);
+        if (setting != value.end())
+          thread[field] = *setting;
+      }
+      data = {{"thread", std::move(thread)}};
       authority = Authority::Merge;
     } else if (action == "models.list") {
       data = {{"models", presentation::member(value, "data",

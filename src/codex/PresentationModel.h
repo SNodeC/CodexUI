@@ -53,6 +53,8 @@ struct ThreadPresentation {
   std::unordered_map<std::string, TurnPresentation> turns;
   nlohmann::json raw = nlohmann::json::object();
   std::unordered_map<std::string, nlohmann::json> domains;
+  nlohmann::json latestSettingsUpdate = nlohmann::json::object();
+  std::uint64_t settingsRevision = 0;
   std::vector<std::string> agentOrder;
   std::unordered_map<std::string, AgentPresentation> agents;
   bool archived = false;

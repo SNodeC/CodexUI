@@ -148,6 +148,29 @@ int main() {
                                   {"status", {{"type", "idle"}}},
                                   {"turns", nlohmann::json::array()}}}}}});
 
+  normalizer.operationResult(
+      "thread.resume", "resume-1", {"threadId", "thread-1"},
+      {{"id", "resume-1"},
+       {"result",
+        {{"thread", {{"id", "thread-1"}}},
+         {"model", "gpt-current"},
+         {"reasoningEffort", "high"},
+         {"approvalPolicy", "never"},
+         {"sandbox", "workspaceWrite"}}}});
+  normalizer.serverNotification(
+      "thread/settings/updated",
+      {{"threadId", "thread-1"},
+       {"threadSettings",
+        {{"model", "gpt-current"}, {"personality", "friendly"}}}});
+  normalizer.serverNotification(
+      "thread/settings/updated",
+      {{"threadId", "thread-1"},
+       {"threadSettings", {{"personality", nullptr}}}});
+  normalizer.serverNotification(
+      "thread/settings/updated",
+      {{"threadId", "thread-2"},
+       {"threadSettings", {{"model", "gpt-background"}}}});
+
   bool validFrames = !frames.empty();
   std::uint64_t expectedSequence = 1;
   for (const nlohmann::json &frame : frames) {
@@ -180,8 +203,23 @@ int main() {
           stringMember(model.connection().settings, "selected") == "ipv6",
       "connection, controller, and transport settings form coherent state");
   passed &= expect(thread != nullptr && thread->turnOrder.size() == 2 &&
-                       thread->cwd == "/workspace",
+                       thread->cwd == "/workspace" &&
+                       stringMember(thread->raw, "model") == "gpt-current" &&
+                       stringMember(thread->raw, "reasoningEffort") == "high",
                    "list, full read, and live events retain one stable thread");
+  const auto settings =
+      thread == nullptr ? nullptr
+                        : &thread->domains.at("thread.settings.changed")
+                               .at("threadSettings");
+  const auto *background = model.thread("thread-2");
+  passed &= expect(
+      settings != nullptr && settings->contains("personality") &&
+          settings->at("personality").is_null() &&
+          thread->settingsRevision == 2 && background != nullptr &&
+          background->settingsRevision == 1 &&
+          stringMember(background->latestSettingsUpdate, "model") ==
+              "gpt-background",
+      "settings updates retain explicit defaults and remain thread scoped");
   passed &= expect(turn != nullptr && turn->status == "completed" &&
                        turn->itemOrder.size() == 1,
                    "live turn lifecycle resolves one stable turn");
