@@ -3,6 +3,7 @@
 #include "codex/middle/MiddleRegionWidget.h"
 
 #include "codex/middle/ComposerPane.h"
+#include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
 #include "codex/middle/InspectorPane.h"
 #include "codex/middle/ThreadPane.h"
@@ -233,6 +234,8 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
            ancestor = ancestor->parentWidget()) {
         if (auto *nested = qobject_cast<QAbstractScrollArea *>(ancestor);
             nested && nested != conversationView) {
+          if (dynamic_cast<CommandOutputView *>(nested))
+            return false;
           if (canConsume(nested, verticalIntent(wheel)))
             return false;
           break;
@@ -245,6 +248,8 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
            ancestor && ancestor != conversationRegion;
            ancestor = ancestor->parentWidget()) {
         if (auto *nested = qobject_cast<QAbstractScrollArea *>(ancestor)) {
+          if (dynamic_cast<CommandOutputView *>(nested))
+            return false;
           if (canConsume(nested, verticalIntent(wheel)))
             return false;
           break;

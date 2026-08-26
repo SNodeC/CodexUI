@@ -338,10 +338,17 @@ bool testThreadAlphanumericSort() {
   ThreadPane pane;
   pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
   pane.refresh(model, "two");
-  return expect(threadOrder(pane) ==
-                        std::vector<std::string>(
-                            {"one", "two", "ten", "alpha", "beta"}) &&
-                    pane.visiblySelectedThreadId() == "two",
+  const std::vector<std::string> order = threadOrder(pane);
+  const bool correct = order == std::vector<std::string>(
+                                    {"one", "two", "ten", "alpha", "beta"}) &&
+                       pane.visiblySelectedThreadId() == "two";
+  if (!correct) {
+    std::cerr << "Observed alphanumeric order:";
+    for (const std::string &id : order)
+      std::cerr << ' ' << id;
+    std::cerr << "; selected=" << pane.visiblySelectedThreadId() << '\n';
+  }
+  return expect(correct,
                 "Alphanumeric sorting is natural and preserves selection");
 }
 
@@ -527,11 +534,11 @@ bool testNestedCommandScrollOwnership() {
       commandOutput->verticalScrollBar()->minimum());
   spin();
   const int outerBefore = region.conversation().verticalScrollBar()->value();
-  QWheelEvent handedOff = wheelFor(commandOutput, 120);
-  result &= expect(region.routeScrollEvent(commandOutput, &handedOff) &&
-                       region.conversation().verticalScrollBar()->value() <
+  QWheelEvent boundary = wheelFor(commandOutput, 120);
+  result &= expect(!region.routeScrollEvent(commandOutput, &boundary) &&
+                       region.conversation().verticalScrollBar()->value() ==
                            outerBefore,
-                   "nested output hands input to the message view at its edge");
+                   "nested output retains input at its scroll boundary");
   return result;
 }
 

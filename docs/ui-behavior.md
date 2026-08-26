@@ -89,6 +89,10 @@ explicit error state.
 
 The composer is cleared immediately after local admission and remains enabled.
 Users may enter additional prompts while earlier prompts await acknowledgment.
+Unsubmitted composer text and attachments form one shared local draft: ordinary
+thread navigation retains them, and submission sends them to the thread that is
+visibly selected at that moment. Explicit new-thread creation still starts with
+a deliberately cleared composer.
 CodexUI queues submissions per thread and dispatches them in order: only one
 unacknowledged prompt operation is in flight for a thread. After each result,
 the next queued prompt is sent using the app-server state produced by the
@@ -119,6 +123,9 @@ Returning to the bottom re-enables following.
 
 Follow/pause mode and the visible-card/pixel-offset anchor are retained per
 thread and restored when the user switches back.
+Scrollable Command output owns wheel and touchpad gestures while the pointer is
+over it, including overscroll at either boundary; those gestures never chain to
+the outer message view.
 
 This policy applies to new messages, streaming updates, pending prompt cards,
 and card reconstruction. It is based on the scroll bar's actual bottom state,

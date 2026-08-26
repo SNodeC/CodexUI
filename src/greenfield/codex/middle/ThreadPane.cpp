@@ -328,7 +328,9 @@ void ThreadPane::updateSortButton() {
 
 void ThreadPane::sortVisibleThreads(std::vector<std::string> &ids,
                                     const PresentationModel &model) const {
-  QCollator collator;
+  QCollator collator(QLocale::system().language() == QLocale::C
+                         ? QLocale(QLocale::English)
+                         : QLocale::system());
   collator.setCaseSensitivity(Qt::CaseInsensitive);
   collator.setIgnorePunctuation(true);
   collator.setNumericMode(true);
