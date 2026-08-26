@@ -2,6 +2,7 @@
 
 #include "codex/middle/PromptCoordinator.h"
 
+#include <QUrl>
 #include <algorithm>
 #include <set>
 #include <utility>
@@ -39,6 +40,15 @@ QString userMessageText(const nlohmann::json &item) {
   return parts.join(QStringLiteral("\n"));
 }
 
+QString markdownLinkLabel(QString label) {
+  label.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+  label.replace(QLatin1Char('['), QStringLiteral("\\["));
+  label.replace(QLatin1Char(']'), QStringLiteral("\\]"));
+  label.replace(QLatin1Char('\r'), QLatin1Char(' '));
+  label.replace(QLatin1Char('\n'), QLatin1Char(' '));
+  return label;
+}
+
 std::vector<std::pair<AuthoritativeItemKey, const ItemPresentation *>>
 orderedItems(const std::string &threadId, const ThreadPresentation &thread) {
   std::vector<std::pair<AuthoritativeItemKey, const ItemPresentation *>> result;
@@ -58,6 +68,26 @@ orderedItems(const std::string &threadId, const ThreadPresentation &thread) {
 }
 
 } // namespace
+
+QString promptWithFileLinks(QString prompt,
+                            std::span<const AttachmentDraft> attachments) {
+  QStringList links;
+  for (const AttachmentDraft &attachment : attachments) {
+    if (attachment.mimeType.startsWith(QStringLiteral("image/")) ||
+        attachment.mimeType.startsWith(QStringLiteral("audio/")))
+      continue;
+    QString target =
+        QUrl::fromLocalFile(attachment.path).toString(QUrl::FullyEncoded);
+    target.replace(QLatin1Char('('), QStringLiteral("%28"));
+    target.replace(QLatin1Char(')'), QStringLiteral("%29"));
+    links.push_back(QStringLiteral("- [%1](%2)")
+                        .arg(markdownLinkLabel(attachment.name), target));
+  }
+  if (links.empty())
+    return prompt;
+  return prompt + QStringLiteral("\n\nAttached files:\n") +
+         links.join(QLatin1Char('\n'));
+}
 
 bool PromptSubmission::acceptedTransitionActive(
     qint64 nowMilliseconds) const noexcept {

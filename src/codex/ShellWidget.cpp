@@ -1071,6 +1071,7 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
   prompt = prompt.trimmed();
   if (prompt.isEmpty())
     return false;
+  prompt = middle::promptWithFileLinks(std::move(prompt), attachments);
   const std::string visiblySelected =
       middleRegion->threads().visiblySelectedThreadId();
   if (!visiblySelected.empty() && visiblySelected != selectedThreadId) {
@@ -1264,10 +1265,6 @@ void ShellWidget::Impl::dispatchPrompt(middle::PromptDispatch dispatch) {
     else if (attachment.mimeType.startsWith(QStringLiteral("audio/")))
       input.push_back(
           {{"type", "localAudio"}, {"path", attachment.path.toStdString()}});
-    else
-      input.push_back({{"type", "mention"},
-                       {"name", attachment.name.toStdString()},
-                       {"path", attachment.path.toStdString()}});
   }
 
   const std::string threadId = dispatch.threadId;

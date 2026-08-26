@@ -299,7 +299,6 @@ ConversationSnapshot ConversationProjection::project(
         turnId,
         {},
         LocalPromptData{submission.id, submission.prompt,
-                        static_cast<int>(submission.attachments.size()),
                         submission.state == PromptState::Queued
                             ? PromptState::InFlight
                             : submission.state,

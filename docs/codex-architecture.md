@@ -492,8 +492,9 @@ The composer opens the same custom file browser in multi-file mode. It supports
 up to sixteen unique files and reports detected MIME type and size. Local
 admission moves the prompt and attachments into a per-thread pending card and
 immediately clears the composer so another prompt can be entered. Images become
-native `localImage` input, audio becomes `localAudio`, and other files become
-native `mention` input.
+native `localImage` input and audio becomes `localAudio`. Other files are
+appended to the admitted prompt as Markdown links to their local paths, so the
+temporary and authoritative cards carry the same durable representation.
 
 These are app-server local-path references, not bytes uploaded through
 `codex-bridge`. The provider must be able to access the selected path. This is

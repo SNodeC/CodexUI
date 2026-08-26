@@ -129,7 +129,6 @@ struct GenericActivityData {
 struct LocalPromptData {
   std::uint64_t submissionId = 0;
   QString prompt;
-  int attachmentCount = 0;
   PromptState state = PromptState::Queued;
   qint64 acceptedAtMilliseconds = 0;
   QString error;

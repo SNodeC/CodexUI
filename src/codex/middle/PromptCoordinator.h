@@ -21,6 +21,10 @@
 
 namespace codexui::codex::middle {
 
+[[nodiscard]] QString
+promptWithFileLinks(QString prompt,
+                    std::span<const AttachmentDraft> attachments);
+
 struct PromptSubmission {
   std::uint64_t id = 0;
   std::uint64_t admissionOrdinal = 0;

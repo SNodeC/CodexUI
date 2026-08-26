@@ -302,7 +302,6 @@ bool testPromptAdmissionFollowOwnership() {
       {},
       LocalPromptData{1001,
                       QStringLiteral("a newly admitted pending prompt"),
-                      0,
                       PromptState::InFlight,
                       0,
                       {}}};
@@ -387,8 +386,12 @@ bool testMutableCardsAndCommandOutput() {
        thread,
        {},
        {},
-       LocalPromptData{
-           77, QStringLiteral("pending"), 0, PromptState::InFlight, 0, {}}},
+       LocalPromptData{77,
+                       QStringLiteral("pending\n\nAttached files:\n"
+                                      "- [report.pdf](file:///tmp/report.pdf)"),
+                       PromptState::InFlight,
+                       0,
+                       {}}},
   };
   ConversationSnapshot snapshot{thread, {section}, 0, false};
   ConversationView view;
@@ -428,6 +431,18 @@ bool testMutableCardsAndCommandOutput() {
           commandText->height() < commandText->maximumHeight() &&
           commandText->verticalScrollBarPolicy() == Qt::ScrollBarAsNeeded,
       "short command text trims empty lines and uses its content height");
+  auto *pendingCard = identities[stableKey(CardKey{LocalPromptKey{77}})];
+  result &= expect(
+      std::ranges::any_of(
+          pendingCard->findChildren<QLabel *>(),
+          [](QLabel *label) {
+            return label->property("markdownSource")
+                       .toString()
+                       .contains(QStringLiteral(
+                           "[report.pdf](file:///tmp/report.pdf)")) &&
+                   label->textFormat() == Qt::RichText;
+          }),
+      "pending prompts render file links before authoritative replacement");
 
   auto &cards = snapshot.sections.front().cards;
   std::get<UserMessageData>(cards[0].payload).text +=
@@ -718,7 +733,6 @@ bool testPendingPromptAnimation() {
                           {},
                           LocalPromptData{901,
                                           QStringLiteral("pending prompt"),
-                                          0,
                                           PromptState::InFlight,
                                           0,
                                           {}}};

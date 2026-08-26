@@ -74,6 +74,10 @@ Submitting a prompt creates a client-local pending prompt card at the bottom of
 the destination thread immediately. The card uses a muted version of the normal
 blue user-card treatment, with a brighter blue highlight sweeping left and
 right across it until the app-server acknowledges the operation.
+Ordinary attached files appear as local Markdown links at the bottom of that
+card from its first frame. The same composed Markdown is sent to app-server and
+retained by the authoritative user message, so acknowledgment does not reflow
+the attachment presentation.
 
 Each pending prompt has a process-wide client-local submission ID and remains
 associated with its destination thread. It therefore remains visible when the

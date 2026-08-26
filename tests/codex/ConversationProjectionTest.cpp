@@ -411,7 +411,7 @@ bool testUserMessageImages() {
   const auto *localCard = local.find(LocalPromptKey{41});
   const auto *localPrompt =
       localCard ? std::get_if<LocalPromptData>(&localCard->payload) : nullptr;
-  result &= expect(localPrompt && localPrompt->attachmentCount == 2 &&
+  result &= expect(localPrompt &&
                        localPrompt->imagePaths ==
                            QStringList{QStringLiteral("/tmp/pending.png")},
                    "temporary prompts expose only their image attachment paths");
@@ -457,6 +457,35 @@ bool testUserMessageImages() {
   return result;
 }
 
+bool testFileLinksArePartOfTheCanonicalPrompt() {
+  const std::vector<AttachmentDraft> attachments{
+      {QStringLiteral("/tmp/review notes [final] (2).pdf"),
+       QStringLiteral("review notes [final] (2).pdf"),
+       QStringLiteral("application/pdf"), 10},
+      {QStringLiteral("/tmp/image.png"), QStringLiteral("image.png"),
+       QStringLiteral("image/png"), 10},
+      {QStringLiteral("/tmp/audio.ogg"), QStringLiteral("audio.ogg"),
+       QStringLiteral("audio/ogg"), 10}};
+  const QString composed =
+      promptWithFileLinks(QStringLiteral("Review this"), attachments);
+  const QString expected = QStringLiteral(
+      "Review this\n\nAttached files:\n"
+      "- [review notes \\[final\\] (2).pdf]"
+      "(file:///tmp/review%20notes%20%5Bfinal%5D%20%282%29.pdf)");
+  bool result = expect(composed == expected,
+                       "ordinary files become escaped durable Markdown links");
+
+  PromptCoordinator prompts;
+  const auto id =
+      prompts.admit("thread-files", composed, attachments,
+                    nlohmann::json::object(), nullptr, std::nullopt, 100);
+  const auto dispatch = prompts.beginNext("thread-files");
+  result &=
+      expect(dispatch && dispatch->id == id && dispatch->prompt == composed,
+             "temporary presentation and transport share one prompt");
+  return result;
+}
+
 } // namespace
 } // namespace codexui::codex::middle
 
@@ -469,6 +498,7 @@ int main() {
   result &= testAnchoredDuplicatePrompts();
   result &= testCommandOutputVisibility();
   result &= testUserMessageImages();
+  result &= testFileLinksArePartOfTheCanonicalPrompt();
   if (result)
     std::cout << "Conversation projection tests passed\n";
   return result ? 0 : 1;

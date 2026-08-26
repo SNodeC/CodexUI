@@ -294,7 +294,6 @@ bool presentationEquals(const VisibleCardData &left,
     const auto &first = std::get<LocalPromptData>(left.payload);
     const auto &second = std::get<LocalPromptData>(right.payload);
     return first.prompt == second.prompt &&
-           first.attachmentCount == second.attachmentCount &&
            first.imagePaths == second.imagePaths &&
            first.state == second.state &&
            first.acceptedAtMilliseconds == second.acceptedAtMilliseconds &&
@@ -585,7 +584,7 @@ public:
       owner->setStyleSheet(QStringLiteral(
           "QFrame#pendingPromptCard{background:transparent;border:0;}"));
       title = makeLabel(QStringLiteral("You"), "title", owner);
-      body = makeLabel({}, "body", owner);
+      body = makeMarkdownLabel({}, owner);
       metadata = makeLabel({}, "meta", owner);
       layout->addWidget(title);
       layout->addWidget(body);
@@ -700,8 +699,7 @@ public:
     }
     case CardKind::LocalPrompt: {
       const auto &prompt = std::get<LocalPromptData>(data.payload);
-      body->setText(prompt.prompt);
-      body->show();
+      setVisibleMarkdown(body, prompt.prompt);
       setImages(prompt.imagePaths);
       refreshPendingPresentation();
       break;
@@ -738,16 +736,6 @@ public:
                    ? QStringLiteral("Not sent")
                    : QStringLiteral("Not sent: %1").arg(prompt->error);
 
-    if (prompt->attachmentCount > 0) {
-      const QString attachments =
-          QStringLiteral("%1 attachment%2")
-              .arg(prompt->attachmentCount)
-              .arg(prompt->attachmentCount == 1 ? QString{}
-                                                : QStringLiteral("s"));
-      status = status.isEmpty()
-                   ? attachments
-                   : status + QStringLiteral("  |  ") + attachments;
-    }
     changed = setVisibleText(metadata, status) || changed;
 
     if (waiting || transitioning) {
