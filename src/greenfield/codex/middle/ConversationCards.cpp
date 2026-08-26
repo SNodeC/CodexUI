@@ -385,7 +385,7 @@ public:
     case CardKind::UserMessage:
       owner->setProperty("messageRole", "user");
       title = makeLabel(QStringLiteral("You"), "title", owner);
-      body = makeLabel({}, "body", owner);
+      body = makeMarkdownLabel({}, owner);
       layout->addWidget(title);
       layout->addWidget(body);
       break;
@@ -472,7 +472,7 @@ public:
     switch (data.kind) {
     case CardKind::UserMessage: {
       const auto &message = std::get<UserMessageData>(data.payload);
-      setVisibleText(body, message.text);
+      setVisibleMarkdown(body, message.text);
       break;
     }
     case CardKind::AgentMessage: {

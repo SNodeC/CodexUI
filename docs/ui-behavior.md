@@ -113,6 +113,10 @@ For an explicit new-thread draft, prompts entered while `thread.create` is in
 flight remain attached to that draft. When creation succeeds, all pending
 prompts move to the returned stable thread ID and are dispatched in order.
 
+Authoritative user-message text is rendered as Markdown through the same safe
+`MarkdownNoHTML` path as agent messages. The locally admitted prompt remains a
+plain-text transitional card until its authoritative item arrives.
+
 ## Conversation scrolling
 
 The message view smoothly follows incoming content only while it is already at

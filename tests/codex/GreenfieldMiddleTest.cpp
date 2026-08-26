@@ -348,7 +348,8 @@ bool testMutableCardsAndCommandOutput() {
   TurnSection section{"turn:cards", "turn", {}};
   section.cards = {
       {AuthoritativeItemKey{thread, "turn", "user"}, CardKind::UserMessage,
-       thread, "turn", "user", UserMessageData{QStringLiteral("hello")}},
+       thread, "turn", "user",
+       UserMessageData{QStringLiteral("hello **Markdown**")}},
       {AuthoritativeItemKey{thread, "turn", "agent"}, CardKind::AgentMessage,
        thread, "turn", "agent",
        AgentMessageData{QStringLiteral("answer"), false}},
@@ -407,6 +408,16 @@ bool testMutableCardsAndCommandOutput() {
           QStringLiteral("commandTextView")));
   bool result = expect(output && output->isHidden(),
                        "empty-line command output has no black surface");
+  auto *userCard = identities[stableKey(
+      CardKey{AuthoritativeItemKey{thread, "turn", "user"}})];
+  const auto userLabels = userCard->findChildren<QLabel *>();
+  result &= expect(
+      std::ranges::any_of(userLabels, [](QLabel *label) {
+        return label->property("markdownSource").toString() ==
+                   QStringLiteral("hello **Markdown**") &&
+               label->textFormat() == Qt::RichText;
+      }),
+      "authoritative user messages use the shared Markdown renderer");
   result &= expect(
       commandText &&
           commandText->toPlainText() == QStringLiteral("printf test") &&
