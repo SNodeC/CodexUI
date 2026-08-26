@@ -284,14 +284,19 @@ void ComposerPane::synchronizeGeometry() {
   const int wantedExtra = canonicalCaptureEnabled_ && canonicalHeight_ > 0
                               ? std::max(0, wantedHeight - canonicalHeight_)
                               : 0;
-  setGeometry(overlayInset, availableHeight - wantedHeight, width,
-              wantedHeight);
+  const QRect wantedGeometry(overlayInset, availableHeight - wantedHeight,
+                             width, wantedHeight);
+  const bool geometryChanged = geometry() != wantedGeometry;
+  if (geometryChanged)
+    setGeometry(wantedGeometry);
   // The natural height was calculated after the prompt layout changed, while
   // the child layout still had the previous overlay geometry. Lay out the
   // children once against the final rectangle so fixed surfaces cannot remain
   // compressed and leave a false gap during upward growth.
-  layout()->invalidate();
-  layout()->activate();
+  if (geometryChanged) {
+    layout()->invalidate();
+    layout()->activate();
+  }
   raise();
 
   if (wantedExtra != extraHeight_) {

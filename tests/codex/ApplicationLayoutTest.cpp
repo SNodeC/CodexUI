@@ -18,6 +18,7 @@
 #include <QContextMenuEvent>
 #include <QComboBox>
 #include <QElapsedTimer>
+#include <QEvent>
 #include <QFile>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -45,6 +46,19 @@
 
 namespace codexui::codex::middle {
 namespace {
+
+class LayoutRequestCounter final : public QObject {
+public:
+  int count = 0;
+
+protected:
+  bool eventFilter(QObject *watched, QEvent *event) override {
+    static_cast<void>(watched);
+    if (event->type() == QEvent::LayoutRequest)
+      ++count;
+    return false;
+  }
+};
 
 bool expect(bool condition, const char *message) {
   if (condition)
@@ -379,6 +393,26 @@ bool testOverlayGeometryAndRegionRouting() {
       expect(region.routeScrollEvent(splitter->handle(2), &overRightHandle) &&
                  view.verticalScrollBar()->value() < beforeRight,
              "the right middle splitter handle routes wheel input");
+  return result;
+}
+
+bool testStableComposerLayoutRequests() {
+  qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
+  bool result = true;
+  {
+    MiddleRegionWidget region;
+    region.resize(1500, 820);
+    region.show();
+    spin(20);
+
+    LayoutRequestCounter composerLayoutRequests;
+    region.composer().installEventFilter(&composerLayoutRequests);
+    spin(80);
+    result = expect(
+        composerLayoutRequests.count <= 1,
+        "stable composer geometry does not perpetually request layout");
+  }
+  qApp->setStyleSheet(QString{});
   return result;
 }
 
@@ -1142,6 +1176,7 @@ int main(int argc, char **argv) {
   result &= testInfoViewerLayout();
   result &= testInspectorDetailParity();
   result &= testGitDiffScopes();
+  result &= testStableComposerLayoutRequests();
   if (result)
     std::cout << "Application layout tests passed\n";
   return result ? 0 : 1;
