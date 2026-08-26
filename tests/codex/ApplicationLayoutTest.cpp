@@ -443,7 +443,11 @@ bool testIncrementalThreadSettings() {
   auto *model = settings.findChild<QComboBox *>(QStringLiteral("codexModel"));
   auto *approval =
       settings.findChild<QComboBox *>(QStringLiteral("codexApproval"));
-  if (!model || !approval)
+  auto *access =
+      settings.findChild<QComboBox *>(QStringLiteral("codexSandbox"));
+  auto *network =
+      settings.findChild<QComboBox *>(QStringLiteral("codexNetwork"));
+  if (!model || !approval || !access || !network)
     return expect(false, "thread settings controls are discoverable");
 
   model->setCurrentIndex(model->findData(QStringLiteral("gpt-b")));
@@ -485,6 +489,22 @@ bool testIncrementalThreadSettings() {
   result &= expect(settings.turnStartOptions().empty() &&
                        settings.threadStartOptions().empty(),
                    "all untouched thread settings produce no overrides");
+  result &= expect(access->isEnabled() && network->isEnabled(),
+                   "a permission preset does not lock its effective access "
+                   "controls");
+
+  settings.setContext(
+      "full-access-thread",
+      {{"sandboxPolicy", {{"type", "dangerFullAccess"}}},
+       {"activePermissionProfile", {{"id", ":full-access"}}}},
+      nlohmann::json::array(),
+      {{"data", nlohmann::json::array(
+                    {{{"id", ":full-access"}, {"allowed", true}}})}});
+  result &= expect(access->isEnabled() && !network->isEnabled() &&
+                       network->currentData().toString() ==
+                           QStringLiteral("enabled"),
+                   "only logically redundant network selection is disabled");
+
   return result;
 }
 

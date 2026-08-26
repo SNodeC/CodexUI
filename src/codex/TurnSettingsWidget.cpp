@@ -752,9 +752,8 @@ void TurnSettingsWidget::refreshPermissionProfiles(
 }
 
 void TurnSettingsWidget::refreshAccessCompatibility() {
-  const bool namedProfile = value(permissionProfile) != DefaultValue;
-  sandbox->setEnabled(!namedProfile);
-  network->setEnabled(!namedProfile && value(sandbox) != "danger-full-access" &&
+  sandbox->setEnabled(true);
+  network->setEnabled(value(sandbox) != "danger-full-access" &&
                       value(sandbox) != DefaultValue);
   if (value(sandbox) == "danger-full-access") {
     const QSignalBlocker blocker(network);
@@ -763,12 +762,14 @@ void TurnSettingsWidget::refreshAccessCompatibility() {
     const QSignalBlocker blocker(network);
     selectValue(network, QString::fromLatin1(DefaultValue));
   }
-  const QString reason =
-      namedProfile
-          ? QStringLiteral("The selected permission profile owns access policy")
-          : QString{};
-  sandbox->setToolTip(reason);
-  network->setToolTip(reason);
+  sandbox->setToolTip({});
+  network->setToolTip(value(sandbox) == "danger-full-access"
+                          ? QStringLiteral(
+                                "Full access already includes network access")
+                      : value(sandbox) == DefaultValue
+                          ? QStringLiteral(
+                                "Select an access mode before network access")
+                          : QString{});
 }
 
 void TurnSettingsWidget::refreshMoreIndicator() {
