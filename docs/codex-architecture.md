@@ -501,6 +501,12 @@ correct for a local CodexUI/app-server workspace and remains explicit for a
 remote bridge topology; adding remote file transfer would require a separate
 bounded protocol and security design.
 
+Image paths are retained in pending and authoritative user-message
+presentation. The conversation shows bounded thumbnails below the Markdown
+prompt; selecting one opens a non-modal, fit-to-window viewer. CodexUI never
+fetches remote image URLs implicitly, and missing local images remain visible
+as unavailable placeholders.
+
 ### 7.4 Changes and Diff Presentation
 
 The Changes inspector is authoritative over the local Git worktrees associated

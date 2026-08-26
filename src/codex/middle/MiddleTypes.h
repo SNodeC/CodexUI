@@ -61,6 +61,7 @@ enum class CardKind {
 
 struct UserMessageData {
   QString text;
+  QStringList imagePaths;
 
   bool operator==(const UserMessageData &) const = default;
 };
@@ -132,6 +133,7 @@ struct LocalPromptData {
   PromptState state = PromptState::Queued;
   qint64 acceptedAtMilliseconds = 0;
   QString error;
+  QStringList imagePaths;
 
   [[nodiscard]] bool
   acceptedTransitionActive(qint64 nowMilliseconds) const noexcept {

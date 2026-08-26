@@ -4,13 +4,21 @@
 
 #include <QColor>
 #include <QDateTime>
+#include <QDialog>
+#include <QDir>
+#include <QFileInfo>
+#include <QImageReader>
 #include <QLabel>
 #include <QLinearGradient>
+#include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPixmap>
 #include <QResizeEvent>
+#include <QScrollArea>
 #include <QScrollBar>
+#include <QShowEvent>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTimer>
@@ -30,6 +38,123 @@ constexpr int MaximumCommandTextHeight = 90;
 constexpr int CommandTextPadding = 7;
 constexpr int PendingAnimationIntervalMilliseconds = 32;
 constexpr qint64 PendingHalfCycleMilliseconds = 850;
+constexpr int ThumbnailMaximumWidth = 280;
+constexpr int ThumbnailMaximumHeight = 180;
+constexpr int ViewerMaximumImageExtent = 4096;
+
+void openImageViewer(const QString &path);
+
+class ImageThumbnail final : public QLabel {
+public:
+  ImageThumbnail(QString path, QWidget *parent)
+      : QLabel(parent), path_(std::move(path)) {
+    setObjectName(QStringLiteral("messageImageThumbnail"));
+    setProperty("kind", "imageThumbnail");
+    setCursor(Qt::PointingHandCursor);
+    setToolTip(QDir::toNativeSeparators(path_));
+    setAlignment(Qt::AlignCenter);
+    setMinimumSize(72, 48);
+    setMaximumSize(ThumbnailMaximumWidth, ThumbnailMaximumHeight);
+
+    QImageReader reader(path_);
+    reader.setAutoTransform(true);
+    const QSize source = reader.size();
+    if (source.isValid())
+      reader.setScaledSize(source.scaled(ThumbnailMaximumWidth - 8,
+                                         ThumbnailMaximumHeight - 8,
+                                         Qt::KeepAspectRatio));
+    const QImage image = reader.read();
+    if (image.isNull()) {
+      setText(QStringLiteral("Image unavailable\n%1")
+                  .arg(QFileInfo(path_).fileName()));
+      setProperty("imageAvailable", false);
+      unsetCursor();
+      path_.clear();
+      return;
+    }
+    setProperty("imageAvailable", true);
+    setPixmap(QPixmap::fromImage(image));
+    setFixedSize(image.size() + QSize(8, 8));
+  }
+
+protected:
+  void mousePressEvent(QMouseEvent *event) override {
+    if (event->button() == Qt::LeftButton && !path_.isEmpty()) {
+      openImageViewer(path_);
+      event->accept();
+      return;
+    }
+    QLabel::mousePressEvent(event);
+  }
+
+private:
+  QString path_;
+};
+
+class ImageViewer final : public QDialog {
+public:
+  explicit ImageViewer(const QString &path) : QDialog(nullptr, Qt::Window) {
+    setObjectName(QStringLiteral("messageImageViewer"));
+    setAttribute(Qt::WA_DeleteOnClose);
+    setWindowModality(Qt::NonModal);
+    setWindowTitle(QFileInfo(path).fileName());
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(8, 8, 8, 8);
+    scroll_ = new QScrollArea(this);
+    scroll_->setWidgetResizable(true);
+    imageLabel_ = new QLabel(scroll_);
+    imageLabel_->setObjectName(QStringLiteral("messageImageViewerImage"));
+    imageLabel_->setAlignment(Qt::AlignCenter);
+
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    const QSize source = reader.size();
+    if (source.isValid() && (source.width() > ViewerMaximumImageExtent ||
+                             source.height() > ViewerMaximumImageExtent))
+      reader.setScaledSize(source.scaled(ViewerMaximumImageExtent,
+                                         ViewerMaximumImageExtent,
+                                         Qt::KeepAspectRatio));
+    image_ = reader.read();
+    if (image_.isNull())
+      imageLabel_->setText(QStringLiteral("Image unavailable"));
+    scroll_->setWidget(imageLabel_);
+    layout->addWidget(scroll_);
+    resize(900, 650);
+    updatePixmap();
+  }
+
+protected:
+  void showEvent(QShowEvent *event) override {
+    QDialog::showEvent(event);
+    updatePixmap();
+  }
+
+  void resizeEvent(QResizeEvent *event) override {
+    QDialog::resizeEvent(event);
+    updatePixmap();
+  }
+
+private:
+  void updatePixmap() {
+    if (image_.isNull() || !scroll_)
+      return;
+    const QSize available = scroll_->viewport()->size() - QSize(8, 8);
+    if (available.isEmpty())
+      return;
+    imageLabel_->setPixmap(QPixmap::fromImage(
+        image_.scaled(available, Qt::KeepAspectRatio,
+                      Qt::SmoothTransformation)));
+  }
+
+  QImage image_;
+  QScrollArea *scroll_ = nullptr;
+  QLabel *imageLabel_ = nullptr;
+};
+
+void openImageViewer(const QString &path) {
+  auto *viewer = new ImageViewer(path);
+  viewer->show();
+}
 
 QLabel *makeLabel(const QString &value, const char *kind = "body",
                   QWidget *parent = nullptr) {
@@ -170,6 +295,7 @@ bool presentationEquals(const VisibleCardData &left,
     const auto &second = std::get<LocalPromptData>(right.payload);
     return first.prompt == second.prompt &&
            first.attachmentCount == second.attachmentCount &&
+           first.imagePaths == second.imagePaths &&
            first.state == second.state &&
            first.acceptedAtMilliseconds == second.acceptedAtMilliseconds &&
            first.error == second.error;
@@ -255,7 +381,10 @@ CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
             followsLatest_ = isAtBottom();
           });
   connect(verticalScrollBar(), &QScrollBar::rangeChanged, this,
-          [this](int, int) { settleScroll(); });
+          [this](int, int) {
+            if (!programmaticScroll_)
+              settleScroll();
+          });
 
   setOutput(output);
   measureAtCurrentWidth(false);
@@ -391,6 +520,7 @@ public:
       body = makeMarkdownLabel({}, owner);
       layout->addWidget(title);
       layout->addWidget(body);
+      createImageContainer();
       break;
     case CardKind::AgentMessage:
       owner->setProperty("messageRole", "agent");
@@ -460,6 +590,7 @@ public:
       layout->addWidget(title);
       layout->addWidget(body);
       layout->addWidget(metadata);
+      createImageContainer();
       animationTimer = new QTimer(owner);
       animationTimer->setInterval(PendingAnimationIntervalMilliseconds);
       QObject::connect(animationTimer, &QTimer::timeout, owner, [this] {
@@ -471,11 +602,35 @@ public:
     }
   }
 
+  void createImageContainer() {
+    images = new QWidget(owner);
+    images->setObjectName(QStringLiteral("messageImages"));
+    imageLayout = new QVBoxLayout(images);
+    imageLayout->setContentsMargins(0, 0, 0, 0);
+    imageLayout->setSpacing(8);
+    imageLayout->setAlignment(Qt::AlignLeft);
+    images->hide();
+    layout->addWidget(images);
+  }
+
+  void setImages(const QStringList &paths) {
+    while (QLayoutItem *item = imageLayout->takeAt(0)) {
+      delete item->widget();
+      delete item;
+    }
+    for (const QString &path : paths) {
+      auto *thumbnail = new ImageThumbnail(path, images);
+      imageLayout->addWidget(thumbnail, 0, Qt::AlignLeft);
+    }
+    images->setVisible(!paths.isEmpty());
+  }
+
   void applyPayload(const VisibleCardData &data) {
     switch (data.kind) {
     case CardKind::UserMessage: {
       const auto &message = std::get<UserMessageData>(data.payload);
       setVisibleMarkdown(body, message.text);
+      setImages(message.imagePaths);
       break;
     }
     case CardKind::AgentMessage: {
@@ -547,6 +702,7 @@ public:
       const auto &prompt = std::get<LocalPromptData>(data.payload);
       body->setText(prompt.prompt);
       body->show();
+      setImages(prompt.imagePaths);
       refreshPendingPresentation();
       break;
     }
@@ -613,6 +769,8 @@ public:
   ContentSizedTextView *command = nullptr;
   CommandOutputView *output = nullptr;
   QTimer *animationTimer = nullptr;
+  QWidget *images = nullptr;
+  QVBoxLayout *imageLayout = nullptr;
 };
 
 ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent)

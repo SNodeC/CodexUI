@@ -100,6 +100,12 @@ QString applicationStyleSheet() {
         QLabel[kind="body"] { font-size: %2pt; }
         QLabel[kind="meta"] { color: #667085; font-size: %1pt; }
         QLabel[kind="small"] { color: #667085; font-size: %1pt; }
+        QLabel[kind="imageThumbnail"] {
+          background: #f8fafc;
+          border: 1px solid #d7dee8;
+          border-radius: 6px;
+          padding: 3px;
+        }
         QLabel[kind="diffAdditionMeta"] { color: #176b45; font-size: %1pt; font-weight: 600; }
         QLabel[kind="diffDeletionMeta"] { color: #982f3d; font-size: %1pt; font-weight: 600; }
         QPushButton, QToolButton {

@@ -48,6 +48,29 @@ QString messageText(const nlohmann::json &item) {
   return parts.join(QStringLiteral("\n"));
 }
 
+QStringList messageImagePaths(const nlohmann::json &item) {
+  QStringList result;
+  const auto content = item.find("content");
+  if (content == item.end() || !content->is_array())
+    return result;
+  for (const nlohmann::json &entry : *content) {
+    if (stringValue(entry, "type") != "localImage")
+      continue;
+    const std::string path = stringValue(entry, "path");
+    if (!path.empty())
+      result.push_back(text(path));
+  }
+  return result;
+}
+
+QStringList localImagePaths(const PromptSubmission &submission) {
+  QStringList result;
+  for (const AttachmentDraft &attachment : submission.attachments)
+    if (attachment.mimeType.startsWith(QStringLiteral("image/")))
+      result.push_back(attachment.path);
+  return result;
+}
+
 QString joinedStrings(const nlohmann::json &value) {
   if (!value.is_array())
     return {};
@@ -92,7 +115,8 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
 
   if (type == "userMessage") {
     result.kind = CardKind::UserMessage;
-    result.payload = UserMessageData{messageText(item)};
+    result.payload =
+        UserMessageData{messageText(item), messageImagePaths(item)};
   } else if (type == "agentMessage") {
     result.kind = CardKind::AgentMessage;
     result.payload = AgentMessageData{
@@ -279,7 +303,8 @@ ConversationSnapshot ConversationProjection::project(
                         submission.state == PromptState::Queued
                             ? PromptState::InFlight
                             : submission.state,
-                        submission.acceptedAtMilliseconds, submission.error}};
+                        submission.acceptedAtMilliseconds, submission.error,
+                        localImagePaths(submission)}};
     nodes.push_back({position, submission.admissionOrdinal, sectionKey, turnId,
                      std::move(card)});
   }

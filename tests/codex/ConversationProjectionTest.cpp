@@ -362,6 +362,101 @@ bool testCommandOutputVisibility() {
   return result;
 }
 
+bool testUserMessageImages() {
+  ThreadPresentation thread = baseThread("image-thread");
+  appendItem(
+      thread, "turn-1",
+      item("user-images",
+           {{"type", "userMessage"},
+            {"content",
+             {{{"type", "text"}, {"text", "image prompt"}},
+              {{"type", "localImage"}, {"path", "/tmp/first.png"}},
+              {{"type", "localImage"}, {"path", "/tmp/second.jpg"}}}}}));
+  appendItem(thread, "turn-1",
+             item("user-image-only",
+                  {{"type", "userMessage"},
+                   {"content", {{{"type", "localImage"},
+                                  {"path", "/tmp/only.png"}}}}}));
+
+  const ConversationSnapshot authoritative = ConversationProjection::project(
+      thread, {}, ConversationProjection::DefaultAuthoritativeItemLimit, 10);
+  const auto &cards = authoritative.sections.front().cards;
+  const auto *mixed = std::get_if<UserMessageData>(&cards[2].payload);
+  const auto *imageOnly = std::get_if<UserMessageData>(&cards[3].payload);
+  bool result = expect(
+      mixed && mixed->text == QStringLiteral("image prompt") &&
+          mixed->imagePaths ==
+              QStringList{QStringLiteral("/tmp/first.png"),
+                          QStringLiteral("/tmp/second.jpg")},
+      "authoritative user messages retain text and local image paths");
+  result &= expect(imageOnly && imageOnly->text.isEmpty() &&
+                       imageOnly->imagePaths ==
+                           QStringList{QStringLiteral("/tmp/only.png")},
+                   "an image-only user message remains presentable");
+
+  PromptSubmission pending;
+  pending.id = 41;
+  pending.threadId = thread.id;
+  pending.prompt = QStringLiteral("pending image");
+  pending.state = PromptState::InFlight;
+  pending.attachments = {
+      {QStringLiteral("/tmp/pending.png"), QStringLiteral("pending.png"),
+       QStringLiteral("image/png"), 10},
+      {QStringLiteral("/tmp/note.txt"), QStringLiteral("note.txt"),
+       QStringLiteral("text/plain"), 10}};
+  const std::array submissions{pending};
+  const ConversationSnapshot local = ConversationProjection::project(
+      thread, submissions, ConversationProjection::DefaultAuthoritativeItemLimit,
+      10);
+  const auto *localCard = local.find(LocalPromptKey{41});
+  const auto *localPrompt =
+      localCard ? std::get_if<LocalPromptData>(&localCard->payload) : nullptr;
+  result &= expect(localPrompt && localPrompt->attachmentCount == 2 &&
+                       localPrompt->imagePaths ==
+                           QStringList{QStringLiteral("/tmp/pending.png")},
+                   "temporary prompts expose only their image attachment paths");
+
+  ThreadPresentation replacement = baseThread("replacement-thread");
+  addTurn(replacement, "turn-image");
+  PromptCoordinator prompts;
+  const auto submissionId = prompts.admit(
+      replacement.id, QStringLiteral("replacement image"),
+      {{QStringLiteral("/tmp/replacement.png"),
+        QStringLiteral("replacement.png"), QStringLiteral("image/png"), 10}},
+      nlohmann::json::object(), &replacement, std::nullopt, 100);
+  const auto dispatch = prompts.beginNext(replacement.id);
+  result &= expect(dispatch && prompts.acknowledge(
+                                   replacement.id, submissionId,
+                                   std::string("turn-image"), 200),
+                   "image prompt receives a real acknowledgement");
+  appendItem(
+      replacement, "turn-image",
+      item("authoritative-image",
+           {{"type", "userMessage"},
+            {"clientId", dispatch ? dispatch->clientUserMessageId : ""},
+            {"content",
+             {{{"type", "text"}, {"text", "replacement image"}},
+              {{"type", "localImage"},
+               {"path", "/tmp/replacement.png"}}}}}));
+  prompts.reconcile(replacement.id, replacement);
+  prompts.compactResolved(replacement.id, 800);
+  const ConversationSnapshot replaced = ConversationProjection::project(
+      replacement, prompts.submissions(replacement.id), 80, 800);
+  const VisibleCardData *replacedCard =
+      replaced.find(LocalPromptKey{submissionId});
+  const auto *replacedMessage =
+      replacedCard ? std::get_if<UserMessageData>(&replacedCard->payload)
+                   : nullptr;
+  result &= expect(
+      replacedCard && replacedCard->kind == CardKind::UserMessage &&
+          replacedMessage &&
+          replacedMessage->imagePaths ==
+              QStringList{QStringLiteral("/tmp/replacement.png")} &&
+          prompts.submission(replacement.id, submissionId)->attachments.empty(),
+      "authoritative image presentation survives local payload compaction");
+  return result;
+}
+
 } // namespace
 } // namespace codexui::codex::middle
 
@@ -373,6 +468,7 @@ int main() {
   result &= testClientIdentityBindsBeforeAcknowledgement();
   result &= testAnchoredDuplicatePrompts();
   result &= testCommandOutputVisibility();
+  result &= testUserMessageImages();
   if (result)
     std::cout << "Conversation projection tests passed\n";
   return result ? 0 : 1;

@@ -14,6 +14,7 @@
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QThread>
+#include <QTemporaryDir>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -745,6 +746,94 @@ bool testPendingPromptAnimation() {
   return result;
 }
 
+bool testMessageImagePresentation() {
+  QTemporaryDir directory;
+  const QString path = directory.filePath(QStringLiteral("sample.png"));
+  QImage source(640, 360, QImage::Format_ARGB32_Premultiplied);
+  source.fill(QColor(QStringLiteral("#2f6feb")));
+  bool result = expect(directory.isValid() && source.save(path),
+                       "image test fixture is a real readable image");
+
+  VisibleCardData message{
+      AuthoritativeItemKey{"images", "turn", "message"},
+      CardKind::UserMessage,
+      "images",
+      "turn",
+      "message",
+      UserMessageData{QStringLiteral("attached image"), {path}}};
+  auto *card = new ConversationCard(message);
+  card->show();
+  spin();
+  auto *thumbnail =
+      card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
+  const QPixmap thumbnailPixmap = thumbnail ? thumbnail->pixmap() : QPixmap{};
+  result &= expect(thumbnail && thumbnail->property("imageAvailable").toBool() &&
+                       !thumbnailPixmap.isNull() &&
+                       thumbnailPixmap.width() <= 280 &&
+                       thumbnailPixmap.height() <= 180,
+                   "a local image is decoded directly to a bounded thumbnail");
+  if (thumbnail) {
+    const QPointF local(thumbnail->rect().center());
+    QMouseEvent click(QEvent::MouseButtonPress,
+                      local, local,
+                      thumbnail->mapToGlobal(local.toPoint()), Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(thumbnail, &click);
+    spin();
+  }
+  QWidget *viewer = nullptr;
+  for (QWidget *candidate : QApplication::topLevelWidgets())
+    if (candidate->objectName() == QStringLiteral("messageImageViewer"))
+      viewer = candidate;
+  result &= expect(viewer && viewer->isVisible(),
+                   "clicking a thumbnail opens the non-modal image viewer");
+  const auto *viewerImage =
+      viewer ? viewer->findChild<QLabel *>(
+                   QStringLiteral("messageImageViewerImage"))
+             : nullptr;
+  result &= expect(viewerImage && !viewerImage->pixmap().isNull(),
+                   "the shown viewer contains a fitted image pixmap");
+  if (viewer)
+    viewer->close();
+  spin();
+
+  auto &payload = std::get<UserMessageData>(message.payload);
+  payload.imagePaths = {directory.filePath(QStringLiteral("missing.png"))};
+  result &= expect(card->apply(message),
+                   "changing the image list invalidates card presentation");
+  thumbnail =
+      card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
+  result &= expect(thumbnail &&
+                       !thumbnail->property("imageAvailable").toBool() &&
+                       thumbnail->text().contains(QStringLiteral("unavailable")),
+                   "an unreadable image has a stable restrained placeholder");
+
+  payload.imagePaths = {path};
+  card->apply(message);
+  thumbnail =
+      card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
+  if (thumbnail) {
+    const QPointF local(thumbnail->rect().center());
+    QMouseEvent click(QEvent::MouseButtonPress, local, local,
+                      thumbnail->mapToGlobal(local.toPoint()), Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(thumbnail, &click);
+    spin();
+  }
+  viewer = nullptr;
+  for (QWidget *candidate : QApplication::topLevelWidgets())
+    if (candidate->objectName() == QStringLiteral("messageImageViewer"))
+      viewer = candidate;
+  delete card;
+  spin();
+  result &= expect(viewer && viewer->isVisible(),
+                   "an open viewer is independent of its originating card");
+  if (viewer)
+    viewer->close();
+  spin();
+  return result;
+}
+
 } // namespace
 } // namespace codexui::codex::middle
 
@@ -759,6 +848,7 @@ int main(int argc, char **argv) {
   result &= testBottomAnchoredCommandOutputGrowth();
   result &= testCommandOutputStateAcrossNavigation();
   result &= testPendingPromptAnimation();
+  result &= testMessageImagePresentation();
   if (result)
     std::cout << "Conversation card tests passed\n";
   return result ? 0 : 1;
