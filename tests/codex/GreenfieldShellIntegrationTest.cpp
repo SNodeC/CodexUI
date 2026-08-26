@@ -357,8 +357,12 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
       expect(beforeAck && beforeAck->state == middle::PromptState::InFlight,
              "materialization alone cannot acknowledge A1");
 
+  editor->setPlainText(QStringLiteral("unsent shared draft"));
   result &= expect(selectThread(list, "thread-b"),
                    "B can be selected while A remains active");
+  result &= expect(editor->toPlainText() ==
+                       QStringLiteral("unsent shared draft"),
+                   "thread navigation retains the shared composer draft");
   const auto readB = peer.waitFor("thread.read", "thread-b");
   result &= expect(readB.has_value(), "selecting B requests its own hydration");
   if (!readB)

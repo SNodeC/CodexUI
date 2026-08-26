@@ -819,7 +819,6 @@ void ShellWidget::Impl::selectThread(std::string threadId) {
   newThreadOptions = nlohmann::json::object();
   newThreadName.clear();
   newThreadWorkspace.clear();
-  middleRegion->composer().clearDraft();
   historyWindows.try_emplace(selectedThreadId);
   ensureThreadHydrated(selectedThreadId);
   render();
