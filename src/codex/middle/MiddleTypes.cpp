@@ -23,6 +23,12 @@ std::string stableKey(const CardKey &key) {
     appendComponent(result, authoritative->itemId);
     return result;
   }
+  if (const auto *plan = std::get_if<TurnPlanKey>(&key)) {
+    std::string result = "plan:";
+    appendComponent(result, plan->threadId);
+    appendComponent(result, plan->turnId);
+    return result;
+  }
   return "prompt:" + std::to_string(std::get<LocalPromptKey>(key).submissionId);
 }
 

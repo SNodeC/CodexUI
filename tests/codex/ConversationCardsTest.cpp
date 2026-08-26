@@ -11,10 +11,10 @@
 #include <QLabel>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QTemporaryDir>
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QThread>
-#include <QTemporaryDir>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -349,8 +349,8 @@ bool testMutableCardsAndCommandOutput() {
   section.cards = {
       {AuthoritativeItemKey{thread, "turn", "user"}, CardKind::UserMessage,
        thread, "turn", "user",
-       UserMessageData{QStringLiteral(
-           "hello **Markdown**\n\n| Value | Rating |\n|---|---|\n| State | 10 |")}},
+       UserMessageData{QStringLiteral("hello **Markdown**\n\n| Value | Rating "
+                                      "|\n|---|---|\n| State | 10 |")}},
       {AuthoritativeItemKey{thread, "turn", "agent"}, CardKind::AgentMessage,
        thread, "turn", "agent",
        AgentMessageData{QStringLiteral("answer"), false}},
@@ -373,10 +373,16 @@ bool testMutableCardsAndCommandOutput() {
        thread, "turn", "reasoning", ReasoningData{QStringLiteral("summary")}},
       {AuthoritativeItemKey{thread, "turn", "files"}, CardKind::FileChanges,
        thread, "turn", "files",
-       FileChangesData{QStringLiteral("inProgress"), 1,
-                       nlohmann::json::array()}},
+       FileChangesData{
+           QStringLiteral("inProgress"),
+           {{QStringLiteral("src/card.cpp"), QStringLiteral("update"), 2, 1}}}},
       {AuthoritativeItemKey{thread, "turn", "plan"}, CardKind::Plan, thread,
-       "turn", "plan", PlanData{QStringLiteral("plan step")}},
+       "turn", "plan",
+       PlanData{
+           QStringLiteral("Keep the card compact"),
+           {{QStringLiteral("Inspect data"), QStringLiteral("completed")},
+            {QStringLiteral("Render cards"), QStringLiteral("inProgress")}},
+           {}}},
       {AuthoritativeItemKey{thread, "turn", "generic"},
        CardKind::GenericActivity, thread, "turn", "generic",
        GenericActivityData{QStringLiteral("custom activity"),
@@ -403,28 +409,50 @@ bool testMutableCardsAndCommandOutput() {
   std::unordered_map<std::string, ConversationCard *> identities;
   for (const auto &value : snapshot.sections.front().cards)
     identities[stableKey(value.key)] = card(view, stableKey(value.key));
+  auto containsLabelText = [](QWidget *parent, const QString &needle) {
+    return std::ranges::any_of(
+        parent->findChildren<QLabel *>(), [&needle](QLabel *label) {
+          return label->text().contains(needle) ||
+                 label->property("markdownSource").toString().contains(needle);
+        });
+  };
   auto *commandCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "command"}})];
   auto *output = dynamic_cast<CommandOutputView *>(
-      commandCard->findChild<QTextEdit *>(
-          QStringLiteral("commandOutputView")));
+      commandCard->findChild<QTextEdit *>(QStringLiteral("commandOutputView")));
   auto *commandText = dynamic_cast<ContentSizedTextView *>(
-      commandCard->findChild<QTextEdit *>(
-          QStringLiteral("commandTextView")));
+      commandCard->findChild<QTextEdit *>(QStringLiteral("commandTextView")));
   bool result = expect(output && output->isHidden(),
                        "empty-line command output has no black surface");
   auto *userCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "user"}})];
   const auto userLabels = userCard->findChildren<QLabel *>();
-  result &= expect(
-      std::ranges::any_of(userLabels, [](QLabel *label) {
-        return label->property("markdownSource").toString() ==
-                   QStringLiteral("hello **Markdown**\n\n| Value | Rating |\n"
+  result &=
+      expect(std::ranges::any_of(
+                 userLabels,
+                 [](QLabel *label) {
+                   return label->property("markdownSource").toString() ==
+                              QStringLiteral(
+                                  "hello **Markdown**\n\n| Value | Rating |\n"
                                   "|---|---|\n| State | 10 |") &&
-               label->textFormat() == Qt::RichText &&
-               label->text().contains(QStringLiteral("<table"));
-      }),
-      "authoritative user messages render GitHub Markdown tables");
+                          label->textFormat() == Qt::RichText &&
+                          label->text().contains(QStringLiteral("<table"));
+                 }),
+             "authoritative user messages render GitHub Markdown tables");
+  auto *filesCard = identities[stableKey(
+      CardKey{AuthoritativeItemKey{thread, "turn", "files"}})];
+  auto *planCard = identities[stableKey(
+      CardKey{AuthoritativeItemKey{thread, "turn", "plan"}})];
+  result &=
+      expect(containsLabelText(
+                 filesCard, QStringLiteral("src/card.cpp  ·  Update  +2 −1")) &&
+                 containsLabelText(filesCard, QStringLiteral("+2 −1")),
+             "file-change cards show paths, kinds, and truthful diff counts");
+  result &= expect(
+      containsLabelText(planCard, QStringLiteral("Keep the card compact")) &&
+          containsLabelText(planCard, QStringLiteral("✓ Inspect data")) &&
+          containsLabelText(planCard, QStringLiteral("◉ Render cards")),
+      "structured plan cards show explanation and step status");
   result &= expect(
       commandText &&
           commandText->toPlainText() == QStringLiteral("printf test") &&
@@ -456,8 +484,11 @@ bool testMutableCardsAndCommandOutput() {
   std::get<AgentActivityData>(cards[3].payload).resultText =
       QStringLiteral("result");
   std::get<ReasoningData>(cards[4].payload).summary += QStringLiteral(" more");
-  std::get<FileChangesData>(cards[5].payload).pathCount = 2;
-  std::get<PlanData>(cards[6].payload).text += QStringLiteral(" updated");
+  std::get<FileChangesData>(cards[5].payload)
+      .changes.push_back(
+          {QStringLiteral("tests/card.cpp"), QStringLiteral("add"), 3, 0});
+  std::get<PlanData>(cards[6].payload).steps[1].status =
+      QStringLiteral("completed");
   auto &generic = std::get<GenericActivityData>(cards[7].payload);
   generic.type = QStringLiteral("updated custom activity");
   generic.raw["detail"] = "updated";
@@ -582,8 +613,8 @@ bool testInitialCommandGeometrySettlement() {
                        outputView->sizeHint().height() == immediateHint,
                    "initial wrapped output has no delayed geometry settlement");
 
-  const int glyphWidth =
-      std::max(1, outputView->fontMetrics().horizontalAdvance(QLatin1Char('W')));
+  const int glyphWidth = std::max(
+      1, outputView->fontMetrics().horizontalAdvance(QLatin1Char('W')));
   const int charactersPerLine =
       std::max(1, outputView->viewport()->width() / glyphWidth);
   auto &execution = std::get<CommandExecutionData>(
@@ -597,7 +628,8 @@ bool testInitialCommandGeometrySettlement() {
       wrappedBlock.layout() && wrappedBlock.layout()->lineCount() == 2 &&
           outputView->verticalScrollBar()->maximum() == 0 &&
           outputView->viewport()->height() >=
-              static_cast<int>(std::ceil(outputView->document()->size().height())),
+              static_cast<int>(
+                  std::ceil(outputView->document()->size().height())),
       "two visual output lines are fully visible without inner scrolling");
   return result;
 }
@@ -632,10 +664,10 @@ bool testBottomAnchoredCommandOutputGrowth() {
                                    commandCard->findChild<QTextEdit *>(
                                        QStringLiteral("commandOutputView")))
                              : nullptr;
-  bool result = expect(commandCard && metadata && output &&
-                           output->isHidden() && view.isAtBottom() &&
-                           metadata->property("tone") == "active",
-                       "live command starts with a hidden zero-line output");
+  bool result =
+      expect(commandCard && metadata && output && output->isHidden() &&
+                 view.isAtBottom() && metadata->property("tone") == "active",
+             "live command starts with a hidden zero-line output");
   if (!commandCard || !metadata || !output)
     return false;
   const int metadataBottomBefore =
@@ -727,16 +759,14 @@ bool testCommandOutputStateAcrossNavigation() {
 }
 
 bool testPendingPromptAnimation() {
-  VisibleCardData pending{LocalPromptKey{901},
-                          CardKind::LocalPrompt,
-                          "prompt-thread",
-                          {},
-                          {},
-                          LocalPromptData{901,
-                                          QStringLiteral("pending prompt"),
-                                          PromptState::InFlight,
-                                          0,
-                                          {}}};
+  VisibleCardData pending{
+      LocalPromptKey{901},
+      CardKind::LocalPrompt,
+      "prompt-thread",
+      {},
+      {},
+      LocalPromptData{
+          901, QStringLiteral("pending prompt"), PromptState::InFlight, 0, {}}};
   ConversationCard card(pending);
   card.resize(560, 92);
   card.show();
@@ -782,15 +812,14 @@ bool testMessageImagePresentation() {
   auto *thumbnail =
       card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
   const QPixmap thumbnailPixmap = thumbnail ? thumbnail->pixmap() : QPixmap{};
-  result &= expect(thumbnail && thumbnail->property("imageAvailable").toBool() &&
-                       !thumbnailPixmap.isNull() &&
-                       thumbnailPixmap.width() <= 280 &&
-                       thumbnailPixmap.height() <= 180,
-                   "a local image is decoded directly to a bounded thumbnail");
+  result &=
+      expect(thumbnail && thumbnail->property("imageAvailable").toBool() &&
+                 !thumbnailPixmap.isNull() && thumbnailPixmap.width() <= 280 &&
+                 thumbnailPixmap.height() <= 180,
+             "a local image is decoded directly to a bounded thumbnail");
   if (thumbnail) {
     const QPointF local(thumbnail->rect().center());
-    QMouseEvent click(QEvent::MouseButtonPress,
-                      local, local,
+    QMouseEvent click(QEvent::MouseButtonPress, local, local,
                       thumbnail->mapToGlobal(local.toPoint()), Qt::LeftButton,
                       Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(thumbnail, &click);
@@ -802,10 +831,9 @@ bool testMessageImagePresentation() {
       viewer = candidate;
   result &= expect(viewer && viewer->isVisible(),
                    "clicking a thumbnail opens the non-modal image viewer");
-  const auto *viewerImage =
-      viewer ? viewer->findChild<QLabel *>(
-                   QStringLiteral("messageImageViewerImage"))
-             : nullptr;
+  const auto *viewerImage = viewer ? viewer->findChild<QLabel *>(QStringLiteral(
+                                         "messageImageViewerImage"))
+                                   : nullptr;
   result &= expect(viewerImage && !viewerImage->pixmap().isNull(),
                    "the shown viewer contains a fitted image pixmap");
   if (viewer)
@@ -818,10 +846,10 @@ bool testMessageImagePresentation() {
                    "changing the image list invalidates card presentation");
   thumbnail =
       card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
-  result &= expect(thumbnail &&
-                       !thumbnail->property("imageAvailable").toBool() &&
-                       thumbnail->text().contains(QStringLiteral("unavailable")),
-                   "an unreadable image has a stable restrained placeholder");
+  result &=
+      expect(thumbnail && !thumbnail->property("imageAvailable").toBool() &&
+                 thumbnail->text().contains(QStringLiteral("unavailable")),
+             "an unreadable image has a stable restrained placeholder");
 
   payload.imagePaths = {path};
   card->apply(message);
@@ -890,6 +918,29 @@ bool testGeneratedImagePresentationAndGenericBound() {
     viewer->close();
   spin();
 
+  VisibleCardData viewed{
+      AuthoritativeItemKey{"generated", "turn", "view"},
+      CardKind::ImageGeneration,
+      "generated",
+      "turn",
+      "view",
+      ImageGenerationData{path, {}, {}}};
+  ConversationCard viewedCard(viewed);
+  viewedCard.show();
+  spin();
+  const auto viewedLabels = viewedCard.findChildren<QLabel *>();
+  result &= expect(
+      std::ranges::any_of(viewedLabels, [](QLabel *label) {
+        return label->property("kind").toString() == QStringLiteral("title") &&
+               label->text() == QStringLiteral("Image");
+      }) &&
+          std::ranges::any_of(viewedLabels, [](QLabel *label) {
+            return label->objectName() ==
+                       QStringLiteral("messageImageThumbnail") &&
+                   label->property("imageAvailable").toBool();
+          }),
+      "plain image-view cards use a neutral title and the shared thumbnail");
+
   VisibleCardData generic{
       AuthoritativeItemKey{"generated", "turn", "unknown"},
       CardKind::GenericActivity,
@@ -903,10 +954,10 @@ bool testGeneratedImagePresentationAndGenericBound() {
   spin();
   auto *details = genericCard.findChild<QLabel *>(
       QStringLiteral("genericActivityMetadata"));
-  result &= expect(
-      details && details->text().size() < 4200 &&
-          details->text().endsWith(QStringLiteral("[Activity details truncated]")),
-      "unknown activity text is bounded before Qt lays it out");
+  result &= expect(details && details->text().size() < 4200 &&
+                       details->text().endsWith(
+                           QStringLiteral("[Activity details truncated]")),
+                   "unknown activity text is bounded before Qt lays it out");
   return result;
 }
 

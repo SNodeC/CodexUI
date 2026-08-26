@@ -510,8 +510,10 @@ as unavailable placeholders.
 
 Authoritative `imageGeneration` items use their app-server `savedPath` and the
 same thumbnail/viewer. Their Base64 `result` is transport data and is never
-rendered as text. Unknown item types retain a generic diagnostic card, but its
-visible JSON is bounded before Qt performs text layout.
+rendered as text. Authoritative `imageView` items use their local `path` and the
+same presentation with the neutral title `Image`. Unknown item types retain a
+generic diagnostic card, but its visible JSON is bounded before Qt performs
+text layout.
 
 ### 7.4 Changes and Diff Presentation
 
@@ -672,11 +674,14 @@ steps with `pending`, `inProgress`, or `completed` status.
 
 Plan presentation is retained across tab and thread switching. It changes only
 for the identified turn and is cleared only by an explicit authoritative empty
-or replacement event for that turn. A completed textual plan item may be shown
-as conversation activity. When no structured plan survives a fresh
-`thread/read`, the Plan inspector renders the newest retained textual plan item
-as a read-only compatibility view; it never overrides a newer authoritative
-structured turn plan.
+or replacement event for that turn. The Inspector is the production owner of
+structured plans, so they are not duplicated in the conversation. The typed
+turn-level conversation key, conversion, placement, and renderer are retained
+behind a disabled projection switch for narrow reactivation. Textual `plan`
+items remain supported conversation content and use the same card renderer.
+When no structured plan survives a fresh `thread/read`, the Plan inspector
+renders the newest retained textual plan item as a read-only compatibility
+view; it never overrides a newer authoritative structured turn plan.
 
 ### 8.2 Agents
 

@@ -143,9 +143,8 @@ private:
     const QSize available = scroll_->viewport()->size() - QSize(8, 8);
     if (available.isEmpty())
       return;
-    imageLabel_->setPixmap(QPixmap::fromImage(
-        image_.scaled(available, Qt::KeepAspectRatio,
-                      Qt::SmoothTransformation)));
+    imageLabel_->setPixmap(QPixmap::fromImage(image_.scaled(
+        available, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
   }
 
   QImage image_;
@@ -172,10 +171,9 @@ QLabel *makeLabel(const QString &value, const char *kind = "body",
 
 QString markdownHtml(const QString &markdown) {
   QTextDocument document;
-  document.setMarkdown(
-      markdown,
-      QTextDocument::MarkdownFeatures(QTextDocument::MarkdownDialectGitHub) |
-          QTextDocument::MarkdownNoHTML);
+  document.setMarkdown(markdown, QTextDocument::MarkdownFeatures(
+                                     QTextDocument::MarkdownDialectGitHub) |
+                                     QTextDocument::MarkdownNoHTML);
   return document.toHtml();
 }
 
@@ -270,6 +268,11 @@ QString commandMetadata(const CommandExecutionData &command) {
     metadata << QStringLiteral("exit %1").arg(*command.exitCode);
   if (!command.cwd.isEmpty())
     metadata << command.cwd;
+  if (command.durationMilliseconds) {
+    const qreal seconds = qreal(*command.durationMilliseconds) / 1000.0;
+    metadata << QStringLiteral("%1 s").arg(seconds, 0, 'f',
+                                           seconds < 10.0 ? 1 : 0);
+  }
   return metadata.join(QStringLiteral("  |  "));
 }
 
@@ -281,7 +284,77 @@ QString agentMetadata(const AgentActivityData &activity) {
                                                       : activity.status);
   if (!activity.receivers.isEmpty())
     metadata << activity.receivers.join(QStringLiteral(", "));
+  if (!activity.model.isEmpty())
+    metadata << activity.model;
+  if (!activity.reasoningEffort.isEmpty())
+    metadata << activity.reasoningEffort;
+  if (!activity.childThreadId.isEmpty())
+    metadata << QStringLiteral("thread %1").arg(activity.childThreadId);
+  if (!activity.agentPath.isEmpty())
+    metadata << activity.agentPath;
+  if (!activity.senderThreadId.isEmpty())
+    metadata << QStringLiteral("sender %1").arg(activity.senderThreadId);
   return metadata.join(QStringLiteral("  |  "));
+}
+
+QString displayChangeKind(const QString &kind) {
+  if (kind.isEmpty())
+    return QStringLiteral("Changed");
+  QString result = kind;
+  result[0] = result[0].toUpper();
+  return result;
+}
+
+struct DiffCounts {
+  int additions = 0;
+  int deletions = 0;
+};
+
+QString fileChangesText(const FileChangesData &data) {
+  QStringList rows;
+  for (const FileChangeData &change : data.changes) {
+    if (change.path.isEmpty())
+      continue;
+    QString row = QStringLiteral("%1  ·  %2")
+                      .arg(change.path, displayChangeKind(change.kind));
+    if (change.additions && change.deletions)
+      row += QStringLiteral("  +%1 −%2")
+                 .arg(*change.additions)
+                 .arg(*change.deletions);
+    rows << row;
+  }
+  return rows.join(QLatin1Char('\n'));
+}
+
+std::optional<DiffCounts> totalDiffCounts(const FileChangesData &data) {
+  DiffCounts total;
+  bool available = false;
+  for (const FileChangeData &change : data.changes) {
+    if (!change.additions || !change.deletions)
+      continue;
+    available = true;
+    total.additions += *change.additions;
+    total.deletions += *change.deletions;
+  }
+  return available ? std::optional<DiffCounts>{total} : std::nullopt;
+}
+
+QString planMarkdown(const PlanData &plan) {
+  if (!plan.legacyText.isEmpty())
+    return plan.legacyText;
+  QStringList rows;
+  if (!plan.explanation.isEmpty())
+    rows << plan.explanation;
+  if (!plan.steps.empty() && !rows.empty())
+    rows << QString{};
+  for (const PlanStepData &step : plan.steps) {
+    const QString marker =
+        step.status == QStringLiteral("completed")    ? QStringLiteral("✓")
+        : step.status == QStringLiteral("inProgress") ? QStringLiteral("◉")
+                                                      : QStringLiteral("○");
+    rows << QStringLiteral("%1 %2  ").arg(marker, step.text);
+  }
+  return rows.join(QLatin1Char('\n'));
 }
 
 QString boundedGenericActivity(const nlohmann::json &raw) {
@@ -316,14 +389,9 @@ bool presentationEquals(const VisibleCardData &left,
   case CardKind::Reasoning:
     return std::get<ReasoningData>(left.payload) ==
            std::get<ReasoningData>(right.payload);
-  case CardKind::FileChanges: {
-    const auto &first = std::get<FileChangesData>(left.payload);
-    const auto &second = std::get<FileChangesData>(right.payload);
-    // The card presents the aggregate status and path count. The detailed
-    // change JSON belongs to the Changes inspector and is deliberately not a
-    // conversation-card invalidation source.
-    return first.status == second.status && first.pathCount == second.pathCount;
-  }
+  case CardKind::FileChanges:
+    return std::get<FileChangesData>(left.payload) ==
+           std::get<FileChangesData>(right.payload);
   case CardKind::ImageGeneration:
     return std::get<ImageGenerationData>(left.payload) ==
            std::get<ImageGenerationData>(right.payload);
@@ -529,7 +597,6 @@ public:
     owner->setProperty("conversationCardKey",
                        QString::fromStdString(stableKey(initial.key)));
     owner->setProperty("conversationCardKind", static_cast<int>(initial.kind));
-
     layout = new QVBoxLayout(owner);
     layout->setContentsMargins(12, 10, 12, 10);
     layout->setSpacing(6);
@@ -576,9 +643,9 @@ public:
       command = new ContentSizedTextView(MaximumCommandTextHeight, owner);
       command->setProperty("kind", "command");
       command->setObjectName(QStringLiteral("commandTextView"));
-      command->setStyleSheet(QStringLiteral(
-          "QTextEdit#commandTextView{background:#f8fafc;"
-          "border:1px solid #d7dee8;border-radius:6px;}"));
+      command->setStyleSheet(
+          QStringLiteral("QTextEdit#commandTextView{background:#f8fafc;"
+                         "border:1px solid #d7dee8;border-radius:6px;}"));
       output = new CommandOutputView({}, owner);
       output->hide();
       metadata = makeLabel({}, "meta", owner);
@@ -607,7 +674,9 @@ public:
     case CardKind::FileChanges:
       title = makeLabel(QStringLiteral("File changes"), "title", owner);
       metadata = makeLabel({}, "meta", owner);
+      body = makeLabel({}, "body", owner);
       layout->addWidget(title);
+      layout->addWidget(body);
       layout->addWidget(metadata);
       break;
     case CardKind::ImageGeneration:
@@ -620,7 +689,7 @@ public:
       createImageContainer();
       break;
     case CardKind::Plan:
-      title = makeLabel(QStringLiteral("plan"), "title", owner);
+      title = makeLabel(QStringLiteral("Plan"), "title", owner);
       body = makeMarkdownLabel({}, owner);
       layout->addWidget(title);
       layout->addWidget(body);
@@ -733,8 +802,13 @@ public:
     }
     case CardKind::FileChanges: {
       const auto &changes = std::get<FileChangesData>(data.payload);
+      setVisibleText(body, fileChangesText(changes));
       QStringList values{displayStatus(changes.status)};
-      values << QStringLiteral("%1 paths").arg(changes.pathCount);
+      values << QStringLiteral("%1 paths").arg(changes.changes.size());
+      if (const auto counts = totalDiffCounts(changes))
+        values << QStringLiteral("+%1 −%2")
+                      .arg(counts->additions)
+                      .arg(counts->deletions);
       metadata->setText(values.join(QStringLiteral("  |  ")));
       setStatusTone(metadata, changes.status);
       metadata->show();
@@ -742,17 +816,19 @@ public:
     }
     case CardKind::ImageGeneration: {
       const auto &image = std::get<ImageGenerationData>(data.payload);
-      metadata->setText(displayStatus(image.status));
+      const bool generated = !image.status.isEmpty() ||
+                             !image.revisedPrompt.isEmpty();
+      title->setText(generated ? QStringLiteral("Generated image")
+                               : QStringLiteral("Image"));
+      setVisibleText(metadata, displayStatus(image.status));
       setStatusTone(metadata, image.status);
-      metadata->show();
       setVisibleText(body, image.revisedPrompt);
-      setImages(image.path.isEmpty() ? QStringList{}
-                                     : QStringList{image.path});
+      setImages(image.path.isEmpty() ? QStringList{} : QStringList{image.path});
       break;
     }
     case CardKind::Plan: {
       const auto &plan = std::get<PlanData>(data.payload);
-      setVisibleMarkdown(body, plan.text);
+      setVisibleMarkdown(body, planMarkdown(plan));
       break;
     }
     case CardKind::GenericActivity: {

@@ -76,6 +76,10 @@ otherwise inactive threads retain the canonical light-gray dot. Reasoning prose
 and metadata without an authoritative status remain neutral because their
 content does not provide a reliable success, warning, or failure classification.
 
+Conversation activity cards remain neutral so supporting process information
+does not compete with the user/Codex exchange. Color on those cards is reserved
+for authoritative running, completed, warning/interrupted, and failed status.
+
 ## Application layout
 
 The window consists of a 64-pixel identity/status bar, a hideable thread

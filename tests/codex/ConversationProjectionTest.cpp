@@ -364,19 +364,18 @@ bool testCommandOutputVisibility() {
 
 bool testUserMessageImages() {
   ThreadPresentation thread = baseThread("image-thread");
-  appendItem(
-      thread, "turn-1",
-      item("user-images",
-           {{"type", "userMessage"},
-            {"content",
-             {{{"type", "text"}, {"text", "image prompt"}},
-              {{"type", "localImage"}, {"path", "/tmp/first.png"}},
-              {{"type", "localImage"}, {"path", "/tmp/second.jpg"}}}}}));
+  appendItem(thread, "turn-1",
+             item("user-images",
+                  {{"type", "userMessage"},
+                   {"content",
+                    {{{"type", "text"}, {"text", "image prompt"}},
+                     {{"type", "localImage"}, {"path", "/tmp/first.png"}},
+                     {{"type", "localImage"}, {"path", "/tmp/second.jpg"}}}}}));
   appendItem(thread, "turn-1",
              item("user-image-only",
                   {{"type", "userMessage"},
-                   {"content", {{{"type", "localImage"},
-                                  {"path", "/tmp/only.png"}}}}}));
+                   {"content",
+                    {{{"type", "localImage"}, {"path", "/tmp/only.png"}}}}}));
 
   const ConversationSnapshot authoritative = ConversationProjection::project(
       thread, {}, ConversationProjection::DefaultAuthoritativeItemLimit, 10);
@@ -385,9 +384,8 @@ bool testUserMessageImages() {
   const auto *imageOnly = std::get_if<UserMessageData>(&cards[3].payload);
   bool result = expect(
       mixed && mixed->text == QStringLiteral("image prompt") &&
-          mixed->imagePaths ==
-              QStringList{QStringLiteral("/tmp/first.png"),
-                          QStringLiteral("/tmp/second.jpg")},
+          mixed->imagePaths == QStringList{QStringLiteral("/tmp/first.png"),
+                                           QStringLiteral("/tmp/second.jpg")},
       "authoritative user messages retain text and local image paths");
   result &= expect(imageOnly && imageOnly->text.isEmpty() &&
                        imageOnly->imagePaths ==
@@ -406,15 +404,15 @@ bool testUserMessageImages() {
        QStringLiteral("text/plain"), 10}};
   const std::array submissions{pending};
   const ConversationSnapshot local = ConversationProjection::project(
-      thread, submissions, ConversationProjection::DefaultAuthoritativeItemLimit,
-      10);
+      thread, submissions,
+      ConversationProjection::DefaultAuthoritativeItemLimit, 10);
   const auto *localCard = local.find(LocalPromptKey{41});
   const auto *localPrompt =
       localCard ? std::get_if<LocalPromptData>(&localCard->payload) : nullptr;
-  result &= expect(localPrompt &&
-                       localPrompt->imagePaths ==
-                           QStringList{QStringLiteral("/tmp/pending.png")},
-                   "temporary prompts expose only their image attachment paths");
+  result &=
+      expect(localPrompt && localPrompt->imagePaths ==
+                                QStringList{QStringLiteral("/tmp/pending.png")},
+             "temporary prompts expose only their image attachment paths");
 
   ThreadPresentation replacement = baseThread("replacement-thread");
   addTurn(replacement, "turn-image");
@@ -425,10 +423,10 @@ bool testUserMessageImages() {
         QStringLiteral("replacement.png"), QStringLiteral("image/png"), 10}},
       nlohmann::json::object(), &replacement, std::nullopt, 100);
   const auto dispatch = prompts.beginNext(replacement.id);
-  result &= expect(dispatch && prompts.acknowledge(
-                                   replacement.id, submissionId,
-                                   std::string("turn-image"), 200),
-                   "image prompt receives a real acknowledgement");
+  result &=
+      expect(dispatch && prompts.acknowledge(replacement.id, submissionId,
+                                             std::string("turn-image"), 200),
+             "image prompt receives a real acknowledgement");
   appendItem(
       replacement, "turn-image",
       item("authoritative-image",
@@ -436,8 +434,7 @@ bool testUserMessageImages() {
             {"clientId", dispatch ? dispatch->clientUserMessageId : ""},
             {"content",
              {{{"type", "text"}, {"text", "replacement image"}},
-              {{"type", "localImage"},
-               {"path", "/tmp/replacement.png"}}}}}));
+              {{"type", "localImage"}, {"path", "/tmp/replacement.png"}}}}}));
   prompts.reconcile(replacement.id, replacement);
   prompts.compactResolved(replacement.id, 800);
   const ConversationSnapshot replaced = ConversationProjection::project(
@@ -459,28 +456,137 @@ bool testUserMessageImages() {
 
 bool testGeneratedImageProjection() {
   ThreadPresentation thread = baseThread("generated-image-thread");
-  appendItem(
-      thread, "turn-1",
-      item("generated-image",
-           {{"type", "imageGeneration"},
-            {"status", "completed"},
-            {"savedPath", "/tmp/generated.png"},
-            {"revisedPrompt", "A restrained CodexUI color proposal"},
-            {"result", std::string(100000, 'A')}}));
+  appendItem(thread, "turn-1",
+             item("generated-image",
+                  {{"type", "imageGeneration"},
+                   {"status", "completed"},
+                   {"savedPath", "/tmp/generated.png"},
+                   {"revisedPrompt", "A restrained CodexUI color proposal"},
+                   {"result", std::string(100000, 'A')}}));
+  appendItem(thread, "turn-1",
+             item("image-view", {{"type", "imageView"},
+                                 {"path", "/tmp/review.png"}}));
 
   const ConversationSnapshot snapshot = ConversationProjection::project(
       thread, {}, ConversationProjection::DefaultAuthoritativeItemLimit, 10);
-  const VisibleCardData *card = snapshot.find(AuthoritativeItemKey{
-      thread.id, "turn-1", "generated-image"});
+  const VisibleCardData *card = snapshot.find(
+      AuthoritativeItemKey{thread.id, "turn-1", "generated-image"});
   const auto *image =
       card ? std::get_if<ImageGenerationData>(&card->payload) : nullptr;
-  return expect(
+  const VisibleCardData *viewCard = snapshot.find(
+      AuthoritativeItemKey{thread.id, "turn-1", "image-view"});
+  const auto *viewImage =
+      viewCard ? std::get_if<ImageGenerationData>(&viewCard->payload) : nullptr;
+  bool result = expect(
       card && card->kind == CardKind::ImageGeneration && image &&
           image->path == QStringLiteral("/tmp/generated.png") &&
           image->status == QStringLiteral("completed") &&
           image->revisedPrompt ==
               QStringLiteral("A restrained CodexUI color proposal"),
       "generated images project their saved path without exposing base64");
+  result &= expect(viewCard && viewCard->kind == CardKind::ImageGeneration &&
+                       viewImage &&
+                       viewImage->path == QStringLiteral("/tmp/review.png") &&
+                       viewImage->status.isEmpty() &&
+                       viewImage->revisedPrompt.isEmpty(),
+                   "image-view items reuse the local image presentation");
+  return result;
+}
+
+bool testTruthfulActivityProjection() {
+  ThreadPresentation thread = baseThread("activity-thread");
+  TurnPresentation &turn = thread.turns.at("turn-1");
+  turn.plan = {
+      {"explanation", "Keep the conversation chronology compact"},
+      {"steps",
+       nlohmann::json::array(
+           {{{"step", "Inspect protocol data"}, {"status", "completed"}},
+            {{"step", "Render the cards"}, {"status", "inProgress"}}})}};
+  appendItem(thread, "turn-1",
+             item("text-plan", {{"type", "plan"},
+                                {"text", "A textual plan-mode response"}}));
+  appendItem(thread, "turn-1",
+             item("empty-reasoning", {{"type", "reasoning"},
+                                      {"summary", nlohmann::json::array()}}));
+  appendItem(thread, "turn-1",
+             item("command", {{"type", "commandExecution"},
+                              {"command", "true"},
+                              {"status", "completed"},
+                              {"durationMs", 2400}}));
+  appendItem(
+      thread, "turn-1",
+      item("files",
+           {{"type", "fileChange"},
+            {"status", "completed"},
+            {"changes",
+             nlohmann::json::array(
+                 {{{"path", "src/card.cpp"},
+                   {"kind", "update"},
+                   {"diff", "--- a/src/card.cpp\n+++ b/src/card.cpp\n-old\n"
+                            "+new\n++++literal\n+extra\n"}},
+                  {{"path", "tests/card.cpp"},
+                   {"kind", "add"},
+                   {"diff",
+                    "--- /dev/null\n+++ b/tests/card.cpp\n+test\n"}}})}}));
+  appendItem(thread, "turn-1",
+             item("agent", {{"type", "subAgentActivity"},
+                            {"status", "inProgress"},
+                            {"agentThreadId", "child-thread"},
+                            {"model", "gpt-current"},
+                            {"reasoningEffort", "medium"},
+                            {"senderThreadId", "activity-thread"}}));
+
+  const ConversationSnapshot snapshot = ConversationProjection::project(
+      thread, {}, ConversationProjection::DefaultAuthoritativeItemLimit, 10);
+  const VisibleCardData *structured =
+      snapshot.find(TurnPlanKey{thread.id, "turn-1"});
+  const VisibleCardData *textual =
+      snapshot.find(AuthoritativeItemKey{thread.id, "turn-1", "text-plan"});
+  const VisibleCardData *reasoning = snapshot.find(
+      AuthoritativeItemKey{thread.id, "turn-1", "empty-reasoning"});
+  const VisibleCardData *command =
+      snapshot.find(AuthoritativeItemKey{thread.id, "turn-1", "command"});
+  const VisibleCardData *files =
+      snapshot.find(AuthoritativeItemKey{thread.id, "turn-1", "files"});
+  const VisibleCardData *agent =
+      snapshot.find(AuthoritativeItemKey{thread.id, "turn-1", "agent"});
+  const auto *textPlan =
+      textual ? std::get_if<PlanData>(&textual->payload) : nullptr;
+  const auto *execution =
+      command ? std::get_if<CommandExecutionData>(&command->payload) : nullptr;
+  const auto *fileData =
+      files ? std::get_if<FileChangesData>(&files->payload) : nullptr;
+  const auto *agentData =
+      agent ? std::get_if<AgentActivityData>(&agent->payload) : nullptr;
+
+  bool result = expect(
+      !structured,
+      "structured plan state remains Inspector-only in production projection");
+  result &=
+      expect(textPlan &&
+                 textPlan->legacyText ==
+                     QStringLiteral("A textual plan-mode response"),
+             "textual plan items remain supported conversation content");
+  const auto *reasoningData =
+      reasoning ? std::get_if<ReasoningData>(&reasoning->payload) : nullptr;
+  result &= expect(reasoningData && reasoningData->summary.isEmpty(),
+                   "reasoning remains a stable progress card without a public summary");
+  result &= expect(execution && execution->durationMilliseconds == 2400,
+                   "command duration is retained when supplied");
+  result &= expect(
+      fileData && fileData->changes.size() == 2 &&
+          fileData->changes[0].additions == 3 &&
+          fileData->changes[0].deletions == 1 &&
+          fileData->changes[1].additions == 1 &&
+          fileData->changes[1].deletions == 0,
+      "file-change rows and unified-diff counts are projected truthfully");
+  result &= expect(
+      agentData && agentData->childThreadId == QStringLiteral("child-thread") &&
+          agentData->model == QStringLiteral("gpt-current") &&
+          agentData->reasoningEffort == QStringLiteral("medium") &&
+          agentData->senderThreadId == QStringLiteral("activity-thread"),
+      "available agent identity and execution settings are retained");
+  return result;
 }
 
 bool testFileLinksArePartOfTheCanonicalPrompt() {
@@ -525,6 +631,7 @@ int main() {
   result &= testCommandOutputVisibility();
   result &= testUserMessageImages();
   result &= testGeneratedImageProjection();
+  result &= testTruthfulActivityProjection();
   result &= testFileLinksArePartOfTheCanonicalPrompt();
   if (result)
     std::cout << "Conversation projection tests passed\n";

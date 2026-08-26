@@ -126,6 +126,23 @@ Generated-image items show the app-server-saved image as a bounded thumbnail.
 Selecting it opens the shared non-modal image viewer; encoded image data is
 never displayed as generic activity text.
 
+Process cards remain neutral so they support rather than dominate the user and
+Codex conversation. Status text alone uses canonical semantic state colors.
+
+Reasoning items remain visible as stable progress cards even when the app-server
+provides no public summary; later content updates the same card in place.
+File-change cards list each supplied path and change kind and derive compact
+addition and deletion totals from the supplied per-file unified diffs. They do
+not duplicate the full review surface owned by the Changes inspector. Optional
+Command duration and Agent model, reasoning effort, child identity, path,
+sender, and receivers are shown only when app-server supplied them.
+
+Textual `plan` items remain conversation content. Structured
+`turn/plan/updated` state is shown only in the Inspector Plan tab, avoiding a
+duplicate representation in the conversation. Its typed conversation key,
+conversion, placement, and renderer remain implemented behind a disabled
+projection switch so this policy can be reactivated narrowly if required.
+
 ## Conversation scrolling
 
 The message view smoothly follows incoming content only while it is already at

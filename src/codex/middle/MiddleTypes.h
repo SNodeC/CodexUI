@@ -39,7 +39,14 @@ struct LocalPromptKey {
   auto operator<=>(const LocalPromptKey &) const = default;
 };
 
-using CardKey = std::variant<AuthoritativeItemKey, LocalPromptKey>;
+struct TurnPlanKey {
+  std::string threadId;
+  std::string turnId;
+
+  auto operator<=>(const TurnPlanKey &) const = default;
+};
+
+using CardKey = std::variant<AuthoritativeItemKey, TurnPlanKey, LocalPromptKey>;
 
 [[nodiscard]] std::string stableKey(const CardKey &key);
 [[nodiscard]] bool terminalOutputHasVisibleText(QStringView output);
@@ -80,6 +87,7 @@ struct CommandExecutionData {
   QString status;
   QString cwd;
   std::optional<int> exitCode;
+  std::optional<qint64> durationMilliseconds;
 
   bool operator==(const CommandExecutionData &) const = default;
 };
@@ -91,6 +99,11 @@ struct AgentActivityData {
   QString prompt;
   QString resultText;
   QStringList receivers;
+  QString model;
+  QString reasoningEffort;
+  QString childThreadId;
+  QString agentPath;
+  QString senderThreadId;
 
   bool operator==(const AgentActivityData &) const = default;
 };
@@ -101,17 +114,20 @@ struct ReasoningData {
   bool operator==(const ReasoningData &) const = default;
 };
 
+struct FileChangeData {
+  QString path;
+  QString kind;
+  std::optional<int> additions;
+  std::optional<int> deletions;
+
+  bool operator==(const FileChangeData &) const = default;
+};
+
 struct FileChangesData {
   QString status;
-  int pathCount = 0;
-  nlohmann::json changes = nlohmann::json::array();
+  std::vector<FileChangeData> changes;
 
-  // The conversation card shows only status and path count. Diff contents are
-  // owned by the Changes inspector and must not turn a visually identical
-  // conversation projection into a layout mutation.
-  bool operator==(const FileChangesData &other) const {
-    return status == other.status && pathCount == other.pathCount;
-  }
+  bool operator==(const FileChangesData &) const = default;
 };
 
 struct ImageGenerationData {
@@ -122,8 +138,17 @@ struct ImageGenerationData {
   bool operator==(const ImageGenerationData &) const = default;
 };
 
-struct PlanData {
+struct PlanStepData {
   QString text;
+  QString status;
+
+  bool operator==(const PlanStepData &) const = default;
+};
+
+struct PlanData {
+  QString explanation;
+  std::vector<PlanStepData> steps;
+  QString legacyText;
 
   bool operator==(const PlanData &) const = default;
 };
