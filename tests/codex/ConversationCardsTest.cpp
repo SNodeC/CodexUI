@@ -349,7 +349,8 @@ bool testMutableCardsAndCommandOutput() {
   section.cards = {
       {AuthoritativeItemKey{thread, "turn", "user"}, CardKind::UserMessage,
        thread, "turn", "user",
-       UserMessageData{QStringLiteral("hello **Markdown**")}},
+       UserMessageData{QStringLiteral(
+           "hello **Markdown**\n\n| Value | Rating |\n|---|---|\n| State | 10 |")}},
       {AuthoritativeItemKey{thread, "turn", "agent"}, CardKind::AgentMessage,
        thread, "turn", "agent",
        AgentMessageData{QStringLiteral("answer"), false}},
@@ -414,10 +415,12 @@ bool testMutableCardsAndCommandOutput() {
   result &= expect(
       std::ranges::any_of(userLabels, [](QLabel *label) {
         return label->property("markdownSource").toString() ==
-                   QStringLiteral("hello **Markdown**") &&
-               label->textFormat() == Qt::RichText;
+                   QStringLiteral("hello **Markdown**\n\n| Value | Rating |\n"
+                                  "|---|---|\n| State | 10 |") &&
+               label->textFormat() == Qt::RichText &&
+               label->text().contains(QStringLiteral("<table"));
       }),
-      "authoritative user messages use the shared Markdown renderer");
+      "authoritative user messages render GitHub Markdown tables");
   result &= expect(
       commandText &&
           commandText->toPlainText() == QStringLiteral("printf test") &&

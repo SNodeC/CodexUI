@@ -87,7 +87,10 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
 
 QLabel *makeMarkdownLabel(const QString &value) {
   QTextDocument document;
-  document.setMarkdown(value, QTextDocument::MarkdownNoHTML);
+  document.setMarkdown(
+      value,
+      QTextDocument::MarkdownFeatures(QTextDocument::MarkdownDialectGitHub) |
+          QTextDocument::MarkdownNoHTML);
   auto *label = new QLabel(document.toHtml());
   label->setProperty("kind", "body");
   label->setTextFormat(Qt::RichText);

@@ -45,7 +45,10 @@ QLabel *makeLabel(const QString &value, const char *kind = "body",
 
 QString markdownHtml(const QString &markdown) {
   QTextDocument document;
-  document.setMarkdown(markdown, QTextDocument::MarkdownNoHTML);
+  document.setMarkdown(
+      markdown,
+      QTextDocument::MarkdownFeatures(QTextDocument::MarkdownDialectGitHub) |
+          QTextDocument::MarkdownNoHTML);
   return document.toHtml();
 }
 
