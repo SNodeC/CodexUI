@@ -53,6 +53,7 @@ jobs:
             cmake \
             iproute2 \
             libbluetooth-dev \
+            libgit2-dev \
             libmagic-dev \
             libssl-dev \
             ninja-build \
