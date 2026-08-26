@@ -140,6 +140,13 @@ std::string recoveryKey(const std::string &threadId,
 
 struct ShellWidget::Impl final {
   enum class Hydration { NotHydrated, InFlight, Hydrated, Failed };
+  enum class SettingsHydration {
+    Unknown,
+    WaitingForRead,
+    InFlight,
+    Hydrated,
+    Failed
+  };
   struct HistoryWindow {
     std::size_t requested =
         middle::ConversationProjection::DefaultAuthoritativeItemLimit;
@@ -181,6 +188,8 @@ struct ShellWidget::Impl final {
   void beginNewThread();
   void readThread(const std::string &threadId, bool forced = false);
   void ensureThreadHydrated(const std::string &threadId);
+  void ensureThreadSettingsHydrated(const std::string &threadId);
+  void resumeThreadForSettings(const std::string &threadId);
   [[nodiscard]] bool threadIsHydrated(const std::string &threadId) const;
   [[nodiscard]] bool threadRequiresResume(const std::string &threadId) const;
   void renameThread(const std::string &threadId);
@@ -222,6 +231,7 @@ struct ShellWidget::Impl final {
   QString newThreadWorkspace;
 
   std::unordered_map<std::string, Hydration> hydration;
+  std::unordered_map<std::string, SettingsHydration> settingsHydration;
   std::unordered_map<std::string, std::uint64_t> readRevisions;
   std::unordered_set<std::string> staleReadResultCorrelations;
   std::uint64_t nextReadRevision = 1;
@@ -379,7 +389,9 @@ void ShellWidget::Impl::connectUi() {
       selectThread(id);
   };
   threadActions.reload = [this](const std::string &id) {
+    settingsHydration.erase(id);
     readThread(id, true);
+    ensureThreadSettingsHydrated(id);
   };
   threadActions.rename = [this](const std::string &id) { renameThread(id); };
   threadActions.fork = [this](const std::string &id) { forkThread(id); };
@@ -457,6 +469,7 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
   if (connection.generation != observedConnectionGeneration) {
     observedConnectionGeneration = connection.generation;
     hydration.clear();
+    settingsHydration.clear();
     readRevisions.clear();
     operationReadyThreads.clear();
     dispatchScheduledThreads.clear();
@@ -464,6 +477,7 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
   if (connection.providerGeneration != observedProviderGeneration) {
     observedProviderGeneration = connection.providerGeneration;
     hydration.clear();
+    settingsHydration.clear();
     readRevisions.clear();
     operationReadyThreads.clear();
     dispatchScheduledThreads.clear();
@@ -476,6 +490,7 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
   if (kind == "event" && type == "connection.provider" &&
       stringValue(data, "state") == "disconnected") {
     hydration.clear();
+    settingsHydration.clear();
     readRevisions.clear();
     operationReadyThreads.clear();
     dispatchScheduledThreads.clear();
@@ -512,6 +527,7 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
     session.listThreads();
     session.listModels();
     ensureThreadHydrated(selectedThreadId);
+    ensureThreadSettingsHydrated(selectedThreadId);
     for (const std::string &threadId : prompts.queuedThreadIds()) {
       if (threadId == DraftThreadId) {
         if (newThreadIntent)
@@ -527,6 +543,7 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
   if (type == "thread.removed" && !eventThreadId.empty()) {
     prompts.clearThread(eventThreadId);
     hydration.erase(eventThreadId);
+    settingsHydration.erase(eventThreadId);
     readRevisions.erase(eventThreadId);
     operationReadyThreads.erase(eventThreadId);
     resumeInFlightThreads.erase(eventThreadId);
@@ -547,6 +564,7 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
     session.listThreads();
     session.listModels();
     readThread(selectedThreadId, true);
+    ensureThreadSettingsHydrated(selectedThreadId);
   }
 
   hydrateHistoricalAgents();
@@ -825,6 +843,7 @@ void ShellWidget::Impl::selectThread(std::string threadId) {
     return;
   if (threadId == selectedThreadId) {
     ensureThreadHydrated(threadId);
+    ensureThreadSettingsHydrated(threadId);
     return;
   }
   selectedThreadId = std::move(threadId);
@@ -834,6 +853,7 @@ void ShellWidget::Impl::selectThread(std::string threadId) {
   newThreadWorkspace.clear();
   historyWindows.try_emplace(selectedThreadId);
   ensureThreadHydrated(selectedThreadId);
+  ensureThreadSettingsHydrated(selectedThreadId);
   render();
 }
 
@@ -898,6 +918,10 @@ void ShellWidget::Impl::readThread(const std::string &threadId, bool forced) {
     }
     if (result.value("ok", false)) {
       hydration[threadId] = Hydration::Hydrated;
+      const auto settings = settingsHydration.find(threadId);
+      if (settings != settingsHydration.end() &&
+          settings->second == SettingsHydration::WaitingForRead)
+        resumeThreadForSettings(threadId);
       QTimer::singleShot(0, owner,
                          [this, threadId] { dispatchNextPrompt(threadId); });
       return;
@@ -906,6 +930,10 @@ void ShellWidget::Impl::readThread(const std::string &threadId, bool forced) {
     // Explicit Reload bypasses this terminal state, while a new generation
     // clears it together with the other hydration bookkeeping.
     hydration[threadId] = Hydration::Failed;
+    const auto settings = settingsHydration.find(threadId);
+    if (settings != settingsHydration.end() &&
+        settings->second == SettingsHydration::WaitingForRead)
+      settings->second = SettingsHydration::Failed;
     const std::string message =
         safeMessage(result.value("error", nlohmann::json::object()));
     const QString displayed =
@@ -914,6 +942,54 @@ void ShellWidget::Impl::readThread(const std::string &threadId, bool forced) {
     showNotice(displayed);
     render();
   });
+}
+
+void ShellWidget::Impl::ensureThreadSettingsHydrated(
+    const std::string &threadId) {
+  if (threadId.empty() || !model.connection().connected ||
+      model.connection().role != "controller")
+    return;
+  SettingsHydration &state = settingsHydration[threadId];
+  if (state == SettingsHydration::WaitingForRead ||
+      state == SettingsHydration::InFlight ||
+      state == SettingsHydration::Hydrated)
+    return;
+  if (!threadIsHydrated(threadId)) {
+    state = SettingsHydration::WaitingForRead;
+    ensureThreadHydrated(threadId);
+    return;
+  }
+  resumeThreadForSettings(threadId);
+}
+
+void ShellWidget::Impl::resumeThreadForSettings(
+    const std::string &threadId) {
+  if (resumeInFlightThreads.contains(threadId))
+    return;
+  settingsHydration[threadId] = SettingsHydration::InFlight;
+  const auto token = alive;
+  session.resumeThread(
+      threadId, {{"excludeTurns", true}},
+      [this, token, threadId](const nlohmann::json &result) {
+        if (!*token)
+          return;
+        if (!result.value("ok", false)) {
+          settingsHydration[threadId] = SettingsHydration::Failed;
+          if (selectedThreadId == threadId) {
+            const std::string message =
+                safeMessage(result.value("error", nlohmann::json::object()));
+            showNotice(text(message.empty()
+                                ? std::string("Thread settings refresh failed")
+                                : message));
+          }
+        } else {
+          settingsHydration[threadId] = SettingsHydration::Hydrated;
+          hydration[threadId] = Hydration::Hydrated;
+          operationReadyThreads.insert(threadId);
+        }
+        QTimer::singleShot(0, owner,
+                           [this, threadId] { dispatchNextPrompt(threadId); });
+      });
 }
 
 void ShellWidget::Impl::ensureThreadHydrated(const std::string &threadId) {
@@ -1107,6 +1183,7 @@ void ShellWidget::Impl::startThreadForDraft() {
       return;
     }
     hydration[threadId] = Hydration::Hydrated;
+    settingsHydration[threadId] = SettingsHydration::Hydrated;
     operationReadyThreads.insert(threadId);
     const bool viewingDraft = selectedThreadId.empty() && newThreadIntent;
     if (viewingDraft) {
@@ -1127,6 +1204,10 @@ void ShellWidget::Impl::startThreadForDraft() {
 
 void ShellWidget::Impl::dispatchNextPrompt(const std::string &threadId) {
   if (threadId.empty() || !model.connection().connected)
+    return;
+  const auto settings = settingsHydration.find(threadId);
+  if (settings != settingsHydration.end() &&
+      settings->second == SettingsHydration::InFlight)
     return;
   const auto submissions = prompts.submissions(threadId);
   if (std::ranges::none_of(
@@ -1222,6 +1303,7 @@ void ShellWidget::Impl::resumePromptQueue(const std::string &threadId) {
           return;
         resumeInFlightThreads.erase(threadId);
         if (!result.value("ok", false)) {
+          settingsHydration[threadId] = SettingsHydration::Failed;
           const std::string message =
               safeMessage(result.value("error", nlohmann::json::object()));
           const QString displayed = text(
@@ -1232,6 +1314,7 @@ void ShellWidget::Impl::resumePromptQueue(const std::string &threadId) {
           return;
         }
         hydration[threadId] = Hydration::Hydrated;
+        settingsHydration[threadId] = SettingsHydration::Hydrated;
         operationReadyThreads.insert(threadId);
         QTimer::singleShot(0, owner,
                            [this, threadId] { dispatchNextPrompt(threadId); });
@@ -1288,6 +1371,7 @@ bool ShellWidget::Impl::attemptThreadRecovery(const std::string &threadId,
           return;
         resumeInFlightThreads.erase(threadId);
         if (!resumeResult.value("ok", false)) {
+          settingsHydration[threadId] = SettingsHydration::Failed;
           const std::string message = safeMessage(
               resumeResult.value("error", nlohmann::json::object()));
           const QString displayed =
@@ -1299,6 +1383,7 @@ bool ShellWidget::Impl::attemptThreadRecovery(const std::string &threadId,
           return;
         }
         hydration[threadId] = Hydration::Hydrated;
+        settingsHydration[threadId] = SettingsHydration::Hydrated;
         operationReadyThreads.insert(threadId);
         QTimer::singleShot(0, owner,
                            [this, threadId] { dispatchNextPrompt(threadId); });
