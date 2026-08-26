@@ -101,10 +101,15 @@ follow mode and anchor are retained independently for each thread.
 The upcoming-turn settings and composer remain anchored to the bottom. The
 prompt editor starts at one line, grows upward to its maximum, and then scrolls
 internally. The message view reserves the canonical composer height. Additional
-growth overlays, but does not resize, the viewport. A trailing content spacer
-grows by the overlap so the user can scroll the final card above the composer.
-Spacer growth does not move the existing reading position. Shrinking the
-composer removes the spacer and restores the canonical geometry.
+growth overlays, but does not resize, the viewport. The trailing allowance is
+represented as a logical extent equal to the overlap so the user can scroll
+the final card to the composer boundary. The scroll content has no permanent
+bottom padding. Matching the Changes-tab separator, the moving composer uses
+8 px space, a standard divider extending 10 px beyond the adjacent content on
+each side, and another 8 px space. This provides the same boundary at the bottom
+and while reading higher in history. Extent growth does not move the existing
+reading position. Shrinking the composer removes the extent and restores the
+canonical geometry.
 
 ## Pending prompt presentation
 

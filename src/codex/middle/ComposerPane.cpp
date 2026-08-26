@@ -27,6 +27,7 @@ namespace {
 
 constexpr int ControlHeight = 32;
 constexpr int HorizontalInset = 24;
+constexpr int DividerOutset = 10;
 constexpr int BottomInset = 12;
 constexpr int AttachmentRowHeight = 28;
 constexpr int MaximumVisibleAttachments = 4;
@@ -72,7 +73,18 @@ ComposerPane::ComposerPane(QWidget *anchor)
   root->setContentsMargins(0, 8, 0, 0);
   root->setSpacing(8);
 
-  attention_ = new QFrame(this);
+  auto *boundary = new QFrame(this);
+  boundary->setProperty("kind", "standardDivider");
+  boundary->setFixedHeight(1);
+  root->addWidget(boundary);
+
+  auto *surfaces = new QWidget(this);
+  auto *surfacesLayout = new QVBoxLayout(surfaces);
+  surfacesLayout->setContentsMargins(DividerOutset, 0, DividerOutset, 0);
+  surfacesLayout->setSpacing(8);
+  root->addWidget(surfaces);
+
+  attention_ = new QFrame(surfaces);
   attention_->setProperty("kind", "orangeBadge");
   auto *attentionLayout = new QHBoxLayout(attention_);
   attentionLayout->setContentsMargins(10, 6, 10, 6);
@@ -92,12 +104,12 @@ ComposerPane::ComposerPane(QWidget *anchor)
       actions_.review();
   });
   attention_->hide();
-  root->addWidget(attention_);
+  surfacesLayout->addWidget(attention_);
 
-  turnSettings_ = new TurnSettingsWidget(this);
-  root->addWidget(turnSettings_);
+  turnSettings_ = new TurnSettingsWidget(surfaces);
+  surfacesLayout->addWidget(turnSettings_);
 
-  composer_ = new QFrame(this);
+  composer_ = new QFrame(surfaces);
   composer_->setProperty("kind", "composer");
   auto *composerLayout = new QVBoxLayout(composer_);
   composerLayout->setContentsMargins(10, 8, 8, 8);
@@ -151,7 +163,7 @@ ComposerPane::ComposerPane(QWidget *anchor)
   composerGrid_->addWidget(promptEditor_, 0, 1);
   composerGrid_->addWidget(sendButton_, 0, 2);
   composerLayout->addWidget(composerBody_);
-  root->addWidget(composer_);
+  surfacesLayout->addWidget(composer_);
 
   connect(sendButton_, &QPushButton::clicked, this, [this] { submitDraft(); });
   connect(promptEditor_, &codexui::ExpandingPromptEditor::submitRequested, this,
@@ -252,7 +264,8 @@ void ComposerPane::synchronizeGeometry() {
     return;
   synchronizing_ = true;
 
-  const int width = std::max(0, anchor_->width() - 2 * HorizontalInset);
+  const int overlayInset = HorizontalInset - DividerOutset;
+  const int width = std::max(0, anchor_->width() - 2 * overlayInset);
   if (this->width() != width)
     resize(width, std::max(0, height()));
   layout()->activate();
@@ -271,7 +284,7 @@ void ComposerPane::synchronizeGeometry() {
   const int wantedExtra = canonicalCaptureEnabled_ && canonicalHeight_ > 0
                               ? std::max(0, wantedHeight - canonicalHeight_)
                               : 0;
-  setGeometry(HorizontalInset, availableHeight - wantedHeight, width,
+  setGeometry(overlayInset, availableHeight - wantedHeight, width,
               wantedHeight);
   // The natural height was calculated after the prompt layout changed, while
   // the child layout still had the previous overlay geometry. Lay out the

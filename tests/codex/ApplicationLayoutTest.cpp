@@ -184,37 +184,77 @@ bool testOverlayGeometryAndRegionRouting() {
                  region.composer().canonicalReserve()->height() == canonical,
              "composer establishes one compact canonical reserve");
 
+  QFrame *boundary = nullptr;
   QFrame *composerSurface = nullptr;
-  for (QFrame *frame :
-       region.composer().findChildren<QFrame *>(Qt::FindDirectChildrenOnly)) {
-    if (frame->property("kind").toString() == QStringLiteral("composer")) {
+  for (QFrame *frame : region.composer().findChildren<QFrame *>()) {
+    const QString kind = frame->property("kind").toString();
+    if (kind == QStringLiteral("standardDivider"))
+      boundary = frame;
+    else if (kind == QStringLiteral("composer"))
       composerSurface = frame;
-      break;
-    }
   }
   TurnSettingsWidget *settings = region.composer().turnSettings();
+  const auto overlayRect = [&](QWidget *widget) {
+    return QRect(widget->mapTo(&region.composer(), QPoint()), widget->size());
+  };
   const auto settingsToComposerGap = [&] {
-    return composerSurface ? composerSurface->geometry().top() -
-                                 settings->geometry().bottom() - 1
+    return composerSurface ? overlayRect(composerSurface).top() -
+                                 overlayRect(settings).bottom() - 1
                            : -1;
   };
   const auto settingsToEditorGap = [&] {
     return region.composer().promptEditor()->mapTo(&region.composer(), QPoint())
                .y() -
-           settings->geometry().bottom() - 1;
+           overlayRect(settings).bottom() - 1;
   };
   const auto stableComposerGeometry = [&] {
-    return settings->geometry().top() == 8 &&
+    if (!boundary || !composerSurface)
+      return false;
+    const QRect boundaryRect = overlayRect(boundary);
+    const QRect settingsRect = overlayRect(settings);
+    const QRect composerRect = overlayRect(composerSurface);
+    return boundaryRect.top() == 8 && boundaryRect.height() == 1 &&
+           settingsRect.top() - boundaryRect.bottom() - 1 == 8 &&
            settings->height() == settings->sizeHint().height() &&
-           settingsToComposerGap() == 8;
+           settingsToComposerGap() == 8 && boundaryRect.left() == 0 &&
+           boundaryRect.right() == region.composer().width() - 1 &&
+           settingsRect.left() == 10 && composerRect.left() == 10 &&
+           settingsRect.right() == region.composer().width() - 11 &&
+           composerRect.right() == region.composer().width() - 11 &&
+           boundaryRect.width() == composerRect.width() + 20;
+  };
+  const auto finalCardBottom = [&] {
+    int bottom = -1;
+    for (QFrame *frame : view.findChildren<QFrame *>()) {
+      if (!frame->property("conversationAnchorKey").toString().isEmpty() &&
+          frame->isVisible())
+        bottom = std::max(
+            bottom,
+            frame->mapTo(view.viewport(), QPoint(0, frame->height())).y());
+    }
+    return bottom;
   };
   result &= expect(
-      composerSurface &&
+      boundary && composerSurface &&
           region.composer().testAttribute(Qt::WA_StyledBackground) &&
           UiStyle::applicationStyleSheet().contains(
               QStringLiteral("QWidget#composerOverlay")) &&
           stableComposerGeometry(),
       "compact composer has an opaque surface and canonical section gaps");
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
+  spin(10);
+  result &= expect(finalCardBottom() == view.viewport()->height(),
+                   "compact bottom has no scroll-owned trailing gap");
+  const QRect compactOverlayGeometry = region.composer().geometry();
+  const QRect compactBoundaryGeometry = boundary->geometry();
+  view.verticalScrollBar()->setValue(
+      std::max(0, view.verticalScrollBar()->maximum() - 80));
+  spin(10);
+  result &= expect(region.composer().geometry() == compactOverlayGeometry &&
+                       boundary->geometry() == compactBoundaryGeometry,
+                   "history scrolling leaves the composer boundary fixed");
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
+  spin(10);
   const int compactEditorGap = settingsToEditorGap();
   region.composer().setActiveTurn(true);
   spin(20);
@@ -232,9 +272,12 @@ bool testOverlayGeometryAndRegionRouting() {
   const int extra = region.composer().extraOverlayHeight();
   result &= expect(extra > 0 && view.trailingSpaceHeight() == extra,
                    "prompt growth is mirrored by exact trailing scroll space");
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
+  spin(10);
   result &= expect(
       stableComposerGeometry() &&
           settingsToEditorGap() == compactEditorGap &&
+          view.viewport()->height() - finalCardBottom() == extra &&
           view.geometry() == viewGeometry &&
           view.viewport()->geometry() == viewportGeometry &&
           region.composer().canonicalReserve()->height() == canonical,
@@ -243,17 +286,24 @@ bool testOverlayGeometryAndRegionRouting() {
       {{QStringLiteral("/tmp/layout-diagnostic.png"),
         QStringLiteral("layout-diagnostic.png"), QStringLiteral("image/png")}});
   spin(30);
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
+  spin(10);
   result &= expect(
       stableComposerGeometry() &&
           region.composer().extraOverlayHeight() > extra &&
+          view.viewport()->height() - finalCardBottom() ==
+              region.composer().extraOverlayHeight() &&
           view.trailingSpaceHeight() == region.composer().extraOverlayHeight(),
       "attachments retain the canonical settings-to-composer gap");
   region.composer().clearDraft();
   spin(30);
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
+  spin(10);
   result &= expect(
       region.composer().extraOverlayHeight() == 0 &&
           view.trailingSpaceHeight() == 0 && view.geometry() == viewGeometry &&
           view.viewport()->geometry() == viewportGeometry &&
+          finalCardBottom() == view.viewport()->height() &&
           stableComposerGeometry() &&
           settingsToEditorGap() == compactEditorGap,
       "prompt contraction restores canonical layout, gaps, and trailing space");

@@ -27,7 +27,6 @@
 namespace codexui::codex::middle {
 namespace {
 
-constexpr int BottomMargin = 16;
 constexpr int CardSpacing = 8;
 constexpr int NativeScrollLineStep = 20;
 
@@ -73,8 +72,9 @@ ConversationView::ConversationView(QWidget *parent)
   content_->installEventFilter(this);
 
   contentLayout_ = new QVBoxLayout(content_);
-  contentLayout_->setContentsMargins(0, 0, 0, BottomMargin);
+  contentLayout_->setContentsMargins(0, 0, 0, 0);
   contentLayout_->setSpacing(CardSpacing);
+  contentLayout_->setAlignment(Qt::AlignTop);
 
   loadMore_ = new QPushButton(QStringLiteral("Load more activities"), content_);
   loadMore_->setProperty("kind", "history");
@@ -90,17 +90,6 @@ ConversationView::ConversationView(QWidget *parent)
   emptyMessage_ = empty_->text();
   empty_->setParent(content_);
   contentLayout_->addWidget(empty_);
-
-  trailingSpace_ = new QWidget(content_);
-  trailingSpace_->setObjectName(QStringLiteral("conversationTrailingSpace"));
-  trailingSpace_->setFixedHeight(0);
-  trailingSpace_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-  contentLayout_->addWidget(trailingSpace_);
-
-  auto *tailStretch = new QWidget(content_);
-  tailStretch->setMinimumHeight(0);
-  tailStretch->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
-  contentLayout_->addWidget(tailStretch, 1);
 
   followAnimation_ = new QVariantAnimation(this);
   followAnimation_->setEasingCurve(QEasingCurve::OutCubic);
@@ -421,7 +410,6 @@ void ConversationView::setTrailingSpaceHeight(int height) {
     mode_ = Mode::Paused;
   }
   trailingSpaceHeight_ = height;
-  trailingSpace_->setFixedHeight(height);
   recomputeGeometry();
   if (mode_ == Mode::Following)
     setScrollValue(verticalScrollBar()->maximum());
@@ -606,6 +594,7 @@ void ConversationView::recomputeGeometry() {
                    ? contentLayout_->heightForWidth(width)
                    : contentLayout_->sizeHint().height();
   wanted = std::max(wanted, contentLayout_->minimumSize().height());
+  wanted += trailingSpaceHeight_;
   contentHeight_ = std::max(viewport()->height(), wanted);
   content_->resize(width, contentHeight_);
   contentLayout_->setGeometry(QRect(0, 0, width, contentHeight_));

@@ -99,7 +99,6 @@ private:
   QVBoxLayout *contentLayout_ = nullptr;
   QPushButton *loadMore_ = nullptr;
   QLabel *empty_ = nullptr;
-  QWidget *trailingSpace_ = nullptr;
   QVariantAnimation *followAnimation_ = nullptr;
   std::function<void()> loadMoreAction_;
 

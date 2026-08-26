@@ -616,16 +616,18 @@ following resumes.
 The bottom composer overlay has a canonical in-layout reservation. As multiline
 input, attachments, settings, or attention controls grow beyond that height,
 the conversation viewport keeps its geometry and the composer overlays its
-lower portion. A content-owned trailing spacer grows by the same extra height,
-extending the natural `QScrollArea` range so the final card can be scrolled
-above the overlay with the normal gap. The scrollbar maximum is never assigned
-manually.
+lower portion. A content-owned logical trailing extent grows by the same extra
+height, extending the natural `QScrollArea` range so the final card can be
+scrolled to the overlay boundary. Permanent scroll-owned bottom padding is not
+used; the moving composer owns the standard divider with the canonical 8 px
+vertical spacing on both sides and 10 px horizontal outset beyond its adjacent
+content. The scrollbar maximum is never assigned manually.
 
-Spacer growth temporarily suppresses range-driven bottom following and restores
-the previous scrollbar value, so existing messages do not move. Reaching the
-new maximum re-enables following. Composer contraction removes the spacer; Qt
-may clamp the value to the reduced range, and being at that maximum re-enables
-following for later content.
+Trailing-extent growth temporarily suppresses range-driven bottom following
+and restores the previous scrollbar value, so existing messages do not move.
+Reaching the new maximum re-enables following. Composer contraction removes the
+extent; Qt may clamp the value to the reduced range, and being at that maximum
+re-enables following for later content.
 
 ### 7.6 Command Execution Output and Info Viewers
 

@@ -173,13 +173,17 @@ its configured maximum height, after which it scrolls internally.
 The message-view layout reserves only the composer's canonical height. When
 prompt text, attachments, settings, or attention controls increase that height,
 the composer grows upward as an overlay: the viewport keeps its normal geometry
-and may be partly covered. An equal-height trailing spacer is added to the
-scrollable conversation content so the final card can still be moved into the
-visible region with the normal gap above the composer.
+and may be partly covered. An equal logical trailing extent is added to the
+scrollable conversation content so the final card can still be moved to the
+overlay boundary. The conversation owns no permanent bottom padding; the moving
+composer uses the canonical Changes-tab treatment of 8 px space, a standard
+divider extending 10 px beyond the adjacent content on each side, and another
+8 px space. This boundary remains identical whether the conversation is at its
+bottom or paused higher in history.
 
-Growing this spacer preserves the current scrollbar value and does not move the
+Growing this extent preserves the current scrollbar value and does not move the
 messages automatically. Reaching its new maximum re-enables bottom-follow for
-subsequent content. When the composer returns to canonical height, the spacer
+subsequent content. When the composer returns to canonical height, the extent
 is removed; Qt may clamp a former bottom position to the reduced range, after
 which the normal viewport state and bottom-follow policy apply again.
 
