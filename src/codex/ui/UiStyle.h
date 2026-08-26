@@ -4,7 +4,9 @@
 #define CODEXUI_UI_UISTYLE_H
 
 #include <QString>
+#include <QToolButton>
 
+class QPaintEvent;
 class QRect;
 class QWidget;
 
@@ -52,6 +54,14 @@ enum class ChevronDirection { Down, Right };
 void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
                  bool highlighted,
                  ChevronDirection direction = ChevronDirection::Down);
+
+class ChevronToolButton final : public QToolButton {
+public:
+  using QToolButton::QToolButton;
+
+protected:
+  void paintEvent(QPaintEvent *event) override;
+};
 
 } // namespace codexui::UiStyle
 

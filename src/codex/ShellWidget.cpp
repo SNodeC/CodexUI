@@ -18,6 +18,7 @@
 #include "codex/middle/ThreadPane.h"
 #include "codex/ui/BrandMark.h"
 #include "codex/ui/ExpandingPromptEditor.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QAction>
 #include <QApplication>
@@ -298,9 +299,11 @@ void ShellWidget::Impl::buildUi() {
 
   connectionStatusDot = statusDot();
   connectionStatusDot->setToolTip(QStringLiteral("Not connected"));
-  connectionButton = new QToolButton;
+  connectionButton = new UiStyle::ChevronToolButton;
+  connectionButton->setObjectName(QStringLiteral("transportButton"));
   connectionButton->setText(QStringLiteral("Connection"));
   connectionButton->setProperty("kind", "subtle");
+  connectionButton->setProperty("codexChevron", true);
   connectionButton->setPopupMode(QToolButton::InstantPopup);
   connectionButton->setFixedHeight(32);
   auto *connectionMenu = new QMenu(connectionButton);

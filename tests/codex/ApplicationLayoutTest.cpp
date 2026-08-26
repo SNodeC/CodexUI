@@ -10,6 +10,7 @@
 #include "codex/middle/MiddleRegionWidget.h"
 #include "codex/middle/ThreadPane.h"
 #include "codex/ui/ExpandingPromptEditor.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -289,6 +290,7 @@ bool testThreadSelectionProjection() {
           rowLayout->spacing() == 8 && title && status && dot &&
           dot->size() == QSize(10, 10) && rowLayout->indexOf(dot) >= 0 &&
           sortButton &&
+          dynamic_cast<UiStyle::ChevronToolButton *>(sortButton) &&
           sortButton->property("codexChevron").toBool() &&
           title->property("kind").toString() == QStringLiteral("title") &&
           status->property("kind").toString() == QStringLiteral("meta") &&

@@ -14,10 +14,8 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMouseEvent>
-#include <QPaintEvent>
 #include <QPushButton>
 #include <QStyledItemDelegate>
-#include <QStyleOptionToolButton>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -55,25 +53,6 @@ public:
     if (index.data(ContextMenuRole).toBool())
       effective.state |= QStyle::State_MouseOver;
     QStyledItemDelegate::paint(painter, effective, index);
-  }
-};
-
-class ChevronToolButton final : public QToolButton {
-protected:
-  void paintEvent(QPaintEvent *event) override {
-    QToolButton::paintEvent(event);
-    QStyleOptionToolButton option;
-    initStyleOption(&option);
-    const QRect contents =
-        style()->subElementRect(QStyle::SE_ToolButtonLayoutItem, &option, this);
-    const int indicatorWidth =
-        style()->pixelMetric(QStyle::PM_MenuButtonIndicator, &option, this);
-    const QRect indicator(contents.right() - std::max(12, indicatorWidth),
-                          contents.top(), std::max(12, indicatorWidth),
-                          contents.height());
-    UiStyle::drawChevron(
-        this, indicator, option.state & QStyle::State_Enabled,
-        option.state & (QStyle::State_MouseOver | QStyle::State_HasFocus));
   }
 };
 
@@ -222,7 +201,7 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   });
   toolbar->addWidget(refresh);
   toolbar->addStretch();
-  sortButton = new ChevronToolButton;
+  sortButton = new UiStyle::ChevronToolButton;
   sortButton->setObjectName(QStringLiteral("threadSortButton"));
   sortButton->setProperty("kind", "subtle");
   sortButton->setProperty("codexChevron", true);

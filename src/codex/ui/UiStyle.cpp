@@ -4,8 +4,11 @@
 
 #include <QApplication>
 #include <QFontInfo>
+#include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QStyle>
+#include <QStyleOptionToolButton>
 #include <QWidget>
 
 #include <algorithm>
@@ -39,6 +42,22 @@ void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
   painter.setPen(QPen(color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
   painter.setBrush(Qt::NoBrush);
   painter.drawPath(chevron);
+}
+
+void ChevronToolButton::paintEvent(QPaintEvent *event) {
+  QToolButton::paintEvent(event);
+  QStyleOptionToolButton option;
+  initStyleOption(&option);
+  const QRect contents =
+      style()->subElementRect(QStyle::SE_ToolButtonLayoutItem, &option, this);
+  const int indicatorWidth =
+      style()->pixelMetric(QStyle::PM_MenuButtonIndicator, &option, this);
+  const QRect indicator(contents.right() - std::max(12, indicatorWidth),
+                        contents.top(), std::max(12, indicatorWidth),
+                        contents.height());
+  drawChevron(this, indicator, option.state & QStyle::State_Enabled,
+              option.state &
+                  (QStyle::State_MouseOver | QStyle::State_HasFocus));
 }
 
 QString applicationStyleSheet() {
@@ -149,9 +168,9 @@ QString applicationStyleSheet() {
         QPushButton[kind="destructiveCompact"] { background: #c43d4d; border: 0; color: white; border-radius: 4px; padding: 0; font-weight: 700; }
         QPushButton[kind="destructiveCompact"]:hover { background: #aa3342; }
         QPushButton[kind="destructiveCompact"]:pressed { background: #8f2b38; }
-        QPushButton[codexChevron="true"] { padding-right: 26px; }
+        QPushButton[codexChevron="true"] { padding-right: 20px; }
         QPushButton[codexChevron="true"]::menu-indicator { image: none; width: 0; }
-        QToolButton[codexChevron="true"] { padding-right: 26px; }
+        QToolButton[codexChevron="true"] { padding-right: 20px; }
         QToolButton[codexChevron="true"]::menu-indicator { image: none; width: 0; }
         QPushButton[changed="true"] {
             background: #e5eeff;

@@ -10,6 +10,7 @@
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
 #include "codex/ui/ExpandingPromptEditor.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -19,6 +20,7 @@
 #include <QListWidget>
 #include <QTabWidget>
 #include <QThread>
+#include <QToolButton>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -272,6 +274,14 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
   shell.show();
   spin(10);
   bool result = true;
+
+  auto *transportButton =
+      shell.findChild<QToolButton *>(QStringLiteral("transportButton"));
+  result &= expect(
+      transportButton &&
+          dynamic_cast<UiStyle::ChevronToolButton *>(transportButton) &&
+          transportButton->property("codexChevron").toBool(),
+      "transport and thread sorting use the canonical compact chevron button");
 
   auto *conversation = dynamic_cast<middle::ConversationView *>(
       shell.findChild<QWidget *>(QStringLiteral("conversationScroll")));

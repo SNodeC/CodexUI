@@ -47,8 +47,9 @@ bottom or is owned by the user.
   does not provide a separate ascending/descending control.
 - Each visible thread is presented as a compact card. Its status indicator is
   part of that card, and hover and selection strengthen the same card surface
-  instead of introducing a separate row treatment. The Sort control uses the
-  same centered chevron treatment as the prompt settings.
+  instead of introducing a separate row treatment. The Sort and Transport
+  controls use the same centered chevron and compact text-to-indicator spacing
+  as the prompt settings.
 - A left click selects a thread and changes the displayed conversation. A
   right click opens actions for the pointed-to card without changing the
   selected thread or displayed conversation. That card retains its hover
