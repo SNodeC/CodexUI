@@ -169,7 +169,7 @@ QString applicationStyleSheet() {
         QFrame[kind="orangeBadge"] { background: #fff6df; border: 1px solid #e5c77d; border-radius: 7px; }
         QFrame[kind="composer"] { background: #ffffff; border: 1px solid #d7dee8; border-radius: 10px; }
         QFrame[kind="composer"][focused="true"] { border: 2px solid #2f6feb; }
-        QPlainTextEdit {
+        QPlainTextEdit, QTextEdit {
             background: transparent;
             border: 0;
             color: #1d2633;
@@ -180,6 +180,7 @@ QString applicationStyleSheet() {
         }
         QPlainTextEdit[empty="true"] { color: #98a2b3; }
         QPlainTextEdit[kind="code"], QPlainTextEdit[kind="command"],
+        QTextEdit[kind="code"], QTextEdit[kind="command"],
         QPlainTextEdit[kind="infoViewer"] {
             font-family: monospace;
             font-size: %1pt;

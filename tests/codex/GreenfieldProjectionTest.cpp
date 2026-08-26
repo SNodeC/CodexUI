@@ -348,6 +348,17 @@ bool testCommandOutputVisibility() {
   result &= expect(
       terminalOutputHasVisibleText(QStringView{QStringLiteral("done\n")}),
       "printable command output is visible");
+  result &= expect(trimTrailingEmptyLines(QStringView{
+                       QStringLiteral("first\nsecond\n\n \t\r\n")}) ==
+                       QStringLiteral("first\nsecond"),
+                   "trailing empty terminal lines are removed");
+  result &= expect(trimTrailingEmptyLines(
+                       QStringView{QStringLiteral("  meaningful spacing  ")}) ==
+                       QStringLiteral("  meaningful spacing  "),
+                   "spacing on a non-empty final line is retained");
+  result &= expect(
+      trimTrailingEmptyLines(QStringView{QStringLiteral(" \t\r\n")}).isEmpty(),
+      "an entirely empty-line display normalizes to zero lines");
   return result;
 }
 

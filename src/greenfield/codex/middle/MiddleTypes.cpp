@@ -92,6 +92,33 @@ bool terminalOutputHasVisibleText(QStringView output) {
   return false;
 }
 
+QString trimTrailingEmptyLines(QStringView text) {
+  qsizetype end = text.size();
+  while (end > 0) {
+    while (end > 0 && (text[end - 1] == QLatin1Char('\n') ||
+                       text[end - 1] == QLatin1Char('\r')))
+      --end;
+    if (end == 0)
+      break;
+
+    qsizetype lineStart = end;
+    while (lineStart > 0 && text[lineStart - 1] != QLatin1Char('\n') &&
+           text[lineStart - 1] != QLatin1Char('\r'))
+      --lineStart;
+    bool emptyLine = true;
+    for (qsizetype index = lineStart; index < end; ++index) {
+      if (!text[index].isSpace()) {
+        emptyLine = false;
+        break;
+      }
+    }
+    if (!emptyLine)
+      break;
+    end = lineStart;
+  }
+  return text.first(end).toString();
+}
+
 std::vector<CardKey> ConversationSnapshot::cardKeys() const {
   std::vector<CardKey> result;
   for (const TurnSection &section : sections)

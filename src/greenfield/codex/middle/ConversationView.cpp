@@ -9,10 +9,11 @@
 #include <QEasingCurve>
 #include <QEvent>
 #include <QLabel>
+#include <QTextEdit>
 #include <QPushButton>
 #include <QResizeEvent>
-#include <QScrollBar>
 #include <QScopedValueRollback>
+#include <QScrollBar>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
 #include <QVariantAnimation>
@@ -216,6 +217,19 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
     }
   }
   const bool follow = mode_ == Mode::Following;
+  const auto visibleOutputFootprint = [this] {
+    int height = 0;
+    for (const auto &[key, card] : cards_) {
+      static_cast<void>(key);
+      auto *output =
+          dynamic_cast<CommandOutputView *>(card->findChild<QTextEdit *>(
+              QStringLiteral("commandOutputView")));
+      if (output && !output->isHidden())
+        height += output->height();
+    }
+    return height;
+  };
+  const int outputFootprintBefore = visibleOutputFootprint();
 
   stopFollowingAnimation();
   applying_ = true;
@@ -355,10 +369,11 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
   snapshot_ = snapshot;
 
   recomputeGeometry();
+  const bool outputGrew = visibleOutputFootprint() > outputFootprintBefore;
   for (const auto &[card, state] : commandOutputRestorations)
     card->restoreCommandOutputScrollState(state);
   if (follow) {
-    if (switchedThread) {
+    if (switchedThread || outputGrew) {
       setScrollValue(verticalScrollBar()->maximum());
     } else {
       // Reflow above the viewport must preserve the same painted card/pixel
@@ -374,7 +389,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
   viewport()->setUpdatesEnabled(true);
   viewport()->update();
 
-  if (follow && !switchedThread) {
+  if (follow && !switchedThread && !outputGrew) {
     const int stableValue = verticalScrollBar()->value();
     if (verticalScrollBar()->maximum() > stableValue + 3)
       animateToBottom(stableValue);
@@ -640,8 +655,7 @@ bool ConversationView::applyWheel(QWheelEvent *event) {
   // redispatch through ShellWidget's application event filter, which routes
   // the same gesture back into this method recursively.
   QScrollBar *bar = verticalScrollBar();
-  const QPointF local =
-      bar->mapFromGlobal(event->globalPosition().toPoint());
+  const QPointF local = bar->mapFromGlobal(event->globalPosition().toPoint());
   QWheelEvent forwarded(local, event->globalPosition(), event->pixelDelta(),
                         event->angleDelta(), event->buttons(),
                         event->modifiers(), event->phase(), event->inverted());

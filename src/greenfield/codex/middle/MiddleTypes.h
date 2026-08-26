@@ -43,6 +43,7 @@ using CardKey = std::variant<AuthoritativeItemKey, LocalPromptKey>;
 
 [[nodiscard]] std::string stableKey(const CardKey &key);
 [[nodiscard]] bool terminalOutputHasVisibleText(QStringView output);
+[[nodiscard]] QString trimTrailingEmptyLines(QStringView text);
 
 enum class PromptState { Queued, InFlight, Accepted, Failed };
 

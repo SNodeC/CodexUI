@@ -8,8 +8,11 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QLabel>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QTextBlock>
+#include <QTextLayout>
 #include <QThread>
 #include <QWheelEvent>
 
@@ -351,8 +354,8 @@ bool testMutableCardsAndCommandOutput() {
        AgentMessageData{QStringLiteral("answer"), false}},
       {AuthoritativeItemKey{thread, "turn", "command"},
        CardKind::CommandExecution, thread, "turn", "command",
-       CommandExecutionData{QStringLiteral("printf test"),
-                            QStringLiteral(" \n\t\x1b[0m"),
+       CommandExecutionData{QStringLiteral("printf test\n\n \t"),
+                            QStringLiteral(" \n\t"),
                             QStringLiteral("inProgress"),
                             {},
                             std::nullopt}},
@@ -397,10 +400,19 @@ bool testMutableCardsAndCommandOutput() {
   auto *commandCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "command"}})];
   auto *output = dynamic_cast<CommandOutputView *>(
-      commandCard->findChild<QPlainTextEdit *>(
+      commandCard->findChild<QTextEdit *>(
           QStringLiteral("commandOutputView")));
+  auto *commandText = dynamic_cast<ContentSizedTextView *>(
+      commandCard->findChild<QTextEdit *>(
+          QStringLiteral("commandTextView")));
   bool result = expect(output && output->isHidden(),
-                       "control-only command output has no black surface");
+                       "empty-line command output has no black surface");
+  result &= expect(
+      commandText &&
+          commandText->toPlainText() == QStringLiteral("printf test") &&
+          commandText->height() < commandText->maximumHeight() &&
+          commandText->verticalScrollBarPolicy() == Qt::ScrollBarAsNeeded,
+      "short command text trims empty lines and uses its content height");
 
   auto &cards = snapshot.sections.front().cards;
   std::get<UserMessageData>(cards[0].payload).text +=
@@ -408,7 +420,8 @@ bool testMutableCardsAndCommandOutput() {
   std::get<AgentMessageData>(cards[1].payload).text +=
       QStringLiteral(" updated");
   auto &command = std::get<CommandExecutionData>(cards[2].payload);
-  command.output = QString(120, QLatin1Char('x')) + QStringLiteral("\nvisible");
+  command.output =
+      QString(120, QLatin1Char('x')) + QStringLiteral("\nvisible\n\n \t");
   command.status = QStringLiteral("completed");
   std::get<AgentActivityData>(cards[3].payload).resultText =
       QStringLiteral("result");
@@ -438,8 +451,9 @@ bool testMutableCardsAndCommandOutput() {
   result &=
       expect(!output->isHidden() && output->minimumHeight() == 0 &&
                  output->maximumHeight() == 220 &&
+                 output->toPlainText().endsWith(QStringLiteral("visible")) &&
                  output->verticalScrollBarPolicy() == Qt::ScrollBarAsNeeded,
-             "visible command output grows from zero with the 220px cap");
+             "visible output trims empty lines and grows with the 220px cap");
 
   QString longOutput;
   for (int line = 0; line < 80; ++line)
@@ -519,7 +533,7 @@ bool testInitialCommandGeometrySettlement() {
                        "initial visible command output is inserted");
   ConversationCard *commandCard = card(view, stableKey(command.key));
   auto *outputView = commandCard ? dynamic_cast<CommandOutputView *>(
-                                       commandCard->findChild<QPlainTextEdit *>(
+                                       commandCard->findChild<QTextEdit *>(
                                            QStringLiteral("commandOutputView")))
                                  : nullptr;
   result &= expect(commandCard && outputView && !outputView->isHidden() &&
@@ -537,6 +551,89 @@ bool testInitialCommandGeometrySettlement() {
                        outputView->height() == immediateOutputHeight &&
                        outputView->sizeHint().height() == immediateHint,
                    "initial wrapped output has no delayed geometry settlement");
+
+  const int glyphWidth =
+      std::max(1, outputView->fontMetrics().horizontalAdvance(QLatin1Char('W')));
+  const int charactersPerLine =
+      std::max(1, outputView->viewport()->width() / glyphWidth);
+  auto &execution = std::get<CommandExecutionData>(
+      snapshot.sections.front().cards.front().payload);
+  execution.output = QString(charactersPerLine + 1, QLatin1Char('W'));
+  result &= expect(view.reconcile(snapshot),
+                   "single logical output line changes to two visual lines");
+  spin();
+  const QTextBlock wrappedBlock = outputView->document()->firstBlock();
+  result &= expect(
+      wrappedBlock.layout() && wrappedBlock.layout()->lineCount() == 2 &&
+          outputView->verticalScrollBar()->maximum() == 0 &&
+          outputView->viewport()->height() >=
+              static_cast<int>(std::ceil(outputView->document()->size().height())),
+      "two visual output lines are fully visible without inner scrolling");
+  return result;
+}
+
+bool testBottomAnchoredCommandOutputGrowth() {
+  const std::string thread = "bottom-anchored-output";
+  ConversationSnapshot snapshot = conversation(thread, 14);
+  VisibleCardData command{
+      AuthoritativeItemKey{thread, "turn-2", "live-command"},
+      CardKind::CommandExecution,
+      thread,
+      "turn-2",
+      "live-command",
+      CommandExecutionData{QStringLiteral("run live command"),
+                           {},
+                           QStringLiteral("inProgress"),
+                           {},
+                           std::nullopt}};
+  snapshot.sections.back().cards.push_back(command);
+
+  ConversationView view;
+  view.resize(620, 360);
+  view.show();
+  view.reconcile(snapshot);
+  spin();
+  ConversationCard *commandCard = card(view, stableKey(command.key));
+  auto *metadata =
+      commandCard
+          ? commandCard->findChild<QLabel *>(QStringLiteral("commandMetadata"))
+          : nullptr;
+  auto *output = commandCard ? dynamic_cast<CommandOutputView *>(
+                                   commandCard->findChild<QTextEdit *>(
+                                       QStringLiteral("commandOutputView")))
+                             : nullptr;
+  bool result = expect(commandCard && metadata && output &&
+                           output->isHidden() && view.isAtBottom(),
+                       "live command starts with a hidden zero-line output");
+  if (!commandCard || !metadata || !output)
+    return false;
+  const int metadataBottomBefore =
+      metadata->mapTo(view.viewport(), QPoint(0, metadata->height())).y();
+
+  auto &live = std::get<CommandExecutionData>(
+      snapshot.sections.back().cards.back().payload);
+  live.output = QStringLiteral(
+      "first wrapped output line with enough words to use real width\n"
+      "second output line\nthird output line\n\n");
+  result &= expect(view.reconcile(snapshot), "live output becomes visible");
+  const int metadataBottomAfter =
+      metadata->mapTo(view.viewport(), QPoint(0, metadata->height())).y();
+  result &= expect(!output->isHidden() && output->height() > 2 * 20 &&
+                       output->height() == output->sizeHint().height() &&
+                       metadataBottomAfter == metadataBottomBefore &&
+                       view.isAtBottom(),
+                   "multiline output takes its needed height and grows upward");
+
+  QString cappedOutput;
+  for (int line = 0; line < 80; ++line)
+    cappedOutput += QStringLiteral("scrollable line %1\n").arg(line);
+  live.output = cappedOutput;
+  result &= expect(view.reconcile(snapshot), "live output reaches its cap");
+  result &= expect(
+      output->height() == 220 && output->verticalScrollBar()->maximum() > 0 &&
+          metadata->mapTo(view.viewport(), QPoint(0, metadata->height())).y() ==
+              metadataBottomBefore,
+      "capped output keeps its scrollbar and fixed card bottom");
   return result;
 }
 
@@ -567,7 +664,7 @@ bool testCommandOutputStateAcrossNavigation() {
   ConversationCard *commandCard = card(view, stableKey(command.key));
   auto *initialOutput = commandCard
                             ? dynamic_cast<CommandOutputView *>(
-                                  commandCard->findChild<QPlainTextEdit *>(
+                                  commandCard->findChild<QTextEdit *>(
                                       QStringLiteral("commandOutputView")))
                             : nullptr;
   bool result =
@@ -588,7 +685,7 @@ bool testCommandOutputStateAcrossNavigation() {
   commandCard = card(view, stableKey(command.key));
   auto *restoredOutput = commandCard
                              ? dynamic_cast<CommandOutputView *>(
-                                   commandCard->findChild<QPlainTextEdit *>(
+                                   commandCard->findChild<QTextEdit *>(
                                        QStringLiteral("commandOutputView")))
                              : nullptr;
   result &=
@@ -645,6 +742,7 @@ int main(int argc, char **argv) {
   result &= testPromptAdmissionFollowOwnership();
   result &= testMutableCardsAndCommandOutput();
   result &= testInitialCommandGeometrySettlement();
+  result &= testBottomAnchoredCommandOutputGrowth();
   result &= testCommandOutputStateAcrossNavigation();
   result &= testPendingPromptAnimation();
   if (result)

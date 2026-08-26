@@ -180,12 +180,16 @@ non-whitespace text after terminal control sequences are ignored; empty,
 whitespace-only, and ANSI/control-only output has no output surface. A shown box
 has no non-content minimum height, grows from zero to a maximum of 220 pixels,
 and exposes a styled vertical scrollbar only when content exceeds that limit.
-Its content height is measured synchronously during the outer layout
-transaction. Streaming output, completion status, and metadata update the
-retained outer Command execution card in place; they do not replace it. Output
-follows its bottom while already at the bottom. A manual upward scroll pauses
-following until the user returns to the bottom. Each output card retains its
-own follow/pause position across in-place output updates.
+The command surface uses the same content-height behavior with its existing
+90-pixel maximum. Trailing empty lines are omitted from both displayed texts.
+Their wrapped content height is measured at the final viewport width during the
+outer layout transaction. While the conversation follows its bottom, streaming
+output growth holds the card bottom and metadata in place and expands upward.
+Streaming output, completion status, and metadata update the retained outer
+Command execution card in place; they do not replace it. Output follows its
+bottom while already at the bottom. A manual upward scroll pauses following
+until the user returns to the bottom. Each output card retains its own
+follow/pause position across in-place output updates.
 
 ## Inspector and Info presentation
 

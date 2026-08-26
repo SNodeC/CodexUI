@@ -16,7 +16,7 @@
 #include <QImage>
 #include <QLabel>
 #include <QLayoutItem>
-#include <QPlainTextEdit>
+#include <QTextEdit>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QThread>
@@ -200,10 +200,9 @@ public:
       const auto card = shell.conversationCards.find(key);
       if (card == shell.conversationCards.end())
         return 0;
-      const QList<QPlainTextEdit *> views =
-          card->second->findChildren<QPlainTextEdit *>();
+      const QList<QTextEdit *> views = card->second->findChildren<QTextEdit *>();
       return static_cast<int>(
-          std::count_if(views.begin(), views.end(), [](QPlainTextEdit *view) {
+          std::count_if(views.begin(), views.end(), [](QTextEdit *view) {
             return view->property("kind").toString() == QStringLiteral("code");
           }));
     };

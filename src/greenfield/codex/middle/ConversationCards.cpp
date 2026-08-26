@@ -26,6 +26,8 @@ namespace codexui::codex::middle {
 namespace {
 
 constexpr int MaximumCommandOutputHeight = 220;
+constexpr int MaximumCommandTextHeight = 90;
+constexpr int CommandTextPadding = 7;
 constexpr int PendingAnimationIntervalMilliseconds = 32;
 constexpr qint64 PendingHalfCycleMilliseconds = 850;
 
@@ -175,20 +177,72 @@ bool presentationEquals(const VisibleCardData &left,
 
 } // namespace
 
-CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
-    : QPlainTextEdit(parent) {
+ContentSizedTextView::ContentSizedTextView(int maximumContentHeight,
+                                           QWidget *parent)
+    : QTextEdit(parent) {
   setReadOnly(true);
+  setAcceptRichText(false);
   setMinimumHeight(0);
-  setMaximumHeight(MaximumCommandOutputHeight);
-  setLineWrapMode(QPlainTextEdit::WidgetWidth);
+  setMaximumHeight(maximumContentHeight);
+  setLineWrapMode(QTextEdit::WidgetWidth);
   setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
   setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  document()->setDocumentMargin(CommandTextPadding);
+}
+
+bool ContentSizedTextView::setContent(const QString &content) {
+  if (toPlainText() == content)
+    return false;
+  setPlainText(content);
+  measureAtCurrentWidth(true);
+  return true;
+}
+
+QSize ContentSizedTextView::sizeHint() const {
+  QSize result = QTextEdit::sizeHint();
+  result.setHeight(preferredHeight_);
+  return result;
+}
+
+QSize ContentSizedTextView::minimumSizeHint() const {
+  QSize result = QTextEdit::minimumSizeHint();
+  result.setHeight(0);
+  return result;
+}
+
+void ContentSizedTextView::resizeEvent(QResizeEvent *event) {
+  QTextEdit::resizeEvent(event);
+  // Wrapping is authoritative only after QTextEdit has assigned its
+  // viewport width. Propagate a changed hint immediately so a multiline view
+  // cannot remain at an earlier one-line height with a premature scrollbar.
+  measureAtCurrentWidth(true);
+}
+
+void ContentSizedTextView::measureAtCurrentWidth(bool notifyParent) {
+  const QString content = toPlainText();
+  int wantedHeight = 0;
+  if (!content.isEmpty()) {
+    const int frame = 2 * frameWidth();
+    document()->setTextWidth(std::max(1, viewport()->width()));
+    wantedHeight =
+        frame + static_cast<int>(std::ceil(document()->size().height()));
+  }
+  wantedHeight = std::clamp(wantedHeight, 0, maximumHeight());
+  if (wantedHeight == preferredHeight_)
+    return;
+  preferredHeight_ = wantedHeight;
+  if (notifyParent)
+    updateGeometry();
+}
+
+CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
+    : ContentSizedTextView(MaximumCommandOutputHeight, parent) {
   setProperty("kind", "code");
   setObjectName(QStringLiteral("commandOutputView"));
   setStyleSheet(QStringLiteral(
-      "background:#111827;color:#e5e7eb;border-radius:6px;padding:7px;"
-      "font-family:monospace;"));
+      "QTextEdit#commandOutputView{background:#111827;color:#e5e7eb;"
+      "border-radius:6px;}"));
 
   connect(verticalScrollBar(), &QScrollBar::valueChanged, this,
           [this](int value) {
@@ -214,22 +268,23 @@ bool CommandOutputView::followsLatest() const noexcept {
 }
 
 bool CommandOutputView::setOutput(const QString &output) {
-  if (currentOutput_ == output)
+  const QString displayOutput = trimTrailingEmptyLines(output);
+  if (currentOutput_ == displayOutput)
     return false;
 
   const bool retainedFollow = followsLatest_;
   const int retainedValue = preservedScrollValue_;
-  const bool appendOnly = !currentOutput_.isEmpty() &&
-                          output.startsWith(currentOutput_);
+  const bool appendOnly =
+      !currentOutput_.isEmpty() && displayOutput.startsWith(currentOutput_);
   programmaticScroll_ = true;
   if (appendOnly) {
     QTextCursor cursor = textCursor();
     cursor.movePosition(QTextCursor::End);
-    cursor.insertText(output.sliced(currentOutput_.size()));
+    cursor.insertText(displayOutput.sliced(currentOutput_.size()));
   } else {
-    setPlainText(output);
+    setPlainText(displayOutput);
   }
-  currentOutput_ = output;
+  currentOutput_ = displayOutput;
   followsLatest_ = retainedFollow;
   preservedScrollValue_ = retainedValue;
   programmaticScroll_ = false;
@@ -247,26 +302,6 @@ void CommandOutputView::restoreScrollState(const ScrollState &state) {
   settleScroll();
 }
 
-QSize CommandOutputView::sizeHint() const {
-  QSize result = QPlainTextEdit::sizeHint();
-  result.setHeight(preferredHeight_);
-  return result;
-}
-
-QSize CommandOutputView::minimumSizeHint() const {
-  QSize result = QPlainTextEdit::minimumSizeHint();
-  result.setHeight(0);
-  return result;
-}
-
-void CommandOutputView::resizeEvent(QResizeEvent *event) {
-  QPlainTextEdit::resizeEvent(event);
-  // A parent layout is already assigning this width.  Refresh the preferred
-  // height synchronously without scheduling a second outer layout pass.
-  measureAtCurrentWidth(false);
-  settleScroll();
-}
-
 void CommandOutputView::wheelEvent(QWheelEvent *event) {
   QScrollBar *bar = verticalScrollBar();
   const int delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
@@ -274,27 +309,15 @@ void CommandOutputView::wheelEvent(QWheelEvent *event) {
   if (bar->maximum() <= bar->minimum() ||
       (delta > 0 && bar->value() <= bar->minimum()) ||
       (delta < 0 && bar->value() >= bar->maximum())) {
-    event->ignore();
+    event->accept();
     return;
   }
 
   if (delta > 0)
     followsLatest_ = false;
-  QPlainTextEdit::wheelEvent(event);
+  QTextEdit::wheelEvent(event);
   preservedScrollValue_ = bar->value();
   followsLatest_ = isAtBottom();
-}
-
-void CommandOutputView::measureAtCurrentWidth(bool notifyParent) {
-  const int contentHeight = static_cast<int>(
-      std::ceil(document()->documentLayout()->documentSize().height()));
-  const int wantedHeight = std::clamp(contentHeight + 2 * frameWidth() + 14, 0,
-                                      MaximumCommandOutputHeight);
-  if (wantedHeight != preferredHeight_) {
-    preferredHeight_ = wantedHeight;
-    if (notifyParent)
-      updateGeometry();
-  }
 }
 
 void CommandOutputView::settleScroll() {
@@ -302,12 +325,18 @@ void CommandOutputView::settleScroll() {
     return;
   settlingScroll_ = true;
   QScrollBar *bar = verticalScrollBar();
+  const bool wasProgrammatic = programmaticScroll_;
+  programmaticScroll_ = true;
+  if (followsLatest_) {
+    QTextCursor cursor = textCursor();
+    cursor.movePosition(QTextCursor::End);
+    setTextCursor(cursor);
+    ensureCursorVisible();
+  }
   const int target =
       followsLatest_
           ? bar->maximum()
           : std::clamp(preservedScrollValue_, bar->minimum(), bar->maximum());
-  const bool wasProgrammatic = programmaticScroll_;
-  programmaticScroll_ = true;
   bar->setValue(target);
   preservedScrollValue_ = target;
   programmaticScroll_ = wasProgrammatic;
@@ -369,17 +398,12 @@ public:
       break;
     case CardKind::CommandExecution:
       title = makeLabel(QStringLiteral("Command execution"), "title", owner);
-      command = new QPlainTextEdit(owner);
-      command->setReadOnly(true);
-      command->setMaximumHeight(90);
-      command->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-      command->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-      command->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+      command = new ContentSizedTextView(MaximumCommandTextHeight, owner);
       command->setProperty("kind", "command");
       command->setObjectName(QStringLiteral("commandTextView"));
       command->setStyleSheet(QStringLiteral(
-          "background:#f8fafc;border:1px solid #d7dee8;border-radius:6px;"
-          "padding:7px;font-family:monospace;"));
+          "QTextEdit#commandTextView{background:#f8fafc;"
+          "border:1px solid #d7dee8;border-radius:6px;}"));
       output = new CommandOutputView({}, owner);
       output->hide();
       metadata = makeLabel({}, "meta", owner);
@@ -455,17 +479,20 @@ public:
       const auto &message = std::get<AgentMessageData>(data.payload);
       title->setText(message.finalAnswer ? QStringLiteral("Codex")
                                          : QStringLiteral("Codex activity"));
+      layout->setContentsMargins(12, message.finalAnswer ? 10 : 8, 12,
+                                 message.finalAnswer ? 10 : 8);
       setVisibleMarkdown(body, message.text);
       break;
     }
     case CardKind::CommandExecution: {
       const auto &execution = std::get<CommandExecutionData>(data.payload);
-      if (command->toPlainText() != execution.command)
-        command->setPlainText(execution.command);
-      command->setVisible(!execution.command.isEmpty());
-      const bool visibleOutput = terminalOutputHasVisibleText(execution.output);
+      const QString displayCommand = trimTrailingEmptyLines(execution.command);
+      command->setContent(displayCommand);
+      command->setVisible(!displayCommand.isEmpty());
+      const QString displayOutput = trimTrailingEmptyLines(execution.output);
+      const bool visibleOutput = terminalOutputHasVisibleText(displayOutput);
       if (visibleOutput) {
-        output->setOutput(execution.output);
+        output->setOutput(displayOutput);
         output->show();
       } else {
         output->hide();
@@ -585,7 +612,7 @@ public:
   QLabel *body = nullptr;
   QLabel *metadata = nullptr;
   QLabel *detail = nullptr;
-  QPlainTextEdit *command = nullptr;
+  ContentSizedTextView *command = nullptr;
   CommandOutputView *output = nullptr;
   QTimer *animationTimer = nullptr;
 };
