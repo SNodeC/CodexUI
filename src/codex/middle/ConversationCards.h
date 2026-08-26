@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
-#ifndef CODEXUI_GREENFIELD_CODEX_MIDDLE_CONVERSATIONCARDS_H
-#define CODEXUI_GREENFIELD_CODEX_MIDDLE_CONVERSATIONCARDS_H
+#ifndef CODEXUI_CODEX_MIDDLE_CONVERSATIONCARDS_H
+#define CODEXUI_CODEX_MIDDLE_CONVERSATIONCARDS_H
 
 #include "codex/middle/MiddleTypes.h"
 
@@ -101,4 +101,4 @@ createConversationCard(const VisibleCardData &data, QWidget *parent = nullptr);
 
 } // namespace codexui::codex::middle
 
-#endif // CODEXUI_GREENFIELD_CODEX_MIDDLE_CONVERSATIONCARDS_H
+#endif // CODEXUI_CODEX_MIDDLE_CONVERSATIONCARDS_H

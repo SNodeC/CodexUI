@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
-#ifndef CODEXUI_GREENFIELD_CODEX_MIDDLE_MIDDLETYPES_H
-#define CODEXUI_GREENFIELD_CODEX_MIDDLE_MIDDLETYPES_H
+#ifndef CODEXUI_CODEX_MIDDLE_MIDDLETYPES_H
+#define CODEXUI_CODEX_MIDDLE_MIDDLETYPES_H
 
 #include <nlohmann/json.hpp>
 
@@ -185,4 +185,4 @@ struct ConversationSnapshot {
 
 } // namespace codexui::codex::middle
 
-#endif // CODEXUI_GREENFIELD_CODEX_MIDDLE_MIDDLETYPES_H
+#endif // CODEXUI_CODEX_MIDDLE_MIDDLETYPES_H

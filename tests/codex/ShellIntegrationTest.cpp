@@ -725,6 +725,6 @@ int main(int argc, char **argv) {
       codexui::codex::FrontendSessionTestPeer::takeClientDescriptor(session));
   const bool result = codexui::codex::runShellFlow(session, peer);
   if (result)
-    std::cout << "Greenfield shell integration test passed\n";
+    std::cout << "Shell integration test passed\n";
   return result ? 0 : 1;
 }

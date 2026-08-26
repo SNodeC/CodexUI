@@ -919,6 +919,6 @@ int main(int argc, char **argv) {
   result &= testInspectorDetailParity();
   result &= testGitDiffScopes();
   if (result)
-    std::cout << "Greenfield layout tests passed\n";
+    std::cout << "Application layout tests passed\n";
   return result ? 0 : 1;
 }

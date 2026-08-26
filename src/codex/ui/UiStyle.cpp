@@ -56,7 +56,7 @@ QString applicationStyleSheet() {
             color: #1d2633;
             font-size: %1pt;
         }
-        QMainWindow, QWidget#workbench { background: #f6f8fb; }
+        QMainWindow, QWidget#applicationShell { background: #f6f8fb; }
         QLabel { background: transparent; font-weight: 400; }
         QLabel[kind="muted"] { color: #667085; font-size: %1pt; }
         QLabel[kind="section"] {

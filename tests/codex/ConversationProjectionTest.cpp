@@ -374,6 +374,6 @@ int main() {
   result &= testAnchoredDuplicatePrompts();
   result &= testCommandOutputVisibility();
   if (result)
-    std::cout << "Greenfield projection tests passed\n";
+    std::cout << "Conversation projection tests passed\n";
   return result ? 0 : 1;
 }

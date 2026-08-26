@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
-#ifndef CODEXUI_GREENFIELD_CODEX_MIDDLE_PROMPTCOORDINATOR_H
-#define CODEXUI_GREENFIELD_CODEX_MIDDLE_PROMPTCOORDINATOR_H
+#ifndef CODEXUI_CODEX_MIDDLE_PROMPTCOORDINATOR_H
+#define CODEXUI_CODEX_MIDDLE_PROMPTCOORDINATOR_H
 
 #include "codex/FileSelectionDialog.h"
 #include "codex/PresentationModel.h"
@@ -116,4 +116,4 @@ private:
 
 } // namespace codexui::codex::middle
 
-#endif // CODEXUI_GREENFIELD_CODEX_MIDDLE_PROMPTCOORDINATOR_H
+#endif // CODEXUI_CODEX_MIDDLE_PROMPTCOORDINATOR_H

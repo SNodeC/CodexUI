@@ -484,8 +484,7 @@ context menu is created for the stable thread ID under the pointer and exposes
 Reload, Rename, Fork, Archive/Unarchive, and Delete. Read-only Reload remains
 available to an observer; mutations require the connected controller role.
 Opening or invoking the menu does not select the row or disturb the thread
-currently being reviewed. The permanent development harness may retain compact
-diagnostic controls that are not part of the product UI/UX.
+currently being reviewed.
 
 ### 7.3 Message Attachments
 
@@ -900,51 +899,20 @@ The app-server wire is JSON-RPC-shaped but may omit the optional
 `"jsonrpc": "2.0"` member. The frontend SDK owns that compatibility; Qt never
 depends on the member's presence.
 
-## 16. Permanent Development Harness
+## 16. Application Presentation
 
-The codex workbench is retained as a deliberately plain development harness
-alongside the final visual UI/UX shell. Both consumers use the same
-`codexui.presentation` contract and `PresentationModel`; the harness does not
-receive native app-server JSON through a privileged path.
-
-The harness provides:
-
-- explicit thread selection with no automatic selection changes;
-- conversation, plan, correlated agent-activity, and generation-aware
-  pending-request inspection;
-- read-only State inspection for model, account, configuration, permission,
-  feature, skills, hooks, plugin, app, MCP, and other retained domains;
-- controller/observer role and connection-generation visibility;
-- a bounded protocol log containing timestamp, sequence, generation, frame
-  kind, action/event type, authority, stable scope IDs, correlation ID, and
-  result status;
-- explicit sequence-gap and non-monotonic-sequence diagnostics;
-- bounded model counters for discovered threads and selected-thread turns and
-  items.
-
-The protocol log retains at most 2,000 display records. It is telemetry only:
-it cannot replay frames, hydrate the presentation model, supply deletion
-authority, or conceal a missing app-server result. `thread/list` discovery
-preserves the order supplied by app-server for listed IDs, while IDs omitted
-from a non-authoritative discovery page remain retained after that page.
-
-The presentation model separately retains at most 256 authority-free telemetry
-records for status and warning presentation. These records cannot mutate or
-hydrate conversation state. Authoritative normalized domains not requiring a
-specialized reducer remain accessible at their stable global, thread, turn, or
-item scope; their `merge`, `replace`, and `remove` semantics are applied before
-the visual shell consumes them.
-
-The harness is used first when extending normalization or reduction. Once a
-path is proven there, the visual shell consumes the same model and command
-surface through narrow Qt adapters. The shell has no semantic snapshot or
-parallel state authority.
+The production `ShellWidget` is the sole Qt consumer of the
+`codexui.presentation` contract and `PresentationModel`. Conversation, Plan,
+Agents, Changes, Requests, retained State, and bounded Protocol diagnostics are
+integrated into that shell. Diagnostic presentation is telemetry only: it
+cannot replay frames, hydrate state, supply deletion authority, or conceal a
+missing app-server result. The shell has no semantic snapshot or parallel state
+authority.
 
 ## 17. Implemented Components and APIs
 
-The canonical CodexUI implementation contains both the complete visual shell
-and the permanent functional presentation harness. `ExpandingPromptEditor` and
-the visual style helpers live under
+The canonical CodexUI implementation contains one complete visual shell.
+`ExpandingPromptEditor` and the visual style helpers live under
 `src/codex/ui` because they contain no protocol authority.
 
 The implementation is divided into the following concrete components:
@@ -960,7 +928,6 @@ The implementation is divided into the following concrete components:
 | `ProtocolNormalizer` | Native app-server/bridge input to `codexui.presentation` result/event conversion |
 | `PresentationProtocol` | Frame construction, validation, authority, sequence, generation, and scope utilities |
 | `PresentationModel` | Qt-owned stable-ID reducer for threads, turns, items, plans, agents, requests, global domains, and telemetry |
-| `WorkbenchWidget` | Permanent development harness and user-intent adapter |
 | `ShellWidget` | Product shell and protocol/application coordinator; owns stable selection, hydration, recovery, and command dispatch |
 | `MiddleRegionWidget` | Three-pane visual composition and center-region wheel routing |
 | `ThreadPane` | Stable-ID thread-list projection and thread actions |
@@ -1033,14 +1000,10 @@ certificate, timeout, queue, reconnect, and instance-enable options come from
 the corresponding SNode.C client configuration; CodexUI adds no duplicate
 transport configuration.
 
-The build produces two independently launchable applications:
-
-- `codex-ui` is the normal visual UI/UX shell;
-- `codex-ui-harness` is the permanent plain protocol/reducer harness.
-
-They compile the same `FrontendSession`, `ClientRuntime`, socketpair,
-normalizer, protocol, and presentation-model sources. Only the top-level Qt
-consumer differs. Neither executable has a privileged transport or state path.
+The build produces one application, `codex-ui`. It integrates the production
+shell with `FrontendSession`, `ClientRuntime`, the socketpair, normalizer,
+presentation protocol, and presentation model; no alternate UI target has a
+privileged transport or state path.
 
 The current build links the codex AISuite frontend library as
 `AISuite::OpenAICodex`, Qt Widgets, Threads, libgit2 through pkg-config, and the
@@ -1178,7 +1141,7 @@ instead of repeating both mechanisms in every case.
 
 #### Conversation Projection
 
-`codexui-greenfield-projection-test` verifies the pure typed projection and
+`codexui-conversation-projection-test` verifies the pure typed projection and
 prompt coordinator: one section per app-server turn, stable card identity and
 server ordering, per-thread prompt queues, dispatch-time Start/Steer choice,
 callback-only acknowledgment, exact `clientUserMessageId` correlation,
@@ -1187,13 +1150,13 @@ Command execution output visibility.
 
 #### Middle-Region Behavior
 
-`codexui-greenfield-middle-test` exercises the actual conversation widgets
+`codexui-conversation-cards-test` exercises the actual conversation widgets
 programmatically. It verifies smooth follow, user-owned pause, stable
 card-and-pixel anchoring across every card type and width-dependent reflow,
 per-thread restoration, composer trailing space, pending-prompt animation,
 and independent Command execution output sizing and scroll ownership.
 
-`codexui-greenfield-layout-test` verifies the three-pane constraints, composer
+`codexui-application-layout-test` verifies the three-pane constraints, composer
 overlay geometry, complete center-region wheel routing, thread-list selection
 projection, nested-scroll handoff, and retained Inspector/Info behavior. These
 are state and geometry assertions over Qt widgets, not golden-screenshot or
@@ -1202,7 +1165,7 @@ transient card rasters only to prove that motion exists.
 
 #### Shell Integration
 
-`codexui-greenfield-shell-test` drives the production `ShellWidget` and
+`codexui-shell-integration-test` drives the production `ShellWidget` and
 `FrontendSession` across their real socketpair presentation boundary. It
 verifies exact visible-thread routing, independent prompt queues, real result
 acknowledgment, background completion, retained Plan/Agents state, monotonic
@@ -1216,7 +1179,7 @@ retention, bounded child-thread reads, and one-shot thread-not-found recovery.
 repository. It performs filesystem writes rather than UI interaction. The test
 verifies polling discovery of a manually created nested untracked file and
 native watcher refresh after removal, content reversion, deletion restoration,
-and atomic replacement. `codexui-greenfield-layout-test` complements it with
+and atomic replacement. `codexui-application-layout-test` complements it with
 in-process repository-resolution coverage for all scopes, duplicate candidates,
 ambiguous and absolute paths, All and individual repository selection, hidden
 repository exclusion/inclusion, stale hints/selections, and preference for an
@@ -1249,27 +1212,27 @@ The seven focused tests can be built and run directly:
 cmake --build "${BUILD_DIR}" --parallel 8 \
   --target codexui-socketpair-contract-test \
            codexui-presentation-pipeline-test \
-           codexui-greenfield-projection-test \
-           codexui-greenfield-middle-test \
-           codexui-greenfield-layout-test \
+           codexui-conversation-projection-test \
+           codexui-conversation-cards-test \
+           codexui-application-layout-test \
            codexui-git-changes-live-test \
-           codexui-greenfield-shell-test
+           codexui-shell-integration-test
 ctest --test-dir "${BUILD_DIR}" --output-on-failure \
-  -R '^codexui-(socketpair-contract|presentation-pipeline|git-changes-live|greenfield-(projection|middle|layout|shell))$'
+  -R '^codexui-(socketpair-contract|presentation-pipeline|conversation-projection|conversation-cards|application-layout|git-changes-live|shell-integration)$'
 ```
 
 Each test has a 10-to-30-second CTest ceiling. Normal successful execution is
 substantially shorter and requires no network listener, credentials, isolated
 Codex home, or user interaction.
 
-## 18. Live Harness Validation
+## 18. Live Application Validation
 
-The harness was exercised against one persistent real topology:
+The application was exercised against one persistent real topology:
 
 ```text
 Codex app-server over IPv4 WebSocket
     <-> codex-bridge over IPv4 WebSocket
-    <-> CodexUI harness over IPv4 WebSocket
+    <-> CodexUI over IPv4 WebSocket
 ```
 
 An independent `codex-bridge-client` observer remained connected to the same
@@ -1391,9 +1354,7 @@ separate explicit authority and retention decision.
 ## 20. Visual Shell Integration Boundary
 
 The CodexUI shell is implemented in codex-owned Qt widgets. Those widgets
-consume only `PresentationModel` and call only `FrontendSession`. The permanent
-harness remains available as the protocol/reducer diagnostic surface and is not
-itself the product shell.
+consume only `PresentationModel` and call only `FrontendSession`.
 
 The implemented shell contains the 64-pixel top bar, hideable work sidebar,
 thread list, conversation timeline and composer, hideable inspector, Plan,
@@ -1402,16 +1363,17 @@ connection lifecycle/configuration, canonical new-thread/workspace/attachment
 dialogs, per-thread context actions, complete upcoming-turn settings, a
 first-class diff viewer, pending-prompt cards, request status, and the 40-pixel
 status bar. Agent
-messages, plans, reasoning summaries, and agent results are
-rendered with Qt Markdown parsing while embedded HTML is disabled. User text,
-commands, and command output remain literal. State and Protocol diagnostics
-remain nested under Info rather than dominating normal use.
+messages, plans, reasoning summaries, agent results, and authoritative user
+messages are rendered with Qt Markdown parsing while embedded HTML is disabled.
+The transitional local prompt, commands, and command output remain literal.
+State and Protocol diagnostics remain nested under Info rather than dominating
+normal use.
 
 Pending-request presentation exposes category, stable request ID, connection
 generation, owning thread, and a bounded set of safe typed details. The native
 request object remains transiently available to the typed response dialog but
-is never dumped to the shell, harness State view, notice banner, or protocol
-log. Secret answers are held only by password editors until the dialog is
+is never dumped to the shell, Info/State view, notice banner, or protocol log.
+Secret answers are held only by password editors until the dialog is
 destroyed.
 
 Operation errors, provider notices, protocol diagnostics, and connection

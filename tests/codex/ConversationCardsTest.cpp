@@ -757,6 +757,6 @@ int main(int argc, char **argv) {
   result &= testCommandOutputStateAcrossNavigation();
   result &= testPendingPromptAnimation();
   if (result)
-    std::cout << "Greenfield middle-region tests passed\n";
+    std::cout << "Conversation card tests passed\n";
   return result ? 0 : 1;
 }
