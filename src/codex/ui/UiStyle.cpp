@@ -186,6 +186,7 @@ QString applicationStyleSheet() {
         QFrame[kind="greenBadge"] { background: #e9f7f0; border: 1px solid #a9d8c1; border-radius: 6px; }
         QFrame[kind="blueBadge"] { background: #e5eeff; border-radius: 5px; }
         QFrame[kind="orangeBadge"] { background: #fff6df; border: 1px solid #e5c77d; border-radius: 7px; }
+        QWidget#composerOverlay { background: #f6f8fb; }
         QFrame[kind="composer"] { background: #ffffff; border: 1px solid #d7dee8; border-radius: 10px; }
         QFrame[kind="composer"][focused="true"] { border: 2px solid #2f6feb; }
         QPlainTextEdit, QTextEdit {

@@ -19,6 +19,7 @@
 #include <QComboBox>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
@@ -183,6 +184,44 @@ bool testOverlayGeometryAndRegionRouting() {
                  region.composer().canonicalReserve()->height() == canonical,
              "composer establishes one compact canonical reserve");
 
+  QFrame *composerSurface = nullptr;
+  for (QFrame *frame :
+       region.composer().findChildren<QFrame *>(Qt::FindDirectChildrenOnly)) {
+    if (frame->property("kind").toString() == QStringLiteral("composer")) {
+      composerSurface = frame;
+      break;
+    }
+  }
+  TurnSettingsWidget *settings = region.composer().turnSettings();
+  const auto settingsToComposerGap = [&] {
+    return composerSurface ? composerSurface->geometry().top() -
+                                 settings->geometry().bottom() - 1
+                           : -1;
+  };
+  const auto settingsToEditorGap = [&] {
+    return region.composer().promptEditor()->mapTo(&region.composer(), QPoint())
+               .y() -
+           settings->geometry().bottom() - 1;
+  };
+  const auto stableComposerGeometry = [&] {
+    return settings->geometry().top() == 8 &&
+           settings->height() == settings->sizeHint().height() &&
+           settingsToComposerGap() == 8;
+  };
+  result &= expect(
+      composerSurface &&
+          region.composer().testAttribute(Qt::WA_StyledBackground) &&
+          UiStyle::applicationStyleSheet().contains(
+              QStringLiteral("QWidget#composerOverlay")) &&
+          stableComposerGeometry(),
+      "compact composer has an opaque surface and canonical section gaps");
+  const int compactEditorGap = settingsToEditorGap();
+  region.composer().setActiveTurn(true);
+  spin(20);
+  result &= expect(stableComposerGeometry() &&
+                       settingsToEditorGap() == compactEditorGap,
+                   "active-turn controls retain the compact composer gaps");
+
   QString longPrompt;
   for (int line = 0; line < 14; ++line)
     longPrompt += QStringLiteral("A deliberately long prompt line %1 that "
@@ -193,18 +232,33 @@ bool testOverlayGeometryAndRegionRouting() {
   const int extra = region.composer().extraOverlayHeight();
   result &= expect(extra > 0 && view.trailingSpaceHeight() == extra,
                    "prompt growth is mirrored by exact trailing scroll space");
-  result &=
-      expect(view.geometry() == viewGeometry &&
-                 view.viewport()->geometry() == viewportGeometry &&
-                 region.composer().canonicalReserve()->height() == canonical,
-             "prompt growth overlays without shifting the message viewport");
+  result &= expect(
+      stableComposerGeometry() &&
+          settingsToEditorGap() == compactEditorGap &&
+          view.geometry() == viewGeometry &&
+          view.viewport()->geometry() == viewportGeometry &&
+          region.composer().canonicalReserve()->height() == canonical,
+      "prompt growth keeps gaps fixed without shifting the message viewport");
+  region.composer().setAttachments(
+      {{QStringLiteral("/tmp/layout-diagnostic.png"),
+        QStringLiteral("layout-diagnostic.png"), QStringLiteral("image/png")}});
+  spin(30);
+  result &= expect(
+      stableComposerGeometry() &&
+          region.composer().extraOverlayHeight() > extra &&
+          view.trailingSpaceHeight() == region.composer().extraOverlayHeight(),
+      "attachments retain the canonical settings-to-composer gap");
   region.composer().clearDraft();
   spin(30);
   result &= expect(
       region.composer().extraOverlayHeight() == 0 &&
           view.trailingSpaceHeight() == 0 && view.geometry() == viewGeometry &&
-          view.viewport()->geometry() == viewportGeometry,
-      "prompt contraction restores canonical layout and removes space");
+          view.viewport()->geometry() == viewportGeometry &&
+          stableComposerGeometry() &&
+          settingsToEditorGap() == compactEditorGap,
+      "prompt contraction restores canonical layout, gaps, and trailing space");
+  region.composer().setActiveTurn(false);
+  spin(20);
 
   ComposerPane::Actions rejected;
   rejected.submit = [](QString, std::vector<AttachmentDraft>) { return false; };

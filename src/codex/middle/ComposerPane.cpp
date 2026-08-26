@@ -60,7 +60,7 @@ ComposerPane::ComposerPane(QWidget *anchor)
     : QWidget(anchor), anchor_(anchor), reserve_(new QWidget(anchor)) {
   Q_ASSERT(anchor_);
   setObjectName(QStringLiteral("composerOverlay"));
-  setAttribute(Qt::WA_StyledBackground, false);
+  setAttribute(Qt::WA_StyledBackground, true);
   setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
   anchor_->installEventFilter(this);
 
@@ -70,7 +70,7 @@ ComposerPane::ComposerPane(QWidget *anchor)
 
   auto *root = new QVBoxLayout(this);
   root->setContentsMargins(0, 8, 0, 0);
-  root->setSpacing(0);
+  root->setSpacing(8);
 
   attention_ = new QFrame(this);
   attention_->setProperty("kind", "orangeBadge");
@@ -273,6 +273,12 @@ void ComposerPane::synchronizeGeometry() {
                               : 0;
   setGeometry(HorizontalInset, availableHeight - wantedHeight, width,
               wantedHeight);
+  // The natural height was calculated after the prompt layout changed, while
+  // the child layout still had the previous overlay geometry. Lay out the
+  // children once against the final rectangle so fixed surfaces cannot remain
+  // compressed and leave a false gap during upward growth.
+  layout()->invalidate();
+  layout()->activate();
   raise();
 
   if (wantedExtra != extraHeight_) {
