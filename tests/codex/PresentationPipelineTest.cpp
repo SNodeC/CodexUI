@@ -243,6 +243,47 @@ int main() {
              "incomplete thread reads preserve live plan and inspector state");
   passed &= expect(!model.activeTurnId("thread-1").has_value(),
                    "completed stream leaves no active turn");
+  passed &= expect(model.thread("thread-1") != nullptr &&
+                       model.thread("thread-1")->status == "idle",
+                   "completed stream retains idle thread status");
+
+  normalizer.operationResult(
+      "thread.read", "stale-active-read", {{"threadId", "thread-1"}},
+      {{"id", "stale-active-read"},
+       {"result",
+        {{"thread",
+          {{"id", "thread-1"},
+           {"status", {{"type", "active"}}},
+           {"turns",
+            nlohmann::json::array(
+                {{{"id", "turn-1"}, {"status", "completed"}},
+                 {{"id", "turn-2"}, {"status", "inProgress"}}})}}}}}});
+  thread = model.thread("thread-1");
+  turn = thread == nullptr ? nullptr : &thread->turns.at("turn-2");
+  passed &= expect(turn != nullptr && turn->status == "completed" &&
+                       !model.activeTurnId("thread-1").has_value(),
+                   "a stale authoritative read cannot reactivate a completed "
+                   "turn");
+  passed &= expect(thread != nullptr && thread->status == "idle",
+                   "a stale authoritative read cannot restore running thread "
+                   "chrome");
+
+  normalizer.serverNotification(
+      "turn/started",
+      {{"threadId", "thread-1"}, {"turn", {{"id", "turn-3"}}}});
+  passed &= expect(model.activeTurnId("thread-1") == "turn-3" &&
+                       model.thread("thread-1")->status == "active",
+                   "started lifecycle supplies a missing active status");
+  normalizer.serverNotification(
+      "thread/status/changed",
+      {{"threadId", "thread-1"}, {"status", {{"type", "completed"}}}});
+  passed &= expect(!model.activeTurnId("thread-1").has_value(),
+                   "completed thread chrome vetoes a stale active turn");
+  normalizer.serverNotification(
+      "turn/completed",
+      {{"threadId", "thread-1"}, {"turn", {{"id", "turn-3"}}}});
+  passed &= expect(!model.activeTurnId("thread-1").has_value(),
+                   "completed lifecycle clears activity without turn status");
 
   PresentationModel hydratedModel;
   ProtocolNormalizer hydratedNormalizer(

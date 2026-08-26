@@ -56,6 +56,15 @@ std::string statusValue(const nlohmann::json &value) {
   return {};
 }
 
+bool isActiveTurnStatus(const std::string &status) {
+  return status == "inProgress" || status == "active";
+}
+
+bool isTerminalTurnStatus(const std::string &status) {
+  return status == "completed" || status == "interrupted" ||
+         status == "failed";
+}
+
 std::string requestKey(const nlohmann::json &value) {
   return value.is_null() ? std::string{} : value.dump();
 }
@@ -271,9 +280,13 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
     } else if (action == "turn.start") {
       const std::string threadId = stringValue(scope, "threadId");
       const auto thread = threads.find(threadId);
-      if (thread != threads.end())
-        upsertTurn(thread->second,
-                   memberValue(data, "turn", nlohmann::json::object()), false);
+      if (thread != threads.end()) {
+        TurnPresentation &turn = upsertTurn(
+            thread->second,
+            memberValue(data, "turn", nlohmann::json::object()), false);
+        if (isActiveTurnStatus(turn.status))
+          thread->second.status = "active";
+      }
     } else if (action == "models.list") {
       const nlohmann::json listedModels =
           memberValue(data, "models", nlohmann::json::array());
@@ -442,8 +455,19 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
   }
 
   if (type == "turn.upsert") {
-    upsertTurn(thread, memberValue(data, "turn", nlohmann::json::object()),
-               false);
+    nlohmann::json turn =
+        memberValue(data, "turn", nlohmann::json::object());
+    const std::string lifecycle = stringValue(data, "lifecycle");
+    const std::string embeddedStatus =
+        statusValue(memberValue(turn, "status"));
+    if (lifecycle == "completed" &&
+        !isTerminalTurnStatus(embeddedStatus))
+      turn["status"] = "completed";
+    else if (lifecycle == "started" && embeddedStatus.empty())
+      turn["status"] = "inProgress";
+    TurnPresentation &updated = upsertTurn(thread, turn, false);
+    if (lifecycle == "started" && isActiveTurnStatus(updated.status))
+      thread.status = "active";
     correlateAgentThread(threadId);
     return;
   }
@@ -545,6 +569,9 @@ PresentationModel::activeTurnId(const std::string &threadId) const {
   const ThreadPresentation *value = thread(threadId);
   if (!value)
     return std::nullopt;
+  if (!value->status.empty() && value->status != "active" &&
+      value->status != "inProgress" && value->status != "running")
+    return std::nullopt;
   for (auto iterator = value->turnOrder.rbegin();
        iterator != value->turnOrder.rend(); ++iterator) {
     const auto turn = value->turns.find(*iterator);
@@ -624,6 +651,14 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
     result.id = id;
     orderedThreads.insert(orderedThreads.begin(), id);
   }
+  const std::string previousThreadStatus = result.status;
+  std::unordered_map<std::string, std::string> terminalTurnStatuses;
+  if (replaceTurns) {
+    for (const auto &[turnId, turn] : result.turns) {
+      if (isTerminalTurnStatus(turn.status))
+        terminalTurnStatuses.emplace(turnId, turn.status);
+    }
+  }
   nlohmann::json threadFields = raw;
   threadFields.erase("turns");
   if (replaceTurns)
@@ -663,6 +698,26 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
     }
     for (const auto &turn : *turns)
       upsertTurn(result, turn, replaceTurns);
+    if (replaceTurns) {
+      for (const auto &[turnId, terminalStatus] : terminalTurnStatuses) {
+        const auto turn = result.turns.find(turnId);
+        if (turn != result.turns.end() &&
+            isActiveTurnStatus(turn->second.status)) {
+          turn->second.status = terminalStatus;
+          turn->second.raw["status"] = terminalStatus;
+        }
+      }
+    }
+    const bool containsActiveTurn =
+        std::ranges::any_of(result.turns, [](const auto &entry) {
+          return isActiveTurnStatus(entry.second.status);
+        });
+    if (!containsActiveTurn && isActiveTurnStatus(result.status) &&
+        (previousThreadStatus == "idle" ||
+         previousThreadStatus == "completed")) {
+      result.status = previousThreadStatus;
+      result.raw["status"] = previousThreadStatus;
+    }
   }
   return result;
 }
@@ -688,8 +743,11 @@ TurnPresentation &PresentationModel::upsertTurn(ThreadPresentation &thread,
   else
     mergePreservingCompleteness(result.raw, turnFields);
   const std::string status = statusValue(memberValue(raw, "status"));
-  if (!status.empty())
+  if (!status.empty() &&
+      !(isTerminalTurnStatus(result.status) && isActiveTurnStatus(status)))
     result.status = status;
+  if (isTerminalTurnStatus(result.status) && isActiveTurnStatus(status))
+    result.raw["status"] = result.status;
   const auto items = raw.find("items");
   if (items != raw.end() && items->is_array()) {
     if (replaceItems) {

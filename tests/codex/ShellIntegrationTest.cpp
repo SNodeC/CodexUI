@@ -439,7 +439,9 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
          {"clientId", clientId},
          {"content", {{{"type", "text"}, {"text", "prompt A1"}}}}}}},
       Authority::Merge,
-      {{"threadId", "thread-a"}, {"turnId", "turn-a"}, {"itemId", "user-a1"}}));
+      {{"threadId", "thread-a"},
+       {"turnId", "turn-a-live"},
+       {"itemId", "user-a1"}}));
   spin(10);
   const middle::LocalPromptData *beforeAck =
       localPrompt(shell, QStringLiteral("prompt A1"));
@@ -464,8 +466,9 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
   result &= peer.send(presentation::result(
       sequence++, 1, "turn.start",
       startA->value("correlationId", std::string{}), true,
-      {{"turn", {{"id", "turn-a"}, {"status", "inProgress"}}}},
-      Authority::Merge, {{"threadId", "thread-a"}, {"turnId", "turn-a"}}));
+      {{"turn", {{"id", "turn-a-live"}, {"status", "inProgress"}}}},
+      Authority::Merge,
+      {{"threadId", "thread-a"}, {"turnId", "turn-a-live"}}));
   const auto steerA = peer.waitFor("turn.steer", "thread-a");
   result &=
       expect(steerA.has_value(), "A1's real background ack releases queued A2");
@@ -682,7 +685,8 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
   result &= peer.send(
       presentation::result(sequence++, 2, "thread.resume",
                            secondResumeD->value("correlationId", std::string{}),
-                           true, {{"thread", thread("thread-d", "D")}},
+                           true,
+                           {{"thread", thread("thread-d", "D", "active")}},
                            Authority::Merge, {{"threadId", "thread-d"}}));
   const auto retriedSteerD = peer.waitFor("turn.steer", "thread-d");
   result &= expect(retriedSteerD.has_value() &&
