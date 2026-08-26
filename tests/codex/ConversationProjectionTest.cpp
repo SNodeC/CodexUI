@@ -457,6 +457,32 @@ bool testUserMessageImages() {
   return result;
 }
 
+bool testGeneratedImageProjection() {
+  ThreadPresentation thread = baseThread("generated-image-thread");
+  appendItem(
+      thread, "turn-1",
+      item("generated-image",
+           {{"type", "imageGeneration"},
+            {"status", "completed"},
+            {"savedPath", "/tmp/generated.png"},
+            {"revisedPrompt", "A restrained CodexUI color proposal"},
+            {"result", std::string(100000, 'A')}}));
+
+  const ConversationSnapshot snapshot = ConversationProjection::project(
+      thread, {}, ConversationProjection::DefaultAuthoritativeItemLimit, 10);
+  const VisibleCardData *card = snapshot.find(AuthoritativeItemKey{
+      thread.id, "turn-1", "generated-image"});
+  const auto *image =
+      card ? std::get_if<ImageGenerationData>(&card->payload) : nullptr;
+  return expect(
+      card && card->kind == CardKind::ImageGeneration && image &&
+          image->path == QStringLiteral("/tmp/generated.png") &&
+          image->status == QStringLiteral("completed") &&
+          image->revisedPrompt ==
+              QStringLiteral("A restrained CodexUI color proposal"),
+      "generated images project their saved path without exposing base64");
+}
+
 bool testFileLinksArePartOfTheCanonicalPrompt() {
   const std::vector<AttachmentDraft> attachments{
       {QStringLiteral("/tmp/review notes [final] (2).pdf"),
@@ -498,6 +524,7 @@ int main() {
   result &= testAnchoredDuplicatePrompts();
   result &= testCommandOutputVisibility();
   result &= testUserMessageImages();
+  result &= testGeneratedImageProjection();
   result &= testFileLinksArePartOfTheCanonicalPrompt();
   if (result)
     std::cout << "Conversation projection tests passed\n";

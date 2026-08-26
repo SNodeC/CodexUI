@@ -849,6 +849,67 @@ bool testMessageImagePresentation() {
   return result;
 }
 
+bool testGeneratedImagePresentationAndGenericBound() {
+  QTemporaryDir directory;
+  const QString path = directory.filePath(QStringLiteral("generated.png"));
+  QImage source(800, 450, QImage::Format_ARGB32_Premultiplied);
+  source.fill(QColor(QStringLiteral("#e9f7f0")));
+  bool result = expect(directory.isValid() && source.save(path),
+                       "generated-image fixture is readable");
+
+  VisibleCardData generated{
+      AuthoritativeItemKey{"generated", "turn", "image"},
+      CardKind::ImageGeneration,
+      "generated",
+      "turn",
+      "image",
+      ImageGenerationData{path, QStringLiteral("completed"),
+                          QStringLiteral("A generated UI proposal")}};
+  ConversationCard generatedCard(generated);
+  generatedCard.show();
+  spin();
+  auto *thumbnail = generatedCard.findChild<QLabel *>(
+      QStringLiteral("messageImageThumbnail"));
+  result &= expect(thumbnail && thumbnail->property("imageAvailable").toBool(),
+                   "generated-image card reuses the bounded thumbnail");
+  if (thumbnail) {
+    const QPointF local(thumbnail->rect().center());
+    QMouseEvent click(QEvent::MouseButtonPress, local, local,
+                      thumbnail->mapToGlobal(local.toPoint()), Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(thumbnail, &click);
+    spin();
+  }
+  QWidget *viewer = nullptr;
+  for (QWidget *candidate : QApplication::topLevelWidgets())
+    if (candidate->objectName() == QStringLiteral("messageImageViewer"))
+      viewer = candidate;
+  result &= expect(viewer && viewer->isVisible(),
+                   "generated-image thumbnail opens the shared image viewer");
+  if (viewer)
+    viewer->close();
+  spin();
+
+  VisibleCardData generic{
+      AuthoritativeItemKey{"generated", "turn", "unknown"},
+      CardKind::GenericActivity,
+      "generated",
+      "turn",
+      "unknown",
+      GenericActivityData{QStringLiteral("Unknown activity"),
+                          {{"large", std::string(100000, 'x')}}}};
+  ConversationCard genericCard(generic);
+  genericCard.show();
+  spin();
+  auto *details = genericCard.findChild<QLabel *>(
+      QStringLiteral("genericActivityMetadata"));
+  result &= expect(
+      details && details->text().size() < 4200 &&
+          details->text().endsWith(QStringLiteral("[Activity details truncated]")),
+      "unknown activity text is bounded before Qt lays it out");
+  return result;
+}
+
 } // namespace
 } // namespace codexui::codex::middle
 
@@ -864,6 +925,7 @@ int main(int argc, char **argv) {
   result &= testCommandOutputStateAcrossNavigation();
   result &= testPendingPromptAnimation();
   result &= testMessageImagePresentation();
+  result &= testGeneratedImagePresentationAndGenericBound();
   if (result)
     std::cout << "Conversation card tests passed\n";
   return result ? 0 : 1;

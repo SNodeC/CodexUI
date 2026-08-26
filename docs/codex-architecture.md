@@ -508,6 +508,11 @@ prompt; selecting one opens a non-modal, fit-to-window viewer. CodexUI never
 fetches remote image URLs implicitly, and missing local images remain visible
 as unavailable placeholders.
 
+Authoritative `imageGeneration` items use their app-server `savedPath` and the
+same thumbnail/viewer. Their Base64 `result` is transport data and is never
+rendered as text. Unknown item types retain a generic diagnostic card, but its
+visible JSON is bounded before Qt performs text layout.
+
 ### 7.4 Changes and Diff Presentation
 
 The Changes inspector is authoritative over the local Git worktrees associated

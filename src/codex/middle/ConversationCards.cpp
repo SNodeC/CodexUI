@@ -42,6 +42,7 @@ constexpr qint64 PendingHalfCycleMilliseconds = 850;
 constexpr int ThumbnailMaximumWidth = 280;
 constexpr int ThumbnailMaximumHeight = 180;
 constexpr int ViewerMaximumImageExtent = 4096;
+constexpr qsizetype MaximumGenericActivityCharacters = 4096;
 
 void openImageViewer(const QString &path);
 
@@ -283,6 +284,14 @@ QString agentMetadata(const AgentActivityData &activity) {
   return metadata.join(QStringLiteral("  |  "));
 }
 
+QString boundedGenericActivity(const nlohmann::json &raw) {
+  QString rendered = QString::fromStdString(raw.dump(2));
+  if (rendered.size() <= MaximumGenericActivityCharacters)
+    return rendered;
+  rendered.truncate(MaximumGenericActivityCharacters);
+  return rendered + QStringLiteral("\n\n[Activity details truncated]");
+}
+
 bool acceptedTransitionActive(const LocalPromptData &prompt, qint64 now) {
   return prompt.acceptedTransitionActive(now);
 }
@@ -315,6 +324,9 @@ bool presentationEquals(const VisibleCardData &left,
     // conversation-card invalidation source.
     return first.status == second.status && first.pathCount == second.pathCount;
   }
+  case CardKind::ImageGeneration:
+    return std::get<ImageGenerationData>(left.payload) ==
+           std::get<ImageGenerationData>(right.payload);
   case CardKind::Plan:
     return std::get<PlanData>(left.payload) ==
            std::get<PlanData>(right.payload);
@@ -598,6 +610,15 @@ public:
       layout->addWidget(title);
       layout->addWidget(metadata);
       break;
+    case CardKind::ImageGeneration:
+      title = makeLabel(QStringLiteral("Generated image"), "title", owner);
+      metadata = makeLabel({}, "meta", owner);
+      body = makeLabel({}, "body", owner);
+      layout->addWidget(title);
+      layout->addWidget(metadata);
+      layout->addWidget(body);
+      createImageContainer();
+      break;
     case CardKind::Plan:
       title = makeLabel(QStringLiteral("plan"), "title", owner);
       body = makeMarkdownLabel({}, owner);
@@ -719,6 +740,16 @@ public:
       metadata->show();
       break;
     }
+    case CardKind::ImageGeneration: {
+      const auto &image = std::get<ImageGenerationData>(data.payload);
+      metadata->setText(displayStatus(image.status));
+      setStatusTone(metadata, image.status);
+      metadata->show();
+      setVisibleText(body, image.revisedPrompt);
+      setImages(image.path.isEmpty() ? QStringList{}
+                                     : QStringList{image.path});
+      break;
+    }
     case CardKind::Plan: {
       const auto &plan = std::get<PlanData>(data.payload);
       setVisibleMarkdown(body, plan.text);
@@ -728,7 +759,8 @@ public:
       const auto &activity = std::get<GenericActivityData>(data.payload);
       title->setText(activity.type.isEmpty() ? QStringLiteral("Activity")
                                              : activity.type);
-      metadata->setText(QString::fromStdString(activity.raw.dump(2)));
+      metadata->setText(boundedGenericActivity(activity.raw));
+      metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
       metadata->show();
       break;
     }

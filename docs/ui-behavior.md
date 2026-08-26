@@ -122,6 +122,10 @@ Authoritative user-message text is rendered as Markdown through the same safe
 `MarkdownNoHTML` path as agent messages. The locally admitted prompt remains a
 plain-text transitional card until its authoritative item arrives.
 
+Generated-image items show the app-server-saved image as a bounded thumbnail.
+Selecting it opens the shared non-modal image viewer; encoded image data is
+never displayed as generic activity text.
+
 ## Conversation scrolling
 
 The message view smoothly follows incoming content only while it is already at

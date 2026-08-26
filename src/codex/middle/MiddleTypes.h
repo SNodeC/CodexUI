@@ -54,6 +54,7 @@ enum class CardKind {
   AgentActivity,
   Reasoning,
   FileChanges,
+  ImageGeneration,
   Plan,
   GenericActivity,
   LocalPrompt,
@@ -113,6 +114,14 @@ struct FileChangesData {
   }
 };
 
+struct ImageGenerationData {
+  QString path;
+  QString status;
+  QString revisedPrompt;
+
+  bool operator==(const ImageGenerationData &) const = default;
+};
+
 struct PlanData {
   QString text;
 
@@ -148,7 +157,7 @@ struct LocalPromptData {
 using CardPayload =
     std::variant<UserMessageData, AgentMessageData, CommandExecutionData,
                  AgentActivityData, ReasoningData, FileChangesData, PlanData,
-                 GenericActivityData, LocalPromptData>;
+                 ImageGenerationData, GenericActivityData, LocalPromptData>;
 
 struct VisibleCardData {
   CardKey key;

@@ -156,6 +156,16 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
     result.payload = FileChangesData{
         text(stringValue(item, "status")),
         changes.is_array() ? static_cast<int>(changes.size()) : 0, changes};
+  } else if (type == "imageGeneration") {
+    std::string path = stringValue(item, "savedPath");
+    if (path.empty())
+      path = stringValue(item, "saved_path");
+    std::string revisedPrompt = stringValue(item, "revisedPrompt");
+    if (revisedPrompt.empty())
+      revisedPrompt = stringValue(item, "revised_prompt");
+    result.kind = CardKind::ImageGeneration;
+    result.payload = ImageGenerationData{
+        text(path), text(stringValue(item, "status")), text(revisedPrompt)};
   } else if (type == "plan") {
     const QString plan = messageText(item);
     if (!plan.isEmpty()) {
