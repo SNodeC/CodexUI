@@ -574,12 +574,7 @@ public:
     }
 
     QString status;
-    if (prompt->state == PromptState::Queued ||
-        prompt->state == PromptState::InFlight)
-      status = QStringLiteral("Waiting for app-server acknowledgment");
-    else if (transitioning)
-      status = QStringLiteral("Accepted by app-server");
-    else if (failed)
+    if (failed)
       status = prompt->error.isEmpty()
                    ? QStringLiteral("Not sent")
                    : QStringLiteral("Not sent: %1").arg(prompt->error);
