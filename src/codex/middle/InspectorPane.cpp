@@ -199,12 +199,16 @@ QFrame *InspectorPane::agentFrame(const AgentSnapshot &agent) {
   auto *metadataRow = new QHBoxLayout;
   metadataRow->setContentsMargins(0, 0, 0, 0);
   metadataRow->setSpacing(6);
-  metadataRow->addWidget(statusLabel(agent.status));
-  if (!metadata.isEmpty())
-    metadataRow->addWidget(
-        makeLabel(QStringLiteral("|  ") +
-                      metadata.join(QStringLiteral("  |  ")),
-                  "meta"));
+  auto *status = statusLabel(agent.status);
+  status->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+  metadataRow->addWidget(status);
+  if (!metadata.isEmpty()) {
+    auto *details = makeLabel(
+        QStringLiteral("|  ") + metadata.join(QStringLiteral("  |  ")),
+        "meta");
+    details->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    metadataRow->addWidget(details);
+  }
   metadataRow->addStretch();
   layout->addLayout(metadataRow);
   if (!agent.prompt.empty())
