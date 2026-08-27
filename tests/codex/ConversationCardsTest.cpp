@@ -1675,17 +1675,29 @@ bool testGeneratedImagePresentationAndGenericBound() {
       "generated",
       "turn",
       "unknown",
-      GenericActivityData{QStringLiteral("Unknown activity"),
-                          {{"large", std::string(100000, 'x')}}}};
+      GenericActivityData{QStringLiteral("contextCompaction"),
+                          {{"type", "contextCompaction"},
+                           {"large", std::string(100000, 'x')}}}};
   ConversationCard genericCard(generic);
   genericCard.show();
   spin();
   auto *details = genericCard.findChild<QLabel *>(
       QStringLiteral("genericActivityMetadata"));
-  result &= expect(details && details->text().size() < 4200 &&
-                       details->text().endsWith(
-                           QStringLiteral("[Activity details truncated]")),
-                   "unknown activity text is bounded before Qt lays it out");
+  const auto genericLabels = genericCard.findChildren<QLabel *>();
+  result &= expect(
+      std::ranges::any_of(genericLabels,
+                          [](QLabel *label) {
+                            return label->property("kind").toString() ==
+                                       QStringLiteral("title") &&
+                                   label->text() ==
+                                       QStringLiteral("Context compaction");
+                          }) &&
+          std::get<GenericActivityData>(generic.payload).type ==
+              QStringLiteral("contextCompaction") &&
+          details && details->text().size() < 4200 &&
+          details->text().endsWith(
+              QStringLiteral("[Activity details truncated]")),
+      "protocol labels are humanized without changing bounded raw details");
   return result;
 }
 

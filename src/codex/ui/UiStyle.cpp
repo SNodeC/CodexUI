@@ -80,6 +80,8 @@ QString applicationStyleSheet() {
             font-size: %1pt;
         }
         QMainWindow, QWidget#applicationShell { background: #f6f8fb; }
+        QWidget#codexTurnSettings { background: #ffffff; border-top: 1px solid #d7dee8; }
+        QFrame#inspector { background: #fbfcfe; }
         QLabel { background: transparent; font-weight: 400; }
         QLabel[kind="muted"] { color: #667085; font-size: %1pt; }
         QLabel[kind="section"] {
@@ -106,6 +108,7 @@ QString applicationStyleSheet() {
         QLabel[kind="code"] { font-family: monospace; font-size: %2pt; font-weight: 400; }
         QLabel[kind="meta"] { color: #667085; font-size: %1pt; }
         QLabel[kind="small"] { color: #667085; font-size: %1pt; }
+        QLabel[kind="settingLabel"] { color: #667085; font-weight: 600; }
         QLabel[tone="active"] { color: #285fca; }
         QLabel[tone="success"] { color: #176b45; }
         QLabel[tone="warning"] { color: #8a5208; }
@@ -223,6 +226,7 @@ QString applicationStyleSheet() {
             selection-color: #1d2633;
         }
         QPlainTextEdit[empty="true"] { color: #98a2b3; }
+        QLineEdit#codexWorkspace { min-height: 30px; }
         QPlainTextEdit[kind="code"], QPlainTextEdit[kind="command"],
         QTextEdit[kind="code"], QTextEdit[kind="command"],
         QPlainTextEdit[kind="infoViewer"] {
@@ -488,6 +492,36 @@ QString applicationStyleSheet() {
         QToolTip { background: #ffffff; color: #1d2633; border: 1px solid #b9c4d2; padding: 5px; }
     )QSS")
       .arg(compact, standard, section, heading, panelHeader);
+}
+
+QString humanizeLabel(QString value) {
+  value = value.trimmed();
+  QString result;
+  result.reserve(value.size() + 4);
+  bool space = false;
+  for (qsizetype index = 0; index < value.size(); ++index) {
+    QChar character = value[index];
+    if (character.isSpace() || character == QLatin1Char('-') ||
+        character == QLatin1Char('_') || character == QLatin1Char('.') ||
+        character == QLatin1Char('/')) {
+      space = !result.isEmpty();
+      continue;
+    }
+    const QChar previous = index > 0 ? value[index - 1] : QChar{};
+    const QChar next = index + 1 < value.size() ? value[index + 1] : QChar{};
+    const bool wordBoundary =
+        character.isUpper() && (previous.isLower() || previous.isDigit() ||
+                                (previous.isUpper() && next.isLower()));
+    if ((space || wordBoundary) && !result.endsWith(QLatin1Char(' ')))
+      result.append(QLatin1Char(' '));
+    if (wordBoundary || (space && character.isUpper() && next.isLower()))
+      character = character.toLower();
+    result.append(character);
+    space = false;
+  }
+  if (!result.isEmpty())
+    result[0] = result[0].toUpper();
+  return result;
 }
 
 } // namespace codexui::UiStyle

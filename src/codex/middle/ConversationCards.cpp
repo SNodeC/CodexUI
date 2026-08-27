@@ -273,12 +273,13 @@ bool setVisibleMarkdown(QLabel *label, const QString &markdown) {
 
 QString displayStatus(const QString &status) {
   const QByteArray encoded = status.toUtf8();
-  const std::string_view display =
-      classifyStatus(std::string_view(encoded.constData(),
-                                      static_cast<std::size_t>(encoded.size())))
-          .text;
-  return QString::fromUtf8(display.data(),
-                           static_cast<qsizetype>(display.size()));
+  const PresentationStatus classified = classifyStatus(std::string_view(
+      encoded.constData(), static_cast<std::size_t>(encoded.size())));
+  const QString display = QString::fromUtf8(
+      classified.text.data(), static_cast<qsizetype>(classified.text.size()));
+  return classified.kind == StatusKind::Unknown
+             ? UiStyle::humanizeLabel(display)
+             : display;
 }
 
 QString statusTone(const QString &status) {
@@ -338,9 +339,7 @@ QString agentMetadata(const AgentActivityData &activity) {
 QString displayChangeKind(const QString &kind) {
   if (kind.isEmpty())
     return QStringLiteral("Changed");
-  QString result = kind;
-  result[0] = result[0].toUpper();
-  return result;
+  return UiStyle::humanizeLabel(kind);
 }
 
 struct DiffCounts {
@@ -960,8 +959,9 @@ public:
     }
     case CardKind::GenericActivity: {
       const auto &activity = std::get<GenericActivityData>(data.payload);
-      title->setText(activity.type.isEmpty() ? QStringLiteral("Activity")
-                                             : activity.type);
+      title->setText(activity.type.isEmpty()
+                         ? QStringLiteral("Activity")
+                         : UiStyle::humanizeLabel(activity.type));
       metadata->setText(boundedGenericActivity(activity.raw));
       metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
       metadata->show();

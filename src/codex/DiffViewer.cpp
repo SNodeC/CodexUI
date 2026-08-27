@@ -22,6 +22,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollBar>
+#include <QSet>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSplitter>
@@ -855,28 +856,35 @@ void DiffViewer::applySnapshot(const GitDiffSnapshot &value) {
 
 void DiffViewer::updateFileWatches() {
   QStringList desired;
+  QSet<QString> desiredSet;
+  const auto retain = [&desired, &desiredSet](const QString &path) {
+    if (!path.isEmpty() && !desiredSet.contains(path)) {
+      desired.push_back(path);
+      desiredSet.insert(path);
+    }
+  };
   if (snapshot) {
     for (const GitDiffFile &file : snapshot->files) {
       const QFileInfo info(file.absolutePath);
       if (info.exists())
-        desired.push_back(info.absoluteFilePath());
+        retain(info.absoluteFilePath());
       const QString parent = info.absolutePath();
-      if (!parent.isEmpty() && QFileInfo(parent).isDir())
-        desired.push_back(parent);
+      if (QFileInfo(parent).isDir())
+        retain(parent);
     }
   }
-  desired.removeDuplicates();
   const QStringList existing = fileWatcher->files() + fileWatcher->directories();
+  const QSet<QString> existingSet(existing.begin(), existing.end());
   QStringList removed;
   for (const QString &path : existing) {
-    if (!desired.contains(path))
+    if (!desiredSet.contains(path))
       removed.push_back(path);
   }
   if (!removed.isEmpty())
     fileWatcher->removePaths(removed);
   QStringList added;
   for (const QString &path : desired) {
-    if (!existing.contains(path))
+    if (!existingSet.contains(path))
       added.push_back(path);
   }
   if (!added.isEmpty())

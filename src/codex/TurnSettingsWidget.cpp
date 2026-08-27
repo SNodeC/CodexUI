@@ -82,14 +82,6 @@ std::string stringValue(const nlohmann::json &object, const char *key) {
              : std::string{};
 }
 
-QString friendly(QString value) {
-  value.replace(QLatin1Char('-'), QLatin1Char(' '));
-  value.replace(QLatin1Char('_'), QLatin1Char(' '));
-  if (!value.isEmpty())
-    value[0] = value[0].toUpper();
-  return value;
-}
-
 void addChoice(QComboBox *combo, const QString &label, const QString &value) {
   if (combo->findData(value) < 0)
     combo->addItem(label, value);
@@ -99,7 +91,8 @@ void selectValue(QComboBox *combo, const QString &value,
                  const QString &fallback = {}) {
   int index = combo->findData(value);
   if (index < 0) {
-    combo->addItem(fallback.isEmpty() ? friendly(value) : fallback, value);
+    combo->addItem(
+        fallback.isEmpty() ? UiStyle::humanizeLabel(value) : fallback, value);
     index = combo->count() - 1;
   }
   combo->setCurrentIndex(index);
@@ -122,7 +115,7 @@ QWidget *labelled(const QString &caption, QWidget *control,
   layout->setContentsMargins(0, 0, 0, 0);
   layout->setSpacing(SettingLabelSpacing);
   auto *label = new QLabel(caption);
-  label->setStyleSheet(QStringLiteral("color:#667085;font-weight:600;"));
+  label->setProperty("kind", "settingLabel");
   const int labelHeight = label->fontMetrics().height();
   label->setFixedHeight(labelHeight);
   label->setBuddy(buddy ? buddy : control);
@@ -187,9 +180,6 @@ QString optionalString(const nlohmann::json &object, const char *key) {
 
 TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   setObjectName(QStringLiteral("codexTurnSettings"));
-  setStyleSheet(QStringLiteral(
-      "QWidget#codexTurnSettings{background:#ffffff;border-top:1px solid "
-      "#d7dee8;}"));
   setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
   auto *root = new QGridLayout(this);
   root->setContentsMargins(10, 8, 10, 8);
@@ -204,8 +194,6 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   cwd = new QLineEdit;
   cwd->setObjectName(QStringLiteral("codexWorkspace"));
   cwd->setFixedHeight(SettingControlHeight);
-  cwd->setStyleSheet(
-      QStringLiteral("QLineEdit#codexWorkspace{min-height:30px;}"));
   cwd->setPlaceholderText(QStringLiteral("Thread default workspace"));
   auto *workspacePicker = new QWidget;
   workspacePicker->setFixedHeight(SettingControlHeight);
@@ -269,7 +257,7 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   addChoice(effort, QStringLiteral("Thread default"), DefaultValue);
   for (const char *value :
        {"minimal", "low", "medium", "high", "xhigh", "ultra"})
-    addChoice(effort, friendly(QString::fromLatin1(value)),
+    addChoice(effort, UiStyle::humanizeLabel(QString::fromLatin1(value)),
               QString::fromLatin1(value));
   addChoice(sandbox, QStringLiteral("Thread default"), DefaultValue);
   addChoice(sandbox, QStringLiteral("Workspace"),
@@ -640,8 +628,8 @@ void TurnSettingsWidget::refreshModelOptions() {
     const std::string defaultEffort =
         stringValue(*definition, "defaultReasoningEffort");
     if (!defaultEffort.empty())
-      defaultLabel =
-          friendly(text(defaultEffort)) + QStringLiteral(" - default");
+      defaultLabel = UiStyle::humanizeLabel(text(defaultEffort)) +
+                     QStringLiteral(" - default");
   }
   addChoice(effort, defaultLabel, DefaultValue);
   const nlohmann::json supported =
@@ -652,12 +640,12 @@ void TurnSettingsWidget::refreshModelOptions() {
     for (const auto &option : supported) {
       const std::string key = stringValue(option, "reasoningEffort");
       if (!key.empty())
-        addChoice(effort, friendly(text(key)), text(key));
+        addChoice(effort, UiStyle::humanizeLabel(text(key)), text(key));
     }
   } else {
     for (const char *key :
          {"minimal", "low", "medium", "high", "xhigh", "ultra"})
-      addChoice(effort, friendly(QString::fromLatin1(key)),
+      addChoice(effort, UiStyle::humanizeLabel(QString::fromLatin1(key)),
                 QString::fromLatin1(key));
   }
   const QString requestedEffort =
@@ -699,7 +687,8 @@ void TurnSettingsWidget::refreshModelOptions() {
     if (legacyTiers.is_array()) {
       for (const auto &tier : legacyTiers) {
         if (tier.is_string())
-          addChoice(serviceTier, friendly(text(tier.get<std::string>())),
+          addChoice(serviceTier,
+                    UiStyle::humanizeLabel(text(tier.get<std::string>())),
                     text(tier.get<std::string>()));
       }
     }
