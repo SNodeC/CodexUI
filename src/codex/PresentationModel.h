@@ -136,7 +136,7 @@ private:
                            const nlohmann::json &activity, bool live = true);
   void assignChildOwnership(ThreadPresentation &parent,
                             AgentPresentation &agent,
-                            const std::string &childThreadId);
+                            const std::string &childThreadId, bool live);
   void releaseChildOwnership(const std::string &childThreadId,
                              bool promoteToRoot);
   void synchronizeOwningAgent(const std::string &childThreadId,

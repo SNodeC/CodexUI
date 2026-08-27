@@ -122,6 +122,19 @@ std::string agentIdentity(const nlohmann::json &activity,
   return childThreadIdentity(activity);
 }
 
+bool isStaleAgentReplay(const ThreadPresentation &owner,
+                        const nlohmann::json &scope,
+                        const nlohmann::json &activity, bool live) {
+  if (live)
+    return false;
+  const std::string id = agentIdentity(activity, scope);
+  const std::string childThreadId = childThreadIdentity(activity);
+  const auto agent = owner.agents.find(id);
+  return !childThreadId.empty() && agent != owner.agents.end() &&
+         !agent->second.childThreadId.empty() &&
+         agent->second.childThreadId != childThreadId;
+}
+
 void mergePreservingCompleteness(nlohmann::json &target,
                                  const nlohmann::json &update) {
   if (!target.is_object() || !update.is_object()) {
@@ -724,9 +737,9 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
       result.raw["status"] = previousThreadStatus;
     }
   }
-  if (replaceTurns)
-    synchronizeOwningAgent(id, true);
-  else if (status != raw.end())
+  if (turns != raw.end() && turns->is_array())
+    synchronizeOwningAgent(id, replaceTurns);
+  else if (status != raw.end() && result.status != "notLoaded")
     updateOwningAgentStatus(id, result.status);
   return result;
 }
@@ -779,6 +792,19 @@ ItemPresentation &PresentationModel::upsertItem(ThreadPresentation &thread,
     static ItemPresentation ignored;
     return ignored;
   }
+  const nlohmann::json scope{{"threadId", thread.id},
+                             {"turnId", turn.id},
+                             {"itemId", id}};
+  const std::string incomingType = stringValue(raw, "type");
+  if ((incomingType == "subAgentActivity" ||
+       incomingType == "collabAgentToolCall") &&
+      isStaleAgentReplay(thread, scope, raw, live)) {
+    const auto existing = turn.items.find(id);
+    if (existing != turn.items.end())
+      return existing->second;
+    static ItemPresentation ignored;
+    return ignored;
+  }
   auto [iterator, inserted] = turn.items.try_emplace(id);
   ItemPresentation &result = iterator->second;
   if (inserted) {
@@ -791,10 +817,7 @@ ItemPresentation &PresentationModel::upsertItem(ThreadPresentation &thread,
   const std::string type = stringValue(result.raw, "type");
   retainRepositoryHints(thread, result.raw);
   if (type == "subAgentActivity" || type == "collabAgentToolCall") {
-    upsertAgentActivity(
-        thread,
-        {{"threadId", thread.id}, {"turnId", turn.id}, {"itemId", result.id}},
-        result.raw, live);
+    upsertAgentActivity(thread, scope, result.raw, live);
   }
   if (type == "agentMessage")
     updateOwningAgentResult(thread.id, stringValue(result.raw, "text"));
@@ -845,6 +868,8 @@ void PresentationModel::upsertAgentActivity(ThreadPresentation &owner,
   const std::string id = agentIdentity(activity, scope);
   if (id.empty())
     return;
+  if (isStaleAgentReplay(owner, scope, activity, live))
+    return;
 
   auto [iterator, inserted] = owner.agents.try_emplace(id);
   AgentPresentation &agent = iterator->second;
@@ -852,13 +877,13 @@ void PresentationModel::upsertAgentActivity(ThreadPresentation &owner,
     agent.id = id;
     owner.agentOrder.push_back(id);
   }
+  const bool changesChild = !childThreadId.empty() &&
+                            !agent.childThreadId.empty() &&
+                            agent.childThreadId != childThreadId;
   agent.itemId = stringValue(scope, "itemId");
   agent.ownerTurnId = stringValue(scope, "turnId");
   mergePreservingCompleteness(agent.raw, activity);
 
-  const bool changesChild = !childThreadId.empty() &&
-                            !agent.childThreadId.empty() &&
-                            agent.childThreadId != childThreadId;
   if (changesChild) {
     agent.status.clear();
     agent.raw.erase("status");
@@ -884,12 +909,13 @@ void PresentationModel::upsertAgentActivity(ThreadPresentation &owner,
   }
 
   if (!childThreadId.empty())
-    assignChildOwnership(owner, agent, childThreadId);
+    assignChildOwnership(owner, agent, childThreadId, live);
 }
 
 void PresentationModel::assignChildOwnership(ThreadPresentation &parent,
                                              AgentPresentation &agent,
-                                             const std::string &childThreadId) {
+                                             const std::string &childThreadId,
+                                             bool live) {
   if (childThreadId == parent.id)
     return;
   std::string ancestorId = parent.id;
@@ -913,8 +939,21 @@ void PresentationModel::assignChildOwnership(ThreadPresentation &parent,
   const auto previous = childOwnerships.find(childThreadId);
   if (previous != childOwnerships.end() &&
       (previous->second.parentThreadId != parent.id ||
-       previous->second.agentId != agent.id))
+       previous->second.agentId != agent.id)) {
+    const auto previousParent = threads.find(previous->second.parentThreadId);
+    // A child read contains inherited ancestor and sibling activity. Those
+    // replayed items are historical context, not a new ownership authority.
+    // Replace/removal releases a vanished owner before reconstruction, while
+    // live activity may still authoritatively rebind an existing child.
+    if (!live && previousParent != threads.end()) {
+      const auto previousAgent =
+          previousParent->second.agents.find(previous->second.agentId);
+      if (previousAgent != previousParent->second.agents.end() &&
+          previousAgent->second.childThreadId == childThreadId)
+        return;
+    }
     releaseChildOwnership(childThreadId, false);
+  }
 
   agent.childThreadId = childThreadId;
   agent.raw["childThreadId"] = childThreadId;
@@ -1045,7 +1084,9 @@ void PresentationModel::synchronizeOwningAgent(
   // A thread-level lifecycle is authoritative. Turn status is only a fallback
   // for incremental payloads that do not carry the thread lifecycle; an old
   // or interrupted turn must not make an idle child appear active.
-  std::string childStatus = child->second.status;
+  std::string childStatus =
+      child->second.status == "notLoaded" ? std::string{}
+                                           : child->second.status;
   std::string resultText;
   for (auto turnId = child->second.turnOrder.rbegin();
        turnId != child->second.turnOrder.rend(); ++turnId) {
