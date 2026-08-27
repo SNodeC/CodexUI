@@ -81,7 +81,12 @@ public:
 protected:
   void paintEvent(QPaintEvent *event) override {
     static_cast<void>(event);
-    UiStyle::drawChevron(this, rect().adjusted(3, 3, -3, -3), isEnabled(),
+    QRect indicator = rect().adjusted(3, 3, -3, -3);
+    // Keep the full 24 px hit target while aligning the visible stroke with
+    // the card's canonical right inset. The narrower left glyph needs two
+    // pixels more optical compensation than the down glyph.
+    indicator.translate(expanded_ ? 7 : 9, 0);
+    UiStyle::drawChevron(this, indicator, isEnabled(),
                          underMouse() || hasFocus(),
                          expanded_ ? UiStyle::ChevronDirection::Down
                                    : UiStyle::ChevronDirection::Left);

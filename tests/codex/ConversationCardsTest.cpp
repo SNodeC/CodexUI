@@ -123,6 +123,22 @@ QToolButton *disclosure(ConversationCard *card) {
               : nullptr;
 }
 
+QRect paintedDisclosureBounds(QToolButton *button) {
+  if (!button)
+    return {};
+  QImage image(button->size(), QImage::Format_ARGB32_Premultiplied);
+  image.fill(Qt::transparent);
+  button->render(&image, QPoint{}, QRegion{}, QWidget::DrawChildren);
+  QRect bounds;
+  for (int y = 0; y < image.height(); ++y) {
+    for (int x = 0; x < image.width(); ++x) {
+      if (qAlpha(image.pixel(x, y)) > 0)
+        bounds |= QRect(x, y, 1, 1);
+    }
+  }
+  return bounds;
+}
+
 bool setFolded(ConversationCard *card, bool collapsed) {
   if (!card)
     return false;
@@ -747,6 +763,13 @@ bool testCardFoldingGeometryAndRetention() {
           disclosure(userCard)->property("chevronDirection") == "down" &&
           disclosure(reasoningCard)->property("chevronDirection") == "left",
       "all cards share disclosure controls with role-correct initial state");
+  const QRect collapsedDisclosure =
+      paintedDisclosureBounds(disclosure(reasoningCard));
+  result &= expect(
+      collapsedDisclosure.isValid() &&
+          collapsedDisclosure.left() > disclosure(reasoningCard)->width() / 2 &&
+          collapsedDisclosure.right() >= disclosure(reasoningCard)->width() - 3,
+      "collapsed disclosure paints only a right-inset left chevron");
   result &= expect(
       std::ranges::all_of(additionalActionCards,
                           [](ConversationCard *value) {
@@ -786,6 +809,13 @@ bool testCardFoldingGeometryAndRetention() {
           filesCard->mapTo(view.viewport(), QPoint{}).y() ==
               filesTop + expandedReasoningHeight - foldedReasoningHeight,
       "expansion fixes the affected title and grows only downward");
+  const QRect expandedDisclosure =
+      paintedDisclosureBounds(disclosure(reasoningCard));
+  result &= expect(
+      expandedDisclosure.isValid() &&
+          expandedDisclosure.left() > disclosure(reasoningCard)->width() / 2 &&
+          expandedDisclosure.right() >= disclosure(reasoningCard)->width() - 3,
+      "expanded disclosure paints only a right-inset down chevron");
 
   const int commandHeight = commandCard->height();
   auto &execution = std::get<CommandExecutionData>(
