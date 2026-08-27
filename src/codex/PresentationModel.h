@@ -38,6 +38,13 @@ struct AgentPresentation {
   nlohmann::json raw = nlohmann::json::object();
 };
 
+struct ChildThreadOwnership {
+  std::string parentThreadId;
+  std::string agentId;
+
+  bool operator==(const ChildThreadOwnership &) const = default;
+};
+
 struct ThreadPresentation {
   std::string id;
   std::string title;
@@ -57,8 +64,8 @@ struct ThreadPresentation {
   std::uint64_t settingsRevision = 0;
   std::vector<std::string> agentOrder;
   std::unordered_map<std::string, AgentPresentation> agents;
+  std::vector<std::string> childThreadOrder;
   bool archived = false;
-  bool agentThread = false;
 };
 
 struct PendingRequestPresentation {
@@ -98,6 +105,8 @@ public:
   [[nodiscard]] const std::vector<std::string> &threadOrder() const noexcept;
   [[nodiscard]] const ThreadPresentation *
   thread(const std::string &threadId) const noexcept;
+  [[nodiscard]] const ChildThreadOwnership *
+  childOwnership(const std::string &childThreadId) const noexcept;
   [[nodiscard]] std::optional<std::string>
   activeTurnId(const std::string &threadId) const;
   [[nodiscard]] std::size_t pendingRequestCount() const noexcept;
@@ -125,7 +134,25 @@ private:
   void upsertAgentActivity(ThreadPresentation &owner,
                            const nlohmann::json &scope,
                            const nlohmann::json &activity, bool live = true);
-  void correlateAgentThread(const std::string &childThreadId);
+  void assignChildOwnership(ThreadPresentation &parent,
+                            AgentPresentation &agent,
+                            const std::string &childThreadId, bool live);
+  void releaseChildOwnership(const std::string &childThreadId,
+                             bool promoteToRoot);
+  void synchronizeOwningAgent(const std::string &childThreadId,
+                              bool clearMissingResult = false);
+  AgentPresentation *owningAgent(const std::string &childThreadId);
+  ItemPresentation *agentSourceItem(ThreadPresentation &parent,
+                                    const AgentPresentation &agent);
+  void setAgentStatus(ThreadPresentation &parent, AgentPresentation &agent,
+                      const std::string &status);
+  void setAgentResult(ThreadPresentation &parent, AgentPresentation &agent,
+                      const std::string &resultText);
+  void clearAgentResult(ThreadPresentation &parent, AgentPresentation &agent);
+  void updateOwningAgentStatus(const std::string &childThreadId,
+                               const std::string &status);
+  void updateOwningAgentResult(const std::string &childThreadId,
+                               const std::string &resultText);
   void removeThread(const std::string &threadId);
   void clearProviderState();
   void retainDomainEvent(const std::string &type, const nlohmann::json &data,
@@ -137,6 +164,7 @@ private:
 
   std::vector<std::string> orderedThreads;
   std::unordered_map<std::string, ThreadPresentation> threads;
+  std::unordered_map<std::string, ChildThreadOwnership> childOwnerships;
   std::unordered_map<std::string, PendingRequestPresentation> pendingRequests;
   ConnectionPresentation connectionState;
   nlohmann::json models = nlohmann::json::array();

@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class QListWidget;
@@ -53,7 +54,11 @@ private:
     std::string title;
     std::string cwd;
     std::string status;
+    std::string parentId;
     std::size_t pending = 0;
+    std::size_t depth = 0;
+    bool hasChildren = false;
+    bool expanded = false;
 
     bool operator==(const ThreadRowSnapshot &) const = default;
   };
@@ -66,8 +71,15 @@ private:
   };
 
   void updateSortButton();
-  void sortVisibleThreads(std::vector<std::string> &ids,
-                          const PresentationModel &model) const;
+  void sortRootThreads(std::vector<std::string> &ids,
+                       const PresentationModel &model) const;
+  void appendVisibleThread(
+      ThreadPaneSnapshot &snapshot, const PresentationModel &model,
+      const std::unordered_map<std::string, std::size_t> &pendingByThread,
+      const std::string &threadId, const std::string &parentId,
+      std::size_t depth, std::unordered_set<std::string> &visited) const;
+  void toggleExpanded(const std::string &threadId);
+  void navigateHierarchy(int key);
   void setContextHighlight(const std::string &threadId, bool highlighted);
   void showContextMenu(const QPoint &position);
 
@@ -77,7 +89,7 @@ private:
   QToolButton *sortButton = nullptr;
   QListWidget *list = nullptr;
   std::unordered_map<std::string, QListWidgetItem *> rows;
-  std::vector<std::string> retainedVisibleThreads;
+  std::unordered_set<std::string> expandedThreads;
   std::string projectedSelectedThreadId;
   std::string contextThreadId;
   QMenu *contextMenu = nullptr;

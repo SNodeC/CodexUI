@@ -344,6 +344,561 @@ int main() {
                                    "retained-a"},
       "thread discovery preserves provider order and one retained tail");
 
+  PresentationModel ownershipModel;
+  ownershipModel.applyEvent(codexui::codex::presentation::result(
+      1, 1, "threads.list", "ownership-roots", true,
+      {{"threads",
+        nlohmann::json::array({{{"id", "parent"}},
+                               {{"id", "child-one"}},
+                               {{"id", "second-root"}}})}},
+      codexui::codex::presentation::Authority::Merge));
+  ownershipModel.applyEvent(codexui::codex::presentation::event(
+      2, 1, "conversation.item.upsert",
+      {{"item",
+        {{"id", "spawn-one"},
+         {"type", "subAgentActivity"},
+         {"status", "started"},
+         {"agentThreadId", "child-one"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "parent"},
+       {"turnId", "parent-turn"},
+       {"itemId", "spawn-one"}}));
+  ownershipModel.applyEvent(codexui::codex::presentation::event(
+      3, 1, "conversation.item.upsert",
+      {{"item",
+        {{"id", "spawn-one"},
+         {"type", "subAgentActivity"},
+         {"status", "started"},
+         {"agentThreadId", "child-one"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "parent"},
+       {"turnId", "parent-turn"},
+       {"itemId", "spawn-one"}}));
+  ownershipModel.applyEvent(codexui::codex::presentation::event(
+      4, 1, "conversation.item.upsert",
+      {{"item",
+        {{"id", "spawn-two"},
+         {"type", "subAgentActivity"},
+         {"status", "started"},
+         {"agentThreadId", "child-two"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "parent"},
+       {"turnId", "parent-turn"},
+       {"itemId", "spawn-two"}}));
+  ownershipModel.applyEvent(codexui::codex::presentation::event(
+      5, 1, "conversation.item.upsert",
+      {{"item",
+        {{"id", "spawn-grandchild"},
+         {"type", "subAgentActivity"},
+         {"status", "started"},
+         {"agentThreadId", "grandchild"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "child-one"},
+       {"turnId", "child-turn"},
+       {"itemId", "spawn-grandchild"}}));
+  const auto *childOneOwnership =
+      ownershipModel.childOwnership("child-one");
+  const auto *grandchildOwnership =
+      ownershipModel.childOwnership("grandchild");
+  const auto *parent = ownershipModel.thread("parent");
+  const auto *childOne = ownershipModel.thread("child-one");
+  passed &= expect(
+      childOneOwnership && childOneOwnership->parentThreadId == "parent" &&
+          childOneOwnership->agentId == "spawn-one" &&
+          grandchildOwnership &&
+          grandchildOwnership->parentThreadId == "child-one" &&
+          parent &&
+          parent->childThreadOrder ==
+              std::vector<std::string>{"child-one", "child-two"} &&
+          childOne && childOne->childThreadOrder ==
+                          std::vector<std::string>{"grandchild"} &&
+          ownershipModel.threadOrder() ==
+              std::vector<std::string>{"parent", "second-root"},
+      "ownership is unique, ordered, nested, and excluded from root order");
+
+  ownershipModel.applyEvent(codexui::codex::presentation::event(
+      6, 1, "agents.activity.upsert",
+      {{"activity",
+        {{"id", "peer-interaction"},
+         {"type", "subAgentActivity"},
+         {"kind", "interacted"},
+         {"agentPath", "/root/child-two"},
+         {"agentThreadId", "child-two"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "child-one"},
+       {"turnId", "child-turn"},
+       {"itemId", "peer-interaction"}}));
+  parent = ownershipModel.thread("parent");
+  childOne = ownershipModel.thread("child-one");
+  passed &= expect(
+      parent && childOne &&
+          parent->childThreadOrder ==
+              std::vector<std::string>{"child-one", "child-two"} &&
+          childOne->childThreadOrder ==
+              std::vector<std::string>{"grandchild"} &&
+          ownershipModel.childOwnership("child-two") &&
+          ownershipModel.childOwnership("child-two")->parentThreadId ==
+              "parent" &&
+          !childOne->agents.contains("peer-interaction") &&
+          parent->agents.at("spawn-two").status == "started" &&
+          stringMember(parent->agents.at("spawn-two").raw, "agentPath") ==
+              "/root/child-two",
+      "peer interaction cannot reparent a sibling as a nested child");
+
+  ownershipModel.applyEvent(codexui::codex::presentation::event(
+      7, 1, "turn.upsert",
+      {{"turn", {{"id", "child-turn"}, {"status", "completed"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "child-one"}, {"turnId", "child-turn"}}));
+  ownershipModel.applyEvent(codexui::codex::presentation::event(
+      8, 1, "conversation.item.upsert",
+      {{"item",
+        {{"id", "child-answer"},
+         {"type", "agentMessage"},
+         {"text", "direct child result"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "child-one"},
+       {"turnId", "child-turn"},
+       {"itemId", "child-answer"}}));
+  parent = ownershipModel.thread("parent");
+  const auto ownerAgent = parent == nullptr
+                              ? nullptr
+                              : [&]() -> const codexui::codex::AgentPresentation * {
+                                  const auto found =
+                                      parent->agents.find("spawn-one");
+                                  return found == parent->agents.end()
+                                             ? nullptr
+                                             : &found->second;
+                                }();
+  const auto *ownerSourceItem =
+      parent ? &parent->turns.at("parent-turn").items.at("spawn-one")
+             : nullptr;
+  passed &= expect(
+      ownerAgent && ownerAgent->status == "completed" &&
+          stringMember(ownerAgent->raw, "resultText") ==
+              "direct child result" &&
+          ownerSourceItem &&
+          stringMember(ownerSourceItem->raw, "resultText") ==
+              "direct child result" &&
+          parent->agents.at("spawn-two").status == "started",
+      "child completion and results route only to the indexed owning agent");
+
+  ownershipModel.applyEvent(codexui::codex::presentation::event(
+      9, 1, "agents.activity.upsert",
+      {{"activity",
+        {{"id", "wait-state"},
+         {"type", "collabAgentToolCall"},
+         {"tool", "wait_agent"},
+         {"agentsStates",
+          {{"child-one",
+            {{"status", "completed"},
+             {"message", "state-correlated result"}}}}}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "parent"},
+       {"turnId", "parent-turn"},
+       {"itemId", "wait-state"}}));
+  parent = ownershipModel.thread("parent");
+  ownerSourceItem =
+      parent ? &parent->turns.at("parent-turn").items.at("spawn-one")
+             : nullptr;
+  passed &= expect(
+      parent &&
+          stringMember(parent->agents.at("spawn-one").raw, "resultText") ==
+              "state-correlated result" &&
+          ownerSourceItem &&
+          stringMember(ownerSourceItem->raw, "resultText") ==
+              "state-correlated result",
+      "agent state results route to the indexed owner and its source item");
+
+  ownershipModel.applyEvent(codexui::codex::presentation::result(
+      10, 1, "thread.read", "replace-child", true,
+      {{"thread",
+        {{"id", "child-one"},
+         {"status", {{"type", "idle"}}},
+         {"turns",
+          nlohmann::json::array(
+              {{{"id", "child-turn"},
+                {"status", "inProgress"},
+                {"items",
+                 nlohmann::json::array(
+                     {{{"id", "spawn-grandchild"},
+                       {"type", "subAgentActivity"},
+                       {"status", "started"},
+                       {"agentThreadId", "grandchild"}}})}}})}}}},
+      codexui::codex::presentation::Authority::Replace,
+      {{"threadId", "child-one"}}));
+  parent = ownershipModel.thread("parent");
+  passed &= expect(
+      parent && parent->agents.at("spawn-one").status == "idle" &&
+          !parent->agents.at("spawn-one").raw.contains("resultText") &&
+          ownershipModel.childOwnership("child-one") != nullptr &&
+          ownershipModel.childOwnership("grandchild") != nullptr,
+      "authoritative child hydration clears stale results without losing ownership");
+
+  ownershipModel.applyEvent(codexui::codex::presentation::result(
+      11, 1, "threads.list", "relisted-owned-child", true,
+      {{"threads",
+        nlohmann::json::array({{{"id", "child-one"}},
+                               {{"id", "second-root"}},
+                               {{"id", "parent"}}})}},
+      codexui::codex::presentation::Authority::Merge));
+  passed &= expect(
+      ownershipModel.threadOrder() ==
+          std::vector<std::string>{"second-root", "parent"},
+      "thread relisting cannot reintroduce an owned child as a root");
+
+  ownershipModel.applyEvent(codexui::codex::presentation::result(
+      12, 1, "thread.read", "replace-parent", true,
+      {{"thread",
+        {{"id", "parent"},
+         {"turns",
+          nlohmann::json::array(
+              {{{"id", "replacement-turn"},
+                {"items",
+                 nlohmann::json::array(
+                     {{{"id", "spawn-two"},
+                       {"type", "subAgentActivity"},
+                       {"status", "started"},
+                       {"agentThreadId", "child-two"}},
+                      {{"id", "spawn-one"},
+                       {"type", "subAgentActivity"},
+                       {"status", "completed"},
+                       {"agentThreadId", "child-one"}}})}}})}}}},
+      codexui::codex::presentation::Authority::Replace,
+      {{"threadId", "parent"}}));
+  parent = ownershipModel.thread("parent");
+  passed &= expect(
+      parent &&
+          parent->childThreadOrder ==
+              std::vector<std::string>{"child-two", "child-one"} &&
+          ownershipModel.childOwnership("child-one") &&
+          ownershipModel.childOwnership("child-two") &&
+          ownershipModel.threadOrder() ==
+              std::vector<std::string>{"second-root", "parent"},
+      "authoritative parent hydration rebuilds ordered ownership in one pass");
+
+  ownershipModel.applyEvent(codexui::codex::presentation::event(
+      13, 1, "thread.removed", nlohmann::json::object(),
+      codexui::codex::presentation::Authority::Remove,
+      {{"threadId", "child-one"}}));
+  parent = ownershipModel.thread("parent");
+  passed &= expect(
+      ownershipModel.thread("child-one") == nullptr && parent &&
+          parent->childThreadOrder ==
+              std::vector<std::string>{"child-two"} &&
+          ownershipModel.childOwnership("child-one") == nullptr &&
+          ownershipModel.childOwnership("grandchild") == nullptr &&
+          ownershipModel.threadOrder() ==
+              std::vector<std::string>{"second-root", "parent",
+                                       "grandchild"},
+      "authoritative child removal prunes ownership and promotes surviving descendants");
+
+  ownershipModel.applyEvent(codexui::codex::presentation::event(
+      14, 1, "thread.removed", nlohmann::json::object(),
+      codexui::codex::presentation::Authority::Remove,
+      {{"threadId", "parent"}}));
+  passed &= expect(
+      ownershipModel.thread("parent") == nullptr &&
+          ownershipModel.childOwnership("child-two") == nullptr &&
+          ownershipModel.threadOrder() ==
+              std::vector<std::string>{"second-root", "child-two",
+                                       "grandchild"},
+      "authoritative parent removal promotes children in retained root order");
+
+  ownershipModel.applyEvent(codexui::codex::presentation::event(
+      15, 1, "connection.provider",
+      {{"generation", std::uint64_t{1}}, {"state", "disconnected"}},
+      codexui::codex::presentation::Authority::Replace));
+  passed &= expect(ownershipModel.threadOrder().empty() &&
+                       ownershipModel.thread("child-two") == nullptr &&
+                       ownershipModel.childOwnership("child-two") == nullptr,
+                   "provider loss clears threads and ownership atomically");
+
+  PresentationModel reconnectOwnershipModel;
+  reconnectOwnershipModel.applyEvent(codexui::codex::presentation::result(
+      1, 1, "thread.read", "hydrate-owner", true,
+      {{"thread",
+        {{"id", "hydrated-parent"},
+         {"turns",
+          nlohmann::json::array(
+              {{{"id", "hydrated-turn"},
+                {"items",
+                 nlohmann::json::array(
+                     {{{"id", "hydrated-spawn"},
+                       {"type", "subAgentActivity"},
+                       {"status", "started"},
+                       {"agentThreadId", "hydrated-child"}}})}}})}}}},
+      codexui::codex::presentation::Authority::Replace,
+      {{"threadId", "hydrated-parent"}}));
+  reconnectOwnershipModel.applyEvent(codexui::codex::presentation::result(
+      2, 1, "thread.read", "hydrate-child", true,
+      {{"thread",
+        {{"id", "hydrated-child"},
+         {"status", {{"type", "notLoaded"}}},
+         {"turns",
+          nlohmann::json::array(
+              {{{"id", "stale-outer-turn"},
+                {"status", "interrupted"},
+                {"items", nlohmann::json::array()}},
+               {{"id", "child-turn"},
+                {"status", "completed"},
+                {"items",
+                 nlohmann::json::array(
+                     {{{"id", "nested-spawn"},
+                       {"type", "subAgentActivity"},
+                       {"status", "started"},
+                       {"agentThreadId", "hydrated-grandchild"}},
+                      {{"id", "hydrated-result"},
+                       {"type", "agentMessage"},
+                       {"text", "hydrated answer"}}})}}})}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "hydrated-child"}}));
+  const auto *hydratedParent =
+      reconnectOwnershipModel.thread("hydrated-parent");
+  const auto *hydratedSourceItem =
+      hydratedParent
+          ? &hydratedParent->turns.at("hydrated-turn")
+                 .items.at("hydrated-spawn")
+          : nullptr;
+  passed &= expect(
+      hydratedParent &&
+          reconnectOwnershipModel.childOwnership("hydrated-child") &&
+          reconnectOwnershipModel.childOwnership("hydrated-grandchild") &&
+          hydratedParent->agents.at("hydrated-spawn").status == "completed" &&
+          stringMember(hydratedParent->agents.at("hydrated-spawn").raw,
+                       "resultText") == "hydrated answer" &&
+          hydratedSourceItem &&
+          stringMember(hydratedSourceItem->raw, "status") == "completed" &&
+          stringMember(hydratedSourceItem->raw, "resultText") ==
+              "hydrated answer",
+      "parent-first and nested child hydration retain direct correlation");
+  reconnectOwnershipModel.applyEvent(codexui::codex::presentation::event(
+      1, 2, "connection.lifecycle", {{"state", "connected"}},
+      codexui::codex::presentation::Authority::Replace));
+  reconnectOwnershipModel.applyEvent(codexui::codex::presentation::result(
+      2, 2, "threads.list", "post-reconnect-roots", true,
+      {{"threads",
+        nlohmann::json::array({{{"id", "hydrated-child"}},
+                               {{"id", "hydrated-parent"}}})}},
+      codexui::codex::presentation::Authority::Merge));
+  passed &= expect(
+      reconnectOwnershipModel.childOwnership("hydrated-child") &&
+          reconnectOwnershipModel.threadOrder() ==
+              std::vector<std::string>{"hydrated-parent"},
+      "connection-generation reconnect preserves ownership and root filtering");
+
+  PresentationModel inheritedHistoryModel;
+  inheritedHistoryModel.applyEvent(codexui::codex::presentation::result(
+      1, 1, "thread.read", "hydrate-sibling-parent", true,
+      {{"thread",
+        {{"id", "sibling-parent"},
+         {"turns",
+          nlohmann::json::array(
+              {{{"id", "parent-turn"},
+                {"items",
+                 nlohmann::json::array(
+                     {{{"id", "spawn-a"},
+                       {"type", "subAgentActivity"},
+                       {"status", "started"},
+                       {"agentThreadId", "sibling-a"}},
+                      {{"id", "spawn-b"},
+                       {"type", "subAgentActivity"},
+                       {"status", "started"},
+                       {"agentThreadId", "sibling-b"}}})}}})}}}},
+      codexui::codex::presentation::Authority::Replace,
+      {{"threadId", "sibling-parent"}}));
+  inheritedHistoryModel.applyEvent(codexui::codex::presentation::result(
+      2, 1, "thread.read", "hydrate-sibling-b", true,
+      {{"thread",
+        {{"id", "sibling-b"},
+         {"turns",
+          nlohmann::json::array(
+              {{{"id", "inherited-parent-turn"},
+                {"items",
+                 nlohmann::json::array(
+                     {{{"id", "spawn-a"},
+                       {"type", "subAgentActivity"},
+                       {"status", "started"},
+                       {"agentThreadId", "sibling-a"}}})}}})}}}},
+      codexui::codex::presentation::Authority::Replace,
+      {{"threadId", "sibling-b"}}));
+  inheritedHistoryModel.applyEvent(codexui::codex::presentation::result(
+      3, 1, "thread.read", "complete-sibling-a", true,
+      {{"thread",
+        {{"id", "sibling-a"},
+         {"status", {{"type", "notLoaded"}}},
+         {"turns",
+          nlohmann::json::array(
+              {{{"id", "sibling-a-turn"},
+                {"status", "completed"},
+                {"items",
+                 nlohmann::json::array(
+                     {{{"id", "sibling-a-answer"},
+                       {"type", "agentMessage"},
+                       {"text", "sibling answer"}}})}}})}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "sibling-a"}}));
+  const auto *siblingParent = inheritedHistoryModel.thread("sibling-parent");
+  const auto *siblingB = inheritedHistoryModel.thread("sibling-b");
+  const auto *siblingOwnership =
+      inheritedHistoryModel.childOwnership("sibling-a");
+  passed &= expect(
+      siblingParent && siblingB && siblingOwnership &&
+          siblingOwnership->parentThreadId == "sibling-parent" &&
+          siblingOwnership->agentId == "spawn-a" &&
+          siblingParent->childThreadOrder ==
+              std::vector<std::string>{"sibling-a", "sibling-b"} &&
+          siblingParent->agents.at("spawn-a").childThreadId == "sibling-a" &&
+          siblingParent->agents.at("spawn-a").status == "completed" &&
+          stringMember(siblingParent->agents.at("spawn-a").raw,
+                       "resultText") == "sibling answer" &&
+          siblingB->agents.at("spawn-a").childThreadId.empty(),
+      "inherited sibling history cannot steal direct child ownership");
+
+  PresentationModel reboundOwnershipModel;
+  reboundOwnershipModel.applyEvent(codexui::codex::presentation::event(
+      1, 1, "thread.upsert", {{"thread", {{"id", "rebind-parent"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "rebind-parent"}}));
+  reboundOwnershipModel.applyEvent(codexui::codex::presentation::event(
+      2, 1, "conversation.item.upsert",
+      {{"item",
+        {{"type", "subAgentActivity"},
+         {"id", "stable-agent"},
+         {"status", "completed"},
+         {"resultText", "old result"},
+         {"agentThreadId", "old-child"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "rebind-parent"},
+       {"turnId", "rebind-turn"},
+       {"itemId", "stable-agent"}}));
+  reboundOwnershipModel.applyEvent(codexui::codex::presentation::event(
+      3, 1, "agents.activity.upsert",
+      {{"activity",
+        {{"type", "subAgentActivity"},
+         {"status", "started"},
+         {"agentThreadId", "new-child"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "rebind-parent"},
+       {"turnId", "rebind-turn"},
+       {"itemId", "stable-agent"}}));
+  const auto *rebindParent =
+      reboundOwnershipModel.thread("rebind-parent");
+  passed &= expect(
+      rebindParent &&
+          rebindParent->childThreadOrder ==
+              std::vector<std::string>{"new-child"} &&
+          reboundOwnershipModel.childOwnership("old-child") == nullptr &&
+          reboundOwnershipModel.childOwnership("new-child") &&
+          reboundOwnershipModel.threadOrder() ==
+              std::vector<std::string>{"rebind-parent", "old-child"},
+      "rebinding one stable agent detaches and promotes the old child");
+  passed &= expect(
+      rebindParent &&
+          rebindParent->agents.at("stable-agent").childThreadId ==
+              "new-child" &&
+          rebindParent->agents.at("stable-agent").status == "started" &&
+          !rebindParent->agents.at("stable-agent").raw.contains("resultText") &&
+          !rebindParent->turns.at("rebind-turn")
+               .items.at("stable-agent")
+               .raw.contains("resultText"),
+      "rebinding one stable agent resets its stale completion and result");
+  reboundOwnershipModel.applyEvent(codexui::codex::presentation::event(
+      4, 1, "turn.upsert",
+      {{"turn", {{"id", "new-child-turn"}, {"status", "completed"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "new-child"}, {"turnId", "new-child-turn"}}));
+  reboundOwnershipModel.applyEvent(codexui::codex::presentation::event(
+      5, 1, "conversation.item.upsert",
+      {{"item",
+        {{"id", "new-child-answer"},
+         {"type", "agentMessage"},
+         {"text", "new child result"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "new-child"},
+       {"turnId", "new-child-turn"},
+       {"itemId", "new-child-answer"}}));
+  reboundOwnershipModel.applyEvent(codexui::codex::presentation::result(
+      6, 1, "thread.read", "stale-parent-merge", true,
+      {{"thread",
+        {{"id", "rebind-parent"},
+         {"turns",
+          nlohmann::json::array(
+              {{{"id", "rebind-turn"},
+                {"items",
+                 nlohmann::json::array(
+                     {{{"id", "stable-agent"},
+                       {"type", "subAgentActivity"},
+                       {"status", "inProgress"},
+                       {"kind", "started"},
+                       {"agentThreadId", "new-child"}}})}}})}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "rebind-parent"}}));
+  rebindParent = reboundOwnershipModel.thread("rebind-parent");
+  const auto *reboundSourceItem =
+      rebindParent
+          ? &rebindParent->turns.at("rebind-turn").items.at("stable-agent")
+          : nullptr;
+  passed &= expect(
+      rebindParent &&
+          rebindParent->agents.at("stable-agent").status == "completed" &&
+          reboundSourceItem &&
+          stringMember(reboundSourceItem->raw, "status") == "completed",
+      "stale merged parent hydration cannot reactivate a completed child agent");
+  reboundOwnershipModel.applyEvent(codexui::codex::presentation::result(
+      7, 1, "thread.read", "stale-former-child-merge", true,
+      {{"thread",
+        {{"id", "rebind-parent"},
+         {"turns",
+          nlohmann::json::array(
+              {{{"id", "rebind-turn"},
+                {"items",
+                 nlohmann::json::array(
+                     {{{"id", "stable-agent"},
+                       {"type", "subAgentActivity"},
+                       {"status", "started"},
+                       {"agentThreadId", "old-child"}}})}}})}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "rebind-parent"}}));
+  rebindParent = reboundOwnershipModel.thread("rebind-parent");
+  const auto *reboundSourceAfterFormerChild =
+      rebindParent
+          ? &rebindParent->turns.at("rebind-turn").items.at("stable-agent")
+          : nullptr;
+  passed &= expect(
+      rebindParent &&
+          rebindParent->agents.at("stable-agent").childThreadId ==
+              "new-child" &&
+          rebindParent->agents.at("stable-agent").status == "completed" &&
+          stringMember(rebindParent->agents.at("stable-agent").raw,
+                       "resultText") == "new child result" &&
+          reboundSourceAfterFormerChild &&
+          stringMember(reboundSourceAfterFormerChild->raw, "status") ==
+              "completed" &&
+          stringMember(reboundSourceAfterFormerChild->raw, "resultText") ==
+              "new child result" &&
+          reboundOwnershipModel.childOwnership("old-child") == nullptr &&
+          reboundOwnershipModel.childOwnership("new-child") &&
+          reboundOwnershipModel.childOwnership("new-child")->parentThreadId ==
+              "rebind-parent",
+      "stale merged identity cannot undo a live child rebind");
+  reboundOwnershipModel.applyEvent(codexui::codex::presentation::event(
+      8, 1, "agents.activity.upsert",
+      {{"activity",
+        {{"type", "subAgentActivity"},
+         {"status", "started"},
+         {"agentThreadId", "rebind-parent"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "new-child"},
+       {"turnId", "cycle-turn"},
+       {"itemId", "cycle-agent"}}));
+  passed &= expect(
+      reboundOwnershipModel.childOwnership("rebind-parent") == nullptr &&
+          reboundOwnershipModel.thread("new-child") &&
+          reboundOwnershipModel.thread("new-child")
+              ->childThreadOrder.empty(),
+      "ancestor ownership cycles are rejected without disturbing the tree");
+
   normalizer.bridgeEvent({{"kind", "bridge.provider"},
                           {"state", "disconnected"},
                           {"providerGeneration", std::uint64_t{1}},
