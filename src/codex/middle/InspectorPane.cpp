@@ -251,7 +251,6 @@ QFrame *InspectorPane::agentFrame(const AgentSnapshot &agent) {
 
 InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   setObjectName(QStringLiteral("inspector"));
-  setStyleSheet(QStringLiteral("QFrame#inspector{background:#fbfcfe;}"));
   setMinimumWidth(300);
   setMaximumWidth(520);
 
@@ -610,7 +609,8 @@ void InspectorPane::refreshRequests() {
     auto *layout = new QVBoxLayout(frame);
     layout->setContentsMargins(12, 10, 12, 10);
     layout->setSpacing(6);
-    layout->addWidget(makeLabel(text(request.kind), "title"));
+    layout->addWidget(
+        makeLabel(UiStyle::humanizeLabel(text(request.kind)), "title"));
     layout->addWidget(
         makeLabel(QStringLiteral("thread %1  |  generation %2  |  request %3")
                       .arg(text(request.threadContext))

@@ -560,12 +560,21 @@ bool testIncrementalThreadSettings() {
   if (!model || !approval || !access || !network)
     return expect(false, "thread settings controls are discoverable");
 
+  bool canonicalSettingsStyle = settings.styleSheet().isEmpty();
+  for (const QLabel *label : settings.findChildren<QLabel *>()) {
+    if (label->text() == QStringLiteral("Model"))
+      canonicalSettingsStyle &= label->property("kind") == "settingLabel" &&
+                                label->styleSheet().isEmpty();
+  }
+
   model->setCurrentIndex(model->findData(QStringLiteral("gpt-b")));
   settings.setContext(
       "thread-a",
       {{"model", "gpt-a"}, {"approvalPolicy", "on-request"}}, models,
       nlohmann::json::array(), 1, {{"approvalPolicy", "on-request"}});
-  bool result = expect(
+  bool result = expect(canonicalSettingsStyle,
+                       "thread settings use canonical application styling");
+  result &= expect(
       model->currentData().toString() == QStringLiteral("gpt-b") &&
           approval->currentData().toString() == QStringLiteral("on-request"),
       "a partial authoritative update preserves unrelated pending settings");
@@ -1312,10 +1321,12 @@ bool testInspectorDetailParity() {
       "long agent Markdown follows visible metadata without surplus height");
   inspector.tabs()->setCurrentIndex(3);
   spin(20);
-  result &= expect(
-      hasLabelContaining(inspector, QStringLiteral("thread Original title")) &&
-          hasLabelContaining(inspector, QStringLiteral("3 questions")),
-      "Requests show their thread title and retained question count");
+  result &=
+      expect(hasLabelContaining(inspector, QStringLiteral("User input")) &&
+                 hasLabelContaining(inspector,
+                                    QStringLiteral("thread Original title")) &&
+                 hasLabelContaining(inspector, QStringLiteral("3 questions")),
+             "Requests show their thread title and retained question count");
   model.applyEvent(presentation::event(
       5, 1, "thread.name.changed", {{"name", "Renamed title"}},
       presentation::Authority::Replace, {{"threadId", "owner-thread"}}));
