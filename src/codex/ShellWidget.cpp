@@ -576,7 +576,7 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
     ensureThreadSettingsHydrated(selectedThreadId);
   }
 
-  if (kind == "result" && action == "thread.read" &&
+  if (!staleReadResult && kind == "result" && action == "thread.read" &&
       event.value("ok", false))
     hydrateHistoricalChildren(eventThreadId);
   else if (kind == "event" && type == "agents.activity.upsert")
