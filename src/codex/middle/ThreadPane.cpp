@@ -11,6 +11,7 @@
 #include <QCollator>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QMenu>
@@ -28,8 +29,17 @@ namespace codexui::codex::middle {
 namespace {
 
 constexpr int ContextMenuRole = Qt::UserRole + 1;
+constexpr int DepthRole = Qt::UserRole + 2;
+constexpr int HasChildrenRole = Qt::UserRole + 3;
+constexpr int ExpandedRole = Qt::UserRole + 4;
+constexpr int ParentIdRole = Qt::UserRole + 5;
+constexpr int ChildIndent = 16;
 
 class ThreadListWidget final : public QListWidget {
+public:
+  std::function<void(const std::string &)> toggleExpansion;
+  std::function<void(int)> navigateHierarchy;
+
 protected:
   QItemSelectionModel::SelectionFlags
   selectionCommand(const QModelIndex &index,
@@ -41,6 +51,35 @@ protected:
         return QItemSelectionModel::NoUpdate;
     }
     return QListWidget::selectionCommand(index, event);
+  }
+
+  void mousePressEvent(QMouseEvent *event) override {
+    QListWidgetItem *item = itemAt(event->position().toPoint());
+    if (event->button() == Qt::LeftButton && item &&
+        item->data(HasChildrenRole).toBool()) {
+      const QRect itemRect = visualItemRect(item);
+      const int indicatorRight =
+          itemRect.left() + 5 + item->data(DepthRole).toInt() * ChildIndent +
+          16;
+      if (event->position().x() <= indicatorRight) {
+        if (toggleExpansion)
+          toggleExpansion(
+              item->data(Qt::UserRole).toString().toStdString());
+        event->accept();
+        return;
+      }
+    }
+    QListWidget::mousePressEvent(event);
+  }
+
+  void keyPressEvent(QKeyEvent *event) override {
+    if ((event->key() == Qt::Key_Left || event->key() == Qt::Key_Right) &&
+        navigateHierarchy) {
+      navigateHierarchy(event->key());
+      event->accept();
+      return;
+    }
+    QListWidget::keyPressEvent(event);
   }
 };
 
@@ -81,10 +120,21 @@ QFrame *statusDot() {
 
 void updateRow(QWidget *row, const std::string &threadId,
                const std::string &threadTitle,
-               const std::string &threadStatus, std::size_t requestCount) {
+               const std::string &threadStatus, std::size_t requestCount,
+               std::size_t depth, bool hasChildren, bool expanded) {
   auto *title = row->findChild<QLabel *>(QStringLiteral("threadTitle"));
   auto *status = row->findChild<QLabel *>(QStringLiteral("threadStatus"));
   auto *dot = row->findChild<QFrame *>(QStringLiteral("threadStatusDot"));
+  auto *indent = row->findChild<QWidget *>(QStringLiteral("threadIndent"));
+  auto *indicator =
+      row->findChild<QLabel *>(QStringLiteral("threadExpansionIndicator"));
+  indent->setFixedWidth(static_cast<int>(depth) * ChildIndent);
+  indicator->setText(hasChildren ? (expanded ? QStringLiteral("⌄")
+                                             : QStringLiteral("›"))
+                                 : QString{});
+  indicator->setToolTip(hasChildren ? (expanded ? QStringLiteral("Collapse")
+                                                : QStringLiteral("Expand"))
+                                    : QString{});
   QString titleText = text(threadTitle);
   if (titleText.isEmpty())
     titleText = text(threadId.substr(0, 12));
@@ -119,6 +169,17 @@ QWidget *createRow() {
   auto *layout = new QHBoxLayout(row);
   layout->setContentsMargins(5, 2, 5, 2);
   layout->setSpacing(8);
+  auto *indent = new QWidget;
+  indent->setObjectName(QStringLiteral("threadIndent"));
+  indent->setFixedWidth(0);
+  indent->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+  layout->addWidget(indent);
+  auto *indicator = makeLabel({}, "meta");
+  indicator->setObjectName(QStringLiteral("threadExpansionIndicator"));
+  indicator->setAlignment(Qt::AlignCenter);
+  indicator->setFixedWidth(8);
+  indicator->setTextInteractionFlags(Qt::NoTextInteraction);
+  layout->addWidget(indicator);
   layout->addWidget(statusDot());
   auto *copy = new QVBoxLayout;
   copy->setContentsMargins(0, 0, 0, 0);
@@ -234,6 +295,11 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   layout->addLayout(toolbar);
 
   list = new ThreadListWidget;
+  auto *threadList = static_cast<ThreadListWidget *>(list);
+  threadList->toggleExpansion =
+      [this](const std::string &id) { toggleExpanded(id); };
+  threadList->navigateHierarchy =
+      [this](int key) { navigateHierarchy(key); };
   list->setObjectName(QStringLiteral("threadList"));
   list->setItemDelegate(new ThreadItemDelegate(list));
   list->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -307,8 +373,8 @@ void ThreadPane::updateSortButton() {
                             : QStringLiteral("Recent")));
 }
 
-void ThreadPane::sortVisibleThreads(std::vector<std::string> &ids,
-                                    const PresentationModel &model) const {
+void ThreadPane::sortRootThreads(std::vector<std::string> &ids,
+                                 const PresentationModel &model) const {
   QCollator collator(QLocale::system().language() == QLocale::C
                          ? QLocale(QLocale::English)
                          : QLocale::system());
@@ -348,6 +414,75 @@ void ThreadPane::sortVisibleThreads(std::vector<std::string> &ids,
             });
 }
 
+void ThreadPane::appendVisibleThread(
+    ThreadPaneSnapshot &snapshot, const PresentationModel &model,
+    const std::unordered_map<std::string, std::size_t> &pendingByThread,
+    const std::string &threadId, const std::string &parentId,
+    std::size_t depth, std::unordered_set<std::string> &visited) const {
+  if (!visited.insert(threadId).second)
+    return;
+  const ThreadPresentation *thread = model.thread(threadId);
+  if (!thread)
+    return;
+  const bool hasChildren = std::ranges::any_of(
+      thread->childThreadOrder,
+      [&model](const std::string &id) { return model.thread(id) != nullptr; });
+  const bool expanded = hasChildren && !collapsedThreads.contains(threadId);
+  const auto pending = pendingByThread.find(threadId);
+  snapshot.rows.push_back(
+      {threadId, thread->title, thread->cwd, thread->status, parentId,
+       pending == pendingByThread.end() ? std::size_t{} : pending->second,
+       depth, hasChildren, expanded});
+  if (!expanded)
+    return;
+  for (const std::string &childThreadId : thread->childThreadOrder)
+    appendVisibleThread(snapshot, model, pendingByThread, childThreadId,
+                        threadId, depth + 1, visited);
+}
+
+void ThreadPane::toggleExpanded(const std::string &threadId) {
+  if (collapsedThreads.contains(threadId))
+    collapsedThreads.erase(threadId);
+  else
+    collapsedThreads.insert(threadId);
+  visibleSnapshot.reset();
+  if (currentModel)
+    refresh(*currentModel, projectedSelectedThreadId);
+}
+
+void ThreadPane::navigateHierarchy(int key) {
+  QListWidgetItem *current = list->currentItem();
+  if (!current)
+    return;
+  const std::string id =
+      current->data(Qt::UserRole).toString().toStdString();
+  const bool hasChildren = current->data(HasChildrenRole).toBool();
+  const bool expanded = current->data(ExpandedRole).toBool();
+  if (key == Qt::Key_Right && hasChildren) {
+    if (!expanded) {
+      toggleExpanded(id);
+      return;
+    }
+    const int nextRow = list->row(current) + 1;
+    if (nextRow < list->count() &&
+        list->item(nextRow)->data(ParentIdRole).toString().toStdString() == id)
+      list->setCurrentRow(nextRow);
+    return;
+  }
+  if (key != Qt::Key_Left)
+    return;
+  if (hasChildren && expanded) {
+    toggleExpanded(id);
+    return;
+  }
+  const QString parentId = current->data(ParentIdRole).toString();
+  if (parentId.isEmpty())
+    return;
+  const auto parent = rows.find(parentId.toStdString());
+  if (parent != rows.end())
+    list->setCurrentItem(parent->second);
+}
+
 void ThreadPane::setContextHighlight(const std::string &threadId,
                                      bool highlighted) {
   const auto found = rows.find(threadId);
@@ -360,23 +495,12 @@ void ThreadPane::refresh(const PresentationModel &model,
                          const std::string &selectedThreadId) {
   currentModel = &model;
   projectedSelectedThreadId = selectedThreadId;
-  const std::vector<std::string> &authoritativeOrder = model.threadOrder();
-  const std::unordered_set<std::string> authoritativeIds(
-      authoritativeOrder.begin(), authoritativeOrder.end());
-  std::erase_if(retainedVisibleThreads, [&](const std::string &id) {
-    return !model.thread(id) || authoritativeIds.contains(id);
+  std::erase_if(collapsedThreads, [&model](const std::string &id) {
+    const ThreadPresentation *thread = model.thread(id);
+    return !thread || thread->childThreadOrder.empty();
   });
-  if (!selectedThreadId.empty() && model.thread(selectedThreadId) &&
-      !authoritativeIds.contains(selectedThreadId) &&
-      std::find(retainedVisibleThreads.begin(), retainedVisibleThreads.end(),
-                selectedThreadId) == retainedVisibleThreads.end()) {
-    retainedVisibleThreads.insert(retainedVisibleThreads.begin(),
-                                  selectedThreadId);
-  }
-  std::vector<std::string> visibleOrder = retainedVisibleThreads;
-  visibleOrder.insert(visibleOrder.end(), authoritativeOrder.begin(),
-                      authoritativeOrder.end());
-  sortVisibleThreads(visibleOrder, model);
+  std::vector<std::string> rootOrder = model.threadOrder();
+  sortRootThreads(rootOrder, model);
 
   std::unordered_map<std::string, std::size_t> pendingByThread;
   pendingByThread.reserve(model.pendingRequestCount());
@@ -385,20 +509,11 @@ void ThreadPane::refresh(const PresentationModel &model,
     static_cast<void>(requestId);
     ++pendingByThread[request.threadId];
   }
-  const auto pendingCount = [&pendingByThread](const std::string &id) {
-    const auto found = pendingByThread.find(id);
-    return found == pendingByThread.end() ? std::size_t{} : found->second;
-  };
-
   ThreadPaneSnapshot next{selectedThreadId, sortCriterion, {}};
-  next.rows.reserve(visibleOrder.size());
-  for (const std::string &id : visibleOrder) {
-    const ThreadPresentation *thread = model.thread(id);
-    if (!thread)
-      continue;
-    next.rows.push_back({id, thread->title, thread->cwd, thread->status,
-                         pendingCount(id)});
-  }
+  std::unordered_set<std::string> visited;
+  visited.reserve(rootOrder.size());
+  for (const std::string &id : rootOrder)
+    appendVisibleThread(next, model, pendingByThread, id, {}, 0, visited);
   if (visibleSnapshot && *visibleSnapshot == next)
     return;
   visibleSnapshot = std::move(next);
@@ -463,8 +578,12 @@ void ThreadPane::refresh(const PresentationModel &model,
     }
     QListWidgetItem *item = found->second;
     item->setToolTip(text(row.cwd));
+    item->setData(DepthRole, static_cast<qulonglong>(row.depth));
+    item->setData(HasChildrenRole, row.hasChildren);
+    item->setData(ExpandedRole, row.expanded);
+    item->setData(ParentIdRole, text(row.parentId));
     updateRow(list->itemWidget(item), row.id, row.title, row.status,
-              row.pending);
+              row.pending, row.depth, row.hasChildren, row.expanded);
     if (row.id == contextThreadId)
       setContextHighlight(row.id, true);
     if (row.id == snapshot.selectedThreadId)
