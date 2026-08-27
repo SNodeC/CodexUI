@@ -208,7 +208,7 @@ struct ShellWidget::Impl final {
   void renderConversation();
   void refreshSettings();
   void refreshStatus();
-  void hydrateHistoricalAgents();
+  void hydrateHistoricalChildren(const std::string &parentThreadId);
   void showNotice(QString message, bool error = true);
   void resetRuntimeForConnection();
 
@@ -576,7 +576,11 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
     ensureThreadSettingsHydrated(selectedThreadId);
   }
 
-  hydrateHistoricalAgents();
+  if (kind == "result" && action == "thread.read" &&
+      event.value("ok", false))
+    hydrateHistoricalChildren(eventThreadId);
+  else if (kind == "event" && type == "agents.activity.upsert")
+    hydrateHistoricalChildren(eventThreadId);
   scheduleRender();
 }
 
@@ -820,19 +824,24 @@ void ShellWidget::Impl::refreshStatus() {
   middleRegion->composer().setSettingsEnabled(canSubmit && !snapshot.active);
 }
 
-void ShellWidget::Impl::hydrateHistoricalAgents() {
-  const ThreadPresentation *thread = model.thread(selectedThreadId);
+void ShellWidget::Impl::hydrateHistoricalChildren(
+    const std::string &parentThreadId) {
+  const ThreadPresentation *thread = model.thread(parentThreadId);
   if (!thread)
     return;
-  for (const std::string &id : thread->agentOrder) {
-    const auto agent = thread->agents.find(id);
-    if (agent == thread->agents.end() || agent->second.childThreadId.empty() ||
-        agent->second.status != "started")
+  for (const std::string &childThreadId : thread->childThreadOrder) {
+    const ChildThreadOwnership *ownership =
+        model.childOwnership(childThreadId);
+    if (!ownership || ownership->parentThreadId != parentThreadId)
+      continue;
+    const auto agent = thread->agents.find(ownership->agentId);
+    if (agent == thread->agents.end() ||
+        !isActiveStatus(agent->second.status))
       continue;
     // Historical child hydration shares the same monotonic read boundary as
     // user-selected threads, so a pre-reconnect result cannot replace newer
     // child/agent presentation state.
-    readThread(agent->second.childThreadId);
+    readThread(childThreadId);
   }
 }
 
