@@ -700,6 +700,13 @@ void ShellWidget::Impl::refreshStatus() {
     }
   }
   const bool active = model.activeTurnId(selectedThreadId).has_value();
+  const std::size_t selectedPending = static_cast<std::size_t>(std::count_if(
+      model.pendingRequestPresentations().begin(),
+      model.pendingRequestPresentations().end(),
+      [this](const auto &entry) {
+        return entry.second.threadId == selectedThreadId;
+      }));
+  const std::size_t totalPending = model.pendingRequestCount();
   const std::string serialized = nlohmann::json{
       {"connected", connection.connected},
       {"retrying", connection.retrying},
@@ -714,9 +721,8 @@ void ShellWidget::Impl::refreshStatus() {
       {"agentCount", thread ? thread->agents.size() : 0U},
       {"runningAgents", runningAgents},
       {"active", active},
-      {"selectedPending", model.pendingRequestCount(selectedThreadId)},
-      {"totalPending",
-       model.pendingRequestCount()}}.dump();
+      {"selectedPending", selectedPending},
+      {"totalPending", totalPending}}.dump();
   const QByteArray next(serialized.data(),
                         static_cast<qsizetype>(serialized.size()));
   if (next == statusSnapshot)
@@ -764,9 +770,6 @@ void ShellWidget::Impl::refreshStatus() {
                                 : QStringLiteral("Claim control"));
   controllerButton->setEnabled(connection.connected);
 
-  const std::size_t selectedPending =
-      model.pendingRequestCount(selectedThreadId);
-  const std::size_t totalPending = model.pendingRequestCount();
   requestButton->setText(QStringLiteral("Requests (%1)")
                              .arg(static_cast<qulonglong>(totalPending)));
   requestButton->setVisible(totalPending != 0);

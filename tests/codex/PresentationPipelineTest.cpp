@@ -322,6 +322,28 @@ int main() {
               std::vector<std::string>{"lib/example.cpp", "removed.txt"},
       "authoritative thread hydration retains compact repository hints");
 
+  PresentationModel orderingModel;
+  orderingModel.applyEvent(codexui::codex::presentation::event(
+      1, 1, "thread.upsert", {{"thread", {{"id", "retained-a"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "retained-a"}}));
+  orderingModel.applyEvent(codexui::codex::presentation::event(
+      2, 1, "thread.upsert", {{"thread", {{"id", "retained-b"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "retained-b"}}));
+  orderingModel.applyEvent(codexui::codex::presentation::result(
+      3, 1, "threads.list", "ordered-threads", true,
+      {{"threads",
+        nlohmann::json::array({{{"id", "provider-a"}},
+                               {{"id", "provider-b"}},
+                               {{"id", "provider-a"}}})}},
+      codexui::codex::presentation::Authority::Merge));
+  passed &= expect(
+      orderingModel.threadOrder() ==
+          std::vector<std::string>{"provider-a", "provider-b", "retained-b",
+                                   "retained-a"},
+      "thread discovery preserves provider order and one retained tail");
+
   normalizer.bridgeEvent({{"kind", "bridge.provider"},
                           {"state", "disconnected"},
                           {"providerGeneration", std::uint64_t{1}},

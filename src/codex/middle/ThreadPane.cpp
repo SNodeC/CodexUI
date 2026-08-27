@@ -360,14 +360,13 @@ void ThreadPane::refresh(const PresentationModel &model,
   currentModel = &model;
   projectedSelectedThreadId = selectedThreadId;
   const std::vector<std::string> &authoritativeOrder = model.threadOrder();
+  const std::unordered_set<std::string> authoritativeIds(
+      authoritativeOrder.begin(), authoritativeOrder.end());
   std::erase_if(retainedVisibleThreads, [&](const std::string &id) {
-    return !model.thread(id) ||
-           std::find(authoritativeOrder.begin(), authoritativeOrder.end(),
-                     id) != authoritativeOrder.end();
+    return !model.thread(id) || authoritativeIds.contains(id);
   });
   if (!selectedThreadId.empty() && model.thread(selectedThreadId) &&
-      std::find(authoritativeOrder.begin(), authoritativeOrder.end(),
-                selectedThreadId) == authoritativeOrder.end() &&
+      !authoritativeIds.contains(selectedThreadId) &&
       std::find(retainedVisibleThreads.begin(), retainedVisibleThreads.end(),
                 selectedThreadId) == retainedVisibleThreads.end()) {
     retainedVisibleThreads.insert(retainedVisibleThreads.begin(),
@@ -377,6 +376,19 @@ void ThreadPane::refresh(const PresentationModel &model,
   visibleOrder.insert(visibleOrder.end(), authoritativeOrder.begin(),
                       authoritativeOrder.end());
   sortVisibleThreads(visibleOrder, model);
+
+  std::unordered_map<std::string, std::size_t> pendingByThread;
+  pendingByThread.reserve(model.pendingRequestCount());
+  for (const auto &[requestId, request] :
+       model.pendingRequestPresentations()) {
+    static_cast<void>(requestId);
+    ++pendingByThread[request.threadId];
+  }
+  const auto pendingCount = [&pendingByThread](const std::string &id) {
+    const auto found = pendingByThread.find(id);
+    return found == pendingByThread.end() ? std::size_t{} : found->second;
+  };
+
   nlohmann::json visible = nlohmann::json::array();
   for (const std::string &id : visibleOrder) {
     const ThreadPresentation *thread = model.thread(id);
@@ -386,7 +398,7 @@ void ThreadPane::refresh(const PresentationModel &model,
                        {"title", thread->title},
                        {"cwd", thread->cwd},
                        {"status", thread->status},
-                       {"pending", model.pendingRequestCount(id)}});
+                       {"pending", pendingCount(id)}});
   }
   const std::string serialized = nlohmann::json{
       {"selected", selectedThreadId},
@@ -404,50 +416,73 @@ void ThreadPane::refresh(const PresentationModel &model,
   // existing row.
   list->clearSelection();
   list->setCurrentRow(-1);
-  std::unordered_set<std::string> retained;
+
+  const std::unordered_set<std::string> wanted(visibleOrder.begin(),
+                                                visibleOrder.end());
+  for (int index = list->count() - 1; index >= 0; --index) {
+    QListWidgetItem *item = list->item(index);
+    const std::string id =
+        item->data(Qt::UserRole).toString().toStdString();
+    if (wanted.contains(id))
+      continue;
+    rows.erase(id);
+    delete list->takeItem(index);
+  }
+
+  std::unordered_map<std::string, int> existingPositions;
+  existingPositions.reserve(rows.size());
+  int existingIndex = 0;
+  for (const std::string &id : visibleOrder) {
+    if (rows.contains(id))
+      existingPositions.emplace(id, existingIndex++);
+  }
+
+  std::unordered_set<std::string> moved;
+  moved.reserve(rows.size());
+  for (int index = list->count() - 1; index >= 0; --index) {
+    QListWidgetItem *item = list->item(index);
+    const std::string id =
+        item->data(Qt::UserRole).toString().toStdString();
+    if (existingPositions.at(id) == index)
+      continue;
+    // Removing an index widget transfers it into Qt's deferred-deletion path.
+    // A changed row receives a fresh widget when its item is reinserted.
+    list->removeItemWidget(item);
+    list->takeItem(index);
+    moved.insert(id);
+  }
+  existingIndex = 0;
+  for (const std::string &id : visibleOrder) {
+    const auto found = rows.find(id);
+    if (found == rows.end())
+      continue;
+    if (moved.contains(id)) {
+      list->insertItem(existingIndex, found->second);
+      list->setItemWidget(found->second, createRow());
+    }
+    ++existingIndex;
+  }
+
   int wantedIndex = 0;
   for (const std::string &id : visibleOrder) {
-    const ThreadPresentation *thread = model.thread(id);
-    if (!thread)
-      continue;
-    retained.insert(id);
-    QListWidgetItem *item = nullptr;
-    const auto found = rows.find(id);
+    auto found = rows.find(id);
     if (found == rows.end()) {
-      item = new QListWidgetItem;
+      auto *item = new QListWidgetItem;
       item->setSizeHint(QSize(0, 54));
       item->setData(Qt::UserRole, text(id));
       list->insertItem(wantedIndex, item);
       list->setItemWidget(item, createRow());
-      rows[id] = item;
-    } else {
-      item = found->second;
-      const int currentIndex = list->row(item);
-      if (currentIndex != wantedIndex) {
-        // Removing an index widget transfers it into Qt's deferred-deletion
-        // path. It must never be attached again after moving the item.
-        list->removeItemWidget(item);
-        item = list->takeItem(currentIndex);
-        list->insertItem(wantedIndex, item);
-        list->setItemWidget(item, createRow());
-        rows[id] = item;
-      }
+      found = rows.emplace(id, item).first;
     }
+    QListWidgetItem *item = found->second;
+    const ThreadPresentation *thread = model.thread(id);
     item->setToolTip(text(thread->cwd));
-    updateRow(list->itemWidget(item), *thread, model.pendingRequestCount(id));
+    updateRow(list->itemWidget(item), *thread, pendingCount(id));
     if (id == contextThreadId)
       setContextHighlight(id, true);
     if (id == selectedThreadId)
       list->setCurrentItem(item);
     ++wantedIndex;
-  }
-  for (auto it = rows.begin(); it != rows.end();) {
-    if (retained.contains(it->first)) {
-      ++it;
-      continue;
-    }
-    delete list->takeItem(list->row(it->second));
-    it = rows.erase(it);
   }
   list->setUpdatesEnabled(true);
   list->blockSignals(false);
