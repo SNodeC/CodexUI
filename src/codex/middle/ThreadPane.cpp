@@ -451,18 +451,6 @@ void ThreadPane::refresh(const PresentationModel &model,
     list->takeItem(index);
     moved.insert(id);
   }
-  existingIndex = 0;
-  for (const std::string &id : visibleOrder) {
-    const auto found = rows.find(id);
-    if (found == rows.end())
-      continue;
-    if (moved.contains(id)) {
-      list->insertItem(existingIndex, found->second);
-      list->setItemWidget(found->second, createRow());
-    }
-    ++existingIndex;
-  }
-
   int wantedIndex = 0;
   for (const std::string &id : visibleOrder) {
     auto found = rows.find(id);
@@ -473,6 +461,9 @@ void ThreadPane::refresh(const PresentationModel &model,
       list->insertItem(wantedIndex, item);
       list->setItemWidget(item, createRow());
       found = rows.emplace(id, item).first;
+    } else if (moved.contains(id)) {
+      list->insertItem(wantedIndex, found->second);
+      list->setItemWidget(found->second, createRow());
     }
     QListWidgetItem *item = found->second;
     const ThreadPresentation *thread = model.thread(id);

@@ -255,6 +255,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
     TurnSectionWidget *widget = nullptr;
     int position = 0;
     bool insert = false;
+    std::vector<std::string> cardKeys;
   };
   struct DesiredCard {
     TurnSectionWidget *section = nullptr;
@@ -293,16 +294,18 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
     } else {
       section = existingSection->second;
     }
-    desiredSections.emplace(
-        sectionData.key, DesiredSection{section, sectionIndex++, newSection});
     section->setProperty("turnId", QString::fromStdString(sectionData.turnId));
 
+    DesiredSection desiredSection{section, sectionIndex++, newSection};
+    desiredSection.cardKeys.reserve(sectionData.cards.size());
     int cardIndex = 0;
     for (const VisibleCardData &cardData : sectionData.cards) {
-      const std::string key = stableKey(cardData.key);
+      desiredSection.cardKeys.push_back(stableKey(cardData.key));
+      const std::string &key = desiredSection.cardKeys.back();
       displayedKeys.push_back(key);
       desiredCards.emplace(key, DesiredCard{section, cardIndex++, &cardData});
     }
+    desiredSections.emplace(sectionData.key, std::move(desiredSection));
   }
 
   for (std::size_t offset = displayedSectionKeys_.size(); offset > 0;
@@ -352,14 +355,13 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
   }
 
   for (const TurnSection &sectionData : snapshot.sections) {
-    TurnSectionWidget *section = desiredSections.at(sectionData.key).widget;
-    std::vector<std::string> desiredCardKeys;
-    desiredCardKeys.reserve(sectionData.cards.size());
+    DesiredSection &desiredSection = desiredSections.at(sectionData.key);
+    TurnSectionWidget *section = desiredSection.widget;
     int cardIndex = 0;
     for (const VisibleCardData &cardData : sectionData.cards) {
-      const std::string key = stableKey(cardData.key);
+      const std::string &key =
+          desiredSection.cardKeys[static_cast<std::size_t>(cardIndex)];
       DesiredCard &desired = desiredCards.at(key);
-      desiredCardKeys.push_back(key);
 
       ConversationCard *card = nullptr;
       const auto existingCard = cards_.find(key);
@@ -397,8 +399,10 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
         section->cards->insertWidget(cardIndex, card);
       ++cardIndex;
     }
-    section->cardKeys = std::move(desiredCardKeys);
+    section->cardKeys = std::move(desiredSection.cardKeys);
     section->setVisible(!sectionData.cards.empty());
+    if (desiredSection.insert)
+      contentLayout_->insertWidget(1 + desiredSection.position, section);
   }
 
   for (auto iterator = sections_.begin(); iterator != sections_.end();) {
@@ -409,13 +413,6 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
     delete iterator->second;
     iterator = sections_.erase(iterator);
     visualChange = true;
-  }
-  for (int index = 0; index < static_cast<int>(desiredSectionKeys.size());
-       ++index) {
-    const std::string &key = desiredSectionKeys[static_cast<std::size_t>(index)];
-    const DesiredSection &desired = desiredSections.at(key);
-    if (desired.insert)
-      contentLayout_->insertWidget(1 + index, desired.widget);
   }
   displayedSectionKeys_ = std::move(desiredSectionKeys);
 
