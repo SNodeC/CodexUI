@@ -29,6 +29,7 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -1069,6 +1070,17 @@ bool testInfoViewerLayout() {
                        "Info exposes State and Protocol through choice navigation");
   if (!infoStack || !protocolChoice || !protocol || !state || !statistics)
     return false;
+  const auto inspectorScrolls = inspector.findChildren<QScrollArea *>();
+  result &= expect(
+      inspectorScrolls.size() == 3 &&
+          std::ranges::all_of(inspectorScrolls, [](QScrollArea *scroll) {
+            return scroll && scroll->property("kind") == "inspectorScroll" &&
+                   scroll->verticalScrollBarPolicy() ==
+                       Qt::ScrollBarAsNeeded &&
+                   scroll->verticalScrollBar()->property("kind") ==
+                       "infoViewer";
+          }),
+      "Plan, Agents, and Requests use the canonical Inspector scrollbar");
   protocolChoice->click();
   inspector.appendProtocolFrame(
       {{"kind", "event"},

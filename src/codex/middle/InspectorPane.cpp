@@ -302,6 +302,8 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->verticalScrollBar()->setProperty("kind", "infoViewer");
     scroll->setWidget(content);
     return scroll;
   };
