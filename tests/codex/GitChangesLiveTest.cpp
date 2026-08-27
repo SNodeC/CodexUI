@@ -208,6 +208,37 @@ bool testLiveWorkingTreeChanges() {
                            },
                            3500),
                    "discovers a modified tracked file");
+  const QString renamed =
+      directory.filePath(QStringLiteral("renamed-tracked.txt"));
+  result &= expect(writeFile(tracked, QByteArray("original\n")) &&
+                       QFile::rename(tracked, renamed) &&
+                       waitFor(
+                           [&] {
+                             return hasFile(viewer.currentSnapshot(),
+                                            QStringLiteral(
+                                                "renamed-tracked.txt"),
+                                            QStringLiteral("Renamed"));
+                           },
+                           1500),
+                   "moves watches with a renamed tracked file");
+  result &= expect(QFile::rename(renamed, tracked) &&
+                       waitFor(
+                           [&] {
+                             return viewer.currentSnapshot().files.empty();
+                           },
+                           1500),
+                   "restores watches when a renamed file moves back");
+  result &= expect(writeFile(tracked, QByteArray("modified\n")),
+                   "modifies the restored tracked file");
+  viewer.refreshRepository();
+  result &= expect(waitFor(
+                       [&] {
+                         return hasFile(viewer.currentSnapshot(),
+                                        QStringLiteral("tracked.txt"),
+                                        QStringLiteral("Modified"));
+                       },
+                       1500),
+                   "rediscovers a modified file after a rename cycle");
   result &= expect(writeFile(tracked, QByteArray("original\n")) &&
                        waitFor(
                            [&] {
