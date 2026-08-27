@@ -581,6 +581,38 @@ bool ShellFlow::verifyBoundedChildHydration() {
   result &=
       expect(!peer.waitFor("thread.read", "child-failure", 100).has_value(),
              "a failed child hydration does not enter an automatic retry loop");
+
+  result &= expect(selectThread(list, "thread-a") &&
+                       selectThread(list, "thread-b"),
+                   "explicit navigation returns to the failed child's parent");
+  const auto retriedChildRead =
+      peer.waitFor("thread.read", "child-failure");
+  result &= expect(retriedChildRead.has_value(),
+                   "explicit parent navigation retries one failed child read");
+  if (!retriedChildRead)
+    return false;
+  result &= peer.send(presentation::result(
+      sequence++, 2, "thread.read",
+      retriedChildRead->value("correlationId", std::string{}), true,
+      {{"thread", threadWithAgentMessage("child-failure", "Child",
+                                          "completed child result")}},
+      Authority::Replace, {{"threadId", "child-failure"}}));
+  spin(10);
+
+  auto *inspector = shell.findChild<QFrame *>(QStringLiteral("inspector"));
+  auto *tabs = inspector ? inspector->findChild<QTabWidget *>(
+                               QString{}, Qt::FindDirectChildrenOnly)
+                         : nullptr;
+  if (tabs) {
+    tabs->setCurrentIndex(1);
+    spin();
+  }
+  result &= expect(inspector && tabs &&
+                       hasPresentedText(*inspector,
+                                        QStringLiteral("Completed")) &&
+                       !hasPresentedText(*inspector,
+                                         QStringLiteral("Running")),
+                   "retried child completion replaces the stale Running badge");
   return result;
 }
 

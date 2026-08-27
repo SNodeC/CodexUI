@@ -208,7 +208,8 @@ struct ShellWidget::Impl final {
   void renderConversation();
   void refreshSettings();
   void refreshStatus();
-  void hydrateHistoricalChildren(const std::string &parentThreadId);
+  void hydrateHistoricalChildren(const std::string &parentThreadId,
+                                  bool retryFailed = false);
   void showNotice(QString message, bool error = true);
   void resetRuntimeForConnection();
 
@@ -216,6 +217,7 @@ struct ShellWidget::Impl final {
   void beginNewThread();
   void readThread(const std::string &threadId, bool forced = false);
   void ensureThreadHydrated(const std::string &threadId);
+  void hydrateThreadForSelection(const std::string &threadId);
   void ensureThreadSettingsHydrated(const std::string &threadId);
   void resumeThreadForSettings(const std::string &threadId);
   void renameThread(const std::string &threadId);
@@ -825,7 +827,7 @@ void ShellWidget::Impl::refreshStatus() {
 }
 
 void ShellWidget::Impl::hydrateHistoricalChildren(
-    const std::string &parentThreadId) {
+    const std::string &parentThreadId, bool retryFailed) {
   const ThreadPresentation *thread = model.thread(parentThreadId);
   if (!thread)
     return;
@@ -838,10 +840,13 @@ void ShellWidget::Impl::hydrateHistoricalChildren(
     if (agent == thread->agents.end() ||
         !isActiveStatus(agent->second.status))
       continue;
-    // Historical child hydration shares the same monotonic read boundary as
-    // user-selected threads, so a pre-reconnect result cannot replace newer
-    // child/agent presentation state.
-    readThread(childThreadId);
+    const auto runtime = runtimeByThread.find(childThreadId);
+    const bool failed = runtime != runtimeByThread.end() &&
+                        runtime->second.hydration == Hydration::Failed;
+    // Background activity never retries a failed read. Explicit navigation
+    // supplies a new bounded retry boundary without creating a retry loop.
+    if (!failed || retryFailed)
+      readThread(childThreadId, failed);
   }
 }
 
@@ -849,8 +854,7 @@ void ShellWidget::Impl::selectThread(std::string threadId) {
   if (threadId.empty())
     return;
   if (threadId == selectedThreadId) {
-    ensureThreadHydrated(threadId);
-    ensureThreadSettingsHydrated(threadId);
+    hydrateThreadForSelection(threadId);
     return;
   }
   selectedThreadId = std::move(threadId);
@@ -859,8 +863,7 @@ void ShellWidget::Impl::selectThread(std::string threadId) {
   newThreadName.clear();
   newThreadWorkspace.clear();
   historyWindows.try_emplace(selectedThreadId);
-  ensureThreadHydrated(selectedThreadId);
-  ensureThreadSettingsHydrated(selectedThreadId);
+  hydrateThreadForSelection(selectedThreadId);
   render();
 }
 
@@ -1012,6 +1015,18 @@ void ShellWidget::Impl::ensureThreadHydrated(const std::string &threadId) {
        found->second.hydration == Hydration::InFlight))
     return;
   readThread(threadId);
+}
+
+void ShellWidget::Impl::hydrateThreadForSelection(
+    const std::string &threadId) {
+  const auto runtime = runtimeByThread.find(threadId);
+  if (runtime != runtimeByThread.end() &&
+      runtime->second.hydration == Hydration::Failed)
+    readThread(threadId, true);
+  else
+    ensureThreadHydrated(threadId);
+  ensureThreadSettingsHydrated(threadId);
+  hydrateHistoricalChildren(threadId, true);
 }
 
 void ShellWidget::Impl::renameThread(const std::string &threadId) {

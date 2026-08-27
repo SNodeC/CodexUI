@@ -142,6 +142,13 @@ private:
   void synchronizeOwningAgent(const std::string &childThreadId,
                               bool clearMissingResult = false);
   AgentPresentation *owningAgent(const std::string &childThreadId);
+  ItemPresentation *agentSourceItem(ThreadPresentation &parent,
+                                    const AgentPresentation &agent);
+  void setAgentStatus(ThreadPresentation &parent, AgentPresentation &agent,
+                      const std::string &status);
+  void setAgentResult(ThreadPresentation &parent, AgentPresentation &agent,
+                      const std::string &resultText);
+  void clearAgentResult(ThreadPresentation &parent, AgentPresentation &agent);
   void updateOwningAgentStatus(const std::string &childThreadId,
                                const std::string &status);
   void updateOwningAgentResult(const std::string &childThreadId,

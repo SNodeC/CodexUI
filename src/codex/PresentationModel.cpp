@@ -832,7 +832,7 @@ void PresentationModel::upsertAgentActivity(ThreadPresentation &owner,
       if (!status.empty())
         updateOwningAgentStatus(childThreadId, status);
       if (!message.empty())
-        existing->raw["resultText"] = message;
+        updateOwningAgentResult(childThreadId, message);
       existing->raw["agentState"] = state;
     }
     return;
@@ -861,7 +861,10 @@ void PresentationModel::upsertAgentActivity(ThreadPresentation &owner,
                             agent.childThreadId != childThreadId;
   if (changesChild) {
     agent.status.clear();
-    agent.raw.erase("resultText");
+    agent.raw.erase("status");
+    if (ItemPresentation *item = agentSourceItem(owner, agent))
+      item->raw.erase("status");
+    clearAgentResult(owner, agent);
     agent.raw.erase("agentState");
   }
 
@@ -872,10 +875,13 @@ void PresentationModel::upsertAgentActivity(ThreadPresentation &owner,
     candidateStatus = "inProgress";
   else if (candidateStatus.empty() && !activityKind.empty())
     candidateStatus = activityKind;
-  if (!candidateStatus.empty() &&
-      !(isTerminalTurnStatus(agent.status) &&
-        isActiveStatus(candidateStatus)))
-    agent.status = candidateStatus;
+  if (!candidateStatus.empty()) {
+    if (isTerminalTurnStatus(agent.status) &&
+        isActiveStatus(candidateStatus))
+      setAgentStatus(owner, agent, agent.status);
+    else
+      setAgentStatus(owner, agent, candidateStatus);
+  }
 
   if (!childThreadId.empty())
     assignChildOwnership(owner, agent, childThreadId);
@@ -960,23 +966,73 @@ PresentationModel::owningAgent(const std::string &childThreadId) {
   return agent == parent->second.agents.end() ? nullptr : &agent->second;
 }
 
+ItemPresentation *
+PresentationModel::agentSourceItem(ThreadPresentation &parent,
+                                   const AgentPresentation &agent) {
+  const auto turn = parent.turns.find(agent.ownerTurnId);
+  if (turn == parent.turns.end())
+    return nullptr;
+  const auto item = turn->second.items.find(agent.itemId);
+  return item == turn->second.items.end() ? nullptr : &item->second;
+}
+
+void PresentationModel::setAgentStatus(ThreadPresentation &parent,
+                                       AgentPresentation &agent,
+                                       const std::string &status) {
+  agent.status = status;
+  agent.raw["status"] = status;
+  if (ItemPresentation *item = agentSourceItem(parent, agent))
+    item->raw["status"] = status;
+}
+
+void PresentationModel::setAgentResult(ThreadPresentation &parent,
+                                       AgentPresentation &agent,
+                                       const std::string &resultText) {
+  agent.raw["resultText"] = resultText;
+  if (ItemPresentation *item = agentSourceItem(parent, agent))
+    item->raw["resultText"] = resultText;
+}
+
+void PresentationModel::clearAgentResult(ThreadPresentation &parent,
+                                         AgentPresentation &agent) {
+  agent.raw.erase("resultText");
+  if (ItemPresentation *item = agentSourceItem(parent, agent))
+    item->raw.erase("resultText");
+}
+
 void PresentationModel::updateOwningAgentStatus(
     const std::string &childThreadId, const std::string &status) {
   if (status.empty())
     return;
-  if (AgentPresentation *agent = owningAgent(childThreadId)) {
-    if (isTerminalTurnStatus(agent->status) && isActiveStatus(status))
-      return;
-    agent->status = status;
+  const auto ownership = childOwnerships.find(childThreadId);
+  if (ownership == childOwnerships.end())
+    return;
+  const auto parent = threads.find(ownership->second.parentThreadId);
+  if (parent == threads.end())
+    return;
+  const auto agent = parent->second.agents.find(ownership->second.agentId);
+  if (agent == parent->second.agents.end())
+    return;
+  if (isTerminalTurnStatus(agent->second.status) && isActiveStatus(status)) {
+    setAgentStatus(parent->second, agent->second, agent->second.status);
+    return;
   }
+  setAgentStatus(parent->second, agent->second, status);
 }
 
 void PresentationModel::updateOwningAgentResult(
     const std::string &childThreadId, const std::string &resultText) {
   if (resultText.empty())
     return;
-  if (AgentPresentation *agent = owningAgent(childThreadId))
-    agent->raw["resultText"] = resultText;
+  const auto ownership = childOwnerships.find(childThreadId);
+  if (ownership == childOwnerships.end())
+    return;
+  const auto parent = threads.find(ownership->second.parentThreadId);
+  if (parent == threads.end())
+    return;
+  const auto agent = parent->second.agents.find(ownership->second.agentId);
+  if (agent != parent->second.agents.end())
+    setAgentResult(parent->second, agent->second, resultText);
 }
 
 void PresentationModel::synchronizeOwningAgent(
@@ -1011,10 +1067,16 @@ void PresentationModel::synchronizeOwningAgent(
   if (childStatus.empty())
     childStatus = child->second.status;
   updateOwningAgentStatus(childThreadId, childStatus);
+  const auto ownership = childOwnerships.find(childThreadId);
+  const auto parent = ownership == childOwnerships.end()
+                          ? threads.end()
+                          : threads.find(ownership->second.parentThreadId);
+  if (parent == threads.end())
+    return;
   if (resultText.empty() && clearMissingResult)
-    agent->raw.erase("resultText");
+    clearAgentResult(parent->second, *agent);
   else if (!resultText.empty())
-    agent->raw["resultText"] = resultText;
+    setAgentResult(parent->second, *agent, resultText);
 }
 
 void PresentationModel::removeThread(const std::string &threadId) {
