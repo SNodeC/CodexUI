@@ -49,25 +49,46 @@ QString markdownLinkLabel(QString label) {
   return label;
 }
 
-std::vector<std::pair<AuthoritativeItemKey, const ItemPresentation *>>
-orderedItems(const std::string &threadId, const ThreadPresentation &thread) {
-  std::vector<std::pair<AuthoritativeItemKey, const ItemPresentation *>> result;
-  for (const std::string &turnId : thread.turnOrder) {
-    const auto turn = thread.turns.find(turnId);
-    if (turn == thread.turns.end())
+} // namespace
+
+std::optional<std::size_t> AuthoritativeItemIndex::position(
+    const AuthoritativeItemKey &key) const noexcept {
+  const auto found = positions.find(key);
+  return found == positions.end() ? std::nullopt
+                                  : std::optional<std::size_t>{found->second};
+}
+
+AuthoritativeItemIndex
+indexAuthoritativeItems(const std::string &threadId,
+                        const ThreadPresentation *thread) {
+  AuthoritativeItemIndex result;
+  result.threadId = threadId;
+  if (!thread)
+    return result;
+  for (const std::string &turnId : thread->turnOrder) {
+    const auto turn = thread->turns.find(turnId);
+    if (turn == thread->turns.end())
       continue;
     for (const std::string &itemId : turn->second.itemOrder) {
       const auto item = turn->second.items.find(itemId);
       if (item == turn->second.items.end())
         continue;
-      result.emplace_back(AuthoritativeItemKey{threadId, turnId, itemId},
-                          &item->second);
+      const std::size_t position = result.ordered.size();
+      result.ordered.push_back(
+          {AuthoritativeItemKey{threadId, turnId, itemId}, &item->second});
+      result.positions.emplace(result.ordered.back().key, position);
+      if (stringValue(item->second.raw, "type") == "userMessage") {
+        const std::string clientId = stringValue(item->second.raw, "clientId");
+        if (!clientId.empty())
+          result.userMessagesByClientId.try_emplace(clientId, position);
+        const QString content = userMessageText(item->second.raw).trimmed();
+        result.userMessagesByText.emplace(std::string{}, content, position);
+        result.userMessagesByText.emplace(turnId, content, position);
+      }
     }
   }
   return result;
 }
-
-} // namespace
 
 QString promptWithFileLinks(QString prompt,
                             std::span<const AttachmentDraft> attachments) {
@@ -123,9 +144,10 @@ std::uint64_t PromptCoordinator::admit(
   submission.expectedTurnId = std::move(activeTurnId);
 
   if (authoritativeThread) {
-    const auto items = orderedItems(submission.threadId, *authoritativeThread);
-    if (!items.empty())
-      submission.admissionAnchor = items.back().first;
+    const auto items =
+        indexAuthoritativeItems(submission.threadId, authoritativeThread);
+    if (!items.ordered.empty())
+      submission.admissionAnchor = items.ordered.back().key;
   }
 
   const std::uint64_t id = submission.id;
@@ -251,42 +273,50 @@ bool PromptCoordinator::reassignThread(const std::string &fromThreadId,
   return true;
 }
 
-void PromptCoordinator::reconcile(
-    const std::string &threadId,
-    const ThreadPresentation &authoritativeThread) {
+void PromptCoordinator::reconcile(const std::string &threadId,
+                                  const ThreadPresentation &authoritativeThread) {
+  auto authoritativeItems =
+      indexAuthoritativeItems(threadId, &authoritativeThread);
+  reconcile(threadId, authoritativeItems);
+}
+
+void PromptCoordinator::reconcile(const std::string &threadId,
+                                  AuthoritativeItemIndex &authoritativeItems) {
   auto found = byThread.find(threadId);
   if (found == byThread.end())
     return;
-  const auto items = orderedItems(threadId, authoritativeThread);
-  std::set<AuthoritativeItemKey> claimed;
+  std::vector<bool> claimed(authoritativeItems.ordered.size());
   for (const PromptSubmission &submission : found->second)
-    if (submission.materializedItem)
-      claimed.insert(*submission.materializedItem);
+    if (submission.materializedItem) {
+      const auto position =
+          authoritativeItems.position(*submission.materializedItem);
+      if (position)
+        claimed[*position] = true;
+    }
 
   for (PromptSubmission &submission : found->second) {
     if (submission.materializedItem)
       continue;
-
-    // A prompt admitted before thread hydration is anchored exactly once when
-    // the authoritative tail first becomes available. Later output therefore
-    // cannot move the local card through the history.
     if (!submission.admissionAnchor &&
-        submission.state == PromptState::Queued && !items.empty())
-      submission.admissionAnchor = items.back().first;
+        submission.state == PromptState::Queued &&
+        !authoritativeItems.ordered.empty())
+      submission.admissionAnchor = authoritativeItems.ordered.back().key;
 
-    const auto exact = std::ranges::find_if(items, [&](const auto &entry) {
-      const auto &[key, item] = entry;
-      return !claimed.contains(key) &&
-             stringValue(item->raw, "type") == "userMessage" &&
-             stringValue(item->raw, "clientId") ==
-                 submission.clientUserMessageId;
-    });
-    if (exact != items.end()) {
-      submission.materializedItem = exact->first;
-      submission.expectedTurnId = exact->first.turnId;
-      claimed.insert(exact->first);
+    const auto exact = authoritativeItems.userMessagesByClientId.find(
+        submission.clientUserMessageId);
+    if (exact == authoritativeItems.userMessagesByClientId.end() ||
+        claimed[exact->second])
       continue;
-    }
+    const AuthoritativeItemKey &key =
+        authoritativeItems.ordered[exact->second].key;
+    submission.materializedItem = key;
+    submission.expectedTurnId = key.turnId;
+    claimed[exact->second] = true;
+  }
+
+  for (PromptSubmission &submission : found->second) {
+    if (submission.materializedItem)
+      continue;
 
     // Semantic acknowledgement remains callback-only. Without protocol
     // client-id support, do not guess from text before that callback arrives.
@@ -295,30 +325,32 @@ void PromptCoordinator::reconcile(
 
     std::size_t firstCandidate = 0;
     if (submission.admissionAnchor) {
-      const auto anchor = std::ranges::find(
-          items, *submission.admissionAnchor,
-          [](const auto &entry) -> const AuthoritativeItemKey & {
-            return entry.first;
-          });
-      if (anchor != items.end())
-        firstCandidate =
-            static_cast<std::size_t>(std::distance(items.begin(), anchor)) + 1;
+      const auto anchor =
+          authoritativeItems.position(*submission.admissionAnchor);
+      if (anchor)
+        firstCandidate = *anchor + 1;
     }
 
-    for (std::size_t index = firstCandidate; index < items.size(); ++index) {
-      const auto &[key, item] = items[index];
-      if (submission.expectedTurnId && key.turnId != *submission.expectedTurnId)
-        continue;
-      if (claimed.contains(key) ||
-          stringValue(item->raw, "type") != "userMessage" ||
-          userMessageText(item->raw).trimmed() != submission.prompt.trimmed())
-        continue;
-      submission.materializedItem = key;
-      if (!submission.expectedTurnId)
-        submission.expectedTurnId = key.turnId;
-      claimed.insert(key);
-      break;
-    }
+    const std::string turnId =
+        submission.expectedTurnId.value_or(std::string{});
+    const QString prompt = submission.prompt.trimmed();
+    auto candidate = authoritativeItems.userMessagesByText.lower_bound(
+        {turnId, prompt, firstCandidate});
+    while (candidate != authoritativeItems.userMessagesByText.end() &&
+           std::get<0>(*candidate) == turnId &&
+           std::get<1>(*candidate) == prompt &&
+           claimed[std::get<2>(*candidate)])
+      candidate = authoritativeItems.userMessagesByText.erase(candidate);
+    if (candidate == authoritativeItems.userMessagesByText.end() ||
+        std::get<0>(*candidate) != turnId || std::get<1>(*candidate) != prompt)
+      continue;
+    const std::size_t index = std::get<2>(*candidate);
+    const AuthoritativeItemKey &key = authoritativeItems.ordered[index].key;
+    submission.materializedItem = key;
+    if (!submission.expectedTurnId)
+      submission.expectedTurnId = key.turnId;
+    claimed[index] = true;
+    authoritativeItems.userMessagesByText.erase(candidate);
   }
 }
 

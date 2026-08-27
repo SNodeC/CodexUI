@@ -15,8 +15,11 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace codexui::codex::middle {
@@ -54,6 +57,26 @@ struct PromptDispatch {
   nlohmann::json turnOptions = nlohmann::json::object();
   std::optional<std::string> expectedTurnId;
 };
+
+struct AuthoritativeItem {
+  AuthoritativeItemKey key;
+  const ItemPresentation *presentation = nullptr;
+};
+
+struct AuthoritativeItemIndex {
+  std::string threadId;
+  std::vector<AuthoritativeItem> ordered;
+  std::map<AuthoritativeItemKey, std::size_t> positions;
+  std::unordered_map<std::string, std::size_t> userMessagesByClientId;
+  std::set<std::tuple<std::string, QString, std::size_t>> userMessagesByText;
+
+  [[nodiscard]] std::optional<std::size_t>
+  position(const AuthoritativeItemKey &key) const noexcept;
+};
+
+[[nodiscard]] AuthoritativeItemIndex
+indexAuthoritativeItems(const std::string &threadId,
+                        const ThreadPresentation *thread);
 
 // Owns only local submission state. It does not schedule timers and cannot
 // infer acknowledgement from presentation events: acknowledge() is intended
@@ -93,6 +116,8 @@ public:
   // the content fallback is used only after the real operation callback.
   void reconcile(const std::string &threadId,
                  const ThreadPresentation &authoritativeThread);
+  void reconcile(const std::string &threadId,
+                 AuthoritativeItemIndex &authoritativeItems);
 
   // Resolved submissions remain as lightweight authoritative-item aliases so
   // their visual keys stay stable. Dispatch-only payload is released after the

@@ -23,7 +23,7 @@ public:
       AuthoritativeHistoryPageSize;
 
   [[nodiscard]] static ConversationSnapshot
-  project(const std::string &threadId,
+  project(const AuthoritativeItemIndex &authoritativeItems,
           const ThreadPresentation *authoritativeThread,
           std::span<const PromptSubmission> localSubmissions,
           std::size_t authoritativeItemLimit, qint64 nowMilliseconds);
@@ -32,8 +32,10 @@ public:
   project(const ThreadPresentation &authoritativeThread,
           std::span<const PromptSubmission> localSubmissions,
           std::size_t authoritativeItemLimit, qint64 nowMilliseconds) {
-    return project(authoritativeThread.id, &authoritativeThread,
-                   localSubmissions, authoritativeItemLimit, nowMilliseconds);
+    const auto items =
+        indexAuthoritativeItems(authoritativeThread.id, &authoritativeThread);
+    return project(items, &authoritativeThread, localSubmissions,
+                   authoritativeItemLimit, nowMilliseconds);
   }
 };
 

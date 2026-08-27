@@ -592,19 +592,14 @@ void ShellWidget::Impl::renderConversation() {
   const std::string projectionId = selectedThreadId.empty() && newThreadIntent
                                        ? std::string(DraftThreadId)
                                        : selectedThreadId;
+  middle::AuthoritativeItemIndex authoritativeItems =
+      middle::indexAuthoritativeItems(projectionId, thread);
   if (thread)
-    prompts.reconcile(selectedThreadId, *thread);
+    prompts.reconcile(selectedThreadId, authoritativeItems);
   if (!projectionId.empty())
     prompts.compactResolved(projectionId, now);
   const auto submissions = prompts.submissions(projectionId);
-  std::size_t authoritativeCount = 0;
-  if (thread) {
-    for (const std::string &turnId : thread->turnOrder) {
-      const auto turn = thread->turns.find(turnId);
-      if (turn != thread->turns.end())
-        authoritativeCount += turn->second.itemOrder.size();
-    }
-  }
+  const std::size_t authoritativeCount = authoritativeItems.ordered.size();
   HistoryWindow &history = historyWindows[projectionId];
   const middle::ConversationView::Mode viewportMode =
       middleRegion->conversation().modeForThread(projectionId);
@@ -618,8 +613,8 @@ void ShellWidget::Impl::renderConversation() {
   }
   history.lastAuthoritativeCount = authoritativeCount;
   const middle::ConversationSnapshot snapshot =
-      middle::ConversationProjection::project(projectionId, thread, submissions,
-                                              history.effective, now);
+      middle::ConversationProjection::project(
+          authoritativeItems, thread, submissions, history.effective, now);
   if (!thread && newThreadIntent)
     middleRegion->conversation().setEmptyMessage(
         QStringLiteral("Send a message to create this thread."));
