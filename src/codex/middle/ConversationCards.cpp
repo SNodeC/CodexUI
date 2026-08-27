@@ -749,6 +749,22 @@ public:
       break;
     case CardKind::AgentMessage:
       owner->setProperty("messageRole", "agent");
+      title->setText(QStringLiteral("Codex"));
+      title->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+      phaseSeparator = makeLabel(QStringLiteral("•"), "messagePhase", header);
+      phaseSeparator->setObjectName(
+          QStringLiteral("agentMessagePhaseSeparator"));
+      phaseSeparator->setWordWrap(false);
+      phaseSeparator->setSizePolicy(QSizePolicy::Fixed,
+                                    QSizePolicy::Preferred);
+      phase = makeLabel({}, "messagePhase", header);
+      phase->setObjectName(QStringLiteral("agentMessagePhase"));
+      phase->setWordWrap(false);
+      phase->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+      headerLayout->setStretch(0, 0);
+      headerLayout->insertWidget(1, phaseSeparator, 0, Qt::AlignVCenter);
+      headerLayout->insertWidget(2, phase, 0, Qt::AlignVCenter);
+      headerLayout->insertStretch(3, 1);
       body = makeMarkdownLabel({}, content);
       contentLayout->addWidget(body);
       break;
@@ -861,9 +877,13 @@ public:
     }
     case CardKind::AgentMessage: {
       const auto &message = std::get<AgentMessageData>(data.payload);
-      title->setText(message.finalAnswer
-                         ? QStringLiteral("Codex • final answer")
-                         : QStringLiteral("Codex • update"));
+      phase->setText(message.finalAnswer ? QStringLiteral("final answer")
+                                         : QStringLiteral("update"));
+      const QString phaseStatus = message.finalAnswer
+                                      ? QStringLiteral("completed")
+                                      : QStringLiteral("inProgress");
+      setStatusTone(phaseSeparator, phaseStatus);
+      setStatusTone(phase, phaseStatus);
       layout->setContentsMargins(12, message.finalAnswer ? 10 : 8, 12,
                                  message.finalAnswer ? 10 : 8);
       setVisibleMarkdown(body, message.text);
@@ -1004,6 +1024,8 @@ public:
   QWidget *header = nullptr;
   QHBoxLayout *headerLayout = nullptr;
   QLabel *title = nullptr;
+  QLabel *phaseSeparator = nullptr;
+  QLabel *phase = nullptr;
   CardDisclosureButton *disclosure = nullptr;
   QWidget *content = nullptr;
   QVBoxLayout *contentLayout = nullptr;

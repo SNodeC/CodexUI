@@ -8,6 +8,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QFont>
 #include <QImage>
 #include <QLabel>
 #include <QScrollArea>
@@ -680,6 +681,8 @@ bool testPromptAdmissionFollowOwnership() {
 }
 
 bool testMutableCardsAndCommandOutput() {
+  const QString originalStyleSheet = qApp->styleSheet();
+  qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
   const std::string thread = "card-thread";
   TurnSection section{"turn:cards", "turn", {}};
   section.cards = {
@@ -771,6 +774,10 @@ bool testMutableCardsAndCommandOutput() {
       CardKey{AuthoritativeItemKey{thread, "turn", "user"}})];
   auto *agentCardWidget = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "agent"}})];
+  auto *agentPhaseSeparator = agentCardWidget->findChild<QLabel *>(
+      QStringLiteral("agentMessagePhaseSeparator"));
+  auto *agentPhase = agentCardWidget->findChild<QLabel *>(
+      QStringLiteral("agentMessagePhase"));
   const auto userLabels = userCard->findChildren<QLabel *>();
   result &=
       expect(std::ranges::any_of(
@@ -784,9 +791,16 @@ bool testMutableCardsAndCommandOutput() {
                           label->text().contains(QStringLiteral("<table"));
                  }),
              "authoritative user messages render GitHub Markdown tables");
-  result &=
-      expect(titleText(agentCardWidget) == QStringLiteral("Codex • update"),
-             "interim agent messages identify their update phase plainly");
+  result &= expect(
+      titleText(agentCardWidget) == QStringLiteral("Codex") &&
+          agentPhaseSeparator &&
+          agentPhaseSeparator->text() == QStringLiteral("•") && agentPhase &&
+          agentPhase->text() == QStringLiteral("update") &&
+          agentPhase->property("tone").toString() == QStringLiteral("active") &&
+          agentPhaseSeparator->property("tone").toString() ==
+              QStringLiteral("active") &&
+          agentPhase->font().weight() == QFont::Normal,
+      "interim agent messages show a normal-weight active update phase");
   auto *filesCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "files"}})];
   auto *planCard = identities[stableKey(
@@ -858,9 +872,16 @@ bool testMutableCardsAndCommandOutput() {
     result &= expect(card(view, stableKey(value.key)) ==
                          identities[stableKey(value.key)],
                      "same-key same-kind card updates in place");
-  result &= expect(titleText(agentCardWidget) ==
-                       QStringLiteral("Codex • final answer"),
-                   "final agent messages identify their answer phase plainly");
+  result &= expect(
+      titleText(agentCardWidget) == QStringLiteral("Codex") &&
+          agentPhaseSeparator && agentPhase &&
+          agentPhase->text() == QStringLiteral("final answer") &&
+          agentPhase->property("tone").toString() ==
+              QStringLiteral("success") &&
+          agentPhaseSeparator->property("tone").toString() ==
+              QStringLiteral("success") &&
+          agentPhase->font().weight() == QFont::Normal,
+      "final agent messages show a normal-weight success answer phase");
   result &=
       expect(!output->isHidden() && output->minimumHeight() == 0 &&
                  output->maximumHeight() == 220 &&
@@ -916,6 +937,8 @@ bool testMutableCardsAndCommandOutput() {
                  view.verticalScrollBar()->maximum() == hiddenOuterRange &&
                  commandCard->height() == hiddenCommandHeight,
              "hidden command output causes no delayed outer reflow");
+  qApp->setStyleSheet(originalStyleSheet);
+  spin();
   return result;
 }
 
