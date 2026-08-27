@@ -2,6 +2,7 @@
 
 #include "codex/middle/ConversationCards.h"
 
+#include "codex/PresentationStatus.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QColor>
@@ -271,37 +272,22 @@ bool setVisibleMarkdown(QLabel *label, const QString &markdown) {
 }
 
 QString displayStatus(const QString &status) {
-  if (status == QStringLiteral("inProgress") ||
-      status == QStringLiteral("active") ||
-      status == QStringLiteral("running") ||
-      status == QStringLiteral("started"))
-    return QStringLiteral("Running");
-  if (status == QStringLiteral("completed") || status == QStringLiteral("idle"))
-    return QStringLiteral("Completed");
-  if (status == QStringLiteral("failed") ||
-      status == QStringLiteral("systemError"))
-    return QStringLiteral("Failed");
-  if (status == QStringLiteral("interrupted"))
-    return QStringLiteral("Interrupted");
-  if (status.isEmpty())
-    return QStringLiteral("Unknown");
-  return status;
+  const QByteArray encoded = status.toUtf8();
+  const std::string_view display =
+      classifyStatus(std::string_view(encoded.constData(),
+                                      static_cast<std::size_t>(encoded.size())))
+          .text;
+  return QString::fromUtf8(display.data(),
+                           static_cast<qsizetype>(display.size()));
 }
 
 QString statusTone(const QString &status) {
-  if (status == QStringLiteral("inProgress") ||
-      status == QStringLiteral("active") ||
-      status == QStringLiteral("running") ||
-      status == QStringLiteral("started"))
-    return QStringLiteral("active");
-  if (status == QStringLiteral("completed") || status == QStringLiteral("idle"))
-    return QStringLiteral("success");
-  if (status == QStringLiteral("failed") ||
-      status == QStringLiteral("systemError"))
-    return QStringLiteral("danger");
-  if (status == QStringLiteral("interrupted"))
-    return QStringLiteral("warning");
-  return {};
+  const QByteArray encoded = status.toUtf8();
+  const std::string_view tone =
+      classifyStatus(std::string_view(encoded.constData(),
+                                      static_cast<std::size_t>(encoded.size())))
+          .tone;
+  return QString::fromLatin1(tone.data(), static_cast<qsizetype>(tone.size()));
 }
 
 void setStatusTone(QLabel *label, const QString &status) {

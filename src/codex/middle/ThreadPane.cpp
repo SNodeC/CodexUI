@@ -3,6 +3,7 @@
 #include "codex/middle/ThreadPane.h"
 
 #include "codex/PresentationModel.h"
+#include "codex/PresentationStatus.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QAbstractItemView>
@@ -56,36 +57,8 @@ public:
   }
 };
 
-QString text(const std::string &value) {
+QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
-}
-
-QString displayStatus(const std::string &status) {
-  if (status == "inProgress" || status == "active" || status == "running" ||
-      status == "started")
-    return QStringLiteral("Running");
-  if (status == "completed" || status == "idle")
-    return QStringLiteral("Completed");
-  if (status == "failed" || status == "systemError")
-    return QStringLiteral("Failed");
-  if (status == "interrupted")
-    return QStringLiteral("Interrupted");
-  return status.empty() ? QStringLiteral("Unknown") : text(status);
-}
-
-QString statusTone(const std::string &status, std::size_t requestCount) {
-  if (requestCount != 0)
-    return QStringLiteral("warning");
-  if (status == "active" || status == "inProgress" || status == "running" ||
-      status == "started")
-    return QStringLiteral("active");
-  if (status == "completed" || status == "idle")
-    return QStringLiteral("success");
-  if (status == "failed" || status == "systemError")
-    return QStringLiteral("danger");
-  if (status == "interrupted")
-    return QStringLiteral("warning");
-  return {};
 }
 
 QLabel *makeLabel(QString value, const char *kind = "body") {
@@ -117,8 +90,10 @@ void updateRow(QWidget *row, const ThreadPresentation &thread,
   if (requestCount != 0)
     titleText.prepend(QStringLiteral("! "));
   title->setText(titleText);
-  status->setText(displayStatus(thread.status));
-  const QString tone = statusTone(thread.status, requestCount);
+  const PresentationStatus classified = classifyStatus(thread.status);
+  status->setText(text(classified.text));
+  const QString tone =
+      requestCount != 0 ? QStringLiteral("warning") : text(classified.tone);
   if (status->property("tone").toString() != tone) {
     status->setProperty("tone", tone);
     status->style()->unpolish(status);
@@ -128,10 +103,9 @@ void updateRow(QWidget *row, const ThreadPresentation &thread,
   QString color = QStringLiteral("#cacccf");
   if (requestCount != 0)
     color = QStringLiteral("#a85d0c");
-  else if (thread.status == "active" || thread.status == "inProgress" ||
-           thread.status == "running" || thread.status == "started")
+  else if (classified.kind == StatusKind::Active)
     color = QStringLiteral("#2f6feb");
-  else if (thread.status == "failed" || thread.status == "systemError")
+  else if (classified.kind == StatusKind::Failed)
     color = QStringLiteral("#c43d4d");
   dot->setStyleSheet(
       QStringLiteral("background:%1;border-radius:5px;").arg(color));
