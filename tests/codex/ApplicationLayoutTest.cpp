@@ -934,8 +934,20 @@ bool testInspectorDetailParity() {
          {"status", "inProgress"},
          {"agentThreadId", "child-thread"},
          {"resultText",
-          "Agent result summary.\n\n* First rendered finding.\n* Second "
-          "rendered finding."},
+          "No blocking Inspector findings.\n\n"
+          "* Typed snapshots cover all rendered Plan, Agent, and Request "
+          "fields, with default equality and optional first-render state.\n"
+          "* Rendering now uses those typed projections directly.\n"
+          "* Request thread titles participate in equality, so rename-only "
+          "changes invalidate correctly.\n"
+          "* optional size correctly distinguishes absent questions from a "
+          "visible zero questions.\n"
+          "* The added Application Layout regression is minimal and well "
+          "targeted: render the original title, rename without changing the "
+          "request, refresh, then require the new label and reject the old "
+          "one.\n"
+          "* Application Layout tests pass offscreen.\n\n"
+          "No files were edited."},
          {"senderThreadId", "sender-thread"},
          {"receiverThreadIds",
           nlohmann::json::array({"receiver-one", "receiver-two"})}}}},
@@ -944,7 +956,25 @@ bool testInspectorDetailParity() {
        {"turnId", "turn-one"},
        {"itemId", "agent-one"}}));
   model.applyEvent(presentation::event(
-      3, 1, "pending-request.upsert",
+      3, 1, "agents.activity.upsert",
+      {{"activity",
+        {{"id", "agent-two"},
+         {"type", "subAgentActivity"},
+         {"status", "completed"},
+         {"agentThreadId", "child-thread-two"},
+         {"resultText",
+          "No blocking Git snapshot issues found.\n\n"
+          "* Add defaulted equality to the file and snapshot records.\n"
+          "* Replace both retained snapshot hashes with optional typed "
+          "snapshots so an initial empty result still renders.\n"
+          "* Preserve the current snapshot fallback and repository context "
+          "behavior."}}}},
+      presentation::Authority::Merge,
+      {{"threadId", "owner-thread"},
+       {"turnId", "turn-one"},
+       {"itemId", "agent-two"}}));
+  model.applyEvent(presentation::event(
+      4, 1, "pending-request.upsert",
       {{"requestId", "request-one"},
        {"category", "userInput"},
        {"request",
@@ -976,9 +1006,29 @@ bool testInspectorDetailParity() {
                    "running agent status uses the canonical active tone");
   auto *agentResult =
       inspector.findChild<QLabel *>(QStringLiteral("agentResult"));
+  auto *agentFrame =
+      agentResult ? qobject_cast<QFrame *>(agentResult->parentWidget()) : nullptr;
+  const int statusBottom =
+      agentStatus && agentFrame
+          ? agentStatus->mapTo(agentFrame, QPoint()).y() + agentStatus->height()
+          : 0;
+  const int resultTop = agentResult && agentFrame
+                            ? agentResult->mapTo(agentFrame, QPoint()).y()
+                            : 0;
+  const int resultHeightForWidth =
+      agentResult ? agentResult->heightForWidth(agentResult->width()) : -1;
+  result &= expect(agentStatus && agentStatus->width() > 0 &&
+                       !agentStatus->visibleRegion().isEmpty(),
+                   "agent status occupies its metadata row instead of "
+                   "leaving an invisible gap");
   result &= expect(
-      agentResult && agentResult->alignment().testFlag(Qt::AlignTop),
-      "agent Markdown starts at the top of any surplus result-label height");
+      agentFrame && agentFrame->layout() && agentResult &&
+          resultTop - statusBottom <= agentFrame->layout()->spacing() &&
+          agentResult->alignment().testFlag(Qt::AlignTop) &&
+          resultHeightForWidth >= 0 &&
+          agentResult->height() >= resultHeightForWidth - 1 &&
+          agentResult->height() <= resultHeightForWidth + 1,
+      "long agent Markdown follows visible metadata without surplus height");
   inspector.tabs()->setCurrentIndex(3);
   spin(20);
   result &= expect(
@@ -986,7 +1036,7 @@ bool testInspectorDetailParity() {
           hasLabelContaining(inspector, QStringLiteral("3 questions")),
       "Requests show their thread title and retained question count");
   model.applyEvent(presentation::event(
-      4, 1, "thread.name.changed", {{"name", "Renamed title"}},
+      5, 1, "thread.name.changed", {{"name", "Renamed title"}},
       presentation::Authority::Replace, {{"threadId", "owner-thread"}}));
   inspector.refresh(model, "owner-thread");
   spin(20);

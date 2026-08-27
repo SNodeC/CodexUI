@@ -330,7 +330,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
       if (desired != desiredCards.end() && card != cards_.end() &&
           desired->second.section == section &&
           desired->second.position == static_cast<int>(index) &&
-          card->second->cardKind() == desired->second.data->kind)
+          card->second->canApply(*desired->second.data))
         continue;
       delete section->cards->takeAt(static_cast<int>(index));
       if (desired != desiredCards.end())
@@ -342,7 +342,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
   for (auto iterator = cards_.begin(); iterator != cards_.end();) {
     const auto desired = desiredCards.find(iterator->first);
     if (desired != desiredCards.end() &&
-        iterator->second->cardKind() == desired->second.data->kind) {
+        iterator->second->canApply(*desired->second.data)) {
       ++iterator;
       continue;
     }
@@ -393,8 +393,10 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
         desired.insert = true;
         visualChange = true;
       }
-      if (desired.insert)
+      if (desired.insert) {
         section->cards->insertWidget(cardIndex, card);
+        card->show();
+      }
       ++cardIndex;
     }
     section->cardKeys = std::move(desiredSection.cardKeys);

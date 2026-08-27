@@ -101,6 +101,7 @@ QString applicationStyleSheet() {
         QLabel[kind="applicationTitle"] { font-weight: 700; }
         QLabel[kind="brand"] { font-size: %3pt; font-weight: 600; }
         QLabel[kind="title"] { font-size: %2pt; font-weight: 600; }
+        QLabel[kind="messagePhase"] { font-size: %2pt; font-weight: 400; }
         QLabel[kind="body"] { font-size: %2pt; }
         QLabel[kind="meta"] { color: #667085; font-size: %1pt; }
         QLabel[kind="small"] { color: #667085; font-size: %1pt; }

@@ -61,6 +61,7 @@ struct PromptDispatch {
 struct AuthoritativeItem {
   AuthoritativeItemKey key;
   const ItemPresentation *presentation = nullptr;
+  std::optional<LocalPromptKey> localPromptKey;
 };
 
 struct AuthoritativeItemIndex {
@@ -114,7 +115,8 @@ public:
   // Correlates prompts with authoritative userMessage items. Exact client ids
   // may bind before acknowledgement so the awaiting card is never duplicated;
   // the content fallback is used only after the real operation callback. Fully
-  // resolved submissions are removed after their accepted transition.
+  // resolved submissions are removed after their accepted transition while a
+  // compact visual-key alias retains the admitted card identity.
   void reconcile(const std::string &threadId,
                  const ThreadPresentation &authoritativeThread,
                  qint64 nowMilliseconds);
@@ -135,8 +137,12 @@ public:
 private:
   [[nodiscard]] PromptSubmission *find(const std::string &threadId,
                                        std::uint64_t submissionId) noexcept;
+  void applyVisualAliases(const std::string &threadId,
+                          AuthoritativeItemIndex &authoritativeItems) const;
 
   std::map<std::string, std::vector<PromptSubmission>> byThread;
+  std::map<std::string, std::map<AuthoritativeItemKey, LocalPromptKey>>
+      visualAliasesByThread;
   std::uint64_t nextSubmissionId = 1;
   std::uint64_t nextAdmissionOrdinal = 1;
 };

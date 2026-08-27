@@ -666,13 +666,25 @@ public:
     refreshFoldPresentation();
   }
 
+  [[nodiscard]] bool canApply(const VisibleCardData &next) const noexcept {
+    return current.key == next.key && (current.kind == next.kind ||
+                                       (current.kind == CardKind::LocalPrompt &&
+                                        next.kind == CardKind::UserMessage));
+  }
+
   bool apply(const VisibleCardData &next) {
-    if (current.key != next.key || current.kind != next.kind) {
+    if (!canApply(next)) {
       Q_ASSERT_X(false, "ConversationCard::apply",
-                 "a persistent conversation card cannot change key or kind");
+                 "a persistent conversation card received an incompatible "
+                 "key or kind");
       return false;
     }
-    const bool presentationChanged = !presentationEquals(current, next);
+    const bool becomingAuthoritative = current.kind == CardKind::LocalPrompt &&
+                                       next.kind == CardKind::UserMessage;
+    const bool presentationChanged =
+        becomingAuthoritative || !presentationEquals(current, next);
+    if (becomingAuthoritative)
+      promoteToAuthoritativeUserMessage();
     current = next;
     if (!presentationChanged)
       return false;
@@ -681,6 +693,23 @@ public:
     owner->updateGeometry();
     owner->update();
     return true;
+  }
+
+  void promoteToAuthoritativeUserMessage() {
+    if (animationTimer)
+      animationTimer->stop();
+    owner->setObjectName(QStringLiteral("conversationCard"));
+    owner->setProperty("conversationCardKind",
+                       static_cast<int>(CardKind::UserMessage));
+    owner->setProperty("messageRole", "user");
+    owner->setStyleSheet(QString{});
+    for (QLabel *label : {title, body, metadata})
+      if (label)
+        label->setStyleSheet(QString{});
+    if (metadata) {
+      metadata->clear();
+      metadata->hide();
+    }
   }
 
   void setCollapsed(bool next) {
@@ -720,6 +749,22 @@ public:
       break;
     case CardKind::AgentMessage:
       owner->setProperty("messageRole", "agent");
+      title->setText(QStringLiteral("Codex"));
+      title->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+      phaseSeparator = makeLabel(QStringLiteral("•"), "messagePhase", header);
+      phaseSeparator->setObjectName(
+          QStringLiteral("agentMessagePhaseSeparator"));
+      phaseSeparator->setWordWrap(false);
+      phaseSeparator->setSizePolicy(QSizePolicy::Fixed,
+                                    QSizePolicy::Preferred);
+      phase = makeLabel({}, "messagePhase", header);
+      phase->setObjectName(QStringLiteral("agentMessagePhase"));
+      phase->setWordWrap(false);
+      phase->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+      headerLayout->setStretch(0, 0);
+      headerLayout->insertWidget(1, phaseSeparator, 0, Qt::AlignVCenter);
+      headerLayout->insertWidget(2, phase, 0, Qt::AlignVCenter);
+      headerLayout->insertStretch(3, 1);
       body = makeMarkdownLabel({}, content);
       contentLayout->addWidget(body);
       break;
@@ -779,8 +824,9 @@ public:
       break;
     case CardKind::LocalPrompt:
       owner->setObjectName(QStringLiteral("pendingPromptCard"));
-      owner->setStyleSheet(QStringLiteral(
-          "QFrame#pendingPromptCard{background:transparent;border:0;}"));
+      owner->setStyleSheet(
+          QStringLiteral("QFrame#pendingPromptCard{background:transparent;"
+                         "border:1px solid transparent;border-radius:8px;}"));
       title->setText(QStringLiteral("You"));
       body = makeMarkdownLabel({}, content);
       metadata = makeLabel({}, "meta", content);
@@ -831,8 +877,13 @@ public:
     }
     case CardKind::AgentMessage: {
       const auto &message = std::get<AgentMessageData>(data.payload);
-      title->setText(message.finalAnswer ? QStringLiteral("Codex")
-                                         : QStringLiteral("Codex activity"));
+      phase->setText(message.finalAnswer ? QStringLiteral("final answer")
+                                         : QStringLiteral("update"));
+      const QString phaseStatus = message.finalAnswer
+                                      ? QStringLiteral("completed")
+                                      : QStringLiteral("inProgress");
+      setStatusTone(phaseSeparator, phaseStatus);
+      setStatusTone(phase, phaseStatus);
       layout->setContentsMargins(12, message.finalAnswer ? 10 : 8, 12,
                                  message.finalAnswer ? 10 : 8);
       setVisibleMarkdown(body, message.text);
@@ -973,6 +1024,8 @@ public:
   QWidget *header = nullptr;
   QHBoxLayout *headerLayout = nullptr;
   QLabel *title = nullptr;
+  QLabel *phaseSeparator = nullptr;
+  QLabel *phase = nullptr;
   CardDisclosureButton *disclosure = nullptr;
   QWidget *content = nullptr;
   QVBoxLayout *contentLayout = nullptr;
@@ -1020,6 +1073,10 @@ void ConversationCard::restoreCommandOutputScrollState(
 
 bool ConversationCard::apply(const VisibleCardData &data) {
   return impl_->apply(data);
+}
+
+bool ConversationCard::canApply(const VisibleCardData &data) const noexcept {
+  return impl_->canApply(data);
 }
 
 void ConversationCard::paintEvent(QPaintEvent *event) {

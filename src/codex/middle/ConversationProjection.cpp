@@ -321,7 +321,8 @@ ConversationSnapshot ConversationProjection::project(
     if (binding != bindings.end() &&
         binding->second->localCardVisible(nowMilliseconds))
       continue;
-    CardKey visualKey = item.key;
+    CardKey visualKey =
+        item.localPromptKey ? CardKey{*item.localPromptKey} : CardKey{item.key};
     if (binding != bindings.end())
       visualKey = LocalPromptKey{binding->second->id};
     const std::size_t position =
