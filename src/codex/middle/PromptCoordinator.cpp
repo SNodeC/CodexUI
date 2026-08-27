@@ -78,6 +78,8 @@ QString promptWithFileLinks(QString prompt,
       continue;
     QString target =
         QUrl::fromLocalFile(attachment.path).toString(QUrl::FullyEncoded);
+    target.replace(QLatin1Char('['), QStringLiteral("%5B"));
+    target.replace(QLatin1Char(']'), QStringLiteral("%5D"));
     target.replace(QLatin1Char('('), QStringLiteral("%28"));
     target.replace(QLatin1Char(')'), QStringLiteral("%29"));
     links.push_back(QStringLiteral("- [%1](%2)")
