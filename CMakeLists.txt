@@ -49,6 +49,7 @@ set(
     src/codex/NewThreadDialog.h
     src/codex/PresentationModel.cpp
     src/codex/PresentationModel.h
+    src/codex/PresentationStatus.h
     src/codex/PresentationProtocol.cpp
     src/codex/PresentationProtocol.h
     src/codex/ProtocolNormalizer.cpp

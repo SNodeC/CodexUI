@@ -8,6 +8,7 @@
 #include "codex/NewThreadDialog.h"
 #include "codex/PendingRequestDialog.h"
 #include "codex/PresentationModel.h"
+#include "codex/PresentationStatus.h"
 #include "codex/TurnSettingsWidget.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationProjection.h"
@@ -55,7 +56,7 @@ namespace {
 
 constexpr auto DraftThreadId = "draft:new-thread";
 
-QString text(const std::string &value) {
+QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
 }
 
@@ -65,16 +66,6 @@ std::string stringValue(const nlohmann::json &object, const char *key) {
   const auto found = object.find(key);
   return found != object.end() && found->is_string() ? found->get<std::string>()
                                                      : std::string{};
-}
-
-QString displayStatus(const std::string &status) {
-  if (status == "inProgress" || status == "active")
-    return QStringLiteral("Running");
-  if (status == "completed" || status == "idle")
-    return QStringLiteral("Completed");
-  if (status == "failed" || status == "systemError")
-    return QStringLiteral("Failed");
-  return status.empty() ? QStringLiteral("Unknown") : text(status);
 }
 
 std::string safeMessage(const nlohmann::json &value) {
@@ -641,9 +632,9 @@ void ShellWidget::Impl::renderConversation() {
   middleRegion->conversation().reconcile(snapshot);
 
   if (thread) {
-    middleRegion->setThreadHeading(text(thread->title),
-                                   text(thread->cwd) + QStringLiteral("  |  ") +
-                                       displayStatus(thread->status));
+    middleRegion->setThreadHeading(
+        text(thread->title), text(thread->cwd) + QStringLiteral("  |  ") +
+                                 text(classifyStatus(thread->status).text));
   } else if (newThreadIntent) {
     middleRegion->setThreadHeading(QStringLiteral("New thread"),
                                    newThreadWorkspace.isEmpty()
@@ -712,8 +703,7 @@ void ShellWidget::Impl::refreshStatus() {
   if (thread) {
     for (const auto &[id, agent] : thread->agents) {
       static_cast<void>(id);
-      if (agent.status == "inProgress" || agent.status == "running" ||
-          agent.status == "started")
+      if (isActiveStatus(agent.status))
         ++runningAgents;
     }
   }
@@ -795,7 +785,8 @@ void ShellWidget::Impl::refreshStatus() {
     workspace = text(thread->cwd);
     threadContextStatus->setText(
         QStringLiteral("%1  |  %2")
-            .arg(text(thread->title), displayStatus(thread->status)));
+            .arg(text(thread->title),
+                 text(classifyStatus(thread->status).text)));
     agentActivityStatus->setText(
         thread->agents.empty()
             ? QStringLiteral("No agent activity")

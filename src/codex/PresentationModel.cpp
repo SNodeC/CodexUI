@@ -3,6 +3,7 @@
 #include "codex/PresentationModel.h"
 
 #include "codex/PresentationProtocol.h"
+#include "codex/PresentationStatus.h"
 
 #include <algorithm>
 
@@ -54,15 +55,6 @@ std::string statusValue(const nlohmann::json &value) {
   if (value.is_object())
     return stringValue(value, "type");
   return {};
-}
-
-bool isActiveTurnStatus(const std::string &status) {
-  return status == "inProgress" || status == "active";
-}
-
-bool isTerminalTurnStatus(const std::string &status) {
-  return status == "completed" || status == "interrupted" ||
-         status == "failed";
 }
 
 std::string requestKey(const nlohmann::json &value) {
@@ -284,7 +276,7 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
         TurnPresentation &turn = upsertTurn(
             thread->second,
             memberValue(data, "turn", nlohmann::json::object()), false);
-        if (isActiveTurnStatus(turn.status))
+        if (isActiveStatus(turn.status))
           thread->second.status = "active";
       }
     } else if (action == "models.list") {
@@ -466,7 +458,7 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
     else if (lifecycle == "started" && embeddedStatus.empty())
       turn["status"] = "inProgress";
     TurnPresentation &updated = upsertTurn(thread, turn, false);
-    if (lifecycle == "started" && isActiveTurnStatus(updated.status))
+    if (lifecycle == "started" && isActiveStatus(updated.status))
       thread.status = "active";
     correlateAgentThread(threadId);
     return;
@@ -569,14 +561,12 @@ PresentationModel::activeTurnId(const std::string &threadId) const {
   const ThreadPresentation *value = thread(threadId);
   if (!value)
     return std::nullopt;
-  if (!value->status.empty() && value->status != "active" &&
-      value->status != "inProgress" && value->status != "running")
+  if (!value->status.empty() && !isActiveStatus(value->status))
     return std::nullopt;
   for (auto iterator = value->turnOrder.rbegin();
        iterator != value->turnOrder.rend(); ++iterator) {
     const auto turn = value->turns.find(*iterator);
-    if (turn != value->turns.end() && (turn->second.status == "inProgress" ||
-                                       turn->second.status == "active"))
+    if (turn != value->turns.end() && isActiveStatus(turn->second.status))
       return turn->first;
   }
   return std::nullopt;
@@ -701,8 +691,7 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
     if (replaceTurns) {
       for (const auto &[turnId, terminalStatus] : terminalTurnStatuses) {
         const auto turn = result.turns.find(turnId);
-        if (turn != result.turns.end() &&
-            isActiveTurnStatus(turn->second.status)) {
+        if (turn != result.turns.end() && isActiveStatus(turn->second.status)) {
           turn->second.status = terminalStatus;
           turn->second.raw["status"] = terminalStatus;
         }
@@ -710,11 +699,10 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
     }
     const bool containsActiveTurn =
         std::ranges::any_of(result.turns, [](const auto &entry) {
-          return isActiveTurnStatus(entry.second.status);
+          return isActiveStatus(entry.second.status);
         });
-    if (!containsActiveTurn && isActiveTurnStatus(result.status) &&
-        (previousThreadStatus == "idle" ||
-         previousThreadStatus == "completed")) {
+    if (!containsActiveTurn && isActiveStatus(result.status) &&
+        classifyStatus(previousThreadStatus).kind == StatusKind::Completed) {
       result.status = previousThreadStatus;
       result.raw["status"] = previousThreadStatus;
     }
@@ -744,9 +732,9 @@ TurnPresentation &PresentationModel::upsertTurn(ThreadPresentation &thread,
     mergePreservingCompleteness(result.raw, turnFields);
   const std::string status = statusValue(memberValue(raw, "status"));
   if (!status.empty() &&
-      !(isTerminalTurnStatus(result.status) && isActiveTurnStatus(status)))
+      !(isTerminalTurnStatus(result.status) && isActiveStatus(status)))
     result.status = status;
-  if (isTerminalTurnStatus(result.status) && isActiveTurnStatus(status))
+  if (isTerminalTurnStatus(result.status) && isActiveStatus(status))
     result.raw["status"] = result.status;
   const auto items = raw.find("items");
   if (items != raw.end() && items->is_array()) {

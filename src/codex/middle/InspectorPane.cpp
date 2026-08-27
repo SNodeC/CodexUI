@@ -4,6 +4,7 @@
 
 #include "codex/DiffViewer.h"
 #include "codex/PresentationModel.h"
+#include "codex/PresentationStatus.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QDateTime>
@@ -33,7 +34,7 @@ constexpr int InfoChoicePage = 0;
 constexpr int StatePage = 1;
 constexpr int ProtocolPage = 2;
 
-QString text(const std::string &value) {
+QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
 }
 
@@ -64,32 +65,6 @@ std::string stringValue(const nlohmann::json &object, const char *key) {
                                                      : std::string{};
 }
 
-QString displayStatus(const std::string &status) {
-  if (status == "inProgress" || status == "active" || status == "running" ||
-      status == "started")
-    return QStringLiteral("Running");
-  if (status == "completed" || status == "idle")
-    return QStringLiteral("Completed");
-  if (status == "failed" || status == "systemError")
-    return QStringLiteral("Failed");
-  if (status == "interrupted")
-    return QStringLiteral("Interrupted");
-  return status.empty() ? QStringLiteral("Unknown") : text(status);
-}
-
-const char *statusTone(const std::string &status) {
-  if (status == "inProgress" || status == "active" || status == "running" ||
-      status == "started")
-    return "active";
-  if (status == "completed" || status == "idle")
-    return "success";
-  if (status == "failed" || status == "systemError")
-    return "danger";
-  if (status == "interrupted")
-    return "warning";
-  return nullptr;
-}
-
 QLabel *makeLabel(QString value, const char *kind = "body") {
   auto *label = new QLabel(std::move(value));
   label->setProperty("kind", kind);
@@ -102,9 +77,10 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
 }
 
 QLabel *statusLabel(const std::string &status) {
-  auto *label = makeLabel(displayStatus(status), "meta");
-  if (const char *tone = statusTone(status))
-    label->setProperty("tone", tone);
+  const PresentationStatus classified = classifyStatus(status);
+  auto *label = makeLabel(text(classified.text), "meta");
+  if (!classified.tone.empty())
+    label->setProperty("tone", classified.tone.data());
   return label;
 }
 
