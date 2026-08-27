@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
-#ifndef CODEXUI_GREENFIELD_CODEX_MIDDLE_COMPOSERPANE_H
-#define CODEXUI_GREENFIELD_CODEX_MIDDLE_COMPOSERPANE_H
+#ifndef CODEXUI_CODEX_MIDDLE_COMPOSERPANE_H
+#define CODEXUI_CODEX_MIDDLE_COMPOSERPANE_H
 
 #include "codex/FileSelectionDialog.h"
 
@@ -106,4 +106,4 @@ private:
 } // namespace middle
 } // namespace codexui::codex
 
-#endif // CODEXUI_GREENFIELD_CODEX_MIDDLE_COMPOSERPANE_H
+#endif // CODEXUI_CODEX_MIDDLE_COMPOSERPANE_H

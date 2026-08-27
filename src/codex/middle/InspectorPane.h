@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
-#ifndef CODEXUI_GREENFIELD_CODEX_MIDDLE_INSPECTORPANE_H
-#define CODEXUI_GREENFIELD_CODEX_MIDDLE_INSPECTORPANE_H
+#ifndef CODEXUI_CODEX_MIDDLE_INSPECTORPANE_H
+#define CODEXUI_CODEX_MIDDLE_INSPECTORPANE_H
 
 #include <QByteArray>
 #include <QFrame>
@@ -16,6 +16,7 @@
 
 class QLabel;
 class QPlainTextEdit;
+class QStackedWidget;
 class QTabWidget;
 class QVBoxLayout;
 
@@ -61,7 +62,7 @@ private:
   std::function<void()> hideAction;
 
   QTabWidget *inspectorTabs = nullptr;
-  QTabWidget *infoTabs = nullptr;
+  QStackedWidget *infoStack = nullptr;
   QWidget *planContent = nullptr;
   QVBoxLayout *planLayout = nullptr;
   QWidget *agentsContent = nullptr;
@@ -75,7 +76,6 @@ private:
 
   QByteArray planSnapshot;
   QByteArray agentsSnapshot;
-  QByteArray changesSnapshot;
   QByteArray requestsSnapshot;
   QByteArray stateSnapshot;
   QByteArray protocolStatsSnapshot;

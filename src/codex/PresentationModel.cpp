@@ -39,6 +39,15 @@ bool boolValue(const nlohmann::json &object, const char *key,
              : fallback;
 }
 
+void updateTimestamp(const nlohmann::json &object, const char *key,
+                     std::optional<std::int64_t> &target) {
+  if (!object.is_object())
+    return;
+  const auto iterator = object.find(key);
+  if (iterator != object.end() && iterator->is_number_integer())
+    target = iterator->get<std::int64_t>();
+}
+
 std::string statusValue(const nlohmann::json &value) {
   if (value.is_string())
     return value.get<std::string>();
@@ -47,8 +56,41 @@ std::string statusValue(const nlohmann::json &value) {
   return {};
 }
 
+bool isActiveTurnStatus(const std::string &status) {
+  return status == "inProgress" || status == "active";
+}
+
+bool isTerminalTurnStatus(const std::string &status) {
+  return status == "completed" || status == "interrupted" ||
+         status == "failed";
+}
+
 std::string requestKey(const nlohmann::json &value) {
   return value.is_null() ? std::string{} : value.dump();
+}
+
+void appendUnique(std::vector<std::string> &values, const std::string &value,
+                  std::size_t maximum) {
+  if (value.empty() ||
+      std::find(values.begin(), values.end(), value) != values.end())
+    return;
+  if (values.size() == maximum)
+    values.erase(values.begin());
+  values.push_back(value);
+}
+
+void retainRepositoryHints(ThreadPresentation &thread,
+                           const nlohmann::json &item) {
+  const std::string type = stringValue(item, "type");
+  if (type == "commandExecution")
+    appendUnique(thread.commandCwds, stringValue(item, "cwd"), 64);
+  if (type != "fileChange")
+    return;
+  const auto changes = item.find("changes");
+  if (changes == item.end() || !changes->is_array())
+    return;
+  for (const auto &change : *changes)
+    appendUnique(thread.changedPaths, stringValue(change, "path"), 512);
 }
 
 bool isSpawnActivity(const nlohmann::json &activity) {
@@ -102,6 +144,21 @@ void mergePreservingCompleteness(nlohmann::json &target,
   }
 }
 
+void mergeExplicitMembers(nlohmann::json &target,
+                          const nlohmann::json &update) {
+  if (!target.is_object() || !update.is_object()) {
+    target = update;
+    return;
+  }
+  for (const auto &[key, value] : update.items()) {
+    auto current = target.find(key);
+    if (current != target.end() && current->is_object() && value.is_object())
+      mergeExplicitMembers(*current, value);
+    else
+      target[key] = value;
+  }
+}
+
 void appendText(nlohmann::json &item, const char *field,
                 const nlohmann::json &params) {
   const std::string delta = stringValue(params, "delta");
@@ -148,6 +205,12 @@ void applyDomainAuthority(
   }
   if (authority == "replace" || !domains.contains(type)) {
     domains[type] = data;
+    return;
+  }
+  if (type == "thread.settings.changed") {
+    // A null setting explicitly restores the app-server default. Preserve it
+    // instead of treating it as an incomplete presentation update.
+    mergeExplicitMembers(domains[type], data);
     return;
   }
   mergePreservingCompleteness(domains[type], data);
@@ -217,9 +280,13 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
     } else if (action == "turn.start") {
       const std::string threadId = stringValue(scope, "threadId");
       const auto thread = threads.find(threadId);
-      if (thread != threads.end())
-        upsertTurn(thread->second,
-                   memberValue(data, "turn", nlohmann::json::object()), false);
+      if (thread != threads.end()) {
+        TurnPresentation &turn = upsertTurn(
+            thread->second,
+            memberValue(data, "turn", nlohmann::json::object()), false);
+        if (isActiveTurnStatus(turn.status))
+          thread->second.status = "active";
+      }
     } else if (action == "models.list") {
       const nlohmann::json listedModels =
           memberValue(data, "models", nlohmann::json::array());
@@ -382,9 +449,25 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
   retainDomainEvent(type, data, scope,
                     presentation::stringMember(event, "authority"));
 
+  if (type == "thread.settings.changed" && data.is_object()) {
+    thread.latestSettingsUpdate = data.value("threadSettings", data);
+    ++thread.settingsRevision;
+  }
+
   if (type == "turn.upsert") {
-    upsertTurn(thread, memberValue(data, "turn", nlohmann::json::object()),
-               false);
+    nlohmann::json turn =
+        memberValue(data, "turn", nlohmann::json::object());
+    const std::string lifecycle = stringValue(data, "lifecycle");
+    const std::string embeddedStatus =
+        statusValue(memberValue(turn, "status"));
+    if (lifecycle == "completed" &&
+        !isTerminalTurnStatus(embeddedStatus))
+      turn["status"] = "completed";
+    else if (lifecycle == "started" && embeddedStatus.empty())
+      turn["status"] = "inProgress";
+    TurnPresentation &updated = upsertTurn(thread, turn, false);
+    if (lifecycle == "started" && isActiveTurnStatus(updated.status))
+      thread.status = "active";
     correlateAgentThread(threadId);
     return;
   }
@@ -436,9 +519,11 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
     return;
   }
   if (type == "conversation.file-change.patch-replaced") {
-    if (ItemPresentation *item = findItem(scope))
+    if (ItemPresentation *item = findItem(scope)) {
       item->raw["changes"] =
           memberValue(data, "changes", nlohmann::json::array());
+      retainRepositoryHints(thread, item->raw);
+    }
     return;
   }
   if (type == "conversation.mcp.progress") {
@@ -483,6 +568,9 @@ std::optional<std::string>
 PresentationModel::activeTurnId(const std::string &threadId) const {
   const ThreadPresentation *value = thread(threadId);
   if (!value)
+    return std::nullopt;
+  if (!value->status.empty() && value->status != "active" &&
+      value->status != "inProgress" && value->status != "running")
     return std::nullopt;
   for (auto iterator = value->turnOrder.rbegin();
        iterator != value->turnOrder.rend(); ++iterator) {
@@ -563,6 +651,14 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
     result.id = id;
     orderedThreads.insert(orderedThreads.begin(), id);
   }
+  const std::string previousThreadStatus = result.status;
+  std::unordered_map<std::string, std::string> terminalTurnStatuses;
+  if (replaceTurns) {
+    for (const auto &[turnId, turn] : result.turns) {
+      if (isTerminalTurnStatus(turn.status))
+        terminalTurnStatuses.emplace(turnId, turn.status);
+    }
+  }
   nlohmann::json threadFields = raw;
   threadFields.erase("turns");
   if (replaceTurns)
@@ -585,6 +681,9 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
   const auto status = raw.find("status");
   if (status != raw.end())
     result.status = statusValue(*status);
+  updateTimestamp(raw, "createdAt", result.createdAt);
+  updateTimestamp(raw, "updatedAt", result.updatedAt);
+  updateTimestamp(raw, "recencyAt", result.recencyAt);
   result.archived = boolValue(raw, "archived", result.archived);
 
   const auto turns = raw.find("turns");
@@ -594,9 +693,31 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
       result.turns.clear();
       result.agentOrder.clear();
       result.agents.clear();
+      result.commandCwds.clear();
+      result.changedPaths.clear();
     }
     for (const auto &turn : *turns)
       upsertTurn(result, turn, replaceTurns);
+    if (replaceTurns) {
+      for (const auto &[turnId, terminalStatus] : terminalTurnStatuses) {
+        const auto turn = result.turns.find(turnId);
+        if (turn != result.turns.end() &&
+            isActiveTurnStatus(turn->second.status)) {
+          turn->second.status = terminalStatus;
+          turn->second.raw["status"] = terminalStatus;
+        }
+      }
+    }
+    const bool containsActiveTurn =
+        std::ranges::any_of(result.turns, [](const auto &entry) {
+          return isActiveTurnStatus(entry.second.status);
+        });
+    if (!containsActiveTurn && isActiveTurnStatus(result.status) &&
+        (previousThreadStatus == "idle" ||
+         previousThreadStatus == "completed")) {
+      result.status = previousThreadStatus;
+      result.raw["status"] = previousThreadStatus;
+    }
   }
   return result;
 }
@@ -622,8 +743,11 @@ TurnPresentation &PresentationModel::upsertTurn(ThreadPresentation &thread,
   else
     mergePreservingCompleteness(result.raw, turnFields);
   const std::string status = statusValue(memberValue(raw, "status"));
-  if (!status.empty())
+  if (!status.empty() &&
+      !(isTerminalTurnStatus(result.status) && isActiveTurnStatus(status)))
     result.status = status;
+  if (isTerminalTurnStatus(result.status) && isActiveTurnStatus(status))
+    result.raw["status"] = result.status;
   const auto items = raw.find("items");
   if (items != raw.end() && items->is_array()) {
     if (replaceItems) {
@@ -655,6 +779,7 @@ ItemPresentation &PresentationModel::upsertItem(ThreadPresentation &thread,
     mergePreservingCompleteness(result.raw, raw);
   }
   const std::string type = stringValue(result.raw, "type");
+  retainRepositoryHints(thread, result.raw);
   if (type == "subAgentActivity" || type == "collabAgentToolCall") {
     upsertAgentActivity(
         thread,

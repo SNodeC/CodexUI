@@ -4,6 +4,7 @@
 
 #include "codex/DiffViewer.h"
 #include "codex/PresentationModel.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QDateTime>
 #include <QHBoxLayout>
@@ -12,6 +13,8 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QStackedWidget>
+#include <QStyleOptionButton>
 #include <QTabWidget>
 #include <QTextDocument>
 #include <QTimer>
@@ -26,9 +29,20 @@ namespace codexui::codex::middle {
 namespace {
 
 constexpr int MaximumProtocolLines = 2000;
+constexpr int InfoChoicePage = 0;
+constexpr int StatePage = 1;
+constexpr int ProtocolPage = 2;
 
 QString text(const std::string &value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
+}
+
+QStringList texts(const std::vector<std::string> &values) {
+  QStringList result;
+  result.reserve(static_cast<qsizetype>(values.size()));
+  for (const std::string &value : values)
+    result.push_back(text(value));
+  return result;
 }
 
 QString joinedStrings(const nlohmann::json &value) {
@@ -51,13 +65,29 @@ std::string stringValue(const nlohmann::json &object, const char *key) {
 }
 
 QString displayStatus(const std::string &status) {
-  if (status == "inProgress" || status == "active")
+  if (status == "inProgress" || status == "active" || status == "running" ||
+      status == "started")
     return QStringLiteral("Running");
   if (status == "completed" || status == "idle")
     return QStringLiteral("Completed");
   if (status == "failed" || status == "systemError")
     return QStringLiteral("Failed");
+  if (status == "interrupted")
+    return QStringLiteral("Interrupted");
   return status.empty() ? QStringLiteral("Unknown") : text(status);
+}
+
+const char *statusTone(const std::string &status) {
+  if (status == "inProgress" || status == "active" || status == "running" ||
+      status == "started")
+    return "active";
+  if (status == "completed" || status == "idle")
+    return "success";
+  if (status == "failed" || status == "systemError")
+    return "danger";
+  if (status == "interrupted")
+    return "warning";
+  return nullptr;
 }
 
 QLabel *makeLabel(QString value, const char *kind = "body") {
@@ -71,9 +101,19 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
   return label;
 }
 
+QLabel *statusLabel(const std::string &status) {
+  auto *label = makeLabel(displayStatus(status), "meta");
+  if (const char *tone = statusTone(status))
+    label->setProperty("tone", tone);
+  return label;
+}
+
 QLabel *makeMarkdownLabel(const QString &value) {
   QTextDocument document;
-  document.setMarkdown(value, QTextDocument::MarkdownNoHTML);
+  document.setMarkdown(
+      value,
+      QTextDocument::MarkdownFeatures(QTextDocument::MarkdownDialectGitHub) |
+          QTextDocument::MarkdownNoHTML);
   auto *label = new QLabel(document.toHtml());
   label->setProperty("kind", "body");
   label->setTextFormat(Qt::RichText);
@@ -104,6 +144,23 @@ QByteArray bytes(const nlohmann::json &value) {
                     static_cast<qsizetype>(serialized.size()));
 }
 
+class InfoChoiceButton final : public QPushButton {
+protected:
+  void paintEvent(QPaintEvent *event) override {
+    QPushButton::paintEvent(event);
+    QStyleOptionButton option;
+    initStyleOption(&option);
+    const QRect contents = style()->subElementRect(
+        QStyle::SE_PushButtonContents, &option, this);
+    const QRect indicator(contents.right() - 18, contents.top(), 18,
+                          contents.height());
+    UiStyle::drawChevron(
+        this, indicator, option.state & QStyle::State_Enabled,
+        option.state & (QStyle::State_MouseOver | QStyle::State_HasFocus),
+        UiStyle::ChevronDirection::Right);
+  }
+};
+
 QFrame *agentFrame(const AgentPresentation &agent) {
   auto *frame = new QFrame;
   frame->setProperty("kind", "raised");
@@ -116,13 +173,23 @@ QFrame *agentFrame(const AgentPresentation &agent) {
       : tool.empty()               ? QStringLiteral("Agent activity")
                                    : QStringLiteral("Agent %1").arg(text(tool));
   layout->addWidget(makeLabel(title, "title"));
-  QStringList metadata{displayStatus(agent.status)};
+  QStringList metadata;
   for (const char *key : {"agentPath", "tool", "model", "reasoningEffort"}) {
     const QString value = text(stringValue(agent.raw, key));
     if (!value.isEmpty())
       metadata << value;
   }
-  layout->addWidget(makeLabel(metadata.join(QStringLiteral("  |  ")), "meta"));
+  auto *metadataRow = new QHBoxLayout;
+  metadataRow->setContentsMargins(0, 0, 0, 0);
+  metadataRow->setSpacing(6);
+  metadataRow->addWidget(statusLabel(agent.status));
+  if (!metadata.isEmpty())
+    metadataRow->addWidget(
+        makeLabel(QStringLiteral("|  ") +
+                      metadata.join(QStringLiteral("  |  ")),
+                  "meta"));
+  metadataRow->addStretch();
+  layout->addLayout(metadataRow);
   const QString prompt = text(stringValue(agent.raw, "prompt"));
   if (!prompt.isEmpty())
     layout->addWidget(makeLabel(prompt));
@@ -143,6 +210,47 @@ QFrame *agentFrame(const AgentPresentation &agent) {
     layout->addWidget(
         makeLabel(identities.join(QStringLiteral("  |  ")), "meta"));
   return frame;
+}
+
+QPushButton *infoChoice(const QString &title, const QString &description) {
+  auto *button = new InfoChoiceButton;
+  button->setProperty("kind", "infoChoice");
+  button->setMinimumHeight(64);
+  button->setCursor(Qt::PointingHandCursor);
+
+  auto *layout = new QHBoxLayout(button);
+  layout->setContentsMargins(12, 9, 30, 9);
+  layout->setSpacing(8);
+  auto *copy = new QVBoxLayout;
+  copy->setSpacing(2);
+  auto *titleLabel = makeLabel(title, "title");
+  auto *descriptionLabel = makeLabel(description, "meta");
+  titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+  descriptionLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+  titleLabel->setTextInteractionFlags(Qt::NoTextInteraction);
+  descriptionLabel->setTextInteractionFlags(Qt::NoTextInteraction);
+  copy->addWidget(titleLabel);
+  copy->addWidget(descriptionLabel);
+  layout->addLayout(copy, 1);
+  return button;
+}
+
+QWidget *infoDetail(const QString &title, QWidget *content,
+                    QPushButton **backButton) {
+  auto *page = new QWidget;
+  auto *layout = new QVBoxLayout(page);
+  layout->setContentsMargins(8, 8, 8, 8);
+  layout->setSpacing(8);
+  auto *heading = new QHBoxLayout;
+  *backButton = new QPushButton(QStringLiteral("‹  Info"));
+  (*backButton)->setProperty("kind", "subtle");
+  (*backButton)->setFixedHeight(28);
+  heading->addWidget(*backButton);
+  heading->addStretch();
+  heading->addWidget(makeLabel(title, "title"));
+  layout->addLayout(heading);
+  layout->addWidget(content, 1);
+  return page;
 }
 
 struct ScrollPosition {
@@ -173,7 +281,11 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   outer->setContentsMargins(18, 14, 20, 0);
   outer->setSpacing(0);
   auto *heading = new QHBoxLayout;
-  heading->addWidget(makeLabel(QStringLiteral("INSPECTOR"), "section"));
+  heading->addStrut(24);
+  auto *sectionTitle = makeLabel(QStringLiteral("INSPECTOR"), "panelHeader");
+  sectionTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  sectionTitle->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+  heading->addWidget(sectionTitle);
   heading->addStretch();
   auto *hide = new QPushButton(QStringLiteral("Hide"));
   hide->setProperty("kind", "subtle");
@@ -184,7 +296,11 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   });
   heading->addWidget(hide);
   outer->addLayout(heading);
-  outer->addSpacing(7);
+  auto *headerDivider = new QFrame;
+  headerDivider->setProperty("kind", "standardDivider");
+  headerDivider->setFixedHeight(1);
+  outer->addWidget(headerDivider);
+  outer->addSpacing(8);
 
   inspectorTabs = new QTabWidget;
   inspectorTabs->setDocumentMode(true);
@@ -204,15 +320,14 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
 
   const auto makeScroll = [](QWidget *content) {
     auto *scroll = new QScrollArea;
+    scroll->setProperty("kind", "inspectorScroll");
+    scroll->setFrameShape(QFrame::NoFrame);
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setWidget(content);
     return scroll;
   };
 
-  auto *stateContent = new QWidget;
-  auto *stateLayout = new QVBoxLayout(stateContent);
-  stateLayout->setContentsMargins(8, 8, 8, 8);
   stateView = new QPlainTextEdit;
   stateView->setObjectName(QStringLiteral("stateInfoView"));
   stateView->setProperty("kind", "infoViewer");
@@ -221,11 +336,9 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   stateView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   stateView->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
   stateView->verticalScrollBar()->setProperty("kind", "infoViewer");
-  stateLayout->addWidget(stateView);
-
   auto *protocolContent = new QWidget;
   auto *protocolLayout = new QVBoxLayout(protocolContent);
-  protocolLayout->setContentsMargins(8, 8, 8, 8);
+  protocolLayout->setContentsMargins(0, 0, 0, 0);
   protocolLayout->setSpacing(6);
   protocolLog = new QPlainTextEdit;
   protocolLog->setObjectName(QStringLiteral("protocolInfoLog"));
@@ -250,27 +363,54 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   protocolLayout->addWidget(protocolLog, 1);
   protocolLayout->addWidget(protocolStats);
 
-  infoTabs = new QTabWidget;
-  infoTabs->setObjectName(QStringLiteral("infoTabs"));
-  infoTabs->setDocumentMode(true);
-  infoTabs->addTab(stateContent, QStringLiteral("State"));
-  infoTabs->addTab(protocolContent, QStringLiteral("Protocol"));
+  infoStack = new QStackedWidget;
+  infoStack->setObjectName(QStringLiteral("infoStack"));
+  auto *choices = new QWidget;
+  auto *choicesLayout = new QVBoxLayout(choices);
+  choicesLayout->setContentsMargins(8, 8, 8, 8);
+  choicesLayout->setSpacing(8);
+  auto *stateChoice = infoChoice(
+      QStringLiteral("State"), QStringLiteral("Current application state"));
+  stateChoice->setObjectName(QStringLiteral("stateInfoChoice"));
+  auto *protocolChoice = infoChoice(
+      QStringLiteral("Protocol"), QStringLiteral("App-server protocol messages"));
+  protocolChoice->setObjectName(QStringLiteral("protocolInfoChoice"));
+  choicesLayout->addWidget(stateChoice);
+  choicesLayout->addWidget(protocolChoice);
+  choicesLayout->addStretch();
+
+  QPushButton *stateBack = nullptr;
+  QPushButton *protocolBack = nullptr;
+  infoStack->addWidget(choices);
+  infoStack->addWidget(infoDetail(QStringLiteral("State"), stateView,
+                                  &stateBack));
+  infoStack->addWidget(infoDetail(QStringLiteral("Protocol"), protocolContent,
+                                  &protocolBack));
+  connect(stateChoice, &QPushButton::clicked, this, [this] {
+    infoStack->setCurrentIndex(StatePage);
+    refreshCurrentTab();
+  });
+  connect(protocolChoice, &QPushButton::clicked, this, [this] {
+    infoStack->setCurrentIndex(ProtocolPage);
+    showProtocolTail();
+    refreshCurrentTab();
+  });
+  const auto showInfoChoices = [this] {
+    infoStack->setCurrentIndex(InfoChoicePage);
+  };
+  connect(stateBack, &QPushButton::clicked, this, showInfoChoices);
+  connect(protocolBack, &QPushButton::clicked, this, showInfoChoices);
 
   inspectorTabs->addTab(makeScroll(planContent), QStringLiteral("Plan"));
   inspectorTabs->addTab(makeScroll(agentsContent), QStringLiteral("Agents"));
   inspectorTabs->addTab(diffViewer, QStringLiteral("Changes"));
   inspectorTabs->addTab(makeScroll(requestsContent),
                         QStringLiteral("Requests"));
-  inspectorTabs->addTab(infoTabs, QStringLiteral("Info"));
+  inspectorTabs->addTab(infoStack, QStringLiteral("Info"));
   outer->addWidget(inspectorTabs, 1);
 
   connect(inspectorTabs, &QTabWidget::currentChanged, this,
           [this](int) { refreshCurrentTab(); });
-  connect(infoTabs, &QTabWidget::currentChanged, this, [this](int index) {
-    if (index == 1)
-      showProtocolTail();
-    refreshCurrentTab();
-  });
 }
 
 void InspectorPane::setHideAction(std::function<void()> hide) {
@@ -307,9 +447,9 @@ void InspectorPane::refreshCurrentTab() {
     refreshRequests();
     break;
   case 4:
-    if (infoTabs->currentIndex() == 0)
+    if (infoStack->currentIndex() == StatePage)
       refreshState();
-    else {
+    else if (infoStack->currentIndex() == ProtocolPage) {
       showProtocolTail();
       refreshProtocolStats();
     }
@@ -374,12 +514,12 @@ void InspectorPane::refreshPlan() {
     for (const auto &step :
          planTurn->plan.value("steps", nlohmann::json::array())) {
       auto *row = new QFrame;
-      row->setProperty("kind", "summary");
+      row->setProperty("kind", "raised");
       auto *layout = new QVBoxLayout(row);
-      layout->setContentsMargins(9, 7, 9, 7);
+      layout->setContentsMargins(12, 10, 12, 10);
+      layout->setSpacing(6);
       layout->addWidget(makeLabel(text(stringValue(step, "step"))));
-      layout->addWidget(
-          makeLabel(displayStatus(stringValue(step, "status")), "meta"));
+      layout->addWidget(statusLabel(stringValue(step, "status")));
       planLayout->addWidget(row);
     }
   } else if (planItem) {
@@ -446,57 +586,11 @@ void InspectorPane::refreshAgents() {
 
 void InspectorPane::refreshChanges() {
   const ThreadPresentation *thread = currentModel->thread(currentThreadId);
-  QString liveDiff;
-  std::vector<DiffFilePresentation> retained;
-  if (thread) {
-    for (auto id = thread->turnOrder.rbegin();
-         id != thread->turnOrder.rend() && liveDiff.isEmpty(); ++id) {
-      const auto turn = thread->turns.find(*id);
-      if (turn == thread->turns.end())
-        continue;
-      const auto domain = turn->second.domains.find("turn.diff.changed");
-      if (domain != turn->second.domains.end())
-        liveDiff = text(stringValue(domain->second, "diff"));
-    }
-    if (liveDiff.isEmpty()) {
-      for (auto id = thread->turnOrder.rbegin();
-           id != thread->turnOrder.rend() && retained.empty(); ++id) {
-        const auto turn = thread->turns.find(*id);
-        if (turn == thread->turns.end())
-          continue;
-        for (auto itemId = turn->second.itemOrder.rbegin();
-             itemId != turn->second.itemOrder.rend(); ++itemId) {
-          const auto item = turn->second.items.find(*itemId);
-          if (item == turn->second.items.end() ||
-              stringValue(item->second.raw, "type") != "fileChange")
-            continue;
-          for (const auto &change :
-               item->second.raw.value("changes", nlohmann::json::array())) {
-            QString kind = text(stringValue(change, "kind"));
-            if (kind.isEmpty() && change.contains("kind") &&
-                change["kind"].is_object())
-              kind = text(stringValue(change["kind"], "type"));
-            retained.push_back({text(stringValue(change, "path")),
-                                std::move(kind),
-                                text(stringValue(change, "diff"))});
-          }
-          if (!retained.empty())
-            break;
-        }
-      }
-    }
-  }
-  nlohmann::json signature{{"threadId", currentThreadId},
-                           {"live", liveDiff.toStdString()}};
-  for (const auto &change : retained)
-    signature["retained"].push_back({change.path.toStdString(),
-                                     change.kind.toStdString(),
-                                     change.diff.toStdString()});
-  const QByteArray next = bytes(signature);
-  if (next == changesSnapshot)
-    return;
-  changesSnapshot = next;
-  diffViewer->setChanges(std::move(liveDiff), std::move(retained));
+  diffViewer->setRepositoryContext(
+      text(currentThreadId), thread ? text(thread->cwd) : QString{},
+      thread ? texts(thread->commandCwds) : QStringList{},
+      thread ? texts(thread->changedPaths) : QStringList{});
+  diffViewer->refreshRepository();
 }
 
 void InspectorPane::refreshRequests() {
@@ -524,10 +618,11 @@ void InspectorPane::refreshRequests() {
   for (const auto &[id, request] :
        currentModel->pendingRequestPresentations()) {
     auto *frame = new QFrame;
-    frame->setProperty("kind", "summary");
+    frame->setProperty("kind", "raised");
+    frame->setProperty("tone", "warning");
     auto *layout = new QVBoxLayout(frame);
-    layout->setContentsMargins(9, 7, 9, 7);
-    layout->setSpacing(5);
+    layout->setContentsMargins(12, 10, 12, 10);
+    layout->setSpacing(6);
     layout->addWidget(makeLabel(text(request.kind), "title"));
     QString threadContext = text(request.threadId);
     if (const ThreadPresentation *thread =
@@ -560,7 +655,8 @@ void InspectorPane::refreshRequests() {
     actions->setContentsMargins(0, 2, 0, 0);
     auto *deny = new QPushButton(QStringLiteral("Deny"));
     auto *review = new QPushButton(QStringLiteral("Review"));
-    review->setProperty("kind", "primary");
+    deny->setProperty("kind", "destructive");
+    review->setProperty("kind", "request");
     deny->setFixedHeight(28);
     review->setFixedHeight(28);
     connect(deny, &QPushButton::clicked, this, [this, id] {

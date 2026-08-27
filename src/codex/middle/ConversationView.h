@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
-#ifndef CODEXUI_GREENFIELD_CODEX_MIDDLE_CONVERSATIONVIEW_H
-#define CODEXUI_GREENFIELD_CODEX_MIDDLE_CONVERSATIONVIEW_H
+#ifndef CODEXUI_CODEX_MIDDLE_CONVERSATIONVIEW_H
+#define CODEXUI_CODEX_MIDDLE_CONVERSATIONVIEW_H
 
 #include "codex/middle/ConversationCards.h"
 
@@ -16,6 +16,7 @@
 class QLabel;
 class QEvent;
 class QPushButton;
+class QSpacerItem;
 class QVariantAnimation;
 class QVBoxLayout;
 class QWheelEvent;
@@ -82,6 +83,8 @@ private:
   class TurnSectionWidget;
 
   void setThread(const std::string &threadId);
+  void setCardCollapsed(const std::string &key, ConversationCard *card,
+                        bool collapsed);
   [[nodiscard]] Anchor captureAnchor() const;
   void restoreAnchor(const Anchor &anchor);
   void storeCurrentThreadState();
@@ -98,8 +101,8 @@ private:
   QWidget *content_ = nullptr;
   QVBoxLayout *contentLayout_ = nullptr;
   QPushButton *loadMore_ = nullptr;
+  QSpacerItem *trailingSpace_ = nullptr;
   QLabel *empty_ = nullptr;
-  QWidget *trailingSpace_ = nullptr;
   QVariantAnimation *followAnimation_ = nullptr;
   std::function<void()> loadMoreAction_;
 
@@ -111,9 +114,12 @@ private:
   std::unordered_map<std::string, ThreadScrollState> threadStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>
       commandOutputStates_;
+  std::unordered_map<std::string, bool> cardCollapsedStates_;
 
   Mode mode_ = Mode::Following;
   int trailingSpaceHeight_ = 0;
+  int foldBottomCompensation_ = 0;
+  int naturalContentHeight_ = 0;
   int contentHeight_ = 0;
   QString emptyMessage_;
   bool applying_ = false;
@@ -126,4 +132,4 @@ private:
 
 } // namespace codexui::codex::middle
 
-#endif // CODEXUI_GREENFIELD_CODEX_MIDDLE_CONVERSATIONVIEW_H
+#endif // CODEXUI_CODEX_MIDDLE_CONVERSATIONVIEW_H

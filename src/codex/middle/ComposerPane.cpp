@@ -27,6 +27,7 @@ namespace {
 
 constexpr int ControlHeight = 32;
 constexpr int HorizontalInset = 24;
+constexpr int DividerOutset = 10;
 constexpr int BottomInset = 12;
 constexpr int AttachmentRowHeight = 28;
 constexpr int MaximumVisibleAttachments = 4;
@@ -60,7 +61,7 @@ ComposerPane::ComposerPane(QWidget *anchor)
     : QWidget(anchor), anchor_(anchor), reserve_(new QWidget(anchor)) {
   Q_ASSERT(anchor_);
   setObjectName(QStringLiteral("composerOverlay"));
-  setAttribute(Qt::WA_StyledBackground, false);
+  setAttribute(Qt::WA_StyledBackground, true);
   setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
   anchor_->installEventFilter(this);
 
@@ -70,10 +71,21 @@ ComposerPane::ComposerPane(QWidget *anchor)
 
   auto *root = new QVBoxLayout(this);
   root->setContentsMargins(0, 8, 0, 0);
-  root->setSpacing(0);
+  root->setSpacing(8);
 
-  attention_ = new QFrame(this);
-  attention_->setProperty("kind", "amberBadge");
+  auto *boundary = new QFrame(this);
+  boundary->setProperty("kind", "standardDivider");
+  boundary->setFixedHeight(1);
+  root->addWidget(boundary);
+
+  auto *surfaces = new QWidget(this);
+  auto *surfacesLayout = new QVBoxLayout(surfaces);
+  surfacesLayout->setContentsMargins(DividerOutset, 0, DividerOutset, 0);
+  surfacesLayout->setSpacing(8);
+  root->addWidget(surfaces);
+
+  attention_ = new QFrame(surfaces);
+  attention_->setProperty("kind", "orangeBadge");
   auto *attentionLayout = new QHBoxLayout(attention_);
   attentionLayout->setContentsMargins(10, 6, 10, 6);
   attentionLayout->addWidget(makeLabel(
@@ -81,6 +93,8 @@ ComposerPane::ComposerPane(QWidget *anchor)
   attentionLayout->addStretch();
   auto *deny = new QPushButton(QStringLiteral("Deny"), attention_);
   auto *review = new QPushButton(QStringLiteral("Review"), attention_);
+  deny->setProperty("kind", "destructive");
+  review->setProperty("kind", "request");
   attentionLayout->addWidget(deny);
   attentionLayout->addWidget(review);
   connect(deny, &QPushButton::clicked, this, [this] {
@@ -92,12 +106,12 @@ ComposerPane::ComposerPane(QWidget *anchor)
       actions_.review();
   });
   attention_->hide();
-  root->addWidget(attention_);
+  surfacesLayout->addWidget(attention_);
 
-  turnSettings_ = new TurnSettingsWidget(this);
-  root->addWidget(turnSettings_);
+  turnSettings_ = new TurnSettingsWidget(surfaces);
+  surfacesLayout->addWidget(turnSettings_);
 
-  composer_ = new QFrame(this);
+  composer_ = new QFrame(surfaces);
   composer_->setProperty("kind", "composer");
   auto *composerLayout = new QVBoxLayout(composer_);
   composerLayout->setContentsMargins(10, 8, 8, 8);
@@ -151,7 +165,7 @@ ComposerPane::ComposerPane(QWidget *anchor)
   composerGrid_->addWidget(promptEditor_, 0, 1);
   composerGrid_->addWidget(sendButton_, 0, 2);
   composerLayout->addWidget(composerBody_);
-  root->addWidget(composer_);
+  surfacesLayout->addWidget(composer_);
 
   connect(sendButton_, &QPushButton::clicked, this, [this] { submitDraft(); });
   connect(promptEditor_, &codexui::ExpandingPromptEditor::submitRequested, this,
@@ -252,7 +266,8 @@ void ComposerPane::synchronizeGeometry() {
     return;
   synchronizing_ = true;
 
-  const int width = std::max(0, anchor_->width() - 2 * HorizontalInset);
+  const int overlayInset = HorizontalInset - DividerOutset;
+  const int width = std::max(0, anchor_->width() - 2 * overlayInset);
   if (this->width() != width)
     resize(width, std::max(0, height()));
   layout()->activate();
@@ -271,8 +286,19 @@ void ComposerPane::synchronizeGeometry() {
   const int wantedExtra = canonicalCaptureEnabled_ && canonicalHeight_ > 0
                               ? std::max(0, wantedHeight - canonicalHeight_)
                               : 0;
-  setGeometry(HorizontalInset, availableHeight - wantedHeight, width,
-              wantedHeight);
+  const QRect wantedGeometry(overlayInset, availableHeight - wantedHeight,
+                             width, wantedHeight);
+  const bool geometryChanged = geometry() != wantedGeometry;
+  if (geometryChanged)
+    setGeometry(wantedGeometry);
+  // The natural height was calculated after the prompt layout changed, while
+  // the child layout still had the previous overlay geometry. Lay out the
+  // children once against the final rectangle so fixed surfaces cannot remain
+  // compressed and leave a false gap during upward growth.
+  if (geometryChanged) {
+    layout()->invalidate();
+    layout()->activate();
+  }
   raise();
 
   if (wantedExtra != extraHeight_) {
@@ -336,11 +362,7 @@ void ComposerPane::refreshAttachments() {
     remove->setAccessibleName(QStringLiteral("Remove %1").arg(attachment.name));
     remove->setToolTip(QStringLiteral("Remove attachment"));
     remove->setFixedSize(18, 18);
-    remove->setStyleSheet(
-        QStringLiteral("QPushButton{background:#b83a3a;color:#ffffff;border:0;"
-                       "border-radius:4px;padding:0;font-weight:700;}"
-                       "QPushButton:hover{background:#9f2f2f;}"
-                       "QPushButton:pressed{background:#842626;}"));
+    remove->setProperty("kind", "destructiveCompact");
     connect(remove, &QPushButton::clicked, this, [this, index] {
       if (index >= attachments_.size())
         return;

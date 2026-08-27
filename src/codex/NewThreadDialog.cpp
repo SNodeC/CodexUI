@@ -115,7 +115,7 @@ NewThreadDialog::NewThreadDialog(QString initialWorkspace, QWidget *parent)
   root->addWidget(scroll, 1);
 
   errorLabel = label({}, "meta");
-  errorLabel->setStyleSheet(QStringLiteral("color:#b83a3a;"));
+  errorLabel->setProperty("tone", "danger");
   errorLabel->hide();
   root->addWidget(errorLabel);
 

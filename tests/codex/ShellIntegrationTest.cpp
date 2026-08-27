@@ -10,15 +10,18 @@
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
 #include "codex/ui/ExpandingPromptEditor.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QComboBox>
 #include <QElapsedTimer>
 #include <QFrame>
 #include <QLabel>
 #include <QListWidget>
 #include <QTabWidget>
 #include <QThread>
+#include <QToolButton>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -273,6 +276,14 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
   spin(10);
   bool result = true;
 
+  auto *transportButton =
+      shell.findChild<QToolButton *>(QStringLiteral("transportButton"));
+  result &= expect(
+      transportButton &&
+          dynamic_cast<UiStyle::ChevronToolButton *>(transportButton) &&
+          transportButton->property("codexChevron").toBool(),
+      "transport and thread sorting use the canonical compact chevron button");
+
   auto *conversation = dynamic_cast<middle::ConversationView *>(
       shell.findChild<QWidget *>(QStringLiteral("conversationScroll")));
   result &= expect(conversation, "the shell owns the conversation viewport");
@@ -314,12 +325,91 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
   result &= expect(readA.has_value(), "selecting A requests hydration");
   if (!readA)
     return false;
+  result &= expect(selectThread(list, "thread-b"),
+                   "B can be selected while A is still hydrating");
+  const auto readB = peer.waitFor("thread.read", "thread-b");
+  result &= expect(readB.has_value(), "selecting B requests its own hydration");
+  if (!readB)
+    return false;
+  result &= peer.send(presentation::event(
+      sequence++, 1, "thread.upsert",
+      {{"thread", thread("thread-a", "A", "notLoaded")}}, Authority::Merge,
+      {{"threadId", "thread-a"}}));
   result &= peer.send(presentation::result(
       sequence++, 1, "thread.read",
       readA->value("correlationId", std::string{}), true,
       {{"thread", threadWithPlanAndAgent("thread-a", "A")}}, Authority::Replace,
       {{"threadId", "thread-a"}}));
   spin(10);
+  const auto rejoinA = peer.waitFor("thread.resume", "thread-a");
+  result &= expect(
+      rejoinA.has_value() &&
+          rejoinA->value("data", nlohmann::json::object())
+              .value("excludeTurns", false),
+      "a thread still refreshes settings after selection moves away");
+  if (!rejoinA)
+    return false;
+  result &= peer.send(presentation::result(
+      sequence++, 1, "thread.resume",
+      rejoinA->value("correlationId", std::string{}), true,
+      {{"thread",
+        {{"id", "thread-a"},
+         {"model", "gpt-resumed"},
+         {"reasoningEffort", "medium"},
+         {"sandbox", "workspaceWrite"}}}},
+      Authority::Merge, {{"threadId", "thread-a"}}));
+  spin(10);
+  auto *settingsModel =
+      shell.findChild<QComboBox *>(QStringLiteral("codexModel"));
+  auto *settingsEffort =
+      shell.findChild<QComboBox *>(QStringLiteral("codexEffort"));
+  result &= expect(
+      settingsModel && settingsEffort &&
+          settingsModel->currentData().toString() !=
+              QStringLiteral("gpt-resumed"),
+      "a background settings response does not alter visible B controls");
+  result &= peer.send(
+      presentation::result(sequence++, 1, "thread.read",
+                           readB->value("correlationId", std::string{}), true,
+                           {{"thread", thread("thread-b", "B")}},
+                           Authority::Replace, {{"threadId", "thread-b"}}));
+  const auto rejoinB = peer.waitFor("thread.resume", "thread-b");
+  result &= expect(rejoinB.has_value(),
+                   "B receives its independent settings refresh");
+  if (!rejoinB)
+    return false;
+  result &= peer.send(presentation::result(
+      sequence++, 1, "thread.resume",
+      rejoinB->value("correlationId", std::string{}), true,
+      {{"thread",
+        {{"id", "thread-b"},
+         {"model", "gpt-b"},
+         {"reasoningEffort", "low"}}}},
+      Authority::Merge, {{"threadId", "thread-b"}}));
+  spin(10);
+  result &= expect(selectThread(list, "thread-a"),
+                   "A can be selected again after background hydration");
+  spin(10);
+  result &= expect(
+      settingsModel && settingsEffort &&
+          settingsModel->currentData().toString() ==
+              QStringLiteral("gpt-resumed") &&
+          settingsEffort->currentData().toString() == QStringLiteral("medium"),
+      "A retains its background-refreshed effective settings");
+
+  const auto completeSettingsRefresh = [&](const std::string &threadId) {
+    const auto request = peer.waitFor("thread.resume", threadId);
+    const std::string message =
+        threadId + " receives its metadata-only settings refresh";
+    if (!expect(request.has_value(), message.c_str()) ||
+        !request)
+      return false;
+    return peer.send(presentation::result(
+        sequence++, 2, "thread.resume",
+        request->value("correlationId", std::string{}), true,
+        {{"thread", {{"id", threadId}}}}, Authority::Merge,
+        {{"threadId", threadId}}));
+  };
 
   result &= expect(submit(editor, QStringLiteral("prompt A1")),
                    "A1 is admitted through the real composer");
@@ -349,7 +439,9 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
          {"clientId", clientId},
          {"content", {{{"type", "text"}, {"text", "prompt A1"}}}}}}},
       Authority::Merge,
-      {{"threadId", "thread-a"}, {"turnId", "turn-a"}, {"itemId", "user-a1"}}));
+      {{"threadId", "thread-a"},
+       {"turnId", "turn-a-live"},
+       {"itemId", "user-a1"}}));
   spin(10);
   const middle::LocalPromptData *beforeAck =
       localPrompt(shell, QStringLiteral("prompt A1"));
@@ -357,18 +449,14 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
       expect(beforeAck && beforeAck->state == middle::PromptState::InFlight,
              "materialization alone cannot acknowledge A1");
 
+  editor->setPlainText(QStringLiteral("unsent shared draft"));
   result &= expect(selectThread(list, "thread-b"),
                    "B can be selected while A remains active");
-  const auto readB = peer.waitFor("thread.read", "thread-b");
-  result &= expect(readB.has_value(), "selecting B requests its own hydration");
-  if (!readB)
-    return false;
-  result &= peer.send(
-      presentation::result(sequence++, 1, "thread.read",
-                           readB->value("correlationId", std::string{}), true,
-                           {{"thread", thread("thread-b", "B")}},
-                           Authority::Replace, {{"threadId", "thread-b"}}));
-  spin(10);
+  result &= expect(editor->toPlainText() ==
+                       QStringLiteral("unsent shared draft"),
+                   "thread navigation retains the shared composer draft");
+  result &= expect(!peer.waitFor("thread.read", "thread-b", 100).has_value(),
+                   "returning to hydrated B does not reread its history");
   result &= expect(submit(editor, QStringLiteral("prompt B1")),
                    "B1 is admitted while A1 is in flight");
   const auto startB = peer.waitFor("turn.start", "thread-b");
@@ -378,8 +466,9 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
   result &= peer.send(presentation::result(
       sequence++, 1, "turn.start",
       startA->value("correlationId", std::string{}), true,
-      {{"turn", {{"id", "turn-a"}, {"status", "inProgress"}}}},
-      Authority::Merge, {{"threadId", "thread-a"}, {"turnId", "turn-a"}}));
+      {{"turn", {{"id", "turn-a-live"}, {"status", "inProgress"}}}},
+      Authority::Merge,
+      {{"threadId", "thread-a"}, {"turnId", "turn-a-live"}}));
   const auto steerA = peer.waitFor("turn.steer", "thread-a");
   result &=
       expect(steerA.has_value(), "A1's real background ack releases queued A2");
@@ -455,6 +544,7 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
                            readC1->value("correlationId", std::string{}), true,
                            {{"thread", thread("thread-c", "stale C")}},
                            Authority::Replace, {{"threadId", "thread-c"}}));
+  result &= completeSettingsRefresh("thread-c");
   spin(10);
   result &= expect(hasAgentMessage(shell, QStringLiteral("current C marker")),
                    "a late successful stale read cannot replace newer cards");
@@ -521,6 +611,7 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
                            readD->value("correlationId", std::string{}), true,
                            {{"thread", thread("thread-d", "D")}},
                            Authority::Replace, {{"threadId", "thread-d"}}));
+  result &= completeSettingsRefresh("thread-d");
   spin(5);
   result &= expect(submit(editor, QStringLiteral("prompt D1")),
                    "D1 is admitted before recovery");
@@ -594,7 +685,8 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
   result &= peer.send(
       presentation::result(sequence++, 2, "thread.resume",
                            secondResumeD->value("correlationId", std::string{}),
-                           true, {{"thread", thread("thread-d", "D")}},
+                           true,
+                           {{"thread", thread("thread-d", "D", "active")}},
                            Authority::Merge, {{"threadId", "thread-d"}}));
   const auto retriedSteerD = peer.waitFor("turn.steer", "thread-d");
   result &= expect(retriedSteerD.has_value() &&
@@ -671,6 +763,7 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
                            readF->value("correlationId", std::string{}), true,
                            {{"thread", thread("thread-f", "F")}},
                            Authority::Replace, {{"threadId", "thread-f"}}));
+  result &= completeSettingsRefresh("thread-f");
   spin(5);
   result &= expect(submit(editor, QStringLiteral("prompt F1")),
                    "F1 is admitted while connected");
@@ -721,6 +814,6 @@ int main(int argc, char **argv) {
       codexui::codex::FrontendSessionTestPeer::takeClientDescriptor(session));
   const bool result = codexui::codex::runShellFlow(session, peer);
   if (result)
-    std::cout << "Greenfield shell integration test passed\n";
+    std::cout << "Shell integration test passed\n";
   return result ? 0 : 1;
 }

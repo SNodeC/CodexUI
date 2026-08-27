@@ -3,52 +3,68 @@
 #ifndef CODEXUI_CODEX_DIFFVIEWER_H
 #define CODEXUI_CODEX_DIFFVIEWER_H
 
-#include <QString>
+#include "codex/GitDiffProvider.h"
+
+#include <QPointer>
+#include <QStringList>
 #include <QWidget>
 
-#include <vector>
-
+class QComboBox;
+class QFileSystemWatcher;
 class QLabel;
 class QListWidget;
 class QPlainTextEdit;
 class QPushButton;
+class QTimer;
 
 namespace codexui::codex {
 
-struct DiffFilePresentation {
-  QString path;
-  QString kind;
-  QString diff;
-};
+class GitDiffReviewWindow;
 
 class DiffViewer final : public QWidget {
 public:
   explicit DiffViewer(QWidget *parent = nullptr);
 
-  void setChanges(QString liveDiff,
-                  std::vector<DiffFilePresentation> retainedChanges);
+  void setRepositoryContext(QString threadId, QString workspace,
+                            QStringList commandDirectories,
+                            QStringList changedPaths);
+  void refreshRepository();
+  [[nodiscard]] const GitDiffSnapshot &currentSnapshot() const noexcept;
 
 private:
-  struct FileDiff {
-    QString path;
-    QString kind;
-    QString content;
-    int additions = 0;
-    int deletions = 0;
-  };
-
-  static std::vector<FileDiff> parseUnifiedDiff(const QString &diff);
+  void applySnapshot(const GitDiffSnapshot &snapshot);
   void showSelectedFile();
-  void showExpanded();
+  void openReview();
+  void updateFileWatches();
+  [[nodiscard]] QString selectedPath() const;
+  [[nodiscard]] QStringList repositoryCandidates() const;
 
+  GitDiffProvider *provider = nullptr;
+  QFileSystemWatcher *fileWatcher = nullptr;
+  QTimer *refreshTimer = nullptr;
+  QTimer *repositoryTimer = nullptr;
+  QString workspace;
+  QString threadId;
+  QStringList commandDirectories;
+  QStringList changedPaths;
+  QStringList persistedRepositoryRoots;
+  QString selectedRepository;
+  GitDiffSnapshot snapshot;
+  QByteArray snapshotFingerprint;
+  QComboBox *scope = nullptr;
+  QComboBox *repositories = nullptr;
+  QPushButton *hiddenRepositories = nullptr;
   QLabel *summary = nullptr;
   QLabel *authority = nullptr;
+  QLabel *truncationSummary = nullptr;
+  QLabel *additionSummary = nullptr;
+  QLabel *deletionSummary = nullptr;
+  QLabel *selectedFile = nullptr;
   QListWidget *files = nullptr;
   QPlainTextEdit *diff = nullptr;
   QPushButton *copyButton = nullptr;
-  QPushButton *expandButton = nullptr;
-  std::vector<FileDiff> fileDiffs;
-  QByteArray contentFingerprint;
+  QPushButton *reviewButton = nullptr;
+  QPointer<GitDiffReviewWindow> reviewWindow;
 };
 
 } // namespace codexui::codex

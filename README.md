@@ -19,19 +19,18 @@ event loop, selected transport, `AISuite::OpenAICodex` frontend proxy SDK,
 native protocol normalization, and connection/controller telemetry. They
 exchange only bounded `codexui.presentation` JSONL commands and events.
 
-## Applications
+## Application
 
-- `codex-ui`: the normal visual application.
-- `codex-ui-harness`: the permanent protocol and reducer development harness.
-
-Both applications use the same transport, socketpair, normalization,
-presentation protocol, and model implementation. Only their top-level Qt
-consumer differs.
+`codex-ui` is the canonical visual application. Its production shell consumes
+the normalized presentation protocol and model directly; there is no parallel
+legacy UI or alternate application target.
 
 ## Build
 
-Qt 6 Widgets, Threads, SNode.C `master`/HEAD, and an installed canonical
-AISuite package exporting `AISuite::OpenAICodex` are required.
+Qt 6 Widgets, Threads, libgit2 development files (discoverable as `libgit2`
+through pkg-config), SNode.C `master`/HEAD, and an installed canonical AISuite
+package exporting `AISuite::OpenAICodex` are required. On Debian and Ubuntu,
+the libgit2 package is `libgit2-dev`.
 
 ```sh
 cmake -S . -B "${BUILD_DIR}" -G Ninja \

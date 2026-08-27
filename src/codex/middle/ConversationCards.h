@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
-#ifndef CODEXUI_GREENFIELD_CODEX_MIDDLE_CONVERSATIONCARDS_H
-#define CODEXUI_GREENFIELD_CODEX_MIDDLE_CONVERSATIONCARDS_H
+#ifndef CODEXUI_CODEX_MIDDLE_CONVERSATIONCARDS_H
+#define CODEXUI_CODEX_MIDDLE_CONVERSATIONCARDS_H
 
 #include "codex/middle/MiddleTypes.h"
 
 #include <QFrame>
-#include <QPlainTextEdit>
+#include <QTextEdit>
 
 #include <memory>
 #include <optional>
@@ -20,7 +20,24 @@ class QWheelEvent;
 
 namespace codexui::codex::middle {
 
-class CommandOutputView final : public QPlainTextEdit {
+class ContentSizedTextView : public QTextEdit {
+public:
+  explicit ContentSizedTextView(int maximumContentHeight,
+                                QWidget *parent = nullptr);
+
+  bool setContent(const QString &content);
+  QSize sizeHint() const override;
+  QSize minimumSizeHint() const override;
+
+protected:
+  void resizeEvent(QResizeEvent *event) override;
+  void measureAtCurrentWidth(bool notifyParent);
+
+private:
+  int preferredHeight_ = 0;
+};
+
+class CommandOutputView final : public ContentSizedTextView {
 public:
   struct ScrollState {
     bool followsLatest = true;
@@ -39,15 +56,10 @@ public:
   bool setOutput(const QString &output);
   void restoreScrollState(const ScrollState &state);
 
-  QSize sizeHint() const override;
-  QSize minimumSizeHint() const override;
-
 protected:
-  void resizeEvent(QResizeEvent *event) override;
   void wheelEvent(QWheelEvent *event) override;
 
 private:
-  void measureAtCurrentWidth(bool notifyParent);
   void settleScroll();
   [[nodiscard]] bool isAtBottom() const;
 
@@ -55,11 +67,12 @@ private:
   bool programmaticScroll_ = false;
   bool settlingScroll_ = false;
   int preservedScrollValue_ = 0;
-  int preferredHeight_ = 0;
   QString currentOutput_;
 };
 
 class ConversationCard : public QFrame {
+  Q_OBJECT
+
 public:
   explicit ConversationCard(const VisibleCardData &data,
                             QWidget *parent = nullptr);
@@ -67,6 +80,8 @@ public:
 
   [[nodiscard]] CardKind cardKind() const noexcept;
   [[nodiscard]] const VisibleCardData &data() const noexcept;
+  [[nodiscard]] bool isCollapsed() const noexcept;
+  void setCollapsed(bool collapsed);
   [[nodiscard]] std::optional<CommandOutputView::ScrollState>
   commandOutputScrollState() const;
   void
@@ -76,6 +91,9 @@ public:
   // kinds in place and returns false when neither content nor presentation
   // changed. Passing a different key or kind is a programming error.
   bool apply(const VisibleCardData &data);
+
+signals:
+  void foldRequested(bool collapsed);
 
 protected:
   void paintEvent(QPaintEvent *event) override;
@@ -90,4 +108,4 @@ createConversationCard(const VisibleCardData &data, QWidget *parent = nullptr);
 
 } // namespace codexui::codex::middle
 
-#endif // CODEXUI_GREENFIELD_CODEX_MIDDLE_CONVERSATIONCARDS_H
+#endif // CODEXUI_CODEX_MIDDLE_CONVERSATIONCARDS_H

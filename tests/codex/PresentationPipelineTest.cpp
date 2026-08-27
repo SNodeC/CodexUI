@@ -148,6 +148,29 @@ int main() {
                                   {"status", {{"type", "idle"}}},
                                   {"turns", nlohmann::json::array()}}}}}});
 
+  normalizer.operationResult(
+      "thread.resume", "resume-1", {"threadId", "thread-1"},
+      {{"id", "resume-1"},
+       {"result",
+        {{"thread", {{"id", "thread-1"}}},
+         {"model", "gpt-current"},
+         {"reasoningEffort", "high"},
+         {"approvalPolicy", "never"},
+         {"sandbox", "workspaceWrite"}}}});
+  normalizer.serverNotification(
+      "thread/settings/updated",
+      {{"threadId", "thread-1"},
+       {"threadSettings",
+        {{"model", "gpt-current"}, {"personality", "friendly"}}}});
+  normalizer.serverNotification(
+      "thread/settings/updated",
+      {{"threadId", "thread-1"},
+       {"threadSettings", {{"personality", nullptr}}}});
+  normalizer.serverNotification(
+      "thread/settings/updated",
+      {{"threadId", "thread-2"},
+       {"threadSettings", {{"model", "gpt-background"}}}});
+
   bool validFrames = !frames.empty();
   std::uint64_t expectedSequence = 1;
   for (const nlohmann::json &frame : frames) {
@@ -180,8 +203,23 @@ int main() {
           stringMember(model.connection().settings, "selected") == "ipv6",
       "connection, controller, and transport settings form coherent state");
   passed &= expect(thread != nullptr && thread->turnOrder.size() == 2 &&
-                       thread->cwd == "/workspace",
+                       thread->cwd == "/workspace" &&
+                       stringMember(thread->raw, "model") == "gpt-current" &&
+                       stringMember(thread->raw, "reasoningEffort") == "high",
                    "list, full read, and live events retain one stable thread");
+  const auto settings =
+      thread == nullptr ? nullptr
+                        : &thread->domains.at("thread.settings.changed")
+                               .at("threadSettings");
+  const auto *background = model.thread("thread-2");
+  passed &= expect(
+      settings != nullptr && settings->contains("personality") &&
+          settings->at("personality").is_null() &&
+          thread->settingsRevision == 2 && background != nullptr &&
+          background->settingsRevision == 1 &&
+          stringMember(background->latestSettingsUpdate, "model") ==
+              "gpt-background",
+      "settings updates retain explicit defaults and remain thread scoped");
   passed &= expect(turn != nullptr && turn->status == "completed" &&
                        turn->itemOrder.size() == 1,
                    "live turn lifecycle resolves one stable turn");
@@ -205,6 +243,85 @@ int main() {
              "incomplete thread reads preserve live plan and inspector state");
   passed &= expect(!model.activeTurnId("thread-1").has_value(),
                    "completed stream leaves no active turn");
+  passed &= expect(model.thread("thread-1") != nullptr &&
+                       model.thread("thread-1")->status == "idle",
+                   "completed stream retains idle thread status");
+
+  normalizer.operationResult(
+      "thread.read", "stale-active-read", {{"threadId", "thread-1"}},
+      {{"id", "stale-active-read"},
+       {"result",
+        {{"thread",
+          {{"id", "thread-1"},
+           {"status", {{"type", "active"}}},
+           {"turns",
+            nlohmann::json::array(
+                {{{"id", "turn-1"}, {"status", "completed"}},
+                 {{"id", "turn-2"}, {"status", "inProgress"}}})}}}}}});
+  thread = model.thread("thread-1");
+  turn = thread == nullptr ? nullptr : &thread->turns.at("turn-2");
+  passed &= expect(turn != nullptr && turn->status == "completed" &&
+                       !model.activeTurnId("thread-1").has_value(),
+                   "a stale authoritative read cannot reactivate a completed "
+                   "turn");
+  passed &= expect(thread != nullptr && thread->status == "idle",
+                   "a stale authoritative read cannot restore running thread "
+                   "chrome");
+
+  normalizer.serverNotification(
+      "turn/started",
+      {{"threadId", "thread-1"}, {"turn", {{"id", "turn-3"}}}});
+  passed &= expect(model.activeTurnId("thread-1") == "turn-3" &&
+                       model.thread("thread-1")->status == "active",
+                   "started lifecycle supplies a missing active status");
+  normalizer.serverNotification(
+      "thread/status/changed",
+      {{"threadId", "thread-1"}, {"status", {{"type", "completed"}}}});
+  passed &= expect(!model.activeTurnId("thread-1").has_value(),
+                   "completed thread chrome vetoes a stale active turn");
+  normalizer.serverNotification(
+      "turn/completed",
+      {{"threadId", "thread-1"}, {"turn", {{"id", "turn-3"}}}});
+  passed &= expect(!model.activeTurnId("thread-1").has_value(),
+                   "completed lifecycle clears activity without turn status");
+
+  PresentationModel hydratedModel;
+  ProtocolNormalizer hydratedNormalizer(
+      [&](const nlohmann::json &frame) {
+        hydratedModel.applyEvent(frame);
+        return true;
+      });
+  hydratedNormalizer.transportEvent("connected");
+  hydratedNormalizer.operationResult(
+      "thread.read", "repository-hints", {{"threadId", "repository-thread"}},
+      {{"id", "repository-hints"},
+       {"result",
+        {{"thread",
+          {{"id", "repository-thread"},
+           {"cwd", "/workspace"},
+           {"turns",
+            nlohmann::json::array(
+                {{{"id", "repository-turn"},
+                  {"items",
+                   nlohmann::json::array(
+                       {{{"id", "repository-command"},
+                         {"type", "commandExecution"},
+                         {"cwd", "/workspace/project/src"}},
+                        {{"id", "repository-change"},
+                         {"type", "fileChange"},
+                         {"changes",
+                          nlohmann::json::array(
+                              {{{"path", "lib/example.cpp"}},
+                               {{"path", "removed.txt"}}})}}})}}})}}}}}});
+  const auto *repositoryThread = hydratedModel.thread("repository-thread");
+  passed &= expect(
+      repositoryThread != nullptr &&
+          repositoryThread->commandCwds ==
+              std::vector<std::string>{"/workspace/project/src"} &&
+          repositoryThread->changedPaths ==
+              std::vector<std::string>{"lib/example.cpp", "removed.txt"},
+      "authoritative thread hydration retains compact repository hints");
+
   normalizer.bridgeEvent({{"kind", "bridge.provider"},
                           {"state", "disconnected"},
                           {"providerGeneration", std::uint64_t{1}},

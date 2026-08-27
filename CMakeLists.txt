@@ -23,6 +23,8 @@ find_package(
     COMPONENTS net-rc-stream-legacy net-rc-stream-tls
 )
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBGIT2 REQUIRED IMPORTED_TARGET libgit2)
 find_package(Threads REQUIRED)
 
 set(
@@ -37,6 +39,8 @@ set(
     src/codex/DiffViewer.h
     src/codex/FrontendSession.cpp
     src/codex/FrontendSession.h
+    src/codex/GitDiffProvider.cpp
+    src/codex/GitDiffProvider.h
     src/codex/FileSelectionDialog.cpp
     src/codex/FileSelectionDialog.h
     src/codex/MainWindow.cpp
@@ -65,45 +69,38 @@ set(
 )
 
 set(
-    CODEXUI_GREENFIELD_MIDDLE_SOURCES
-    src/greenfield/codex/ShellWidget.cpp
-    src/greenfield/codex/ShellWidget.h
-    src/greenfield/codex/middle/ComposerPane.cpp
-    src/greenfield/codex/middle/ComposerPane.h
-    src/greenfield/codex/middle/ConversationCards.cpp
-    src/greenfield/codex/middle/ConversationCards.h
-    src/greenfield/codex/middle/ConversationProjection.cpp
-    src/greenfield/codex/middle/ConversationProjection.h
-    src/greenfield/codex/middle/ConversationView.cpp
-    src/greenfield/codex/middle/ConversationView.h
-    src/greenfield/codex/middle/InspectorPane.cpp
-    src/greenfield/codex/middle/InspectorPane.h
-    src/greenfield/codex/middle/MiddleRegionWidget.cpp
-    src/greenfield/codex/middle/MiddleRegionWidget.h
-    src/greenfield/codex/middle/MiddleTypes.cpp
-    src/greenfield/codex/middle/MiddleTypes.h
-    src/greenfield/codex/middle/PromptCoordinator.cpp
-    src/greenfield/codex/middle/PromptCoordinator.h
-    src/greenfield/codex/middle/ThreadPane.cpp
-    src/greenfield/codex/middle/ThreadPane.h
+    CODEXUI_SHELL_SOURCES
+    src/codex/ShellWidget.cpp
+    src/codex/ShellWidget.h
+    src/codex/middle/ComposerPane.cpp
+    src/codex/middle/ComposerPane.h
+    src/codex/middle/ConversationCards.cpp
+    src/codex/middle/ConversationCards.h
+    src/codex/middle/ConversationProjection.cpp
+    src/codex/middle/ConversationProjection.h
+    src/codex/middle/ConversationView.cpp
+    src/codex/middle/ConversationView.h
+    src/codex/middle/InspectorPane.cpp
+    src/codex/middle/InspectorPane.h
+    src/codex/middle/MiddleRegionWidget.cpp
+    src/codex/middle/MiddleRegionWidget.h
+    src/codex/middle/MiddleTypes.cpp
+    src/codex/middle/MiddleTypes.h
+    src/codex/middle/PromptCoordinator.cpp
+    src/codex/middle/PromptCoordinator.h
+    src/codex/middle/ThreadPane.cpp
+    src/codex/middle/ThreadPane.h
 )
 
 qt_add_executable(
     codex-ui
     ${CODEXUI_CODEX_COMMON_SOURCES}
-    ${CODEXUI_GREENFIELD_MIDDLE_SOURCES}
+    ${CODEXUI_SHELL_SOURCES}
     src/codex/PendingRequestDialog.cpp
     src/codex/PendingRequestDialog.h
     src/codex/TurnSettingsWidget.cpp
     src/codex/TurnSettingsWidget.h
 )
-qt_add_executable(
-    codex-ui-harness
-    ${CODEXUI_CODEX_COMMON_SOURCES}
-    src/codex/WorkbenchWidget.cpp
-    src/codex/WorkbenchWidget.h
-)
-
 function(configure_codexui_target target)
     target_compile_features(${target} PRIVATE cxx_std_20)
     target_include_directories(${target} PRIVATE src)
@@ -111,6 +108,7 @@ function(configure_codexui_target target)
         ${target}
         PRIVATE
             AISuite::OpenAICodex
+            PkgConfig::LIBGIT2
             Qt6::Widgets
             Threads::Threads
             snodec::net-un-stream-legacy
@@ -120,33 +118,24 @@ function(configure_codexui_target target)
 endfunction()
 
 configure_codexui_target(codex-ui)
-target_include_directories(codex-ui BEFORE PRIVATE src/greenfield)
-configure_codexui_target(codex-ui-harness)
-target_compile_definitions(codex-ui-harness PRIVATE CODEXUI_DEVELOPMENT_HARNESS=1)
 
 if(TARGET snodec::net-in-stream-tls AND TARGET snodec::net-in6-stream-tls)
-    foreach(target codex-ui codex-ui-harness)
-        target_compile_definitions(${target} PRIVATE CODEXUI_CODEX_FRONTEND_TLS=1)
-        target_link_libraries(
-            ${target} PRIVATE snodec::net-in-stream-tls snodec::net-in6-stream-tls
-        )
-    endforeach()
+    target_compile_definitions(codex-ui PRIVATE CODEXUI_CODEX_FRONTEND_TLS=1)
+    target_link_libraries(
+        codex-ui PRIVATE snodec::net-in-stream-tls snodec::net-in6-stream-tls
+    )
 endif()
 
 if(TARGET snodec::net-rc-stream-legacy AND TARGET snodec::net-rc-stream-tls)
-    foreach(target codex-ui codex-ui-harness)
-        target_compile_definitions(${target} PRIVATE CODEXUI_CODEX_FRONTEND_RFCOMM=1)
-        target_link_libraries(
-            ${target} PRIVATE snodec::net-rc-stream-legacy snodec::net-rc-stream-tls
-        )
-    endforeach()
+    target_compile_definitions(codex-ui PRIVATE CODEXUI_CODEX_FRONTEND_RFCOMM=1)
+    target_link_libraries(
+        codex-ui PRIVATE snodec::net-rc-stream-legacy snodec::net-rc-stream-tls
+    )
 endif()
 
 if(TARGET snodec::http-client AND TARGET snodec::websocket-client)
-    foreach(target codex-ui codex-ui-harness)
-        target_compile_definitions(${target} PRIVATE CODEXUI_CODEX_FRONTEND_WEBSOCKET=1)
-        target_link_libraries(${target} PRIVATE snodec::http-client snodec::websocket-client)
-    endforeach()
+    target_compile_definitions(codex-ui PRIVATE CODEXUI_CODEX_FRONTEND_WEBSOCKET=1)
+    target_link_libraries(codex-ui PRIVATE snodec::http-client snodec::websocket-client)
 endif()
 
 if(BUILD_TESTING)
@@ -207,65 +196,65 @@ if(BUILD_TESTING)
     )
 
     add_executable(
-        codexui-greenfield-projection-test
-        tests/codex/GreenfieldProjectionTest.cpp
-        src/greenfield/codex/middle/ConversationProjection.cpp
-        src/greenfield/codex/middle/ConversationProjection.h
-        src/greenfield/codex/middle/MiddleTypes.cpp
-        src/greenfield/codex/middle/MiddleTypes.h
-        src/greenfield/codex/middle/PromptCoordinator.cpp
-        src/greenfield/codex/middle/PromptCoordinator.h
+        codexui-conversation-projection-test
+        tests/codex/ConversationProjectionTest.cpp
+        src/codex/middle/ConversationProjection.cpp
+        src/codex/middle/ConversationProjection.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+        src/codex/middle/PromptCoordinator.cpp
+        src/codex/middle/PromptCoordinator.h
     )
     target_compile_features(
-        codexui-greenfield-projection-test PRIVATE cxx_std_20
+        codexui-conversation-projection-test PRIVATE cxx_std_20
     )
-    target_include_directories(
-        codexui-greenfield-projection-test BEFORE PRIVATE src/greenfield src
-    )
+    target_include_directories(codexui-conversation-projection-test PRIVATE src)
     target_link_libraries(
-        codexui-greenfield-projection-test PRIVATE Qt6::Widgets
+        codexui-conversation-projection-test PRIVATE Qt6::Widgets
     )
     add_test(
-        NAME codexui-greenfield-projection
-        COMMAND codexui-greenfield-projection-test
+        NAME codexui-conversation-projection
+        COMMAND codexui-conversation-projection-test
     )
     set_tests_properties(
-        codexui-greenfield-projection PROPERTIES TIMEOUT 10
+        codexui-conversation-projection PROPERTIES TIMEOUT 10
     )
 
     qt_add_executable(
-        codexui-greenfield-middle-test
-        tests/codex/GreenfieldMiddleTest.cpp
-        src/greenfield/codex/middle/ConversationCards.cpp
-        src/greenfield/codex/middle/ConversationCards.h
-        src/greenfield/codex/middle/ConversationView.cpp
-        src/greenfield/codex/middle/ConversationView.h
-        src/greenfield/codex/middle/MiddleTypes.cpp
-        src/greenfield/codex/middle/MiddleTypes.h
+        codexui-conversation-cards-test
+        tests/codex/ConversationCardsTest.cpp
+        src/codex/middle/ConversationCards.cpp
+        src/codex/middle/ConversationCards.h
+        src/codex/middle/ConversationView.cpp
+        src/codex/middle/ConversationView.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
     )
     target_compile_features(
-        codexui-greenfield-middle-test PRIVATE cxx_std_20
+        codexui-conversation-cards-test PRIVATE cxx_std_20
     )
-    target_include_directories(
-        codexui-greenfield-middle-test BEFORE PRIVATE src/greenfield src
-    )
+    target_include_directories(codexui-conversation-cards-test PRIVATE src)
     target_link_libraries(
-        codexui-greenfield-middle-test PRIVATE Qt6::Widgets
+        codexui-conversation-cards-test PRIVATE Qt6::Widgets
     )
     add_test(
-        NAME codexui-greenfield-middle
-        COMMAND codexui-greenfield-middle-test
+        NAME codexui-conversation-cards
+        COMMAND codexui-conversation-cards-test
     )
     set_tests_properties(
-        codexui-greenfield-middle
+        codexui-conversation-cards
         PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 
     qt_add_executable(
-        codexui-greenfield-layout-test
-        tests/codex/GreenfieldLayoutTest.cpp
+        codexui-application-layout-test
+        tests/codex/ApplicationLayoutTest.cpp
         src/codex/DiffViewer.cpp
         src/codex/DiffViewer.h
+        src/codex/GitDiffProvider.cpp
+        src/codex/GitDiffProvider.h
         src/codex/FileSelectionDialog.cpp
         src/codex/FileSelectionDialog.h
         src/codex/PresentationModel.cpp
@@ -276,73 +265,95 @@ if(BUILD_TESTING)
         src/codex/TurnSettingsWidget.h
         src/codex/ui/ExpandingPromptEditor.cpp
         src/codex/ui/ExpandingPromptEditor.h
-        src/greenfield/codex/middle/ComposerPane.cpp
-        src/greenfield/codex/middle/ComposerPane.h
-        src/greenfield/codex/middle/ConversationCards.cpp
-        src/greenfield/codex/middle/ConversationCards.h
-        src/greenfield/codex/middle/ConversationView.cpp
-        src/greenfield/codex/middle/ConversationView.h
-        src/greenfield/codex/middle/InspectorPane.cpp
-        src/greenfield/codex/middle/InspectorPane.h
-        src/greenfield/codex/middle/MiddleRegionWidget.cpp
-        src/greenfield/codex/middle/MiddleRegionWidget.h
-        src/greenfield/codex/middle/MiddleTypes.cpp
-        src/greenfield/codex/middle/MiddleTypes.h
-        src/greenfield/codex/middle/ThreadPane.cpp
-        src/greenfield/codex/middle/ThreadPane.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
+        src/codex/middle/ComposerPane.cpp
+        src/codex/middle/ComposerPane.h
+        src/codex/middle/ConversationCards.cpp
+        src/codex/middle/ConversationCards.h
+        src/codex/middle/ConversationView.cpp
+        src/codex/middle/ConversationView.h
+        src/codex/middle/InspectorPane.cpp
+        src/codex/middle/InspectorPane.h
+        src/codex/middle/MiddleRegionWidget.cpp
+        src/codex/middle/MiddleRegionWidget.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+        src/codex/middle/ThreadPane.cpp
+        src/codex/middle/ThreadPane.h
     )
     target_compile_features(
-        codexui-greenfield-layout-test PRIVATE cxx_std_20
+        codexui-application-layout-test PRIVATE cxx_std_20
     )
-    target_include_directories(
-        codexui-greenfield-layout-test BEFORE PRIVATE src/greenfield src
-    )
+    target_include_directories(codexui-application-layout-test PRIVATE src)
     target_link_libraries(
-        codexui-greenfield-layout-test PRIVATE AISuite::OpenAICodex Qt6::Widgets
+        codexui-application-layout-test
+        PRIVATE AISuite::OpenAICodex PkgConfig::LIBGIT2 Qt6::Widgets
     )
     add_test(
-        NAME codexui-greenfield-layout
-        COMMAND codexui-greenfield-layout-test
+        NAME codexui-application-layout
+        COMMAND codexui-application-layout-test
     )
     set_tests_properties(
-        codexui-greenfield-layout
+        codexui-application-layout
         PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 
-    set(CODEXUI_GREENFIELD_SHELL_TEST_SOURCES ${CODEXUI_CODEX_COMMON_SOURCES})
+    qt_add_executable(
+        codexui-git-changes-live-test
+        tests/codex/GitChangesLiveTest.cpp
+        src/codex/DiffViewer.cpp
+        src/codex/DiffViewer.h
+        src/codex/GitDiffProvider.cpp
+        src/codex/GitDiffProvider.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
+    )
+    target_compile_features(codexui-git-changes-live-test PRIVATE cxx_std_20)
+    target_include_directories(codexui-git-changes-live-test PRIVATE src)
+    target_link_libraries(
+        codexui-git-changes-live-test PRIVATE PkgConfig::LIBGIT2 Qt6::Widgets
+    )
+    add_test(
+        NAME codexui-git-changes-live
+        COMMAND codexui-git-changes-live-test
+    )
+    set_tests_properties(
+        codexui-git-changes-live
+        PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+
+    set(CODEXUI_SHELL_TEST_SOURCES ${CODEXUI_CODEX_COMMON_SOURCES})
     list(
-        REMOVE_ITEM CODEXUI_GREENFIELD_SHELL_TEST_SOURCES
+        REMOVE_ITEM CODEXUI_SHELL_TEST_SOURCES
         src/codex/main.cpp
         src/codex/MainWindow.cpp
         src/codex/MainWindow.h
     )
     qt_add_executable(
-        codexui-greenfield-shell-test
-        tests/codex/GreenfieldShellIntegrationTest.cpp
-        ${CODEXUI_GREENFIELD_SHELL_TEST_SOURCES}
-        ${CODEXUI_GREENFIELD_MIDDLE_SOURCES}
+        codexui-shell-integration-test
+        tests/codex/ShellIntegrationTest.cpp
+        ${CODEXUI_SHELL_TEST_SOURCES}
+        ${CODEXUI_SHELL_SOURCES}
         src/codex/PendingRequestDialog.cpp
         src/codex/PendingRequestDialog.h
         src/codex/TurnSettingsWidget.cpp
         src/codex/TurnSettingsWidget.h
     )
-    configure_codexui_target(codexui-greenfield-shell-test)
-    target_include_directories(
-        codexui-greenfield-shell-test BEFORE PRIVATE src/greenfield
-    )
+    configure_codexui_target(codexui-shell-integration-test)
     add_test(
-        NAME codexui-greenfield-shell
-        COMMAND codexui-greenfield-shell-test
+        NAME codexui-shell-integration
+        COMMAND codexui-shell-integration-test
     )
     set_tests_properties(
-        codexui-greenfield-shell
+        codexui-shell-integration
         PROPERTIES TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 
 endif()
 
 install(
-    TARGETS codex-ui codex-ui-harness
+    TARGETS codex-ui
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     BUNDLE DESTINATION .
 )

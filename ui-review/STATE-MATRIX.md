@@ -30,7 +30,7 @@
 | Conversation | User returns to bottom | Automatic following resumes. |
 | Composer | Short prompt | One-line compact height. |
 | Composer | Multiline prompt | Editor overlays the unchanged message viewport; matching trailing scroll space is added without moving existing messages. |
-| Composer | User reaches extended bottom | The final card sits above the composer with the normal gap and bottom-follow resumes. |
+| Composer | User reaches extended bottom | The final card reaches the overlay boundary; canonical 8 px spacing surrounds the moving divider and bottom-follow resumes. |
 | Composer | Prompt shrinks | Trailing space is removed; Qt may clamp the scroll position to the reduced range. |
 | Composer | Shrink clamps to conversation bottom | Bottom-follow is reactivated for subsequent incoming content. |
 | Composer | Maximum prompt height | Editor stops growing and scrolls internally. |

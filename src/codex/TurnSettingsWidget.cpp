@@ -3,6 +3,7 @@
 #include "codex/TurnSettingsWidget.h"
 
 #include "codex/FileSelectionDialog.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QComboBox>
 #include <QDir>
@@ -13,8 +14,6 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QPaintEvent>
-#include <QPainter>
-#include <QPainterPath>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QStyle>
@@ -33,29 +32,6 @@ constexpr auto DefaultValue = "default";
 constexpr int SettingControlHeight = 32;
 constexpr int SettingLabelSpacing = 5;
 
-void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
-                 bool highlighted) {
-  if (!indicator.isValid() || indicator.isEmpty())
-    return;
-  const QPointF center = indicator.center();
-  QPainterPath chevron;
-  chevron.moveTo(center.x() - 3.5, center.y() - 1.5);
-  chevron.lineTo(center.x(), center.y() + 2.0);
-  chevron.lineTo(center.x() + 3.5, center.y() - 1.5);
-
-  QColor color(QStringLiteral("#667085"));
-  if (!enabled)
-    color = QColor(QStringLiteral("#98a2b3"));
-  else if (highlighted)
-    color = QColor(QStringLiteral("#1d2633"));
-
-  QPainter painter(widget);
-  painter.setRenderHint(QPainter::Antialiasing, true);
-  painter.setPen(QPen(color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-  painter.setBrush(Qt::NoBrush);
-  painter.drawPath(chevron);
-}
-
 class CompactComboBox final : public QComboBox {
 protected:
   void paintEvent(QPaintEvent *event) override {
@@ -65,9 +41,9 @@ protected:
     initStyleOption(&option);
     const QRect indicator = style()->subControlRect(
         QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxArrow, this);
-    drawChevron(this, indicator, option.state & QStyle::State_Enabled,
-                option.state &
-                    (QStyle::State_MouseOver | QStyle::State_HasFocus));
+    UiStyle::drawChevron(
+        this, indicator, option.state & QStyle::State_Enabled,
+        option.state & (QStyle::State_MouseOver | QStyle::State_HasFocus));
   }
 };
 
@@ -87,9 +63,9 @@ protected:
     QRect indicator(contents.right() - std::max(12, indicatorWidth),
                     contents.top(), std::max(12, indicatorWidth),
                     contents.height());
-    drawChevron(this, indicator, option.state & QStyle::State_Enabled,
-                option.state &
-                    (QStyle::State_MouseOver | QStyle::State_HasFocus));
+    UiStyle::drawChevron(
+        this, indicator, option.state & QStyle::State_Enabled,
+        option.state & (QStyle::State_MouseOver | QStyle::State_HasFocus));
   }
 };
 
@@ -230,7 +206,7 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   cwd->setFixedHeight(SettingControlHeight);
   cwd->setStyleSheet(
       QStringLiteral("QLineEdit#codexWorkspace{min-height:30px;}"));
-  cwd->setPlaceholderText(QStringLiteral("Codex default workspace"));
+  cwd->setPlaceholderText(QStringLiteral("Thread default workspace"));
   auto *workspacePicker = new QWidget;
   workspacePicker->setFixedHeight(SettingControlHeight);
   auto *workspaceLayout = new QHBoxLayout(workspacePicker);
@@ -290,48 +266,48 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
   moreMenu->addAction(moreAction);
   more->setMenu(moreMenu);
 
-  addChoice(effort, QStringLiteral("Codex default"), DefaultValue);
+  addChoice(effort, QStringLiteral("Thread default"), DefaultValue);
   for (const char *value :
        {"minimal", "low", "medium", "high", "xhigh", "ultra"})
     addChoice(effort, friendly(QString::fromLatin1(value)),
               QString::fromLatin1(value));
-  addChoice(sandbox, QStringLiteral("Codex default"), DefaultValue);
+  addChoice(sandbox, QStringLiteral("Thread default"), DefaultValue);
   addChoice(sandbox, QStringLiteral("Workspace"),
             QStringLiteral("workspace-write"));
   addChoice(sandbox, QStringLiteral("Read only"), QStringLiteral("read-only"));
   addChoice(sandbox, QStringLiteral("Full access"),
             QStringLiteral("danger-full-access"));
   addChoice(sandbox, QStringLiteral("External"), QStringLiteral("external"));
-  addChoice(network, QStringLiteral("Codex default"), DefaultValue);
+  addChoice(network, QStringLiteral("Thread default"), DefaultValue);
   addChoice(network, QStringLiteral("Restricted"),
             QStringLiteral("restricted"));
   addChoice(network, QStringLiteral("Enabled"), QStringLiteral("enabled"));
-  addChoice(approval, QStringLiteral("Codex default"), DefaultValue);
+  addChoice(approval, QStringLiteral("Thread default"), DefaultValue);
   addChoice(approval, QStringLiteral("On request"),
             QStringLiteral("on-request"));
   addChoice(approval, QStringLiteral("Untrusted"), QStringLiteral("untrusted"));
   addChoice(approval, QStringLiteral("Never"), QStringLiteral("never"));
-  addChoice(personality, QStringLiteral("Codex default"), DefaultValue);
+  addChoice(personality, QStringLiteral("Thread default"), DefaultValue);
   addChoice(personality, QStringLiteral("None"), QStringLiteral("none"));
   addChoice(personality, QStringLiteral("Friendly"),
             QStringLiteral("friendly"));
   addChoice(personality, QStringLiteral("Pragmatic"),
             QStringLiteral("pragmatic"));
-  addChoice(reviewer, QStringLiteral("Codex default"), DefaultValue);
+  addChoice(reviewer, QStringLiteral("Thread default"), DefaultValue);
   addChoice(reviewer, QStringLiteral("User"), QStringLiteral("user"));
   addChoice(reviewer, QStringLiteral("Auto review"),
             QStringLiteral("auto_review"));
   addChoice(reviewer, QStringLiteral("Guardian"),
             QStringLiteral("guardian_subagent"));
-  addChoice(serviceTier, QStringLiteral("Codex default"), DefaultValue);
-  addChoice(summary, QStringLiteral("Codex default"), DefaultValue);
+  addChoice(serviceTier, QStringLiteral("Thread default"), DefaultValue);
+  addChoice(summary, QStringLiteral("Thread default"), DefaultValue);
   addChoice(summary, QStringLiteral("Auto"), QStringLiteral("auto"));
   addChoice(summary, QStringLiteral("Concise"), QStringLiteral("concise"));
   addChoice(summary, QStringLiteral("Detailed"), QStringLiteral("detailed"));
   addChoice(summary, QStringLiteral("None"), QStringLiteral("none"));
   addChoice(collaboration, QStringLiteral("Code"), QStringLiteral("default"));
   addChoice(collaboration, QStringLiteral("Plan"), QStringLiteral("plan"));
-  addChoice(permissionProfile, QStringLiteral("Codex default"), DefaultValue);
+  addChoice(permissionProfile, QStringLiteral("Thread default"), DefaultValue);
 
   const auto connectCombo = [this](QComboBox *combo, Field field) {
     connect(combo, &QComboBox::currentIndexChanged, this,
@@ -375,12 +351,61 @@ TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
 void TurnSettingsWidget::setContext(std::string identity,
                                     const nlohmann::json &canonical,
                                     const nlohmann::json &models,
-                                    const nlohmann::json &permissionProfiles) {
+                                    const nlohmann::json &permissionProfiles,
+                                    std::uint64_t settingsRevision,
+                                    const nlohmann::json &settingsUpdate) {
   const bool changed = contextIdentity != identity;
   contextIdentity = std::move(identity);
   modelCatalog = models.is_array() ? models : nlohmann::json::array();
-  if (changed)
-    resetFromCanonical(canonical);
+  std::array<bool, static_cast<std::size_t>(Field::Count)> fields{};
+  if (changed) {
+    fields.fill(true);
+  } else {
+    const auto differs = [this, &canonical](const char *name) {
+      return canonicalContext.value(name, nlohmann::json(nullptr)) !=
+             canonical.value(name, nlohmann::json(nullptr));
+    };
+    const auto received = [&settingsUpdate,
+                           authoritative = canonicalSettingsRevision !=
+                                           settingsRevision](const char *name) {
+      return authoritative && settingsUpdate.is_object() &&
+             settingsUpdate.contains(name);
+    };
+    fields[static_cast<std::size_t>(Field::Model)] =
+        differs("model") || received("model");
+    fields[static_cast<std::size_t>(Field::Effort)] =
+        differs("effort") || differs("reasoningEffort") ||
+        received("effort") || received("reasoningEffort");
+    fields[static_cast<std::size_t>(Field::Personality)] =
+        differs("personality") || received("personality");
+    const bool sandboxChanged = differs("sandbox") ||
+                                differs("sandboxPolicy") ||
+                                received("sandbox") ||
+                                received("sandboxPolicy");
+    fields[static_cast<std::size_t>(Field::Sandbox)] = sandboxChanged;
+    fields[static_cast<std::size_t>(Field::Network)] = sandboxChanged;
+    fields[static_cast<std::size_t>(Field::Approval)] =
+        differs("approvalPolicy") || received("approvalPolicy");
+    fields[static_cast<std::size_t>(Field::Reviewer)] =
+        differs("approvalsReviewer") || received("approvalsReviewer");
+    fields[static_cast<std::size_t>(Field::Workspace)] =
+        differs("cwd") || received("cwd");
+    fields[static_cast<std::size_t>(Field::PermissionProfile)] =
+        differs("activePermissionProfile") ||
+        received("activePermissionProfile");
+    fields[static_cast<std::size_t>(Field::ServiceTier)] =
+        differs("serviceTier") || received("serviceTier");
+    fields[static_cast<std::size_t>(Field::Summary)] =
+        differs("summary") || received("summary");
+    fields[static_cast<std::size_t>(Field::Collaboration)] =
+        differs("collaborationMode") || received("collaborationMode");
+  }
+  for (std::size_t index = 0; index < fields.size(); ++index)
+    if (fields[index])
+      touchedFields[index] = false;
+  refreshFromCanonical(canonical, fields);
+  canonicalContext = canonical;
+  canonicalSettingsRevision = settingsRevision;
   refreshModels(modelCatalog);
   refreshPermissionProfiles(permissionProfiles);
   refreshModelOptions();
@@ -469,9 +494,11 @@ nlohmann::json TurnSettingsWidget::turnStartOptions() const {
       (touched(Field::Sandbox) || touched(Field::Network))) {
     result["sandboxPolicy"] = sandboxPolicy();
   }
-  const nlohmann::json mode = collaborationMode();
-  if (!mode.is_null())
-    result["collaborationMode"] = mode;
+  if (touched(Field::Collaboration)) {
+    const nlohmann::json mode = collaborationMode();
+    if (!mode.is_null())
+      result["collaborationMode"] = mode;
+  }
   return result;
 }
 
@@ -480,8 +507,12 @@ void TurnSettingsWidget::markTouched(Field field) {
   refreshMoreIndicator();
 }
 
-void TurnSettingsWidget::resetFromCanonical(const nlohmann::json &canonical) {
-  touchedFields.fill(false);
+void TurnSettingsWidget::refreshFromCanonical(
+    const nlohmann::json &canonical,
+    const std::array<bool, static_cast<std::size_t>(Field::Count)> &fields) {
+  const auto refresh = [&fields](Field field) {
+    return fields[static_cast<std::size_t>(field)];
+  };
   const QSignalBlocker modelBlocker(model);
   const QSignalBlocker effortBlocker(effort);
   const QSignalBlocker personalityBlocker(personality);
@@ -495,49 +526,66 @@ void TurnSettingsWidget::resetFromCanonical(const nlohmann::json &canonical) {
   const QSignalBlocker summaryBlocker(summary);
   const QSignalBlocker collaborationBlocker(collaboration);
 
-  selectValue(model, optionalString(canonical, "model"),
-              QStringLiteral("Codex default"));
-  QString canonicalEffort = optionalString(canonical, "reasoningEffort");
-  if (canonicalEffort == DefaultValue)
-    canonicalEffort = optionalString(canonical, "effort");
-  selectValue(effort, canonicalEffort, QStringLiteral("Codex default"));
-  selectValue(personality, optionalString(canonical, "personality"),
-              QStringLiteral("Codex default"));
-  const nlohmann::json nativeSandbox = canonicalSandbox(canonical);
-  selectValue(sandbox, sandboxKey(nativeSandbox),
-              QStringLiteral("Codex default"));
-  selectValue(network, sandboxKey(nativeSandbox) == DefaultValue
-                           ? QString::fromLatin1(DefaultValue)
-                       : sandboxNetworkEnabled(nativeSandbox)
-                           ? QStringLiteral("enabled")
-                           : QStringLiteral("restricted"));
-  std::string nativeApproval = stringValue(canonical, "approvalPolicy");
-  selectValue(approval,
-              nativeApproval.empty() ? QString::fromLatin1(DefaultValue)
-                                     : text(nativeApproval),
-              nativeApproval.empty() ? QStringLiteral("Codex default")
-                                     : QStringLiteral("Current policy"));
-  selectValue(reviewer, optionalString(canonical, "approvalsReviewer"),
-              QStringLiteral("Codex default"));
-  cwd->setText(text(stringValue(canonical, "cwd")));
-  QString activeProfile = QString::fromLatin1(DefaultValue);
-  const nlohmann::json profile =
-      canonical.value("activePermissionProfile", nlohmann::json::object());
-  if (profile.is_object() && profile.contains("id") &&
-      profile["id"].is_string())
-    activeProfile = text(profile["id"].get<std::string>());
-  selectValue(permissionProfile, activeProfile,
-              QStringLiteral("Current permission profile"));
-  selectValue(serviceTier, optionalString(canonical, "serviceTier"),
-              QStringLiteral("Codex default"));
-  selectValue(summary, optionalString(canonical, "summary"),
-              QStringLiteral("Codex default"));
-  const nlohmann::json mode =
-      canonical.value("collaborationMode", nlohmann::json::object());
-  selectValue(collaboration, mode.is_object() && mode.contains("mode") &&
-                                     mode["mode"].is_string()
-                                 ? text(mode["mode"].get<std::string>())
-                                 : QStringLiteral("default"));
+  if (refresh(Field::Model))
+    selectValue(model, optionalString(canonical, "model"),
+                QStringLiteral("Thread default"));
+  if (refresh(Field::Effort)) {
+    QString canonicalEffort = optionalString(canonical, "reasoningEffort");
+    if (canonicalEffort == DefaultValue)
+      canonicalEffort = optionalString(canonical, "effort");
+    selectValue(effort, canonicalEffort, QStringLiteral("Thread default"));
+  }
+  if (refresh(Field::Personality))
+    selectValue(personality, optionalString(canonical, "personality"),
+                QStringLiteral("Thread default"));
+  if (refresh(Field::Sandbox))
+    selectValue(sandbox, sandboxKey(canonicalSandbox(canonical)),
+                QStringLiteral("Thread default"));
+  if (refresh(Field::Network)) {
+    const nlohmann::json nativeSandbox = canonicalSandbox(canonical);
+    selectValue(network, sandboxKey(nativeSandbox) == DefaultValue
+                             ? QString::fromLatin1(DefaultValue)
+                         : sandboxNetworkEnabled(nativeSandbox)
+                             ? QStringLiteral("enabled")
+                             : QStringLiteral("restricted"));
+  }
+  if (refresh(Field::Approval)) {
+    const std::string nativeApproval = stringValue(canonical, "approvalPolicy");
+    selectValue(approval,
+                nativeApproval.empty() ? QString::fromLatin1(DefaultValue)
+                                       : text(nativeApproval),
+                nativeApproval.empty() ? QStringLiteral("Thread default")
+                                       : QStringLiteral("Current policy"));
+  }
+  if (refresh(Field::Reviewer))
+    selectValue(reviewer, optionalString(canonical, "approvalsReviewer"),
+                QStringLiteral("Thread default"));
+  if (refresh(Field::Workspace))
+    cwd->setText(text(stringValue(canonical, "cwd")));
+  if (refresh(Field::PermissionProfile)) {
+    QString activeProfile = QString::fromLatin1(DefaultValue);
+    const nlohmann::json profile = canonical.value(
+        "activePermissionProfile", nlohmann::json::object());
+    if (profile.is_object() && profile.contains("id") &&
+        profile["id"].is_string())
+      activeProfile = text(profile["id"].get<std::string>());
+    selectValue(permissionProfile, activeProfile,
+                QStringLiteral("Current permission profile"));
+  }
+  if (refresh(Field::ServiceTier))
+    selectValue(serviceTier, optionalString(canonical, "serviceTier"),
+                QStringLiteral("Thread default"));
+  if (refresh(Field::Summary))
+    selectValue(summary, optionalString(canonical, "summary"),
+                QStringLiteral("Thread default"));
+  if (refresh(Field::Collaboration)) {
+    const nlohmann::json mode =
+        canonical.value("collaborationMode", nlohmann::json::object());
+    selectValue(collaboration, mode.is_object() && mode.contains("mode") &&
+                                       mode["mode"].is_string()
+                                   ? text(mode["mode"].get<std::string>())
+                                   : QStringLiteral("default"));
+  }
 }
 
 void TurnSettingsWidget::refreshModels(const nlohmann::json &models) {
@@ -549,7 +597,7 @@ void TurnSettingsWidget::refreshModels(const nlohmann::json &models) {
        model->currentText() != model->itemText(model->currentIndex()));
   const QSignalBlocker blocker(model);
   model->clear();
-  addChoice(model, QStringLiteral("Codex default"), DefaultValue);
+  addChoice(model, QStringLiteral("Thread default"), DefaultValue);
   if (models.is_array()) {
     for (const auto &entry : models) {
       if (!entry.is_object() || entry.value("hidden", false))
@@ -587,7 +635,7 @@ void TurnSettingsWidget::refreshModelOptions() {
   }
   const QSignalBlocker blocker(effort);
   effort->clear();
-  QString defaultLabel = QStringLiteral("Codex default");
+  QString defaultLabel = QStringLiteral("Thread default");
   if (definition) {
     const std::string defaultEffort =
         stringValue(*definition, "defaultReasoningEffort");
@@ -622,7 +670,7 @@ void TurnSettingsWidget::refreshModelOptions() {
   const QString selectedTier = value(serviceTier);
   const QSignalBlocker tierBlocker(serviceTier);
   serviceTier->clear();
-  QString defaultTierLabel = QStringLiteral("Codex default");
+  QString defaultTierLabel = QStringLiteral("Thread default");
   if (definition) {
     const std::string defaultTier =
         stringValue(*definition, "defaultServiceTier");
@@ -682,7 +730,7 @@ void TurnSettingsWidget::refreshPermissionProfiles(
   const QString selected = value(permissionProfile);
   const QSignalBlocker blocker(permissionProfile);
   permissionProfile->clear();
-  addChoice(permissionProfile, QStringLiteral("Codex default"), DefaultValue);
+  addChoice(permissionProfile, QStringLiteral("Thread default"), DefaultValue);
   nlohmann::json entries = profiles;
   if (profiles.is_object())
     entries = profiles.value("data", nlohmann::json::array());
@@ -704,9 +752,8 @@ void TurnSettingsWidget::refreshPermissionProfiles(
 }
 
 void TurnSettingsWidget::refreshAccessCompatibility() {
-  const bool namedProfile = value(permissionProfile) != DefaultValue;
-  sandbox->setEnabled(!namedProfile);
-  network->setEnabled(!namedProfile && value(sandbox) != "danger-full-access" &&
+  sandbox->setEnabled(true);
+  network->setEnabled(value(sandbox) != "danger-full-access" &&
                       value(sandbox) != DefaultValue);
   if (value(sandbox) == "danger-full-access") {
     const QSignalBlocker blocker(network);
@@ -715,12 +762,14 @@ void TurnSettingsWidget::refreshAccessCompatibility() {
     const QSignalBlocker blocker(network);
     selectValue(network, QString::fromLatin1(DefaultValue));
   }
-  const QString reason =
-      namedProfile
-          ? QStringLiteral("The selected permission profile owns access policy")
-          : QString{};
-  sandbox->setToolTip(reason);
-  network->setToolTip(reason);
+  sandbox->setToolTip({});
+  network->setToolTip(value(sandbox) == "danger-full-access"
+                          ? QStringLiteral(
+                                "Full access already includes network access")
+                      : value(sandbox) == DefaultValue
+                          ? QStringLiteral(
+                                "Select an access mode before network access")
+                          : QString{});
 }
 
 void TurnSettingsWidget::refreshMoreIndicator() {

@@ -4,10 +4,65 @@
 
 #include <QApplication>
 #include <QFontInfo>
+#include <QPaintEvent>
+#include <QPainter>
+#include <QPainterPath>
+#include <QStyle>
+#include <QStyleOptionToolButton>
+#include <QWidget>
 
 #include <algorithm>
 
 namespace codexui::UiStyle {
+
+void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
+                 bool highlighted, ChevronDirection direction) {
+  if (!indicator.isValid() || indicator.isEmpty())
+    return;
+  const QPointF center = indicator.center();
+  QPainterPath chevron;
+  if (direction == ChevronDirection::Right) {
+    chevron.moveTo(center.x() - 1.5, center.y() - 3.5);
+    chevron.lineTo(center.x() + 2.0, center.y());
+    chevron.lineTo(center.x() - 1.5, center.y() + 3.5);
+  } else if (direction == ChevronDirection::Left) {
+    chevron.moveTo(center.x() + 1.5, center.y() - 3.5);
+    chevron.lineTo(center.x() - 2.0, center.y());
+    chevron.lineTo(center.x() + 1.5, center.y() + 3.5);
+  } else {
+    chevron.moveTo(center.x() - 3.5, center.y() - 1.5);
+    chevron.lineTo(center.x(), center.y() + 2.0);
+    chevron.lineTo(center.x() + 3.5, center.y() - 1.5);
+  }
+
+  QColor color(QStringLiteral("#667085"));
+  if (!enabled)
+    color = QColor(QStringLiteral("#98a2b3"));
+  else if (highlighted)
+    color = QColor(QStringLiteral("#1d2633"));
+
+  QPainter painter(widget);
+  painter.setRenderHint(QPainter::Antialiasing, true);
+  painter.setPen(QPen(color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  painter.setBrush(Qt::NoBrush);
+  painter.drawPath(chevron);
+}
+
+void ChevronToolButton::paintEvent(QPaintEvent *event) {
+  QToolButton::paintEvent(event);
+  QStyleOptionToolButton option;
+  initStyleOption(&option);
+  const QRect contents =
+      style()->subElementRect(QStyle::SE_ToolButtonLayoutItem, &option, this);
+  const int indicatorWidth =
+      style()->pixelMetric(QStyle::PM_MenuButtonIndicator, &option, this);
+  const QRect indicator(contents.right() - std::max(12, indicatorWidth),
+                        contents.top(), std::max(12, indicatorWidth),
+                        contents.height());
+  drawChevron(this, indicator, option.state & QStyle::State_Enabled,
+              option.state &
+                  (QStyle::State_MouseOver | QStyle::State_HasFocus));
+}
 
 QString applicationStyleSheet() {
   const qreal configuredSize = QFontInfo(QApplication::font()).pointSizeF();
@@ -16,6 +71,7 @@ QString applicationStyleSheet() {
       QString::number(std::max(1.0, baseSize - 1.0), 'f', 1);
   const QString standard = QString::number(baseSize, 'f', 1);
   const QString section = QString::number(baseSize + 1.0, 'f', 1);
+  const QString panelHeader = QString::number(baseSize + 1.0, 'f', 1);
   const QString heading = QString::number(baseSize + 3.0, 'f', 1);
 
   return QStringLiteral(R"QSS(
@@ -23,7 +79,7 @@ QString applicationStyleSheet() {
             color: #1d2633;
             font-size: %1pt;
         }
-        QMainWindow, QWidget#workbench { background: #f6f8fb; }
+        QMainWindow, QWidget#applicationShell { background: #f6f8fb; }
         QLabel { background: transparent; font-weight: 400; }
         QLabel[kind="muted"] { color: #667085; font-size: %1pt; }
         QLabel[kind="section"] {
@@ -31,8 +87,13 @@ QString applicationStyleSheet() {
             font-size: %3pt;
             font-weight: 600;
         }
+        QLabel[kind="panelHeader"] {
+            color: #475467;
+            font-size: %5pt;
+            font-weight: 700;
+        }
         QLabel[kind="attentionSection"] {
-            color: #a76812;
+            color: #a85d0c;
             font-size: %1pt;
             font-weight: 600;
         }
@@ -43,6 +104,18 @@ QString applicationStyleSheet() {
         QLabel[kind="body"] { font-size: %2pt; }
         QLabel[kind="meta"] { color: #667085; font-size: %1pt; }
         QLabel[kind="small"] { color: #667085; font-size: %1pt; }
+        QLabel[tone="active"] { color: #285fca; }
+        QLabel[tone="success"] { color: #176b45; }
+        QLabel[tone="warning"] { color: #8a5208; }
+        QLabel[tone="danger"] { color: #982f3d; }
+        QLabel[kind="imageThumbnail"] {
+          background: #f8fafc;
+          border: 1px solid #d7dee8;
+          border-radius: 6px;
+          padding: 3px;
+        }
+        QLabel[kind="diffAdditionMeta"] { color: #176b45; font-size: %1pt; font-weight: 600; }
+        QLabel[kind="diffDeletionMeta"] { color: #982f3d; font-size: %1pt; font-weight: 600; }
         QPushButton, QToolButton {
             background: #ffffff;
             border: 1px solid #d7dee8;
@@ -51,6 +124,7 @@ QString applicationStyleSheet() {
             font-size: %1pt;
             font-weight: 600;
         }
+        QPushButton[comboPeer="true"] { min-height: 30px; max-height: 30px; }
         QPushButton:hover, QToolButton:hover { background: #f1f5fb; border-color: #b9c4d2; }
         QPushButton:pressed, QToolButton:pressed { background: #e5eeff; border-color: #bfd3f9; }
         QPushButton:focus, QToolButton:focus { border: 2px solid #2f6feb; }
@@ -59,7 +133,7 @@ QString applicationStyleSheet() {
         QPushButton[kind="primary"]:hover { background: #285fca; border-color: #285fca; }
         QPushButton[kind="history"] { background: #e5eeff; border-color: #bfd3f9; color: #285fca; }
         QPushButton[kind="history"]:hover { background: #d8e7ff; border-color: #9ebcf3; }
-        QPushButton[kind="request"] { background: #fff6df; border-color: #e5c77d; color: #8a5a00; }
+        QPushButton[kind="request"] { background: #fff6df; border-color: #e5c77d; color: #8a5208; }
         QPushButton[kind="request"]:hover { background: #ffefc4; border-color: #d5ad50; }
         QPushButton[kind="steer"] { background: #ffffff; border-color: #2f6feb; color: #2f6feb; }
         QPushButton[kind="steer"]:hover { background: #e5eeff; border-color: #285fca; color: #285fca; }
@@ -70,6 +144,27 @@ QString applicationStyleSheet() {
             background: transparent;
             border-color: transparent;
         }
+        QPushButton[kind="infoChoice"] {
+          background: #ffffff;
+          border: 1px solid #d7dee8;
+          border-radius: 10px;
+          padding: 0;
+          text-align: left;
+        }
+        QPushButton[kind="infoChoice"]:hover { background: #f8fafc; border-color: #b9c4d2; }
+        QPushButton[kind="infoChoice"]:pressed { background: #f1f5fb; border-color: #9eabbc; }
+        QPushButton[kind="segment"] {
+          background: #ffffff;
+          border-color: #d7dee8;
+          border-radius: 7px;
+          padding: 0 10px;
+        }
+        QPushButton[kind="segment"]:checked {
+          background: #e5eeff;
+          border-color: #bfd3f9;
+          color: #1d2633;
+        }
+        QPushButton[kind="segment"]:hover:!checked { background: #f1f5fb; }
         QToolButton[kind="composerAction"] {
             background: #ffffff;
             border: 1px solid #d7dee8;
@@ -77,11 +172,25 @@ QString applicationStyleSheet() {
             padding: 0;
         }
         QToolButton[kind="composerAction"]:hover { background: #f1f5fb; border-color: #b9c4d2; }
+        QToolButton#cardDisclosureButton {
+            background: transparent;
+            border: 0;
+            padding: 0;
+        }
         QPushButton[kind="agentLink"] { background: #e5eeff; border-color: #bfd3f9; color: #2f6feb; text-align: left; }
-        QPushButton[kind="stop"] { background: #ffffff; border-color: #b83a3a; color: #b83a3a; }
-        QPushButton[kind="stop"]:hover { background: #fff1f1; }
-        QPushButton[codexChevron="true"] { padding-right: 26px; }
+        QPushButton[kind="success"] { background: #18865e; border-color: #18865e; color: white; }
+        QPushButton[kind="success"]:hover { background: #14734f; border-color: #14734f; }
+        QPushButton[kind="success"]:pressed { background: #105f41; border-color: #105f41; }
+        QPushButton[kind="destructive"], QPushButton[kind="stop"] { background: #c43d4d; border-color: #c43d4d; color: white; }
+        QPushButton[kind="destructive"]:hover, QPushButton[kind="stop"]:hover { background: #aa3342; border-color: #aa3342; }
+        QPushButton[kind="destructive"]:pressed, QPushButton[kind="stop"]:pressed { background: #8f2b38; border-color: #8f2b38; }
+        QPushButton[kind="destructiveCompact"] { background: #c43d4d; border: 0; color: white; border-radius: 4px; padding: 0; font-weight: 700; }
+        QPushButton[kind="destructiveCompact"]:hover { background: #aa3342; }
+        QPushButton[kind="destructiveCompact"]:pressed { background: #8f2b38; }
+        QPushButton[codexChevron="true"] { padding-right: 20px; }
         QPushButton[codexChevron="true"]::menu-indicator { image: none; width: 0; }
+        QToolButton[codexChevron="true"] { padding-right: 20px; }
+        QToolButton[codexChevron="true"]::menu-indicator { image: none; width: 0; }
         QPushButton[changed="true"] {
             background: #e5eeff;
             color: #2f6feb;
@@ -89,15 +198,20 @@ QString applicationStyleSheet() {
         }
         QFrame[kind="panel"] { background: #ffffff; }
         QFrame[kind="raised"] { background: #ffffff; border: 1px solid #d7dee8; border-radius: 10px; }
+        QFrame[kind="raised"][tone="warning"] { background: #fff6df; border-color: #e5c77d; }
         QFrame[messageRole="user"] { background: #eaf2ff; border: 1px solid #bfd3f9; border-radius: 8px; }
         QFrame[messageRole="agent"] { background: #ffffff; border: 0; border-radius: 8px; }
         QFrame[kind="summary"] { background: #f8fafc; border: 1px solid #d7dee8; border-radius: 7px; }
-        QFrame[kind="greenBadge"] { background: #e9f7f0; border-radius: 6px; }
+        QFrame[kind="standardDivider"] { background: #d7dee8; border: none; }
+        QFrame[kind="greenBadge"] { background: #e9f7f0; border: 1px solid #a9d8c1; border-radius: 6px; }
         QFrame[kind="blueBadge"] { background: #e5eeff; border-radius: 5px; }
-        QFrame[kind="amberBadge"] { background: #fff6df; border: 1px solid #e5c77d; border-radius: 7px; }
+        QFrame[kind="orangeBadge"] { background: #fff6df; border: 1px solid #e5c77d; border-radius: 7px; }
+        QFrame#conversationNoticeBar[tone="warning"] { background: #fff6df; border: 1px solid #e5c77d; border-radius: 7px; }
+        QFrame#conversationNoticeBar[tone="danger"] { background: #fff0f2; border: 1px solid #efb8c0; border-radius: 7px; }
+        QWidget#composerOverlay { background: #f6f8fb; }
         QFrame[kind="composer"] { background: #ffffff; border: 1px solid #d7dee8; border-radius: 10px; }
         QFrame[kind="composer"][focused="true"] { border: 2px solid #2f6feb; }
-        QPlainTextEdit {
+        QPlainTextEdit, QTextEdit {
             background: transparent;
             border: 0;
             color: #1d2633;
@@ -108,6 +222,7 @@ QString applicationStyleSheet() {
         }
         QPlainTextEdit[empty="true"] { color: #98a2b3; }
         QPlainTextEdit[kind="code"], QPlainTextEdit[kind="command"],
+        QTextEdit[kind="code"], QTextEdit[kind="command"],
         QPlainTextEdit[kind="infoViewer"] {
             font-family: monospace;
             font-size: %1pt;
@@ -215,6 +330,11 @@ QString applicationStyleSheet() {
         QDialog { background: #ffffff; }
         QScrollArea { background: #f6f8fb; border: 0; }
         QTabWidget QScrollArea { background: #fbfcfe; }
+        QScrollArea[kind="inspectorScroll"],
+        QScrollArea[kind="inspectorScroll"] > QWidget > QWidget {
+          background: transparent;
+          border: 0;
+        }
         QDialog QScrollArea { background: #ffffff; }
         QScrollArea > QWidget > QWidget { background: transparent; }
         QAbstractScrollArea::corner { background: transparent; border: 0; }
@@ -334,14 +454,38 @@ QString applicationStyleSheet() {
         QTabBar::tab:selected { background: #e5eeff; color: #1d2633; font-weight: 600; }
         QTabBar::tab:hover:!selected { background: #f1f5fb; color: #1d2633; }
         QTabBar::tab:focus { border: 1px solid #2f6feb; }
-        QMenu { background: #ffffff; color: #1d2633; border: 1px solid #d7dee8; padding: 5px; }
-        QMenu::item { padding: 7px 28px 7px 10px; border-radius: 4px; }
-        QMenu::item:selected { background: #e5eeff; color: #1d2633; }
+        QMenu {
+            background: #ffffff;
+            color: #1d2633;
+            border: 1px solid #d7dee8;
+            border-radius: 8px;
+            padding: 4px;
+        }
+        QMenu::item {
+            min-height: 30px;
+            padding: 0 24px 0 10px;
+            border-radius: 5px;
+            font-weight: 400;
+        }
+        QMenu::item:selected {
+            background: #f1f5fb;
+            color: #1d2633;
+        }
+        QMenu::item:checked {
+            background: #e5eeff;
+            color: #285fca;
+        }
+        QMenu::item:checked:selected { background: #d8e7ff; }
         QMenu::item:disabled { color: #98a2b3; }
-        QMenu::separator { height: 1px; background: #d7dee8; margin: 5px 8px; }
+        QMenu::item:disabled:selected { background: transparent; }
+        QMenu::separator {
+            height: 1px;
+            background: #d7dee8;
+            margin: 4px 8px;
+        }
         QToolTip { background: #ffffff; color: #1d2633; border: 1px solid #b9c4d2; padding: 5px; }
     )QSS")
-      .arg(compact, standard, section, heading);
+      .arg(compact, standard, section, heading, panelHeader);
 }
 
 } // namespace codexui::UiStyle

@@ -23,7 +23,10 @@ public:
 
   void setContext(std::string identity, const nlohmann::json &canonical,
                   const nlohmann::json &models,
-                  const nlohmann::json &permissionProfiles);
+                  const nlohmann::json &permissionProfiles,
+                  std::uint64_t settingsRevision = 0,
+                  const nlohmann::json &settingsUpdate =
+                      nlohmann::json::object());
   void setControlsEnabled(bool enabled);
   void setWorkspace(QString path);
 
@@ -49,7 +52,9 @@ private:
   };
 
   void markTouched(Field field);
-  void resetFromCanonical(const nlohmann::json &canonical);
+  void refreshFromCanonical(
+      const nlohmann::json &canonical,
+      const std::array<bool, static_cast<std::size_t>(Field::Count)> &fields);
   void refreshModels(const nlohmann::json &models);
   void refreshModelOptions();
   void refreshPermissionProfiles(const nlohmann::json &profiles);
@@ -61,6 +66,8 @@ private:
   [[nodiscard]] nlohmann::json collaborationMode() const;
 
   std::string contextIdentity;
+  nlohmann::json canonicalContext = nlohmann::json::object();
+  std::uint64_t canonicalSettingsRevision = 0;
   nlohmann::json modelCatalog = nlohmann::json::array();
   std::array<bool, static_cast<std::size_t>(Field::Count)> touchedFields{};
 

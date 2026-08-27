@@ -3,6 +3,7 @@
 #include "codex/middle/MiddleRegionWidget.h"
 
 #include "codex/middle/ComposerPane.h"
+#include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
 #include "codex/middle/InspectorPane.h"
 #include "codex/middle/ThreadPane.h"
@@ -15,9 +16,11 @@
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSplitter>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
+#include <array>
 #include <utility>
 
 namespace codexui::codex::middle {
@@ -34,10 +37,12 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
   return label;
 }
 
-QFrame *divider() {
+QFrame *divider(const char *name = nullptr) {
   auto *line = new QFrame;
+  if (name)
+    line->setObjectName(QString::fromLatin1(name));
+  line->setProperty("kind", "standardDivider");
   line->setFixedHeight(1);
-  line->setStyleSheet(QStringLiteral("background:#d7dee8;"));
   return line;
 }
 
@@ -80,35 +85,51 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
       QStringLiteral("QFrame#conversation{background:#f6f8fb;}"));
   conversationRegion->setMinimumWidth(480);
   auto *center = new QVBoxLayout(conversationRegion);
-  center->setContentsMargins(24, 14, 24, 12);
+  center->setContentsMargins(10, 14, 10, 12);
   center->setSpacing(0);
   auto *context = new QHBoxLayout;
-  auto *badge = makeLabel(QStringLiteral("THREAD"), "small");
-  badge->setAlignment(Qt::AlignCenter);
-  badge->setFixedSize(58, 20);
-  badge->setStyleSheet(QStringLiteral(
-      "background:#e5eeff;color:#2f6feb;border-radius:5px;font-weight:600;"));
-  context->addWidget(badge);
+  context->setContentsMargins(14, 0, 14, 0);
+  context->addStrut(24);
+  auto *sectionTitle =
+      makeLabel(QStringLiteral("CONVERSATION"), "panelHeader");
+  sectionTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+  sectionTitle->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+  context->addWidget(sectionTitle);
   context->addStretch();
   center->addLayout(context);
-  center->addSpacing(2);
+  center->addWidget(divider("conversationHeaderDivider"));
+  center->addSpacing(8);
+
+  auto *content = new QWidget;
+  auto *contentLayout = new QVBoxLayout(content);
+  contentLayout->setContentsMargins(14, 0, 14, 0);
+  contentLayout->setSpacing(0);
+  auto *threadHeading = new QHBoxLayout;
+  threadHeading->setSpacing(10);
   conversationTitle =
       makeLabel(QStringLiteral("No synchronized thread"), "heading");
+  conversationTitle->setObjectName(QStringLiteral("conversationTitle"));
+  conversationTitle->setWordWrap(false);
+  conversationTitle->setSizePolicy(QSizePolicy::Minimum,
+                                   QSizePolicy::Preferred);
   conversationMetadata = makeLabel({}, "meta");
-  center->addWidget(conversationTitle);
-  center->addSpacing(2);
-  center->addWidget(conversationMetadata);
-  center->addSpacing(7);
-  center->addWidget(divider());
-  center->addSpacing(7);
+  conversationMetadata->setObjectName(
+      QStringLiteral("conversationMetadata"));
+  conversationMetadata->setWordWrap(false);
+  threadHeading->addWidget(conversationTitle, 0, Qt::AlignBaseline);
+  threadHeading->addWidget(conversationMetadata, 1, Qt::AlignBaseline);
+  contentLayout->addLayout(threadHeading);
+  contentLayout->addSpacing(7);
+  contentLayout->addWidget(divider());
+  contentLayout->addSpacing(7);
 
   noticeBar = new QFrame;
-  noticeBar->setStyleSheet(QStringLiteral(
-      "background:#fff4f2;border:1px solid #efc2bc;border-radius:6px;"));
+  noticeBar->setObjectName(QStringLiteral("conversationNoticeBar"));
+  noticeBar->setProperty("tone", "danger");
   auto *noticeLayout = new QHBoxLayout(noticeBar);
   noticeLayout->setContentsMargins(10, 6, 8, 6);
   noticeLabel = makeLabel({}, "meta");
-  noticeLabel->setStyleSheet(QStringLiteral("color:#9d2e2e;"));
+  noticeLabel->setProperty("tone", "danger");
   auto *dismiss = new QPushButton(QStringLiteral("Dismiss"));
   dismiss->setProperty("kind", "subtle");
   dismiss->setFixedHeight(28);
@@ -116,14 +137,15 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   noticeLayout->addWidget(dismiss);
   noticeBar->hide();
   connect(dismiss, &QPushButton::clicked, noticeBar, &QWidget::hide);
-  center->addWidget(noticeBar);
+  contentLayout->addWidget(noticeBar);
 
   conversationView = new ConversationView;
-  center->addWidget(conversationView, 1);
+  contentLayout->addWidget(conversationView, 1);
   composerPane = new ComposerPane(conversationRegion);
   composerPane->setExtraOverlayHeightAction(
       [this](int height) { conversationView->setTrailingSpaceHeight(height); });
-  center->addWidget(composerPane->canonicalReserve());
+  contentLayout->addWidget(composerPane->canonicalReserve());
+  center->addWidget(content, 1);
   splitter->addWidget(conversationRegion);
 
   inspectorPane = new InspectorPane;
@@ -166,13 +188,15 @@ void MiddleRegionWidget::showNotice(QString message, bool error) {
   if (message.trimmed().isEmpty())
     return;
   noticeLabel->setText(std::move(message));
-  noticeBar->setStyleSheet(
-      error ? QStringLiteral("background:#fff4f2;border:1px solid #efc2bc;"
-                             "border-radius:6px;")
-            : QStringLiteral("background:#fff8e8;border:1px solid #e5c77d;"
-                             "border-radius:6px;"));
-  noticeLabel->setStyleSheet(error ? QStringLiteral("color:#9d2e2e;")
-                                   : QStringLiteral("color:#8a5a00;"));
+  const QString tone =
+      error ? QStringLiteral("danger") : QStringLiteral("warning");
+  const std::array<QWidget *, 2> tonedWidgets{noticeBar, noticeLabel};
+  for (QWidget *widget : tonedWidgets) {
+    widget->setProperty("tone", tone);
+    widget->style()->unpolish(widget);
+    widget->style()->polish(widget);
+    widget->update();
+  }
   noticeBar->show();
 }
 
@@ -232,6 +256,8 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
            ancestor = ancestor->parentWidget()) {
         if (auto *nested = qobject_cast<QAbstractScrollArea *>(ancestor);
             nested && nested != conversationView) {
+          if (dynamic_cast<CommandOutputView *>(nested))
+            return false;
           if (canConsume(nested, verticalIntent(wheel)))
             return false;
           break;
@@ -244,6 +270,8 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
            ancestor && ancestor != conversationRegion;
            ancestor = ancestor->parentWidget()) {
         if (auto *nested = qobject_cast<QAbstractScrollArea *>(ancestor)) {
+          if (dynamic_cast<CommandOutputView *>(nested))
+            return false;
           if (canConsume(nested, verticalIntent(wheel)))
             return false;
           break;
