@@ -785,8 +785,8 @@ bool testMutableCardsAndCommandOutput() {
                  }),
              "authoritative user messages render GitHub Markdown tables");
   result &=
-      expect(titleText(agentCardWidget) == QStringLiteral("Codex activity"),
-             "interim agent messages retain their activity title");
+      expect(titleText(agentCardWidget) == QStringLiteral("Codex • update"),
+             "interim agent messages identify their update phase plainly");
   auto *filesCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "files"}})];
   auto *planCard = identities[stableKey(
@@ -859,7 +859,7 @@ bool testMutableCardsAndCommandOutput() {
                          identities[stableKey(value.key)],
                      "same-key same-kind card updates in place");
   result &= expect(titleText(agentCardWidget) ==
-                       QStringLiteral("Codex * Final answer"),
+                       QStringLiteral("Codex • final answer"),
                    "final agent messages identify their answer phase plainly");
   result &=
       expect(!output->isHidden() && output->minimumHeight() == 0 &&

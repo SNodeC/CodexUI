@@ -862,8 +862,8 @@ public:
     case CardKind::AgentMessage: {
       const auto &message = std::get<AgentMessageData>(data.payload);
       title->setText(message.finalAnswer
-                         ? QStringLiteral("Codex * Final answer")
-                         : QStringLiteral("Codex activity"));
+                         ? QStringLiteral("Codex • final answer")
+                         : QStringLiteral("Codex • update"));
       layout->setContentsMargins(12, message.finalAnswer ? 10 : 8, 12,
                                  message.finalAnswer ? 10 : 8);
       setVisibleMarkdown(body, message.text);
