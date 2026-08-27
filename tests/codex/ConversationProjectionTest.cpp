@@ -171,17 +171,27 @@ bool testQueueIsolationAndRealAcknowledgement() {
              "the authoritative user item assumes the local stable key");
   result &= expect(stableKey(local->key) == stableKey(authoritative->key),
                    "materialization does not change the visual identity");
-  prompts.reconcile(first.id, first, 700);
+  auto compactedItems = indexAuthoritativeItems(first.id, &first);
+  prompts.reconcile(first.id, compactedItems, 700);
   accepted = prompts.submission(first.id, firstId);
   const ConversationSnapshot compacted = ConversationProjection::project(
-      first, prompts.submissions(first.id), 80, 701);
+      compactedItems, &first, prompts.submissions(first.id), 80, 701);
   result &= expect(
       !accepted && prompts.submissions(first.id).empty() &&
-          compacted.find(
-              AuthoritativeItemKey{first.id, "turn-2", "user-new"}) &&
-          compacted.find(AuthoritativeItemKey{first.id, "turn-2", "user-new"})
-                  ->kind == CardKind::UserMessage,
-      "fully resolved submissions leave only authoritative presentation");
+          compacted.find(LocalPromptKey{firstId}) &&
+          compacted.find(LocalPromptKey{firstId})->kind ==
+              CardKind::UserMessage &&
+          !compacted.find(AuthoritativeItemKey{first.id, "turn-2", "user-new"}),
+      "submission cleanup retains the compact local visual identity alias");
+  auto retainedAliasItems = indexAuthoritativeItems(first.id, &first);
+  prompts.reconcile(first.id, retainedAliasItems, 701);
+  const ConversationSnapshot retainedAlias = ConversationProjection::project(
+      retainedAliasItems, &first, prompts.submissions(first.id), 80, 702);
+  result &=
+      expect(retainedAlias.find(LocalPromptKey{firstId}) &&
+                 retainedAlias.find(LocalPromptKey{firstId})->kind ==
+                     CardKind::UserMessage,
+             "a later projection reapplies the retained visual identity alias");
   return result;
 }
 

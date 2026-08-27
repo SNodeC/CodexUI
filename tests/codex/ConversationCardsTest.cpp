@@ -15,6 +15,7 @@
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QThread>
+#include <QTimer>
 #include <QToolButton>
 #include <QWheelEvent>
 
@@ -929,6 +930,7 @@ bool testCardFoldingGeometryAndRetention() {
   result &= expect(promptCard && !promptCard->isCollapsed() &&
                        setFolded(promptCard, true),
                    "temporary You prompts start expanded and can be folded");
+  ConversationCard *const admittedPromptCard = promptCard;
   promptSnapshot.sections.front().cards.front() = {
       promptKey,    CardKind::UserMessage,
       promptThread, "turn",
@@ -936,10 +938,19 @@ bool testCardFoldingGeometryAndRetention() {
   view.reconcile(promptSnapshot);
   spin();
   promptCard = card(view, stableKey(promptKey));
-  result &=
-      expect(promptCard && promptCard->cardKind() == CardKind::UserMessage &&
-                 promptCard->isCollapsed(),
-             "fold state survives authoritative prompt replacement");
+  auto *promptAnimation = admittedPromptCard->findChild<QTimer *>(
+      QString{}, Qt::FindDirectChildrenOnly);
+  result &= expect(
+      promptCard && promptCard == admittedPromptCard &&
+          promptCard->cardKind() == CardKind::UserMessage &&
+          promptCard->isCollapsed() && promptAnimation &&
+          !promptAnimation->isActive() &&
+          promptCard->property("messageRole") == QStringLiteral("user") &&
+          promptCard->property("conversationCardKind").toInt() ==
+              static_cast<int>(CardKind::UserMessage) &&
+          promptCard->objectName() == QStringLiteral("conversationCard") &&
+          promptCard->styleSheet().isEmpty(),
+      "acknowledgement morphs the retained You card in place");
 
   const std::string edgeThread = "folding-bottom-edge";
   ConversationSnapshot edge = conversation(edgeThread, 12);

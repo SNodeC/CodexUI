@@ -666,13 +666,25 @@ public:
     refreshFoldPresentation();
   }
 
+  [[nodiscard]] bool canApply(const VisibleCardData &next) const noexcept {
+    return current.key == next.key && (current.kind == next.kind ||
+                                       (current.kind == CardKind::LocalPrompt &&
+                                        next.kind == CardKind::UserMessage));
+  }
+
   bool apply(const VisibleCardData &next) {
-    if (current.key != next.key || current.kind != next.kind) {
+    if (!canApply(next)) {
       Q_ASSERT_X(false, "ConversationCard::apply",
-                 "a persistent conversation card cannot change key or kind");
+                 "a persistent conversation card received an incompatible "
+                 "key or kind");
       return false;
     }
-    const bool presentationChanged = !presentationEquals(current, next);
+    const bool becomingAuthoritative = current.kind == CardKind::LocalPrompt &&
+                                       next.kind == CardKind::UserMessage;
+    const bool presentationChanged =
+        becomingAuthoritative || !presentationEquals(current, next);
+    if (becomingAuthoritative)
+      promoteToAuthoritativeUserMessage();
     current = next;
     if (!presentationChanged)
       return false;
@@ -681,6 +693,23 @@ public:
     owner->updateGeometry();
     owner->update();
     return true;
+  }
+
+  void promoteToAuthoritativeUserMessage() {
+    if (animationTimer)
+      animationTimer->stop();
+    owner->setObjectName(QStringLiteral("conversationCard"));
+    owner->setProperty("conversationCardKind",
+                       static_cast<int>(CardKind::UserMessage));
+    owner->setProperty("messageRole", "user");
+    owner->setStyleSheet(QString{});
+    for (QLabel *label : {title, body, metadata})
+      if (label)
+        label->setStyleSheet(QString{});
+    if (metadata) {
+      metadata->clear();
+      metadata->hide();
+    }
   }
 
   void setCollapsed(bool next) {
@@ -1020,6 +1049,10 @@ void ConversationCard::restoreCommandOutputScrollState(
 
 bool ConversationCard::apply(const VisibleCardData &data) {
   return impl_->apply(data);
+}
+
+bool ConversationCard::canApply(const VisibleCardData &data) const noexcept {
+  return impl_->canApply(data);
 }
 
 void ConversationCard::paintEvent(QPaintEvent *event) {

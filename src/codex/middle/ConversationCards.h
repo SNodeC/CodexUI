@@ -87,9 +87,11 @@ public:
   void
   restoreCommandOutputScrollState(const CommandOutputView::ScrollState &state);
 
-  // A key and kind identify the persistent widget. apply() updates all card
-  // kinds in place and returns false when neither content nor presentation
-  // changed. Passing a different key or kind is a programming error.
+  [[nodiscard]] bool canApply(const VisibleCardData &data) const noexcept;
+
+  // A key identifies the persistent widget. apply() updates matching card
+  // kinds in place and also performs the one supported semantic transition
+  // from an admitted local prompt to its authoritative user message.
   bool apply(const VisibleCardData &data);
 
 signals:
