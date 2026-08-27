@@ -518,6 +518,7 @@ int main() {
          {"turns",
           nlohmann::json::array(
               {{{"id", "child-turn"},
+                {"status", "inProgress"},
                 {"items",
                  nlohmann::json::array(
                      {{{"id", "spawn-grandchild"},

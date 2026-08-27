@@ -1042,7 +1042,10 @@ void PresentationModel::synchronizeOwningAgent(
   if (!agent || child == threads.end())
     return;
 
-  std::string childStatus;
+  // A thread-level lifecycle is authoritative. Turn status is only a fallback
+  // for incremental payloads that do not carry the thread lifecycle; an old
+  // or interrupted turn must not make an idle child appear active.
+  std::string childStatus = child->second.status;
   std::string resultText;
   for (auto turnId = child->second.turnOrder.rbegin();
        turnId != child->second.turnOrder.rend(); ++turnId) {
@@ -1064,8 +1067,6 @@ void PresentationModel::synchronizeOwningAgent(
     if (!resultText.empty() && !childStatus.empty())
       break;
   }
-  if (childStatus.empty())
-    childStatus = child->second.status;
   updateOwningAgentStatus(childThreadId, childStatus);
   const auto ownership = childOwnerships.find(childThreadId);
   const auto parent = ownership == childOwnerships.end()
