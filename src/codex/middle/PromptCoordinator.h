@@ -113,16 +113,14 @@ public:
 
   // Correlates prompts with authoritative userMessage items. Exact client ids
   // may bind before acknowledgement so the awaiting card is never duplicated;
-  // the content fallback is used only after the real operation callback.
+  // the content fallback is used only after the real operation callback. Fully
+  // resolved submissions are removed after their accepted transition.
   void reconcile(const std::string &threadId,
-                 const ThreadPresentation &authoritativeThread);
+                 const ThreadPresentation &authoritativeThread,
+                 qint64 nowMilliseconds);
   void reconcile(const std::string &threadId,
-                 AuthoritativeItemIndex &authoritativeItems);
-
-  // Resolved submissions remain as lightweight authoritative-item aliases so
-  // their visual keys stay stable. Dispatch-only payload is released after the
-  // accepted transition and materialization are both complete.
-  void compactResolved(const std::string &threadId, qint64 nowMilliseconds);
+                 AuthoritativeItemIndex &authoritativeItems,
+                 qint64 nowMilliseconds);
 
   [[nodiscard]] std::span<const PromptSubmission>
   submissions(const std::string &threadId) const noexcept;

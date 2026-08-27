@@ -546,9 +546,8 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
     }
   } else if (!eventThreadId.empty()) {
     if (const ThreadPresentation *thread = model.thread(eventThreadId)) {
-      prompts.reconcile(eventThreadId, *thread);
-      prompts.compactResolved(eventThreadId,
-                              QDateTime::currentMSecsSinceEpoch());
+      prompts.reconcile(eventThreadId, *thread,
+                        QDateTime::currentMSecsSinceEpoch());
     }
   } else if (kind == "event" && type == "connection.provider" &&
              stringValue(data, "state") == "ready") {
@@ -595,9 +594,7 @@ void ShellWidget::Impl::renderConversation() {
   middle::AuthoritativeItemIndex authoritativeItems =
       middle::indexAuthoritativeItems(projectionId, thread);
   if (thread)
-    prompts.reconcile(selectedThreadId, authoritativeItems);
-  if (!projectionId.empty())
-    prompts.compactResolved(projectionId, now);
+    prompts.reconcile(selectedThreadId, authoritativeItems, now);
   const auto submissions = prompts.submissions(projectionId);
   const std::size_t authoritativeCount = authoritativeItems.ordered.size();
   HistoryWindow &history = historyWindows[projectionId];
@@ -1315,8 +1312,6 @@ void ShellWidget::Impl::completePrompt(const std::string &threadId,
     static_cast<void>(prompts.acknowledge(threadId, submissionId,
                                           resultTurnId(result),
                                           QDateTime::currentMSecsSinceEpoch()));
-    if (const ThreadPresentation *thread = model.thread(threadId))
-      prompts.reconcile(threadId, *thread);
     scheduleAcceptedTransition(threadId, submissionId);
   } else {
     const std::string message =
@@ -1396,8 +1391,7 @@ void ShellWidget::Impl::scheduleAcceptedTransition(const std::string &threadId,
           return;
         }
         if (const ThreadPresentation *thread = model.thread(threadId))
-          prompts.reconcile(threadId, *thread);
-        prompts.compactResolved(threadId, now);
+          prompts.reconcile(threadId, *thread, now);
         render();
       });
 }

@@ -274,14 +274,16 @@ bool PromptCoordinator::reassignThread(const std::string &fromThreadId,
 }
 
 void PromptCoordinator::reconcile(const std::string &threadId,
-                                  const ThreadPresentation &authoritativeThread) {
+                                  const ThreadPresentation &authoritativeThread,
+                                  qint64 nowMilliseconds) {
   auto authoritativeItems =
       indexAuthoritativeItems(threadId, &authoritativeThread);
-  reconcile(threadId, authoritativeItems);
+  reconcile(threadId, authoritativeItems, nowMilliseconds);
 }
 
 void PromptCoordinator::reconcile(const std::string &threadId,
-                                  AuthoritativeItemIndex &authoritativeItems) {
+                                  AuthoritativeItemIndex &authoritativeItems,
+                                  qint64 nowMilliseconds) {
   auto found = byThread.find(threadId);
   if (found == byThread.end())
     return;
@@ -352,28 +354,11 @@ void PromptCoordinator::reconcile(const std::string &threadId,
     claimed[index] = true;
     authoritativeItems.userMessagesByText.erase(candidate);
   }
-}
-
-void PromptCoordinator::compactResolved(const std::string &threadId,
-                                        qint64 nowMilliseconds) {
-  auto found = byThread.find(threadId);
-  if (found == byThread.end())
-    return;
-  for (PromptSubmission &submission : found->second) {
-    if (submission.state != PromptState::Accepted ||
-        !submission.materializedItem ||
-        submission.acceptedTransitionActive(nowMilliseconds) ||
-        submission.clientUserMessageId.empty())
-      continue;
-    std::string{}.swap(submission.clientUserMessageId);
-    QString{}.swap(submission.prompt);
-    std::vector<AttachmentDraft>{}.swap(submission.attachments);
-    submission.turnOptions = nlohmann::json::object();
-    submission.error.clear();
-    submission.error.squeeze();
-    submission.expectedTurnId.reset();
-    submission.acceptedAtMilliseconds = 0;
-  }
+  std::erase_if(found->second, [nowMilliseconds](const auto &submission) {
+    return submission.state == PromptState::Accepted &&
+           submission.materializedItem &&
+           !submission.acceptedTransitionActive(nowMilliseconds);
+  });
 }
 
 std::span<const PromptSubmission>
