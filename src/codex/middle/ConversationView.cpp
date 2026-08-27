@@ -182,7 +182,6 @@ void ConversationView::setThread(const std::string &threadId) {
     return;
   storeCurrentThreadState();
   stopFollowingAnimation();
-  foldBottomCompensation_ = 0;
   threadId_ = threadId;
   const auto saved = threadStates_.find(threadId_);
   mode_ = saved == threadStates_.end() ? Mode::Following : saved->second.mode;
@@ -223,7 +222,6 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
     return height;
   };
   const int outputFootprintBefore = visibleOutputFootprint();
-  const int naturalHeightBefore = naturalContentHeight_;
 
   stopFollowingAnimation();
   applying_ = true;
@@ -425,13 +423,6 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
   snapshot_ = snapshot;
 
   recomputeGeometry();
-  if (!switchedThread && foldBottomCompensation_ > 0 &&
-      naturalContentHeight_ > naturalHeightBefore) {
-    foldBottomCompensation_ =
-        std::max(0, foldBottomCompensation_ -
-                        (naturalContentHeight_ - naturalHeightBefore));
-    recomputeGeometry();
-  }
   const bool outputGrew = visibleOutputFootprint() > outputFootprintBefore;
   for (const auto &[card, state] : commandOutputRestorations)
     card->restoreCommandOutputScrollState(state);
@@ -470,7 +461,6 @@ void ConversationView::setCardCollapsed(const std::string &key,
     return;
 
   const int titleTop = card->mapTo(viewport(), QPoint{}).y();
-  const int naturalHeightBefore = naturalContentHeight_;
   stopFollowingAnimation();
   applying_ = true;
   viewport()->setUpdatesEnabled(false);
@@ -482,21 +472,14 @@ void ConversationView::setCardCollapsed(const std::string &key,
   cardCollapsedStates_[key] = collapsed;
   card->setCollapsed(collapsed);
   recomputeGeometry();
-  if (foldBottomCompensation_ > 0 &&
-      naturalContentHeight_ > naturalHeightBefore) {
-    foldBottomCompensation_ =
-        std::max(0, foldBottomCompensation_ -
-                        (naturalContentHeight_ - naturalHeightBefore));
-    recomputeGeometry();
-  }
-
-  int desiredValue = card->mapTo(content_, QPoint{}).y() - titleTop;
-  if (desiredValue > verticalScrollBar()->maximum()) {
-    foldBottomCompensation_ += desiredValue - verticalScrollBar()->maximum();
-    recomputeGeometry();
-    desiredValue = card->mapTo(content_, QPoint{}).y() - titleTop;
-  }
-  setScrollValue(desiredValue);
+  const int visibleHeight =
+      std::max(0, viewport()->height() - trailingSpaceHeight_);
+  const int visibleTop =
+      collapsed
+          ? titleTop
+          : std::clamp(titleTop, 0,
+                       std::max(0, visibleHeight - card->height()));
+  setScrollValue(card->mapTo(content_, QPoint{}).y() - visibleTop);
 
   applying_ = false;
   content_->setUpdatesEnabled(true);
@@ -728,11 +711,10 @@ void ConversationView::recomputeGeometry() {
                    : contentLayout_->sizeHint().height();
   wanted = std::max(wanted, contentLayout_->minimumSize().height());
   naturalContentHeight_ = wanted;
-  const int tailHeight = trailingSpaceHeight_ + foldBottomCompensation_;
-  trailingSpace_->changeSize(0, tailHeight, QSizePolicy::Minimum,
+  trailingSpace_->changeSize(0, trailingSpaceHeight_, QSizePolicy::Minimum,
                              QSizePolicy::Fixed);
   contentLayout_->invalidate();
-  wanted += tailHeight;
+  wanted += trailingSpaceHeight_;
   contentHeight_ = std::max(viewport()->height(), wanted);
   content_->resize(width, contentHeight_);
   contentLayout_->setGeometry(QRect(0, 0, width, contentHeight_));

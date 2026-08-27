@@ -119,7 +119,6 @@ private:
 
   Mode mode_ = Mode::Following;
   int trailingSpaceHeight_ = 0;
-  int foldBottomCompensation_ = 0;
   int naturalContentHeight_ = 0;
   int contentHeight_ = 0;
   QString emptyMessage_;

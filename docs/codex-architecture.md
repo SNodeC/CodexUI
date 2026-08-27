@@ -521,8 +521,11 @@ stable visual card key retains its user-selected collapsed state in the
 new activity cards default collapsed. The card owns one header and one content
 container, so streamed payload updates remain live while folded without
 changing visible height. `ConversationView` owns the fold geometry transaction,
-including title anchoring and lower-limit compensation, alongside its existing
-single-owner scrolling calculations.
+including title anchoring within the natural scroll range, alongside its
+existing single-owner scrolling calculations. Expansion scrolls only as needed
+to reveal the complete card when it fits in the unobscured viewport above any
+grown composer overlay. At the lower limit, normal range clamping may move the
+selected title rather than creating artificial blank space.
 
 ### 7.4 Changes and Diff Presentation
 

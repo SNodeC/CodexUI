@@ -968,24 +968,41 @@ bool testCardFoldingGeometryAndRetention() {
       edgeCard ? edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() : 0;
   result &= expect(setFolded(edgeCard, false),
                    "bottom-edge command expands from its compact default");
-  result &=
-      expect(edgeCard && edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() ==
-                             collapsedTop,
-             "bottom-edge expansion keeps the selected title fixed");
+  result &= expect(
+      edgeCard && edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() <
+                      collapsedTop &&
+          edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() +
+                  edgeCard->height() <=
+              edgeView.viewport()->height(),
+      "bottom-edge expansion shifts upward to reveal the complete card");
   wheel(edgeView, -10000);
   const int followedTitleTop =
       edgeCard ? edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() : 0;
+  const int expandedScrollMaximum = edgeView.verticalScrollBar()->maximum();
   result &= expect(edgeView.isAtBottom() && followedTitleTop >= 0,
                    "expanded lower-limit fixture exposes its title at bottom");
   result &= expect(setFolded(edgeCard, true),
                    "expanded bottom-edge command collapses");
   spin(120);
-  result &=
-      expect(edgeCard &&
-                 edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() ==
-                     followedTitleTop &&
-                 edgeView.mode() == ConversationView::Mode::Paused,
-             "bottom compensation defeats range clamping and fixes the title");
+  result &= expect(
+      edgeCard && edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() >
+                      followedTitleTop &&
+          edgeView.verticalScrollBar()->maximum() < expandedScrollMaximum &&
+          edgeView.isAtBottom() &&
+          edgeView.mode() == ConversationView::Mode::Paused,
+      "bottom-edge collapse accepts the natural range without a blank tail");
+  constexpr int ComposerOverlayHeight = 80;
+  edgeView.setTrailingSpaceHeight(ComposerOverlayHeight);
+  result &= expect(setFolded(edgeCard, false),
+                   "bottom-edge command expands again");
+  spin(120);
+  result &= expect(
+      edgeView.verticalScrollBar()->maximum() ==
+              expandedScrollMaximum + ComposerOverlayHeight &&
+          edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() +
+                  edgeCard->height() <=
+              edgeView.viewport()->height() - ComposerOverlayHeight,
+      "fold round trip reveals the complete card above a grown composer");
   return result;
 }
 

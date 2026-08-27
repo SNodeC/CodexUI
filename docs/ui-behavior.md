@@ -139,11 +139,14 @@ activity cards initially render collapsed. A user-selected state survives
 streaming updates, authoritative prompt replacement, and thread switching for
 the lifetime of the CodexUI process.
 
-Folding is an explicit geometry transaction. The selected title row keeps its
-exact viewport position: collapsing shifts only following cards upward, while
-expanding grows only downward. The gesture pauses follow-latest. At the lower
-scroll limit, bounded bottom compensation prevents scrollbar clamping from
-moving the selected title; later expansion consumes that compensation.
+Folding is an explicit geometry transaction. Collapsing keeps the selected
+title row fixed while the natural scroll range permits and shifts following
+cards upward. Expanding grows downward when the complete card remains visible;
+otherwise the viewport scrolls only enough to reveal it, so the title may move
+upward. The visible boundary excludes any extra composer height currently
+overlaying the conversation. The gesture pauses follow-latest. At the lower
+scroll limit, the viewport accepts the natural clamp instead of retaining
+artificial blank space.
 
 Reasoning items remain visible as stable progress cards even when the app-server
 provides no public summary; later content updates the same card in place.
