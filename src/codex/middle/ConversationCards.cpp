@@ -808,8 +808,9 @@ public:
       break;
     case CardKind::LocalPrompt:
       owner->setObjectName(QStringLiteral("pendingPromptCard"));
-      owner->setStyleSheet(QStringLiteral(
-          "QFrame#pendingPromptCard{background:transparent;border:0;}"));
+      owner->setStyleSheet(
+          QStringLiteral("QFrame#pendingPromptCard{background:transparent;"
+                         "border:1px solid transparent;border-radius:8px;}"));
       title->setText(QStringLiteral("You"));
       body = makeMarkdownLabel({}, content);
       metadata = makeLabel({}, "meta", content);

@@ -2,6 +2,7 @@
 
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -90,6 +91,75 @@ VisibleCardData agentCard(const std::string &threadId,
           turnId,
           itemId,
           AgentMessageData{std::move(text), index % 3 == 0}};
+}
+
+VisibleCardData cardForAppearanceAudit(const std::string &threadId,
+                                       CardKind kind, int index) {
+  const std::string itemId = "appearance-" + std::to_string(index);
+  CardKey key =
+      kind == CardKind::LocalPrompt
+          ? CardKey{LocalPromptKey{9000U + static_cast<std::uint64_t>(index)}}
+          : CardKey{AuthoritativeItemKey{threadId, "turn-2", itemId}};
+  CardPayload payload = GenericActivityData{};
+  switch (kind) {
+  case CardKind::UserMessage:
+    payload = UserMessageData{QStringLiteral("User appearance audit"), {}};
+    break;
+  case CardKind::AgentMessage:
+    payload = AgentMessageData{QStringLiteral("Agent appearance audit"), true};
+    break;
+  case CardKind::CommandExecution:
+    payload = CommandExecutionData{
+        QStringLiteral("printf audit"), {}, QStringLiteral("inProgress"),
+        QStringLiteral("/workspace"),   {}, {}};
+    break;
+  case CardKind::AgentActivity:
+    payload = AgentActivityData{QStringLiteral("spawn_agent"),
+                                QStringLiteral("inProgress"),
+                                QStringLiteral("tool"),
+                                QStringLiteral("Inspect appearance"),
+                                {},
+                                {},
+                                {},
+                                {},
+                                {},
+                                {},
+                                {}};
+    break;
+  case CardKind::Reasoning:
+    payload = ReasoningData{QStringLiteral("Initial reasoning summary")};
+    break;
+  case CardKind::FileChanges:
+    payload = FileChangesData{
+        QStringLiteral("inProgress"),
+        {{QStringLiteral("src/a.cpp"), QStringLiteral("update"), 1, 0}}};
+    break;
+  case CardKind::ImageGeneration:
+    payload = ImageGenerationData{{},
+                                  QStringLiteral("inProgress"),
+                                  QStringLiteral("Initial image prompt")};
+    break;
+  case CardKind::Plan:
+    payload =
+        PlanData{QStringLiteral("Initial plan"),
+                 {{QStringLiteral("Inspect"), QStringLiteral("inProgress")}},
+                 {}};
+    break;
+  case CardKind::GenericActivity:
+    payload = GenericActivityData{
+        QStringLiteral("unknownActivity"),
+        {{"type", "unknownActivity"}, {"status", "inProgress"}}};
+    break;
+  case CardKind::LocalPrompt:
+    payload = LocalPromptData{9000U + static_cast<std::uint64_t>(index),
+                              QStringLiteral("Local prompt appearance audit"),
+                              PromptState::InFlight,
+                              0,
+                              {},
+                              {}};
+    break;
+  }
+  return {std::move(key), kind, threadId, "turn-2", itemId, std::move(payload)};
 }
 
 ConversationSnapshot conversation(const std::string &threadId, int count) {
@@ -190,6 +260,42 @@ std::pair<std::string, int> firstVisible(ConversationView &view) {
   }
   return {};
 }
+
+class PaintAnchorProbe final : public QObject {
+public:
+  explicit PaintAnchorProbe(ConversationView &view) : view_(view) {
+    view_.viewport()->installEventFilter(this);
+  }
+
+  ~PaintAnchorProbe() override { view_.viewport()->removeEventFilter(this); }
+
+  void start(QWidget *tracked = nullptr) {
+    anchors.clear();
+    trackedGeometries.clear();
+    tracked_ = tracked;
+    active = true;
+  }
+
+  std::vector<std::pair<std::string, int>> anchors;
+  std::vector<QRect> trackedGeometries;
+  bool active = false;
+
+protected:
+  bool eventFilter(QObject *watched, QEvent *event) override {
+    if (active && watched == view_.viewport() &&
+        event->type() == QEvent::Paint) {
+      anchors.push_back(firstVisible(view_));
+      if (tracked_)
+        trackedGeometries.emplace_back(
+            tracked_->mapTo(view_.viewport(), QPoint{}), tracked_->size());
+    }
+    return false;
+  }
+
+private:
+  ConversationView &view_;
+  QWidget *tracked_ = nullptr;
+};
 
 void wheel(ConversationView &view, int pixelDelta) {
   const QPointF local(view.viewport()->rect().center());
@@ -355,6 +461,112 @@ bool testFollowPauseAndStableAnchor() {
       afterPageStepReflow.first == pageStepAnchor.first &&
           std::abs(afterPageStepReflow.second - pageStepAnchor.second) <= 1,
       "page-action scroll ownership survives later reflow");
+  return result;
+}
+
+bool testPausedExpandedCommandStaysPainted() {
+  const QString originalStyleSheet = qApp->styleSheet();
+  qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
+  const std::string thread = "paused-expanded-command";
+  ConversationSnapshot snapshot = conversation(thread, 24);
+  QString output;
+  for (int line = 0; line < 48; ++line)
+    output += QStringLiteral("completed command output %1\n").arg(line);
+  VisibleCardData completedCommand{
+      AuthoritativeItemKey{thread, "turn-2", "completed-command"},
+      CardKind::CommandExecution,
+      thread,
+      "turn-2",
+      "completed-command",
+      CommandExecutionData{QStringLiteral("run completed command"), output,
+                           QStringLiteral("completed"),
+                           QStringLiteral("/workspace"), 0, 1250}};
+  snapshot.sections.back().cards.push_back(completedCommand);
+
+  ConversationView view;
+  view.resize(620, 420);
+  view.show();
+  bool result = expect(view.reconcile(snapshot),
+                       "expanded-command audit renders its conversation");
+  spin();
+  ConversationCard *const commandCard =
+      card(view, stableKey(completedCommand.key));
+  result &= expect(setFolded(commandCard, false),
+                   "completed command is expanded before incoming cards");
+  auto *outputView = commandCard ? dynamic_cast<CommandOutputView *>(
+                                       commandCard->findChild<QTextEdit *>(
+                                           QStringLiteral("commandOutputView")))
+                                 : nullptr;
+  if (outputView && outputView->verticalScrollBar()->maximum() > 0) {
+    outputView->verticalScrollBar()->setValue(
+        outputView->verticalScrollBar()->maximum() / 2);
+    spin();
+  }
+  result &= expect(commandCard && outputView &&
+                       view.mode() == ConversationView::Mode::Paused,
+                   "expanded completed command owns a paused viewport");
+
+  PaintAnchorProbe paintProbe(view);
+  const std::vector<CardKind> incomingKinds{
+      CardKind::UserMessage,      CardKind::AgentMessage,
+      CardKind::CommandExecution, CardKind::AgentActivity,
+      CardKind::Reasoning,        CardKind::FileChanges,
+      CardKind::ImageGeneration,  CardKind::Plan,
+      CardKind::GenericActivity,  CardKind::LocalPrompt};
+  const auto stableAgainst = [](const std::pair<std::string, int> &reference,
+                                const std::pair<std::string, int> &candidate) {
+    return candidate.first == reference.first &&
+           std::abs(candidate.second - reference.second) <= 1;
+  };
+  for (std::size_t index = 0; index < incomingKinds.size(); ++index) {
+    const auto anchorBefore = firstVisible(view);
+    const QRect commandBefore(commandCard->mapTo(view.viewport(), QPoint{}),
+                              commandCard->size());
+    const auto outputStateBefore = commandCard->commandOutputScrollState();
+    snapshot.sections.back().cards.push_back(cardForAppearanceAudit(
+        thread, incomingKinds[index], 100 + static_cast<int>(index)));
+    paintProbe.start(commandCard);
+    const bool changed = view.reconcile(snapshot);
+    const auto immediateAnchor = firstVisible(view);
+    const QRect immediateCommand(commandCard->mapTo(view.viewport(), QPoint{}),
+                                 commandCard->size());
+    const std::string incomingKey =
+        stableKey(snapshot.sections.back().cards.back().key);
+    ConversationCard *const incomingCard = card(view, incomingKey);
+    const int immediateIncomingHeight =
+        incomingCard ? incomingCard->height() : -1;
+    const int immediateRange = view.verticalScrollBar()->maximum();
+    spin(80);
+    paintProbe.active = false;
+    const auto settledAnchor = firstVisible(view);
+    const QRect settledCommand(commandCard->mapTo(view.viewport(), QPoint{}),
+                               commandCard->size());
+    const int settledIncomingHeight =
+        incomingCard ? incomingCard->height() : -1;
+    const bool paintedAnchorStable =
+        std::ranges::all_of(paintProbe.anchors, [&](const auto &anchor) {
+          return stableAgainst(anchorBefore, anchor);
+        });
+    const bool paintedStable = std::ranges::all_of(
+        paintProbe.trackedGeometries, [&commandBefore](const QRect &geometry) {
+          return geometry == commandBefore;
+        });
+    result &= expect(
+        changed && card(view, stableKey(completedCommand.key)) == commandCard &&
+            view.mode() == ConversationView::Mode::Paused &&
+            stableAgainst(anchorBefore, immediateAnchor) &&
+            stableAgainst(anchorBefore, settledAnchor) &&
+            immediateCommand == commandBefore &&
+            settledCommand == commandBefore && paintedAnchorStable &&
+            paintedStable && incomingCard &&
+            immediateIncomingHeight == settledIncomingHeight &&
+            view.verticalScrollBar()->maximum() == immediateRange &&
+            commandCard->commandOutputScrollState() == outputStateBefore,
+        "incoming card preserves a visible expanded command in every paint");
+  }
+
+  qApp->setStyleSheet(originalStyleSheet);
+  spin();
   return result;
 }
 
@@ -692,6 +904,8 @@ bool testMutableCardsAndCommandOutput() {
 }
 
 bool testCardFoldingGeometryAndRetention() {
+  const QString originalStyleSheet = qApp->styleSheet();
+  qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
   const std::string thread = "folding-thread";
   const VisibleCardData user{
       AuthoritativeItemKey{thread, "turn", "user"},
@@ -931,6 +1145,16 @@ bool testCardFoldingGeometryAndRetention() {
                        setFolded(promptCard, true),
                    "temporary You prompts start expanded and can be folded");
   ConversationCard *const admittedPromptCard = promptCard;
+  QWidget *const admittedPromptHeader =
+      admittedPromptCard ? admittedPromptCard->findChild<QWidget *>(
+                               QStringLiteral("conversationCardHeader"))
+                         : nullptr;
+  const QSize admittedPromptSize =
+      admittedPromptCard ? admittedPromptCard->size() : QSize{};
+  const QRect admittedPromptHeaderGeometry =
+      admittedPromptHeader ? admittedPromptHeader->geometry() : QRect{};
+  const int admittedPromptFrameWidth =
+      admittedPromptCard ? admittedPromptCard->frameWidth() : -1;
   promptSnapshot.sections.front().cards.front() = {
       promptKey,    CardKind::UserMessage,
       promptThread, "turn",
@@ -949,8 +1173,11 @@ bool testCardFoldingGeometryAndRetention() {
           promptCard->property("conversationCardKind").toInt() ==
               static_cast<int>(CardKind::UserMessage) &&
           promptCard->objectName() == QStringLiteral("conversationCard") &&
-          promptCard->styleSheet().isEmpty(),
-      "acknowledgement morphs the retained You card in place");
+          promptCard->styleSheet().isEmpty() &&
+          promptCard->size() == admittedPromptSize && admittedPromptHeader &&
+          admittedPromptHeader->geometry() == admittedPromptHeaderGeometry &&
+          promptCard->frameWidth() == admittedPromptFrameWidth,
+      "acknowledgement morphs the retained You card without geometry drift");
 
   const std::string edgeThread = "folding-bottom-edge";
   ConversationSnapshot edge = conversation(edgeThread, 12);
@@ -1014,6 +1241,8 @@ bool testCardFoldingGeometryAndRetention() {
                   edgeCard->height() <=
               edgeView.viewport()->height() - ComposerOverlayHeight,
       "fold round trip reveals the complete card above a grown composer");
+  qApp->setStyleSheet(originalStyleSheet);
+  spin();
   return result;
 }
 
@@ -1429,6 +1658,7 @@ int main(int argc, char **argv) {
   using namespace codexui::codex::middle;
   bool result = testStructuralOrderAndIdentity();
   result &= testFollowPauseAndStableAnchor();
+  result &= testPausedExpandedCommandStaysPainted();
   result &= testThreadLocalScrollAndComposerExtent();
   result &= testPromptAdmissionFollowOwnership();
   result &= testMutableCardsAndCommandOutput();

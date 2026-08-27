@@ -393,8 +393,10 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
         desired.insert = true;
         visualChange = true;
       }
-      if (desired.insert)
+      if (desired.insert) {
         section->cards->insertWidget(cardIndex, card);
+        card->show();
+      }
       ++cardIndex;
     }
     section->cardKeys = std::move(desiredSection.cardKeys);
