@@ -40,6 +40,7 @@ struct PromptSubmission {
   qint64 acceptedAtMilliseconds = 0;
   QString error;
   std::optional<AuthoritativeItemKey> admissionAnchor;
+  bool admissionAtStart = false;
   std::optional<std::string> expectedTurnId;
   std::optional<AuthoritativeItemKey> materializedItem;
 
@@ -58,10 +59,16 @@ struct PromptDispatch {
   std::optional<std::string> expectedTurnId;
 };
 
+struct PromptVisualAlias {
+  LocalPromptKey key;
+  std::optional<AuthoritativeItemKey> admissionAnchor;
+  std::uint64_t admissionOrdinal = 0;
+};
+
 struct AuthoritativeItem {
   AuthoritativeItemKey key;
   const ItemPresentation *presentation = nullptr;
-  std::optional<LocalPromptKey> localPromptKey;
+  std::optional<PromptVisualAlias> promptAlias;
 };
 
 struct AuthoritativeItemIndex {
@@ -116,7 +123,7 @@ public:
   // may bind before acknowledgement so the awaiting card is never duplicated;
   // the content fallback is used only after the real operation callback. Fully
   // resolved submissions are removed after their accepted transition while a
-  // compact visual-key alias retains the admitted card identity.
+  // compact visual alias retains the admitted card identity and boundary.
   void reconcile(const std::string &threadId,
                  const ThreadPresentation &authoritativeThread,
                  qint64 nowMilliseconds);
@@ -141,7 +148,7 @@ private:
                           AuthoritativeItemIndex &authoritativeItems) const;
 
   std::map<std::string, std::vector<PromptSubmission>> byThread;
-  std::map<std::string, std::map<AuthoritativeItemKey, LocalPromptKey>>
+  std::map<std::string, std::map<AuthoritativeItemKey, PromptVisualAlias>>
       visualAliasesByThread;
   std::uint64_t nextSubmissionId = 1;
   std::uint64_t nextAdmissionOrdinal = 1;
