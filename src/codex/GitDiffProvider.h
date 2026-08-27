@@ -27,6 +27,8 @@ struct GitDiffFile {
   int additions = 0;
   int deletions = 0;
   bool binary = false;
+
+  bool operator==(const GitDiffFile &) const = default;
 };
 
 struct GitDiffSnapshot {
@@ -39,6 +41,8 @@ struct GitDiffSnapshot {
   std::vector<GitDiffFile> files;
   bool repository = false;
   bool truncated = false;
+
+  bool operator==(const GitDiffSnapshot &) const = default;
 };
 
 class GitDiffProvider final : public QObject {

@@ -22,7 +22,6 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
-#include <array>
 #include <utility>
 #include <vector>
 
@@ -44,17 +43,6 @@ QStringList texts(const std::vector<std::string> &values) {
   for (const std::string &value : values)
     result.push_back(text(value));
   return result;
-}
-
-QString joinedStrings(const nlohmann::json &value) {
-  if (!value.is_array())
-    return {};
-  QStringList result;
-  for (const auto &item : value) {
-    if (item.is_string())
-      result.push_back(text(item.get<std::string>()));
-  }
-  return result.join(QStringLiteral(", "));
 }
 
 std::string stringValue(const nlohmann::json &object, const char *key) {
@@ -114,12 +102,6 @@ void clearLayout(QLayout *layout) {
   }
 }
 
-QByteArray bytes(const nlohmann::json &value) {
-  const std::string serialized = value.dump();
-  return QByteArray(serialized.data(),
-                    static_cast<qsizetype>(serialized.size()));
-}
-
 class InfoChoiceButton final : public QPushButton {
 protected:
   void paintEvent(QPaintEvent *event) override {
@@ -136,57 +118,6 @@ protected:
         UiStyle::ChevronDirection::Right);
   }
 };
-
-QFrame *agentFrame(const AgentPresentation &agent) {
-  auto *frame = new QFrame;
-  frame->setProperty("kind", "raised");
-  auto *layout = new QVBoxLayout(frame);
-  layout->setContentsMargins(12, 10, 12, 10);
-  layout->setSpacing(6);
-  const std::string tool = stringValue(agent.raw, "tool");
-  const QString title =
-      !agent.childThreadId.empty() ? QStringLiteral("Subagent")
-      : tool.empty()               ? QStringLiteral("Agent activity")
-                                   : QStringLiteral("Agent %1").arg(text(tool));
-  layout->addWidget(makeLabel(title, "title"));
-  QStringList metadata;
-  for (const char *key : {"agentPath", "tool", "model", "reasoningEffort"}) {
-    const QString value = text(stringValue(agent.raw, key));
-    if (!value.isEmpty())
-      metadata << value;
-  }
-  auto *metadataRow = new QHBoxLayout;
-  metadataRow->setContentsMargins(0, 0, 0, 0);
-  metadataRow->setSpacing(6);
-  metadataRow->addWidget(statusLabel(agent.status));
-  if (!metadata.isEmpty())
-    metadataRow->addWidget(
-        makeLabel(QStringLiteral("|  ") +
-                      metadata.join(QStringLiteral("  |  ")),
-                  "meta"));
-  metadataRow->addStretch();
-  layout->addLayout(metadataRow);
-  const QString prompt = text(stringValue(agent.raw, "prompt"));
-  if (!prompt.isEmpty())
-    layout->addWidget(makeLabel(prompt));
-  const QString result = text(stringValue(agent.raw, "resultText"));
-  if (!result.isEmpty())
-    layout->addWidget(makeMarkdownLabel(result));
-  QStringList identities;
-  if (!agent.childThreadId.empty())
-    identities << QStringLiteral("thread %1").arg(text(agent.childThreadId));
-  const QString sender = text(stringValue(agent.raw, "senderThreadId"));
-  if (!sender.isEmpty())
-    identities << QStringLiteral("sender %1").arg(sender);
-  const QString receivers = joinedStrings(
-      agent.raw.value("receiverThreadIds", nlohmann::json::array()));
-  if (!receivers.isEmpty())
-    identities << QStringLiteral("receivers %1").arg(receivers);
-  if (!identities.isEmpty())
-    layout->addWidget(
-        makeLabel(identities.join(QStringLiteral("  |  ")), "meta"));
-  return frame;
-}
 
 QPushButton *infoChoice(const QString &title, const QString &description) {
   auto *button = new InfoChoiceButton;
@@ -246,6 +177,58 @@ void restoreScrollPosition(QPlainTextEdit *view,
 }
 
 } // namespace
+
+QFrame *InspectorPane::agentFrame(const AgentSnapshot &agent) {
+  auto *frame = new QFrame;
+  frame->setProperty("kind", "raised");
+  auto *layout = new QVBoxLayout(frame);
+  layout->setContentsMargins(12, 10, 12, 10);
+  layout->setSpacing(6);
+  const QString title =
+      !agent.childThreadId.empty()
+          ? QStringLiteral("Subagent")
+      : agent.tool.empty() ? QStringLiteral("Agent activity")
+                           : QStringLiteral("Agent %1").arg(text(agent.tool));
+  layout->addWidget(makeLabel(title, "title"));
+  QStringList metadata;
+  for (const std::string *value :
+       {&agent.agentPath, &agent.tool, &agent.model, &agent.reasoningEffort}) {
+    if (!value->empty())
+      metadata << text(*value);
+  }
+  auto *metadataRow = new QHBoxLayout;
+  metadataRow->setContentsMargins(0, 0, 0, 0);
+  metadataRow->setSpacing(6);
+  metadataRow->addWidget(statusLabel(agent.status));
+  if (!metadata.isEmpty())
+    metadataRow->addWidget(
+        makeLabel(QStringLiteral("|  ") +
+                      metadata.join(QStringLiteral("  |  ")),
+                  "meta"));
+  metadataRow->addStretch();
+  layout->addLayout(metadataRow);
+  if (!agent.prompt.empty())
+    layout->addWidget(makeLabel(text(agent.prompt)));
+  if (!agent.resultText.empty()) {
+    auto *result = makeMarkdownLabel(text(agent.resultText));
+    result->setObjectName(QStringLiteral("agentResult"));
+    result->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    layout->addWidget(result);
+  }
+  QStringList identities;
+  if (!agent.childThreadId.empty())
+    identities << QStringLiteral("thread %1").arg(text(agent.childThreadId));
+  if (!agent.senderThreadId.empty())
+    identities << QStringLiteral("sender %1").arg(text(agent.senderThreadId));
+  const QString receivers =
+      texts(agent.receiverThreadIds).join(QStringLiteral(", "));
+  if (!receivers.isEmpty())
+    identities << QStringLiteral("receivers %1").arg(receivers);
+  if (!identities.isEmpty())
+    layout->addWidget(
+        makeLabel(identities.join(QStringLiteral("  |  ")), "meta"));
+  return frame;
+}
 
 InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   setObjectName(QStringLiteral("inspector"));
@@ -437,9 +420,9 @@ void InspectorPane::refreshCurrentTab() {
 
 void InspectorPane::refreshPlan() {
   const ThreadPresentation *thread = currentModel->thread(currentThreadId);
-  nlohmann::json snapshot{{"threadId", currentThreadId}};
-  const TurnPresentation *planTurn = nullptr;
-  const ItemPresentation *planItem = nullptr;
+  PlanSnapshot next;
+  next.threadId = currentThreadId;
+  next.threadPresent = thread != nullptr;
   if (thread) {
     for (auto id = thread->turnOrder.rbegin(); id != thread->turnOrder.rend();
          ++id) {
@@ -448,15 +431,14 @@ void InspectorPane::refreshPlan() {
         continue;
       if (turn->second.plan.is_object() &&
           turn->second.plan.contains("steps")) {
-        planTurn = &turn->second;
-        snapshot["plan"]["explanation"] =
-            stringValue(planTurn->plan, "explanation");
-        snapshot["plan"]["steps"] = nlohmann::json::array();
+        PlanContentSnapshot plan;
+        plan.explanation = stringValue(turn->second.plan, "explanation");
         for (const auto &step :
-             planTurn->plan.value("steps", nlohmann::json::array()))
-          snapshot["plan"]["steps"].push_back(
-              {{"step", stringValue(step, "step")},
-               {"status", stringValue(step, "status")}});
+             turn->second.plan.value("steps", nlohmann::json::array())) {
+          plan.steps.push_back(
+              {stringValue(step, "step"), stringValue(step, "status")});
+        }
+        next.plan = std::move(plan);
         break;
       }
       for (auto itemId = turn->second.itemOrder.rbegin();
@@ -464,42 +446,39 @@ void InspectorPane::refreshPlan() {
         const auto item = turn->second.items.find(*itemId);
         if (item != turn->second.items.end() &&
             stringValue(item->second.raw, "type") == "plan") {
-          planItem = &item->second;
-          snapshot["planItem"] = stringValue(planItem->raw, "text");
+          next.planItem = stringValue(item->second.raw, "text");
           break;
         }
       }
-      if (planItem)
+      if (next.planItem)
         break;
     }
   }
-  const QByteArray next = bytes(snapshot);
-  if (next == planSnapshot)
+  if (planSnapshot && *planSnapshot == next)
     return;
-  planSnapshot = next;
+  planSnapshot = std::move(next);
+  const PlanSnapshot &snapshot = *planSnapshot;
   setUpdatesEnabled(false);
   clearLayout(planLayout);
-  if (!thread) {
+  if (!snapshot.threadPresent) {
     planLayout->addWidget(
         makeLabel(QStringLiteral("No selected thread."), "muted"));
-  } else if (planTurn) {
-    const QString explanation =
-        text(stringValue(planTurn->plan, "explanation"));
+  } else if (snapshot.plan) {
+    const QString explanation = text(snapshot.plan->explanation);
     if (!explanation.isEmpty())
       planLayout->addWidget(makeMarkdownLabel(explanation));
-    for (const auto &step :
-         planTurn->plan.value("steps", nlohmann::json::array())) {
+    for (const PlanStepSnapshot &step : snapshot.plan->steps) {
       auto *row = new QFrame;
       row->setProperty("kind", "raised");
       auto *layout = new QVBoxLayout(row);
       layout->setContentsMargins(12, 10, 12, 10);
       layout->setSpacing(6);
-      layout->addWidget(makeLabel(text(stringValue(step, "step"))));
-      layout->addWidget(statusLabel(stringValue(step, "status")));
+      layout->addWidget(makeLabel(text(step.step)));
+      layout->addWidget(statusLabel(step.status));
       planLayout->addWidget(row);
     }
-  } else if (planItem) {
-    const QString value = text(stringValue(planItem->raw, "text"));
+  } else if (snapshot.planItem) {
+    const QString value = text(*snapshot.planItem);
     planLayout->addWidget(
         value.isEmpty()
             ? makeLabel(QStringLiteral("Plan is being prepared."), "muted")
@@ -514,48 +493,54 @@ void InspectorPane::refreshPlan() {
 
 void InspectorPane::refreshAgents() {
   const ThreadPresentation *thread = currentModel->thread(currentThreadId);
-  nlohmann::json snapshot = nlohmann::json::array();
+  AgentsSnapshot next;
+  next.threadId = currentThreadId;
+  next.threadPresent = thread != nullptr;
   if (thread) {
+    next.agents.reserve(thread->agentOrder.size());
     for (const std::string &id : thread->agentOrder) {
       const auto agent = thread->agents.find(id);
-      if (agent != thread->agents.end())
-        snapshot.push_back(
-            {{"id", id},
-             {"status", agent->second.status},
-             {"childThreadId", agent->second.childThreadId},
-             {"agentPath", stringValue(agent->second.raw, "agentPath")},
-             {"tool", stringValue(agent->second.raw, "tool")},
-             {"model", stringValue(agent->second.raw, "model")},
-             {"reasoningEffort",
-              stringValue(agent->second.raw, "reasoningEffort")},
-             {"prompt", stringValue(agent->second.raw, "prompt")},
-             {"resultText", stringValue(agent->second.raw, "resultText")},
-             {"senderThreadId",
-              stringValue(agent->second.raw, "senderThreadId")},
-             {"receiverThreadIds",
-              agent->second.raw.value("receiverThreadIds",
-                                      nlohmann::json::array())}});
+      if (agent == thread->agents.end())
+        continue;
+      AgentSnapshot snapshot;
+      snapshot.id = id;
+      snapshot.status = agent->second.status;
+      snapshot.childThreadId = agent->second.childThreadId;
+      snapshot.agentPath = stringValue(agent->second.raw, "agentPath");
+      snapshot.tool = stringValue(agent->second.raw, "tool");
+      snapshot.model = stringValue(agent->second.raw, "model");
+      snapshot.reasoningEffort =
+          stringValue(agent->second.raw, "reasoningEffort");
+      snapshot.prompt = stringValue(agent->second.raw, "prompt");
+      snapshot.resultText = stringValue(agent->second.raw, "resultText");
+      snapshot.senderThreadId =
+          stringValue(agent->second.raw, "senderThreadId");
+      const auto receivers = agent->second.raw.find("receiverThreadIds");
+      if (receivers != agent->second.raw.end() && receivers->is_array()) {
+        for (const auto &receiver : *receivers) {
+          if (receiver.is_string())
+            snapshot.receiverThreadIds.push_back(
+                receiver.get<std::string>());
+        }
+      }
+      next.agents.push_back(std::move(snapshot));
     }
   }
-  const QByteArray next =
-      bytes({{"threadId", currentThreadId}, {"agents", snapshot}});
-  if (next == agentsSnapshot)
+  if (agentsSnapshot && *agentsSnapshot == next)
     return;
-  agentsSnapshot = next;
+  agentsSnapshot = std::move(next);
+  const AgentsSnapshot &snapshot = *agentsSnapshot;
   setUpdatesEnabled(false);
   clearLayout(agentsLayout);
-  if (!thread)
+  if (!snapshot.threadPresent)
     agentsLayout->addWidget(
         makeLabel(QStringLiteral("No selected thread."), "muted"));
-  else if (snapshot.empty())
+  else if (snapshot.agents.empty())
     agentsLayout->addWidget(makeLabel(
         QStringLiteral("No agent activity for this thread."), "muted"));
   else
-    for (const std::string &id : thread->agentOrder) {
-      const auto agent = thread->agents.find(id);
-      if (agent != thread->agents.end())
-        agentsLayout->addWidget(agentFrame(agent->second));
-    }
+    for (const AgentSnapshot &agent : snapshot.agents)
+      agentsLayout->addWidget(agentFrame(agent));
   agentsLayout->addStretch();
   setUpdatesEnabled(true);
 }
@@ -570,29 +555,34 @@ void InspectorPane::refreshChanges() {
 }
 
 void InspectorPane::refreshRequests() {
-  nlohmann::json snapshot = nlohmann::json::array();
+  std::vector<RequestSnapshot> next;
+  next.reserve(currentModel->pendingRequestCount());
   for (const auto &[id, request] :
        currentModel->pendingRequestPresentations()) {
-    const nlohmann::json questions =
-        request.raw.value("questions", nlohmann::json::array());
-    snapshot.push_back(
-        {{"id", id},
-         {"kind", request.kind},
-         {"threadId", request.threadId},
-         {"generation", request.generation},
-         {"command", stringValue(request.raw, "command")},
-         {"reason", stringValue(request.raw, "reason")},
-         {"message", stringValue(request.raw, "message")},
-         {"questionCount", questions.is_array() ? questions.size() : 0U}});
+    RequestSnapshot snapshot;
+    snapshot.id = id;
+    snapshot.kind = request.kind;
+    snapshot.threadContext = request.threadId;
+    if (const ThreadPresentation *thread =
+            currentModel->thread(request.threadId);
+        thread && !thread->title.empty())
+      snapshot.threadContext = thread->title;
+    snapshot.generation = request.generation;
+    snapshot.command = stringValue(request.raw, "command");
+    snapshot.reason = stringValue(request.raw, "reason");
+    snapshot.message = stringValue(request.raw, "message");
+    const auto questions = request.raw.find("questions");
+    if (questions != request.raw.end() && questions->is_array())
+      snapshot.questionCount = questions->size();
+    next.push_back(std::move(snapshot));
   }
-  const QByteArray next = bytes(snapshot);
-  if (next == requestsSnapshot)
+  if (requestsSnapshot && *requestsSnapshot == next)
     return;
-  requestsSnapshot = next;
+  requestsSnapshot = std::move(next);
+  const std::vector<RequestSnapshot> &snapshot = *requestsSnapshot;
   setUpdatesEnabled(false);
   clearLayout(requestsLayout);
-  for (const auto &[id, request] :
-       currentModel->pendingRequestPresentations()) {
+  for (const RequestSnapshot &request : snapshot) {
     auto *frame = new QFrame;
     frame->setProperty("kind", "raised");
     frame->setProperty("tone", "warning");
@@ -600,32 +590,26 @@ void InspectorPane::refreshRequests() {
     layout->setContentsMargins(12, 10, 12, 10);
     layout->setSpacing(6);
     layout->addWidget(makeLabel(text(request.kind), "title"));
-    QString threadContext = text(request.threadId);
-    if (const ThreadPresentation *thread =
-            currentModel->thread(request.threadId);
-        thread && !thread->title.empty())
-      threadContext = text(thread->title);
     layout->addWidget(
         makeLabel(QStringLiteral("thread %1  |  generation %2  |  request %3")
-                      .arg(threadContext)
+                      .arg(text(request.threadContext))
                       .arg(static_cast<qulonglong>(request.generation))
-                      .arg(text(id)),
+                      .arg(text(request.id)),
                   "meta"));
-    for (const auto &[key, prefix] :
-         std::array<std::pair<const char *, const char *>, 3>{
-             {{"command", "Command: "},
-              {"reason", "Reason: "},
-              {"message", ""}}}) {
-      const QString value = text(stringValue(request.raw, key));
-      if (!value.isEmpty())
+    const auto addMetadata = [layout](const std::string &value,
+                                      const char *prefix) {
+      const QString displayed = text(value);
+      if (!displayed.isEmpty())
         layout->addWidget(
-            makeLabel(QString::fromLatin1(prefix) + value, "meta"));
-    }
-    const auto questions = request.raw.find("questions");
-    if (questions != request.raw.end() && questions->is_array())
+            makeLabel(QString::fromLatin1(prefix) + displayed, "meta"));
+    };
+    addMetadata(request.command, "Command: ");
+    addMetadata(request.reason, "Reason: ");
+    addMetadata(request.message, "");
+    if (request.questionCount)
       layout->addWidget(
           makeLabel(QStringLiteral("%1 questions")
-                        .arg(static_cast<qulonglong>(questions->size())),
+                        .arg(static_cast<qulonglong>(*request.questionCount)),
                     "meta"));
     auto *actions = new QHBoxLayout;
     actions->setContentsMargins(0, 2, 0, 0);
@@ -635,11 +619,11 @@ void InspectorPane::refreshRequests() {
     review->setProperty("kind", "request");
     deny->setFixedHeight(28);
     review->setFixedHeight(28);
-    connect(deny, &QPushButton::clicked, this, [this, id] {
+    connect(deny, &QPushButton::clicked, this, [this, id = request.id] {
       if (rejectRequest)
         rejectRequest(id);
     });
-    connect(review, &QPushButton::clicked, this, [this, id] {
+    connect(review, &QPushButton::clicked, this, [this, id = request.id] {
       if (reviewRequest)
         reviewRequest(id);
     });
