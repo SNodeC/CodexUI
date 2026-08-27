@@ -752,6 +752,13 @@ bool testMutableCardsAndCommandOutput() {
                  label->property("markdownSource").toString().contains(needle);
         });
   };
+  auto titleText = [](QWidget *parent) {
+    const auto labels = parent->findChildren<QLabel *>();
+    const auto title = std::ranges::find_if(labels, [](QLabel *label) {
+      return label->property("kind").toString() == QStringLiteral("title");
+    });
+    return title == labels.end() ? QString{} : (*title)->text();
+  };
   auto *commandCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "command"}})];
   auto *output = dynamic_cast<CommandOutputView *>(
@@ -762,6 +769,8 @@ bool testMutableCardsAndCommandOutput() {
                        "empty-line command output has no black surface");
   auto *userCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "user"}})];
+  auto *agentCardWidget = identities[stableKey(
+      CardKey{AuthoritativeItemKey{thread, "turn", "agent"}})];
   const auto userLabels = userCard->findChildren<QLabel *>();
   result &=
       expect(std::ranges::any_of(
@@ -775,6 +784,9 @@ bool testMutableCardsAndCommandOutput() {
                           label->text().contains(QStringLiteral("<table"));
                  }),
              "authoritative user messages render GitHub Markdown tables");
+  result &=
+      expect(titleText(agentCardWidget) == QStringLiteral("Codex activity"),
+             "interim agent messages retain their activity title");
   auto *filesCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "files"}})];
   auto *planCard = identities[stableKey(
@@ -811,8 +823,9 @@ bool testMutableCardsAndCommandOutput() {
   auto &cards = snapshot.sections.front().cards;
   std::get<UserMessageData>(cards[0].payload).text +=
       QStringLiteral(" updated");
-  std::get<AgentMessageData>(cards[1].payload).text +=
-      QStringLiteral(" updated");
+  auto &agent = std::get<AgentMessageData>(cards[1].payload);
+  agent.text += QStringLiteral(" updated");
+  agent.finalAnswer = true;
   auto &command = std::get<CommandExecutionData>(cards[2].payload);
   command.output =
       QString(120, QLatin1Char('x')) + QStringLiteral("\nvisible\n\n \t");
@@ -845,6 +858,9 @@ bool testMutableCardsAndCommandOutput() {
     result &= expect(card(view, stableKey(value.key)) ==
                          identities[stableKey(value.key)],
                      "same-key same-kind card updates in place");
+  result &= expect(titleText(agentCardWidget) ==
+                       QStringLiteral("Codex * Final answer"),
+                   "final agent messages identify their answer phase plainly");
   result &=
       expect(!output->isHidden() && output->minimumHeight() == 0 &&
                  output->maximumHeight() == 220 &&
