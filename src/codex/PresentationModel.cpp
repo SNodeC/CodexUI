@@ -88,8 +88,10 @@ void retainRepositoryHints(ThreadPresentation &thread,
 
 bool isSpawnActivity(const nlohmann::json &activity) {
   const std::string type = stringValue(activity, "type");
-  if (type == "subAgentActivity")
-    return true;
+  if (type == "subAgentActivity") {
+    const std::string kind = stringValue(activity, "kind");
+    return kind.empty() || kind == "started";
+  }
   if (type != "collabAgentToolCall")
     return false;
   const std::string tool = stringValue(activity, "tool");
@@ -804,6 +806,18 @@ void PresentationModel::upsertAgentActivity(ThreadPresentation &owner,
                                             const nlohmann::json &activity,
                                             bool live) {
   const std::string type = stringValue(activity, "type");
+  if (type == "subAgentActivity" && !isSpawnActivity(activity)) {
+    const std::string childThreadId = childThreadIdentity(activity);
+    AgentPresentation *existing = owningAgent(childThreadId);
+    if (!existing)
+      return;
+    const std::string agentPath = stringValue(activity, "agentPath");
+    if (!agentPath.empty())
+      existing->raw["agentPath"] = agentPath;
+    if (stringValue(activity, "kind") == "interrupted")
+      updateOwningAgentStatus(childThreadId, "interrupted");
+    return;
+  }
   if (type == "collabAgentToolCall" && !isSpawnActivity(activity)) {
     const nlohmann::json states =
         memberValue(activity, "agentsStates", nlohmann::json::object());

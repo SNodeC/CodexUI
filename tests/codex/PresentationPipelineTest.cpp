@@ -417,12 +417,41 @@ int main() {
       "ownership is unique, ordered, nested, and excluded from root order");
 
   ownershipModel.applyEvent(codexui::codex::presentation::event(
-      6, 1, "turn.upsert",
+      6, 1, "agents.activity.upsert",
+      {{"activity",
+        {{"id", "peer-interaction"},
+         {"type", "subAgentActivity"},
+         {"kind", "interacted"},
+         {"agentPath", "/root/child-two"},
+         {"agentThreadId", "child-two"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "child-one"},
+       {"turnId", "child-turn"},
+       {"itemId", "peer-interaction"}}));
+  parent = ownershipModel.thread("parent");
+  childOne = ownershipModel.thread("child-one");
+  passed &= expect(
+      parent && childOne &&
+          parent->childThreadOrder ==
+              std::vector<std::string>{"child-one", "child-two"} &&
+          childOne->childThreadOrder ==
+              std::vector<std::string>{"grandchild"} &&
+          ownershipModel.childOwnership("child-two") &&
+          ownershipModel.childOwnership("child-two")->parentThreadId ==
+              "parent" &&
+          !childOne->agents.contains("peer-interaction") &&
+          parent->agents.at("spawn-two").status == "started" &&
+          stringMember(parent->agents.at("spawn-two").raw, "agentPath") ==
+              "/root/child-two",
+      "peer interaction cannot reparent a sibling as a nested child");
+
+  ownershipModel.applyEvent(codexui::codex::presentation::event(
+      7, 1, "turn.upsert",
       {{"turn", {{"id", "child-turn"}, {"status", "completed"}}}},
       codexui::codex::presentation::Authority::Merge,
       {{"threadId", "child-one"}, {"turnId", "child-turn"}}));
   ownershipModel.applyEvent(codexui::codex::presentation::event(
-      7, 1, "conversation.item.upsert",
+      8, 1, "conversation.item.upsert",
       {{"item",
         {{"id", "child-answer"},
          {"type", "agentMessage"},
@@ -449,7 +478,7 @@ int main() {
       "child completion and results route only to the indexed owning agent");
 
   ownershipModel.applyEvent(codexui::codex::presentation::result(
-      8, 1, "thread.read", "replace-child", true,
+      9, 1, "thread.read", "replace-child", true,
       {{"thread",
         {{"id", "child-one"},
          {"status", {{"type", "idle"}}},
@@ -473,7 +502,7 @@ int main() {
       "authoritative child hydration clears stale results without losing ownership");
 
   ownershipModel.applyEvent(codexui::codex::presentation::result(
-      9, 1, "threads.list", "relisted-owned-child", true,
+      10, 1, "threads.list", "relisted-owned-child", true,
       {{"threads",
         nlohmann::json::array({{{"id", "child-one"}},
                                {{"id", "second-root"}},
@@ -485,7 +514,7 @@ int main() {
       "thread relisting cannot reintroduce an owned child as a root");
 
   ownershipModel.applyEvent(codexui::codex::presentation::result(
-      10, 1, "thread.read", "replace-parent", true,
+      11, 1, "thread.read", "replace-parent", true,
       {{"thread",
         {{"id", "parent"},
          {"turns",
@@ -515,7 +544,7 @@ int main() {
       "authoritative parent hydration rebuilds ordered ownership in one pass");
 
   ownershipModel.applyEvent(codexui::codex::presentation::event(
-      11, 1, "thread.removed", nlohmann::json::object(),
+      12, 1, "thread.removed", nlohmann::json::object(),
       codexui::codex::presentation::Authority::Remove,
       {{"threadId", "child-one"}}));
   parent = ownershipModel.thread("parent");
@@ -531,7 +560,7 @@ int main() {
       "authoritative child removal prunes ownership and promotes surviving descendants");
 
   ownershipModel.applyEvent(codexui::codex::presentation::event(
-      12, 1, "thread.removed", nlohmann::json::object(),
+      13, 1, "thread.removed", nlohmann::json::object(),
       codexui::codex::presentation::Authority::Remove,
       {{"threadId", "parent"}}));
   passed &= expect(
@@ -543,7 +572,7 @@ int main() {
       "authoritative parent removal promotes children in retained root order");
 
   ownershipModel.applyEvent(codexui::codex::presentation::event(
-      13, 1, "connection.provider",
+      14, 1, "connection.provider",
       {{"generation", std::uint64_t{1}}, {"state", "disconnected"}},
       codexui::codex::presentation::Authority::Replace));
   passed &= expect(ownershipModel.threadOrder().empty() &&
