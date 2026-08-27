@@ -281,3 +281,24 @@ flaky without evidence.
 This sequence starts with narrow correctness and low-risk algorithmic wins,
 then approaches the scroll- and lifecycle-sensitive conversation work with
 stronger fixtures and measurements already in place.
+
+## Delivery strategy
+
+Do not deliver the complete roadmap in one pull request. Use several scoped
+pull requests, each containing multiple independently reviewable commits:
+
+1. Establish a reliable test baseline, provide canonical protocol fixtures,
+   split the shell integration scenarios and centralize status classification.
+2. Build the authoritative-item index, make prompt reconciliation linear and
+   compact fully resolved submissions.
+3. Optimize thread-list reconciliation and conversation layout ordering.
+4. Consolidate `ThreadRuntimeState` and replace serialized UI fingerprints with
+   local typed snapshots.
+5. Add the child-thread ownership index, indexed agent correlation and the
+   structural thread hierarchy.
+6. Apply only measurement-supported repository, filesystem-watch, Inspector,
+   settings-catalog, helper and styling cleanup.
+
+Every commit must compile and pass the focused tests for its changed invariant.
+Every pull request must pass the complete test suite before merge. Keep commits
+small enough to review and bisect without depending on a later cleanup commit.
