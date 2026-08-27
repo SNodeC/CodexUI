@@ -241,31 +241,6 @@ QStringList stringListSetting(const QString &key) {
   return result;
 }
 
-QByteArray fingerprint(const GitDiffSnapshot &snapshot) {
-  QByteArray value = snapshot.repositoryRoot.toUtf8();
-  value += '\0';
-  value += snapshot.error.toUtf8();
-  value += static_cast<char>(snapshot.scope);
-  value += static_cast<char>(snapshot.context);
-  value += snapshot.repository ? '\1' : '\0';
-  value += snapshot.truncated ? '\1' : '\0';
-  for (const GitDiffFile &file : snapshot.files) {
-    value += '\0';
-    value += file.repositoryRoot.toUtf8();
-    value += '\0';
-    value += file.path.toUtf8();
-    value += '\0';
-    value += file.absolutePath.toUtf8();
-    value += '\0';
-    value += file.previousPath.toUtf8();
-    value += '\0';
-    value += file.status.toUtf8();
-    value += '\0';
-    value += file.patch.toUtf8();
-  }
-  return QCryptographicHash::hash(value, QCryptographicHash::Sha256);
-}
-
 struct SideBySideText {
   QString left;
   QString right;
@@ -439,7 +414,7 @@ public:
       reload();
     });
     connect(provider, &GitDiffProvider::loadingChanged, this, [this](bool value) {
-      if (value && snapshot.files.empty())
+      if (value && (!snapshot || snapshot->files.empty()))
         subtitle->setText(QStringLiteral("Loading repository changes…"));
     });
     connect(provider, &GitDiffProvider::snapshotReady, this,
@@ -494,10 +469,8 @@ private:
   }
 
   void apply(const GitDiffSnapshot &value) {
-    const QByteArray nextFingerprint = fingerprint(value);
-    if (nextFingerprint == snapshotFingerprint)
+    if (snapshot && *snapshot == value)
       return;
-    snapshotFingerprint = nextFingerprint;
     snapshot = value;
     subtitle->setText(value.error.isEmpty()
                           ? QStringLiteral("%1  |  %2")
@@ -532,11 +505,12 @@ private:
 
   void renderSelected() {
     const int index = reviewFiles->currentRow();
-    if (index < 0 || static_cast<std::size_t>(index) >= snapshot.files.size())
+    if (!snapshot || index < 0 ||
+        static_cast<std::size_t>(index) >= snapshot->files.size())
       return;
-    const GitDiffFile &file = snapshot.files[static_cast<std::size_t>(index)];
+    const GitDiffFile &file = snapshot->files[static_cast<std::size_t>(index)];
     requestedPath = file.absolutePath;
-    title->setText(fileTitle(file, snapshot.repositoryRoots.size() > 1));
+    title->setText(fileTitle(file, snapshot->repositoryRoots.size() > 1));
     const QString content = file.patch.isEmpty()
                                 ? QStringLiteral("No textual patch is available for this file.")
                                 : file.patch;
@@ -550,7 +524,7 @@ private:
   }
 
   GitDiffProvider *provider = nullptr;
-  GitDiffSnapshot snapshot;
+  std::optional<GitDiffSnapshot> snapshot;
   QString workspace;
   QStringList commandDirectories;
   QStringList changedPaths;
@@ -559,7 +533,6 @@ private:
   QString requestedPath;
   GitDiffScope scope = GitDiffScope::Unstaged;
   GitDiffContext context = GitDiffContext::Compact;
-  QByteArray snapshotFingerprint;
   QLabel *title = nullptr;
   QLabel *subtitle = nullptr;
   QListWidget *reviewFiles = nullptr;
@@ -681,7 +654,9 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
                       scopeValue(scope), GitDiffContext::Compact);
   });
   connect(provider, &GitDiffProvider::loadingChanged, this, [this](bool loading) {
-    if (loading && snapshot.files.empty() && snapshot.error.isEmpty()) {
+    if (loading &&
+        (!snapshot ||
+         (snapshot->files.empty() && snapshot->error.isEmpty()))) {
       summary->setText(QStringLiteral("Loading changes…"));
     }
   });
@@ -754,16 +729,16 @@ void DiffViewer::setRepositoryContext(QString nextThreadId,
     selectedRepository =
         QSettings().value(base + QStringLiteral("/selected")).toString();
   }
-  snapshot = {};
+  snapshot.reset();
   updateFileWatches();
-  snapshotFingerprint.clear();
   files->clear();
   diff->clear();
   refreshRepository();
 }
 
 const GitDiffSnapshot &DiffViewer::currentSnapshot() const noexcept {
-  return snapshot;
+  static const GitDiffSnapshot empty;
+  return snapshot ? *snapshot : empty;
 }
 
 void DiffViewer::refreshRepository() {
@@ -784,19 +759,17 @@ QStringList DiffViewer::repositoryCandidates() const {
 
 QString DiffViewer::selectedPath() const {
   const int index = files->currentRow();
-  return index >= 0 && static_cast<std::size_t>(index) < snapshot.files.size()
-             ? snapshot.files[static_cast<std::size_t>(index)].absolutePath
-             : QString{};
+  if (!snapshot || index < 0 ||
+      static_cast<std::size_t>(index) >= snapshot->files.size())
+    return {};
+  return snapshot->files[static_cast<std::size_t>(index)].absolutePath;
 }
 
 void DiffViewer::applySnapshot(const GitDiffSnapshot &value) {
-  const QByteArray nextFingerprint = fingerprint(value);
-  if (nextFingerprint == snapshotFingerprint) {
-    snapshot = value;
+  if (snapshot && *snapshot == value) {
     updateFileWatches();
     return;
   }
-  snapshotFingerprint = nextFingerprint;
   const QString previous = selectedPath();
   const int previousScroll = diff->verticalScrollBar()->value();
   snapshot = value;
@@ -882,13 +855,15 @@ void DiffViewer::applySnapshot(const GitDiffSnapshot &value) {
 
 void DiffViewer::updateFileWatches() {
   QStringList desired;
-  for (const GitDiffFile &file : snapshot.files) {
-    const QFileInfo info(file.absolutePath);
-    if (info.exists())
-      desired.push_back(info.absoluteFilePath());
-    const QString parent = info.absolutePath();
-    if (!parent.isEmpty() && QFileInfo(parent).isDir())
-      desired.push_back(parent);
+  if (snapshot) {
+    for (const GitDiffFile &file : snapshot->files) {
+      const QFileInfo info(file.absolutePath);
+      if (info.exists())
+        desired.push_back(info.absoluteFilePath());
+      const QString parent = info.absolutePath();
+      if (!parent.isEmpty() && QFileInfo(parent).isDir())
+        desired.push_back(parent);
+    }
   }
   desired.removeDuplicates();
   const QStringList existing = fileWatcher->files() + fileWatcher->directories();
@@ -910,14 +885,15 @@ void DiffViewer::updateFileWatches() {
 
 void DiffViewer::showSelectedFile() {
   const int index = files->currentRow();
-  if (index < 0 || static_cast<std::size_t>(index) >= snapshot.files.size()) {
+  if (!snapshot || index < 0 ||
+      static_cast<std::size_t>(index) >= snapshot->files.size()) {
     selectedFile->setText(QStringLiteral("Select a changed file"));
     diff->clear();
     return;
   }
-  const GitDiffFile &file = snapshot.files[static_cast<std::size_t>(index)];
+  const GitDiffFile &file = snapshot->files[static_cast<std::size_t>(index)];
   selectedFile->setText(
-      fileTitle(file, snapshot.repositoryRoots.size() > 1));
+      fileTitle(file, snapshot->repositoryRoots.size() > 1));
   diff->setPlainText(file.patch.isEmpty()
                          ? QStringLiteral("No textual patch is available for this file.")
                          : file.patch);

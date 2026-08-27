@@ -9,6 +9,8 @@
 #include <QStringList>
 #include <QWidget>
 
+#include <optional>
+
 class QComboBox;
 class QFileSystemWatcher;
 class QLabel;
@@ -49,8 +51,7 @@ private:
   QStringList changedPaths;
   QStringList persistedRepositoryRoots;
   QString selectedRepository;
-  GitDiffSnapshot snapshot;
-  QByteArray snapshotFingerprint;
+  std::optional<GitDiffSnapshot> snapshot;
   QComboBox *scope = nullptr;
   QComboBox *repositories = nullptr;
   QPushButton *hiddenRepositories = nullptr;

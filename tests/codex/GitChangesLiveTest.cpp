@@ -10,6 +10,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QListWidget>
 #include <QSaveFile>
 #include <QTemporaryDir>
 #include <QThread>
@@ -24,6 +25,7 @@ namespace {
 
 using codexui::codex::DiffViewer;
 using codexui::codex::GitDiffFile;
+using codexui::codex::GitDiffProvider;
 using codexui::codex::GitDiffSnapshot;
 
 bool expect(bool condition, const char *message) {
@@ -97,6 +99,47 @@ bool hasFile(const GitDiffSnapshot &snapshot, const QString &path,
       return true;
   }
   return false;
+}
+
+bool testSnapshotMetadataRefresh() {
+  DiffViewer viewer;
+  auto *provider = viewer.findChild<GitDiffProvider *>();
+  auto *files =
+      viewer.findChild<QListWidget *>(QStringLiteral("codexDiffFiles"));
+  const bool updated = [provider, files] {
+    if (!provider || !files)
+      return false;
+    GitDiffFile file;
+    file.repositoryRoot = QStringLiteral("/repository");
+    file.path = QStringLiteral("changed.txt");
+    file.absolutePath = QStringLiteral("/repository/changed.txt");
+    file.status = QStringLiteral("Modified");
+    file.patch = QStringLiteral("@@ -1 +1 @@\n-before\n+after");
+    file.additions = 1;
+    file.deletions = 2;
+    GitDiffSnapshot snapshot;
+    snapshot.workspace = QStringLiteral("/workspace");
+    snapshot.repositoryRoot = file.repositoryRoot;
+    snapshot.repositoryRoots = {file.repositoryRoot};
+    snapshot.files = {file};
+    snapshot.repository = true;
+    provider->snapshotReady(snapshot);
+    const bool initialRendered =
+        files->count() == 1 &&
+        files->item(0)->text().contains(QStringLiteral("+1")) &&
+        files->item(0)->text().contains(QStringLiteral("−2"));
+
+    snapshot.files.front().additions = 7;
+    snapshot.files.front().deletions = 5;
+    provider->snapshotReady(snapshot);
+    const bool metadataUpdated =
+        files->count() == 1 &&
+        files->item(0)->text().contains(QStringLiteral("+7")) &&
+        files->item(0)->text().contains(QStringLiteral("−5"));
+    return initialRendered && metadataUpdated;
+  }();
+  return expect(updated,
+                "diff presentation updates when only line totals change");
 }
 
 bool testLiveWorkingTreeChanges() {
@@ -238,7 +281,8 @@ bool testLiveWorkingTreeChanges() {
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
   git_libgit2_init();
-  const bool result = testLiveWorkingTreeChanges();
+  bool result = testSnapshotMetadataRefresh();
+  result &= testLiveWorkingTreeChanges();
   git_libgit2_shutdown();
   return result ? 0 : 1;
 }
