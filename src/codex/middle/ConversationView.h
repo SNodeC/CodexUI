@@ -110,6 +110,7 @@ private:
   std::string threadId_;
   std::unordered_map<std::string, TurnSectionWidget *> sections_;
   std::unordered_map<std::string, ConversationCard *> cards_;
+  std::vector<std::string> displayedSectionKeys_;
   std::vector<std::string> displayedCardKeys_;
   std::unordered_map<std::string, ThreadScrollState> threadStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>

@@ -22,7 +22,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <unordered_set>
 #include <utility>
 
 namespace codexui::codex::middle {
@@ -54,6 +53,7 @@ public:
   }
 
   QVBoxLayout *cards = nullptr;
+  std::vector<std::string> cardKeys;
 };
 
 ConversationView::ConversationView(QWidget *parent)
@@ -251,8 +251,21 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
                                   snapshot.hiddenAuthoritativeItemCount)));
   }
 
-  std::unordered_set<std::string> wantedSections;
-  std::unordered_set<std::string> wantedCards;
+  struct DesiredSection {
+    TurnSectionWidget *widget = nullptr;
+    int position = 0;
+    bool insert = false;
+  };
+  struct DesiredCard {
+    TurnSectionWidget *section = nullptr;
+    int position = 0;
+    const VisibleCardData *data = nullptr;
+    bool insert = false;
+  };
+  std::unordered_map<std::string, DesiredSection> desiredSections;
+  std::unordered_map<std::string, DesiredCard> desiredCards;
+  std::vector<std::string> desiredSectionKeys;
+  desiredSectionKeys.reserve(snapshot.sections.size());
   std::vector<std::string> displayedKeys;
   std::vector<std::pair<ConversationCard *, CommandOutputView::ScrollState>>
       commandOutputRestorations;
@@ -264,13 +277,14 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
     else
       commandOutputStates_.erase(key);
   };
-  int sectionIndex = 1; // load-more owns index zero (also while hidden).
 
+  int sectionIndex = 0;
   for (const TurnSection &sectionData : snapshot.sections) {
-    wantedSections.insert(sectionData.key);
+    desiredSectionKeys.push_back(sectionData.key);
     TurnSectionWidget *section = nullptr;
     const auto existingSection = sections_.find(sectionData.key);
-    if (existingSection == sections_.end()) {
+    const bool newSection = existingSection == sections_.end();
+    if (newSection) {
       section = new TurnSectionWidget(content_);
       section->setProperty("turnSectionKey",
                            QString::fromStdString(sectionData.key));
@@ -279,33 +293,80 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
     } else {
       section = existingSection->second;
     }
+    desiredSections.emplace(
+        sectionData.key, DesiredSection{section, sectionIndex++, newSection});
     section->setProperty("turnId", QString::fromStdString(sectionData.turnId));
-
-    if (contentLayout_->indexOf(section) != sectionIndex) {
-      contentLayout_->removeWidget(section);
-      contentLayout_->insertWidget(sectionIndex, section);
-      visualChange = true;
-    }
-    ++sectionIndex;
 
     int cardIndex = 0;
     for (const VisibleCardData &cardData : sectionData.cards) {
       const std::string key = stableKey(cardData.key);
-      wantedCards.insert(key);
       displayedKeys.push_back(key);
+      desiredCards.emplace(key, DesiredCard{section, cardIndex++, &cardData});
+    }
+  }
+
+  for (std::size_t offset = displayedSectionKeys_.size(); offset > 0;
+       --offset) {
+    const std::size_t index = offset - 1;
+    const std::string &key = displayedSectionKeys_[index];
+    const auto desired = desiredSections.find(key);
+    if (desired != desiredSections.end() &&
+        desired->second.position == static_cast<int>(index))
+      continue;
+    delete contentLayout_->takeAt(1 + static_cast<int>(index));
+    if (desired != desiredSections.end())
+      desired->second.insert = true;
+    visualChange = true;
+  }
+
+  for (const auto &[sectionKey, section] : sections_) {
+    static_cast<void>(sectionKey);
+    for (std::size_t offset = section->cardKeys.size(); offset > 0; --offset) {
+      const std::size_t index = offset - 1;
+      const std::string &key = section->cardKeys[index];
+      const auto desired = desiredCards.find(key);
+      const auto card = cards_.find(key);
+      if (desired != desiredCards.end() && card != cards_.end() &&
+          desired->second.section == section &&
+          desired->second.position == static_cast<int>(index) &&
+          card->second->cardKind() == desired->second.data->kind)
+        continue;
+      delete section->cards->takeAt(static_cast<int>(index));
+      if (desired != desiredCards.end())
+        desired->second.insert = true;
+      visualChange = true;
+    }
+  }
+
+  for (auto iterator = cards_.begin(); iterator != cards_.end();) {
+    const auto desired = desiredCards.find(iterator->first);
+    if (desired != desiredCards.end() &&
+        iterator->second->cardKind() == desired->second.data->kind) {
+      ++iterator;
+      continue;
+    }
+    retainCommandOutputState(iterator->first, iterator->second);
+    delete iterator->second;
+    iterator = cards_.erase(iterator);
+    visualChange = true;
+  }
+
+  for (const TurnSection &sectionData : snapshot.sections) {
+    TurnSectionWidget *section = desiredSections.at(sectionData.key).widget;
+    std::vector<std::string> desiredCardKeys;
+    desiredCardKeys.reserve(sectionData.cards.size());
+    int cardIndex = 0;
+    for (const VisibleCardData &cardData : sectionData.cards) {
+      const std::string key = stableKey(cardData.key);
+      DesiredCard &desired = desiredCards.at(key);
+      desiredCardKeys.push_back(key);
 
       ConversationCard *card = nullptr;
       const auto existingCard = cards_.find(key);
-      if (existingCard != cards_.end() &&
-          existingCard->second->cardKind() == cardData.kind) {
+      if (existingCard != cards_.end()) {
         card = existingCard->second;
         visualChange = card->apply(cardData) || visualChange;
       } else {
-        if (existingCard != cards_.end()) {
-          retainCommandOutputState(key, existingCard->second);
-          delete existingCard->second;
-          cards_.erase(existingCard);
-        }
         card = createConversationCard(cardData, section);
         card->setProperty("conversationAnchorKey", QString::fromStdString(key));
         if (const auto collapsed = cardCollapsedStates_.find(key);
@@ -323,38 +384,25 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
           commandOutputStates_.erase(saved);
         }
         cards_.emplace(key, card);
+        desired.insert = true;
         visualChange = true;
       }
 
       if (card->parentWidget() != section) {
-        if (QWidget *oldParent = card->parentWidget();
-            oldParent && oldParent->layout())
-          oldParent->layout()->removeWidget(card);
         card->setParent(section);
+        desired.insert = true;
         visualChange = true;
       }
-      if (section->cards->indexOf(card) != cardIndex) {
-        section->cards->removeWidget(card);
+      if (desired.insert)
         section->cards->insertWidget(cardIndex, card);
-        visualChange = true;
-      }
       ++cardIndex;
     }
+    section->cardKeys = std::move(desiredCardKeys);
     section->setVisible(!sectionData.cards.empty());
   }
 
-  for (auto iterator = cards_.begin(); iterator != cards_.end();) {
-    if (wantedCards.contains(iterator->first)) {
-      ++iterator;
-      continue;
-    }
-    retainCommandOutputState(iterator->first, iterator->second);
-    delete iterator->second;
-    iterator = cards_.erase(iterator);
-    visualChange = true;
-  }
   for (auto iterator = sections_.begin(); iterator != sections_.end();) {
-    if (wantedSections.contains(iterator->first)) {
+    if (desiredSections.contains(iterator->first)) {
       ++iterator;
       continue;
     }
@@ -362,6 +410,14 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
     iterator = sections_.erase(iterator);
     visualChange = true;
   }
+  for (int index = 0; index < static_cast<int>(desiredSectionKeys.size());
+       ++index) {
+    const std::string &key = desiredSectionKeys[static_cast<std::size_t>(index)];
+    const DesiredSection &desired = desiredSections.at(key);
+    if (desired.insert)
+      contentLayout_->insertWidget(1 + index, desired.widget);
+  }
+  displayedSectionKeys_ = std::move(desiredSectionKeys);
 
   const bool empty = displayedKeys.empty();
   if (empty_->isVisible() != empty) {
