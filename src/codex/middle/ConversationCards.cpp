@@ -124,7 +124,6 @@ public:
                   .arg(QFileInfo(path_).fileName()));
       setProperty("imageAvailable", false);
       unsetCursor();
-      path_.clear();
       return;
     }
     setProperty("imageAvailable", true);
@@ -132,9 +131,15 @@ public:
     setFixedSize(image.size() + QSize(8, 8));
   }
 
+  [[nodiscard]] bool represents(const QString &path) const {
+    return path_ == path &&
+           property("imageAvailable").toBool() == QFileInfo(path).isFile();
+  }
+
 protected:
   void mousePressEvent(QMouseEvent *event) override {
-    if (event->button() == Qt::LeftButton && !path_.isEmpty()) {
+    if (event->button() == Qt::LeftButton &&
+        property("imageAvailable").toBool()) {
       openImageViewer(path_);
       event->accept();
       return;
@@ -408,47 +413,18 @@ bool acceptedTransitionActive(const LocalPromptData &prompt, qint64 now) {
 
 bool presentationEquals(const VisibleCardData &left,
                         const VisibleCardData &right) {
-  if (left.kind != right.kind || left.payload.index() != right.payload.index())
+  if (left.kind != right.kind)
     return false;
-  switch (left.kind) {
-  case CardKind::UserMessage:
-    return std::get<UserMessageData>(left.payload) ==
-           std::get<UserMessageData>(right.payload);
-  case CardKind::AgentMessage:
-    return std::get<AgentMessageData>(left.payload) ==
-           std::get<AgentMessageData>(right.payload);
-  case CardKind::CommandExecution:
-    return std::get<CommandExecutionData>(left.payload) ==
-           std::get<CommandExecutionData>(right.payload);
-  case CardKind::AgentActivity:
-    return std::get<AgentActivityData>(left.payload) ==
-           std::get<AgentActivityData>(right.payload);
-  case CardKind::Reasoning:
-    return std::get<ReasoningData>(left.payload) ==
-           std::get<ReasoningData>(right.payload);
-  case CardKind::FileChanges:
-    return std::get<FileChangesData>(left.payload) ==
-           std::get<FileChangesData>(right.payload);
-  case CardKind::ImageGeneration:
-    return std::get<ImageGenerationData>(left.payload) ==
-           std::get<ImageGenerationData>(right.payload);
-  case CardKind::Plan:
-    return std::get<PlanData>(left.payload) ==
-           std::get<PlanData>(right.payload);
-  case CardKind::GenericActivity:
-    return std::get<GenericActivityData>(left.payload) ==
-           std::get<GenericActivityData>(right.payload);
-  case CardKind::LocalPrompt: {
-    const auto &first = std::get<LocalPromptData>(left.payload);
-    const auto &second = std::get<LocalPromptData>(right.payload);
-    return first.prompt == second.prompt &&
-           first.imagePaths == second.imagePaths &&
-           first.state == second.state &&
-           first.acceptedAtMilliseconds == second.acceptedAtMilliseconds &&
-           first.error == second.error;
+  const auto *first = std::get_if<LocalPromptData>(&left.payload);
+  const auto *second = std::get_if<LocalPromptData>(&right.payload);
+  if (first && second) {
+    return first->prompt == second->prompt &&
+           first->imagePaths == second->imagePaths &&
+           first->state == second->state &&
+           first->acceptedAtMilliseconds == second->acceptedAtMilliseconds &&
+           first->error == second->error;
   }
-  }
-  return false;
+  return left.payload == right.payload;
 }
 
 } // namespace
@@ -660,8 +636,9 @@ public:
 
     QObject::connect(disclosure, &QToolButton::clicked, owner,
                      [this] { emit this->owner->foldRequested(!collapsed); });
-    createChildren(initial.kind);
-    applyPayload(initial);
+    owner->setProperty("kind", "raised");
+    std::visit([this](const auto &payload) { createComposition(payload); },
+               initial.payload);
     refreshFoldPresentation();
   }
 
@@ -687,7 +664,8 @@ public:
     current = next;
     if (!presentationChanged)
       return false;
-    applyPayload(next);
+    std::visit([this](const auto &payload) { updateComposition(payload); },
+               next.payload);
     refreshFoldPresentation();
     owner->updateGeometry();
     owner->update();
@@ -736,113 +714,6 @@ public:
     content->setVisible(expandable && !collapsed);
   }
 
-  void createChildren(CardKind kind) {
-    owner->setProperty("kind", "raised");
-    switch (kind) {
-    case CardKind::UserMessage:
-      owner->setProperty("messageRole", "user");
-      title->setText(QStringLiteral("You"));
-      body = makeMarkdownLabel({}, content);
-      contentLayout->addWidget(body);
-      createImageContainer();
-      break;
-    case CardKind::AgentMessage:
-      owner->setProperty("messageRole", "agent");
-      title->setText(QStringLiteral("Codex"));
-      title->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-      phaseSeparator = makeLabel(QStringLiteral("•"), "messagePhase", header);
-      phaseSeparator->setObjectName(
-          QStringLiteral("agentMessagePhaseSeparator"));
-      phaseSeparator->setWordWrap(false);
-      phaseSeparator->setSizePolicy(QSizePolicy::Fixed,
-                                    QSizePolicy::Preferred);
-      phase = makeLabel({}, "messagePhase", header);
-      phase->setObjectName(QStringLiteral("agentMessagePhase"));
-      phase->setWordWrap(false);
-      phase->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-      headerLayout->setStretch(0, 0);
-      headerLayout->insertWidget(1, phaseSeparator, 0, Qt::AlignVCenter);
-      headerLayout->insertWidget(2, phase, 0, Qt::AlignVCenter);
-      headerLayout->insertStretch(3, 1);
-      body = makeMarkdownLabel({}, content);
-      contentLayout->addWidget(body);
-      break;
-    case CardKind::CommandExecution:
-      title->setText(QStringLiteral("Command execution"));
-      command = new ContentSizedTextView(MaximumCommandTextHeight, content);
-      command->setProperty("kind", "command");
-      command->setObjectName(QStringLiteral("commandTextView"));
-      command->setStyleSheet(
-          QStringLiteral("QTextEdit#commandTextView{background:#f8fafc;"
-                         "border:1px solid #d7dee8;border-radius:6px;}"));
-      output = new CommandOutputView({}, content);
-      output->hide();
-      metadata = makeLabel({}, "meta", content);
-      metadata->setObjectName(QStringLiteral("commandMetadata"));
-      contentLayout->addWidget(command);
-      contentLayout->addWidget(output);
-      contentLayout->addWidget(metadata);
-      break;
-    case CardKind::AgentActivity:
-      title->setText(QStringLiteral("Agent activity"));
-      metadata = makeLabel({}, "meta", content);
-      body = makeLabel({}, "body", content);
-      detail = makeMarkdownLabel({}, content);
-      contentLayout->addWidget(metadata);
-      contentLayout->addWidget(body);
-      contentLayout->addWidget(detail);
-      break;
-    case CardKind::Reasoning:
-      title->setText(QStringLiteral("Reasoning"));
-      body = makeMarkdownLabel({}, content);
-      contentLayout->addWidget(body);
-      break;
-    case CardKind::FileChanges:
-      title->setText(QStringLiteral("File changes"));
-      metadata = makeLabel({}, "meta", content);
-      body = makeLabel({}, "body", content);
-      contentLayout->addWidget(body);
-      contentLayout->addWidget(metadata);
-      break;
-    case CardKind::ImageGeneration:
-      title->setText(QStringLiteral("Generated image"));
-      metadata = makeLabel({}, "meta", content);
-      body = makeLabel({}, "body", content);
-      contentLayout->addWidget(metadata);
-      contentLayout->addWidget(body);
-      createImageContainer();
-      break;
-    case CardKind::Plan:
-      title->setText(QStringLiteral("Plan"));
-      body = makeMarkdownLabel({}, content);
-      contentLayout->addWidget(body);
-      break;
-    case CardKind::GenericActivity:
-      metadata = makeLabel({}, "meta", content);
-      contentLayout->addWidget(metadata);
-      break;
-    case CardKind::LocalPrompt:
-      owner->setObjectName(QStringLiteral("pendingPromptCard"));
-      owner->setStyleSheet(
-          QStringLiteral("QFrame#pendingPromptCard{background:transparent;"
-                         "border:1px solid transparent;border-radius:8px;}"));
-      title->setText(QStringLiteral("You"));
-      body = makeMarkdownLabel({}, content);
-      metadata = makeLabel({}, "meta", content);
-      contentLayout->addWidget(body);
-      contentLayout->addWidget(metadata);
-      createImageContainer();
-      animationTimer = new QTimer(owner);
-      animationTimer->setInterval(PendingAnimationIntervalMilliseconds);
-      QObject::connect(animationTimer, &QTimer::timeout, owner, [this] {
-        if (refreshPendingPresentation())
-          owner->updateGeometry();
-        owner->update();
-      });
-      break;
-    }
-  }
-
   void createImageContainer() {
     images = new QWidget(content);
     images->setObjectName(QStringLiteral("messageImages"));
@@ -854,7 +725,17 @@ public:
     contentLayout->addWidget(images);
   }
 
-  void setImages(const QStringList &paths) {
+  void setImages(const QStringList &paths, bool forceRebuild = false) {
+    bool matches = !forceRebuild && imageLayout->count() == paths.size();
+    for (qsizetype index = 0; matches && index < paths.size(); ++index) {
+      const auto *thumbnail = dynamic_cast<ImageThumbnail *>(
+          imageLayout->itemAt(static_cast<int>(index))->widget());
+      matches = thumbnail && thumbnail->represents(paths.at(index));
+    }
+    if (matches) {
+      images->setVisible(!paths.isEmpty());
+      return;
+    }
     while (QLayoutItem *item = imageLayout->takeAt(0)) {
       delete item->widget();
       delete item;
@@ -866,115 +747,222 @@ public:
     images->setVisible(!paths.isEmpty());
   }
 
-  void applyPayload(const VisibleCardData &data) {
-    switch (data.kind) {
-    case CardKind::UserMessage: {
-      const auto &message = std::get<UserMessageData>(data.payload);
-      setVisibleMarkdown(body, message.text);
-      setImages(message.imagePaths);
-      break;
+  void createComposition(const UserMessageData &message) {
+    owner->setProperty("messageRole", "user");
+    title->setText(QStringLiteral("You"));
+    body = makeMarkdownLabel({}, content);
+    contentLayout->addWidget(body);
+    createImageContainer();
+    updateComposition(message);
+  }
+
+  void updateComposition(const UserMessageData &message) {
+    setVisibleMarkdown(body, message.text);
+    setImages(message.imagePaths);
+  }
+
+  void createComposition(const AgentMessageData &message) {
+    owner->setProperty("messageRole", "agent");
+    title->setText(QStringLiteral("Codex"));
+    title->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    phaseSeparator = makeLabel(QStringLiteral("•"), "messagePhase", header);
+    phaseSeparator->setObjectName(QStringLiteral("agentMessagePhaseSeparator"));
+    phaseSeparator->setWordWrap(false);
+    phaseSeparator->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+    phase = makeLabel({}, "messagePhase", header);
+    phase->setObjectName(QStringLiteral("agentMessagePhase"));
+    phase->setWordWrap(false);
+    phase->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    headerLayout->setStretch(0, 0);
+    headerLayout->insertWidget(1, phaseSeparator, 0, Qt::AlignVCenter);
+    headerLayout->insertWidget(2, phase, 0, Qt::AlignVCenter);
+    headerLayout->insertStretch(3, 1);
+    body = makeMarkdownLabel({}, content);
+    contentLayout->addWidget(body);
+    updateComposition(message);
+  }
+
+  void updateComposition(const AgentMessageData &message) {
+    phase->setText(message.finalAnswer ? QStringLiteral("final answer")
+                                       : QStringLiteral("update"));
+    const QString phaseStatus = message.finalAnswer
+                                    ? QStringLiteral("completed")
+                                    : QStringLiteral("inProgress");
+    setStatusTone(phaseSeparator, phaseStatus);
+    setStatusTone(phase, phaseStatus);
+    layout->setContentsMargins(12, message.finalAnswer ? 10 : 8, 12,
+                               message.finalAnswer ? 10 : 8);
+    setVisibleMarkdown(body, message.text);
+  }
+
+  void createComposition(const CommandExecutionData &execution) {
+    title->setText(QStringLiteral("Command execution"));
+    command = new ContentSizedTextView(MaximumCommandTextHeight, content);
+    command->setProperty("kind", "command");
+    command->setObjectName(QStringLiteral("commandTextView"));
+    command->setStyleSheet(
+        QStringLiteral("QTextEdit#commandTextView{background:#f8fafc;"
+                       "border:1px solid #d7dee8;border-radius:6px;}"));
+    output = new CommandOutputView({}, content);
+    output->hide();
+    metadata = makeLabel({}, "meta", content);
+    metadata->setObjectName(QStringLiteral("commandMetadata"));
+    contentLayout->addWidget(command);
+    contentLayout->addWidget(output);
+    contentLayout->addWidget(metadata);
+    updateComposition(execution);
+  }
+
+  void updateComposition(const CommandExecutionData &execution) {
+    const QString displayCommand = trimTrailingEmptyLines(execution.command);
+    command->setContent(displayCommand);
+    command->setVisible(!displayCommand.isEmpty());
+    const QString displayOutput = trimTrailingEmptyLines(execution.output);
+    const bool visibleOutput = terminalOutputHasVisibleText(displayOutput);
+    if (visibleOutput) {
+      output->setOutput(displayOutput);
+      output->show();
+    } else {
+      output->hide();
+      output->setOutput({});
+      // Once the surface ceases to exist there is no user-owned paused
+      // position to retain. If visible output appears later it starts in
+      // the documented follow-latest state.
+      output->restoreScrollState({true, 0});
     }
-    case CardKind::AgentMessage: {
-      const auto &message = std::get<AgentMessageData>(data.payload);
-      phase->setText(message.finalAnswer ? QStringLiteral("final answer")
-                                         : QStringLiteral("update"));
-      const QString phaseStatus = message.finalAnswer
-                                      ? QStringLiteral("completed")
-                                      : QStringLiteral("inProgress");
-      setStatusTone(phaseSeparator, phaseStatus);
-      setStatusTone(phase, phaseStatus);
-      layout->setContentsMargins(12, message.finalAnswer ? 10 : 8, 12,
-                                 message.finalAnswer ? 10 : 8);
-      setVisibleMarkdown(body, message.text);
-      break;
-    }
-    case CardKind::CommandExecution: {
-      const auto &execution = std::get<CommandExecutionData>(data.payload);
-      const QString displayCommand = trimTrailingEmptyLines(execution.command);
-      command->setContent(displayCommand);
-      command->setVisible(!displayCommand.isEmpty());
-      const QString displayOutput = trimTrailingEmptyLines(execution.output);
-      const bool visibleOutput = terminalOutputHasVisibleText(displayOutput);
-      if (visibleOutput) {
-        output->setOutput(displayOutput);
-        output->show();
-      } else {
-        output->hide();
-        output->setOutput({});
-        // Once the surface ceases to exist there is no user-owned paused
-        // position to retain. If visible output appears later it starts in
-        // the documented follow-latest state.
-        output->restoreScrollState({true, 0});
-      }
-      metadata->setText(commandMetadata(execution));
-      setStatusTone(metadata, execution.status);
-      metadata->show();
-      break;
-    }
-    case CardKind::AgentActivity: {
-      const auto &activity = std::get<AgentActivityData>(data.payload);
-      metadata->setText(agentMetadata(activity));
-      setStatusTone(metadata, activity.status.isEmpty() ? activity.kind
-                                                        : activity.status);
-      metadata->show();
-      setVisibleText(body, activity.prompt);
-      setVisibleMarkdown(detail, activity.resultText);
-      break;
-    }
-    case CardKind::Reasoning: {
-      const auto &reasoning = std::get<ReasoningData>(data.payload);
-      setVisibleMarkdown(body, reasoning.summary);
-      break;
-    }
-    case CardKind::FileChanges: {
-      const auto &changes = std::get<FileChangesData>(data.payload);
-      setVisibleText(body, fileChangesText(changes));
-      QStringList values{displayStatus(changes.status)};
-      values << QStringLiteral("%1 paths").arg(changes.changes.size());
-      if (const auto counts = totalDiffCounts(changes))
-        values << QStringLiteral("+%1 −%2")
-                      .arg(counts->additions)
-                      .arg(counts->deletions);
-      metadata->setText(values.join(QStringLiteral("  |  ")));
-      setStatusTone(metadata, changes.status);
-      metadata->show();
-      break;
-    }
-    case CardKind::ImageGeneration: {
-      const auto &image = std::get<ImageGenerationData>(data.payload);
-      const bool generated =
-          !image.status.isEmpty() || !image.revisedPrompt.isEmpty();
-      title->setText(generated ? QStringLiteral("Generated image")
-                               : QStringLiteral("Image"));
-      setVisibleText(metadata, displayStatus(image.status));
-      setStatusTone(metadata, image.status);
-      setVisibleText(body, image.revisedPrompt);
-      setImages(image.path.isEmpty() ? QStringList{} : QStringList{image.path});
-      break;
-    }
-    case CardKind::Plan: {
-      const auto &plan = std::get<PlanData>(data.payload);
-      setVisibleMarkdown(body, planMarkdown(plan));
-      break;
-    }
-    case CardKind::GenericActivity: {
-      const auto &activity = std::get<GenericActivityData>(data.payload);
-      title->setText(activity.type.isEmpty()
-                         ? QStringLiteral("Activity")
-                         : UiStyle::humanizeLabel(activity.type));
-      metadata->setText(boundedGenericActivity(activity.raw));
-      metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
-      metadata->show();
-      break;
-    }
-    case CardKind::LocalPrompt: {
-      const auto &prompt = std::get<LocalPromptData>(data.payload);
-      setVisibleMarkdown(body, prompt.prompt);
-      setImages(prompt.imagePaths);
-      refreshPendingPresentation();
-      break;
-    }
-    }
+    metadata->setText(commandMetadata(execution));
+    setStatusTone(metadata, execution.status);
+    metadata->show();
+  }
+
+  void createComposition(const AgentActivityData &activity) {
+    title->setText(QStringLiteral("Agent activity"));
+    metadata = makeLabel({}, "meta", content);
+    body = makeLabel({}, "body", content);
+    detail = makeMarkdownLabel({}, content);
+    contentLayout->addWidget(metadata);
+    contentLayout->addWidget(body);
+    contentLayout->addWidget(detail);
+    updateComposition(activity);
+  }
+
+  void updateComposition(const AgentActivityData &activity) {
+    metadata->setText(agentMetadata(activity));
+    setStatusTone(metadata,
+                  activity.status.isEmpty() ? activity.kind : activity.status);
+    metadata->show();
+    setVisibleText(body, activity.prompt);
+    setVisibleMarkdown(detail, activity.resultText);
+  }
+
+  void createComposition(const ReasoningData &reasoning) {
+    title->setText(QStringLiteral("Reasoning"));
+    body = makeMarkdownLabel({}, content);
+    contentLayout->addWidget(body);
+    updateComposition(reasoning);
+  }
+
+  void updateComposition(const ReasoningData &reasoning) {
+    setVisibleMarkdown(body, reasoning.summary);
+  }
+
+  void createComposition(const FileChangesData &changes) {
+    title->setText(QStringLiteral("File changes"));
+    metadata = makeLabel({}, "meta", content);
+    body = makeLabel({}, "body", content);
+    contentLayout->addWidget(body);
+    contentLayout->addWidget(metadata);
+    updateComposition(changes);
+  }
+
+  void updateComposition(const FileChangesData &changes) {
+    setVisibleText(body, fileChangesText(changes));
+    QStringList values{displayStatus(changes.status)};
+    values << QStringLiteral("%1 paths").arg(changes.changes.size());
+    if (const auto counts = totalDiffCounts(changes))
+      values << QStringLiteral("+%1 −%2")
+                    .arg(counts->additions)
+                    .arg(counts->deletions);
+    metadata->setText(values.join(QStringLiteral("  |  ")));
+    setStatusTone(metadata, changes.status);
+    metadata->show();
+  }
+
+  void createComposition(const PlanData &plan) {
+    title->setText(QStringLiteral("Plan"));
+    body = makeMarkdownLabel({}, content);
+    contentLayout->addWidget(body);
+    updateComposition(plan);
+  }
+
+  void updateComposition(const PlanData &plan) {
+    setVisibleMarkdown(body, planMarkdown(plan));
+  }
+
+  void createComposition(const ImageGenerationData &image) {
+    title->setText(QStringLiteral("Generated image"));
+    metadata = makeLabel({}, "meta", content);
+    body = makeLabel({}, "body", content);
+    contentLayout->addWidget(metadata);
+    contentLayout->addWidget(body);
+    createImageContainer();
+    updateComposition(image);
+  }
+
+  void updateComposition(const ImageGenerationData &image) {
+    const bool generated =
+        !image.status.isEmpty() || !image.revisedPrompt.isEmpty();
+    title->setText(generated ? QStringLiteral("Generated image")
+                             : QStringLiteral("Image"));
+    setVisibleText(metadata, displayStatus(image.status));
+    setStatusTone(metadata, image.status);
+    setVisibleText(body, image.revisedPrompt);
+    // A generated image can become readable at the same path as its status
+    // advances, so its update remains the authoritative reload boundary.
+    setImages(image.path.isEmpty() ? QStringList{} : QStringList{image.path},
+              true);
+  }
+
+  void createComposition(const GenericActivityData &activity) {
+    metadata = makeLabel({}, "meta", content);
+    contentLayout->addWidget(metadata);
+    updateComposition(activity);
+  }
+
+  void updateComposition(const GenericActivityData &activity) {
+    title->setText(activity.type.isEmpty()
+                       ? QStringLiteral("Activity")
+                       : UiStyle::humanizeLabel(activity.type));
+    metadata->setText(boundedGenericActivity(activity.raw));
+    metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
+    metadata->show();
+  }
+
+  void createComposition(const LocalPromptData &prompt) {
+    owner->setObjectName(QStringLiteral("pendingPromptCard"));
+    owner->setStyleSheet(
+        QStringLiteral("QFrame#pendingPromptCard{background:transparent;"
+                       "border:1px solid transparent;border-radius:8px;}"));
+    title->setText(QStringLiteral("You"));
+    body = makeMarkdownLabel({}, content);
+    metadata = makeLabel({}, "meta", content);
+    contentLayout->addWidget(body);
+    contentLayout->addWidget(metadata);
+    createImageContainer();
+    animationTimer = new QTimer(owner);
+    animationTimer->setInterval(PendingAnimationIntervalMilliseconds);
+    QObject::connect(animationTimer, &QTimer::timeout, owner, [this] {
+      if (refreshPendingPresentation())
+        owner->updateGeometry();
+      owner->update();
+    });
+    updateComposition(prompt);
+  }
+
+  void updateComposition(const LocalPromptData &prompt) {
+    setVisibleMarkdown(body, prompt.prompt);
+    setImages(prompt.imagePaths);
+    refreshPendingPresentation();
   }
 
   bool refreshPendingPresentation() {
