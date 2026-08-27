@@ -593,10 +593,9 @@ A fast successful result retains a 500-millisecond accepted transition so the
 state change remains visible. Pending cards survive thread switching and
 become normal authoritative user messages when the corresponding app-server
 item materializes. The pending and authoritative forms share one visual key
-and anchor during replacement. Once materialization and the accepted transition
-are complete, the prompt coordinator releases dispatch-only payload while
-retaining that lightweight identity alias. Failure produces a retained error
-card.
+and anchor during the accepted transition. Once materialization and that
+transition are complete, the local submission is removed and the retained item
+uses its authoritative identity. Failure produces a retained error card.
 
 The composer remains enabled while acknowledgments are outstanding. Multiple
 prompts may be admitted, but CodexUI dispatches them sequentially per thread so
@@ -1173,7 +1172,7 @@ instead of repeating both mechanisms in every case.
 prompt coordinator: one section per app-server turn, stable card identity and
 server ordering, per-thread prompt queues, dispatch-time Start/Steer choice,
 callback-only acknowledgment, exact `clientUserMessageId` correlation,
-duplicate-prompt ordering, history bounds, resolved-payload compaction, and
+duplicate-prompt ordering, history bounds, resolved-submission removal, and
 Command execution output visibility.
 
 #### Middle-Region Behavior

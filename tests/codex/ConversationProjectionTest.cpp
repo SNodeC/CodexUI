@@ -141,7 +141,7 @@ bool testQueueIsolationAndRealAcknowledgement() {
       first, "turn-2",
       item("user-new", {{"type", "userMessage"},
                         {"content", {{{"type", "text"}, {"text", "same"}}}}}));
-  prompts.reconcile(first.id, first);
+  prompts.reconcile(first.id, first, 199);
   result &= expect(prompts.submission(first.id, firstId)->state ==
                            PromptState::InFlight &&
                        !prompts.submission(first.id, firstId)->materializedItem,
@@ -149,7 +149,7 @@ bool testQueueIsolationAndRealAcknowledgement() {
 
   result &= expect(prompts.acknowledge(first.id, firstId, "turn-2", 200),
                    "the matching completion acknowledges the in-flight prompt");
-  prompts.reconcile(first.id, first);
+  prompts.reconcile(first.id, first, 200);
   const PromptSubmission *accepted = prompts.submission(first.id, firstId);
   result &= expect(accepted && accepted->state == PromptState::Accepted &&
                        accepted->materializedItem &&
@@ -171,18 +171,17 @@ bool testQueueIsolationAndRealAcknowledgement() {
              "the authoritative user item assumes the local stable key");
   result &= expect(stableKey(local->key) == stableKey(authoritative->key),
                    "materialization does not change the visual identity");
-  prompts.compactResolved("thread-a", 700);
+  prompts.reconcile(first.id, first, 700);
   accepted = prompts.submission(first.id, firstId);
   const ConversationSnapshot compacted = ConversationProjection::project(
       first, prompts.submissions(first.id), 80, 701);
   result &= expect(
-      accepted && accepted->prompt.isEmpty() && accepted->attachments.empty() &&
-          accepted->clientUserMessageId.empty() &&
-          accepted->turnOptions.empty() &&
-          compacted.find(LocalPromptKey{firstId}) &&
-          compacted.find(LocalPromptKey{firstId})->kind ==
-              CardKind::UserMessage,
-      "resolved aliases release dispatch payload and retain identity");
+      !accepted && prompts.submissions(first.id).empty() &&
+          compacted.find(
+              AuthoritativeItemKey{first.id, "turn-2", "user-new"}) &&
+          compacted.find(AuthoritativeItemKey{first.id, "turn-2", "user-new"})
+                  ->kind == CardKind::UserMessage,
+      "fully resolved submissions leave only authoritative presentation");
   return result;
 }
 
@@ -202,7 +201,7 @@ bool testDispatchChoiceAndPreHydrationTail() {
       "thread-tail", QStringLiteral("after retained history"), {},
       nlohmann::json::object(), nullptr, std::nullopt, 400);
   ThreadPresentation retained = baseThread("thread-tail");
-  beforeHydration.reconcile(retained.id, retained);
+  beforeHydration.reconcile(retained.id, retained, 401);
   const ConversationSnapshot atTail = ConversationProjection::project(
       retained, beforeHydration.submissions(retained.id), 80, 401);
   const auto keys = atTail.cardKeys();
@@ -231,7 +230,7 @@ bool testClientIdentityBindsBeforeAcknowledgement() {
            {{"type", "userMessage"},
             {"clientId", dispatch->clientUserMessageId},
             {"content", {{{"type", "text"}, {"text", "identity matched"}}}}}));
-  prompts.reconcile(thread.id, thread);
+  prompts.reconcile(thread.id, thread, 501);
   const PromptSubmission *pending = prompts.submission(thread.id, id);
   result &= expect(pending && pending->state == PromptState::InFlight &&
                        pending->materializedItem &&
@@ -281,7 +280,7 @@ bool testAnchoredDuplicatePrompts() {
              item("repeat-1",
                   {{"type", "userMessage"},
                    {"content", {{{"type", "text"}, {"text", "repeat"}}}}}));
-  prompts.reconcile(thread.id, thread);
+  prompts.reconcile(thread.id, thread, 1020);
   const ConversationSnapshot partiallyMaterialized =
       ConversationProjection::project(thread, prompts.submissions(thread.id),
                                       80, 1600);
@@ -299,7 +298,7 @@ bool testAnchoredDuplicatePrompts() {
              item("repeat-2",
                   {{"type", "userMessage"},
                    {"content", {{{"type", "text"}, {"text", "repeat"}}}}}));
-  prompts.reconcile(thread.id, thread);
+  prompts.reconcile(thread.id, thread, 1021);
   const PromptSubmission *first = prompts.submission(thread.id, firstId);
   const PromptSubmission *second = prompts.submission(thread.id, secondId);
   result &= expect(
@@ -435,12 +434,12 @@ bool testUserMessageImages() {
             {"content",
              {{{"type", "text"}, {"text", "replacement image"}},
               {{"type", "localImage"}, {"path", "/tmp/replacement.png"}}}}}));
-  prompts.reconcile(replacement.id, replacement);
-  prompts.compactResolved(replacement.id, 800);
+  prompts.reconcile(replacement.id, replacement, 200);
+  prompts.reconcile(replacement.id, replacement, 800);
   const ConversationSnapshot replaced = ConversationProjection::project(
       replacement, prompts.submissions(replacement.id), 80, 800);
-  const VisibleCardData *replacedCard =
-      replaced.find(LocalPromptKey{submissionId});
+  const VisibleCardData *replacedCard = replaced.find(AuthoritativeItemKey{
+      replacement.id, "turn-image", "authoritative-image"});
   const auto *replacedMessage =
       replacedCard ? std::get_if<UserMessageData>(&replacedCard->payload)
                    : nullptr;
@@ -449,7 +448,7 @@ bool testUserMessageImages() {
           replacedMessage &&
           replacedMessage->imagePaths ==
               QStringList{QStringLiteral("/tmp/replacement.png")} &&
-          prompts.submission(replacement.id, submissionId)->attachments.empty(),
+          !prompts.submission(replacement.id, submissionId),
       "authoritative image presentation survives local payload compaction");
   return result;
 }

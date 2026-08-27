@@ -264,31 +264,6 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
   return result;
 }
 
-struct OrderedItem {
-  AuthoritativeItemKey key;
-  const ItemPresentation *presentation = nullptr;
-};
-
-std::vector<OrderedItem> orderedItems(const std::string &threadId,
-                                      const ThreadPresentation *thread) {
-  std::vector<OrderedItem> result;
-  if (!thread)
-    return result;
-  for (const std::string &turnId : thread->turnOrder) {
-    const auto turn = thread->turns.find(turnId);
-    if (turn == thread->turns.end())
-      continue;
-    for (const std::string &itemId : turn->second.itemOrder) {
-      const auto item = turn->second.items.find(itemId);
-      if (item == turn->second.items.end())
-        continue;
-      result.push_back(
-          {AuthoritativeItemKey{threadId, turnId, itemId}, &item->second});
-    }
-  }
-  return result;
-}
-
 struct ProjectedNode {
   std::size_t position = 0;
   std::uint64_t tieBreaker = 0;
@@ -299,37 +274,34 @@ struct ProjectedNode {
 
 std::size_t submissionPosition(
     const PromptSubmission &submission,
-    const std::vector<OrderedItem> &authoritativeItems,
+    const AuthoritativeItemIndex &authoritativeItems,
     std::optional<std::size_t> materializedIndex = std::nullopt) {
   if (submission.admissionAnchor) {
-    const auto anchor = std::ranges::find(
-        authoritativeItems, *submission.admissionAnchor, &OrderedItem::key);
-    if (anchor != authoritativeItems.end())
-      return static_cast<std::size_t>(
-                 std::distance(authoritativeItems.begin(), anchor) + 1) *
-             2;
+    const auto anchor =
+        authoritativeItems.position(*submission.admissionAnchor);
+    if (anchor)
+      return (*anchor + 1) * 2;
   }
   if (materializedIndex)
     return *materializedIndex * 2 + 1;
   // No authoritative tail was known at admission. Until reconcile establishes
   // one, the prompt is a tail item rather than a synthetic history prefix.
-  return authoritativeItems.size() * 2 + 2;
+  return authoritativeItems.ordered.size() * 2 + 2;
 }
 
 } // namespace
 
 ConversationSnapshot ConversationProjection::project(
-    const std::string &threadId, const ThreadPresentation *authoritativeThread,
+    const AuthoritativeItemIndex &authoritativeItems,
+    const ThreadPresentation *authoritativeThread,
     std::span<const PromptSubmission> localSubmissions,
     std::size_t authoritativeItemLimit, qint64 nowMilliseconds) {
   ConversationSnapshot result;
-  result.threadId = threadId;
+  result.threadId = authoritativeItems.threadId;
 
-  const std::vector<OrderedItem> authoritativeItems =
-      orderedItems(threadId, authoritativeThread);
   result.hiddenAuthoritativeItemCount =
-      authoritativeItems.size() > authoritativeItemLimit
-          ? authoritativeItems.size() - authoritativeItemLimit
+      authoritativeItems.ordered.size() > authoritativeItemLimit
+          ? authoritativeItems.ordered.size() - authoritativeItemLimit
           : 0;
   result.hasMore = result.hiddenAuthoritativeItemCount > 0;
   const std::size_t firstVisible = result.hiddenAuthoritativeItemCount;
@@ -340,11 +312,11 @@ ConversationSnapshot ConversationProjection::project(
       bindings.emplace(*submission.materializedItem, &submission);
 
   std::vector<ProjectedNode> nodes;
-  nodes.reserve(authoritativeItems.size() - firstVisible +
+  nodes.reserve(authoritativeItems.ordered.size() - firstVisible +
                 localSubmissions.size());
-  for (std::size_t index = firstVisible; index < authoritativeItems.size();
-       ++index) {
-    const OrderedItem &item = authoritativeItems[index];
+  for (std::size_t index = firstVisible;
+       index < authoritativeItems.ordered.size(); ++index) {
+    const AuthoritativeItem &item = authoritativeItems.ordered[index];
     const auto binding = bindings.find(item.key);
     if (binding != bindings.end() &&
         binding->second->localCardVisible(nowMilliseconds))
@@ -361,16 +333,19 @@ ConversationSnapshot ConversationProjection::project(
     VisibleCardData card =
         authoritativeCard(item.key, *item.presentation, std::move(visualKey));
     nodes.push_back({position, tieBreaker,
-                     sectionComponent("turn:", threadId, item.key.turnId),
+                     sectionComponent("turn:", authoritativeItems.threadId,
+                                      item.key.turnId),
                      item.key.turnId, std::move(card)});
   }
 
   if (projectStructuredPlansInConversation && authoritativeThread) {
     std::unordered_map<std::string, std::size_t> firstItemIndexes;
     std::unordered_map<std::string, std::size_t> lastItemIndexes;
-    for (std::size_t index = 0; index < authoritativeItems.size(); ++index) {
-      firstItemIndexes.try_emplace(authoritativeItems[index].key.turnId, index);
-      lastItemIndexes[authoritativeItems[index].key.turnId] = index;
+    for (std::size_t index = 0; index < authoritativeItems.ordered.size();
+         ++index) {
+      firstItemIndexes.try_emplace(authoritativeItems.ordered[index].key.turnId,
+                                   index);
+      lastItemIndexes[authoritativeItems.ordered[index].key.turnId] = index;
     }
     std::unordered_map<std::string, std::optional<std::size_t>> nextItemIndexes;
     std::optional<std::size_t> nextItemIndex;
@@ -398,20 +373,21 @@ ConversationSnapshot ConversationProjection::project(
           next == nextItemIndexes.end() ? std::nullopt : next->second;
       if (lastItemIndex && *lastItemIndex < firstVisible)
         continue;
-      const std::size_t position = lastItemIndex ? *lastItemIndex * 2 + 2
-                                   : followingItemIndex
-                                       ? *followingItemIndex * 2
-                                       : authoritativeItems.size() * 2 + 2;
-      nodes.push_back({position,
-                       0,
-                       sectionComponent("turn:", threadId, turnId),
-                       turnId,
-                       {TurnPlanKey{threadId, turnId},
-                        CardKind::Plan,
-                        threadId,
-                        turnId,
-                        {},
-                        structuredPlan(turn->second)}});
+      const std::size_t position =
+          lastItemIndex        ? *lastItemIndex * 2 + 2
+          : followingItemIndex ? *followingItemIndex * 2
+                               : authoritativeItems.ordered.size() * 2 + 2;
+      nodes.push_back(
+          {position,
+           0,
+           sectionComponent("turn:", authoritativeItems.threadId, turnId),
+           turnId,
+           {TurnPlanKey{authoritativeItems.threadId, turnId},
+            CardKind::Plan,
+            authoritativeItems.threadId,
+            turnId,
+            {},
+            structuredPlan(turn->second)}});
     }
   }
 
@@ -419,13 +395,9 @@ ConversationSnapshot ConversationProjection::project(
     if (!submission.localCardVisible(nowMilliseconds))
       continue;
     std::optional<std::size_t> materializedIndex;
-    if (submission.materializedItem) {
-      const auto materialized = std::ranges::find(
-          authoritativeItems, *submission.materializedItem, &OrderedItem::key);
-      if (materialized != authoritativeItems.end())
-        materializedIndex = static_cast<std::size_t>(
-            std::distance(authoritativeItems.begin(), materialized));
-    }
+    if (submission.materializedItem)
+      materializedIndex =
+          authoritativeItems.position(*submission.materializedItem);
     const std::size_t position =
         submissionPosition(submission, authoritativeItems, materializedIndex);
 
@@ -438,11 +410,12 @@ ConversationSnapshot ConversationProjection::project(
     const std::string turnId =
         submission.expectedTurnId.value_or(std::string{});
     const std::string sectionKey =
-        knownTurn ? sectionComponent("turn:", threadId, turnId)
-                  : "pending:" + std::to_string(submission.id);
+        knownTurn
+            ? sectionComponent("turn:", authoritativeItems.threadId, turnId)
+            : "pending:" + std::to_string(submission.id);
     VisibleCardData card{LocalPromptKey{submission.id},
                          CardKind::LocalPrompt,
-                         threadId,
+                         authoritativeItems.threadId,
                          turnId,
                          {},
                          LocalPromptData{submission.id, submission.prompt,

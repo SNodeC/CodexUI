@@ -15,8 +15,11 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace codexui::codex::middle {
@@ -55,6 +58,26 @@ struct PromptDispatch {
   std::optional<std::string> expectedTurnId;
 };
 
+struct AuthoritativeItem {
+  AuthoritativeItemKey key;
+  const ItemPresentation *presentation = nullptr;
+};
+
+struct AuthoritativeItemIndex {
+  std::string threadId;
+  std::vector<AuthoritativeItem> ordered;
+  std::map<AuthoritativeItemKey, std::size_t> positions;
+  std::unordered_map<std::string, std::size_t> userMessagesByClientId;
+  std::set<std::tuple<std::string, QString, std::size_t>> userMessagesByText;
+
+  [[nodiscard]] std::optional<std::size_t>
+  position(const AuthoritativeItemKey &key) const noexcept;
+};
+
+[[nodiscard]] AuthoritativeItemIndex
+indexAuthoritativeItems(const std::string &threadId,
+                        const ThreadPresentation *thread);
+
 // Owns only local submission state. It does not schedule timers and cannot
 // infer acknowledgement from presentation events: acknowledge() is intended
 // to be called exclusively by the matching turn.start/turn.steer completion.
@@ -90,14 +113,14 @@ public:
 
   // Correlates prompts with authoritative userMessage items. Exact client ids
   // may bind before acknowledgement so the awaiting card is never duplicated;
-  // the content fallback is used only after the real operation callback.
+  // the content fallback is used only after the real operation callback. Fully
+  // resolved submissions are removed after their accepted transition.
   void reconcile(const std::string &threadId,
-                 const ThreadPresentation &authoritativeThread);
-
-  // Resolved submissions remain as lightweight authoritative-item aliases so
-  // their visual keys stay stable. Dispatch-only payload is released after the
-  // accepted transition and materialization are both complete.
-  void compactResolved(const std::string &threadId, qint64 nowMilliseconds);
+                 const ThreadPresentation &authoritativeThread,
+                 qint64 nowMilliseconds);
+  void reconcile(const std::string &threadId,
+                 AuthoritativeItemIndex &authoritativeItems,
+                 qint64 nowMilliseconds);
 
   [[nodiscard]] std::span<const PromptSubmission>
   submissions(const std::string &threadId) const noexcept;
