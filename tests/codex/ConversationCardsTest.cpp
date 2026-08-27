@@ -15,6 +15,7 @@
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QThread>
+#include <QToolButton>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -85,6 +86,25 @@ ConversationCard *card(ConversationView &view, const std::string &key) {
       return candidate;
   }
   return nullptr;
+}
+
+QToolButton *disclosure(ConversationCard *card) {
+  return card ? card->findChild<QToolButton *>(
+                    QStringLiteral("cardDisclosureButton"))
+              : nullptr;
+}
+
+bool setFolded(ConversationCard *card, bool collapsed) {
+  if (!card)
+    return false;
+  if (card->isCollapsed() == collapsed)
+    return true;
+  QToolButton *button = disclosure(card);
+  if (!button)
+    return false;
+  button->click();
+  spin();
+  return card->isCollapsed() == collapsed;
 }
 
 std::pair<std::string, int> firstVisible(ConversationView &view) {
@@ -567,6 +587,265 @@ bool testMutableCardsAndCommandOutput() {
   return result;
 }
 
+bool testCardFoldingGeometryAndRetention() {
+  const std::string thread = "folding-thread";
+  const VisibleCardData user{
+      AuthoritativeItemKey{thread, "turn", "user"},
+      CardKind::UserMessage,
+      thread,
+      "turn",
+      "user",
+      UserMessageData{QStringLiteral("Keep this message initially expanded."),
+                      {}}};
+  const VisibleCardData agent{
+      AuthoritativeItemKey{thread, "turn", "agent"},
+      CardKind::AgentMessage,
+      thread,
+      "turn",
+      "agent",
+      AgentMessageData{QStringLiteral("Codex also starts expanded."), true}};
+  const VisibleCardData reasoning{
+      AuthoritativeItemKey{thread, "turn", "reasoning"},
+      CardKind::Reasoning,
+      thread,
+      "turn",
+      "reasoning",
+      ReasoningData{QStringLiteral("A retained public summary with enough "
+                                   "detail to create real height.\n\n"
+                                   "The second paragraph proves expansion uses "
+                                   "the final wrapped size.")}};
+  const VisibleCardData command{
+      AuthoritativeItemKey{thread, "turn", "command"},
+      CardKind::CommandExecution,
+      thread,
+      "turn",
+      "command",
+      CommandExecutionData{
+          QStringLiteral("produce output"), QStringLiteral("initial output"),
+          QStringLiteral("completed"), QStringLiteral("/workspace"), 0}};
+  const VisibleCardData files{
+      AuthoritativeItemKey{thread, "turn", "files"},
+      CardKind::FileChanges,
+      thread,
+      "turn",
+      "files",
+      FileChangesData{
+          QStringLiteral("completed"),
+          {{QStringLiteral("src/card.cpp"), QStringLiteral("update"), 4, 1}}}};
+  const VisibleCardData activity{
+      AuthoritativeItemKey{thread, "turn", "activity"},
+      CardKind::AgentActivity,
+      thread,
+      "turn",
+      "activity",
+      AgentActivityData{QStringLiteral("spawn_agent"),
+                        QStringLiteral("completed"),
+                        {},
+                        QStringLiteral("Inspect folding"),
+                        QStringLiteral("Inspection complete"),
+                        {}}};
+  const VisibleCardData image{
+      AuthoritativeItemKey{thread, "turn", "image"},
+      CardKind::ImageGeneration,
+      thread,
+      "turn",
+      "image",
+      ImageGenerationData{QStringLiteral("/tmp/folding-preview.png"),
+                          QStringLiteral("completed"),
+                          QStringLiteral("A folding preview")}};
+  const VisibleCardData plan{AuthoritativeItemKey{thread, "turn", "plan"},
+                             CardKind::Plan,
+                             thread,
+                             "turn",
+                             "plan",
+                             PlanData{QStringLiteral("Verify folding"),
+                                      {{QStringLiteral("Inspect geometry"),
+                                        QStringLiteral("completed")}},
+                                      {}}};
+  const VisibleCardData generic{
+      AuthoritativeItemKey{thread, "turn", "generic"},
+      CardKind::GenericActivity,
+      thread,
+      "turn",
+      "generic",
+      GenericActivityData{QStringLiteral("Unknown activity"),
+                          {{"detail", "bounded"}}}};
+  ConversationSnapshot snapshot{thread,
+                                {{"turn:folding",
+                                  "turn",
+                                  {user, agent, reasoning, command, files,
+                                   activity, image, plan, generic}}},
+                                0,
+                                false};
+
+  ConversationView view;
+  view.resize(700, 820);
+  view.show();
+  bool result = expect(view.reconcile(snapshot), "folding fixture renders");
+  spin();
+
+  ConversationCard *userCard = card(view, stableKey(user.key));
+  ConversationCard *agentCardWidget = card(view, stableKey(agent.key));
+  ConversationCard *reasoningCard = card(view, stableKey(reasoning.key));
+  ConversationCard *commandCard = card(view, stableKey(command.key));
+  ConversationCard *filesCard = card(view, stableKey(files.key));
+  const std::vector<ConversationCard *> additionalActionCards{
+      card(view, stableKey(activity.key)), card(view, stableKey(image.key)),
+      card(view, stableKey(plan.key)), card(view, stableKey(generic.key))};
+  result &= expect(
+      userCard && agentCardWidget && reasoningCard && commandCard &&
+          filesCard && !userCard->isCollapsed() &&
+          !agentCardWidget->isCollapsed() && reasoningCard->isCollapsed() &&
+          commandCard->isCollapsed() && filesCard->isCollapsed() &&
+          disclosure(userCard) && disclosure(agentCardWidget) &&
+          disclosure(reasoningCard) && disclosure(commandCard) &&
+          disclosure(filesCard),
+      "all cards share disclosure controls with role-correct initial state");
+  result &= expect(
+      std::ranges::all_of(additionalActionCards,
+                          [](ConversationCard *value) {
+                            return value && value->isCollapsed() &&
+                                   disclosure(value);
+                          }),
+      "agent, image, plan, and fallback activity cards also start collapsed");
+  if (!userCard || !agentCardWidget || !reasoningCard || !commandCard ||
+      !filesCard)
+    return false;
+
+  const int userTop = userCard->mapTo(view.viewport(), QPoint{}).y();
+  const int reasoningTop = reasoningCard->mapTo(view.viewport(), QPoint{}).y();
+  const int filesTop = filesCard->mapTo(view.viewport(), QPoint{}).y();
+  const int foldedReasoningHeight = reasoningCard->height();
+  result &= expect(setFolded(reasoningCard, false),
+                   "reasoning expands through its disclosure control");
+  const int expandedReasoningHeight = reasoningCard->height();
+  result &= expect(
+      reasoningCard->mapTo(view.viewport(), QPoint{}).y() == reasoningTop &&
+          userCard->mapTo(view.viewport(), QPoint{}).y() == userTop &&
+          expandedReasoningHeight > foldedReasoningHeight &&
+          filesCard->mapTo(view.viewport(), QPoint{}).y() ==
+              filesTop + expandedReasoningHeight - foldedReasoningHeight,
+      "expansion fixes the affected title and grows only downward");
+
+  const int commandHeight = commandCard->height();
+  auto &execution = std::get<CommandExecutionData>(
+      snapshot.sections.front().cards[3].payload);
+  execution.output = QStringLiteral(
+      "streamed line 1\nstreamed line 2\nstreamed line 3\nstreamed line 4");
+  result &= expect(view.reconcile(snapshot),
+                   "folded command accepts a streamed content update");
+  auto *output = dynamic_cast<CommandOutputView *>(
+      commandCard->findChild<QTextEdit *>(QStringLiteral("commandOutputView")));
+  result &= expect(
+      commandCard->isCollapsed() && commandCard->height() == commandHeight &&
+          output &&
+          output->toPlainText().contains(QStringLiteral("streamed line 4")),
+      "streaming updates folded content without changing height");
+
+  const int userHeight = userCard->height();
+  const int agentTop = agentCardWidget->mapTo(view.viewport(), QPoint{}).y();
+  result &= expect(setFolded(userCard, true),
+                   "You can be folded from its expanded default");
+  result &= expect(
+      userCard->mapTo(view.viewport(), QPoint{}).y() == userTop &&
+          agentCardWidget->mapTo(view.viewport(), QPoint{}).y() ==
+              agentTop - (userHeight - userCard->height()),
+      "folding You fixes its title and shifts only following cards upward");
+
+  view.reconcile(conversation("folding-other-thread", 4));
+  spin();
+  view.reconcile(snapshot);
+  spin();
+  userCard = card(view, stableKey(user.key));
+  reasoningCard = card(view, stableKey(reasoning.key));
+  commandCard = card(view, stableKey(command.key));
+  result &= expect(
+      userCard && reasoningCard && commandCard && userCard->isCollapsed() &&
+          !reasoningCard->isCollapsed() && commandCard->isCollapsed(),
+      "user fold choices survive thread switching and updates");
+
+  const std::string promptThread = "folding-prompt-replacement";
+  const LocalPromptKey promptKey{4242};
+  VisibleCardData localPrompt{
+      promptKey,
+      CardKind::LocalPrompt,
+      promptThread,
+      {},
+      {},
+      LocalPromptData{4242,
+                      QStringLiteral("A temporary prompt"),
+                      PromptState::InFlight,
+                      0,
+                      {},
+                      {}}};
+  ConversationSnapshot promptSnapshot{
+      promptThread, {{"local:folding-prompt", {}, {localPrompt}}}, 0, false};
+  view.reconcile(promptSnapshot);
+  spin();
+  ConversationCard *promptCard = card(view, stableKey(promptKey));
+  result &= expect(promptCard && !promptCard->isCollapsed() &&
+                       setFolded(promptCard, true),
+                   "temporary You prompts start expanded and can be folded");
+  promptSnapshot.sections.front().cards.front() = {
+      promptKey,    CardKind::UserMessage,
+      promptThread, "turn",
+      "user",       UserMessageData{QStringLiteral("A temporary prompt"), {}}};
+  view.reconcile(promptSnapshot);
+  spin();
+  promptCard = card(view, stableKey(promptKey));
+  result &=
+      expect(promptCard && promptCard->cardKind() == CardKind::UserMessage &&
+                 promptCard->isCollapsed(),
+             "fold state survives authoritative prompt replacement");
+
+  const std::string edgeThread = "folding-bottom-edge";
+  ConversationSnapshot edge = conversation(edgeThread, 12);
+  QString longOutput;
+  for (int line = 0; line < 70; ++line)
+    longOutput += QStringLiteral("bottom-edge line %1\n").arg(line);
+  VisibleCardData edgeCommand{
+      AuthoritativeItemKey{edgeThread, "turn-2", "edge-command"},
+      CardKind::CommandExecution,
+      edgeThread,
+      "turn-2",
+      "edge-command",
+      CommandExecutionData{QStringLiteral("produce capped output"),
+                           longOutput,
+                           QStringLiteral("completed"),
+                           {},
+                           0}};
+  edge.sections.back().cards.push_back(edgeCommand);
+  ConversationView edgeView;
+  edgeView.resize(650, 520);
+  edgeView.show();
+  edgeView.reconcile(edge);
+  spin();
+  ConversationCard *edgeCard = card(edgeView, stableKey(edgeCommand.key));
+  const int collapsedTop =
+      edgeCard ? edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() : 0;
+  result &= expect(setFolded(edgeCard, false),
+                   "bottom-edge command expands from its compact default");
+  result &=
+      expect(edgeCard && edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() ==
+                             collapsedTop,
+             "bottom-edge expansion keeps the selected title fixed");
+  wheel(edgeView, -10000);
+  const int followedTitleTop =
+      edgeCard ? edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() : 0;
+  result &= expect(edgeView.isAtBottom() && followedTitleTop >= 0,
+                   "expanded lower-limit fixture exposes its title at bottom");
+  result &= expect(setFolded(edgeCard, true),
+                   "expanded bottom-edge command collapses");
+  spin(120);
+  result &=
+      expect(edgeCard &&
+                 edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() ==
+                     followedTitleTop &&
+                 edgeView.mode() == ConversationView::Mode::Paused,
+             "bottom compensation defeats range clamping and fixes the title");
+  return result;
+}
+
 bool testInitialCommandGeometrySettlement() {
   const std::string thread = "initial-command-thread";
   QString output;
@@ -593,6 +872,8 @@ bool testInitialCommandGeometrySettlement() {
   bool result = expect(view.reconcile(snapshot),
                        "initial visible command output is inserted");
   ConversationCard *commandCard = card(view, stableKey(command.key));
+  result &= expect(setFolded(commandCard, false),
+                   "initially folded command can be expanded for inspection");
   auto *outputView = commandCard ? dynamic_cast<CommandOutputView *>(
                                        commandCard->findChild<QTextEdit *>(
                                            QStringLiteral("commandOutputView")))
@@ -656,6 +937,9 @@ bool testBottomAnchoredCommandOutputGrowth() {
   view.reconcile(snapshot);
   spin();
   ConversationCard *commandCard = card(view, stableKey(command.key));
+  bool result = expect(setFolded(commandCard, false),
+                       "live command expands from its compact default");
+  wheel(view, -10000);
   auto *metadata =
       commandCard
           ? commandCard->findChild<QLabel *>(QStringLiteral("commandMetadata"))
@@ -664,7 +948,7 @@ bool testBottomAnchoredCommandOutputGrowth() {
                                    commandCard->findChild<QTextEdit *>(
                                        QStringLiteral("commandOutputView")))
                              : nullptr;
-  bool result =
+  result &=
       expect(commandCard && metadata && output && output->isHidden() &&
                  view.isAtBottom() && metadata->property("tone") == "active",
              "live command starts with a hidden zero-line output");
@@ -725,12 +1009,14 @@ bool testCommandOutputStateAcrossNavigation() {
   view.reconcile(commandThread);
   spin();
   ConversationCard *commandCard = card(view, stableKey(command.key));
+  bool result = expect(setFolded(commandCard, false),
+                       "navigation command expands from its compact default");
   auto *initialOutput = commandCard
                             ? dynamic_cast<CommandOutputView *>(
                                   commandCard->findChild<QTextEdit *>(
                                       QStringLiteral("commandOutputView")))
                             : nullptr;
-  bool result =
+  result &=
       expect(initialOutput && initialOutput->verticalScrollBar()->maximum() > 0,
              "navigation test has independently scrollable output");
   if (!initialOutput)
@@ -918,27 +1204,30 @@ bool testGeneratedImagePresentationAndGenericBound() {
     viewer->close();
   spin();
 
-  VisibleCardData viewed{
-      AuthoritativeItemKey{"generated", "turn", "view"},
-      CardKind::ImageGeneration,
-      "generated",
-      "turn",
-      "view",
-      ImageGenerationData{path, {}, {}}};
+  VisibleCardData viewed{AuthoritativeItemKey{"generated", "turn", "view"},
+                         CardKind::ImageGeneration,
+                         "generated",
+                         "turn",
+                         "view",
+                         ImageGenerationData{path, {}, {}}};
   ConversationCard viewedCard(viewed);
   viewedCard.show();
   spin();
   const auto viewedLabels = viewedCard.findChildren<QLabel *>();
   result &= expect(
-      std::ranges::any_of(viewedLabels, [](QLabel *label) {
-        return label->property("kind").toString() == QStringLiteral("title") &&
-               label->text() == QStringLiteral("Image");
-      }) &&
-          std::ranges::any_of(viewedLabels, [](QLabel *label) {
-            return label->objectName() ==
-                       QStringLiteral("messageImageThumbnail") &&
-                   label->property("imageAvailable").toBool();
-          }),
+      std::ranges::any_of(viewedLabels,
+                          [](QLabel *label) {
+                            return label->property("kind").toString() ==
+                                       QStringLiteral("title") &&
+                                   label->text() == QStringLiteral("Image");
+                          }) &&
+          std::ranges::any_of(
+              viewedLabels,
+              [](QLabel *label) {
+                return label->objectName() ==
+                           QStringLiteral("messageImageThumbnail") &&
+                       label->property("imageAvailable").toBool();
+              }),
       "plain image-view cards use a neutral title and the shared thumbnail");
 
   VisibleCardData generic{
@@ -971,6 +1260,7 @@ int main(int argc, char **argv) {
   result &= testThreadLocalScrollAndComposerExtent();
   result &= testPromptAdmissionFollowOwnership();
   result &= testMutableCardsAndCommandOutput();
+  result &= testCardFoldingGeometryAndRetention();
   result &= testInitialCommandGeometrySettlement();
   result &= testBottomAnchoredCommandOutputGrowth();
   result &= testCommandOutputStateAcrossNavigation();

@@ -168,6 +168,17 @@ QString applicationStyleSheet() {
             padding: 0;
         }
         QToolButton[kind="composerAction"]:hover { background: #f1f5fb; border-color: #b9c4d2; }
+        QToolButton#cardDisclosureButton {
+            background: transparent;
+            border: 0;
+            border-radius: 5px;
+            padding: 0;
+        }
+        QToolButton#cardDisclosureButton:hover { background: #f1f5fb; }
+        QToolButton#cardDisclosureButton:focus {
+            background: #e5eeff;
+            border: 1px solid #bfd3f9;
+        }
         QPushButton[kind="agentLink"] { background: #e5eeff; border-color: #bfd3f9; color: #2f6feb; text-align: left; }
         QPushButton[kind="success"] { background: #18865e; border-color: #18865e; color: white; }
         QPushButton[kind="success"]:hover { background: #14734f; border-color: #14734f; }

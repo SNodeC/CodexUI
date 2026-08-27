@@ -129,6 +129,19 @@ never displayed as generic activity text.
 Process cards remain neutral so they support rather than dominate the user and
 Codex conversation. Status text alone uses canonical semantic state colors.
 
+Every conversation card uses the same keyboard-focusable disclosure chevron.
+You, Codex, and temporary You cards initially render expanded; Reasoning,
+Command execution, File changes, Agent activity, Image, Plan, and fallback
+activity cards initially render collapsed. A user-selected state survives
+streaming updates, authoritative prompt replacement, and thread switching for
+the lifetime of the CodexUI process.
+
+Folding is an explicit geometry transaction. The selected title row keeps its
+exact viewport position: collapsing shifts only following cards upward, while
+expanding grows only downward. The gesture pauses follow-latest. At the lower
+scroll limit, bounded bottom compensation prevents scrollbar clamping from
+moving the selected title; later expansion consumes that compensation.
+
 Reasoning items remain visible as stable progress cards even when the app-server
 provides no public summary; later content updates the same card in place.
 File-change cards list each supplied path and change kind and derive compact

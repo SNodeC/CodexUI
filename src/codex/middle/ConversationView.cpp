@@ -9,12 +9,13 @@
 #include <QEasingCurve>
 #include <QEvent>
 #include <QLabel>
-#include <QTextEdit>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScopedValueRollback>
 #include <QScrollBar>
 #include <QSignalBlocker>
+#include <QSpacerItem>
+#include <QTextEdit>
 #include <QVBoxLayout>
 #include <QVariantAnimation>
 #include <QWheelEvent>
@@ -90,6 +91,9 @@ ConversationView::ConversationView(QWidget *parent)
   emptyMessage_ = empty_->text();
   empty_->setParent(content_);
   contentLayout_->addWidget(empty_);
+  trailingSpace_ =
+      new QSpacerItem(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
+  contentLayout_->addItem(trailingSpace_);
 
   followAnimation_ = new QVariantAnimation(this);
   followAnimation_->setEasingCurve(QEasingCurve::OutCubic);
@@ -178,6 +182,7 @@ void ConversationView::setThread(const std::string &threadId) {
     return;
   storeCurrentThreadState();
   stopFollowingAnimation();
+  foldBottomCompensation_ = 0;
   threadId_ = threadId;
   const auto saved = threadStates_.find(threadId_);
   mode_ = saved == threadStates_.end() ? Mode::Following : saved->second.mode;
@@ -210,15 +215,15 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
     int height = 0;
     for (const auto &[key, card] : cards_) {
       static_cast<void>(key);
-      auto *output =
-          dynamic_cast<CommandOutputView *>(card->findChild<QTextEdit *>(
-              QStringLiteral("commandOutputView")));
-      if (output && !output->isHidden())
+      auto *output = dynamic_cast<CommandOutputView *>(
+          card->findChild<QTextEdit *>(QStringLiteral("commandOutputView")));
+      if (output && output->isVisibleTo(card))
         height += output->height();
     }
     return height;
   };
   const int outputFootprintBefore = visibleOutputFootprint();
+  const int naturalHeightBefore = naturalContentHeight_;
 
   stopFollowingAnimation();
   applying_ = true;
@@ -303,6 +308,15 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
         }
         card = createConversationCard(cardData, section);
         card->setProperty("conversationAnchorKey", QString::fromStdString(key));
+        if (const auto collapsed = cardCollapsedStates_.find(key);
+            collapsed != cardCollapsedStates_.end())
+          card->setCollapsed(collapsed->second);
+        connect(card, &ConversationCard::foldRequested, this,
+                [this, key, card](bool collapsed) {
+                  const auto retained = cards_.find(key);
+                  if (retained != cards_.end() && retained->second == card)
+                    setCardCollapsed(key, card, collapsed);
+                });
         if (const auto saved = commandOutputStates_.find(key);
             saved != commandOutputStates_.end()) {
           commandOutputRestorations.emplace_back(card, saved->second);
@@ -358,6 +372,13 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
   snapshot_ = snapshot;
 
   recomputeGeometry();
+  if (!switchedThread && foldBottomCompensation_ > 0 &&
+      naturalContentHeight_ > naturalHeightBefore) {
+    foldBottomCompensation_ =
+        std::max(0, foldBottomCompensation_ -
+                        (naturalContentHeight_ - naturalHeightBefore));
+    recomputeGeometry();
+  }
   const bool outputGrew = visibleOutputFootprint() > outputFootprintBefore;
   for (const auto &[card, state] : commandOutputRestorations)
     card->restoreCommandOutputScrollState(state);
@@ -387,6 +408,48 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
   }
   storeCurrentThreadState();
   return visualChange;
+}
+
+void ConversationView::setCardCollapsed(const std::string &key,
+                                        ConversationCard *card,
+                                        bool collapsed) {
+  if (!card || card->isCollapsed() == collapsed)
+    return;
+
+  const int titleTop = card->mapTo(viewport(), QPoint{}).y();
+  const int naturalHeightBefore = naturalContentHeight_;
+  stopFollowingAnimation();
+  applying_ = true;
+  viewport()->setUpdatesEnabled(false);
+  content_->setUpdatesEnabled(false);
+  const QSignalBlocker scrollSignals(verticalScrollBar());
+
+  mode_ = Mode::Paused;
+  pausedByComposerGrowth_ = false;
+  cardCollapsedStates_[key] = collapsed;
+  card->setCollapsed(collapsed);
+  recomputeGeometry();
+  if (foldBottomCompensation_ > 0 &&
+      naturalContentHeight_ > naturalHeightBefore) {
+    foldBottomCompensation_ =
+        std::max(0, foldBottomCompensation_ -
+                        (naturalContentHeight_ - naturalHeightBefore));
+    recomputeGeometry();
+  }
+
+  int desiredValue = card->mapTo(content_, QPoint{}).y() - titleTop;
+  if (desiredValue > verticalScrollBar()->maximum()) {
+    foldBottomCompensation_ += desiredValue - verticalScrollBar()->maximum();
+    recomputeGeometry();
+    desiredValue = card->mapTo(content_, QPoint{}).y() - titleTop;
+  }
+  setScrollValue(desiredValue);
+
+  applying_ = false;
+  content_->setUpdatesEnabled(true);
+  viewport()->setUpdatesEnabled(true);
+  viewport()->update();
+  storeCurrentThreadState();
 }
 
 void ConversationView::setTrailingSpaceHeight(int height) {
@@ -578,6 +641,8 @@ void ConversationView::recomputeGeometry() {
   if (!content_ || !viewport())
     return;
   const int width = std::max(0, viewport()->width());
+  trailingSpace_->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
+  contentLayout_->invalidate();
 
   // Give every nested layout its final width before asking for height.  This
   // makes wrapped labels and command output contribute to the same range
@@ -588,13 +653,38 @@ void ConversationView::recomputeGeometry() {
     static_cast<void>(key);
     section->layout()->activate();
   }
+  for (const auto &[key, card] : cards_) {
+    static_cast<void>(key);
+    if (QWidget *cardContent = card->findChild<QWidget *>(
+            QStringLiteral("conversationCardContent"));
+        cardContent && cardContent->layout()) {
+      cardContent->layout()->invalidate();
+      cardContent->layout()->activate();
+      cardContent->updateGeometry();
+    }
+    if (card->layout()) {
+      card->layout()->invalidate();
+      card->layout()->activate();
+    }
+    card->updateGeometry();
+  }
+  for (const auto &[key, section] : sections_) {
+    static_cast<void>(key);
+    section->layout()->invalidate();
+    section->layout()->activate();
+  }
   contentLayout_->activate();
 
   int wanted = contentLayout_->hasHeightForWidth()
                    ? contentLayout_->heightForWidth(width)
                    : contentLayout_->sizeHint().height();
   wanted = std::max(wanted, contentLayout_->minimumSize().height());
-  wanted += trailingSpaceHeight_;
+  naturalContentHeight_ = wanted;
+  const int tailHeight = trailingSpaceHeight_ + foldBottomCompensation_;
+  trailingSpace_->changeSize(0, tailHeight, QSizePolicy::Minimum,
+                             QSizePolicy::Fixed);
+  contentLayout_->invalidate();
+  wanted += tailHeight;
   contentHeight_ = std::max(viewport()->height(), wanted);
   content_->resize(width, contentHeight_);
   contentLayout_->setGeometry(QRect(0, 0, width, contentHeight_));
@@ -608,6 +698,7 @@ void ConversationView::recomputeGeometry() {
   verticalScrollBar()->setRange(
       0, std::max(0, contentHeight_ - viewport()->height()));
   positionContent();
+  QCoreApplication::sendPostedEvents(content_, QEvent::LayoutRequest);
 }
 
 void ConversationView::positionContent() {

@@ -79,6 +79,10 @@ content does not provide a reliable success, warning, or failure classification.
 Conversation activity cards remain neutral so supporting process information
 does not compete with the user/Codex exchange. Color on those cards is reserved
 for authoritative running, completed, warning/interrupted, and failed status.
+All conversation cards use one disclosure-header grammar. Message cards open
+expanded and activity cards open collapsed; user choices remain session-local.
+Folding is immediate rather than animated and anchors the selected title row,
+so content only contracts upward or grows downward below the interaction point.
 
 ## Application layout
 

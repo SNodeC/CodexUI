@@ -515,6 +515,15 @@ same presentation with the neutral title `Image`. Unknown item types retain a
 generic diagnostic card, but its visible JSON is bounded before Qt performs
 text layout.
 
+Conversation-card folding is presentation state, not protocol state. Each
+stable visual card key retains its user-selected collapsed state in the
+`ConversationView` for the UI session. New message cards default expanded and
+new activity cards default collapsed. The card owns one header and one content
+container, so streamed payload updates remain live while folded without
+changing visible height. `ConversationView` owns the fold geometry transaction,
+including title anchoring and lower-limit compensation, alongside its existing
+single-owner scrolling calculations.
+
 ### 7.4 Changes and Diff Presentation
 
 The Changes inspector is authoritative over the local Git worktrees associated

@@ -2,11 +2,14 @@
 
 #include "codex/middle/ConversationCards.h"
 
+#include "codex/ui/UiStyle.h"
+
 #include <QColor>
 #include <QDateTime>
 #include <QDialog>
 #include <QDir>
 #include <QFileInfo>
+#include <QHBoxLayout>
 #include <QImageReader>
 #include <QLabel>
 #include <QLinearGradient>
@@ -23,6 +26,7 @@
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QVariant>
 #include <QWheelEvent>
@@ -43,6 +47,47 @@ constexpr int ThumbnailMaximumWidth = 280;
 constexpr int ThumbnailMaximumHeight = 180;
 constexpr int ViewerMaximumImageExtent = 4096;
 constexpr qsizetype MaximumGenericActivityCharacters = 4096;
+
+bool initiallyCollapsed(CardKind kind) {
+  return kind != CardKind::UserMessage && kind != CardKind::AgentMessage &&
+         kind != CardKind::LocalPrompt;
+}
+
+class CardDisclosureButton final : public QToolButton {
+public:
+  explicit CardDisclosureButton(QWidget *parent = nullptr)
+      : QToolButton(parent) {
+    setObjectName(QStringLiteral("cardDisclosureButton"));
+    setProperty("kind", "subtle");
+    setFixedSize(24, 24);
+    setCursor(Qt::PointingHandCursor);
+    setFocusPolicy(Qt::StrongFocus);
+    setAccessibleName(QStringLiteral("Expand card"));
+    setToolTip(accessibleName());
+  }
+
+  void setExpanded(bool expanded) {
+    if (expanded_ == expanded)
+      return;
+    expanded_ = expanded;
+    setAccessibleName(expanded ? QStringLiteral("Collapse card")
+                               : QStringLiteral("Expand card"));
+    setToolTip(accessibleName());
+    update();
+  }
+
+protected:
+  void paintEvent(QPaintEvent *event) override {
+    QToolButton::paintEvent(event);
+    UiStyle::drawChevron(this, rect().adjusted(3, 3, -3, -3), isEnabled(),
+                         underMouse() || hasFocus(),
+                         expanded_ ? UiStyle::ChevronDirection::Down
+                                   : UiStyle::ChevronDirection::Right);
+  }
+
+private:
+  bool expanded_ = false;
+};
 
 void openImageViewer(const QString &path);
 
@@ -592,7 +637,8 @@ bool CommandOutputView::isAtBottom() const {
 class ConversationCard::Impl final {
 public:
   Impl(ConversationCard *owner, const VisibleCardData &initial)
-      : owner(owner), current(initial) {
+      : owner(owner), current(initial),
+        collapsed(initiallyCollapsed(initial.kind)) {
     owner->setObjectName(QStringLiteral("conversationCard"));
     owner->setProperty("conversationCardKey",
                        QString::fromStdString(stableKey(initial.key)));
@@ -600,8 +646,31 @@ public:
     layout = new QVBoxLayout(owner);
     layout->setContentsMargins(12, 10, 12, 10);
     layout->setSpacing(6);
+
+    header = new QWidget(owner);
+    header->setObjectName(QStringLiteral("conversationCardHeader"));
+    headerLayout = new QHBoxLayout(header);
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setSpacing(6);
+    title = makeLabel({}, "title", header);
+    title->setWordWrap(false);
+    disclosure = new CardDisclosureButton(header);
+    headerLayout->addWidget(title, 1);
+    headerLayout->addWidget(disclosure, 0, Qt::AlignRight | Qt::AlignVCenter);
+    layout->addWidget(header);
+
+    content = new QWidget(owner);
+    content->setObjectName(QStringLiteral("conversationCardContent"));
+    contentLayout = new QVBoxLayout(content);
+    contentLayout->setContentsMargins(0, 0, 0, 0);
+    contentLayout->setSpacing(6);
+    layout->addWidget(content);
+
+    QObject::connect(disclosure, &QToolButton::clicked, owner,
+                     [this] { emit this->owner->foldRequested(!collapsed); });
     createChildren(initial.kind);
     applyPayload(initial);
+    refreshFoldPresentation();
   }
 
   bool apply(const VisibleCardData &next) {
@@ -615,9 +684,33 @@ public:
     if (!presentationChanged)
       return false;
     applyPayload(next);
+    refreshFoldPresentation();
     owner->updateGeometry();
     owner->update();
     return true;
+  }
+
+  void setCollapsed(bool next) {
+    if (collapsed == next)
+      return;
+    collapsed = next;
+    refreshFoldPresentation();
+    owner->updateGeometry();
+    owner->update();
+  }
+
+  [[nodiscard]] bool hasVisibleContent() const {
+    for (int index = 0; index < contentLayout->count(); ++index) {
+      if (QWidget *widget = contentLayout->itemAt(index)->widget();
+          widget && !widget->isHidden())
+        return true;
+    }
+    return false;
+  }
+
+  void refreshFoldPresentation() {
+    disclosure->setExpanded(!collapsed);
+    content->setVisible(!collapsed && hasVisibleContent());
   }
 
   void createChildren(CardKind kind) {
@@ -625,91 +718,79 @@ public:
     switch (kind) {
     case CardKind::UserMessage:
       owner->setProperty("messageRole", "user");
-      title = makeLabel(QStringLiteral("You"), "title", owner);
-      body = makeMarkdownLabel({}, owner);
-      layout->addWidget(title);
-      layout->addWidget(body);
+      title->setText(QStringLiteral("You"));
+      body = makeMarkdownLabel({}, content);
+      contentLayout->addWidget(body);
       createImageContainer();
       break;
     case CardKind::AgentMessage:
       owner->setProperty("messageRole", "agent");
-      title = makeLabel({}, "title", owner);
-      body = makeMarkdownLabel({}, owner);
-      layout->addWidget(title);
-      layout->addWidget(body);
+      body = makeMarkdownLabel({}, content);
+      contentLayout->addWidget(body);
       break;
     case CardKind::CommandExecution:
-      title = makeLabel(QStringLiteral("Command execution"), "title", owner);
-      command = new ContentSizedTextView(MaximumCommandTextHeight, owner);
+      title->setText(QStringLiteral("Command execution"));
+      command = new ContentSizedTextView(MaximumCommandTextHeight, content);
       command->setProperty("kind", "command");
       command->setObjectName(QStringLiteral("commandTextView"));
       command->setStyleSheet(
           QStringLiteral("QTextEdit#commandTextView{background:#f8fafc;"
                          "border:1px solid #d7dee8;border-radius:6px;}"));
-      output = new CommandOutputView({}, owner);
+      output = new CommandOutputView({}, content);
       output->hide();
-      metadata = makeLabel({}, "meta", owner);
+      metadata = makeLabel({}, "meta", content);
       metadata->setObjectName(QStringLiteral("commandMetadata"));
-      layout->addWidget(title);
-      layout->addWidget(command);
-      layout->addWidget(output);
-      layout->addWidget(metadata);
+      contentLayout->addWidget(command);
+      contentLayout->addWidget(output);
+      contentLayout->addWidget(metadata);
       break;
     case CardKind::AgentActivity:
-      title = makeLabel(QStringLiteral("Agent activity"), "title", owner);
-      metadata = makeLabel({}, "meta", owner);
-      body = makeLabel({}, "body", owner);
-      detail = makeMarkdownLabel({}, owner);
-      layout->addWidget(title);
-      layout->addWidget(metadata);
-      layout->addWidget(body);
-      layout->addWidget(detail);
+      title->setText(QStringLiteral("Agent activity"));
+      metadata = makeLabel({}, "meta", content);
+      body = makeLabel({}, "body", content);
+      detail = makeMarkdownLabel({}, content);
+      contentLayout->addWidget(metadata);
+      contentLayout->addWidget(body);
+      contentLayout->addWidget(detail);
       break;
     case CardKind::Reasoning:
-      title = makeLabel(QStringLiteral("Reasoning"), "title", owner);
-      body = makeMarkdownLabel({}, owner);
-      layout->addWidget(title);
-      layout->addWidget(body);
+      title->setText(QStringLiteral("Reasoning"));
+      body = makeMarkdownLabel({}, content);
+      contentLayout->addWidget(body);
       break;
     case CardKind::FileChanges:
-      title = makeLabel(QStringLiteral("File changes"), "title", owner);
-      metadata = makeLabel({}, "meta", owner);
-      body = makeLabel({}, "body", owner);
-      layout->addWidget(title);
-      layout->addWidget(body);
-      layout->addWidget(metadata);
+      title->setText(QStringLiteral("File changes"));
+      metadata = makeLabel({}, "meta", content);
+      body = makeLabel({}, "body", content);
+      contentLayout->addWidget(body);
+      contentLayout->addWidget(metadata);
       break;
     case CardKind::ImageGeneration:
-      title = makeLabel(QStringLiteral("Generated image"), "title", owner);
-      metadata = makeLabel({}, "meta", owner);
-      body = makeLabel({}, "body", owner);
-      layout->addWidget(title);
-      layout->addWidget(metadata);
-      layout->addWidget(body);
+      title->setText(QStringLiteral("Generated image"));
+      metadata = makeLabel({}, "meta", content);
+      body = makeLabel({}, "body", content);
+      contentLayout->addWidget(metadata);
+      contentLayout->addWidget(body);
       createImageContainer();
       break;
     case CardKind::Plan:
-      title = makeLabel(QStringLiteral("Plan"), "title", owner);
-      body = makeMarkdownLabel({}, owner);
-      layout->addWidget(title);
-      layout->addWidget(body);
+      title->setText(QStringLiteral("Plan"));
+      body = makeMarkdownLabel({}, content);
+      contentLayout->addWidget(body);
       break;
     case CardKind::GenericActivity:
-      title = makeLabel({}, "title", owner);
-      metadata = makeLabel({}, "meta", owner);
-      layout->addWidget(title);
-      layout->addWidget(metadata);
+      metadata = makeLabel({}, "meta", content);
+      contentLayout->addWidget(metadata);
       break;
     case CardKind::LocalPrompt:
       owner->setObjectName(QStringLiteral("pendingPromptCard"));
       owner->setStyleSheet(QStringLiteral(
           "QFrame#pendingPromptCard{background:transparent;border:0;}"));
-      title = makeLabel(QStringLiteral("You"), "title", owner);
-      body = makeMarkdownLabel({}, owner);
-      metadata = makeLabel({}, "meta", owner);
-      layout->addWidget(title);
-      layout->addWidget(body);
-      layout->addWidget(metadata);
+      title->setText(QStringLiteral("You"));
+      body = makeMarkdownLabel({}, content);
+      metadata = makeLabel({}, "meta", content);
+      contentLayout->addWidget(body);
+      contentLayout->addWidget(metadata);
       createImageContainer();
       animationTimer = new QTimer(owner);
       animationTimer->setInterval(PendingAnimationIntervalMilliseconds);
@@ -723,14 +804,14 @@ public:
   }
 
   void createImageContainer() {
-    images = new QWidget(owner);
+    images = new QWidget(content);
     images->setObjectName(QStringLiteral("messageImages"));
     imageLayout = new QVBoxLayout(images);
     imageLayout->setContentsMargins(0, 0, 0, 0);
     imageLayout->setSpacing(8);
     imageLayout->setAlignment(Qt::AlignLeft);
     images->hide();
-    layout->addWidget(images);
+    contentLayout->addWidget(images);
   }
 
   void setImages(const QStringList &paths) {
@@ -816,8 +897,8 @@ public:
     }
     case CardKind::ImageGeneration: {
       const auto &image = std::get<ImageGenerationData>(data.payload);
-      const bool generated = !image.status.isEmpty() ||
-                             !image.revisedPrompt.isEmpty();
+      const bool generated =
+          !image.status.isEmpty() || !image.revisedPrompt.isEmpty();
       title->setText(generated ? QStringLiteral("Generated image")
                                : QStringLiteral("Image"));
       setVisibleText(metadata, displayStatus(image.status));
@@ -892,8 +973,14 @@ public:
 
   ConversationCard *owner = nullptr;
   VisibleCardData current;
+  bool collapsed = false;
   QVBoxLayout *layout = nullptr;
+  QWidget *header = nullptr;
+  QHBoxLayout *headerLayout = nullptr;
   QLabel *title = nullptr;
+  CardDisclosureButton *disclosure = nullptr;
+  QWidget *content = nullptr;
+  QVBoxLayout *contentLayout = nullptr;
   QLabel *body = nullptr;
   QLabel *metadata = nullptr;
   QLabel *detail = nullptr;
@@ -915,6 +1002,12 @@ CardKind ConversationCard::cardKind() const noexcept {
 
 const VisibleCardData &ConversationCard::data() const noexcept {
   return impl_->current;
+}
+
+bool ConversationCard::isCollapsed() const noexcept { return impl_->collapsed; }
+
+void ConversationCard::setCollapsed(bool collapsed) {
+  impl_->setCollapsed(collapsed);
 }
 
 std::optional<CommandOutputView::ScrollState>

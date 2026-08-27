@@ -16,6 +16,7 @@
 class QLabel;
 class QEvent;
 class QPushButton;
+class QSpacerItem;
 class QVariantAnimation;
 class QVBoxLayout;
 class QWheelEvent;
@@ -82,6 +83,8 @@ private:
   class TurnSectionWidget;
 
   void setThread(const std::string &threadId);
+  void setCardCollapsed(const std::string &key, ConversationCard *card,
+                        bool collapsed);
   [[nodiscard]] Anchor captureAnchor() const;
   void restoreAnchor(const Anchor &anchor);
   void storeCurrentThreadState();
@@ -98,6 +101,7 @@ private:
   QWidget *content_ = nullptr;
   QVBoxLayout *contentLayout_ = nullptr;
   QPushButton *loadMore_ = nullptr;
+  QSpacerItem *trailingSpace_ = nullptr;
   QLabel *empty_ = nullptr;
   QVariantAnimation *followAnimation_ = nullptr;
   std::function<void()> loadMoreAction_;
@@ -110,9 +114,12 @@ private:
   std::unordered_map<std::string, ThreadScrollState> threadStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>
       commandOutputStates_;
+  std::unordered_map<std::string, bool> cardCollapsedStates_;
 
   Mode mode_ = Mode::Following;
   int trailingSpaceHeight_ = 0;
+  int foldBottomCompensation_ = 0;
+  int naturalContentHeight_ = 0;
   int contentHeight_ = 0;
   QString emptyMessage_;
   bool applying_ = false;

@@ -229,6 +229,8 @@ if(BUILD_TESTING)
         src/codex/middle/ConversationView.h
         src/codex/middle/MiddleTypes.cpp
         src/codex/middle/MiddleTypes.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
     )
     target_compile_features(
         codexui-conversation-cards-test PRIVATE cxx_std_20

@@ -71,6 +71,8 @@ private:
 };
 
 class ConversationCard : public QFrame {
+  Q_OBJECT
+
 public:
   explicit ConversationCard(const VisibleCardData &data,
                             QWidget *parent = nullptr);
@@ -78,6 +80,8 @@ public:
 
   [[nodiscard]] CardKind cardKind() const noexcept;
   [[nodiscard]] const VisibleCardData &data() const noexcept;
+  [[nodiscard]] bool isCollapsed() const noexcept;
+  void setCollapsed(bool collapsed);
   [[nodiscard]] std::optional<CommandOutputView::ScrollState>
   commandOutputScrollState() const;
   void
@@ -87,6 +91,9 @@ public:
   // kinds in place and returns false when neither content nor presentation
   // changed. Passing a different key or kind is a programming error.
   bool apply(const VisibleCardData &data);
+
+signals:
+  void foldRequested(bool collapsed);
 
 protected:
   void paintEvent(QPaintEvent *event) override;
