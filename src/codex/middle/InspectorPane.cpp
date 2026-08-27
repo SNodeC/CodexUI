@@ -209,8 +209,12 @@ QFrame *InspectorPane::agentFrame(const AgentSnapshot &agent) {
   layout->addLayout(metadataRow);
   if (!agent.prompt.empty())
     layout->addWidget(makeLabel(text(agent.prompt)));
-  if (!agent.resultText.empty())
-    layout->addWidget(makeMarkdownLabel(text(agent.resultText)));
+  if (!agent.resultText.empty()) {
+    auto *result = makeMarkdownLabel(text(agent.resultText));
+    result->setObjectName(QStringLiteral("agentResult"));
+    result->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    layout->addWidget(result);
+  }
   QStringList identities;
   if (!agent.childThreadId.empty())
     identities << QStringLiteral("thread %1").arg(text(agent.childThreadId));

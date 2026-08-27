@@ -933,6 +933,9 @@ bool testInspectorDetailParity() {
          {"type", "subAgentActivity"},
          {"status", "inProgress"},
          {"agentThreadId", "child-thread"},
+         {"resultText",
+          "Agent result summary.\n\n* First rendered finding.\n* Second "
+          "rendered finding."},
          {"senderThreadId", "sender-thread"},
          {"receiverThreadIds",
           nlohmann::json::array({"receiver-one", "receiver-two"})}}}},
@@ -971,6 +974,11 @@ bool testInspectorDetailParity() {
   }
   result &= expect(agentStatus && agentStatus->property("tone") == "active",
                    "running agent status uses the canonical active tone");
+  auto *agentResult =
+      inspector.findChild<QLabel *>(QStringLiteral("agentResult"));
+  result &= expect(
+      agentResult && agentResult->alignment().testFlag(Qt::AlignTop),
+      "agent Markdown starts at the top of any surplus result-label height");
   inspector.tabs()->setCurrentIndex(3);
   spin(20);
   result &= expect(
