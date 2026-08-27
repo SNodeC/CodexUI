@@ -79,18 +79,19 @@ QFrame *statusDot() {
   return dot;
 }
 
-void updateRow(QWidget *row, const ThreadPresentation &thread,
-               std::size_t requestCount) {
+void updateRow(QWidget *row, const std::string &threadId,
+               const std::string &threadTitle,
+               const std::string &threadStatus, std::size_t requestCount) {
   auto *title = row->findChild<QLabel *>(QStringLiteral("threadTitle"));
   auto *status = row->findChild<QLabel *>(QStringLiteral("threadStatus"));
   auto *dot = row->findChild<QFrame *>(QStringLiteral("threadStatusDot"));
-  QString titleText = text(thread.title);
+  QString titleText = text(threadTitle);
   if (titleText.isEmpty())
-    titleText = text(thread.id.substr(0, 12));
+    titleText = text(threadId.substr(0, 12));
   if (requestCount != 0)
     titleText.prepend(QStringLiteral("! "));
   title->setText(titleText);
-  const PresentationStatus classified = classifyStatus(thread.status);
+  const PresentationStatus classified = classifyStatus(threadStatus);
   status->setText(text(classified.text));
   const QString tone =
       requestCount != 0 ? QStringLiteral("warning") : text(classified.tone);
@@ -267,7 +268,7 @@ void ThreadPane::setSortCriterion(SortCriterion criterion) {
     return;
   sortCriterion = criterion;
   updateSortButton();
-  visibleSnapshot.clear();
+  visibleSnapshot.reset();
   if (currentModel)
     refresh(*currentModel, projectedSelectedThreadId);
 }
@@ -389,26 +390,19 @@ void ThreadPane::refresh(const PresentationModel &model,
     return found == pendingByThread.end() ? std::size_t{} : found->second;
   };
 
-  nlohmann::json visible = nlohmann::json::array();
+  ThreadPaneSnapshot next{selectedThreadId, sortCriterion, {}};
+  next.rows.reserve(visibleOrder.size());
   for (const std::string &id : visibleOrder) {
     const ThreadPresentation *thread = model.thread(id);
     if (!thread)
       continue;
-    visible.push_back({{"id", id},
-                       {"title", thread->title},
-                       {"cwd", thread->cwd},
-                       {"status", thread->status},
-                       {"pending", pendingCount(id)}});
+    next.rows.push_back({id, thread->title, thread->cwd, thread->status,
+                         pendingCount(id)});
   }
-  const std::string serialized = nlohmann::json{
-      {"selected", selectedThreadId},
-      {"sort", static_cast<int>(sortCriterion)},
-      {"rows", visible}}.dump();
-  const QByteArray next(serialized.data(),
-                        static_cast<qsizetype>(serialized.size()));
-  if (next == visibleSnapshot)
+  if (visibleSnapshot && *visibleSnapshot == next)
     return;
-  visibleSnapshot = next;
+  visibleSnapshot = std::move(next);
+  const ThreadPaneSnapshot &snapshot = *visibleSnapshot;
   list->blockSignals(true);
   list->setUpdatesEnabled(false);
   // Selection is a projection of selectedThreadId, never retained widget
@@ -417,8 +411,10 @@ void ThreadPane::refresh(const PresentationModel &model,
   list->clearSelection();
   list->setCurrentRow(-1);
 
-  const std::unordered_set<std::string> wanted(visibleOrder.begin(),
-                                                visibleOrder.end());
+  std::unordered_set<std::string> wanted;
+  wanted.reserve(snapshot.rows.size());
+  for (const ThreadRowSnapshot &row : snapshot.rows)
+    wanted.insert(row.id);
   for (int index = list->count() - 1; index >= 0; --index) {
     QListWidgetItem *item = list->item(index);
     const std::string id =
@@ -432,9 +428,9 @@ void ThreadPane::refresh(const PresentationModel &model,
   std::unordered_map<std::string, int> existingPositions;
   existingPositions.reserve(rows.size());
   int existingIndex = 0;
-  for (const std::string &id : visibleOrder) {
-    if (rows.contains(id))
-      existingPositions.emplace(id, existingIndex++);
+  for (const ThreadRowSnapshot &row : snapshot.rows) {
+    if (rows.contains(row.id))
+      existingPositions.emplace(row.id, existingIndex++);
   }
 
   std::unordered_set<std::string> moved;
@@ -452,26 +448,26 @@ void ThreadPane::refresh(const PresentationModel &model,
     moved.insert(id);
   }
   int wantedIndex = 0;
-  for (const std::string &id : visibleOrder) {
-    auto found = rows.find(id);
+  for (const ThreadRowSnapshot &row : snapshot.rows) {
+    auto found = rows.find(row.id);
     if (found == rows.end()) {
       auto *item = new QListWidgetItem;
       item->setSizeHint(QSize(0, 54));
-      item->setData(Qt::UserRole, text(id));
+      item->setData(Qt::UserRole, text(row.id));
       list->insertItem(wantedIndex, item);
       list->setItemWidget(item, createRow());
-      found = rows.emplace(id, item).first;
-    } else if (moved.contains(id)) {
+      found = rows.emplace(row.id, item).first;
+    } else if (moved.contains(row.id)) {
       list->insertItem(wantedIndex, found->second);
       list->setItemWidget(found->second, createRow());
     }
     QListWidgetItem *item = found->second;
-    const ThreadPresentation *thread = model.thread(id);
-    item->setToolTip(text(thread->cwd));
-    updateRow(list->itemWidget(item), *thread, pendingCount(id));
-    if (id == contextThreadId)
-      setContextHighlight(id, true);
-    if (id == selectedThreadId)
+    item->setToolTip(text(row.cwd));
+    updateRow(list->itemWidget(item), row.id, row.title, row.status,
+              row.pending);
+    if (row.id == contextThreadId)
+      setContextHighlight(row.id, true);
+    if (row.id == snapshot.selectedThreadId)
       list->setCurrentItem(item);
     ++wantedIndex;
   }

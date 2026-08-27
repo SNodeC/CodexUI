@@ -3,10 +3,11 @@
 #ifndef CODEXUI_CODEX_MIDDLE_THREADPANE_H
 #define CODEXUI_CODEX_MIDDLE_THREADPANE_H
 
-#include <QByteArray>
 #include <QFrame>
 
+#include <cstddef>
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -47,6 +48,23 @@ public:
   [[nodiscard]] std::string visiblySelectedThreadId() const;
 
 private:
+  struct ThreadRowSnapshot {
+    std::string id;
+    std::string title;
+    std::string cwd;
+    std::string status;
+    std::size_t pending = 0;
+
+    bool operator==(const ThreadRowSnapshot &) const = default;
+  };
+  struct ThreadPaneSnapshot {
+    std::string selectedThreadId;
+    SortCriterion sortCriterion = SortCriterion::Recency;
+    std::vector<ThreadRowSnapshot> rows;
+
+    bool operator==(const ThreadPaneSnapshot &) const = default;
+  };
+
   void updateSortButton();
   void sortVisibleThreads(std::vector<std::string> &ids,
                           const PresentationModel &model) const;
@@ -63,7 +81,7 @@ private:
   std::string projectedSelectedThreadId;
   std::string contextThreadId;
   QMenu *contextMenu = nullptr;
-  QByteArray visibleSnapshot;
+  std::optional<ThreadPaneSnapshot> visibleSnapshot;
 };
 
 } // namespace middle

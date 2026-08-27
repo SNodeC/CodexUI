@@ -150,6 +150,30 @@ struct ShellWidget::Impl final {
       dispatchScheduled = false;
     }
   };
+  struct SettingsUiSnapshot {
+    std::string identity;
+    nlohmann::json canonical;
+    nlohmann::json modelCatalog;
+    nlohmann::json permissionProfiles;
+    std::uint64_t settingsRevision = 0;
+    nlohmann::json settingsUpdate;
+
+    bool operator==(const SettingsUiSnapshot &) const = default;
+  };
+  struct StatusUiSnapshot {
+    bool connected = false;
+    bool retrying = false;
+    std::string role;
+    QString selectedTransport;
+    QString workspace;
+    QString threadContext;
+    QString agentActivity;
+    bool active = false;
+    std::size_t selectedPending = 0;
+    std::size_t totalPending = 0;
+
+    bool operator==(const StatusUiSnapshot &) const = default;
+  };
   struct HistoryWindow {
     std::size_t requested =
         middle::ConversationProjection::DefaultAuthoritativeItemLimit;
@@ -238,8 +262,8 @@ struct ShellWidget::Impl final {
   std::unordered_map<std::string, HistoryWindow> historyWindows;
   std::uint64_t observedConnectionGeneration = 0;
   std::uint64_t observedProviderGeneration = 0;
-  QByteArray settingsSnapshot;
-  QByteArray statusSnapshot;
+  std::optional<SettingsUiSnapshot> settingsSnapshot;
+  std::optional<StatusUiSnapshot> statusSnapshot;
   bool renderScheduled = false;
 
   middle::MiddleRegionWidget *middleRegion = nullptr;
@@ -667,20 +691,20 @@ void ShellWidget::Impl::refreshSettings() {
       model.globalDomains().find("operation.permission-profiles.list");
   if (found != model.globalDomains().end())
     profiles = found->second;
-  const std::string serialized = nlohmann::json{
-      {"identity", identity},
-      {"canonical", canonical},
-      {"settingsRevision", settingsRevision},
-      {"models", model.modelCatalog()},
-      {"profiles", profiles}}.dump();
-  const QByteArray next(serialized.data(),
-                        static_cast<qsizetype>(serialized.size()));
-  if (next == settingsSnapshot)
+  SettingsUiSnapshot next{std::move(identity),
+                          std::move(canonical),
+                          model.modelCatalog(),
+                          std::move(profiles),
+                          settingsRevision,
+                          std::move(settingsUpdate)};
+  if (settingsSnapshot && *settingsSnapshot == next)
     return;
-  settingsSnapshot = next;
+  settingsSnapshot = std::move(next);
+  const SettingsUiSnapshot &snapshot = *settingsSnapshot;
   middleRegion->composer().turnSettings()->setContext(
-      identity, canonical, model.modelCatalog(), profiles, settingsRevision,
-      settingsUpdate);
+      snapshot.identity, snapshot.canonical, snapshot.modelCatalog,
+      snapshot.permissionProfiles, snapshot.settingsRevision,
+      snapshot.settingsUpdate);
 }
 
 void ShellWidget::Impl::refreshStatus() {
@@ -702,41 +726,6 @@ void ShellWidget::Impl::refreshStatus() {
         return entry.second.threadId == selectedThreadId;
       }));
   const std::size_t totalPending = model.pendingRequestCount();
-  const std::string serialized = nlohmann::json{
-      {"connected", connection.connected},
-      {"retrying", connection.retrying},
-      {"role", connection.role},
-      {"settings", connection.settings},
-      {"selectedThreadId", selectedThreadId},
-      {"newThreadIntent", newThreadIntent},
-      {"newThreadWorkspace", newThreadWorkspace.toStdString()},
-      {"threadTitle", thread ? thread->title : std::string{}},
-      {"threadCwd", thread ? thread->cwd : std::string{}},
-      {"threadStatus", thread ? thread->status : std::string{}},
-      {"agentCount", thread ? thread->agents.size() : 0U},
-      {"runningAgents", runningAgents},
-      {"active", active},
-      {"selectedPending", selectedPending},
-      {"totalPending", totalPending}}.dump();
-  const QByteArray next(serialized.data(),
-                        static_cast<qsizetype>(serialized.size()));
-  if (next == statusSnapshot)
-    return;
-  statusSnapshot = next;
-  QString dotStyle;
-  QString dotTip;
-  if (connection.connected) {
-    dotStyle = QStringLiteral("background:#18865e;border-radius:5px;");
-    dotTip = QStringLiteral("Connected");
-  } else if (connection.retrying) {
-    dotStyle = QStringLiteral("background:#a85d0c;border-radius:5px;");
-    dotTip = QStringLiteral("Disconnected, retrying");
-  } else {
-    dotStyle = QStringLiteral("background:#c43d4d;border-radius:5px;");
-    dotTip = QStringLiteral("Disconnected");
-  }
-  connectionStatusDot->setStyleSheet(dotStyle);
-  connectionStatusDot->setToolTip(dotTip);
   QString selectedTransport;
   const std::string selectedKey = stringValue(connection.settings, "selected");
   const nlohmann::json available =
@@ -749,58 +738,86 @@ void ShellWidget::Impl::refreshStatus() {
       }
     }
   }
-  connectionButton->setText(selectedTransport.isEmpty()
-                                ? QStringLiteral("Connection")
-                                : selectedTransport);
-  connectionButton->setToolTip(
-      connection.connected ? QStringLiteral("Connected bridge transport")
-                           : QStringLiteral("Disconnected bridge transport"));
-  connectAction->setEnabled(!connection.connected);
-  disconnectAction->setEnabled(connection.connected);
-  reconnectAction->setEnabled(connection.connected);
-  controllerLabel->setText(connection.role.empty() ? QStringLiteral("No role")
-                                                   : text(connection.role));
-  controllerButton->setText(connection.role == "controller"
-                                ? QStringLiteral("Release control")
-                                : QStringLiteral("Claim control"));
-  controllerButton->setEnabled(connection.connected);
-
-  requestButton->setText(QStringLiteral("Requests (%1)")
-                             .arg(static_cast<qulonglong>(totalPending)));
-  requestButton->setVisible(totalPending != 0);
-  middleRegion->composer().setAttentionVisible(selectedPending != 0);
-
   QString workspace = QStringLiteral("No workspace");
+  QString threadContext = QStringLiteral("No thread context");
+  QString agentActivity = QStringLiteral("No agent activity");
   if (thread) {
     workspace = text(thread->cwd);
-    threadContextStatus->setText(
+    threadContext =
         QStringLiteral("%1  |  %2")
             .arg(text(thread->title),
-                 text(classifyStatus(thread->status).text)));
-    agentActivityStatus->setText(
-        thread->agents.empty()
-            ? QStringLiteral("No agent activity")
-            : QStringLiteral("%1 agents  |  %2 active")
-                  .arg(static_cast<qulonglong>(thread->agents.size()))
-                  .arg(static_cast<qulonglong>(runningAgents)));
-  } else {
-    if (newThreadIntent)
-      workspace = text(middleRegion->composer().turnSettings()->workspace(
-          QDir::currentPath().toStdString()));
-    threadContextStatus->setText(newThreadIntent
-                                     ? QStringLiteral("New thread")
-                                     : QStringLiteral("No thread context"));
-    agentActivityStatus->setText(QStringLiteral("No agent activity"));
+                 text(classifyStatus(thread->status).text));
+    if (!thread->agents.empty()) {
+      agentActivity = QStringLiteral("%1 agents  |  %2 active")
+                          .arg(static_cast<qulonglong>(thread->agents.size()))
+                          .arg(static_cast<qulonglong>(runningAgents));
+    }
+  } else if (newThreadIntent) {
+    workspace = text(middleRegion->composer().turnSettings()->workspace(
+        QDir::currentPath().toStdString()));
+    threadContext = QStringLiteral("New thread");
   }
-  workspaceBreadcrumb->setToolTip(workspace);
-  workspaceBreadcrumb->setText(workspaceBreadcrumb->fontMetrics().elidedText(
-      workspace, Qt::ElideMiddle, workspaceBreadcrumb->maximumWidth()));
+  StatusUiSnapshot next{connection.connected,
+                        connection.retrying,
+                        connection.role,
+                        std::move(selectedTransport),
+                        std::move(workspace),
+                        std::move(threadContext),
+                        std::move(agentActivity),
+                        active,
+                        selectedPending,
+                        totalPending};
+  if (statusSnapshot && *statusSnapshot == next)
+    return;
+  statusSnapshot = std::move(next);
+  const StatusUiSnapshot &snapshot = *statusSnapshot;
+  QString dotStyle;
+  QString dotTip;
+  if (snapshot.connected) {
+    dotStyle = QStringLiteral("background:#18865e;border-radius:5px;");
+    dotTip = QStringLiteral("Connected");
+  } else if (snapshot.retrying) {
+    dotStyle = QStringLiteral("background:#a85d0c;border-radius:5px;");
+    dotTip = QStringLiteral("Disconnected, retrying");
+  } else {
+    dotStyle = QStringLiteral("background:#c43d4d;border-radius:5px;");
+    dotTip = QStringLiteral("Disconnected");
+  }
+  connectionStatusDot->setStyleSheet(dotStyle);
+  connectionStatusDot->setToolTip(dotTip);
+  connectionButton->setText(snapshot.selectedTransport.isEmpty()
+                                ? QStringLiteral("Connection")
+                                : snapshot.selectedTransport);
+  connectionButton->setToolTip(
+      snapshot.connected ? QStringLiteral("Connected bridge transport")
+                         : QStringLiteral("Disconnected bridge transport"));
+  connectAction->setEnabled(!snapshot.connected);
+  disconnectAction->setEnabled(snapshot.connected);
+  reconnectAction->setEnabled(snapshot.connected);
+  controllerLabel->setText(snapshot.role.empty() ? QStringLiteral("No role")
+                                                 : text(snapshot.role));
+  controllerButton->setText(snapshot.role == "controller"
+                                ? QStringLiteral("Release control")
+                                : QStringLiteral("Claim control"));
+  controllerButton->setEnabled(snapshot.connected);
 
-  const bool canSubmit =
-      connection.connected && connection.role == "controller";
-  middleRegion->composer().setActiveTurn(active);
+  requestButton->setText(
+      QStringLiteral("Requests (%1)")
+          .arg(static_cast<qulonglong>(snapshot.totalPending)));
+  requestButton->setVisible(snapshot.totalPending != 0);
+  middleRegion->composer().setAttentionVisible(snapshot.selectedPending != 0);
+
+  threadContextStatus->setText(snapshot.threadContext);
+  agentActivityStatus->setText(snapshot.agentActivity);
+  workspaceBreadcrumb->setToolTip(snapshot.workspace);
+  workspaceBreadcrumb->setText(workspaceBreadcrumb->fontMetrics().elidedText(
+      snapshot.workspace, Qt::ElideMiddle,
+      workspaceBreadcrumb->maximumWidth()));
+
+  const bool canSubmit = snapshot.connected && snapshot.role == "controller";
+  middleRegion->composer().setActiveTurn(snapshot.active);
   middleRegion->composer().setCanSubmit(canSubmit);
-  middleRegion->composer().setSettingsEnabled(canSubmit && !active);
+  middleRegion->composer().setSettingsEnabled(canSubmit && !snapshot.active);
 }
 
 void ShellWidget::Impl::hydrateHistoricalAgents() {
@@ -864,7 +881,7 @@ void ShellWidget::Impl::beginNewThread() {
         draft.developerInstructions.toStdString();
   if (draft.ephemeral)
     newThreadOptions["ephemeral"] = true;
-  settingsSnapshot.clear();
+  settingsSnapshot.reset();
   middleRegion->composer().clearDraft();
   middleRegion->composer().turnSettings()->setWorkspace(draft.workspace);
   middleRegion->composer().promptEditor()->setFocus();
@@ -1169,7 +1186,7 @@ void ShellWidget::Impl::startThreadForDraft() {
     newThreadOptions = nlohmann::json::object();
     newThreadName.clear();
     newThreadWorkspace.clear();
-    settingsSnapshot.clear();
+    settingsSnapshot.reset();
     if (!requestedName.isEmpty())
       session.renameThread(threadId, requestedName.toStdString());
     render();
