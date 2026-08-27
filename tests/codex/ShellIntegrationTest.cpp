@@ -174,21 +174,32 @@ private:
 };
 
 nlohmann::json thread(std::string id, std::string name,
-                      std::string status = "completed") {
+                      std::string status = "idle",
+                      std::string activeTurnId = {}) {
+  nlohmann::json turns = nlohmann::json::array();
+  if (status == "active") {
+    if (activeTurnId.empty())
+      activeTurnId = id + "-turn";
+    turns.push_back({{"id", std::move(activeTurnId)},
+                     {"status", "inProgress"},
+                     {"items", nlohmann::json::array()}});
+  }
   return {{"id", std::move(id)},
           {"name", std::move(name)},
           {"cwd", "/tmp/codexui-shell-test"},
           {"status", std::move(status)},
-          {"turns", nlohmann::json::array()}};
+          {"turns", std::move(turns)}};
 }
 
 nlohmann::json threadWithAgentMessage(std::string id, std::string name,
                                       std::string message) {
+  const std::string turnId = id + "-turn";
+  const std::string messageId = id + "-message";
   nlohmann::json value = thread(std::move(id), std::move(name));
   value["turns"] = nlohmann::json::array(
-      {{{"id", "current-turn"},
+      {{{"id", turnId},
         {"status", "completed"},
-        {"items", nlohmann::json::array({{{"id", "current-message"},
+        {"items", nlohmann::json::array({{{"id", messageId},
                                           {"type", "agentMessage"},
                                           {"phase", "final_answer"},
                                           {"text", std::move(message)}}})}}});
@@ -196,15 +207,18 @@ nlohmann::json threadWithAgentMessage(std::string id, std::string name,
 }
 
 nlohmann::json threadWithPlanAndAgent(std::string id, std::string name) {
+  const std::string turnId = id + "-turn";
+  const std::string planId = id + "-plan";
+  const std::string agentId = id + "-agent";
   nlohmann::json value = thread(std::move(id), std::move(name));
   value["turns"] = nlohmann::json::array(
-      {{{"id", "turn-a"},
+      {{{"id", turnId},
         {"status", "completed"},
         {"items",
-         nlohmann::json::array({{{"id", "plan-a"},
+         nlohmann::json::array({{{"id", planId},
                                  {"type", "plan"},
                                  {"text", "retained plan marker"}},
-                                {{"id", "agent-a"},
+                                {{"id", agentId},
                                  {"type", "subAgentActivity"},
                                  {"status", "completed"},
                                  {"prompt", "retained agent marker"}}})}}});
@@ -686,7 +700,8 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
       presentation::result(sequence++, 2, "thread.resume",
                            secondResumeD->value("correlationId", std::string{}),
                            true,
-                           {{"thread", thread("thread-d", "D", "active")}},
+                           {{"thread",
+                             thread("thread-d", "D", "active", "turn-d")}},
                            Authority::Merge, {{"threadId", "thread-d"}}));
   const auto retriedSteerD = peer.waitFor("turn.steer", "thread-d");
   result &= expect(retriedSteerD.has_value() &&
