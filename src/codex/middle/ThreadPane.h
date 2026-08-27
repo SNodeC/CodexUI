@@ -89,7 +89,7 @@ private:
   QToolButton *sortButton = nullptr;
   QListWidget *list = nullptr;
   std::unordered_map<std::string, QListWidgetItem *> rows;
-  std::unordered_set<std::string> collapsedThreads;
+  std::unordered_set<std::string> expandedThreads;
   std::string projectedSelectedThreadId;
   std::string contextThreadId;
   QMenu *contextMenu = nullptr;

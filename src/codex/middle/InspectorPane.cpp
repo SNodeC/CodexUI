@@ -184,33 +184,48 @@ QFrame *InspectorPane::agentFrame(const AgentSnapshot &agent) {
   auto *layout = new QVBoxLayout(frame);
   layout->setContentsMargins(12, 10, 12, 10);
   layout->setSpacing(6);
-  const QString title =
-      !agent.childThreadId.empty()
-          ? QStringLiteral("Subagent")
-      : agent.tool.empty() ? QStringLiteral("Agent activity")
-                           : QStringLiteral("Agent %1").arg(text(agent.tool));
-  layout->addWidget(makeLabel(title, "title"));
+  const QString agentPath = text(agent.agentPath);
+  const QStringList pathParts = agentPath.split('/', Qt::SkipEmptyParts);
+  QString agentName;
+  if (!pathParts.isEmpty())
+    agentName = pathParts.back();
+  else if (!agent.tool.empty())
+    agentName = text(agent.tool);
+  auto *heading = new QHBoxLayout;
+  heading->setContentsMargins(0, 0, 0, 0);
+  heading->setSpacing(6);
+  auto *titleLabel = makeLabel(QStringLiteral("Agent"), "title");
+  titleLabel->setObjectName(QStringLiteral("agentTitle"));
+  titleLabel->setWordWrap(false);
+  titleLabel->setContentsMargins(0, 0, 0, 1);
+  titleLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+  heading->addWidget(titleLabel, 0, Qt::AlignBaseline);
+  if (!agentName.isEmpty()) {
+    auto *nameLabel = makeLabel(agentName, "code");
+    nameLabel->setObjectName(QStringLiteral("agentName"));
+    nameLabel->setWordWrap(false);
+    // The fixed-width font's descent sits one pixel below the proportional
+    // labels. Preserve their visual baseline without changing its font.
+    nameLabel->setContentsMargins(0, 0, 0, 1);
+    nameLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    if (!agentPath.isEmpty())
+      nameLabel->setToolTip(agentPath);
+    heading->addWidget(nameLabel, 0, Qt::AlignBottom);
+  }
+  heading->addStretch();
+  auto *status = statusLabel(agent.status);
+  status->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+  heading->addWidget(status, 0, Qt::AlignBaseline);
+  layout->addLayout(heading);
   QStringList metadata;
-  for (const std::string *value :
-       {&agent.agentPath, &agent.tool, &agent.model, &agent.reasoningEffort}) {
+  if (!agent.tool.empty() && !agentPath.isEmpty())
+    metadata << text(agent.tool);
+  for (const std::string *value : {&agent.model, &agent.reasoningEffort}) {
     if (!value->empty())
       metadata << text(*value);
   }
-  auto *metadataRow = new QHBoxLayout;
-  metadataRow->setContentsMargins(0, 0, 0, 0);
-  metadataRow->setSpacing(6);
-  auto *status = statusLabel(agent.status);
-  status->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
-  metadataRow->addWidget(status);
-  if (!metadata.isEmpty()) {
-    auto *details = makeLabel(
-        QStringLiteral("|  ") + metadata.join(QStringLiteral("  |  ")),
-        "meta");
-    details->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-    metadataRow->addWidget(details);
-  }
-  metadataRow->addStretch();
-  layout->addLayout(metadataRow);
+  if (!metadata.isEmpty())
+    layout->addWidget(makeLabel(metadata.join(QStringLiteral("  ·  ")), "meta"));
   if (!agent.prompt.empty())
     layout->addWidget(makeLabel(text(agent.prompt)));
   if (!agent.resultText.empty()) {

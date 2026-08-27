@@ -16,6 +16,7 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QPaintEvent>
 #include <QPushButton>
 #include <QStyledItemDelegate>
 #include <QToolButton>
@@ -34,6 +35,8 @@ constexpr int HasChildrenRole = Qt::UserRole + 3;
 constexpr int ExpandedRole = Qt::UserRole + 4;
 constexpr int ParentIdRole = Qt::UserRole + 5;
 constexpr int ChildIndent = 16;
+constexpr int DisclosureWidth = 16;
+constexpr int DisclosureExtent = 24;
 
 class ThreadListWidget final : public QListWidget {
 public:
@@ -57,11 +60,18 @@ protected:
     QListWidgetItem *item = itemAt(event->position().toPoint());
     if (event->button() == Qt::LeftButton && item &&
         item->data(HasChildrenRole).toBool()) {
-      const QRect itemRect = visualItemRect(item);
-      const int indicatorRight =
-          itemRect.left() + 5 + item->data(DepthRole).toInt() * ChildIndent +
-          16;
-      if (event->position().x() <= indicatorRight) {
+      QWidget *row = itemWidget(item);
+      QWidget *indicator =
+          row ? row->findChild<QWidget *>(
+                    QStringLiteral("threadExpansionIndicator"))
+              : nullptr;
+      const QRect indicatorRect =
+          indicator
+              ? QRect(indicator->mapTo(viewport(), QPoint()), indicator->size())
+                    .adjusted(-(DisclosureExtent - DisclosureWidth) / 2, 0,
+                              (DisclosureExtent - DisclosureWidth) / 2, 0)
+              : QRect{};
+      if (indicatorRect.contains(event->position().toPoint())) {
         if (toggleExpansion)
           toggleExpansion(
               item->data(Qt::UserRole).toString().toStdString());
@@ -96,6 +106,48 @@ public:
   }
 };
 
+class ThreadDisclosureIndicator final : public QWidget {
+public:
+  explicit ThreadDisclosureIndicator(QWidget *parent = nullptr)
+      : QWidget(parent) {
+    setObjectName(QStringLiteral("threadExpansionIndicator"));
+    setFixedSize(DisclosureWidth, DisclosureExtent);
+    setAttribute(Qt::WA_TransparentForMouseEvents);
+  }
+
+  void setState(bool hasChildren, bool expanded) {
+    if (hasChildren_ == hasChildren && expanded_ == expanded)
+      return;
+    hasChildren_ = hasChildren;
+    expanded_ = expanded;
+    const QString action = !hasChildren
+                               ? QString{}
+                           : expanded ? QStringLiteral("Collapse branch")
+                                      : QStringLiteral("Expand branch");
+    setAccessibleName(action);
+    setToolTip(action);
+    setProperty("chevronDirection",
+                !hasChildren ? QString{}
+                : expanded  ? QStringLiteral("down")
+                            : QStringLiteral("right"));
+    update();
+  }
+
+protected:
+  void paintEvent(QPaintEvent *event) override {
+    static_cast<void>(event);
+    if (!hasChildren_)
+      return;
+    UiStyle::drawChevron(this, rect().adjusted(3, 3, -3, -3), isEnabled(),
+                         false, expanded_ ? UiStyle::ChevronDirection::Down
+                                          : UiStyle::ChevronDirection::Right);
+  }
+
+private:
+  bool hasChildren_ = false;
+  bool expanded_ = false;
+};
+
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
 }
@@ -126,15 +178,11 @@ void updateRow(QWidget *row, const std::string &threadId,
   auto *status = row->findChild<QLabel *>(QStringLiteral("threadStatus"));
   auto *dot = row->findChild<QFrame *>(QStringLiteral("threadStatusDot"));
   auto *indent = row->findChild<QWidget *>(QStringLiteral("threadIndent"));
-  auto *indicator =
-      row->findChild<QLabel *>(QStringLiteral("threadExpansionIndicator"));
+  auto *indicator = static_cast<ThreadDisclosureIndicator *>(
+      row->findChild<QWidget *>(
+          QStringLiteral("threadExpansionIndicator")));
   indent->setFixedWidth(static_cast<int>(depth) * ChildIndent);
-  indicator->setText(hasChildren ? (expanded ? QStringLiteral("⌄")
-                                             : QStringLiteral("›"))
-                                 : QString{});
-  indicator->setToolTip(hasChildren ? (expanded ? QStringLiteral("Collapse")
-                                                : QStringLiteral("Expand"))
-                                    : QString{});
+  indicator->setState(hasChildren, expanded);
   QString titleText = text(threadTitle);
   if (titleText.isEmpty())
     titleText = text(threadId.substr(0, 12));
@@ -167,20 +215,18 @@ QWidget *createRow() {
   row->setAttribute(Qt::WA_TransparentForMouseEvents);
   row->setStyleSheet(QStringLiteral("background:transparent;"));
   auto *layout = new QHBoxLayout(row);
-  layout->setContentsMargins(5, 2, 5, 2);
-  layout->setSpacing(8);
+  layout->setContentsMargins(0, 2, 0, 2);
+  layout->setSpacing(0);
   auto *indent = new QWidget;
   indent->setObjectName(QStringLiteral("threadIndent"));
   indent->setFixedWidth(0);
   indent->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
   layout->addWidget(indent);
-  auto *indicator = makeLabel({}, "meta");
-  indicator->setObjectName(QStringLiteral("threadExpansionIndicator"));
-  indicator->setAlignment(Qt::AlignCenter);
-  indicator->setFixedWidth(8);
-  indicator->setTextInteractionFlags(Qt::NoTextInteraction);
-  layout->addWidget(indicator);
-  layout->addWidget(statusDot());
+  auto *indicator = new ThreadDisclosureIndicator;
+  layout->addWidget(indicator, 0, Qt::AlignVCenter);
+  layout->addSpacing(2);
+  layout->addWidget(statusDot(), 0, Qt::AlignVCenter);
+  layout->addSpacing(8);
   auto *copy = new QVBoxLayout;
   copy->setContentsMargins(0, 0, 0, 0);
   copy->setSpacing(1);
@@ -427,7 +473,7 @@ void ThreadPane::appendVisibleThread(
   const bool hasChildren = std::ranges::any_of(
       thread->childThreadOrder,
       [&model](const std::string &id) { return model.thread(id) != nullptr; });
-  const bool expanded = hasChildren && !collapsedThreads.contains(threadId);
+  const bool expanded = hasChildren && expandedThreads.contains(threadId);
   const auto pending = pendingByThread.find(threadId);
   snapshot.rows.push_back(
       {threadId, thread->title, thread->cwd, thread->status, parentId,
@@ -441,10 +487,10 @@ void ThreadPane::appendVisibleThread(
 }
 
 void ThreadPane::toggleExpanded(const std::string &threadId) {
-  if (collapsedThreads.contains(threadId))
-    collapsedThreads.erase(threadId);
+  if (expandedThreads.contains(threadId))
+    expandedThreads.erase(threadId);
   else
-    collapsedThreads.insert(threadId);
+    expandedThreads.insert(threadId);
   visibleSnapshot.reset();
   if (currentModel)
     refresh(*currentModel, projectedSelectedThreadId);
@@ -493,9 +539,22 @@ void ThreadPane::setContextHighlight(const std::string &threadId,
 
 void ThreadPane::refresh(const PresentationModel &model,
                          const std::string &selectedThreadId) {
+  const bool selectionChanged = selectedThreadId != projectedSelectedThreadId;
   currentModel = &model;
   projectedSelectedThreadId = selectedThreadId;
-  std::erase_if(collapsedThreads, [&model](const std::string &id) {
+  if (selectionChanged) {
+    std::unordered_set<std::string> visited;
+    std::string descendantId = selectedThreadId;
+    while (!descendantId.empty() && visited.insert(descendantId).second) {
+      const ChildThreadOwnership *ownership =
+          model.childOwnership(descendantId);
+      if (!ownership)
+        break;
+      expandedThreads.insert(ownership->parentThreadId);
+      descendantId = ownership->parentThreadId;
+    }
+  }
+  std::erase_if(expandedThreads, [&model](const std::string &id) {
     const ThreadPresentation *thread = model.thread(id);
     return !thread || thread->childThreadOrder.empty();
   });

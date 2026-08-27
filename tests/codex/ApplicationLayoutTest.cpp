@@ -468,7 +468,8 @@ bool testThreadSelectionProjection() {
           selected->data(Qt::UserRole).toString() ==
               QStringLiteral("thread-b") &&
           pane.visiblySelectedThreadId() == "thread-b",
-      "a hydrated selected child thread is visible beneath its parent");
+      "navigating to a nested thread reveals and selects it beneath its "
+      "parent");
   QWidget *row = selected && list ? list->itemWidget(selected) : nullptr;
   auto *title =
       row ? row->findChild<QLabel *>(QStringLiteral("threadTitle")) : nullptr;
@@ -480,11 +481,28 @@ bool testThreadSelectionProjection() {
   auto *rowLayout = row ? qobject_cast<QHBoxLayout *>(row->layout()) : nullptr;
   auto *sortButton =
       pane.findChild<QToolButton *>(QStringLiteral("threadSortButton"));
+  QListWidgetItem *parentItem = threadItem(list, "thread-a");
+  QWidget *parentRow =
+      list && parentItem ? list->itemWidget(parentItem) : nullptr;
+  QWidget *disclosure =
+      parentRow ? parentRow->findChild<QWidget *>(
+                      QStringLiteral("threadExpansionIndicator"))
+                : nullptr;
+  auto *parentDot =
+      parentRow ? parentRow->findChild<QFrame *>(
+                      QStringLiteral("threadStatusDot"))
+                : nullptr;
   result &= expect(
       selected && selected->sizeHint().height() == 54 && rowLayout &&
-          rowLayout->contentsMargins() == QMargins(5, 2, 5, 2) &&
-          rowLayout->spacing() == 8 && title && status && dot &&
+          rowLayout->contentsMargins() == QMargins(0, 2, 0, 2) &&
+          rowLayout->spacing() == 0 && title && status && dot &&
           dot->size() == QSize(10, 10) && rowLayout->indexOf(dot) >= 0 &&
+          disclosure && disclosure->size() == QSize(16, 24) &&
+          disclosure->geometry().left() == 0 && parentDot &&
+          parentDot->geometry().left() - disclosure->geometry().right() - 1 ==
+              2 &&
+          disclosure->property("chevronDirection").toString() ==
+              QStringLiteral("down") &&
           sortButton &&
           dynamic_cast<UiStyle::ChevronToolButton *>(sortButton) &&
           sortButton->property("codexChevron").toBool() &&
@@ -493,8 +511,8 @@ bool testThreadSelectionProjection() {
           status->property("tone").toString() == QStringLiteral("active") &&
           title->textInteractionFlags().testFlag(Qt::TextSelectableByMouse) &&
           status->textInteractionFlags().testFlag(Qt::TextSelectableByMouse),
-      "thread cards keep their status dot and shared chevron styling inside "
-      "the UI contract");
+      "thread cards keep their status dot and canonical disclosure styling "
+      "inside the UI contract");
   pane.refresh(model, "thread-a");
   bool childPresent = false;
   if (list) {
@@ -640,7 +658,7 @@ bool testThreadHierarchyExpansionAndNavigation() {
 
   ThreadPane pane;
   pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
-  std::string selectedThread = "grandchild";
+  std::string selectedThread;
   int selections = 0;
   ThreadPane::Actions actions;
   actions.select = [&](const std::string &id) {
@@ -656,35 +674,34 @@ bool testThreadHierarchyExpansionAndNavigation() {
 
   auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
   QListWidgetItem *rootA = threadItem(list, "root-a");
-  QListWidgetItem *childZ = threadItem(list, "child-z");
-  QListWidgetItem *childA = threadItem(list, "child-a");
-  QListWidgetItem *grandchild = threadItem(list, "grandchild");
-  QWidget *grandchildRow =
-      list && grandchild ? list->itemWidget(grandchild) : nullptr;
-  QLabel *grandchildTitle = grandchildRow
-                                ? grandchildRow->findChild<QLabel *>(
-                                      QStringLiteral("threadTitle"))
-                                : nullptr;
+  QWidget *rootRow = list && rootA ? list->itemWidget(rootA) : nullptr;
+  QWidget *rootDisclosure =
+      rootRow ? rootRow->findChild<QWidget *>(
+                    QStringLiteral("threadExpansionIndicator"))
+              : nullptr;
   bool result = expect(
-      list &&
-          threadOrder(pane) ==
-              std::vector<std::string>{"root-a", "child-z", "grandchild",
-                                       "child-a", "root-z"} &&
-          rootA && rootA->data(Qt::UserRole + 2).toInt() == 0 && childZ &&
-          childZ->data(Qt::UserRole + 2).toInt() == 1 && grandchild &&
-          grandchild->data(Qt::UserRole + 2).toInt() == 2 && childA &&
-          grandchildTitle && grandchildTitle->text().startsWith("! ") &&
-          pane.visiblySelectedThreadId() == "grandchild",
-      "thread hierarchy keeps root sorting, child order, nesting, requests, "
-      "and selected navigation");
-  if (!list || !rootA || !childZ || !grandchild)
+      list && threadOrder(pane) ==
+                  std::vector<std::string>{"root-a", "root-z"} &&
+          rootA && rootA->data(Qt::UserRole + 2).toInt() == 0 &&
+          rootDisclosure && rootDisclosure->size() == QSize(16, 24) &&
+          rootDisclosure->property("chevronDirection").toString() ==
+              QStringLiteral("right") &&
+          pane.visiblySelectedThreadId().empty(),
+      "thread branches default to a canonical collapsed disclosure without "
+      "selecting a hidden descendant");
+  if (!list || !rootA)
     return false;
 
   const auto clickExpansion = [list](QListWidgetItem *item) {
-    const QRect rectangle = list->visualItemRect(item);
-    const int depth = item->data(Qt::UserRole + 2).toInt();
-    const QPoint position(rectangle.left() + 7 + depth * 16,
-                          rectangle.center().y());
+    QWidget *row = item ? list->itemWidget(item) : nullptr;
+    QWidget *indicator =
+        row ? row->findChild<QWidget *>(
+                  QStringLiteral("threadExpansionIndicator"))
+            : nullptr;
+    const QPoint position =
+        indicator
+            ? indicator->mapTo(list->viewport(), indicator->rect().center())
+            : QPoint{};
     QMouseEvent press(QEvent::MouseButtonPress, position,
                       list->viewport()->mapToGlobal(position), Qt::LeftButton,
                       Qt::LeftButton, Qt::NoModifier);
@@ -692,6 +709,52 @@ bool testThreadHierarchyExpansionAndNavigation() {
     spin();
   };
 
+  clickExpansion(rootA);
+  QListWidgetItem *childZ = threadItem(list, "child-z");
+  QListWidgetItem *childA = threadItem(list, "child-a");
+  rootA = threadItem(list, "root-a");
+  rootRow = rootA ? list->itemWidget(rootA) : nullptr;
+  rootDisclosure =
+      rootRow ? rootRow->findChild<QWidget *>(
+                    QStringLiteral("threadExpansionIndicator"))
+              : nullptr;
+  result &= expect(
+      threadOrder(pane) ==
+              std::vector<std::string>{"root-a", "child-z", "child-a",
+                                       "root-z"} &&
+          childZ && childZ->data(Qt::UserRole + 2).toInt() == 1 && childA &&
+          rootDisclosure &&
+          rootDisclosure->property("chevronDirection").toString() ==
+              QStringLiteral("down") &&
+          pane.visiblySelectedThreadId().empty() && selections == 0,
+      "expanding a root reveals its ordered children and updates the "
+      "canonical disclosure");
+  if (!childZ)
+    return false;
+
+  selectedThread = "grandchild";
+  pane.refresh(model, selectedThread);
+  spin();
+  QListWidgetItem *grandchild = threadItem(list, "grandchild");
+  QWidget *grandchildRow =
+      list && grandchild ? list->itemWidget(grandchild) : nullptr;
+  QLabel *grandchildTitle = grandchildRow
+                                ? grandchildRow->findChild<QLabel *>(
+                                      QStringLiteral("threadTitle"))
+                                : nullptr;
+  result &= expect(
+      threadOrder(pane) ==
+              std::vector<std::string>{"root-a", "child-z", "grandchild",
+                                       "child-a", "root-z"} &&
+          grandchild && grandchild->data(Qt::UserRole + 2).toInt() == 2 &&
+          grandchildTitle && grandchildTitle->text().startsWith("! ") &&
+          pane.visiblySelectedThreadId() == "grandchild" && selections == 0,
+      "nested navigation expands only its ancestor path and restores nesting, "
+      "requests, and selection");
+  if (!grandchild)
+    return false;
+
+  childZ = threadItem(list, "child-z");
   clickExpansion(childZ);
   result &= expect(
       threadOrder(pane) ==
@@ -1092,6 +1155,8 @@ bool testInfoViewerLayout() {
 }
 
 bool testInspectorDetailParity() {
+  const QString previousStyleSheet = qApp->styleSheet();
+  qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
   PresentationModel model;
   model.applyEvent(presentation::event(
       1, 1, "thread.upsert",
@@ -1103,6 +1168,7 @@ bool testInspectorDetailParity() {
         {{"id", "agent-one"},
          {"type", "subAgentActivity"},
          {"status", "inProgress"},
+         {"agentPath", "/root/lifecycle_review"},
          {"agentThreadId", "child-thread"},
          {"resultText",
           "No blocking Inspector findings.\n\n"
@@ -1132,6 +1198,7 @@ bool testInspectorDetailParity() {
         {{"id", "agent-two"},
          {"type", "subAgentActivity"},
          {"status", "completed"},
+         {"agentPath", "/root/hierarchy_ui_review"},
          {"agentThreadId", "child-thread-two"},
          {"resultText",
           "No blocking Git snapshot issues found.\n\n"
@@ -1179,10 +1246,28 @@ bool testInspectorDetailParity() {
       inspector.findChild<QLabel *>(QStringLiteral("agentResult"));
   auto *agentFrame =
       agentResult ? qobject_cast<QFrame *>(agentResult->parentWidget()) : nullptr;
+  auto *agentTitle = agentFrame
+                         ? agentFrame->findChild<QLabel *>(
+                               QStringLiteral("agentTitle"))
+                         : nullptr;
+  auto *agentName = agentFrame
+                        ? agentFrame->findChild<QLabel *>(
+                              QStringLiteral("agentName"))
+                        : nullptr;
   const int statusBottom =
       agentStatus && agentFrame
           ? agentStatus->mapTo(agentFrame, QPoint()).y() + agentStatus->height()
           : 0;
+  const int headingBottom =
+      std::max({agentTitle && agentFrame
+                    ? agentTitle->mapTo(agentFrame, QPoint()).y() +
+                          agentTitle->height()
+                    : 0,
+                agentName && agentFrame
+                    ? agentName->mapTo(agentFrame, QPoint()).y() +
+                          agentName->height()
+                    : 0,
+                statusBottom});
   const int resultTop = agentResult && agentFrame
                             ? agentResult->mapTo(agentFrame, QPoint()).y()
                             : 0;
@@ -1190,11 +1275,24 @@ bool testInspectorDetailParity() {
       agentResult ? agentResult->heightForWidth(agentResult->width()) : -1;
   result &= expect(agentStatus && agentStatus->width() > 0 &&
                        !agentStatus->visibleRegion().isEmpty(),
-                   "agent status occupies its metadata row instead of "
+                   "agent status occupies the card heading instead of "
                    "leaving an invisible gap");
   result &= expect(
+      agentTitle && agentTitle->text() == QStringLiteral("Agent") &&
+          agentTitle->property("kind").toString() == QStringLiteral("title") &&
+          agentTitle->contentsMargins().bottom() == 1 && agentName &&
+          agentName->text() == QStringLiteral("lifecycle_review") &&
+          agentName->property("kind").toString() == QStringLiteral("code") &&
+          agentName->toolTip() == QStringLiteral("/root/lifecycle_review") &&
+          agentStatus &&
+          agentStatus->geometry().left() > agentName->geometry().left() &&
+          !hasLabelContaining(inspector,
+                              QStringLiteral("/root/lifecycle_review")),
+      "agent cards show a regular monospace identity and right-aligned status "
+      "while retaining the full path as a tooltip");
+  result &= expect(
       agentFrame && agentFrame->layout() && agentResult &&
-          resultTop - statusBottom <= agentFrame->layout()->spacing() &&
+          resultTop - headingBottom <= agentFrame->layout()->spacing() &&
           agentResult->alignment().testFlag(Qt::AlignTop) &&
           resultHeightForWidth >= 0 &&
           agentResult->height() >= resultHeightForWidth - 1 &&
@@ -1236,6 +1334,7 @@ bool testInspectorDetailParity() {
           denyButton->property("kind") == "destructive" &&
           reviewButton->property("kind") == "request",
       "pending requests use warning surfaces and semantic actions");
+  qApp->setStyleSheet(previousStyleSheet);
   return result;
 }
 
