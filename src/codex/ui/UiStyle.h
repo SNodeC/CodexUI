@@ -50,7 +50,7 @@ inline constexpr auto redText = "#982f3d";
 inline constexpr auto purple = "#6941c6";
 
 QString applicationStyleSheet();
-enum class ChevronDirection { Down, Right };
+enum class ChevronDirection { Down, Left, Right };
 void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
                  bool highlighted,
                  ChevronDirection direction = ChevronDirection::Down);

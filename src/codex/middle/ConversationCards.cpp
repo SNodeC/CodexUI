@@ -64,6 +64,7 @@ public:
     setFocusPolicy(Qt::StrongFocus);
     setAccessibleName(QStringLiteral("Expand card"));
     setToolTip(accessibleName());
+    setProperty("chevronDirection", "left");
   }
 
   void setExpanded(bool expanded) {
@@ -73,16 +74,17 @@ public:
     setAccessibleName(expanded ? QStringLiteral("Collapse card")
                                : QStringLiteral("Expand card"));
     setToolTip(accessibleName());
+    setProperty("chevronDirection", expanded ? "down" : "left");
     update();
   }
 
 protected:
   void paintEvent(QPaintEvent *event) override {
-    QToolButton::paintEvent(event);
+    static_cast<void>(event);
     UiStyle::drawChevron(this, rect().adjusted(3, 3, -3, -3), isEnabled(),
                          underMouse() || hasFocus(),
                          expanded_ ? UiStyle::ChevronDirection::Down
-                                   : UiStyle::ChevronDirection::Right);
+                                   : UiStyle::ChevronDirection::Left);
   }
 
 private:
@@ -709,8 +711,10 @@ public:
   }
 
   void refreshFoldPresentation() {
+    const bool expandable = hasVisibleContent();
     disclosure->setExpanded(!collapsed);
-    content->setVisible(!collapsed && hasVisibleContent());
+    disclosure->setVisible(expandable);
+    content->setVisible(expandable && !collapsed);
   }
 
   void createChildren(CardKind kind) {

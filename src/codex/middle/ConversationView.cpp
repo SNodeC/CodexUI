@@ -658,19 +658,14 @@ void ConversationView::recomputeGeometry() {
     if (QWidget *cardContent = card->findChild<QWidget *>(
             QStringLiteral("conversationCardContent"));
         cardContent && cardContent->layout()) {
-      cardContent->layout()->invalidate();
       cardContent->layout()->activate();
-      cardContent->updateGeometry();
     }
     if (card->layout()) {
-      card->layout()->invalidate();
       card->layout()->activate();
     }
-    card->updateGeometry();
   }
   for (const auto &[key, section] : sections_) {
     static_cast<void>(key);
-    section->layout()->invalidate();
     section->layout()->activate();
   }
   contentLayout_->activate();
@@ -698,6 +693,7 @@ void ConversationView::recomputeGeometry() {
   verticalScrollBar()->setRange(
       0, std::max(0, contentHeight_ - viewport()->height()));
   positionContent();
+
   QCoreApplication::sendPostedEvents(content_, QEvent::LayoutRequest);
 }
 

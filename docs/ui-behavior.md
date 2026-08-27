@@ -129,7 +129,10 @@ never displayed as generic activity text.
 Process cards remain neutral so they support rather than dominate the user and
 Codex conversation. Status text alone uses canonical semantic state colors.
 
-Every conversation card uses the same keyboard-focusable disclosure chevron.
+Every conversation card with visible detail uses the same keyboard-focusable
+disclosure chevron: down when expanded and left when collapsed. Title-only
+cards, including Reasoning without a public summary, omit the chevron until
+detail arrives.
 You, Codex, and temporary You cards initially render expanded; Reasoning,
 Command execution, File changes, Agent activity, Image, Plan, and fallback
 activity cards initially render collapsed. A user-selected state survives

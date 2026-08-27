@@ -25,6 +25,10 @@ void drawChevron(QWidget *widget, const QRect &indicator, bool enabled,
     chevron.moveTo(center.x() - 1.5, center.y() - 3.5);
     chevron.lineTo(center.x() + 2.0, center.y());
     chevron.lineTo(center.x() - 1.5, center.y() + 3.5);
+  } else if (direction == ChevronDirection::Left) {
+    chevron.moveTo(center.x() + 1.5, center.y() - 3.5);
+    chevron.lineTo(center.x() - 2.0, center.y());
+    chevron.lineTo(center.x() + 1.5, center.y() + 3.5);
   } else {
     chevron.moveTo(center.x() - 3.5, center.y() - 1.5);
     chevron.lineTo(center.x(), center.y() + 2.0);
@@ -171,13 +175,7 @@ QString applicationStyleSheet() {
         QToolButton#cardDisclosureButton {
             background: transparent;
             border: 0;
-            border-radius: 5px;
             padding: 0;
-        }
-        QToolButton#cardDisclosureButton:hover { background: #f1f5fb; }
-        QToolButton#cardDisclosureButton:focus {
-            background: #e5eeff;
-            border: 1px solid #bfd3f9;
         }
         QPushButton[kind="agentLink"] { background: #e5eeff; border-color: #bfd3f9; color: #2f6feb; text-align: left; }
         QPushButton[kind="success"] { background: #18865e; border-color: #18865e; color: white; }

@@ -36,6 +36,35 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
+class LayoutRequestProbe final : public QObject {
+public:
+  explicit LayoutRequestProbe(QWidget *root) : root_(root) {
+    qApp->installEventFilter(this);
+  }
+
+  ~LayoutRequestProbe() override { qApp->removeEventFilter(this); }
+
+  void start() {
+    count = 0;
+    active = true;
+  }
+
+  int count = 0;
+  bool active = false;
+
+protected:
+  bool eventFilter(QObject *watched, QEvent *event) override {
+    auto *widget = qobject_cast<QWidget *>(watched);
+    if (active && event->type() == QEvent::LayoutRequest && widget &&
+        (widget == root_ || root_->isAncestorOf(widget)))
+      ++count;
+    return false;
+  }
+
+private:
+  QWidget *root_ = nullptr;
+};
+
 void spin(int milliseconds = 0) {
   QElapsedTimer timer;
   timer.start();
@@ -211,9 +240,14 @@ bool testFollowPauseAndStableAnchor() {
         "\nA reflowing upstream update.\nA second line.\nA third line.");
   }
   snapshot.sections.back().cards.push_back(agentCard("thread-a", "turn-2", 35));
+  LayoutRequestProbe layoutRequests(&view);
   result &= expect(view.reconcile(snapshot),
                    "paused incoming changes still materialize");
+  layoutRequests.start();
   spin();
+  result &= expect(layoutRequests.count <= 12,
+                   "a paused append leaves only bounded ancestor/new-card "
+                   "layout settlement, not per-card deferred work");
   const auto after = firstVisible(view);
   result &= expect(after.first == anchor.first &&
                        std::abs(after.second - anchor.second) <= 1,
@@ -670,11 +704,19 @@ bool testCardFoldingGeometryAndRetention() {
       "generic",
       GenericActivityData{QStringLiteral("Unknown activity"),
                           {{"detail", "bounded"}}}};
+  const VisibleCardData emptyReasoning{
+      AuthoritativeItemKey{thread, "turn", "empty-reasoning"},
+      CardKind::Reasoning,
+      thread,
+      "turn",
+      "empty-reasoning",
+      ReasoningData{}};
   ConversationSnapshot snapshot{thread,
                                 {{"turn:folding",
                                   "turn",
                                   {user, agent, reasoning, command, files,
-                                   activity, image, plan, generic}}},
+                                   activity, image, plan, generic,
+                                   emptyReasoning}}},
                                 0,
                                 false};
 
@@ -692,6 +734,8 @@ bool testCardFoldingGeometryAndRetention() {
   const std::vector<ConversationCard *> additionalActionCards{
       card(view, stableKey(activity.key)), card(view, stableKey(image.key)),
       card(view, stableKey(plan.key)), card(view, stableKey(generic.key))};
+  ConversationCard *emptyReasoningCard =
+      card(view, stableKey(emptyReasoning.key));
   result &= expect(
       userCard && agentCardWidget && reasoningCard && commandCard &&
           filesCard && !userCard->isCollapsed() &&
@@ -699,7 +743,9 @@ bool testCardFoldingGeometryAndRetention() {
           commandCard->isCollapsed() && filesCard->isCollapsed() &&
           disclosure(userCard) && disclosure(agentCardWidget) &&
           disclosure(reasoningCard) && disclosure(commandCard) &&
-          disclosure(filesCard),
+          disclosure(filesCard) &&
+          disclosure(userCard)->property("chevronDirection") == "down" &&
+          disclosure(reasoningCard)->property("chevronDirection") == "left",
       "all cards share disclosure controls with role-correct initial state");
   result &= expect(
       std::ranges::all_of(additionalActionCards,
@@ -708,9 +754,22 @@ bool testCardFoldingGeometryAndRetention() {
                                    disclosure(value);
                           }),
       "agent, image, plan, and fallback activity cards also start collapsed");
+  result &= expect(emptyReasoningCard && emptyReasoningCard->isCollapsed() &&
+                       disclosure(emptyReasoningCard) &&
+                       disclosure(emptyReasoningCard)->isHidden(),
+                   "title-only reasoning omits a meaningless disclosure");
   if (!userCard || !agentCardWidget || !reasoningCard || !commandCard ||
-      !filesCard)
+      !filesCard || !emptyReasoningCard)
     return false;
+
+  std::get<ReasoningData>(snapshot.sections.front().cards.back().payload)
+      .summary = QStringLiteral("Public reasoning summary arrived");
+  result &= expect(view.reconcile(snapshot),
+                   "empty reasoning accepts later public content");
+  result &= expect(!disclosure(emptyReasoningCard)->isHidden() &&
+                       disclosure(emptyReasoningCard)
+                               ->property("chevronDirection") == "left",
+                   "reasoning disclosure appears collapsed when detail arrives");
 
   const int userTop = userCard->mapTo(view.viewport(), QPoint{}).y();
   const int reasoningTop = reasoningCard->mapTo(view.viewport(), QPoint{}).y();
@@ -723,6 +782,7 @@ bool testCardFoldingGeometryAndRetention() {
       reasoningCard->mapTo(view.viewport(), QPoint{}).y() == reasoningTop &&
           userCard->mapTo(view.viewport(), QPoint{}).y() == userTop &&
           expandedReasoningHeight > foldedReasoningHeight &&
+          disclosure(reasoningCard)->property("chevronDirection") == "down" &&
           filesCard->mapTo(view.viewport(), QPoint{}).y() ==
               filesTop + expandedReasoningHeight - foldedReasoningHeight,
       "expansion fixes the affected title and grows only downward");
