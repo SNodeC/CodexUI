@@ -729,10 +729,19 @@ bool testThreadRowReorderOwnership() {
   spin();
   result &= expect(!threadB->data(Qt::UserRole + 1).toBool(),
                    "closing row actions clears the native context hover");
+  QPointer<QWidget> stableThreadARow = list->itemWidget(threadA);
   QPointer<QWidget> originalRow = list->itemWidget(threadB);
 
+  model.applyEvent(presentation::event(
+      3, 1, "thread.status.changed", {{"status", "completed"}},
+      presentation::Authority::Merge, {{"threadId", "thread-b"}}));
+  pane.refresh(model, "thread-a");
+  result &= expect(stableThreadARow == list->itemWidget(threadA) &&
+                       originalRow == list->itemWidget(threadB),
+                   "content-only refreshes preserve thread row widgets");
+
   model.applyEvent(presentation::result(
-      3, 1, "threads.list", "reordered-threads", true,
+      4, 1, "threads.list", "reordered-threads", true,
       {{"threads",
         nlohmann::json::array({{{"id", "thread-a"}, {"name", "Z"}},
                                {{"id", "thread-b"}, {"name", "B"}}})}},

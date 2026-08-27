@@ -110,6 +110,7 @@ private:
   std::string threadId_;
   std::unordered_map<std::string, TurnSectionWidget *> sections_;
   std::unordered_map<std::string, ConversationCard *> cards_;
+  std::vector<std::string> displayedSectionKeys_;
   std::vector<std::string> displayedCardKeys_;
   std::unordered_map<std::string, ThreadScrollState> threadStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>
@@ -118,7 +119,6 @@ private:
 
   Mode mode_ = Mode::Following;
   int trailingSpaceHeight_ = 0;
-  int foldBottomCompensation_ = 0;
   int naturalContentHeight_ = 0;
   int contentHeight_ = 0;
   QString emptyMessage_;

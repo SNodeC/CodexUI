@@ -117,6 +117,25 @@ ConversationCard *card(ConversationView &view, const std::string &key) {
   return nullptr;
 }
 
+std::vector<std::string> visualCardKeys(ConversationView &view) {
+  std::vector<ConversationCard *> cards;
+  for (QWidget *widget : view.findChildren<QWidget *>())
+    if (auto *candidate = dynamic_cast<ConversationCard *>(widget))
+      cards.push_back(candidate);
+  std::ranges::sort(cards, [&view](QWidget *left, QWidget *right) {
+    return left->mapTo(view.viewport(), QPoint{}).y() <
+           right->mapTo(view.viewport(), QPoint{}).y();
+  });
+
+  std::vector<std::string> keys;
+  keys.reserve(cards.size());
+  for (ConversationCard *candidate : cards)
+    keys.push_back(candidate->property("conversationAnchorKey")
+                       .toString()
+                       .toStdString());
+  return keys;
+}
+
 QToolButton *disclosure(ConversationCard *card) {
   return card ? card->findChild<QToolButton *>(
                     QStringLiteral("cardDisclosureButton"))
@@ -187,6 +206,40 @@ void mouseWheelNotch(ConversationView &view, int angleDelta) {
                     Qt::NoModifier, Qt::ScrollUpdate, false);
   QApplication::sendEvent(view.viewport(), &event);
   spin();
+}
+
+bool testStructuralOrderAndIdentity() {
+  ConversationView view;
+  view.resize(620, 420);
+  view.show();
+  ConversationSnapshot snapshot = conversation("structural-order", 8);
+  view.reconcile(snapshot);
+  spin();
+
+  std::unordered_map<std::string, ConversationCard *> identities;
+  for (const TurnSection &section : snapshot.sections)
+    for (const VisibleCardData &value : section.cards)
+      identities.emplace(stableKey(value.key), card(view, stableKey(value.key)));
+
+  for (TurnSection &section : snapshot.sections)
+    std::ranges::reverse(section.cards);
+  std::ranges::reverse(snapshot.sections);
+  std::vector<std::string> expectedKeys;
+  for (const TurnSection &section : snapshot.sections)
+    for (const VisibleCardData &value : section.cards)
+      expectedKeys.push_back(stableKey(value.key));
+
+  bool result = expect(view.reconcile(snapshot),
+                       "structural order changes reconcile");
+  spin();
+  result &= expect(visualCardKeys(view) == expectedKeys,
+                   "section and card order follows the projection exactly");
+  bool retainedIdentity = true;
+  for (const auto &[key, identity] : identities)
+    retainedIdentity = retainedIdentity && card(view, key) == identity;
+  result &= expect(retainedIdentity,
+                   "structural moves preserve same-kind card identity");
+  return result;
 }
 
 bool testFollowPauseAndStableAnchor() {
@@ -915,24 +968,41 @@ bool testCardFoldingGeometryAndRetention() {
       edgeCard ? edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() : 0;
   result &= expect(setFolded(edgeCard, false),
                    "bottom-edge command expands from its compact default");
-  result &=
-      expect(edgeCard && edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() ==
-                             collapsedTop,
-             "bottom-edge expansion keeps the selected title fixed");
+  result &= expect(
+      edgeCard && edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() <
+                      collapsedTop &&
+          edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() +
+                  edgeCard->height() <=
+              edgeView.viewport()->height(),
+      "bottom-edge expansion shifts upward to reveal the complete card");
   wheel(edgeView, -10000);
   const int followedTitleTop =
       edgeCard ? edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() : 0;
+  const int expandedScrollMaximum = edgeView.verticalScrollBar()->maximum();
   result &= expect(edgeView.isAtBottom() && followedTitleTop >= 0,
                    "expanded lower-limit fixture exposes its title at bottom");
   result &= expect(setFolded(edgeCard, true),
                    "expanded bottom-edge command collapses");
   spin(120);
-  result &=
-      expect(edgeCard &&
-                 edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() ==
-                     followedTitleTop &&
-                 edgeView.mode() == ConversationView::Mode::Paused,
-             "bottom compensation defeats range clamping and fixes the title");
+  result &= expect(
+      edgeCard && edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() >
+                      followedTitleTop &&
+          edgeView.verticalScrollBar()->maximum() < expandedScrollMaximum &&
+          edgeView.isAtBottom() &&
+          edgeView.mode() == ConversationView::Mode::Paused,
+      "bottom-edge collapse accepts the natural range without a blank tail");
+  constexpr int ComposerOverlayHeight = 80;
+  edgeView.setTrailingSpaceHeight(ComposerOverlayHeight);
+  result &= expect(setFolded(edgeCard, false),
+                   "bottom-edge command expands again");
+  spin(120);
+  result &= expect(
+      edgeView.verticalScrollBar()->maximum() ==
+              expandedScrollMaximum + ComposerOverlayHeight &&
+          edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() +
+                  edgeCard->height() <=
+              edgeView.viewport()->height() - ComposerOverlayHeight,
+      "fold round trip reveals the complete card above a grown composer");
   return result;
 }
 
@@ -1346,7 +1416,8 @@ bool testGeneratedImagePresentationAndGenericBound() {
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
   using namespace codexui::codex::middle;
-  bool result = testFollowPauseAndStableAnchor();
+  bool result = testStructuralOrderAndIdentity();
+  result &= testFollowPauseAndStableAnchor();
   result &= testThreadLocalScrollAndComposerExtent();
   result &= testPromptAdmissionFollowOwnership();
   result &= testMutableCardsAndCommandOutput();

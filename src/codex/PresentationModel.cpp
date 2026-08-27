@@ -6,6 +6,7 @@
 #include "codex/PresentationStatus.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace codexui::codex {
 namespace {
@@ -576,15 +577,6 @@ std::size_t PresentationModel::pendingRequestCount() const noexcept {
   return pendingRequests.size();
 }
 
-std::size_t PresentationModel::pendingRequestCount(
-    const std::string &threadId) const noexcept {
-  return static_cast<std::size_t>(
-      std::count_if(pendingRequests.begin(), pendingRequests.end(),
-                    [&threadId](const auto &entry) {
-                      return entry.second.threadId == threadId;
-                    }));
-}
-
 const ConnectionPresentation &PresentationModel::connection() const noexcept {
   return connectionState;
 }
@@ -612,24 +604,29 @@ void PresentationModel::mergeThreadList(const nlohmann::json &listedThreads) {
   if (!listedThreads.is_array())
     return;
 
-  std::vector<std::string> listedIds;
+  std::unordered_set<std::string> listedIds;
   listedIds.reserve(listedThreads.size());
+  std::vector<std::string> nextOrder;
+  nextOrder.reserve(listedThreads.size() + orderedThreads.size());
   for (const auto &raw : listedThreads) {
     const std::string id = stringValue(raw, "id");
     if (id.empty())
       continue;
-    upsertThread(raw, false);
-    listedIds.push_back(id);
+    upsertThread(raw, false, false);
+    if (listedIds.insert(id).second)
+      nextOrder.push_back(id);
   }
 
-  for (const std::string &id : listedIds)
-    std::erase(orderedThreads, id);
-  orderedThreads.insert(orderedThreads.begin(), listedIds.begin(),
-                        listedIds.end());
+  for (const std::string &id : orderedThreads) {
+    if (!listedIds.contains(id))
+      nextOrder.push_back(id);
+  }
+  orderedThreads = std::move(nextOrder);
 }
 
 ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
-                                                    bool replaceTurns) {
+                                                    bool replaceTurns,
+                                                    bool prependNewThread) {
   const std::string id = stringValue(raw, "id");
   if (id.empty()) {
     static ThreadPresentation ignored;
@@ -639,7 +636,8 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
   ThreadPresentation &result = iterator->second;
   if (inserted) {
     result.id = id;
-    orderedThreads.insert(orderedThreads.begin(), id);
+    if (prependNewThread)
+      orderedThreads.insert(orderedThreads.begin(), id);
   }
   const std::string previousThreadStatus = result.status;
   std::unordered_map<std::string, std::string> terminalTurnStatuses;

@@ -101,8 +101,6 @@ public:
   [[nodiscard]] std::optional<std::string>
   activeTurnId(const std::string &threadId) const;
   [[nodiscard]] std::size_t pendingRequestCount() const noexcept;
-  [[nodiscard]] std::size_t
-  pendingRequestCount(const std::string &threadId) const noexcept;
   [[nodiscard]] const ConnectionPresentation &connection() const noexcept;
   [[nodiscard]] const nlohmann::json &modelCatalog() const noexcept;
   [[nodiscard]] const std::unordered_map<std::string, nlohmann::json> &
@@ -117,7 +115,8 @@ private:
   void applyValidatedEvent(const nlohmann::json &event);
   void mergeThreadList(const nlohmann::json &listedThreads);
   ThreadPresentation &upsertThread(const nlohmann::json &raw,
-                                   bool replaceTurns);
+                                   bool replaceTurns,
+                                   bool prependNewThread = true);
   TurnPresentation &upsertTurn(ThreadPresentation &thread,
                                const nlohmann::json &raw, bool replaceItems);
   ItemPresentation &upsertItem(ThreadPresentation &thread,
