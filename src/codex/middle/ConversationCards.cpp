@@ -124,7 +124,6 @@ public:
                   .arg(QFileInfo(path_).fileName()));
       setProperty("imageAvailable", false);
       unsetCursor();
-      path_.clear();
       return;
     }
     setProperty("imageAvailable", true);
@@ -132,9 +131,15 @@ public:
     setFixedSize(image.size() + QSize(8, 8));
   }
 
+  [[nodiscard]] bool represents(const QString &path) const {
+    return path_ == path &&
+           property("imageAvailable").toBool() == QFileInfo(path).isFile();
+  }
+
 protected:
   void mousePressEvent(QMouseEvent *event) override {
-    if (event->button() == Qt::LeftButton && !path_.isEmpty()) {
+    if (event->button() == Qt::LeftButton &&
+        property("imageAvailable").toBool()) {
       openImageViewer(path_);
       event->accept();
       return;
@@ -720,7 +725,17 @@ public:
     contentLayout->addWidget(images);
   }
 
-  void setImages(const QStringList &paths) {
+  void setImages(const QStringList &paths, bool forceRebuild = false) {
+    bool matches = !forceRebuild && imageLayout->count() == paths.size();
+    for (qsizetype index = 0; matches && index < paths.size(); ++index) {
+      const auto *thumbnail = dynamic_cast<ImageThumbnail *>(
+          imageLayout->itemAt(static_cast<int>(index))->widget());
+      matches = thumbnail && thumbnail->represents(paths.at(index));
+    }
+    if (matches) {
+      images->setVisible(!paths.isEmpty());
+      return;
+    }
     while (QLayoutItem *item = imageLayout->takeAt(0)) {
       delete item->widget();
       delete item;
@@ -902,7 +917,10 @@ public:
     setVisibleText(metadata, displayStatus(image.status));
     setStatusTone(metadata, image.status);
     setVisibleText(body, image.revisedPrompt);
-    setImages(image.path.isEmpty() ? QStringList{} : QStringList{image.path});
+    // A generated image can become readable at the same path as its status
+    // advances, so its update remains the authoritative reload boundary.
+    setImages(image.path.isEmpty() ? QStringList{} : QStringList{image.path},
+              true);
   }
 
   void createComposition(const GenericActivityData &activity) {

@@ -8,9 +8,11 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFont>
 #include <QImage>
 #include <QLabel>
+#include <QPointer>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QTemporaryDir>
@@ -1542,6 +1544,15 @@ bool testMessageImagePresentation() {
                  !thumbnailPixmap.isNull() && thumbnailPixmap.width() <= 280 &&
                  thumbnailPixmap.height() <= 180,
              "a local image is decoded directly to a bounded thumbnail");
+  auto &payload = std::get<UserMessageData>(message.payload);
+  payload.text = QStringLiteral("attached image with edited text");
+  result &= expect(card->apply(message),
+                   "message text updates with an unchanged attachment");
+  auto *retainedThumbnail =
+      card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
+  result &= expect(retainedThumbnail == thumbnail,
+                   "an unchanged attachment retains its decoded thumbnail");
+  thumbnail = retainedThumbnail;
   if (thumbnail) {
     const QPointF local(thumbnail->rect().center());
     QMouseEvent click(QEvent::MouseButtonPress, local, local,
@@ -1565,16 +1576,40 @@ bool testMessageImagePresentation() {
     viewer->close();
   spin();
 
-  auto &payload = std::get<UserMessageData>(message.payload);
-  payload.imagePaths = {directory.filePath(QStringLiteral("missing.png"))};
+  const QString missingPath = directory.filePath(QStringLiteral("missing.png"));
+  QPointer<QLabel> retainedGuard(retainedThumbnail);
+  payload.imagePaths = {missingPath};
   result &= expect(card->apply(message),
                    "changing the image list invalidates card presentation");
-  thumbnail =
+  auto *missingThumbnail =
       card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
-  result &=
-      expect(thumbnail && !thumbnail->property("imageAvailable").toBool() &&
-                 thumbnail->text().contains(QStringLiteral("unavailable")),
-             "an unreadable image has a stable restrained placeholder");
+  result &= expect(
+      retainedGuard.isNull() && missingThumbnail &&
+          !missingThumbnail->property("imageAvailable").toBool() &&
+          missingThumbnail->text().contains(QStringLiteral("unavailable")),
+      "an unreadable image has a stable restrained placeholder");
+
+  result &= expect(source.save(missingPath),
+                   "the missing attachment can be recreated");
+  QPointer<QLabel> missingGuard(missingThumbnail);
+  payload.text += QStringLiteral(" after recreation");
+  card->apply(message);
+  auto *recreatedThumbnail =
+      card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
+  result &= expect(missingGuard.isNull() && recreatedThumbnail &&
+                       recreatedThumbnail->property("imageAvailable").toBool(),
+                   "recreating an attachment replaces its placeholder");
+
+  result &= expect(QFile::remove(missingPath),
+                   "the recreated attachment can be deleted");
+  QPointer<QLabel> recreatedGuard(recreatedThumbnail);
+  payload.text += QStringLiteral(" after deletion");
+  card->apply(message);
+  auto *deletedThumbnail =
+      card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
+  result &= expect(recreatedGuard.isNull() && deletedThumbnail &&
+                       !deletedThumbnail->property("imageAvailable").toBool(),
+                   "deleting an attachment restores its placeholder");
 
   payload.imagePaths = {path};
   card->apply(message);
