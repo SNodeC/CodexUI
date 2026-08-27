@@ -9,10 +9,13 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <optional>
 #include <string>
+#include <vector>
 
 class QLabel;
 class QPlainTextEdit;
@@ -45,6 +48,62 @@ public:
   [[nodiscard]] QTabWidget *tabs() const noexcept { return inspectorTabs; }
 
 private:
+  struct PlanStepSnapshot {
+    std::string step;
+    std::string status;
+
+    bool operator==(const PlanStepSnapshot &) const = default;
+  };
+  struct PlanContentSnapshot {
+    std::string explanation;
+    std::vector<PlanStepSnapshot> steps;
+
+    bool operator==(const PlanContentSnapshot &) const = default;
+  };
+  struct PlanSnapshot {
+    std::string threadId;
+    bool threadPresent = false;
+    std::optional<PlanContentSnapshot> plan;
+    std::optional<std::string> planItem;
+
+    bool operator==(const PlanSnapshot &) const = default;
+  };
+  struct AgentSnapshot {
+    std::string id;
+    std::string status;
+    std::string childThreadId;
+    std::string agentPath;
+    std::string tool;
+    std::string model;
+    std::string reasoningEffort;
+    std::string prompt;
+    std::string resultText;
+    std::string senderThreadId;
+    std::vector<std::string> receiverThreadIds;
+
+    bool operator==(const AgentSnapshot &) const = default;
+  };
+  struct AgentsSnapshot {
+    std::string threadId;
+    bool threadPresent = false;
+    std::vector<AgentSnapshot> agents;
+
+    bool operator==(const AgentsSnapshot &) const = default;
+  };
+  struct RequestSnapshot {
+    std::string id;
+    std::string kind;
+    std::string threadContext;
+    std::uint64_t generation = 0;
+    std::string command;
+    std::string reason;
+    std::string message;
+    std::optional<std::size_t> questionCount;
+
+    bool operator==(const RequestSnapshot &) const = default;
+  };
+
+  static QFrame *agentFrame(const AgentSnapshot &agent);
   void refreshCurrentTab();
   void refreshPlan();
   void refreshAgents();
@@ -74,9 +133,9 @@ private:
   QPlainTextEdit *protocolLog = nullptr;
   QLabel *protocolStats = nullptr;
 
-  QByteArray planSnapshot;
-  QByteArray agentsSnapshot;
-  QByteArray requestsSnapshot;
+  std::optional<PlanSnapshot> planSnapshot;
+  std::optional<AgentsSnapshot> agentsSnapshot;
+  std::optional<std::vector<RequestSnapshot>> requestsSnapshot;
   QByteArray stateSnapshot;
   QByteArray protocolStatsSnapshot;
   std::deque<QString> protocolLines;

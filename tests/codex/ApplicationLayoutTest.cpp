@@ -923,7 +923,8 @@ bool testInfoViewerLayout() {
 bool testInspectorDetailParity() {
   PresentationModel model;
   model.applyEvent(presentation::event(
-      1, 1, "thread.upsert", {{"thread", {{"id", "owner-thread"}}}},
+      1, 1, "thread.upsert",
+      {{"thread", {{"id", "owner-thread"}, {"name", "Original title"}}}},
       presentation::Authority::Merge, {{"threadId", "owner-thread"}}));
   model.applyEvent(presentation::event(
       2, 1, "agents.activity.upsert",
@@ -972,8 +973,20 @@ bool testInspectorDetailParity() {
                    "running agent status uses the canonical active tone");
   inspector.tabs()->setCurrentIndex(3);
   spin(20);
-  result &= expect(hasLabelContaining(inspector, QStringLiteral("3 questions")),
-                   "Requests show their retained question count");
+  result &= expect(
+      hasLabelContaining(inspector, QStringLiteral("thread Original title")) &&
+          hasLabelContaining(inspector, QStringLiteral("3 questions")),
+      "Requests show their thread title and retained question count");
+  model.applyEvent(presentation::event(
+      4, 1, "thread.name.changed", {{"name", "Renamed title"}},
+      presentation::Authority::Replace, {{"threadId", "owner-thread"}}));
+  inspector.refresh(model, "owner-thread");
+  spin(20);
+  result &= expect(
+      hasLabelContaining(inspector, QStringLiteral("thread Renamed title")) &&
+          !hasLabelContaining(inspector,
+                              QStringLiteral("thread Original title")),
+      "Requests update their thread label after a thread rename");
   QFrame *requestFrame = nullptr;
   for (QFrame *frame : inspector.findChildren<QFrame *>()) {
     if (frame->property("tone") == "warning") {
