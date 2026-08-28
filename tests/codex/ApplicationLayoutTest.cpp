@@ -114,6 +114,14 @@ bool hasLabelContaining(const QWidget &root, const QString &text) {
   return false;
 }
 
+bool hasButtonText(const QWidget &root, const QString &text) {
+  for (const QPushButton *button : root.findChildren<QPushButton *>()) {
+    if (button->text() == text)
+      return true;
+  }
+  return false;
+}
+
 void spin(int milliseconds = 0) {
   QElapsedTimer timer;
   timer.start();
@@ -377,6 +385,25 @@ bool testOverlayGeometryAndRegionRouting() {
       "prompt contraction restores canonical layout, gaps, and trailing space");
   region.composer().setActiveTurn(false);
   spin(20);
+  result &= expect(view.isAtBottom(), "conversation begins at the bottom");
+  region.composer().setAttentionRequest(
+      QStringLiteral("Command approval requested"),
+      QStringLiteral("Command: gh auth status  |  Reason: Verify GitHub "
+                     "authentication"),
+      true, QStringLiteral("Accept"));
+  region.composer().setAttentionVisible(true);
+  spin(20);
+  result &= expect(
+      hasLabelContaining(region.composer(),
+                         QStringLiteral("Command approval requested")) &&
+          hasLabelContaining(region.composer(),
+                             QStringLiteral("Command: gh auth status")) &&
+          hasButtonText(region.composer(), QStringLiteral("Reject")) &&
+          hasButtonText(region.composer(), QStringLiteral("Accept")),
+      "composer attention requests show details and direct semantic actions");
+  region.composer().setAttentionVisible(false);
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
+  spin(10);
 
   ComposerPane::Actions rejected;
   rejected.submit = [](QString, std::vector<AttachmentDraft>) { return false; };
@@ -396,7 +423,6 @@ bool testOverlayGeometryAndRegionRouting() {
   result &= expect(region.composer().promptEditor()->toPlainText().isEmpty(),
                    "successful local admission clears the draft exactly once");
 
-  result &= expect(view.isAtBottom(), "conversation begins at the bottom");
   QWheelEvent overLeftHandle = wheelFor(splitter->handle(1), 180);
   result &=
       expect(region.routeScrollEvent(splitter->handle(1), &overLeftHandle) &&
@@ -553,11 +579,16 @@ bool testIncrementalThreadSettings() {
   auto *model = settings.findChild<QComboBox *>(QStringLiteral("codexModel"));
   auto *approval =
       settings.findChild<QComboBox *>(QStringLiteral("codexApproval"));
+  auto *personality =
+      settings.findChild<QComboBox *>(QStringLiteral("codexPersonality"));
   auto *access =
       settings.findChild<QComboBox *>(QStringLiteral("codexSandbox"));
   auto *network =
       settings.findChild<QComboBox *>(QStringLiteral("codexNetwork"));
-  if (!model || !approval || !access || !network)
+  auto *permissionProfile = settings.findChild<QComboBox *>(
+      QStringLiteral("codexPermissionProfile"));
+  if (!model || !approval || !personality || !access || !network ||
+      !permissionProfile)
     return expect(false, "thread settings controls are discoverable");
 
   bool canonicalSettingsStyle = settings.styleSheet().isEmpty();
@@ -623,6 +654,71 @@ bool testIncrementalThreadSettings() {
                        network->currentData().toString() ==
                            QStringLiteral("enabled"),
                    "only logically redundant network selection is disabled");
+
+  settings.setContext(
+      "workspace-profile-thread",
+      {{"sandboxPolicy",
+        {{"type", "workspaceWrite"}, {"networkAccess", false}}},
+       {"activePermissionProfile", {{"id", ":workspace"}}}},
+      nlohmann::json::array(),
+      {{"data", nlohmann::json::array(
+                    {{{"id", ":workspace"}, {"allowed", true}},
+                     {{"id", ":read-only"}, {"allowed", true}},
+                     {{"id", ":danger-full-access"}, {"allowed", true}}})}});
+  result &= expect(
+      permissionProfile->itemText(
+          permissionProfile->findData(QStringLiteral(":workspace"))) ==
+              QStringLiteral("Workspace") &&
+          permissionProfile->itemText(
+              permissionProfile->findData(QStringLiteral(":read-only"))) ==
+              QStringLiteral("Read only") &&
+          permissionProfile->itemText(permissionProfile->findData(
+              QStringLiteral(":danger-full-access"))) ==
+              QStringLiteral("Full access"),
+      "built-in permission profiles have user-facing labels");
+
+  access->setCurrentIndex(
+      access->findData(QStringLiteral("danger-full-access")));
+  const nlohmann::json explicitAccessTurn = settings.turnStartOptions();
+  const nlohmann::json explicitAccessThread = settings.threadStartOptions();
+  result &= expect(
+      permissionProfile->currentData().toString() ==
+              QStringLiteral("default") &&
+          !explicitAccessTurn.contains("permissions") &&
+          explicitAccessTurn.value("sandboxPolicy", nlohmann::json(nullptr)) ==
+              nlohmann::json({{"type", "dangerFullAccess"}}) &&
+          !explicitAccessThread.contains("permissions") &&
+          explicitAccessThread.value("sandbox", nlohmann::json(nullptr)) ==
+              nlohmann::json("danger-full-access"),
+      "an explicit access choice replaces the active permission profile");
+
+  settings.setContext(
+      "individual-overrides-thread",
+      {{"model", "gpt-a"},
+       {"approvalPolicy", "never"},
+       {"personality", "friendly"},
+       {"sandboxPolicy",
+        {{"type", "workspaceWrite"}, {"networkAccess", false}}},
+       {"activePermissionProfile", {{"id", ":workspace"}}}},
+      models,
+      {{"data", nlohmann::json::array(
+                    {{{"id", ":workspace"}, {"allowed", true}}})}});
+  model->setCurrentIndex(model->findData(QStringLiteral("gpt-b")));
+  approval->setCurrentIndex(
+      approval->findData(QStringLiteral("on-request")));
+  personality->setCurrentIndex(
+      personality->findData(QStringLiteral("pragmatic")));
+  const nlohmann::json individualOverrides = settings.turnStartOptions();
+  result &= expect(
+      permissionProfile->currentData().toString() ==
+              QStringLiteral(":workspace") &&
+          individualOverrides.value("model", "") == "gpt-b" &&
+          individualOverrides.value("approvalPolicy", "") == "on-request" &&
+          individualOverrides.value("personality", "") == "pragmatic" &&
+          !individualOverrides.contains("sandboxPolicy") &&
+          !individualOverrides.contains("permissions"),
+      "supported individual settings override retained thread values without "
+      "discarding its permission profile");
 
   return result;
 }
@@ -1344,19 +1440,45 @@ bool testInspectorDetailParity() {
       break;
     }
   }
-  QPushButton *denyButton = nullptr;
+  QPushButton *rejectButton = nullptr;
   QPushButton *reviewButton = nullptr;
   for (QPushButton *button : inspector.findChildren<QPushButton *>()) {
-    if (button->text() == QStringLiteral("Deny"))
-      denyButton = button;
+    if (button->text() == QStringLiteral("Reject"))
+      rejectButton = button;
     else if (button->text() == QStringLiteral("Review"))
       reviewButton = button;
   }
   result &= expect(
-      requestFrame && denyButton && reviewButton &&
-          denyButton->property("kind") == "destructive" &&
+      requestFrame && rejectButton && reviewButton &&
+          rejectButton->property("kind") == "destructive" &&
           reviewButton->property("kind") == "request",
-      "pending requests use warning surfaces and semantic actions");
+      "complex pending requests use warning surfaces and a review action");
+  model.applyEvent(presentation::event(
+      6, 1, "pending-request.upsert",
+      {{"requestId", "request-two"},
+       {"category", "command-approval"},
+       {"request",
+        {{"command", "gh auth status"},
+         {"reason", "Verify GitHub authentication"},
+         {"cwd", "/home/voc/projects/drafts"}}}},
+      presentation::Authority::Merge,
+      {{"threadId", "owner-thread"}, {"requestId", "request-two"}}));
+  inspector.refresh(model, "owner-thread");
+  spin(20);
+  QPushButton *acceptButton = nullptr;
+  for (QPushButton *button : inspector.findChildren<QPushButton *>()) {
+    if (button->text() == QStringLiteral("Accept")) {
+      acceptButton = button;
+      break;
+    }
+  }
+  result &= expect(
+      acceptButton &&
+          acceptButton->property("kind").toString() == QStringLiteral("request") &&
+          hasLabelContaining(inspector, QStringLiteral("Command: gh auth status")) &&
+          hasLabelContaining(inspector,
+                             QStringLiteral("Reason: Verify GitHub authentication")),
+      "simple approval requests show decision details and direct accept");
   qApp->setStyleSheet(previousStyleSheet);
   return result;
 }

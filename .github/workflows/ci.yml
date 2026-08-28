@@ -43,7 +43,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: 60c81c7f1fb7938e03725cdea4a87e617efae57e
+          ref: 5aeedb2c21d7da0d611219365294cc3fb052cddf
           path: _deps/aisuite
 
       - name: Install build dependencies
@@ -136,3 +136,59 @@ jobs:
           else
             git diff --check HEAD^ HEAD
           fi
+
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out exact CodexUI head
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: >-
+            ${{ github.event_name == 'pull_request' &&
+                github.event.pull_request.head.sha || github.sha }}
+          path: CodexUI/codexui
+
+      - name: Check out pinned AISuite frontend SDK
+        uses: actions/checkout@v5
+        with:
+          repository: SNodeC/AISuite
+          ref: 5aeedb2c21d7da0d611219365294cc3fb052cddf
+          path: AISuite-extraction/AISuite-final
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            AISuite-extraction/AISuite-final/packages/codex-frontend/package-lock.json
+            CodexUI/codexui/web/package-lock.json
+
+      - name: Verify the paired SDK revision
+        working-directory: CodexUI/codexui
+        run: |
+          test "$(git -C ../../AISuite-extraction/AISuite-final rev-parse HEAD)" = \
+            "$(cat web/AISUITE_REVISION)"
+
+      - name: Test the frontend SDK
+        working-directory: AISuite-extraction/AISuite-final/packages/codex-frontend
+        run: |
+          npm ci
+          npm test
+          npm pack --dry-run
+
+      - name: Test and qualify CodexWebUI
+        working-directory: CodexUI/codexui
+        run: |
+          npm ci --prefix web
+          npm run release --prefix web
+
+      - name: Upload CodexWebUI production artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codexui-web
+          path: CodexUI/codexui/web/app-dist
+          if-no-files-found: error

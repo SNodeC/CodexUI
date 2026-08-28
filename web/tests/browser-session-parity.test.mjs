@@ -1,0 +1,154 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
+import {cardKeys, stableKey} from "../dist/index.js";
+
+class FakeSocket {
+    protocol = "codex";
+    readyState = 0;
+    bufferedAmount = 0;
+    binaryType = "arraybuffer";
+    onopen = null;
+    onmessage = null;
+    onerror = null;
+    onclose = null;
+    sent = [];
+    send(data) { this.sent.push(JSON.parse(data)); }
+    close(_code, reason) { this.readyState = 3; this.onclose?.({reason}); }
+    open() { this.readyState = 1; this.onopen?.(); }
+    receive(message) { this.onmessage?.({data: JSON.stringify(message)}); }
+    receiveText(data) { this.onmessage?.({data}); }
+}
+
+function appserver(payload) { return {kind: "appserver", payload}; }
+function requests(socket, method) {
+    return socket.sent.filter(message => message.kind === "appserver" && message.payload.method === method);
+}
+function respond(socket, request, result) {
+    socket.receive(appserver({jsonrpc: "2.0", id: request.payload.id, result}));
+}
+const waitForPublish = () => new Promise(resolve => setTimeout(resolve, 25));
+
+test("browser session defaults to the bridge's canonical WebSocket endpoint", () => {
+    assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "ws://127.0.0.1:8080/codex");
+    globalThis.window = {
+        localStorage: {getItem: () => null},
+        location: {protocol: "https:", host: "codex.example:8443"},
+    };
+    try {
+        assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://codex.example:8443/codex");
+        globalThis.window.localStorage.getItem = () => "wss://configured.example/bridge";
+        assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://configured.example/bridge");
+    } finally {
+        delete globalThis.window;
+    }
+});
+
+test("browser session uses the C++ action routing and preserves prompt-response order", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect();
+    socket.open();
+    socket.receive({kind: "bridge.connection", event: "opened", connectionId: "web-test", role: "observer"});
+    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+
+    const threadList = requests(socket, "thread/list").at(-1);
+    const modelList = requests(socket, "model/list").at(-1);
+    const profiles = requests(socket, "permissionProfile/list").at(-1);
+    assert.ok(threadList && modelList && profiles, "native catalog actions map to current protocol methods");
+    respond(socket, threadList, {data: [{id: "thread-1", preview: "Browser parity", cwd: "/workspace", status: {type: "idle"}}]});
+    respond(socket, modelList, {data: [{id: "gpt-current", displayName: "Current"}]});
+    respond(socket, profiles, {data: []});
+    session.selectThread("thread-1");
+    const read = requests(socket, "thread/read").at(-1);
+    assert.deepEqual(read.payload.params, {threadId: "thread-1", includeTurns: true});
+    respond(socket, read, {thread: {id: "thread-1", preview: "Browser parity", cwd: "/workspace", status: {type: "idle"}, turns: []}});
+
+    assert.equal(await session.submitPrompt("new prompt"), true);
+    await Promise.resolve();
+    const start = requests(socket, "turn/start").at(-1);
+    assert.ok(start);
+    assert.equal(start.payload.params.threadId, "thread-1");
+    assert.equal(start.payload.params.input[0].text, "new prompt");
+    assert.match(start.payload.params.clientUserMessageId, /^codexui-/u);
+
+    socket.receive(appserver({jsonrpc: "2.0", method: "turn/started", params: {
+        threadId: "thread-1", turn: {id: "turn-1", status: "inProgress", items: []},
+    }}));
+    socket.receive(appserver({jsonrpc: "2.0", method: "item/started", params: {
+        threadId: "thread-1", turnId: "turn-1", item: {id: "reasoning-1", type: "reasoning", summary: []},
+    }}));
+    socket.receive(appserver({jsonrpc: "2.0", method: "item/started", params: {
+        threadId: "thread-1", turnId: "turn-1", item: {
+            id: "user-1", type: "userMessage", clientId: start.payload.params.clientUserMessageId,
+            content: [{type: "text", text: "new prompt"}],
+        },
+    }}));
+    respond(socket, start, {turn: {id: "turn-1", status: "inProgress"}});
+    await waitForPublish();
+
+    const visible = cardKeys(session.getSnapshot().conversation).map(stableKey);
+    assert.equal(visible.length, 2);
+    assert.match(visible[0], /^prompt:/u);
+    assert.equal(visible[1], stableKey({kind: "item", threadId: "thread-1", turnId: "turn-1", itemId: "reasoning-1"}));
+    assert.equal(session.model.connection().connected, true);
+    assert.equal(session.model.connection().providerState, "ready");
+    await new Promise(resolve => setTimeout(resolve, 510));
+    assert.equal(session.getSnapshot().conversation.sections[0].cards[0].kind, "userMessage",
+        "the native 500ms acknowledgement timer materializes without another server event");
+    session.dispose();
+});
+
+test("browser transport reconnects cleanly across provider generations", async () => {
+    const sockets = [];
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => {
+        const socket = new FakeSocket(); sockets.push(socket); return socket;
+    });
+    session.connect(); sockets[0].open();
+    sockets[0].receive({kind: "bridge.connection", event: "opened", connectionId: "first", role: "observer"});
+    sockets[0].receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+    respond(sockets[0], requests(sockets[0], "thread/list").at(-1), {data: [{id: "old-thread"}]});
+    assert.ok(session.model.thread("old-thread"));
+    sockets[0].receive({kind: "bridge.provider", state: "disconnected", providerGeneration: 1, reason: "restart"});
+    assert.equal(session.model.thread("old-thread"), undefined);
+    sockets[0].close(1000, "restart");
+    session.reconnect(); await Promise.resolve();
+    assert.equal(sockets.length, 2);
+    sockets[1].open();
+    sockets[1].receive({kind: "bridge.connection", event: "opened", connectionId: "second", role: "controller"});
+    sockets[1].receive({kind: "bridge.provider", state: "ready", providerGeneration: 2});
+    assert.ok(requests(sockets[1], "thread/list").length > 0);
+    assert.equal(session.model.connection().providerGeneration, 2);
+    assert.equal(session.model.connection().role, "controller");
+    session.dispose();
+});
+
+test("malformed WebSocket text is contained at the transport boundary", () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); socket.receiveText("{");
+    assert.equal(socket.readyState, 3);
+    assert.equal(session.model.connection().connected, false);
+    session.dispose();
+});
+
+test("browser session resumes a not-loaded thread before starting its queued turn", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open();
+    socket.receive({kind: "bridge.connection", event: "opened", connectionId: "resume-test", role: "controller"});
+    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "sleeping", status: {type: "notLoaded"}}]});
+    session.selectThread("sleeping");
+    respond(socket, requests(socket, "thread/read").at(-1), {thread: {id: "sleeping", status: {type: "notLoaded"}, turns: []}});
+    await session.submitPrompt("wake and work");
+    await Promise.resolve();
+    const resume = requests(socket, "thread/resume").at(-1);
+    assert.ok(resume);
+    assert.equal(requests(socket, "turn/start").length, 0);
+    respond(socket, resume, {thread: {id: "sleeping", status: {type: "idle"}}});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").at(-1).payload.params.input[0].text, "wake and work");
+    session.dispose();
+});

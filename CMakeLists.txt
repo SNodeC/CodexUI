@@ -2,7 +2,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project(CodexUI LANGUAGES CXX)
+project(CodexUI VERSION 1.0.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CTest)
@@ -119,6 +119,11 @@ function(configure_codexui_target target)
 endfunction()
 
 configure_codexui_target(codex-ui)
+
+set(CODEXUI_WEB_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/web/app-dist" CACHE PATH
+    "Directory containing the built CodexWebUI static artifact")
+install(DIRECTORY "${CODEXUI_WEB_DIST_DIR}/"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/codexui/web" OPTIONAL)
 
 if(TARGET snodec::net-in-stream-tls AND TARGET snodec::net-in6-stream-tls)
     target_compile_definitions(codex-ui PRIVATE CODEXUI_CODEX_FRONTEND_TLS=1)

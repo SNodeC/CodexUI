@@ -1,0 +1,25 @@
+{
+  "name": "@snodec/codex-ui-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:app": "vite build",
+    "profile": "npm run build && node tools/profile-presentation.mjs",
+    "release": "npm test && npm run profile && npm run build:app && npm run verify:artifact",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "verify:artifact": "node tools/verify-artifact.mjs"
+  },
+  "dependencies": {
+    "@snodec/codex-frontend": "file:../../../AISuite-extraction/AISuite-final/packages/codex-frontend",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.27",
+    "@types/react-dom": "18.3.7",
+    "typescript": "5.9.3",
+    "vite": "5.4.21"
+  }
+}

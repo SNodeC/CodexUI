@@ -53,6 +53,18 @@ std::string stringValue(const nlohmann::json &object, const char *key) {
                                                      : std::string{};
 }
 
+bool supportsDirectAccept(std::string_view kind) {
+  return kind == "command-approval" || kind == "file-change-approval" ||
+         kind == "permissions-approval" || kind == "legacy-patch-approval" ||
+         kind == "legacy-command-approval";
+}
+
+QString directAcceptText(std::string_view kind) {
+  if (kind == "permissions-approval")
+    return QStringLiteral("Allow this turn");
+  return QStringLiteral("Accept");
+}
+
 QLabel *makeLabel(QString value, const char *kind = "body") {
   auto *label = new QLabel(std::move(value));
   label->setProperty("kind", kind);
@@ -397,8 +409,10 @@ void InspectorPane::setHideAction(std::function<void()> hide) {
 }
 
 void InspectorPane::setRequestActions(RequestAction review,
+                                      RequestAction accept,
                                       RequestAction reject) {
   reviewRequest = std::move(review);
+  acceptRequest = std::move(accept);
   rejectRequest = std::move(reject);
 }
 
@@ -632,25 +646,42 @@ void InspectorPane::refreshRequests() {
           makeLabel(QStringLiteral("%1 questions")
                         .arg(static_cast<qulonglong>(*request.questionCount)),
                     "meta"));
+    if (request.command.empty() && request.reason.empty() &&
+        request.message.empty() && !request.questionCount)
+      layout->addWidget(
+          makeLabel(QStringLiteral("Request %1 needs a decision.")
+                        .arg(text(request.id)),
+                    "meta"));
     auto *actions = new QHBoxLayout;
     actions->setContentsMargins(0, 2, 0, 0);
-    auto *deny = new QPushButton(QStringLiteral("Deny"));
-    auto *review = new QPushButton(QStringLiteral("Review"));
-    deny->setProperty("kind", "destructive");
-    review->setProperty("kind", "request");
-    deny->setFixedHeight(28);
-    review->setFixedHeight(28);
-    connect(deny, &QPushButton::clicked, this, [this, id = request.id] {
+    auto *reject = new QPushButton(QStringLiteral("Reject"));
+    reject->setProperty("kind", "destructive");
+    reject->setFixedHeight(28);
+    connect(reject, &QPushButton::clicked, this, [this, id = request.id] {
       if (rejectRequest)
         rejectRequest(id);
     });
-    connect(review, &QPushButton::clicked, this, [this, id = request.id] {
-      if (reviewRequest)
-        reviewRequest(id);
-    });
     actions->addStretch();
-    actions->addWidget(deny);
-    actions->addWidget(review);
+    actions->addWidget(reject);
+    if (supportsDirectAccept(request.kind)) {
+      auto *accept = new QPushButton(directAcceptText(request.kind));
+      accept->setProperty("kind", "request");
+      accept->setFixedHeight(28);
+      connect(accept, &QPushButton::clicked, this, [this, id = request.id] {
+        if (acceptRequest)
+          acceptRequest(id);
+      });
+      actions->addWidget(accept);
+    } else {
+      auto *review = new QPushButton(QStringLiteral("Review"));
+      review->setProperty("kind", "request");
+      review->setFixedHeight(28);
+      connect(review, &QPushButton::clicked, this, [this, id = request.id] {
+        if (reviewRequest)
+          reviewRequest(id);
+      });
+      actions->addWidget(review);
+    }
     layout->addLayout(actions);
     requestsLayout->addWidget(frame);
   }
