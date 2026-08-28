@@ -60,7 +60,9 @@ export class BrowserFrontendSession {
     private notice = "";
     private revision = 0;
     private nextCorrelation = 1;
+    private noticeTimer: ReturnType<typeof setTimeout> | undefined;
     private publishScheduled = false;
+    private disposed = false;
     private bridgeUrl: string;
     private readonly createWebSocket: WebSocketFactory | undefined;
     private snapshot: BrowserSessionSnapshot;
@@ -135,7 +137,16 @@ export class BrowserFrontendSession {
     }
     disconnect(): void { this.connection.disconnect("local-disconnect"); this.transport = undefined; }
     reconnect(): void { this.disconnect(); queueMicrotask(() => this.connect()); }
-    dispose(): void { this.connection.dispose(); this.transport = undefined; }
+    dispose(): void {
+        this.disposed = true;
+        this.connection.dispose(); this.transport = undefined;
+        if (this.noticeTimer) clearTimeout(this.noticeTimer);
+        this.noticeTimer = undefined;
+    }
+    dismissNotice(): void {
+        if (this.noticeTimer) clearTimeout(this.noticeTimer);
+        this.noticeTimer = undefined; this.notice = ""; this.publish();
+    }
     claimController(): boolean { return this.sdk.claimController(); }
     releaseController(): boolean { return this.sdk.releaseController(); }
 
@@ -152,7 +163,7 @@ export class BrowserFrontendSession {
         let destination = this.selectedThreadId;
         let thread = this.model.thread(destination);
         if (destination === "") {
-            if (!this.newThreadIntent) { this.notice = "Select a thread or choose New thread before sending."; this.publish(); return false; }
+            if (!this.newThreadIntent) { this.setNotice("Select a thread or choose New thread before sending."); return false; }
             destination = DraftThreadId; thread = undefined;
         }
         this.prompts.admit(destination, canonicalPrompt, attachments, turnOptions, thread,
@@ -163,7 +174,7 @@ export class BrowserFrontendSession {
             const createdThread = isObject(created.data) ? member(created.data, "thread", {}) : {};
             const id = stringMember(createdThread, "id");
             if (!created.ok || id === "" || !this.prompts.reassignThread(DraftThreadId, id)) {
-                this.prompts.failQueued(DraftThreadId, this.errorMessage(created)); this.notice = this.errorMessage(created); this.publish(); return false;
+                this.prompts.failQueued(DraftThreadId, this.errorMessage(created)); this.setNotice(this.errorMessage(created)); return false;
             }
             this.selectedThreadId = id; this.newThreadIntent = false; destination = id;
         }
@@ -183,7 +194,7 @@ export class BrowserFrontendSession {
             const thread = isObject(response.data) ? member(response.data, "thread", {}) : {};
             const id = stringMember(thread, "id");
             if (response.ok && id !== "") this.selectThread(id);
-            else { this.notice = this.errorMessage(response); this.publish(); }
+            else this.setNotice(this.errorMessage(response));
         });
     }
     archiveThread(threadId: string, archived: boolean): void {
@@ -227,7 +238,7 @@ export class BrowserFrontendSession {
             this.requestPromise("thread.resume", {threadId}).then(response => {
                 this.resumeInFlight.delete(threadId);
                 if (response.ok) this.dispatchNextPrompt(threadId);
-                else { this.prompts.failQueued(threadId, this.errorMessage(response)); this.notice = this.errorMessage(response); this.publish(); }
+                else { this.prompts.failQueued(threadId, this.errorMessage(response)); this.setNotice(this.errorMessage(response)); }
             });
             return;
         }
@@ -251,7 +262,7 @@ export class BrowserFrontendSession {
                 this.prompts.acknowledge(dispatch.threadId, dispatch.id, stringMember(turn, "id") || undefined, Date.now());
             } else {
                 this.prompts.fail(dispatch.threadId, dispatch.id, this.errorMessage(response));
-                this.notice = this.errorMessage(response);
+                this.setNotice(this.errorMessage(response));
             }
             this.publish();
             queueMicrotask(() => this.dispatchNextPrompt(dispatch.threadId));
@@ -259,6 +270,13 @@ export class BrowserFrontendSession {
     }
     private errorMessage(response: {error?: unknown}): string {
         return stringMember(response.error, "message") || "Codex operation failed";
+    }
+    private setNotice(message: string, error = true): void {
+        if (this.disposed) return;
+        if (this.noticeTimer) clearTimeout(this.noticeTimer);
+        this.notice = message;
+        this.noticeTimer = setTimeout(() => { this.noticeTimer = undefined; this.notice = ""; this.publish(); }, error ? 10_000 : 6_000);
+        this.publish();
     }
     private schedulePublish(): void {
         if (this.publishScheduled) return;

@@ -9,3 +9,4 @@ export * from "./app/BrowserFrontendSession.js";
 export * from "./app/ConversationViewportState.js";
 export * from "./app/TurnSettingsOptions.js";
 export * from "./app/PendingRequestResponses.js";
+export * from "./app/Humanize.js";

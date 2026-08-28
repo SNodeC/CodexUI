@@ -18,6 +18,7 @@ class FakeSocket {
     close(_code, reason) { this.readyState = 3; this.onclose?.({reason}); }
     open() { this.readyState = 1; this.onopen?.(); }
     receive(message) { this.onmessage?.({data: JSON.stringify(message)}); }
+    receiveText(data) { this.onmessage?.({data}); }
 }
 
 function appserver(payload) { return {kind: "appserver", payload}; }
@@ -78,6 +79,39 @@ test("browser session uses the C++ action routing and preserves prompt-response 
     assert.equal(visible[1], stableKey({kind: "item", threadId: "thread-1", turnId: "turn-1", itemId: "reasoning-1"}));
     assert.equal(session.model.connection().connected, true);
     assert.equal(session.model.connection().providerState, "ready");
+    session.dispose();
+});
+
+test("browser transport reconnects cleanly across provider generations", async () => {
+    const sockets = [];
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => {
+        const socket = new FakeSocket(); sockets.push(socket); return socket;
+    });
+    session.connect(); sockets[0].open();
+    sockets[0].receive({kind: "bridge.connection", event: "opened", connectionId: "first", role: "observer"});
+    sockets[0].receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+    respond(sockets[0], requests(sockets[0], "thread/list").at(-1), {data: [{id: "old-thread"}]});
+    assert.ok(session.model.thread("old-thread"));
+    sockets[0].receive({kind: "bridge.provider", state: "disconnected", providerGeneration: 1, reason: "restart"});
+    assert.equal(session.model.thread("old-thread"), undefined);
+    sockets[0].close(1000, "restart");
+    session.reconnect(); await Promise.resolve();
+    assert.equal(sockets.length, 2);
+    sockets[1].open();
+    sockets[1].receive({kind: "bridge.connection", event: "opened", connectionId: "second", role: "controller"});
+    sockets[1].receive({kind: "bridge.provider", state: "ready", providerGeneration: 2});
+    assert.ok(requests(sockets[1], "thread/list").length > 0);
+    assert.equal(session.model.connection().providerGeneration, 2);
+    assert.equal(session.model.connection().role, "controller");
+    session.dispose();
+});
+
+test("malformed WebSocket text is contained at the transport boundary", () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); socket.receiveText("{");
+    assert.equal(socket.readyState, 3);
+    assert.equal(session.model.connection().connected, false);
     session.dispose();
 });
 

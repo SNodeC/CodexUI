@@ -10,12 +10,9 @@ import type {
     ReasoningData, UserMessageData, AgentMessageData, VisibleCardData,
 } from "../index.js";
 import type {BrowserFrontendSession} from "./BrowserFrontendSession.js";
+import {humanizeProtocolLabel as humanize} from "./Humanize.js";
 
-function humanize(value: string): string {
-    if (value === "contextCompaction") return "Context compaction";
-    const spaced = value.replaceAll(/[._/-]+/gu, " ").replace(/([a-z\d])([A-Z])/gu, "$1 $2").trim();
-    return spaced === "" ? "Activity" : spaced[0]!.toUpperCase() + spaced.slice(1);
-}
+const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 function StatusDot({tone}: {tone: string}) { return <span className={`status-dot ${tone}`} aria-hidden="true" />; }
 
@@ -156,7 +153,7 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
             requestAnimationFrame(() => { if (scroll.current) scroll.current.scrollTop = saved.following ? scroll.current.scrollHeight : saved.scrollTop; });
         }
     }, [projectionId, viewport]);
-    useLayoutEffect(() => {
+    useBrowserLayoutEffect(() => {
         const saved = viewport.scroll(projectionId);
         if (saved.following && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
     }, [revision, projectionId, viewport]);
@@ -318,7 +315,7 @@ export function App({session}: {session: BrowserFrontendSession}) {
                     <button onClick={() => connection.connected || connection.retrying ? session.disconnect() : session.connect(url)}>{connection.connected ? "Disconnect" : "Connect"}</button><StatusDot tone={connectionTone} /></label>
             </div>
         </header>
-        {snapshot.notice && <div className="notice-banner">{snapshot.notice}</div>}
+        {snapshot.notice && <div className="notice-banner" role="alert"><span>{snapshot.notice}</span><button onClick={() => session.dismissNotice()} aria-label="Dismiss notice">×</button></div>}
         <div className="workspace-grid"><ThreadPane session={session} revision={snapshot.revision} /><Conversation session={session} revision={snapshot.revision} /><Inspector session={session} revision={snapshot.revision} /></div>
         <footer className="status-bar"><div><strong>© Volker Christian @ Codex</strong><span> | </span>
             <a href="https://github.com/SNodeC/CodexUI">CodexUI</a><span> • </span><a href="https://github.com/SNodeC/AISuite">AISuite</a><span> • </span>

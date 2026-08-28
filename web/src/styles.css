@@ -26,7 +26,7 @@ button { color: inherit; }
 .status-dot.active { background: #315ccf; box-shadow: 0 0 0 3px #315ccf1d; }
 .status-dot.warning { background: #e79a31; box-shadow: 0 0 0 3px #e79a311d; }
 .status-dot.danger { background: #d84c5c; box-shadow: 0 0 0 3px #d84c5c1d; }
-.notice-banner { padding: 8px 20px; background: #fff4dc; color: #7e5415; border-bottom: 1px solid #f0d79e; font-size: 13px; }
+.notice-banner { display: flex; justify-content: space-between; align-items: center; padding: 8px 20px; background: #fff4dc; color: #7e5415; border-bottom: 1px solid #f0d79e; font-size: 13px; }.notice-banner button { border: 0; background: transparent; color: inherit; font-size: 17px; cursor: pointer; }
 .workspace-grid { display: grid; grid-template-columns: 260px minmax(420px, 1fr) 300px; min-height: 0; }
 .thread-pane, .inspector-pane { min-height: 0; background: #f8fafc; display: flex; flex-direction: column; }
 .thread-pane { border-right: 1px solid #d7dee8; }
