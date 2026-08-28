@@ -1,8 +1,9 @@
 # CodexUI
 
-CodexUI is a native Qt 6 Widgets frontend for the AISuite `codex-bridge`.
-It presents the Codex app-server protocol without introducing another backend,
-semantic cache, snapshot store, or persistence authority.
+CodexUI 1.0 is a native Qt 6 Widgets and browser frontend for the AISuite
+`codex-bridge`. Both applications present the same Codex app-server behavior
+without introducing another backend, semantic cache, snapshot store, or
+persistence authority.
 
 The canonical process has two threads:
 
@@ -19,11 +20,17 @@ event loop, selected transport, `AISuite::OpenAICodex` frontend proxy SDK,
 native protocol normalization, and connection/controller telemetry. They
 exchange only bounded `codexui.presentation` JSONL commands and events.
 
-## Application
+## Applications
 
 `codex-ui` is the canonical visual application. Its production shell consumes
 the normalized presentation protocol and model directly; there is no parallel
 legacy UI or alternate application target.
+
+`CodexWebUI` is the browser presentation. It uses the framework-neutral
+`@snodec/codex-frontend` SDK from AISuite, connects directly to the bridge over
+WebSocket, and follows the same controller, prompt, thread, turn, projection,
+and reconnect rules as the native application. Browser-only limitations are
+listed in the [1.0 contract](docs/web-1.0-contract.md).
 
 ## Build
 
@@ -46,6 +53,30 @@ The executable name, application ID, `StartupWMClass`, desktop entry, and icon
 name intentionally match so Linux launchers and taskbars associate the window
 with the installed CodexUI application.
 
+## Browser build
+
+Node.js 20 or newer and the exact AISuite revision recorded in
+[`web/AISUITE_REVISION`](web/AISUITE_REVISION) are required. The source
+dependency expects the release/CI checkout layout shown below.
+
+```text
+workspace/
+├── AISuite-extraction/AISuite-final/
+└── CodexUI/codexui/
+```
+
+```sh
+npm ci --prefix ../../AISuite-extraction/AISuite-final/packages/codex-frontend
+npm test --prefix ../../AISuite-extraction/AISuite-final/packages/codex-frontend
+npm ci --prefix web
+npm run release --prefix web
+```
+
+Run `npm run dev --prefix web` for local development. The production artifact
+is `web/app-dist/`; serve it from any static HTTP(S) host, then enter the
+bridge's `ws://` or `wss://` endpoint in the application. Deployment and
+release details are in [`web/README.md`](web/README.md).
+
 ## Architecture
 
 The complete thread model, presentation protocol, authority rules, normalized
@@ -61,6 +92,10 @@ documented in
 The browser architecture, native/web parity boundary, state ownership, and
 version 1.0 delivery gates are documented in
 [`docs/web-1.0-contract.md`](docs/web-1.0-contract.md).
+
+Measured performance, equality evidence, packaging, and the release gate are
+recorded in [`docs/web-qualification.md`](docs/web-qualification.md) and
+[`docs/web-release.md`](docs/web-release.md).
 
 ## License
 

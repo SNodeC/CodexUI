@@ -2,7 +2,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project(CodexUI LANGUAGES CXX)
+project(CodexUI VERSION 1.0.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CTest)

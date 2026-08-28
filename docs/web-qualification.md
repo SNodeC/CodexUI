@@ -37,11 +37,14 @@ Representative input: one authoritative thread containing 100 turns and
 item. Five fresh Node processes were run on 2026-08-28 with Node 24.19.0 on an
 Intel Core i7-14700HX (x86-64).
 
-| Operation | Median | Observed range |
-| --- | ---: | ---: |
-| Authoritative hydration, 10,000 items | 44.09 ms | 43.62–44.36 ms |
-| Full projection, 10,000 visible cards | 33.11 ms | 31.31–37.66 ms |
-| Apply 2,000 streaming deltas | 9.85 ms | 9.38–10.35 ms |
+The five-process run was repeated after the lifecycle and release increments
+with the same runtime, machine, and input. Negative change is faster.
+
+| Operation | Initial median | 1.0 median | Change | 1.0 range |
+| --- | ---: | ---: | ---: | ---: |
+| Authoritative hydration, 10,000 items | 44.09 ms | 43.85 ms | −0.5% | 43.16–44.33 ms |
+| Full projection, 10,000 visible cards | 33.11 ms | 32.28 ms | −2.5% | 31.19–36.25 ms |
+| Apply 2,000 streaming deltas | 9.85 ms | 8.21 ms | −16.6% | 4.98–9.14 ms |
 
 The production view starts with the native 80-item history window, schedules
 at most one React publication per animation frame, retains keyed cards, and

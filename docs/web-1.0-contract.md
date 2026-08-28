@@ -92,8 +92,9 @@ The application uses:
 
 - React components for compositional presentation and keyed card identity;
 - ordinary CSS with CodexUI-owned tokens for visual styling;
-- Vitest for SDK, reducer, projection, and component tests;
-- Playwright for browser-level workflows and supported-browser qualification;
+- the Node.js test runner for SDK, reducer, projection, and lifecycle tests;
+- React server rendering plus production-bundle qualification for shell and
+  accessibility/deployment boundaries;
 - npm lockfiles and reproducible production builds.
 
 No general-purpose state framework is introduced. A typed presentation model
