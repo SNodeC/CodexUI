@@ -30,6 +30,21 @@ function respond(socket, request, result) {
 }
 const waitForPublish = () => new Promise(resolve => setTimeout(resolve, 25));
 
+test("browser session defaults to the bridge's canonical WebSocket endpoint", () => {
+    assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "ws://127.0.0.1:8080/codex");
+    globalThis.window = {
+        localStorage: {getItem: () => null},
+        location: {protocol: "https:", hostname: "codex.example"},
+    };
+    try {
+        assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://codex.example:8080/codex");
+        globalThis.window.localStorage.getItem = () => "wss://configured.example/bridge";
+        assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://configured.example/bridge");
+    } finally {
+        delete globalThis.window;
+    }
+});
+
 test("browser session uses the C++ action routing and preserves prompt-response order", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);

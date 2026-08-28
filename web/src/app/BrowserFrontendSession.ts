@@ -111,11 +111,11 @@ export class BrowserFrontendSession {
     }
 
     static defaultBridgeUrl(): string {
-        if (typeof window === "undefined") return "ws://127.0.0.1:8080/";
+        if (typeof window === "undefined") return "ws://127.0.0.1:8080/codex";
         const configured = window.localStorage.getItem("codexui.bridgeUrl");
         if (configured) return configured;
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        return `${protocol}//${window.location.hostname || "127.0.0.1"}:8080/`;
+        return `${protocol}//${window.location.hostname || "127.0.0.1"}:8080/codex`;
     }
 
     subscribe = (listener: () => void): (() => void) => {
