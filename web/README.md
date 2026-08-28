@@ -26,16 +26,17 @@ npm ci
 npm run release
 ```
 
-`npm run dev` starts the development server on port 5173. `npm run profile`
-repeats the large-thread presentation measurement.
+`npm run profile` repeats the large-thread presentation measurement. There is
+no standalone Node development or production server.
 
 ## Deployment
 
 `npm run build:app` creates the relocatable static artifact in `app-dist/`.
-Serve that directory from an HTTP(S) host. A page delivered over HTTPS should
-connect to a `wss://` bridge endpoint so the browser does not reject mixed
-content. The bridge must accept the page's origin according to its deployment
-policy; CodexWebUI does not weaken that policy or proxy traffic.
+The CodexUI CMake install places it in `share/codexui/web`. The existing
+`codex-bridge` HTTP/WebSocket listener serves `/`, `/index.html`, and the
+generated `/assets/` files from that directory while `/codex` remains the
+WebSocket upgrade route. A page delivered over HTTPS automatically derives the
+corresponding same-origin `wss://.../codex` URL.
 
 The configured bridge URL is retained in browser local storage. Provider-side
 workspace paths and generated-image paths are displayed as remote metadata;

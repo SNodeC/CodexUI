@@ -6,7 +6,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:app": "vite build",
-    "dev": "vite --host 0.0.0.0",
     "profile": "npm run build && node tools/profile-presentation.mjs",
     "release": "npm test && npm run profile && npm run build:app && npm run verify:artifact",
     "test": "npm run build && node --test tests/*.test.mjs",

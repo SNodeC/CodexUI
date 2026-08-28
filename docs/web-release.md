@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | CodexUI native application | 1.0.0 | installed `codex-ui`, desktop entry, and icon |
 | CodexWebUI | 1.0.0 | relocatable `web/app-dist/` static artifact |
-| AISuite frontend SDK | 1.0.0 at `050194dbc0c0625fbe0a488fe3971a0ae119dd90` | publishable `@snodec/codex-frontend` package |
+| AISuite frontend SDK | 1.0.0 at `5aeedb2c21d7da0d611219365294cc3fb052cddf` | publishable `@snodec/codex-frontend` package |
 
 The SDK revision is machine-readable in `web/AISUITE_REVISION` and is checked
 by CI before either SDK or application tests run. The source layout and build
@@ -28,9 +28,10 @@ following:
 - `git diff --check` passes and the recorded performance profile shows no
   material regression from `web-qualification.md`.
 
-The CI artifact is named `codexui-web`. Publication consists only of serving
-that static directory; no web-specific server or protocol extension is part
-of the release.
+The CI artifact is named `codexui-web`. Installation copies that static
+directory into the CodexUI data directory, and the existing `codex-bridge`
+listener serves it alongside `/codex`. No Node process, web-specific backend,
+or protocol extension is part of the release.
 
 ## Operator checks
 

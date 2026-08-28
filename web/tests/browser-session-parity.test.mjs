@@ -34,10 +34,10 @@ test("browser session defaults to the bridge's canonical WebSocket endpoint", ()
     assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "ws://127.0.0.1:8080/codex");
     globalThis.window = {
         localStorage: {getItem: () => null},
-        location: {protocol: "https:", hostname: "codex.example"},
+        location: {protocol: "https:", host: "codex.example:8443"},
     };
     try {
-        assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://codex.example:8080/codex");
+        assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://codex.example:8443/codex");
         globalThis.window.localStorage.getItem = () => "wss://configured.example/bridge";
         assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://configured.example/bridge");
     } finally {

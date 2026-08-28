@@ -72,10 +72,10 @@ npm ci --prefix web
 npm run release --prefix web
 ```
 
-Run `npm run dev --prefix web` for local development. The production artifact
-is `web/app-dist/`; serve it from any static HTTP(S) host, then enter the
-bridge's `ws://` or `wss://` endpoint in the application. Deployment and
-release details are in [`web/README.md`](web/README.md).
+The production artifact is `web/app-dist/`. CMake installs it below
+`${CMAKE_INSTALL_DATADIR}/codexui/web`; `codex-bridge` serves those files and
+its `/codex` WebSocket endpoint from the same listener. Node is not part of the
+installed runtime. Deployment details are in [`web/README.md`](web/README.md).
 
 ## Architecture
 
