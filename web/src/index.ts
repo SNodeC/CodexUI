@@ -7,3 +7,5 @@ export * from "./conversation/PromptCoordinator.js";
 export * from "./conversation/ConversationProjection.js";
 export * from "./app/BrowserFrontendSession.js";
 export * from "./app/ConversationViewportState.js";
+export * from "./app/TurnSettingsOptions.js";
+export * from "./app/PendingRequestResponses.js";

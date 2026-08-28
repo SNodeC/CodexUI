@@ -1,6 +1,10 @@
 import {useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
 import type {FormEvent, ReactNode} from "react";
-import {ConversationViewportState, classifyStatus, indexAuthoritativeItems, projectConversation, stableKey} from "../index.js";
+import {
+    ConversationViewportState, DefaultSetting, canonicalSettingValues, classifyStatus, indexAuthoritativeItems,
+    negativePendingResponse, positivePendingResponse, projectConversation, stableKey, threadStartOptions, turnStartOptions,
+} from "../index.js";
+import type {PendingRequestPresentation, SettingField, SettingValues} from "../index.js";
 import type {
     AgentActivityData, CommandExecutionData, FileChangesData, LocalPromptData,
     ReasoningData, UserMessageData, AgentMessageData, VisibleCardData,
@@ -144,6 +148,7 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
     const collapsed = useRef(new Set<string>());
     const [, forceCardState] = useState(0);
     const drafts = useRef(new Map<string, string>());
+    const settingsOptions = useRef<PromptOptions>({turn: {}, thread: {}});
     useEffect(() => {
         if (previousThread.current !== projectionId) {
             previousThread.current = projectionId;
@@ -170,17 +175,62 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
                 {section.cards.map(card => { const key = stableKey(card.key); return <Card key={key} card={card} collapsed={collapsed.current.has(key)} onToggle={() => toggleCard(key)} />; })}
             </section>)}
         </div>
-        <Composer key={projectionId} session={session} active={Boolean(thread || snapshot.newThreadIntent)} draftKey={projectionId} drafts={drafts.current} />
+        <div className="composer-dock">
+            <SettingsPanel key={`settings:${projectionId}`} session={session} canonical={thread?.raw ?? {}} optionsRef={settingsOptions} />
+            <Composer key={projectionId} session={session} active={Boolean(thread || snapshot.newThreadIntent)} draftKey={projectionId} drafts={drafts.current} optionsRef={settingsOptions} />
+        </div>
     </main>;
 }
 
-function Composer({session, active, draftKey, drafts}: {session: BrowserFrontendSession; active: boolean; draftKey: string; drafts: Map<string, string>}) {
+interface PromptOptions {turn: Record<string, unknown>; thread: Record<string, unknown>}
+
+function SettingsPanel({session, canonical, optionsRef}: {session: BrowserFrontendSession; canonical: unknown; optionsRef: {current: PromptOptions}}) {
+    const [open, setOpen] = useState(false);
+    const [values, setValues] = useState<SettingValues>(() => canonicalSettingValues(canonical));
+    const [touched, setTouched] = useState<Set<SettingField>>(() => new Set());
+    const models = session.model.modelCatalog();
+    const updateOptions = (nextValues: SettingValues, nextTouched: Set<SettingField>) => {
+        optionsRef.current = {turn: turnStartOptions(nextValues, nextTouched, models), thread: threadStartOptions(nextValues, nextTouched)};
+    };
+    const change = (field: SettingField, value: string) => {
+        const nextValues = {...values, [field]: value};
+        if (field === "sandbox" && (value === DefaultSetting || value === "danger-full-access"))
+            nextValues.network = value === "danger-full-access" ? "enabled" : DefaultSetting;
+        const nextTouched = new Set(touched); nextTouched.add(field);
+        setValues(nextValues); setTouched(nextTouched); updateOptions(nextValues, nextTouched);
+    };
+    const modelDefinitions = Array.isArray(models) ? models : [];
+    const profilesDomain = session.model.globalDomains().get("operation.permission-profiles.list");
+    const profiles = Array.isArray(profilesDomain) ? profilesDomain : (profilesDomain && typeof profilesDomain === "object" && Array.isArray((profilesDomain as {data?: unknown}).data) ? (profilesDomain as {data: unknown[]}).data : []);
+    const select = (label: string, field: SettingField, choices: readonly [string, string][]) => <label><span>{label}</span><select value={values[field]} onChange={event => change(field, event.target.value)}>{choices.map(([name, value]) => <option key={value} value={value}>{name}</option>)}</select></label>;
+    const defaults: [string, string] = ["Thread default", DefaultSetting];
+    return <div className={`settings-panel ${open ? "open" : ""}`}>
+        <button className="settings-toggle" onClick={() => setOpen(value => !value)} aria-expanded={open}>Turn settings <span>{touched.size > 0 ? `${touched.size} changed` : "Thread defaults"} {open ? "⌃" : "⌄"}</span></button>
+        {open && <div className="settings-grid">
+            {select("Model", "model", [defaults, ...modelDefinitions.filter(value => typeof value === "object" && value !== null && !((value as {hidden?: boolean}).hidden)).map(value => [String((value as {displayName?: string}).displayName ?? (value as {model?: string; id?: string}).model ?? (value as {id?: string}).id), String((value as {model?: string; id?: string}).model ?? (value as {id?: string}).id)] as [string, string])])}
+            {select("Reasoning", "effort", [defaults, ...["minimal", "low", "medium", "high", "xhigh", "ultra"].map(value => [humanize(value), value] as [string, string])])}
+            {select("Access", "sandbox", [defaults, ["Workspace", "workspace-write"], ["Read only", "read-only"], ["Full access", "danger-full-access"], ["External", "external"]])}
+            {select("Network", "network", [defaults, ["Restricted", "restricted"], ["Enabled", "enabled"]])}
+            <label><span>Workspace</span><input value={values.cwd} placeholder="Provider workspace path" onChange={event => change("cwd", event.target.value)} /></label>
+            {select("Approval", "approval", [defaults, ["On request", "on-request"], ["Untrusted", "untrusted"], ["Never", "never"]])}
+            {select("Style", "personality", [defaults, ["None", "none"], ["Friendly", "friendly"], ["Pragmatic", "pragmatic"]])}
+            {select("Approval reviewer", "reviewer", [defaults, ["User", "user"], ["Auto review", "auto_review"], ["Guardian", "guardian_subagent"]])}
+            {select("Permission profile", "permissionProfile", [defaults, ...profiles.filter(value => typeof value === "object" && value !== null && (value as {allowed?: boolean}).allowed !== false).map(value => [String((value as {id?: string}).id), String((value as {id?: string}).id)] as [string, string])])}
+            <label><span>Service tier</span><input value={values.serviceTier === DefaultSetting ? "" : values.serviceTier} placeholder="Thread default" onChange={event => change("serviceTier", event.target.value || DefaultSetting)} /></label>
+            {select("Reasoning summary", "summary", [defaults, ["Auto", "auto"], ["Concise", "concise"], ["Detailed", "detailed"], ["None", "none"]])}
+            {select("Collaboration mode", "collaboration", [["Code", "default"], ["Plan", "plan"]])}
+        </div>}
+    </div>;
+}
+
+function Composer({session, active, draftKey, drafts, optionsRef}: {session: BrowserFrontendSession; active: boolean; draftKey: string; drafts: Map<string, string>; optionsRef: {current: PromptOptions}}) {
     const [prompt, setPrompt] = useState(drafts.get(draftKey) ?? "");
     const running = session.model.activeTurnId(session.getSnapshot().selectedThreadId) !== undefined;
     const submit = (event: FormEvent) => {
         event.preventDefault();
         if (!active || prompt.trim() === "") return;
-        const value = prompt; setPrompt(""); drafts.set(draftKey, ""); void session.submitPrompt(value);
+        const value = prompt; setPrompt(""); drafts.set(draftKey, "");
+        void session.submitPrompt(value, [], optionsRef.current.turn, optionsRef.current.thread);
     };
     return <form className="composer" onSubmit={submit}>
         <textarea value={prompt} disabled={!active} onChange={event => { setPrompt(event.target.value); drafts.set(draftKey, event.target.value); }}
@@ -194,29 +244,61 @@ function Composer({session, active, draftKey, drafts}: {session: BrowserFrontend
 
 function Inspector({session, revision}: {session: BrowserFrontendSession; revision: number}) {
     void revision;
-    const [tab, setTab] = useState<"activity" | "requests" | "protocol">("activity");
+    const [tab, setTab] = useState<"plan" | "agents" | "requests" | "state" | "protocol">("plan");
     const selected = session.model.thread(session.getSnapshot().selectedThreadId);
     const requests = [...session.model.pendingRequestPresentations().values()];
+    const latestPlan = selected && [...selected.turnOrder].reverse().map(id => selected.turns.get(id)).find(turn => turn && (Object.keys(turn.plan).length > 0 || turn.itemOrder.some(itemId => turn.items.get(itemId)?.raw.type === "plan")));
+    const plainState = selected ? {
+        id: selected.id, title: selected.title, cwd: selected.cwd, status: selected.status, archived: selected.archived,
+        turns: selected.turnOrder.map(id => { const turn = selected.turns.get(id)!; return {id, status: turn.status, plan: turn.plan,
+            items: turn.itemOrder.map(itemId => turn.items.get(itemId)?.raw)}; }),
+        agents: selected.agentOrder.map(id => selected.agents.get(id)), domains: Object.fromEntries(selected.domains),
+    } : null;
     return <aside className="inspector-pane">
         <div className="pane-heading"><div><span className="eyebrow">Details</span><h2>Inspector</h2></div></div>
-        <nav className="inspector-tabs">{(["activity", "requests", "protocol"] as const).map(value =>
+        <nav className="inspector-tabs">{(["plan", "agents", "requests", "state", "protocol"] as const).map(value =>
             <button key={value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{humanize(value)}{value === "requests" && requests.length > 0 ? ` ${requests.length}` : ""}</button>)}</nav>
         <div className="inspector-content">
-            {tab === "activity" && (selected ? <>
-                <Info label="Thread" value={selected.id} /><Info label="Status" value={humanize(selected.status)} />
-                <Info label="Workspace" value={selected.cwd} /><Info label="Turns" value={String(selected.turnOrder.length)} />
-                <Info label="Changed files" value={String(selected.changedPaths.length)} />
-                {[...selected.turnOrder].reverse().map(id => { const turn = selected.turns.get(id)!; return <div className="turn-summary" key={id}><strong>{id}</strong><span>{humanize(turn.status)} · {turn.itemOrder.length} items</span></div>; })}
-            </> : <p className="muted-copy">Select a thread to inspect its authoritative presentation state.</p>)}
-            {tab === "requests" && (requests.length === 0 ? <p className="muted-copy">No pending approval or input requests.</p> : requests.map(request => <div className="request-card" key={request.id}>
-                <strong>{humanize(request.kind)}</strong><pre>{JSON.stringify(request.raw, null, 2)}</pre>
-                <div><button onClick={() => session.resolvePending(JSON.parse(request.id), false)}>Deny</button><button className="approve" onClick={() => session.resolvePending(JSON.parse(request.id), true)}>Approve</button></div>
-            </div>))}
+            {tab === "plan" && (!selected ? <p className="muted-copy">Select a thread to inspect its plan.</p> : latestPlan ? <div className="plan-view">
+                {typeof latestPlan.plan.explanation === "string" && <p>{latestPlan.plan.explanation}</p>}
+                {Array.isArray(latestPlan.plan.steps) && latestPlan.plan.steps.map((step, index) => <div key={index}><StatusDot tone={String((step as {status?: string}).status) === "completed" ? "success" : "active"} /><span>{String((step as {step?: string}).step ?? "")}</span><small>{humanize(String((step as {status?: string}).status ?? ""))}</small></div>)}
+            </div> : <p className="muted-copy">No structured plan is available for this thread.</p>)}
+            {tab === "agents" && (!selected || selected.agentOrder.length === 0 ? <p className="muted-copy">No correlated agents are present.</p> : selected.agentOrder.map(id => { const agent = selected.agents.get(id)!; return <div className="agent-card" key={id}>
+                <strong>{agent.raw.agentPath ? String(agent.raw.agentPath) : id}</strong><span>{humanize(agent.status)}</span>
+                {agent.childThreadId && <small>Thread {agent.childThreadId}</small>}{typeof agent.raw.resultText === "string" && <p>{agent.raw.resultText}</p>}
+            </div>; }))}
+            {tab === "requests" && (requests.length === 0 ? <p className="muted-copy">No pending approval or input requests.</p> : requests.map(request => <RequestCard key={request.id} request={request} session={session} />))}
+            {tab === "state" && <>{selected && <div className="state-summary"><Info label="Thread" value={selected.id} /><Info label="Status" value={humanize(selected.status)} /><Info label="Workspace" value={selected.cwd} /><Info label="Turns" value={String(selected.turnOrder.length)} /><Info label="Changed files" value={String(selected.changedPaths.length)} /></div>}<pre className="state-json">{JSON.stringify(plainState, null, 2)}</pre></>}
             {tab === "protocol" && <div className="protocol-list">{[...session.getSnapshot().protocolFrames].reverse().map((frame, index) => <details key={index}><summary>{humanize(String((frame as Record<string, unknown>).type ?? (frame as Record<string, unknown>).action ?? "Frame"))}</summary><pre>{JSON.stringify(frame, null, 2)}</pre></details>)}</div>}
         </div>
     </aside>;
 }
 function Info({label, value}: {label: string; value: string}) { return <div className="info-row"><span>{label}</span><strong>{value || "—"}</strong></div>; }
+
+function RequestCard({request, session}: {request: PendingRequestPresentation; session: BrowserFrontendSession}) {
+    const raw = request.raw && typeof request.raw === "object" ? request.raw as Record<string, unknown> : {};
+    const questions = Array.isArray(raw.questions) ? raw.questions as Record<string, unknown>[] : [];
+    const [answers, setAnswers] = useState<Record<string, string>>({});
+    const [structured, setStructured] = useState("{}");
+    const approve = () => {
+        let input: unknown = {};
+        if (request.kind === "user-input") input = Object.fromEntries(questions.map(question => {
+            const id = String(question.id ?? ""); return [id, {answers: [answers[id] ?? ""]}];
+        }));
+        else if (request.kind === "mcp-elicitation") { try { input = JSON.parse(structured); } catch { return; } }
+        session.resolvePending(JSON.parse(request.id), positivePendingResponse(request, input));
+    };
+    return <div className="request-card">
+        <strong>{humanize(request.kind)}</strong>
+        {typeof raw.message === "string" && <p>{raw.message}</p>}{typeof raw.reason === "string" && <p>{raw.reason}</p>}{typeof raw.command === "string" && <code>{raw.command}</code>}
+        {request.kind === "user-input" && questions.map(question => { const id = String(question.id ?? ""); const options = Array.isArray(question.options) ? question.options as Record<string, unknown>[] : []; return <label className="request-question" key={id}><span>{String(question.question ?? question.header ?? id)}</span>{options.length > 0
+            ? <select value={answers[id] ?? ""} onChange={event => setAnswers(current => ({...current, [id]: event.target.value}))}><option value="">Choose…</option>{options.map(option => <option key={String(option.label)}>{String(option.label)}</option>)}</select>
+            : <input type={question.isSecret ? "password" : "text"} value={answers[id] ?? ""} onChange={event => setAnswers(current => ({...current, [id]: event.target.value}))} />}</label>; })}
+        {request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined && <textarea value={structured} onChange={event => setStructured(event.target.value)} rows={5} aria-label="Structured MCP response" />}
+        <details><summary>Request data</summary><pre>{JSON.stringify(request.raw, null, 2)}</pre></details>
+        <div><button onClick={() => session.resolvePending(JSON.parse(request.id), negativePendingResponse(request))}>Deny</button><button className="approve" onClick={approve}>Approve</button></div>
+    </div>;
+}
 
 export function App({session}: {session: BrowserFrontendSession}) {
     const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);

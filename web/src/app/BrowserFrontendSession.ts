@@ -146,7 +146,7 @@ export class BrowserFrontendSession {
     beginNewThread(): void { this.selectedThreadId = ""; this.newThreadIntent = true; this.publish(); }
     loadMore(): void { /* Default parity window is sufficient until viewport pausing is introduced. */ }
 
-    async submitPrompt(prompt: string, attachments: AttachmentDraft[] = [], turnOptions: JsonObject = {}): Promise<boolean> {
+    async submitPrompt(prompt: string, attachments: AttachmentDraft[] = [], turnOptions: JsonObject = {}, threadOptions: JsonObject = {}): Promise<boolean> {
         const canonicalPrompt = promptWithFileLinks(prompt.trim(), attachments);
         if (canonicalPrompt === "") return false;
         let destination = this.selectedThreadId;
@@ -159,7 +159,7 @@ export class BrowserFrontendSession {
             destination === DraftThreadId ? undefined : this.model.activeTurnId(destination), Date.now());
         this.publish();
         if (destination === DraftThreadId) {
-            const created = await this.requestPromise("thread.create", turnOptions);
+            const created = await this.requestPromise("thread.create", threadOptions);
             const createdThread = isObject(created.data) ? member(created.data, "thread", {}) : {};
             const id = stringMember(createdThread, "id");
             if (!created.ok || id === "" || !this.prompts.reassignThread(DraftThreadId, id)) {
@@ -190,8 +190,9 @@ export class BrowserFrontendSession {
         this.request(archived ? "thread.unarchive" : "thread.archive", {threadId});
     }
     deleteThread(threadId: string): void { this.request("thread.delete", {threadId}); }
-    resolvePending(requestId: unknown, approved: boolean): boolean {
-        return this.sdk.sendRawJson({jsonrpc: "2.0", id: requestId, result: approved ? {decision: "accept"} : {decision: "decline"}});
+    resolvePending(requestId: unknown, response: {result?: unknown; error?: unknown}): boolean {
+        return this.sdk.sendRawJson({jsonrpc: "2.0", id: requestId,
+            ...(Object.hasOwn(response, "error") ? {error: response.error} : {result: response.result ?? {}})});
     }
 
     private hydrateCatalogs(): void {
