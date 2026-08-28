@@ -5,3 +5,4 @@ export * from "./presentation/PresentationModel.js";
 export * from "./conversation/MiddleTypes.js";
 export * from "./conversation/PromptCoordinator.js";
 export * from "./conversation/ConversationProjection.js";
+export * from "./app/BrowserFrontendSession.js";
