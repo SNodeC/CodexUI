@@ -449,7 +449,10 @@ The compact More menu contains the named permission profile, approval
 reviewer, service tier, reasoning summary, and collaboration mode. Model,
 effort, service-tier, and permission-profile choices are populated from fresh
 app-server catalogs. A named permission profile and a sandbox policy are
-mutually exclusive, matching the native app-server contract.
+mutually exclusive, matching the native app-server contract. An explicit Access
+or Network choice therefore returns the permission-profile control to Thread
+default and submits the selected sandbox policy. Other individual controls keep
+the active permission profile and submit their supported app-server overrides.
 
 The settings object is a transient draft bound to the stable selected thread
 identity. User changes are serialized into native `thread/start` and

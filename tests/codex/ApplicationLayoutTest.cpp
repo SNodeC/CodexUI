@@ -553,11 +553,16 @@ bool testIncrementalThreadSettings() {
   auto *model = settings.findChild<QComboBox *>(QStringLiteral("codexModel"));
   auto *approval =
       settings.findChild<QComboBox *>(QStringLiteral("codexApproval"));
+  auto *personality =
+      settings.findChild<QComboBox *>(QStringLiteral("codexPersonality"));
   auto *access =
       settings.findChild<QComboBox *>(QStringLiteral("codexSandbox"));
   auto *network =
       settings.findChild<QComboBox *>(QStringLiteral("codexNetwork"));
-  if (!model || !approval || !access || !network)
+  auto *permissionProfile = settings.findChild<QComboBox *>(
+      QStringLiteral("codexPermissionProfile"));
+  if (!model || !approval || !personality || !access || !network ||
+      !permissionProfile)
     return expect(false, "thread settings controls are discoverable");
 
   bool canonicalSettingsStyle = settings.styleSheet().isEmpty();
@@ -623,6 +628,71 @@ bool testIncrementalThreadSettings() {
                        network->currentData().toString() ==
                            QStringLiteral("enabled"),
                    "only logically redundant network selection is disabled");
+
+  settings.setContext(
+      "workspace-profile-thread",
+      {{"sandboxPolicy",
+        {{"type", "workspaceWrite"}, {"networkAccess", false}}},
+       {"activePermissionProfile", {{"id", ":workspace"}}}},
+      nlohmann::json::array(),
+      {{"data", nlohmann::json::array(
+                    {{{"id", ":workspace"}, {"allowed", true}},
+                     {{"id", ":read-only"}, {"allowed", true}},
+                     {{"id", ":danger-full-access"}, {"allowed", true}}})}});
+  result &= expect(
+      permissionProfile->itemText(
+          permissionProfile->findData(QStringLiteral(":workspace"))) ==
+              QStringLiteral("Workspace") &&
+          permissionProfile->itemText(
+              permissionProfile->findData(QStringLiteral(":read-only"))) ==
+              QStringLiteral("Read only") &&
+          permissionProfile->itemText(permissionProfile->findData(
+              QStringLiteral(":danger-full-access"))) ==
+              QStringLiteral("Full access"),
+      "built-in permission profiles have user-facing labels");
+
+  access->setCurrentIndex(
+      access->findData(QStringLiteral("danger-full-access")));
+  const nlohmann::json explicitAccessTurn = settings.turnStartOptions();
+  const nlohmann::json explicitAccessThread = settings.threadStartOptions();
+  result &= expect(
+      permissionProfile->currentData().toString() ==
+              QStringLiteral("default") &&
+          !explicitAccessTurn.contains("permissions") &&
+          explicitAccessTurn.value("sandboxPolicy", nlohmann::json(nullptr)) ==
+              nlohmann::json({{"type", "dangerFullAccess"}}) &&
+          !explicitAccessThread.contains("permissions") &&
+          explicitAccessThread.value("sandbox", nlohmann::json(nullptr)) ==
+              nlohmann::json("danger-full-access"),
+      "an explicit access choice replaces the active permission profile");
+
+  settings.setContext(
+      "individual-overrides-thread",
+      {{"model", "gpt-a"},
+       {"approvalPolicy", "never"},
+       {"personality", "friendly"},
+       {"sandboxPolicy",
+        {{"type", "workspaceWrite"}, {"networkAccess", false}}},
+       {"activePermissionProfile", {{"id", ":workspace"}}}},
+      models,
+      {{"data", nlohmann::json::array(
+                    {{{"id", ":workspace"}, {"allowed", true}}})}});
+  model->setCurrentIndex(model->findData(QStringLiteral("gpt-b")));
+  approval->setCurrentIndex(
+      approval->findData(QStringLiteral("on-request")));
+  personality->setCurrentIndex(
+      personality->findData(QStringLiteral("pragmatic")));
+  const nlohmann::json individualOverrides = settings.turnStartOptions();
+  result &= expect(
+      permissionProfile->currentData().toString() ==
+              QStringLiteral(":workspace") &&
+          individualOverrides.value("model", "") == "gpt-b" &&
+          individualOverrides.value("approvalPolicy", "") == "on-request" &&
+          individualOverrides.value("personality", "") == "pragmatic" &&
+          !individualOverrides.contains("sandboxPolicy") &&
+          !individualOverrides.contains("permissions"),
+      "supported individual settings override retained thread values without "
+      "discarding its permission profile");
 
   return result;
 }

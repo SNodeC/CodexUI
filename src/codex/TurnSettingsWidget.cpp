@@ -176,6 +176,17 @@ QString optionalString(const nlohmann::json &object, const char *key) {
   return value.empty() ? QString::fromLatin1(DefaultValue) : text(value);
 }
 
+QString permissionProfileLabel(const QString &id) {
+  if (id == QStringLiteral(":workspace"))
+    return QStringLiteral("Workspace");
+  if (id == QStringLiteral(":read-only"))
+    return QStringLiteral("Read only");
+  if (id == QStringLiteral(":danger-full-access") ||
+      id == QStringLiteral(":full-access"))
+    return QStringLiteral("Full access");
+  return id;
+}
+
 } // namespace
 
 TurnSettingsWidget::TurnSettingsWidget(QWidget *parent) : QWidget(parent) {
@@ -492,6 +503,17 @@ nlohmann::json TurnSettingsWidget::turnStartOptions() const {
 
 void TurnSettingsWidget::markTouched(Field field) {
   touchedFields[static_cast<std::size_t>(field)] = true;
+  if ((field == Field::Sandbox || field == Field::Network) &&
+      value(permissionProfile) != DefaultValue) {
+    const QSignalBlocker blocker(permissionProfile);
+    selectValue(permissionProfile, QString::fromLatin1(DefaultValue),
+                QStringLiteral("Thread default"));
+    touchedFields[static_cast<std::size_t>(Field::PermissionProfile)] = false;
+  } else if (field == Field::PermissionProfile &&
+             value(permissionProfile) != DefaultValue) {
+    touchedFields[static_cast<std::size_t>(Field::Sandbox)] = false;
+    touchedFields[static_cast<std::size_t>(Field::Network)] = false;
+  }
   refreshMoreIndicator();
 }
 
@@ -558,7 +580,7 @@ void TurnSettingsWidget::refreshFromCanonical(
         profile["id"].is_string())
       activeProfile = text(profile["id"].get<std::string>());
     selectValue(permissionProfile, activeProfile,
-                QStringLiteral("Current permission profile"));
+                permissionProfileLabel(activeProfile));
   }
   if (refresh(Field::ServiceTier))
     selectValue(serviceTier, optionalString(canonical, "serviceTier"),
@@ -728,16 +750,21 @@ void TurnSettingsWidget::refreshPermissionProfiles(
       const std::string id = stringValue(entry, "id");
       if (id.empty() || !entry.value("allowed", true))
         continue;
-      addChoice(permissionProfile, text(id), text(id));
-      const int index = permissionProfile->findData(text(id));
+      const QString profileId = text(id);
+      addChoice(permissionProfile, permissionProfileLabel(profileId),
+                profileId);
+      const int index = permissionProfile->findData(profileId);
       if (index >= 0)
         permissionProfile->setItemData(
             index, text(stringValue(entry, "description")), Qt::ToolTipRole);
     }
   }
-  selectValue(permissionProfile,
-              selected.isEmpty() ? QString::fromLatin1(DefaultValue) : selected,
-              QStringLiteral("Current permission profile"));
+  const QString selectedProfile =
+      selected.isEmpty() ? QString::fromLatin1(DefaultValue) : selected;
+  selectValue(permissionProfile, selectedProfile,
+              selectedProfile == DefaultValue
+                  ? QStringLiteral("Thread default")
+                  : permissionProfileLabel(selectedProfile));
 }
 
 void TurnSettingsWidget::refreshAccessCompatibility() {

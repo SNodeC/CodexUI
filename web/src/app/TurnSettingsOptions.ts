@@ -5,6 +5,27 @@ export type SettingField = "model" | "effort" | "personality" | "sandbox" | "net
     | "reviewer" | "cwd" | "permissionProfile" | "serviceTier" | "summary" | "collaboration";
 export type SettingValues = Record<SettingField, string>;
 
+export function permissionProfileLabel(id: string): string {
+    if (id === ":workspace") return "Workspace";
+    if (id === ":read-only") return "Read only";
+    if (id === ":danger-full-access" || id === ":full-access") return "Full access";
+    return id;
+}
+
+export function applySettingChange(values: SettingValues, touched: ReadonlySet<SettingField>, field: SettingField, value: string): {values: SettingValues; touched: Set<SettingField>} {
+    const nextValues = {...values, [field]: value};
+    const nextTouched = new Set(touched); nextTouched.add(field);
+    if (field === "sandbox" || field === "network") {
+        nextValues.permissionProfile = DefaultSetting;
+        nextTouched.delete("permissionProfile");
+    } else if (field === "permissionProfile" && value !== DefaultSetting) {
+        nextTouched.delete("sandbox"); nextTouched.delete("network");
+    }
+    if (field === "sandbox" && (value === DefaultSetting || value === "danger-full-access"))
+        nextValues.network = value === "danger-full-access" ? "enabled" : DefaultSetting;
+    return {values: nextValues, touched: nextTouched};
+}
+
 function mergePatch(target: Record<string, unknown>, patch: Record<string, unknown>): void {
     for (const [key, value] of Object.entries(patch)) {
         if (value === null) delete target[key];

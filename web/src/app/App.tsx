@@ -1,8 +1,9 @@
 import {useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
 import type {FormEvent, ReactNode} from "react";
 import {
-    ConversationViewportState, DefaultSetting, canonicalSettingValues, canonicalThreadSettings, classifyStatus, indexAuthoritativeItems,
-    negativePendingResponse, positivePendingResponse, projectConversation, stableKey, threadStartOptions, turnStartOptions,
+    ConversationViewportState, DefaultSetting, applySettingChange, canonicalSettingValues, canonicalThreadSettings, classifyStatus,
+    indexAuthoritativeItems, negativePendingResponse, permissionProfileLabel, positivePendingResponse, projectConversation, stableKey,
+    threadStartOptions, turnStartOptions,
 } from "../index.js";
 import type {PendingRequestPresentation, SettingField, SettingValues} from "../index.js";
 import type {
@@ -192,10 +193,7 @@ function SettingsPanel({session, canonical, settingsRevision, optionsRef}: {sess
         optionsRef.current = {turn: turnStartOptions(nextValues, nextTouched, models), thread: threadStartOptions(nextValues, nextTouched)};
     };
     const change = (field: SettingField, value: string) => {
-        const nextValues = {...values, [field]: value};
-        if (field === "sandbox" && (value === DefaultSetting || value === "danger-full-access"))
-            nextValues.network = value === "danger-full-access" ? "enabled" : DefaultSetting;
-        const nextTouched = new Set(touched); nextTouched.add(field);
+        const {values: nextValues, touched: nextTouched} = applySettingChange(values, touched, field, value);
         setValues(nextValues); setTouched(nextTouched); updateOptions(nextValues, nextTouched);
     };
     const modelDefinitions = Array.isArray(models) ? models : [];
@@ -222,7 +220,7 @@ function SettingsPanel({session, canonical, settingsRevision, optionsRef}: {sess
             {select("Approval", "approval", [defaults, ["On request", "on-request"], ["Untrusted", "untrusted"], ["Never", "never"]])}
             {select("Style", "personality", [defaults, ["None", "none"], ["Friendly", "friendly"], ["Pragmatic", "pragmatic"]])}
             {select("Approval reviewer", "reviewer", [defaults, ["User", "user"], ["Auto review", "auto_review"], ["Guardian", "guardian_subagent"]])}
-            {select("Permission profile", "permissionProfile", [defaults, ...profiles.filter(value => typeof value === "object" && value !== null && (value as {allowed?: boolean}).allowed !== false).map(value => [String((value as {id?: string}).id), String((value as {id?: string}).id)] as [string, string])])}
+            {select("Permission profile", "permissionProfile", [defaults, ...profiles.filter(value => typeof value === "object" && value !== null && (value as {allowed?: boolean}).allowed !== false).map(value => { const id = String((value as {id?: string}).id); return [permissionProfileLabel(id), id] as [string, string]; })])}
             <label><span>Service tier</span><input value={values.serviceTier === DefaultSetting ? "" : values.serviceTier} placeholder="Thread default" onChange={event => change("serviceTier", event.target.value || DefaultSetting)} /></label>
             {select("Reasoning summary", "summary", [defaults, ["Auto", "auto"], ["Concise", "concise"], ["Detailed", "detailed"], ["None", "none"]])}
             {select("Collaboration mode", "collaboration", [["Code", "default"], ["Plan", "plan"]])}

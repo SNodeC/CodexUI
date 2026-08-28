@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-    canonicalSettingValues, canonicalThreadSettings, collaborationMode, negativePendingResponse, positivePendingResponse,
-    sandboxPolicy, threadStartOptions, turnStartOptions,
+    applySettingChange, canonicalSettingValues, canonicalThreadSettings, collaborationMode, negativePendingResponse,
+    permissionProfileLabel, positivePendingResponse, sandboxPolicy, threadStartOptions, turnStartOptions,
 } from "../dist/index.js";
 
 test("native turn-setting option shaping", () => {
@@ -42,6 +42,46 @@ test("native turn-setting option shaping", () => {
     assert.deepEqual(collaborationMode(values, [{id: "gpt-default", isDefault: true}]), {
         mode: "plan", settings: {model: "gpt-default", developer_instructions: null, reasoning_effort: "high"},
     });
+});
+
+test("explicit access replaces a named permission profile", () => {
+    const initial = canonicalSettingValues({
+        sandboxPolicy: {type: "workspaceWrite", networkAccess: false},
+        activePermissionProfile: {id: ":workspace"},
+    });
+    const changed = applySettingChange(initial, new Set(), "sandbox", "danger-full-access");
+    assert.equal(changed.values.permissionProfile, "default");
+    assert.deepEqual([...changed.touched], ["sandbox"]);
+    assert.deepEqual(turnStartOptions(changed.values, changed.touched, []), {
+        sandboxPolicy: {type: "dangerFullAccess"},
+    });
+    assert.deepEqual(threadStartOptions(changed.values, changed.touched), {
+        sandbox: "danger-full-access",
+    });
+});
+
+test("supported individual settings override retained values without discarding permissions", () => {
+    let change = {
+        values: canonicalSettingValues({
+            model: "gpt-a", approvalPolicy: "never", personality: "friendly",
+            sandboxPolicy: {type: "workspaceWrite", networkAccess: false},
+            activePermissionProfile: {id: ":workspace"},
+        }),
+        touched: new Set(),
+    };
+    for (const [field, value] of [["model", "gpt-b"], ["approval", "on-request"], ["personality", "pragmatic"]])
+        change = applySettingChange(change.values, change.touched, field, value);
+    assert.equal(change.values.permissionProfile, ":workspace");
+    assert.deepEqual(turnStartOptions(change.values, change.touched, []), {
+        model: "gpt-b", personality: "pragmatic", approvalPolicy: "on-request",
+    });
+});
+
+test("built-in permission profiles have user-facing labels", () => {
+    assert.equal(permissionProfileLabel(":workspace"), "Workspace");
+    assert.equal(permissionProfileLabel(":read-only"), "Read only");
+    assert.equal(permissionProfileLabel(":danger-full-access"), "Full access");
+    assert.equal(permissionProfileLabel("team-managed"), "team-managed");
 });
 
 test("native pending-request positive and negative response shapes", () => {
