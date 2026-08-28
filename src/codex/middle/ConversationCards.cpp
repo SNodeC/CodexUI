@@ -783,6 +783,13 @@ public:
   }
 
   void updateComposition(const AgentMessageData &message) {
+    const QString messagePhase =
+        message.finalAnswer ? QStringLiteral("final") : QStringLiteral("update");
+    if (owner->property("messagePhase").toString() != messagePhase) {
+      owner->setProperty("messagePhase", messagePhase);
+      owner->style()->unpolish(owner);
+      owner->style()->polish(owner);
+    }
     phase->setText(message.finalAnswer ? QStringLiteral("final answer")
                                        : QStringLiteral("update"));
     const QString phaseStatus = message.finalAnswer

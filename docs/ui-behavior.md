@@ -126,8 +126,11 @@ Generated-image items show the app-server-saved image as a bounded thumbnail.
 Selecting it opens the shared non-modal image viewer; encoded image data is
 never displayed as generic activity text.
 
-Process cards remain neutral so they support rather than dominate the user and
-Codex conversation. Status text alone uses canonical semantic state colors.
+User messages use the canonical soft-violet identity surface. Final Codex
+messages use the canonical soft-blue identity surface, while interim Codex
+updates remain neutral and identify their phase in the header. Process cards
+also remain neutral so they support rather than dominate the primary exchange.
+Status text alone uses canonical semantic state colors.
 
 Every conversation card with visible detail uses the same keyboard-focusable
 disclosure chevron: down when expanded and left when collapsed. Title-only

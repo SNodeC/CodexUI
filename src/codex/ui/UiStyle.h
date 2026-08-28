@@ -48,6 +48,11 @@ inline constexpr auto redSurface = "#fff0f2";
 inline constexpr auto redBorder = "#efb8c0";
 inline constexpr auto redText = "#982f3d";
 inline constexpr auto purple = "#6941c6";
+inline constexpr auto purpleHover = "#5b37ad";
+inline constexpr auto purplePressed = "#4b2e90";
+inline constexpr auto purpleSurface = "#f4f0ff";
+inline constexpr auto purpleBorder = "#d4c5f2";
+inline constexpr auto purpleText = "#53389e";
 
 QString applicationStyleSheet();
 QString humanizeLabel(QString value);
