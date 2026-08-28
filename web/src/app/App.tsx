@@ -1,7 +1,7 @@
 import {useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
 import type {FormEvent, ReactNode} from "react";
 import {
-    ConversationViewportState, DefaultSetting, canonicalSettingValues, classifyStatus, indexAuthoritativeItems,
+    ConversationViewportState, DefaultSetting, canonicalSettingValues, canonicalThreadSettings, classifyStatus, indexAuthoritativeItems,
     negativePendingResponse, positivePendingResponse, projectConversation, stableKey, threadStartOptions, turnStartOptions,
 } from "../index.js";
 import type {PendingRequestPresentation, SettingField, SettingValues} from "../index.js";
@@ -173,7 +173,7 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
             </section>)}
         </div>
         <div className="composer-dock">
-            <SettingsPanel key={`settings:${projectionId}`} session={session} canonical={thread?.raw ?? {}} optionsRef={settingsOptions} />
+            <SettingsPanel key={`settings:${projectionId}`} session={session} canonical={canonicalThreadSettings(thread?.raw ?? {}, thread?.domains.get("thread.settings.changed"))} settingsRevision={thread?.settingsRevision ?? 0} optionsRef={settingsOptions} />
             <Composer key={projectionId} session={session} active={Boolean(thread || snapshot.newThreadIntent)} draftKey={projectionId} drafts={drafts.current} optionsRef={settingsOptions} />
         </div>
     </main>;
@@ -181,10 +181,11 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
 
 interface PromptOptions {turn: Record<string, unknown>; thread: Record<string, unknown>}
 
-function SettingsPanel({session, canonical, optionsRef}: {session: BrowserFrontendSession; canonical: unknown; optionsRef: {current: PromptOptions}}) {
+function SettingsPanel({session, canonical, settingsRevision, optionsRef}: {session: BrowserFrontendSession; canonical: unknown; settingsRevision: number; optionsRef: {current: PromptOptions}}) {
     const [open, setOpen] = useState(false);
     const [values, setValues] = useState<SettingValues>(() => canonicalSettingValues(canonical));
     const [touched, setTouched] = useState<Set<SettingField>>(() => new Set());
+    const canonicalSignature = JSON.stringify(canonical);
     const models = session.model.modelCatalog();
     const updateOptions = (nextValues: SettingValues, nextTouched: Set<SettingField>) => {
         optionsRef.current = {turn: turnStartOptions(nextValues, nextTouched, models), thread: threadStartOptions(nextValues, nextTouched)};
@@ -201,6 +202,14 @@ function SettingsPanel({session, canonical, optionsRef}: {session: BrowserFronte
     const profiles = Array.isArray(profilesDomain) ? profilesDomain : (profilesDomain && typeof profilesDomain === "object" && Array.isArray((profilesDomain as {data?: unknown}).data) ? (profilesDomain as {data: unknown[]}).data : []);
     const select = (label: string, field: SettingField, choices: readonly [string, string][]) => <label><span>{label}</span><select value={values[field]} onChange={event => change(field, event.target.value)}>{choices.map(([name, value]) => <option key={value} value={value}>{name}</option>)}</select></label>;
     const defaults: [string, string] = ["Thread default", DefaultSetting];
+    useEffect(() => {
+        const fresh = canonicalSettingValues(canonical);
+        setValues(current => {
+            const next = {...current};
+            for (const field of Object.keys(fresh) as SettingField[]) if (!touched.has(field)) next[field] = fresh[field];
+            return next;
+        });
+    }, [settingsRevision, canonicalSignature]);
     return <div className={`settings-panel ${open ? "open" : ""}`}>
         <button className="settings-toggle" onClick={() => setOpen(value => !value)} aria-expanded={open}>Turn settings <span>{touched.size > 0 ? `${touched.size} changed` : "Thread defaults"} {open ? "⌃" : "⌄"}</span></button>
         {open && <div className="settings-grid">

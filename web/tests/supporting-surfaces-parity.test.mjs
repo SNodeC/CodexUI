@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-    canonicalSettingValues, collaborationMode, negativePendingResponse, positivePendingResponse,
+    canonicalSettingValues, canonicalThreadSettings, collaborationMode, negativePendingResponse, positivePendingResponse,
     sandboxPolicy, threadStartOptions, turnStartOptions,
 } from "../dist/index.js";
 
 test("native turn-setting option shaping", () => {
+    assert.deepEqual(canonicalThreadSettings(
+        {model: "old", reasoningEffort: "medium", sandbox: "readOnly", personality: "friendly"},
+        {threadSettings: {model: "new", effort: "high", sandboxPolicy: {type: "workspaceWrite"}, personality: null}},
+    ), {model: "new", effort: "high", sandboxPolicy: {type: "workspaceWrite"}});
     const values = canonicalSettingValues({
         model: "gpt-current", reasoningEffort: "high", personality: "friendly", approvalPolicy: "never",
         approvalsReviewer: "auto_review", cwd: "/workspace", serviceTier: "fast", summary: "concise",

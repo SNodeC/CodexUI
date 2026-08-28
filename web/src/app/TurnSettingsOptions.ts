@@ -5,6 +5,24 @@ export type SettingField = "model" | "effort" | "personality" | "sandbox" | "net
     | "reviewer" | "cwd" | "permissionProfile" | "serviceTier" | "summary" | "collaboration";
 export type SettingValues = Record<SettingField, string>;
 
+function mergePatch(target: Record<string, unknown>, patch: Record<string, unknown>): void {
+    for (const [key, value] of Object.entries(patch)) {
+        if (value === null) delete target[key];
+        else if (isObject(value) && isObject(target[key])) mergePatch(target[key], value);
+        else target[key] = structuredClone(value);
+    }
+}
+
+export function canonicalThreadSettings(raw: unknown, settingsDomain: unknown): Record<string, unknown> {
+    const canonical = isObject(raw) ? structuredClone(raw) : {};
+    if (!isObject(settingsDomain)) return canonical;
+    const update = isObject(settingsDomain.threadSettings) ? settingsDomain.threadSettings : settingsDomain;
+    if (Object.hasOwn(update, "effort")) delete canonical.reasoningEffort;
+    if (Object.hasOwn(update, "sandboxPolicy")) delete canonical.sandbox;
+    mergePatch(canonical, update);
+    return canonical;
+}
+
 export function canonicalSettingValues(canonical: unknown): SettingValues {
     const value = isObject(canonical) ? canonical : {};
     const sandboxValue = isObject(value.sandboxPolicy) ? value.sandboxPolicy : value.sandbox;

@@ -79,6 +79,9 @@ test("browser session uses the C++ action routing and preserves prompt-response 
     assert.equal(visible[1], stableKey({kind: "item", threadId: "thread-1", turnId: "turn-1", itemId: "reasoning-1"}));
     assert.equal(session.model.connection().connected, true);
     assert.equal(session.model.connection().providerState, "ready");
+    await new Promise(resolve => setTimeout(resolve, 510));
+    assert.equal(session.getSnapshot().conversation.sections[0].cards[0].kind, "userMessage",
+        "the native 500ms acknowledgement timer materializes without another server event");
     session.dispose();
 });
 

@@ -54,6 +54,7 @@ export class BrowserFrontendSession {
     private readonly listeners = new Set<() => void>();
     private readonly protocolFrames: unknown[] = [];
     private readonly resumeInFlight = new Set<string>();
+    private readonly acceptedTransitionTimers = new Map<number, ReturnType<typeof setTimeout>>();
     private transport: WebSocketTransport | undefined;
     private selectedThreadId = "";
     private newThreadIntent = false;
@@ -78,6 +79,7 @@ export class BrowserFrontendSession {
             const threadId = stringMember(scope, "threadId");
             const thread = this.model.thread(threadId);
             if (thread) this.prompts.reconcile(threadId, thread, Date.now());
+            this.handlePresentationFrame(frame);
             this.schedulePublish();
             return true;
         });
@@ -140,6 +142,8 @@ export class BrowserFrontendSession {
     dispose(): void {
         this.disposed = true;
         this.connection.dispose(); this.transport = undefined;
+        for (const timer of this.acceptedTransitionTimers.values()) clearTimeout(timer);
+        this.acceptedTransitionTimers.clear();
         if (this.noticeTimer) clearTimeout(this.noticeTimer);
         this.noticeTimer = undefined;
     }
@@ -260,6 +264,7 @@ export class BrowserFrontendSession {
             if (response.ok) {
                 const turn = isObject(response.data) ? member(response.data, "turn", {}) : {};
                 this.prompts.acknowledge(dispatch.threadId, dispatch.id, stringMember(turn, "id") || undefined, Date.now());
+                this.scheduleAcceptedTransition(dispatch.threadId, dispatch.id);
             } else {
                 this.prompts.fail(dispatch.threadId, dispatch.id, this.errorMessage(response));
                 this.setNotice(this.errorMessage(response));
@@ -270,6 +275,37 @@ export class BrowserFrontendSession {
     }
     private errorMessage(response: {error?: unknown}): string {
         return stringMember(response.error, "message") || "Codex operation failed";
+    }
+    private scheduleAcceptedTransition(threadId: string, submissionId: number): void {
+        const previous = this.acceptedTransitionTimers.get(submissionId);
+        if (previous) clearTimeout(previous);
+        this.acceptedTransitionTimers.set(submissionId, setTimeout(() => {
+            this.acceptedTransitionTimers.delete(submissionId);
+            const thread = this.model.thread(threadId);
+            if (thread) this.prompts.reconcile(threadId, thread, Date.now());
+            this.publish();
+        }, 500));
+    }
+    private handlePresentationFrame(frame: JsonObject): void {
+        if (frame.kind !== "event") return;
+        const type = stringMember(frame, "type");
+        const data = isObject(frame.data) ? frame.data : {};
+        if (type === "thread.removed") {
+            const scope = isObject(frame.scope) ? frame.scope : {};
+            const threadId = stringMember(scope, "threadId");
+            this.prompts.clearThread(threadId);
+            if (this.selectedThreadId === threadId) this.selectedThreadId = "";
+        } else if (type === "notice.added") {
+            const notice = isObject(data.notice) ? data.notice : {};
+            const message = stringMember(notice, "message") || stringMember(notice, "reason") || stringMember(notice, "detail");
+            if (message !== "") this.setNotice(message, data.severity === "error");
+        } else if (type === "system.diagnostic") {
+            const message = stringMember(data, "message");
+            if (message !== "") this.setNotice(`Protocol diagnostic: ${message}`, false);
+        } else if (type === "connection.lifecycle" && (data.state === "failure" || data.state === "disconnected")) {
+            const detail = stringMember(data, "detail");
+            if (detail !== "" && !detail.startsWith("local-")) this.setNotice(detail);
+        }
     }
     private setNotice(message: string, error = true): void {
         if (this.disposed) return;
