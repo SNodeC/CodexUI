@@ -93,6 +93,7 @@ function SafeMarkdown({text}: {text: string}) {
 function Card({card, active, collapsed, onToggle}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void}) {
     let title = humanize(card.kind);
     let body: ReactNode;
+    let phaseClass = "";
     if (card.kind === "userMessage") {
         const data = card.payload as UserMessageData; title = "You";
         body = <><div className="card-text">{data.text}</div>{data.imagePaths.map(path => <code key={path}>{path}</code>)}</>;
@@ -100,7 +101,7 @@ function Card({card, active, collapsed, onToggle}: {card: VisibleCardData; activ
         const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You";
         body = <><div className="card-text">{data.prompt}</div>{data.error && <div className="error-text">{data.error}</div>}</>;
     } else if (card.kind === "agentMessage") {
-        const data = card.payload as AgentMessageData; title = data.finalAnswer ? "Codex" : "Agent message";
+        const data = card.payload as AgentMessageData; title = "Codex"; phaseClass = data.finalAnswer ? "final" : "update";
         body = <SafeMarkdown text={data.text} />;
     } else if (card.kind === "reasoning") {
         const data = card.payload as ReasoningData; title = "Reasoning";
@@ -128,7 +129,7 @@ function Card({card, active, collapsed, onToggle}: {card: VisibleCardData; activ
     }
     const foldable = ["agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "genericActivity"].includes(card.kind)
         && !(card.kind === "reasoning" && !(card.payload as ReasoningData).summary);
-    return <article className={`conversation-card ${card.kind} ${collapsed ? "collapsed" : ""}`} data-card-key={stableKey(card.key)}>
+    return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""}`} data-card-key={stableKey(card.key)}>
         <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{foldable && <button onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}>{collapsed ? "＋" : "−"}</button>}</span></header>{!collapsed && body}
     </article>;
 }

@@ -5,6 +5,7 @@
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
+#include <QColor>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -176,6 +177,62 @@ ConversationSnapshot conversation(const std::string &threadId, int count) {
             threadId, index < count / 2 ? "turn-1" : "turn-2", index));
   result.sections.push_back(std::move(first));
   result.sections.push_back(std::move(second));
+  return result;
+}
+
+bool testMessageIdentityPalette() {
+  const QString originalStyleSheet = qApp->styleSheet();
+  qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
+  ConversationCard user(VisibleCardData{
+      AuthoritativeItemKey{"identity-palette", "turn", "user"},
+      CardKind::UserMessage,
+      "identity-palette",
+      "turn",
+      "user",
+      UserMessageData{QStringLiteral("Prompt"), {}}});
+  ConversationCard update(VisibleCardData{
+      AuthoritativeItemKey{"identity-palette", "turn", "update"},
+      CardKind::AgentMessage,
+      "identity-palette",
+      "turn",
+      "update",
+      AgentMessageData{QStringLiteral("Working"), false}});
+  ConversationCard final(VisibleCardData{
+      AuthoritativeItemKey{"identity-palette", "turn", "final"},
+      CardKind::AgentMessage,
+      "identity-palette",
+      "turn",
+      "final",
+      AgentMessageData{QStringLiteral("Response"), true}});
+  for (ConversationCard *card : {&user, &update, &final}) {
+    card->resize(600, card->sizeHint().height());
+    card->show();
+  }
+  spin();
+
+  const auto titleColor = [](ConversationCard &card) {
+    for (QLabel *label : card.findChildren<QLabel *>())
+      if (label->property("kind").toString() == QStringLiteral("title"))
+        return label->palette().color(QPalette::WindowText);
+    return QColor{};
+  };
+  const auto surfaceColor = [](ConversationCard &card) {
+    const QImage rendered = card.grab().toImage();
+    return rendered.pixelColor(rendered.width() - 10,
+                               rendered.height() - 10);
+  };
+  const bool result = expect(
+      titleColor(user) ==
+              QColor(QString::fromLatin1(codexui::UiStyle::purpleText)) &&
+          surfaceColor(user) ==
+              QColor(QString::fromLatin1(codexui::UiStyle::purpleSurface)) &&
+          surfaceColor(update) ==
+              QColor(QString::fromLatin1(codexui::UiStyle::panel)) &&
+          titleColor(final) ==
+              QColor(QString::fromLatin1(codexui::UiStyle::blueHover)) &&
+          surfaceColor(final) == QColor(QStringLiteral("#eaf2ff")),
+      "You is violet, interim Codex is neutral, and final Codex is blue");
+  qApp->setStyleSheet(originalStyleSheet);
   return result;
 }
 
@@ -1503,7 +1560,13 @@ bool testPendingPromptAnimation() {
   const QImage second = card.grab().toImage();
   bool result =
       expect(first != second,
-             "an unacknowledged prompt visibly animates its blue sweep");
+             "an unacknowledged prompt visibly animates its violet sweep");
+  result &= expect(
+      first.pixelColor(10, first.height() - 10).blue() >
+              first.pixelColor(10, first.height() - 10).green() &&
+          first.pixelColor(10, first.height() - 10).red() >
+              first.pixelColor(10, first.height() - 10).green(),
+      "the temporary You card stays in the violet identity family");
 
   auto &accepted = std::get<LocalPromptData>(pending.payload);
   accepted.state = PromptState::Accepted;
@@ -1742,7 +1805,8 @@ bool testGeneratedImagePresentationAndGenericBound() {
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
   using namespace codexui::codex::middle;
-  bool result = testStructuralOrderAndIdentity();
+  bool result = testMessageIdentityPalette();
+  result &= testStructuralOrderAndIdentity();
   result &= testFollowPauseAndStableAnchor();
   result &= testPausedExpandedCommandStaysPainted();
   result &= testThreadLocalScrollAndComposerExtent();

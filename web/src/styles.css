@@ -64,10 +64,13 @@ h1, h2, h3, p { margin: 0; }
 .conversation-card > header small { font-size: 9px; opacity: .55; }
 .card-meta { display: flex; align-items: center; gap: 6px; }.card-meta button { width: 20px; height: 20px; padding: 0; border: 1px solid #dce2eb; border-radius: 5px; background: #fff; color: #778194; cursor: pointer; }
 .conversation-card.collapsed > header { margin-bottom: 0; }
-.conversation-card.userMessage, .conversation-card.localPrompt { margin-left: 12%; background: #e7efff; border-color: #c9d8fb; }
-.conversation-card.localPrompt { background: linear-gradient(100deg, #f0f4fb, #e6edfa, #f0f4fb); background-size: 200% 100%; animation: awaiting 1.7s linear infinite; }
+.conversation-card.userMessage, .conversation-card.localPrompt { margin-left: 12%; background: #f4f0ff; border-color: #d4c5f2; }
+.conversation-card.userMessage > header span, .conversation-card.localPrompt > header span { color: #53389e; }
+.conversation-card.localPrompt { background: linear-gradient(100deg, #f4f0ff, #e8def8, #f4f0ff); background-size: 200% 100%; animation: awaiting 1.7s linear infinite; }
 .conversation-card.reasoning { border-left: 3px solid #7896df; }
-.conversation-card.agentMessage { border-left: 3px solid #315ccf; }
+.conversation-card.agentMessage.update { background: #fff; border-color: #dce2eb; }
+.conversation-card.agentMessage.final { background: #eaf2ff; border-color: #bfd3f9; }
+.conversation-card.agentMessage.final > header span { color: #285fca; }
 .conversation-card.fileChanges { border-left: 3px solid #28a56c; }
 @keyframes awaiting { to { background-position: -200% 0; } }
 .card-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.55; }

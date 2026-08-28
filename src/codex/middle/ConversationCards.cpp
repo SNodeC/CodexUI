@@ -783,6 +783,13 @@ public:
   }
 
   void updateComposition(const AgentMessageData &message) {
+    const QString messagePhase =
+        message.finalAnswer ? QStringLiteral("final") : QStringLiteral("update");
+    if (owner->property("messagePhase").toString() != messagePhase) {
+      owner->setProperty("messagePhase", messagePhase);
+      owner->style()->unpolish(owner);
+      owner->style()->polish(owner);
+    }
     phase->setText(message.finalAnswer ? QStringLiteral("final answer")
                                        : QStringLiteral("update"));
     const QString phaseStatus = message.finalAnswer
@@ -974,10 +981,8 @@ public:
     const bool waiting = prompt->state == PromptState::Queued ||
                          prompt->state == PromptState::InFlight;
     const bool failed = prompt->state == PromptState::Failed;
-    const QString foreground = waiting || transitioning
-                                   ? QStringLiteral("#536b8f")
-                               : failed ? QStringLiteral("#982f3d")
-                                        : QStringLiteral("#1d2633");
+    const QString foreground = failed ? QStringLiteral("#982f3d")
+                                      : QStringLiteral("#53389e");
     const QString style =
         QStringLiteral("background:transparent;color:%1;").arg(foreground);
     bool changed = false;
@@ -1084,13 +1089,11 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
   const bool transitioning = acceptedTransitionActive(*prompt, now);
   const bool failed = prompt->state == PromptState::Failed;
   const QColor background = waiting || transitioning
-                                ? QColor(QStringLiteral("#dbe7f8"))
+                                ? QColor(QStringLiteral("#eee8fb"))
                             : failed ? QColor(QStringLiteral("#fff0f2"))
-                                     : QColor(QStringLiteral("#eaf2ff"));
-  const QColor border = waiting || transitioning
-                            ? QColor(QStringLiteral("#9eb9df"))
-                        : failed ? QColor(QStringLiteral("#efb8c0"))
-                                 : QColor(QStringLiteral("#bfd3f9"));
+                                     : QColor(QStringLiteral("#f4f0ff"));
+  const QColor border = failed ? QColor(QStringLiteral("#efb8c0"))
+                               : QColor(QStringLiteral("#d4c5f2"));
   painter.setBrush(background);
   painter.setPen(QPen(border, 1.0));
   painter.drawRoundedRect(bounds, 8.0, 8.0);
@@ -1110,9 +1113,9 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
   const qreal center = bounds.left() + position * bounds.width();
   const qreal radius = std::max(28.0, bounds.width() * 0.24);
   QLinearGradient sweep(center - radius, 0.0, center + radius, 0.0);
-  sweep.setColorAt(0.0, QColor(47, 111, 235, 0));
-  sweep.setColorAt(0.5, QColor(117, 160, 239, 105));
-  sweep.setColorAt(1.0, QColor(47, 111, 235, 0));
+  sweep.setColorAt(0.0, QColor(105, 65, 198, 0));
+  sweep.setColorAt(0.5, QColor(155, 128, 214, 105));
+  sweep.setColorAt(1.0, QColor(105, 65, 198, 0));
   QPainterPath clip;
   clip.addRoundedRect(bounds, 8.0, 8.0);
   painter.save();
@@ -1121,7 +1124,7 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
   painter.restore();
 
   painter.setBrush(Qt::NoBrush);
-  painter.setPen(QPen(QColor(QStringLiteral("#79a0d7")), 1.5));
+  painter.setPen(QPen(QColor(QStringLiteral("#b49bdf")), 1.5));
   painter.drawRoundedRect(bounds, 8.0, 8.0);
 }
 
