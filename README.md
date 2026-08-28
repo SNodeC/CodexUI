@@ -58,6 +58,10 @@ geometry, shell-output, Inspector, and desktop-integration decisions are
 documented in
 [`docs/ui-behavior.md`](docs/ui-behavior.md).
 
+The browser architecture, native/web parity boundary, state ownership, and
+version 1.0 delivery gates are documented in
+[`docs/web-1.0-contract.md`](docs/web-1.0-contract.md).
+
 ## License
 
 CodexUI is available under the LGPL-3.0-or-later OR MIT dual license.
