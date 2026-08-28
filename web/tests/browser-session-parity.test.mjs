@@ -80,3 +80,23 @@ test("browser session uses the C++ action routing and preserves prompt-response 
     assert.equal(session.model.connection().providerState, "ready");
     session.dispose();
 });
+
+test("browser session resumes a not-loaded thread before starting its queued turn", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open();
+    socket.receive({kind: "bridge.connection", event: "opened", connectionId: "resume-test", role: "controller"});
+    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "sleeping", status: {type: "notLoaded"}}]});
+    session.selectThread("sleeping");
+    respond(socket, requests(socket, "thread/read").at(-1), {thread: {id: "sleeping", status: {type: "notLoaded"}, turns: []}});
+    await session.submitPrompt("wake and work");
+    await Promise.resolve();
+    const resume = requests(socket, "thread/resume").at(-1);
+    assert.ok(resume);
+    assert.equal(requests(socket, "turn/start").length, 0);
+    respond(socket, resume, {thread: {id: "sleeping", status: {type: "idle"}}});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").at(-1).payload.params.input[0].text, "wake and work");
+    session.dispose();
+});

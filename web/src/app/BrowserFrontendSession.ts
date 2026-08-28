@@ -53,6 +53,7 @@ export class BrowserFrontendSession {
     private readonly normalizer: ProtocolNormalizer;
     private readonly listeners = new Set<() => void>();
     private readonly protocolFrames: unknown[] = [];
+    private readonly resumeInFlight = new Set<string>();
     private transport: WebSocketTransport | undefined;
     private selectedThreadId = "";
     private newThreadIntent = false;
@@ -80,7 +81,7 @@ export class BrowserFrontendSession {
         });
         this.connection = new ClientConnection(this.sdk, {
             onConnected: () => this.normalizer.transportEvent("connected"),
-            onDisconnected: () => this.normalizer.transportEvent("disconnected"),
+            onDisconnected: () => { this.transport = undefined; this.normalizer.transportEvent("disconnected"); },
             onFailure: reason => this.normalizer.transportEvent("failure", reason),
         });
         this.sdk.onRawJson((direction, message) => {
@@ -176,6 +177,15 @@ export class BrowserFrontendSession {
     }
     requestThreads(): void { this.request("threads.list", {}); }
     renameThread(threadId: string, name: string): void { this.request("thread.rename", {threadId, name}); }
+    reloadThread(threadId: string): void { this.request("thread.read", {threadId, includeTurns: true}); }
+    forkThread(threadId: string): void {
+        this.requestPromise("thread.fork", {threadId}).then(response => {
+            const thread = isObject(response.data) ? member(response.data, "thread", {}) : {};
+            const id = stringMember(thread, "id");
+            if (response.ok && id !== "") this.selectThread(id);
+            else { this.notice = this.errorMessage(response); this.publish(); }
+        });
+    }
     archiveThread(threadId: string, archived: boolean): void {
         this.request(archived ? "thread.unarchive" : "thread.archive", {threadId});
     }
@@ -186,7 +196,9 @@ export class BrowserFrontendSession {
 
     private hydrateCatalogs(): void {
         this.request("threads.list", {}); this.request("models.list", {}); this.request("permission-profiles.list", {});
-        if (this.selectedThreadId !== "") this.request("thread.read", {threadId: this.selectedThreadId, includeTurns: true});
+        const queued = new Set(this.prompts.queuedThreadIds());
+        if (this.selectedThreadId !== "") queued.add(this.selectedThreadId);
+        for (const threadId of queued) this.request("thread.read", {threadId, includeTurns: true}, () => this.dispatchNextPrompt(threadId));
     }
     private request(action: string, parameters: JsonObject, callback?: (frame: JsonObject) => void): string {
         const method = actionMethods[action];
@@ -207,6 +219,17 @@ export class BrowserFrontendSession {
     }
     private dispatchNextPrompt(threadId: string): void {
         if (!this.model.connection().connected || this.prompts.hasInFlight(threadId)) return;
+        const thread = this.model.thread(threadId);
+        if (thread?.status === "notLoaded") {
+            if (this.resumeInFlight.has(threadId)) return;
+            this.resumeInFlight.add(threadId);
+            this.requestPromise("thread.resume", {threadId}).then(response => {
+                this.resumeInFlight.delete(threadId);
+                if (response.ok) this.dispatchNextPrompt(threadId);
+                else { this.prompts.failQueued(threadId, this.errorMessage(response)); this.notice = this.errorMessage(response); this.publish(); }
+            });
+            return;
+        }
         const dispatch = this.prompts.beginNext(threadId, this.model.activeTurnId(threadId));
         if (!dispatch) return;
         this.dispatchPrompt(dispatch);

@@ -1,6 +1,6 @@
-import {useMemo, useState, useSyncExternalStore} from "react";
+import {useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
 import type {FormEvent, ReactNode} from "react";
-import {classifyStatus, stableKey} from "../index.js";
+import {ConversationViewportState, classifyStatus, indexAuthoritativeItems, projectConversation, stableKey} from "../index.js";
 import type {
     AgentActivityData, CommandExecutionData, FileChangesData, LocalPromptData,
     ReasoningData, UserMessageData, AgentMessageData, VisibleCardData,
@@ -18,25 +18,77 @@ function StatusDot({tone}: {tone: string}) { return <span className={`status-dot
 function ThreadPane({session, revision}: {session: BrowserFrontendSession; revision: number}) {
     void revision;
     const selected = session.getSnapshot().selectedThreadId;
+    const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+    const [actionOpen, setActionOpen] = useState("");
+    const toggle = (id: string) => setExpanded(current => {
+        const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next;
+    });
+    const renderThread = (id: string, depth: number): ReactNode => {
+        const thread = session.model.thread(id);
+        if (!thread) return null;
+        const status = classifyStatus(thread.status);
+        const hasChildren = thread.childThreadOrder.length > 0;
+        return <div key={id}>
+            <div className={`thread-row-wrap ${selected === id ? "selected" : ""}`} style={{paddingLeft: `${8 + depth * 14}px`}}>
+                <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id)} aria-label={expanded.has(id) ? "Collapse child threads" : "Expand child threads"}>{hasChildren ? (expanded.has(id) ? "⌄" : "›") : ""}</button>
+                <button className="thread-row" onClick={() => session.selectThread(id)}>
+                    <StatusDot tone={status.tone || "muted"} /><span><strong>{thread.title}</strong><small>{thread.cwd || thread.preview || id}</small></span>
+                </button>
+                {selected === id && <div className="thread-actions">
+                    <button title="Reload" onClick={() => session.reloadThread(id)}>↻</button>
+                    <button title="Fork" onClick={() => session.forkThread(id)}>⑂</button>
+                    <button title={thread.archived ? "Unarchive" : "Archive"} onClick={() => session.archiveThread(id, thread.archived)}>□</button>
+                    <button title="More actions" onClick={() => setActionOpen(current => current === id ? "" : id)}>•••</button>
+                    {actionOpen === id && <div className="action-popover">
+                        <button onClick={() => { const name = window.prompt("Thread name", thread.title); if (name?.trim()) session.renameThread(id, name.trim()); }}>Rename</button>
+                        <button className="danger" onClick={() => { if (window.confirm("Delete the selected thread?")) session.deleteThread(id); }}>Delete</button>
+                    </div>}
+                </div>}
+            </div>
+            {hasChildren && expanded.has(id) && thread.childThreadOrder.map(child => renderThread(child, depth + 1))}
+        </div>;
+    };
     return <aside className="thread-pane">
         <div className="pane-heading"><div><span className="eyebrow">Workspace</span><h2>Threads</h2></div>
             <button className="icon-button" onClick={() => session.beginNewThread()} title="New thread">＋</button></div>
         <div className="thread-list">
-            {session.model.threadOrder().map(id => {
-                const thread = session.model.thread(id)!;
-                const status = classifyStatus(thread.status);
-                return <button key={id} className={`thread-row ${selected === id ? "selected" : ""}`}
-                    onClick={() => session.selectThread(id)}>
-                    <StatusDot tone={status.tone || "muted"} />
-                    <span><strong>{thread.title}</strong><small>{thread.cwd || thread.preview || id}</small></span>
-                </button>;
-            })}
+            {session.model.threadOrder().map(id => renderThread(id, 0))}
         </div>
         <button className="refresh-button" onClick={() => session.requestThreads()}>↻ Refresh threads</button>
     </aside>;
 }
 
-function Card({card}: {card: VisibleCardData}) {
+function safeHref(value: string): string | undefined {
+    try { const url = new URL(value); return url.protocol === "https:" || url.protocol === "http:" ? url.href : undefined; }
+    catch { return undefined; }
+}
+function InlineMarkdown({text}: {text: string}) {
+    const expression = /(`[^`]+`|\[[^\]]+\]\([^)]+\)|\*\*[^*]+\*\*)/gu;
+    return <>{text.split(expression).filter(Boolean).map((part, index) => {
+        if (part.startsWith("`") && part.endsWith("`")) return <code key={index} className="inline-code">{part.slice(1, -1)}</code>;
+        if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
+        const link = /^\[([^\]]+)\]\(([^)]+)\)$/u.exec(part);
+        if (link) { const href = safeHref(link[2]!); return href ? <a key={index} href={href} target="_blank" rel="noreferrer">{link[1]}</a> : <span key={index}>{link[1]} ({link[2]})</span>; }
+        return part;
+    })}</>;
+}
+function SafeMarkdown({text}: {text: string}) {
+    const blocks: ReactNode[] = [];
+    let code: string[] | undefined;
+    let paragraph: string[] = [];
+    const flush = () => { if (paragraph.length) { blocks.push(<p key={`p-${blocks.length}`}><InlineMarkdown text={paragraph.join("\n")} /></p>); paragraph = []; } };
+    for (const line of text.split("\n")) {
+        if (line.startsWith("```")) { if (code) { blocks.push(<pre key={`c-${blocks.length}`}>{code.join("\n")}</pre>); code = undefined; } else { flush(); code = []; } continue; }
+        if (code) { code.push(line); continue; }
+        if (/^#{1,4} /u.test(line)) { flush(); blocks.push(<h3 key={`h-${blocks.length}`}><InlineMarkdown text={line.replace(/^#{1,4} /u, "")} /></h3>); }
+        else if (/^[-*] /u.test(line)) { flush(); blocks.push(<div className="markdown-list" key={`l-${blocks.length}`}>• <InlineMarkdown text={line.slice(2)} /></div>); }
+        else if (line.trim() === "") flush(); else paragraph.push(line);
+    }
+    flush(); if (code) blocks.push(<pre key={`c-${blocks.length}`}>{code.join("\n")}</pre>);
+    return <div className="safe-markdown">{blocks}</div>;
+}
+
+function Card({card, collapsed, onToggle}: {card: VisibleCardData; collapsed: boolean; onToggle: () => void}) {
     let title = humanize(card.kind);
     let body: ReactNode;
     if (card.kind === "userMessage") {
@@ -47,7 +99,7 @@ function Card({card}: {card: VisibleCardData}) {
         body = <><div className="card-text">{data.prompt}</div>{data.error && <div className="error-text">{data.error}</div>}</>;
     } else if (card.kind === "agentMessage") {
         const data = card.payload as AgentMessageData; title = data.finalAnswer ? "Codex" : "Agent message";
-        body = <div className="card-text markdown-text">{data.text}</div>;
+        body = <SafeMarkdown text={data.text} />;
     } else if (card.kind === "reasoning") {
         const data = card.payload as ReasoningData; title = "Reasoning";
         body = data.summary ? <div className="card-text">{data.summary}</div> : <div className="activity-line"><i />Working…</div>;
@@ -72,8 +124,9 @@ function Card({card}: {card: VisibleCardData}) {
         const data = card.payload as {type: string; raw: unknown}; title = humanize(data.type);
         body = <details><summary>Protocol data</summary><pre>{JSON.stringify(data.raw, null, 2)}</pre></details>;
     }
-    return <article className={`conversation-card ${card.kind}`} data-card-key={stableKey(card.key)}>
-        <header><span>{title}</span><small>{card.itemId}</small></header>{body}
+    const foldable = ["agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "genericActivity"].includes(card.kind);
+    return <article className={`conversation-card ${card.kind} ${collapsed ? "collapsed" : ""}`} data-card-key={stableKey(card.key)}>
+        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{foldable && <button onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}>{collapsed ? "＋" : "−"}</button>}</span></header>{!collapsed && body}
     </article>;
 }
 
@@ -81,31 +134,56 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
     void revision;
     const snapshot = session.getSnapshot();
     const thread = session.model.thread(snapshot.selectedThreadId);
+    const projectionId = snapshot.selectedThreadId || (snapshot.newThreadIntent ? "__codexui_new_thread__" : "");
+    const index = indexAuthoritativeItems(projectionId, thread);
+    const viewport = useRef(new ConversationViewportState()).current;
+    const limit = viewport.effectiveLimit(projectionId, index.ordered.length);
+    const conversation = projectConversation(index, session.prompts.submissions(projectionId), limit, Date.now(), thread);
+    const scroll = useRef<HTMLDivElement>(null);
+    const previousThread = useRef(projectionId);
+    const collapsed = useRef(new Set<string>());
+    const [, forceCardState] = useState(0);
+    const drafts = useRef(new Map<string, string>());
+    useEffect(() => {
+        if (previousThread.current !== projectionId) {
+            previousThread.current = projectionId;
+            const saved = viewport.scroll(projectionId);
+            requestAnimationFrame(() => { if (scroll.current) scroll.current.scrollTop = saved.following ? scroll.current.scrollHeight : saved.scrollTop; });
+        }
+    }, [projectionId, viewport]);
+    useLayoutEffect(() => {
+        const saved = viewport.scroll(projectionId);
+        if (saved.following && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
+    }, [revision, projectionId, viewport]);
+    const toggleCard = (key: string) => { if (collapsed.current.has(key)) collapsed.current.delete(key); else collapsed.current.add(key); forceCardState(value => value + 1); };
     return <main className="conversation-pane">
         <div className="conversation-heading"><div><span className="eyebrow">Conversation</span>
             <h1>{thread?.title ?? (snapshot.newThreadIntent ? "New thread" : "Select a thread")}</h1>
             <p>{thread ? `${thread.cwd} · ${classifyStatus(thread.status).text}` : snapshot.newThreadIntent ? "Send a message to create this thread." : "Choose a thread from the left."}</p></div></div>
-        <div className="conversation-scroll">
-            {snapshot.conversation.hasMore && <button className="load-more" onClick={() => session.loadMore()}>Load earlier activity</button>}
-            {snapshot.conversation.sections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
-            {snapshot.conversation.sections.map(section => <section key={section.key} className="turn-section">
-                {section.cards.map(card => <Card key={stableKey(card.key)} card={card} />)}
+        <div className="conversation-scroll" ref={scroll} onScroll={event => {
+            const element = event.currentTarget; const following = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
+            viewport.updateScroll(projectionId, element.scrollTop, following);
+        }}>
+            {conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId); forceCardState(value => value + 1); }}>Load earlier activity</button>}
+            {conversation.sections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
+            {conversation.sections.map(section => <section key={section.key} className="turn-section">
+                {section.cards.map(card => { const key = stableKey(card.key); return <Card key={key} card={card} collapsed={collapsed.current.has(key)} onToggle={() => toggleCard(key)} />; })}
             </section>)}
         </div>
-        <Composer session={session} active={Boolean(thread || snapshot.newThreadIntent)} />
+        <Composer key={projectionId} session={session} active={Boolean(thread || snapshot.newThreadIntent)} draftKey={projectionId} drafts={drafts.current} />
     </main>;
 }
 
-function Composer({session, active}: {session: BrowserFrontendSession; active: boolean}) {
-    const [prompt, setPrompt] = useState("");
+function Composer({session, active, draftKey, drafts}: {session: BrowserFrontendSession; active: boolean; draftKey: string; drafts: Map<string, string>}) {
+    const [prompt, setPrompt] = useState(drafts.get(draftKey) ?? "");
     const running = session.model.activeTurnId(session.getSnapshot().selectedThreadId) !== undefined;
     const submit = (event: FormEvent) => {
         event.preventDefault();
         if (!active || prompt.trim() === "") return;
-        const value = prompt; setPrompt(""); void session.submitPrompt(value);
+        const value = prompt; setPrompt(""); drafts.set(draftKey, ""); void session.submitPrompt(value);
     };
     return <form className="composer" onSubmit={submit}>
-        <textarea value={prompt} disabled={!active} onChange={event => setPrompt(event.target.value)}
+        <textarea value={prompt} disabled={!active} onChange={event => { setPrompt(event.target.value); drafts.set(draftKey, event.target.value); }}
             onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}
             placeholder={active ? "Message Codex…" : "Select or create a thread"} rows={3} />
         <div className="composer-actions"><span>Enter to send · Shift+Enter for a new line</span>
