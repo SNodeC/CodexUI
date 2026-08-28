@@ -1,0 +1,13 @@
+{
+  "name": "@snodec/codex-ui-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@snodec/codex-frontend": "file:../../../AISuite-extraction/AISuite-final/packages/codex-frontend"
+  }
+}
