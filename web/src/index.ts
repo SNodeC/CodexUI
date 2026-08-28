@@ -2,3 +2,6 @@ export * from "./presentation/PresentationProtocol.js";
 export * from "./presentation/PresentationStatus.js";
 export * from "./presentation/ProtocolNormalizer.js";
 export * from "./presentation/PresentationModel.js";
+export * from "./conversation/MiddleTypes.js";
+export * from "./conversation/PromptCoordinator.js";
+export * from "./conversation/ConversationProjection.js";
