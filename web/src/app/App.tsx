@@ -280,6 +280,23 @@ function Inspector({session, revision}: {session: BrowserFrontendSession; revisi
 }
 function Info({label, value}: {label: string; value: string}) { return <div className="info-row"><span>{label}</span><strong>{value || "—"}</strong></div>; }
 
+function requestSupportsDirectAccept(request: PendingRequestPresentation): boolean {
+    return ["command-approval", "file-change-approval", "permissions-approval", "legacy-patch-approval", "legacy-command-approval"].includes(request.kind);
+}
+
+function requestAcceptLabel(request: PendingRequestPresentation): string {
+    return request.kind === "permissions-approval" ? "Allow this turn" : "Accept";
+}
+
+function requestSummary(request: PendingRequestPresentation, raw: Record<string, unknown>, questions: readonly unknown[]): string {
+    const parts: string[] = [];
+    for (const [label, value] of [["Command", raw.command], ["Reason", raw.reason], ["Message", raw.message], ["Directory", raw.cwd], ["Grant root", raw.grantRoot]] as const)
+        if (typeof value === "string" && value.trim() !== "") parts.push(label === "Message" ? value : `${label}: ${value}`);
+    if (raw.permissions !== undefined) parts.push(`Permissions: ${JSON.stringify(raw.permissions)}`);
+    if (questions.length > 0) parts.push(`${questions.length} questions`);
+    return parts.length > 0 ? parts.join("  |  ") : `Request ${request.id} needs a decision.`;
+}
+
 function RequestCard({request, session}: {request: PendingRequestPresentation; session: BrowserFrontendSession}) {
     const raw = request.raw && typeof request.raw === "object" ? request.raw as Record<string, unknown> : {};
     const questions = Array.isArray(raw.questions) ? raw.questions as Record<string, unknown>[] : [];
@@ -293,15 +310,18 @@ function RequestCard({request, session}: {request: PendingRequestPresentation; s
         else if (request.kind === "mcp-elicitation") { try { input = JSON.parse(structured); } catch { return; } }
         session.resolvePending(JSON.parse(request.id), positivePendingResponse(request, input));
     };
+    const reject = () => session.resolvePending(JSON.parse(request.id), negativePendingResponse(request));
+    const directAccept = requestSupportsDirectAccept(request);
     return <div className="request-card">
         <strong>{humanize(request.kind)}</strong>
-        {typeof raw.message === "string" && <p>{raw.message}</p>}{typeof raw.reason === "string" && <p>{raw.reason}</p>}{typeof raw.command === "string" && <code>{raw.command}</code>}
+        <p>{requestSummary(request, raw, questions)}</p>
+        {typeof raw.command === "string" && raw.command.trim() !== "" && <code>{raw.command}</code>}
         {request.kind === "user-input" && questions.map(question => { const id = String(question.id ?? ""); const options = Array.isArray(question.options) ? question.options as Record<string, unknown>[] : []; return <label className="request-question" key={id}><span>{String(question.question ?? question.header ?? id)}</span>{options.length > 0
             ? <select value={answers[id] ?? ""} onChange={event => setAnswers(current => ({...current, [id]: event.target.value}))}><option value="">Choose…</option>{options.map(option => <option key={String(option.label)}>{String(option.label)}</option>)}</select>
             : <input type={question.isSecret ? "password" : "text"} value={answers[id] ?? ""} onChange={event => setAnswers(current => ({...current, [id]: event.target.value}))} />}</label>; })}
         {request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined && <textarea value={structured} onChange={event => setStructured(event.target.value)} rows={5} aria-label="Structured MCP response" />}
         <details><summary>Request data</summary><pre>{JSON.stringify(request.raw, null, 2)}</pre></details>
-        <div><button onClick={() => session.resolvePending(JSON.parse(request.id), negativePendingResponse(request))}>Deny</button><button className="approve" onClick={approve}>Approve</button></div>
+        <div className="request-actions"><button className="request-button danger" onClick={reject}>Reject</button><button className="request-button approve" onClick={approve}>{directAccept ? requestAcceptLabel(request) : "Submit"}</button></div>
     </div>;
 }
 

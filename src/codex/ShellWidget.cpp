@@ -37,6 +37,7 @@
 #include <QPushButton>
 #include <QSizePolicy>
 #include <QStyle>
+#include <QStringList>
 #include <QTabWidget>
 #include <QTimer>
 #include <QToolButton>
@@ -79,6 +80,72 @@ std::string safeMessage(const nlohmann::json &value) {
   return error != value.end() && error->is_object()
              ? stringValue(*error, "message")
              : std::string{};
+}
+
+QString requestTitle(const PendingRequestPresentation &request) {
+  if (request.kind == "command-approval")
+    return QStringLiteral("Command approval requested");
+  if (request.kind == "file-change-approval")
+    return QStringLiteral("File-change approval requested");
+  if (request.kind == "permissions-approval")
+    return QStringLiteral("Permission request");
+  if (request.kind == "user-input")
+    return QStringLiteral("Codex needs input");
+  if (request.kind == "mcp-elicitation")
+    return QStringLiteral("MCP server request");
+  if (request.kind == "legacy-patch-approval")
+    return QStringLiteral("Legacy patch approval");
+  if (request.kind == "legacy-command-approval")
+    return QStringLiteral("Legacy command approval");
+  return QStringLiteral("Codex request needs attention");
+}
+
+QString requestDetail(const PendingRequestPresentation &request) {
+  const auto field = [&request](const char *key) {
+    return text(stringValue(request.raw, key));
+  };
+  QStringList parts;
+  const QString command = field("command");
+  if (!command.isEmpty())
+    parts << QStringLiteral("Command: %1").arg(command);
+  const QString reason = field("reason");
+  if (!reason.isEmpty())
+    parts << QStringLiteral("Reason: %1").arg(reason);
+  const QString message = field("message");
+  if (!message.isEmpty())
+    parts << message;
+  const QString cwd = field("cwd");
+  if (!cwd.isEmpty())
+    parts << QStringLiteral("Directory: %1").arg(cwd);
+  const QString grantRoot = field("grantRoot");
+  if (!grantRoot.isEmpty())
+    parts << QStringLiteral("Grant root: %1").arg(grantRoot);
+  const auto permissions = request.raw.find("permissions");
+  if (permissions != request.raw.end() && !permissions->is_null())
+    parts << QStringLiteral("Permissions: %1")
+                 .arg(text(permissions->dump(0)));
+  const auto questions = request.raw.find("questions");
+  if (questions != request.raw.end() && questions->is_array())
+    parts << QStringLiteral("%1 questions")
+                 .arg(static_cast<qulonglong>(questions->size()));
+  if (parts.isEmpty())
+    return QStringLiteral("Request %1 for thread %2")
+        .arg(text(request.id), text(request.threadId));
+  return parts.join(QStringLiteral("  |  "));
+}
+
+bool requestSupportsDirectAccept(const PendingRequestPresentation &request) {
+  return request.kind == "command-approval" ||
+         request.kind == "file-change-approval" ||
+         request.kind == "permissions-approval" ||
+         request.kind == "legacy-patch-approval" ||
+         request.kind == "legacy-command-approval";
+}
+
+QString directAcceptLabel(const PendingRequestPresentation &request) {
+  if (request.kind == "permissions-approval")
+    return QStringLiteral("Allow this turn");
+  return QStringLiteral("Accept");
 }
 
 bool isThreadNotFoundResult(const nlohmann::json &result) {
@@ -283,6 +350,7 @@ struct ShellWidget::Impl final {
   void chooseAttachments();
   void interruptTurn();
   void reviewPending(const std::string &requestKey);
+  void acceptPending(const std::string &requestKey);
   void rejectPending(const std::string &requestKey);
   void respondToFirstPending(bool approve);
 
@@ -491,6 +559,7 @@ void ShellWidget::Impl::connectUi() {
   };
   composerActions.stop = [this] { interruptTurn(); };
   composerActions.attach = [this] { chooseAttachments(); };
+  composerActions.accept = [this] { respondToFirstPending(true); };
   composerActions.review = [this] { respondToFirstPending(true); };
   composerActions.deny = [this] { respondToFirstPending(false); };
   middleRegion->composer().setActions(std::move(composerActions));
@@ -508,6 +577,7 @@ void ShellWidget::Impl::connectUi() {
   });
   middleRegion->inspector().setRequestActions(
       [this](const std::string &id) { reviewPending(id); },
+      [this](const std::string &id) { acceptPending(id); },
       [this](const std::string &id) { rejectPending(id); });
   middleRegion->setPaneVisibilityAction(
       [this](bool sidebarVisible, bool inspectorVisible) {
@@ -844,7 +914,18 @@ void ShellWidget::Impl::refreshStatus() {
       QStringLiteral("Requests (%1)")
           .arg(static_cast<qulonglong>(snapshot.totalPending)));
   requestButton->setVisible(snapshot.totalPending != 0);
-  middleRegion->composer().setAttentionVisible(snapshot.selectedPending != 0);
+  const auto selectedRequest = std::ranges::find_if(
+      model.pendingRequestPresentations(), [this](const auto &entry) {
+        return entry.second.threadId == selectedThreadId;
+      });
+  if (selectedRequest != model.pendingRequestPresentations().end()) {
+    const PendingRequestPresentation &request = selectedRequest->second;
+    middleRegion->composer().setAttentionRequest(
+        requestTitle(request), requestDetail(request),
+        requestSupportsDirectAccept(request), directAcceptLabel(request));
+  }
+  middleRegion->composer().setAttentionVisible(selectedRequest !=
+                                               model.pendingRequestPresentations().end());
 
   QString globalStatus = QStringLiteral("Ready");
   QString globalTone = QStringLiteral("success");
@@ -1523,7 +1604,7 @@ void ShellWidget::Impl::respondToFirstPending(bool approve) {
   if (request == pending.end())
     return;
   if (approve)
-    reviewPending(request->first);
+    acceptPending(request->first);
   else
     rejectPending(request->first);
 }
@@ -1537,6 +1618,21 @@ void ShellWidget::Impl::reviewPending(const std::string &requestKey) {
     return;
   session.respondToServerRequest(nlohmann::json::parse(requestKey),
                                  response->result, response->error);
+}
+
+void ShellWidget::Impl::acceptPending(const std::string &requestKey) {
+  const auto request = model.pendingRequestPresentations().find(requestKey);
+  if (request == model.pendingRequestPresentations().end())
+    return;
+  if (!requestSupportsDirectAccept(request->second)) {
+    reviewPending(requestKey);
+    return;
+  }
+  PendingRequestResponse response =
+      PendingRequestDialog::positiveResponse(request->second);
+  session.respondToServerRequest(nlohmann::json::parse(requestKey),
+                                 std::move(response.result),
+                                 std::move(response.error));
 }
 
 void ShellWidget::Impl::rejectPending(const std::string &requestKey) {

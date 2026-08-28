@@ -25,6 +25,9 @@ public:
 
   [[nodiscard]] static PendingRequestResponse
   negativeResponse(const PendingRequestPresentation &request);
+
+  [[nodiscard]] static PendingRequestResponse
+  positiveResponse(const PendingRequestPresentation &request);
 };
 
 } // namespace codexui::codex

@@ -14,6 +14,7 @@
 class QEvent;
 class QFrame;
 class QGridLayout;
+class QLabel;
 class QPushButton;
 class QScrollArea;
 class QToolButton;
@@ -37,6 +38,7 @@ public:
     std::function<bool(QString, std::vector<AttachmentDraft>)> submit;
     std::function<void()> stop;
     std::function<void()> attach;
+    std::function<void()> accept;
     std::function<void()> review;
     std::function<void()> deny;
   };
@@ -49,6 +51,8 @@ public:
   [[nodiscard]] const std::vector<AttachmentDraft> &
   attachments() const noexcept;
   void setAttentionVisible(bool visible);
+  void setAttentionRequest(QString title, QString detail, bool directAccept,
+                           QString acceptLabel);
   void setActiveTurn(bool active);
   void setCanSubmit(bool canSubmit);
   void setSettingsEnabled(bool enabled);
@@ -80,6 +84,11 @@ private:
   QWidget *anchor_ = nullptr;
   QWidget *reserve_ = nullptr;
   QFrame *attention_ = nullptr;
+  QLabel *attentionTitle_ = nullptr;
+  QLabel *attentionDetail_ = nullptr;
+  QPushButton *attentionRejectButton_ = nullptr;
+  QPushButton *attentionAcceptButton_ = nullptr;
+  QPushButton *attentionReviewButton_ = nullptr;
   TurnSettingsWidget *turnSettings_ = nullptr;
   QFrame *composer_ = nullptr;
   QFrame *attachmentPanel_ = nullptr;

@@ -233,9 +233,7 @@ PendingRequestDialog::present(const PendingRequestPresentation &request,
       structuredContent->setMinimumHeight(150);
       structuredContent->setLineWrapMode(QPlainTextEdit::WidgetWidth);
       structuredContent->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-      structuredContent->setStyleSheet(QStringLiteral(
-          "background:#f8fafc;border:1px solid #d7dee8;border-radius:6px;"
-          "padding:7px;font-family:monospace;"));
+      structuredContent->setProperty("kind", "dialogEditor");
       contentLayout->addWidget(structuredContent);
     }
   } else if (request.kind == "permissions-approval") {
@@ -381,6 +379,27 @@ PendingRequestResponse PendingRequestDialog::negativeResponse(
         {"success", false}};
   } else {
     response.error = jsonRpcError("Request declined by user");
+  }
+  return response;
+}
+
+PendingRequestResponse PendingRequestDialog::positiveResponse(
+    const PendingRequestPresentation &request) {
+  PendingRequestResponse response;
+  if (request.kind == "command-approval" ||
+      request.kind == "file-change-approval") {
+    response.result = {{"decision", "accept"}};
+  } else if (request.kind == "permissions-approval") {
+    response.result = {
+        {"permissions",
+         request.raw.value("permissions", nlohmann::json::object())},
+        {"scope", "turn"}};
+  } else if (request.kind == "legacy-patch-approval" ||
+             request.kind == "legacy-command-approval") {
+    response.result = {{"decision", "approved"}};
+  } else {
+    response.error =
+        jsonRpcError("CodexUI cannot directly approve this server request");
   }
   return response;
 }

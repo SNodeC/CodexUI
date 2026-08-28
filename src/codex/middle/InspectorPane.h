@@ -40,7 +40,8 @@ public:
   explicit InspectorPane(QWidget *parent = nullptr);
 
   void setHideAction(std::function<void()> hide);
-  void setRequestActions(RequestAction review, RequestAction reject);
+  void setRequestActions(RequestAction review, RequestAction accept,
+                         RequestAction reject);
   void refresh(const PresentationModel &model,
                const std::string &selectedThreadId);
   void appendProtocolFrame(const nlohmann::json &frame);
@@ -117,6 +118,7 @@ private:
   const PresentationModel *currentModel = nullptr;
   std::string currentThreadId;
   RequestAction reviewRequest;
+  RequestAction acceptRequest;
   RequestAction rejectRequest;
   std::function<void()> hideAction;
 

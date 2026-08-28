@@ -114,6 +114,14 @@ bool hasLabelContaining(const QWidget &root, const QString &text) {
   return false;
 }
 
+bool hasButtonText(const QWidget &root, const QString &text) {
+  for (const QPushButton *button : root.findChildren<QPushButton *>()) {
+    if (button->text() == text)
+      return true;
+  }
+  return false;
+}
+
 void spin(int milliseconds = 0) {
   QElapsedTimer timer;
   timer.start();
@@ -377,6 +385,25 @@ bool testOverlayGeometryAndRegionRouting() {
       "prompt contraction restores canonical layout, gaps, and trailing space");
   region.composer().setActiveTurn(false);
   spin(20);
+  result &= expect(view.isAtBottom(), "conversation begins at the bottom");
+  region.composer().setAttentionRequest(
+      QStringLiteral("Command approval requested"),
+      QStringLiteral("Command: gh auth status  |  Reason: Verify GitHub "
+                     "authentication"),
+      true, QStringLiteral("Accept"));
+  region.composer().setAttentionVisible(true);
+  spin(20);
+  result &= expect(
+      hasLabelContaining(region.composer(),
+                         QStringLiteral("Command approval requested")) &&
+          hasLabelContaining(region.composer(),
+                             QStringLiteral("Command: gh auth status")) &&
+          hasButtonText(region.composer(), QStringLiteral("Reject")) &&
+          hasButtonText(region.composer(), QStringLiteral("Accept")),
+      "composer attention requests show details and direct semantic actions");
+  region.composer().setAttentionVisible(false);
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
+  spin(10);
 
   ComposerPane::Actions rejected;
   rejected.submit = [](QString, std::vector<AttachmentDraft>) { return false; };
@@ -396,7 +423,6 @@ bool testOverlayGeometryAndRegionRouting() {
   result &= expect(region.composer().promptEditor()->toPlainText().isEmpty(),
                    "successful local admission clears the draft exactly once");
 
-  result &= expect(view.isAtBottom(), "conversation begins at the bottom");
   QWheelEvent overLeftHandle = wheelFor(splitter->handle(1), 180);
   result &=
       expect(region.routeScrollEvent(splitter->handle(1), &overLeftHandle) &&
@@ -1414,19 +1440,45 @@ bool testInspectorDetailParity() {
       break;
     }
   }
-  QPushButton *denyButton = nullptr;
+  QPushButton *rejectButton = nullptr;
   QPushButton *reviewButton = nullptr;
   for (QPushButton *button : inspector.findChildren<QPushButton *>()) {
-    if (button->text() == QStringLiteral("Deny"))
-      denyButton = button;
+    if (button->text() == QStringLiteral("Reject"))
+      rejectButton = button;
     else if (button->text() == QStringLiteral("Review"))
       reviewButton = button;
   }
   result &= expect(
-      requestFrame && denyButton && reviewButton &&
-          denyButton->property("kind") == "destructive" &&
+      requestFrame && rejectButton && reviewButton &&
+          rejectButton->property("kind") == "destructive" &&
           reviewButton->property("kind") == "request",
-      "pending requests use warning surfaces and semantic actions");
+      "complex pending requests use warning surfaces and a review action");
+  model.applyEvent(presentation::event(
+      6, 1, "pending-request.upsert",
+      {{"requestId", "request-two"},
+       {"category", "command-approval"},
+       {"request",
+        {{"command", "gh auth status"},
+         {"reason", "Verify GitHub authentication"},
+         {"cwd", "/home/voc/projects/drafts"}}}},
+      presentation::Authority::Merge,
+      {{"threadId", "owner-thread"}, {"requestId", "request-two"}}));
+  inspector.refresh(model, "owner-thread");
+  spin(20);
+  QPushButton *acceptButton = nullptr;
+  for (QPushButton *button : inspector.findChildren<QPushButton *>()) {
+    if (button->text() == QStringLiteral("Accept")) {
+      acceptButton = button;
+      break;
+    }
+  }
+  result &= expect(
+      acceptButton &&
+          acceptButton->property("kind").toString() == QStringLiteral("request") &&
+          hasLabelContaining(inspector, QStringLiteral("Command: gh auth status")) &&
+          hasLabelContaining(inspector,
+                             QStringLiteral("Reason: Verify GitHub authentication")),
+      "simple approval requests show decision details and direct accept");
   qApp->setStyleSheet(previousStyleSheet);
   return result;
 }

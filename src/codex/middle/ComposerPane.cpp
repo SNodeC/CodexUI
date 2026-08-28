@@ -88,23 +88,41 @@ ComposerPane::ComposerPane(QWidget *anchor)
   attention_->setProperty("kind", "orangeBadge");
   auto *attentionLayout = new QHBoxLayout(attention_);
   attentionLayout->setContentsMargins(10, 6, 10, 6);
-  attentionLayout->addWidget(makeLabel(
-      QStringLiteral("A Codex request needs attention"), "attentionSection"));
+  attentionLayout->setSpacing(8);
+  auto *attentionText = new QWidget(attention_);
+  auto *attentionTextLayout = new QVBoxLayout(attentionText);
+  attentionTextLayout->setContentsMargins(0, 0, 0, 0);
+  attentionTextLayout->setSpacing(2);
+  attentionTitle_ = makeLabel(QStringLiteral("A Codex request needs attention"),
+                              "attentionSection");
+  attentionDetail_ = makeLabel(QStringLiteral("Review the pending request."),
+                               "meta");
+  attentionTextLayout->addWidget(attentionTitle_);
+  attentionTextLayout->addWidget(attentionDetail_);
+  attentionLayout->addWidget(attentionText, 1);
   attentionLayout->addStretch();
-  auto *deny = new QPushButton(QStringLiteral("Deny"), attention_);
-  auto *review = new QPushButton(QStringLiteral("Review"), attention_);
-  deny->setProperty("kind", "destructive");
-  review->setProperty("kind", "request");
-  attentionLayout->addWidget(deny);
-  attentionLayout->addWidget(review);
-  connect(deny, &QPushButton::clicked, this, [this] {
+  attentionRejectButton_ = new QPushButton(QStringLiteral("Reject"), attention_);
+  attentionAcceptButton_ = new QPushButton(QStringLiteral("Accept"), attention_);
+  attentionReviewButton_ = new QPushButton(QStringLiteral("Review"), attention_);
+  attentionRejectButton_->setProperty("kind", "destructive");
+  attentionAcceptButton_->setProperty("kind", "request");
+  attentionReviewButton_->setProperty("kind", "request");
+  attentionLayout->addWidget(attentionRejectButton_);
+  attentionLayout->addWidget(attentionAcceptButton_);
+  attentionLayout->addWidget(attentionReviewButton_);
+  connect(attentionRejectButton_, &QPushButton::clicked, this, [this] {
     if (actions_.deny)
       actions_.deny();
   });
-  connect(review, &QPushButton::clicked, this, [this] {
+  connect(attentionAcceptButton_, &QPushButton::clicked, this, [this] {
+    if (actions_.accept)
+      actions_.accept();
+  });
+  connect(attentionReviewButton_, &QPushButton::clicked, this, [this] {
     if (actions_.review)
       actions_.review();
   });
+  attentionReviewButton_->hide();
   attention_->hide();
   surfacesLayout->addWidget(attention_);
 
@@ -225,6 +243,30 @@ void ComposerPane::setAttentionVisible(bool visible) {
   if (attention_->isVisible() == visible)
     return;
   attention_->setVisible(visible);
+  synchronizeGeometry();
+}
+
+void ComposerPane::setAttentionRequest(QString title, QString detail,
+                                       bool directAccept,
+                                       QString acceptLabel) {
+  if (title.isEmpty())
+    title = QStringLiteral("A Codex request needs attention");
+  if (detail.isEmpty())
+    detail = QStringLiteral("Review the pending request.");
+  if (acceptLabel.isEmpty())
+    acceptLabel = QStringLiteral("Accept");
+  const bool unchanged =
+      attentionTitle_->text() == title && attentionDetail_->text() == detail &&
+      attentionAcceptButton_->isVisible() == directAccept &&
+      attentionReviewButton_->isVisible() != directAccept &&
+      attentionAcceptButton_->text() == acceptLabel;
+  if (unchanged)
+    return;
+  attentionTitle_->setText(std::move(title));
+  attentionDetail_->setText(std::move(detail));
+  attentionAcceptButton_->setText(std::move(acceptLabel));
+  attentionAcceptButton_->setVisible(directAccept);
+  attentionReviewButton_->setVisible(!directAccept);
   synchronizeGeometry();
 }
 
