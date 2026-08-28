@@ -172,6 +172,7 @@ PromptCoordinator::beginNext(const std::string &threadId,
                            });
   if (next == found->second.end())
     return std::nullopt;
+  next->admissionAtStart = !next->admissionAnchor;
   next->state = PromptState::InFlight;
   // Start versus steer is an operation-time fact. A turn which was active
   // when the prompt entered the local queue may have completed meanwhile.
@@ -216,6 +217,7 @@ bool PromptCoordinator::requeue(const std::string &threadId,
   if (!pending || pending->state != PromptState::InFlight)
     return false;
   pending->state = PromptState::Queued;
+  pending->admissionAtStart = false;
   return true;
 }
 
@@ -246,10 +248,12 @@ bool PromptCoordinator::reassignThread(const std::string &fromThreadId,
     auto moved = std::move(aliases->second);
     visualAliasesByThread.erase(aliases);
     auto &target = visualAliasesByThread[toThreadId];
-    for (const auto &[key, localKey] : moved) {
+    for (auto &[key, alias] : moved) {
       AuthoritativeItemKey reassigned = key;
       reassigned.threadId = toThreadId;
-      target.insert_or_assign(std::move(reassigned), localKey);
+      if (alias.admissionAnchor)
+        alias.admissionAnchor->threadId = toThreadId;
+      target.insert_or_assign(std::move(reassigned), std::move(alias));
     }
   };
   auto source = byThread.find(fromThreadId);
@@ -307,7 +311,7 @@ void PromptCoordinator::reconcile(const std::string &threadId,
   std::vector<bool> claimed(authoritativeItems.ordered.size());
   for (std::size_t index = 0; index < authoritativeItems.ordered.size();
        ++index)
-    if (authoritativeItems.ordered[index].localPromptKey)
+    if (authoritativeItems.ordered[index].promptAlias)
       claimed[index] = true;
   for (const PromptSubmission &submission : found->second)
     if (submission.materializedItem) {
@@ -322,8 +326,10 @@ void PromptCoordinator::reconcile(const std::string &threadId,
       continue;
     if (!submission.admissionAnchor &&
         submission.state == PromptState::Queued &&
-        !authoritativeItems.ordered.empty())
+        !authoritativeItems.ordered.empty()) {
       submission.admissionAnchor = authoritativeItems.ordered.back().key;
+      submission.admissionAtStart = false;
+    }
 
     const auto exact = authoritativeItems.userMessagesByClientId.find(
         submission.clientUserMessageId);
@@ -381,7 +387,10 @@ void PromptCoordinator::reconcile(const std::string &threadId,
         submission.acceptedTransitionActive(nowMilliseconds))
       continue;
     visualAliasesByThread[threadId].insert_or_assign(
-        *submission.materializedItem, LocalPromptKey{submission.id});
+        *submission.materializedItem,
+        PromptVisualAlias{LocalPromptKey{submission.id},
+                          submission.admissionAnchor,
+                          submission.admissionOrdinal});
   }
   std::erase_if(found->second, [nowMilliseconds](const auto &submission) {
     return submission.state == PromptState::Accepted &&
@@ -441,10 +450,10 @@ void PromptCoordinator::applyVisualAliases(
   const auto aliases = visualAliasesByThread.find(threadId);
   if (aliases == visualAliasesByThread.end())
     return;
-  for (const auto &[key, localKey] : aliases->second) {
+  for (const auto &[key, alias] : aliases->second) {
     const auto position = authoritativeItems.position(key);
     if (position)
-      authoritativeItems.ordered[*position].localPromptKey = localKey;
+      authoritativeItems.ordered[*position].promptAlias = alias;
   }
 }
 

@@ -272,20 +272,32 @@ struct ProjectedNode {
   VisibleCardData card;
 };
 
+std::optional<std::size_t> admissionBoundaryPosition(
+    const std::optional<AuthoritativeItemKey> &admissionAnchor,
+    bool admissionAtStart, const AuthoritativeItemIndex &authoritativeItems) {
+  if (admissionAnchor) {
+    const auto anchor = authoritativeItems.position(*admissionAnchor);
+    if (anchor)
+      return (*anchor + 1) * 2;
+  }
+  if (admissionAtStart)
+    return 0;
+  return std::nullopt;
+}
+
 std::size_t submissionPosition(
     const PromptSubmission &submission,
     const AuthoritativeItemIndex &authoritativeItems,
     std::optional<std::size_t> materializedIndex = std::nullopt) {
-  if (submission.admissionAnchor) {
-    const auto anchor =
-        authoritativeItems.position(*submission.admissionAnchor);
-    if (anchor)
-      return (*anchor + 1) * 2;
-  }
+  const auto admitted = admissionBoundaryPosition(submission.admissionAnchor,
+                                                  submission.admissionAtStart,
+                                                  authoritativeItems);
+  if (admitted)
+    return *admitted;
   if (materializedIndex)
     return *materializedIndex * 2 + 1;
-  // No authoritative tail was known at admission. Until reconcile establishes
-  // one, the prompt is a tail item rather than a synthetic history prefix.
+  // A queued pre-hydration prompt has no committed boundary yet. Until
+  // reconcile establishes one, keep it at the tail of retained history.
   return authoritativeItems.ordered.size() * 2 + 2;
 }
 
@@ -322,15 +334,22 @@ ConversationSnapshot ConversationProjection::project(
         binding->second->localCardVisible(nowMilliseconds))
       continue;
     CardKey visualKey =
-        item.localPromptKey ? CardKey{*item.localPromptKey} : CardKey{item.key};
+        item.promptAlias ? CardKey{item.promptAlias->key} : CardKey{item.key};
     if (binding != bindings.end())
       visualKey = LocalPromptKey{binding->second->id};
-    const std::size_t position =
-        binding == bindings.end()
-            ? index * 2 + 1
-            : submissionPosition(*binding->second, authoritativeItems, index);
-    const std::uint64_t tieBreaker =
-        binding == bindings.end() ? 0 : binding->second->admissionOrdinal;
+    std::size_t position = index * 2 + 1;
+    std::uint64_t tieBreaker = 0;
+    if (binding != bindings.end()) {
+      position =
+          submissionPosition(*binding->second, authoritativeItems, index);
+      tieBreaker = binding->second->admissionOrdinal;
+    } else if (item.promptAlias) {
+      const auto admitted = admissionBoundaryPosition(
+          item.promptAlias->admissionAnchor, !item.promptAlias->admissionAnchor,
+          authoritativeItems);
+      position = admitted.value_or(position);
+      tieBreaker = item.promptAlias->admissionOrdinal;
+    }
     VisibleCardData card =
         authoritativeCard(item.key, *item.presentation, std::move(visualKey));
     nodes.push_back({position, tieBreaker,

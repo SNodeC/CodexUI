@@ -218,6 +218,23 @@ bool testDispatchChoiceAndPreHydrationTail() {
   result &=
       expect(keys.size() == 3 && keys.back() == CardKey{LocalPromptKey{tailId}},
              "a pre-hydration prompt stays after retained history");
+
+  PromptCoordinator recovering;
+  ThreadPresentation empty;
+  empty.id = "thread-recovering";
+  const auto recoveringId =
+      recovering.admit(empty.id, QStringLiteral("retry after resume"), {},
+                       nlohmann::json::object(), &empty, std::nullopt, 500);
+  result &= expect(recovering.beginNext(empty.id).has_value() &&
+                       recovering.requeue(empty.id, recoveringId),
+                   "an empty-thread dispatch can return to hydration");
+  ThreadPresentation recovered = baseThread(empty.id);
+  const auto awaitingHydration = ConversationProjection::project(
+      recovered, recovering.submissions(empty.id), 80, 501);
+  result &= expect(
+      awaitingHydration.cardKeys().back() ==
+          CardKey{LocalPromptKey{recoveringId}},
+      "a requeued prompt returns to the unresolved retained-history tail");
   return result;
 }
 
@@ -263,6 +280,148 @@ bool testClientIdentityBindsBeforeAcknowledgement() {
                        failedPrompt->state == PromptState::Failed &&
                        failedPrompt->error == QStringLiteral("rejected"),
                    "a failure remains explicit after early materialization");
+  return result;
+}
+
+bool testFirstResponseOrderIsAdmissionStable() {
+  ThreadPresentation reasoningFirst;
+  reasoningFirst.id = "thread-reasoning-first";
+  PromptCoordinator prompts;
+  const auto promptId = prompts.admit(
+      reasoningFirst.id, QStringLiteral("new prompt"), {},
+      nlohmann::json::object(), &reasoningFirst, std::nullopt, 600);
+  const auto dispatch = prompts.beginNext(reasoningFirst.id);
+  bool result =
+      expect(dispatch.has_value(), "an empty-thread prompt begins dispatch");
+  if (!dispatch)
+    return false;
+
+  addTurn(reasoningFirst, "turn-new");
+  appendItem(reasoningFirst, "turn-new",
+             item("reasoning", {{"type", "reasoning"},
+                                {"summary", nlohmann::json::array()}}));
+  prompts.reconcile(reasoningFirst.id, reasoningFirst, 601);
+  const AuthoritativeItemKey reasoningKey{reasoningFirst.id, "turn-new",
+                                          "reasoning"};
+  const auto beforeUser = ConversationProjection::project(
+      reasoningFirst, prompts.submissions(reasoningFirst.id), 80, 601);
+  result &=
+      expect(beforeUser.cardKeys() ==
+                 std::vector<CardKey>{LocalPromptKey{promptId}, reasoningKey},
+             "reasoning arriving first remains after its admitted prompt");
+
+  appendItem(reasoningFirst, "turn-new",
+             item("user-new",
+                  {{"type", "userMessage"},
+                   {"clientId", dispatch->clientUserMessageId},
+                   {"content", {{{"type", "text"}, {"text", "new prompt"}}}}}));
+  prompts.reconcile(reasoningFirst.id, reasoningFirst, 602);
+  const auto materialized = ConversationProjection::project(
+      reasoningFirst, prompts.submissions(reasoningFirst.id), 80, 602);
+  result &=
+      expect(materialized.cardKeys() ==
+                 std::vector<CardKey>{LocalPromptKey{promptId}, reasoningKey},
+             "early user-message materialization cannot invert the cards");
+
+  result &= expect(prompts.acknowledge(reasoningFirst.id, promptId,
+                                       std::string("turn-new"), 700),
+                   "the reasoning-first prompt is acknowledged");
+  prompts.reconcile(reasoningFirst.id, reasoningFirst, 700);
+  const auto transitioning = ConversationProjection::project(
+      reasoningFirst, prompts.submissions(reasoningFirst.id), 80, 700);
+  result &=
+      expect(transitioning.cardKeys() ==
+                 std::vector<CardKey>{LocalPromptKey{promptId}, reasoningKey},
+             "the animated-to-blue transition retains prompt order");
+
+  auto compactedItems =
+      indexAuthoritativeItems(reasoningFirst.id, &reasoningFirst);
+  prompts.reconcile(reasoningFirst.id, compactedItems, 1200);
+  const auto compacted = ConversationProjection::project(
+      compactedItems, &reasoningFirst, prompts.submissions(reasoningFirst.id),
+      80, 1200);
+  const VisibleCardData *bluePrompt = compacted.find(LocalPromptKey{promptId});
+  result &= expect(
+      compacted.cardKeys() ==
+              std::vector<CardKey>{LocalPromptKey{promptId}, reasoningKey} &&
+          bluePrompt && bluePrompt->kind == CardKind::UserMessage,
+      "the compact blue card retains the original admission boundary");
+
+  ThreadPresentation continued = baseThread("thread-continued");
+  PromptCoordinator continuedPrompts;
+  const auto continuedId = continuedPrompts.admit(
+      continued.id, QStringLiteral("continued prompt"), {},
+      nlohmann::json::object(), &continued, std::nullopt, 750);
+  const auto continuedDispatch = continuedPrompts.beginNext(continued.id);
+  result &= expect(continuedDispatch.has_value(),
+                   "a continued-thread prompt begins dispatch");
+  if (!continuedDispatch)
+    return false;
+  addTurn(continued, "turn-continued");
+  appendItem(
+      continued, "turn-continued",
+      item("reasoning-continued",
+           {{"type", "reasoning"}, {"summary", nlohmann::json::array()}}));
+  appendItem(
+      continued, "turn-continued",
+      item("user-continued",
+           {{"type", "userMessage"},
+            {"clientId", continuedDispatch->clientUserMessageId},
+            {"content", {{{"type", "text"}, {"text", "continued prompt"}}}}}));
+  continuedPrompts.reconcile(continued.id, continued, 751);
+  result &=
+      expect(continuedPrompts.acknowledge(continued.id, continuedId,
+                                          std::string("turn-continued"), 800),
+             "the continued-thread prompt is acknowledged");
+  auto continuedItems = indexAuthoritativeItems(continued.id, &continued);
+  continuedPrompts.reconcile(continued.id, continuedItems, 1300);
+  const auto continuedCompacted = ConversationProjection::project(
+      continuedItems, &continued, continuedPrompts.submissions(continued.id),
+      80, 1300);
+  const auto continuedKeys = continuedCompacted.cardKeys();
+  const auto continuedPrompt =
+      std::ranges::find(continuedKeys, CardKey{LocalPromptKey{continuedId}});
+  const auto continuedReasoning = std::ranges::find(
+      continuedKeys,
+      CardKey{AuthoritativeItemKey{continued.id, "turn-continued",
+                                   "reasoning-continued"}});
+  result &= expect(
+      continuedPrompt != continuedKeys.end() &&
+          continuedReasoning != continuedKeys.end() &&
+          continuedPrompt < continuedReasoning,
+      "a continued-thread blue card cannot move below earlier reasoning");
+
+  ThreadPresentation userFirst;
+  userFirst.id = "thread-user-first";
+  PromptCoordinator ordinaryPrompts;
+  const auto ordinaryId = ordinaryPrompts.admit(
+      userFirst.id, QStringLiteral("ordinary prompt"), {},
+      nlohmann::json::object(), &userFirst, std::nullopt, 800);
+  const auto ordinaryDispatch = ordinaryPrompts.beginNext(userFirst.id);
+  result &= expect(ordinaryDispatch.has_value(),
+                   "the user-first prompt begins dispatch");
+  if (!ordinaryDispatch)
+    return false;
+  addTurn(userFirst, "turn-ordinary");
+  appendItem(
+      userFirst, "turn-ordinary",
+      item("user-ordinary",
+           {{"type", "userMessage"},
+            {"clientId", ordinaryDispatch->clientUserMessageId},
+            {"content", {{{"type", "text"}, {"text", "ordinary prompt"}}}}}));
+  appendItem(
+      userFirst, "turn-ordinary",
+      item("reasoning-ordinary",
+           {{"type", "reasoning"}, {"summary", nlohmann::json::array()}}));
+  ordinaryPrompts.reconcile(userFirst.id, userFirst, 801);
+  const auto userBeforeReasoning = ConversationProjection::project(
+      userFirst, ordinaryPrompts.submissions(userFirst.id), 80, 801);
+  result &= expect(userBeforeReasoning.cardKeys() ==
+                       std::vector<CardKey>{
+                           LocalPromptKey{ordinaryId},
+                           AuthoritativeItemKey{userFirst.id, "turn-ordinary",
+                                                "reasoning-ordinary"}},
+                   "the ordinary user-first event order remains unchanged");
   return result;
 }
 
@@ -636,6 +795,7 @@ int main() {
   result &= testQueueIsolationAndRealAcknowledgement();
   result &= testDispatchChoiceAndPreHydrationTail();
   result &= testClientIdentityBindsBeforeAcknowledgement();
+  result &= testFirstResponseOrderIsAdmissionStable();
   result &= testAnchoredDuplicatePrompts();
   result &= testCommandOutputVisibility();
   result &= testUserMessageImages();
