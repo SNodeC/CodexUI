@@ -1560,7 +1560,13 @@ bool testPendingPromptAnimation() {
   const QImage second = card.grab().toImage();
   bool result =
       expect(first != second,
-             "an unacknowledged prompt visibly animates its blue sweep");
+             "an unacknowledged prompt visibly animates its violet sweep");
+  result &= expect(
+      first.pixelColor(10, first.height() - 10).blue() >
+              first.pixelColor(10, first.height() - 10).green() &&
+          first.pixelColor(10, first.height() - 10).red() >
+              first.pixelColor(10, first.height() - 10).green(),
+      "the temporary You card stays in the violet identity family");
 
   auto &accepted = std::get<LocalPromptData>(pending.payload);
   accepted.state = PromptState::Accepted;

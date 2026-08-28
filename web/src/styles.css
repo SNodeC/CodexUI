@@ -66,7 +66,7 @@ h1, h2, h3, p { margin: 0; }
 .conversation-card.collapsed > header { margin-bottom: 0; }
 .conversation-card.userMessage, .conversation-card.localPrompt { margin-left: 12%; background: #f4f0ff; border-color: #d4c5f2; }
 .conversation-card.userMessage > header span, .conversation-card.localPrompt > header span { color: #53389e; }
-.conversation-card.localPrompt { background: linear-gradient(100deg, #f0f4fb, #e6edfa, #f0f4fb); background-size: 200% 100%; animation: awaiting 1.7s linear infinite; }
+.conversation-card.localPrompt { background: linear-gradient(100deg, #f4f0ff, #e8def8, #f4f0ff); background-size: 200% 100%; animation: awaiting 1.7s linear infinite; }
 .conversation-card.reasoning { border-left: 3px solid #7896df; }
 .conversation-card.agentMessage.update { background: #fff; border-color: #dce2eb; }
 .conversation-card.agentMessage.final { background: #eaf2ff; border-color: #bfd3f9; }
