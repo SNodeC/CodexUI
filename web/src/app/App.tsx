@@ -89,7 +89,7 @@ function SafeMarkdown({text}: {text: string}) {
     return <div className="safe-markdown">{blocks}</div>;
 }
 
-function Card({card, collapsed, onToggle}: {card: VisibleCardData; collapsed: boolean; onToggle: () => void}) {
+function Card({card, active, collapsed, onToggle}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void}) {
     let title = humanize(card.kind);
     let body: ReactNode;
     if (card.kind === "userMessage") {
@@ -103,7 +103,7 @@ function Card({card, collapsed, onToggle}: {card: VisibleCardData; collapsed: bo
         body = <SafeMarkdown text={data.text} />;
     } else if (card.kind === "reasoning") {
         const data = card.payload as ReasoningData; title = "Reasoning";
-        body = data.summary ? <div className="card-text">{data.summary}</div> : <div className="activity-line"><i />Working…</div>;
+        body = data.summary ? <div className="card-text">{data.summary}</div> : active ? <div className="activity-line"><i />Working…</div> : null;
     } else if (card.kind === "commandExecution") {
         const data = card.payload as CommandExecutionData; title = "Command";
         body = <><code className="command-line">{data.command}</code>{data.output && <pre>{data.output}</pre>}
@@ -125,7 +125,8 @@ function Card({card, collapsed, onToggle}: {card: VisibleCardData; collapsed: bo
         const data = card.payload as {type: string; raw: unknown}; title = humanize(data.type);
         body = <details><summary>Protocol data</summary><pre>{JSON.stringify(data.raw, null, 2)}</pre></details>;
     }
-    const foldable = ["agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "genericActivity"].includes(card.kind);
+    const foldable = ["agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "genericActivity"].includes(card.kind)
+        && !(card.kind === "reasoning" && !(card.payload as ReasoningData).summary);
     return <article className={`conversation-card ${card.kind} ${collapsed ? "collapsed" : ""}`} data-card-key={stableKey(card.key)}>
         <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{foldable && <button onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}>{collapsed ? "＋" : "−"}</button>}</span></header>{!collapsed && body}
     </article>;
@@ -169,7 +170,7 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
             {conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId); forceCardState(value => value + 1); }}>Load earlier activity</button>}
             {conversation.sections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
             {conversation.sections.map(section => <section key={section.key} className="turn-section">
-                {section.cards.map(card => { const key = stableKey(card.key); return <Card key={key} card={card} collapsed={collapsed.current.has(key)} onToggle={() => toggleCard(key)} />; })}
+                {section.cards.map(card => { const key = stableKey(card.key); return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === section.turnId} collapsed={collapsed.current.has(key)} onToggle={() => toggleCard(key)} />; })}
             </section>)}
         </div>
         <div className="composer-dock">
