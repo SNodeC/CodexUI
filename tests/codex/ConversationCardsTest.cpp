@@ -223,15 +223,15 @@ bool testMessageIdentityPalette() {
   };
   const bool result = expect(
       titleColor(user) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::purpleText)) &&
-          surfaceColor(user) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::purpleSurface)) &&
+              QColor(QString::fromLatin1(codexui::UiStyle::blueHover)) &&
+          surfaceColor(user) == QColor(QStringLiteral("#eaf2ff")) &&
           surfaceColor(update) ==
               QColor(QString::fromLatin1(codexui::UiStyle::panel)) &&
           titleColor(final) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::blueHover)) &&
-          surfaceColor(final) == QColor(QStringLiteral("#eaf2ff")),
-      "You is violet, interim Codex is neutral, and final Codex is blue");
+              QColor(QString::fromLatin1(codexui::UiStyle::purpleText)) &&
+          surfaceColor(final) ==
+              QColor(QString::fromLatin1(codexui::UiStyle::purpleSurface)),
+      "You is blue, interim Codex is neutral, and final Codex is violet");
   qApp->setStyleSheet(originalStyleSheet);
   return result;
 }
@@ -1560,13 +1560,13 @@ bool testPendingPromptAnimation() {
   const QImage second = card.grab().toImage();
   bool result =
       expect(first != second,
-             "an unacknowledged prompt visibly animates its violet sweep");
+             "an unacknowledged prompt visibly animates its blue sweep");
   result &= expect(
       first.pixelColor(10, first.height() - 10).blue() >
-              first.pixelColor(10, first.height() - 10).green() &&
-          first.pixelColor(10, first.height() - 10).red() >
+              first.pixelColor(10, first.height() - 10).red() &&
+          first.pixelColor(10, first.height() - 10).blue() >
               first.pixelColor(10, first.height() - 10).green(),
-      "the temporary You card stays in the violet identity family");
+      "the temporary You card stays in the blue identity family");
 
   auto &accepted = std::get<LocalPromptData>(pending.payload);
   accepted.state = PromptState::Accepted;

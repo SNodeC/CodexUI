@@ -10,9 +10,9 @@ This document records the implemented CodexUI visual and interaction contract.
   white-text contrast.
 - Hover, focus, selection, disabled, warning, error, pending, and active states
   remain visually distinct.
-- User messages use the violet identity family. Final Codex narrative uses the
-  canonical blue identity family; interim Codex updates remain neutral and are
-  identified by their phase label. Commands, tool activity, files, and
+- User messages use the blue identity family. Final Codex narrative uses the
+  more prominent violet identity family; interim Codex updates remain neutral
+  and are identified by their phase label. Commands, tool activity, files, and
   collaboration activity also use neutral raised cards.
 - Scrollbars use one compact application style across conversation, nested
   output, State, Protocol, and Inspector surfaces.
