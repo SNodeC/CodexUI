@@ -17,6 +17,7 @@
 #include <QScrollBar>
 #include <QSplitter>
 #include <QStyle>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -136,7 +137,14 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   noticeLayout->addWidget(noticeLabel, 1);
   noticeLayout->addWidget(dismiss);
   noticeBar->hide();
-  connect(dismiss, &QPushButton::clicked, noticeBar, &QWidget::hide);
+  noticeTimer = new QTimer(noticeBar);
+  noticeTimer->setObjectName(QStringLiteral("conversationNoticeTimer"));
+  noticeTimer->setSingleShot(true);
+  connect(noticeTimer, &QTimer::timeout, noticeBar, &QWidget::hide);
+  connect(dismiss, &QPushButton::clicked, noticeBar, [this] {
+    noticeTimer->stop();
+    noticeBar->hide();
+  });
   contentLayout->addWidget(noticeBar);
 
   conversationView = new ConversationView;
@@ -198,6 +206,7 @@ void MiddleRegionWidget::showNotice(QString message, bool error) {
     widget->update();
   }
   noticeBar->show();
+  noticeTimer->start(error ? 10000 : 6000);
 }
 
 void MiddleRegionWidget::showSidebar(bool visible) {

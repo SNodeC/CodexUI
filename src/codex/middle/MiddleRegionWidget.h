@@ -11,6 +11,7 @@ class QEvent;
 class QFrame;
 class QLabel;
 class QSplitter;
+class QTimer;
 
 namespace codexui::codex::middle {
 
@@ -53,6 +54,7 @@ private:
   QLabel *conversationMetadata = nullptr;
   QFrame *noticeBar = nullptr;
   QLabel *noticeLabel = nullptr;
+  QTimer *noticeTimer = nullptr;
   ConversationView *conversationView = nullptr;
   ComposerPane *composerPane = nullptr;
   InspectorPane *inspectorPane = nullptr;

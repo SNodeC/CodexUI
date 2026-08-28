@@ -35,6 +35,7 @@
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
+#include <QSizePolicy>
 #include <QStyle>
 #include <QTabWidget>
 #include <QTimer>
@@ -115,6 +116,48 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
   return label;
 }
 
+QLabel *makeStatusLabel(QString value, QString objectName, int maximumWidth,
+                        const char *kind = "meta") {
+  auto *label = makeLabel({}, kind);
+  label->setObjectName(std::move(objectName));
+  label->setWordWrap(false);
+  label->setMaximumWidth(maximumWidth);
+  label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+  label->setToolTip(value);
+  label->setText(label->fontMetrics().elidedText(value, Qt::ElideMiddle,
+                                                 label->maximumWidth()));
+  return label;
+}
+
+void setStatusLabelText(QLabel *label, QString value) {
+  label->setToolTip(value);
+  label->setText(label->fontMetrics().elidedText(value, Qt::ElideMiddle,
+                                                 label->maximumWidth()));
+}
+
+QString statusToneColor(QStringView tone) {
+  if (tone == QStringLiteral("active"))
+    return QStringLiteral("#2f6feb");
+  if (tone == QStringLiteral("success"))
+    return QStringLiteral("#18865e");
+  if (tone == QStringLiteral("warning"))
+    return QStringLiteral("#a85d0c");
+  if (tone == QStringLiteral("danger"))
+    return QStringLiteral("#c43d4d");
+  return QStringLiteral("#98a2b3");
+}
+
+void setStatusTone(QFrame *dot, QLabel *label, const QString &tone) {
+  dot->setStyleSheet(QStringLiteral("background:%1;border-radius:5px;")
+                         .arg(statusToneColor(tone)));
+  if (label->property("tone").toString() == tone)
+    return;
+  label->setProperty("tone", tone);
+  label->style()->unpolish(label);
+  label->style()->polish(label);
+  label->update();
+}
+
 QFrame *statusDot() {
   auto *dot = new QFrame;
   dot->setFixedSize(10, 10);
@@ -166,8 +209,6 @@ struct ShellWidget::Impl final {
     std::string role;
     QString selectedTransport;
     QString workspace;
-    QString threadContext;
-    QString agentActivity;
     bool active = false;
     std::size_t selectedPending = 0;
     std::size_t totalPending = 0;
@@ -279,9 +320,8 @@ struct ShellWidget::Impl final {
   QAction *disconnectAction = nullptr;
   QAction *reconnectAction = nullptr;
   QPushButton *controllerButton = nullptr;
-  QLabel *threadContextStatus = nullptr;
-  QLabel *agentActivityStatus = nullptr;
-  QLabel *controllerLabel = nullptr;
+  QFrame *globalStatusDot = nullptr;
+  QLabel *globalStatusLabel = nullptr;
 };
 
 void ShellWidget::Impl::buildUi() {
@@ -389,15 +429,36 @@ void ShellWidget::Impl::buildUi() {
   statusBar->setFixedHeight(40);
   auto *statusLayout = new QHBoxLayout(statusBar);
   statusLayout->setContentsMargins(18, 0, 24, 0);
-  statusLayout->setSpacing(8);
-  threadContextStatus = makeLabel(QStringLiteral("No thread context"), "meta");
-  statusLayout->addWidget(threadContextStatus);
-  statusLayout->addSpacing(42);
-  agentActivityStatus = makeLabel(QStringLiteral("No agent activity"), "meta");
-  statusLayout->addWidget(agentActivityStatus);
+  statusLayout->setSpacing(10);
+  auto *attribution = new QLabel(QStringLiteral(
+      "<span style=\"color:#344054;font-weight:600\">"
+      "© Volker Christian @ Codex</span>  |  "
+      "<a style=\"color:#344054;text-decoration:none;font-weight:600\" "
+      "href=\"https://github.com/SNodeC/CodexUI\">CodexUI</a>  •  "
+      "<a style=\"color:#344054;text-decoration:none;font-weight:600\" "
+      "href=\"https://github.com/SNodeC/AISuite\">AISuite</a>  •  "
+      "<span style=\"color:#98a2b3;font-size:8pt\">Powered by</span> "
+      "<a style=\"color:#344054;text-decoration:none;font-weight:600\" "
+      "href=\"https://github.com/SNodeC/snode.c\">SNode.C</a>"));
+  attribution->setObjectName(QStringLiteral("statusAttribution"));
+  attribution->setProperty("kind", "meta");
+  attribution->setTextFormat(Qt::RichText);
+  attribution->setOpenExternalLinks(true);
+  attribution->setTextInteractionFlags(Qt::LinksAccessibleByMouse |
+                                       Qt::LinksAccessibleByKeyboard);
+  attribution->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+  statusLayout->addWidget(attribution);
   statusLayout->addStretch();
-  controllerLabel = makeLabel(QStringLiteral("Observer"), "meta");
-  statusLayout->addWidget(controllerLabel);
+  auto *statusCaption = makeStatusLabel(
+      QStringLiteral("Status:"), QStringLiteral("globalStatusCaption"), 60);
+  statusLayout->addWidget(statusCaption);
+  globalStatusDot = statusDot();
+  globalStatusDot->setObjectName(QStringLiteral("shellGlobalStatusDot"));
+  statusLayout->addWidget(globalStatusDot);
+  globalStatusLabel =
+      makeStatusLabel(QStringLiteral("Offline"),
+                      QStringLiteral("globalStatusLabel"), 160, "settingLabel");
+  statusLayout->addWidget(globalStatusLabel);
   root->addWidget(statusBar);
 }
 
@@ -716,14 +777,6 @@ void ShellWidget::Impl::refreshSettings() {
 void ShellWidget::Impl::refreshStatus() {
   const ConnectionPresentation &connection = model.connection();
   const ThreadPresentation *thread = model.thread(selectedThreadId);
-  std::size_t runningAgents = 0;
-  if (thread) {
-    for (const auto &[id, agent] : thread->agents) {
-      static_cast<void>(id);
-      if (isActiveStatus(agent.status))
-        ++runningAgents;
-    }
-  }
   const bool active = model.activeTurnId(selectedThreadId).has_value();
   const std::size_t selectedPending = static_cast<std::size_t>(std::count_if(
       model.pendingRequestPresentations().begin(),
@@ -745,34 +798,16 @@ void ShellWidget::Impl::refreshStatus() {
     }
   }
   QString workspace = QStringLiteral("No workspace");
-  QString threadContext = QStringLiteral("No thread context");
-  QString agentActivity = QStringLiteral("No agent activity");
   if (thread) {
     workspace = text(thread->cwd);
-    threadContext =
-        QStringLiteral("%1  |  %2")
-            .arg(text(thread->title),
-                 text(classifyStatus(thread->status).text));
-    if (!thread->agents.empty()) {
-      agentActivity = QStringLiteral("%1 agents  |  %2 active")
-                          .arg(static_cast<qulonglong>(thread->agents.size()))
-                          .arg(static_cast<qulonglong>(runningAgents));
-    }
   } else if (newThreadIntent) {
     workspace = text(middleRegion->composer().turnSettings()->workspace(
         QDir::currentPath().toStdString()));
-    threadContext = QStringLiteral("New thread");
   }
-  StatusUiSnapshot next{connection.connected,
-                        connection.retrying,
-                        connection.role,
-                        std::move(selectedTransport),
-                        std::move(workspace),
-                        std::move(threadContext),
-                        std::move(agentActivity),
-                        active,
-                        selectedPending,
-                        totalPending};
+  StatusUiSnapshot next{connection.connected, connection.retrying,
+                        connection.role,      std::move(selectedTransport),
+                        std::move(workspace), active,
+                        selectedPending,      totalPending};
   if (statusSnapshot && *statusSnapshot == next)
     return;
   statusSnapshot = std::move(next);
@@ -800,8 +835,6 @@ void ShellWidget::Impl::refreshStatus() {
   connectAction->setEnabled(!snapshot.connected);
   disconnectAction->setEnabled(snapshot.connected);
   reconnectAction->setEnabled(snapshot.connected);
-  controllerLabel->setText(snapshot.role.empty() ? QStringLiteral("No role")
-                                                 : text(snapshot.role));
   controllerButton->setText(snapshot.role == "controller"
                                 ? QStringLiteral("Release control")
                                 : QStringLiteral("Claim control"));
@@ -813,8 +846,20 @@ void ShellWidget::Impl::refreshStatus() {
   requestButton->setVisible(snapshot.totalPending != 0);
   middleRegion->composer().setAttentionVisible(snapshot.selectedPending != 0);
 
-  threadContextStatus->setText(snapshot.threadContext);
-  agentActivityStatus->setText(snapshot.agentActivity);
+  QString globalStatus = QStringLiteral("Ready");
+  QString globalTone = QStringLiteral("success");
+  if (snapshot.retrying) {
+    globalStatus = QStringLiteral("Reconnecting");
+    globalTone = QStringLiteral("warning");
+  } else if (!snapshot.connected) {
+    globalStatus = QStringLiteral("Offline");
+    globalTone = QStringLiteral("danger");
+  } else if (snapshot.totalPending != 0) {
+    globalStatus = QStringLiteral("Attention required");
+    globalTone = QStringLiteral("warning");
+  }
+  setStatusTone(globalStatusDot, globalStatusLabel, globalTone);
+  setStatusLabelText(globalStatusLabel, globalStatus);
   workspaceBreadcrumb->setToolTip(snapshot.workspace);
   workspaceBreadcrumb->setText(workspaceBreadcrumb->fontMetrics().elidedText(
       snapshot.workspace, Qt::ElideMiddle,
