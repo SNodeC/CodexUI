@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <optional>
+#include <vector>
 
 class QLabel;
 class QPaintEvent;
@@ -84,6 +85,7 @@ public:
   [[nodiscard]] const VisibleCardData &data() const noexcept;
   [[nodiscard]] bool isCollapsed() const noexcept;
   void setCollapsed(bool collapsed);
+  void setNestedCards(const std::vector<ConversationCard *> &cards);
   [[nodiscard]] std::optional<CommandOutputView::ScrollState>
   commandOutputScrollState() const;
   void

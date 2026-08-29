@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
 #include <utility>
 
 namespace codexui::codex::middle {
@@ -615,6 +616,7 @@ public:
         collapsed(initiallyCollapsed(initial.kind, commandInitiallyCollapsed,
                                      imageInitiallyCollapsed)) {
     owner->setObjectName(QStringLiteral("conversationCard"));
+    owner->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     owner->setProperty("conversationCardKey",
                        QString::fromStdString(stableKey(initial.key)));
     owner->setProperty("conversationCardKind", static_cast<int>(initial.kind));
@@ -640,6 +642,14 @@ public:
     contentLayout->setContentsMargins(0, 0, 0, 0);
     contentLayout->setSpacing(6);
     layout->addWidget(content);
+
+    nestedCards = new QWidget(owner);
+    nestedCards->setObjectName(QStringLiteral("conversationNestedCards"));
+    nestedLayout = new QVBoxLayout(nestedCards);
+    nestedLayout->setContentsMargins(0, 0, 0, 0);
+    nestedLayout->setSpacing(8);
+    nestedCards->hide();
+    layout->addWidget(nestedCards);
 
     QObject::connect(disclosure, &QToolButton::clicked, owner,
                      [this] { emit this->owner->foldRequested(!collapsed); });
@@ -705,6 +715,36 @@ public:
     owner->update();
   }
 
+  void setNestedCards(const std::vector<ConversationCard *> &cards) {
+    const std::unordered_set<ConversationCard *> retained(cards.begin(),
+                                                           cards.end());
+    for (int index = nestedLayout->count() - 1; index >= 0; --index) {
+      auto *card = dynamic_cast<ConversationCard *>(
+          nestedLayout->itemAt(index)->widget());
+      if (!card || retained.contains(card))
+        continue;
+      const bool explicitlyHidden = card->isHidden();
+      nestedLayout->removeWidget(card);
+      card->setParent(owner->parentWidget());
+      card->setVisible(!explicitlyHidden);
+      card->setProperty("nestedConversationCard", false);
+    }
+    for (std::size_t index = 0; index < cards.size(); ++index) {
+      ConversationCard *card = cards[index];
+      if (!card)
+        continue;
+      const int position = static_cast<int>(index);
+      if (nestedLayout->indexOf(card) != position)
+        nestedLayout->insertWidget(position, card);
+      card->setProperty("nestedConversationCard", true);
+    }
+    hasVisibleNestedCards =
+        std::ranges::any_of(cards, [](const ConversationCard *card) {
+          return card && !card->isHidden();
+        });
+    refreshFoldPresentation();
+  }
+
   [[nodiscard]] bool hasVisibleContent() const {
     for (int index = 0; index < contentLayout->count(); ++index) {
       if (QWidget *widget = contentLayout->itemAt(index)->widget();
@@ -715,10 +755,11 @@ public:
   }
 
   void refreshFoldPresentation() {
-    const bool expandable = hasVisibleContent();
+    const bool expandable = hasVisibleContent() || hasVisibleNestedCards;
     disclosure->setExpanded(!collapsed);
     disclosure->setVisible(expandable);
     content->setVisible(expandable && !collapsed);
+    nestedCards->setVisible(hasVisibleNestedCards && !collapsed);
   }
 
   void createImageContainer() {
@@ -1039,6 +1080,9 @@ public:
   QTimer *animationTimer = nullptr;
   QWidget *images = nullptr;
   QVBoxLayout *imageLayout = nullptr;
+  QWidget *nestedCards = nullptr;
+  QVBoxLayout *nestedLayout = nullptr;
+  bool hasVisibleNestedCards = false;
 };
 
 ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent,
@@ -1062,6 +1106,11 @@ bool ConversationCard::isCollapsed() const noexcept { return impl_->collapsed; }
 
 void ConversationCard::setCollapsed(bool collapsed) {
   impl_->setCollapsed(collapsed);
+}
+
+void ConversationCard::setNestedCards(
+    const std::vector<ConversationCard *> &cards) {
+  impl_->setNestedCards(cards);
 }
 
 std::optional<CommandOutputView::ScrollState>

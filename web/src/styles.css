@@ -66,14 +66,16 @@ h1, h2, h3, p { margin: 0; }
 .conversation-view-controls button.active { background: #e5eeff; border-color: #bfd3f9; color: #1d2633; }
 .conversation-scroll { overflow: auto; padding: 22px max(24px, calc((100% - 780px) / 2)); scroll-behavior: smooth; }
 .turn-section { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+.turn-nested { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .conversation-card { border: 1px solid #dce2eb; border-radius: 11px; background: #fff; padding: 13px 15px; box-shadow: 0 2px 5px #1720330a; overflow: hidden; }
 .conversation-card > header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; color: #667085; }
 .conversation-card > header span { color: #38445a; font-size: 11px; font-weight: 750; text-transform: uppercase; letter-spacing: .07em; }
 .conversation-card > header small { font-size: 9px; opacity: .55; }
 .card-meta { display: flex; align-items: center; gap: 6px; }.card-meta button { width: 20px; height: 20px; padding: 0; border: 1px solid #dce2eb; border-radius: 5px; background: #fff; color: #778194; cursor: pointer; }
 .conversation-card.collapsed > header { margin-bottom: 0; }
-.conversation-card.userMessage, .conversation-card.localPrompt { margin-left: 12%; background: #eaf2ff; border-color: #bfd3f9; }
+.conversation-card.userMessage, .conversation-card.localPrompt { background: #eaf2ff; border-color: #bfd3f9; }
 .conversation-card.userMessage > header span, .conversation-card.localPrompt > header span { color: #285fca; }
+.turn-nested > .conversation-card.userMessage { background: #f3f7ff; border-color: #cfddf4; }
 .conversation-card.localPrompt { background: linear-gradient(100deg, #eaf2ff, #dbe7f8, #eaf2ff); background-size: 200% 100%; animation: awaiting 1.7s linear infinite; }
 .conversation-card.reasoning { border-left: 3px solid #7896df; }
 .conversation-card.agentMessage.update { background: #fff; border-color: #dce2eb; }

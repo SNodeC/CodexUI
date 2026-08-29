@@ -133,7 +133,7 @@ function SafeMarkdown({text}: {text: string}) {
     return <div className="safe-markdown">{blocks}</div>;
 }
 
-function Card({card, active, collapsed, onToggle}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void}) {
+function Card({card, active, collapsed, onToggle, nested}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; nested?: ReactNode}) {
     let title = humanize(card.kind);
     let body: ReactNode;
     let phaseClass = "";
@@ -170,10 +170,10 @@ function Card({card, active, collapsed, onToggle}: {card: VisibleCardData; activ
         const data = card.payload as {type: string; raw: unknown}; title = humanize(data.type);
         body = <details><summary>Protocol data</summary><pre>{JSON.stringify(data.raw, null, 2)}</pre></details>;
     }
-    const foldable = ["agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "imageGeneration", "genericActivity"].includes(card.kind)
+    const foldable = ["userMessage", "localPrompt", "agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "imageGeneration", "genericActivity"].includes(card.kind)
         && !(card.kind === "reasoning" && !(card.payload as ReasoningData).summary);
-    return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""}`} data-card-key={stableKey(card.key)}>
-        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{foldable && <button onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}>{collapsed ? "＋" : "−"}</button>}</span></header>{!collapsed && body}
+    return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""} ${nested ? "turn-container" : ""}`} data-card-key={stableKey(card.key)}>
+        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{foldable && <button onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}>{collapsed ? "＋" : "−"}</button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
 
@@ -225,6 +225,10 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
     const visibleSections = conversation.sections
         .map(section => ({...section, cards: section.cards.filter(cardVisible)}))
         .filter(section => section.cards.length > 0);
+    const renderCard = (card: VisibleCardData, nested?: ReactNode) => {
+        const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
+        return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} nested={nested} />;
+    };
     return <main className="conversation-pane">
         <div className="conversation-heading"><div><span className="eyebrow">Conversation</span>
             <h1>{thread?.title ?? (snapshot.newThreadIntent ? "New thread" : "Select a thread")}</h1>
@@ -242,9 +246,14 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
         }}>
             {conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId); forceCardState(value => value + 1); }}>Load earlier activity</button>}
             {visibleSections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
-            {visibleSections.map(section => <section key={section.key} className="turn-section">
-                {section.cards.map(card => { const key = stableKey(card.key); const collapsed = cardCollapsed(card, key); return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === section.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} />; })}
-            </section>)}
+            {visibleSections.map(section => {
+                const prompt = section.cards.find(card => card.kind === "userMessage" || card.kind === "localPrompt");
+                const nestedCards = prompt ? section.cards.filter(card => card !== prompt) : [];
+                const nested = nestedCards.length > 0 ? nestedCards.map(card => renderCard(card)) : undefined;
+                return <section key={section.key} className="turn-section">
+                    {prompt ? renderCard(prompt, nested) : section.cards.map(card => renderCard(card))}
+                </section>;
+            })}
         </div>
         <div className="composer-dock">
             <SettingsPanel key={`settings:${projectionId}`} session={session} canonical={canonicalThreadSettings(thread?.raw ?? {}, thread?.domains.get("thread.settings.changed"))} settingsRevision={thread?.settingsRevision ?? 0} optionsRef={settingsOptions} />

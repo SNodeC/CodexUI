@@ -46,7 +46,7 @@ class ConversationView::TurnSectionWidget final : public QWidget {
 public:
   explicit TurnSectionWidget(QWidget *parent = nullptr) : QWidget(parent) {
     setAttribute(Qt::WA_StyledBackground, false);
-    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     cards = new QVBoxLayout(this);
     cards->setContentsMargins(0, 0, 0, 0);
     cards->setSpacing(CardSpacing);
@@ -250,7 +250,6 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
   viewport()->setUpdatesEnabled(false);
   content_->setUpdatesEnabled(false);
   const QSignalBlocker scrollSignals(verticalScrollBar());
-
   bool visualChange = switchedThread;
   const bool showLoadMore = snapshot.hasMore;
   if (loadMore_->isVisible() != showLoadMore) {
@@ -279,9 +278,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
   };
   struct DesiredCard {
     TurnSectionWidget *section = nullptr;
-    int position = 0;
     const VisibleCardData *data = nullptr;
-    bool insert = false;
   };
   std::unordered_map<std::string, DesiredSection> desiredSections;
   std::unordered_map<std::string, DesiredCard> desiredCards;
@@ -324,7 +321,8 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
       const std::string &key = desiredSection.cardKeys.back();
       if (cardVisible(cardData))
         displayedKeys.push_back(key);
-      desiredCards.emplace(key, DesiredCard{section, cardIndex++, &cardData});
+      desiredCards.emplace(key, DesiredCard{section, &cardData});
+      ++cardIndex;
     }
     desiredSections.emplace(sectionData.key, std::move(desiredSection));
   }
@@ -343,23 +341,34 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
     visualChange = true;
   }
 
-  for (const auto &[sectionKey, section] : sections_) {
-    static_cast<void>(sectionKey);
-    for (std::size_t offset = section->cardKeys.size(); offset > 0; --offset) {
-      const std::size_t index = offset - 1;
-      const std::string &key = section->cardKeys[index];
-      const auto desired = desiredCards.find(key);
-      const auto card = cards_.find(key);
-      if (desired != desiredCards.end() && card != cards_.end() &&
-          desired->second.section == section &&
-          desired->second.position == static_cast<int>(index) &&
-          card->second->canApply(*desired->second.data))
-        continue;
-      delete section->cards->takeAt(static_cast<int>(index));
-      if (desired != desiredCards.end())
-        desired->second.insert = true;
-      visualChange = true;
+  // A prompt card may currently own desired nested cards while itself falls
+  // outside the retained window. Detach those children before deleting the
+  // obsolete prompt so their stable widgets can move to the transparent
+  // section fallback instead of being destroyed with their QObject parent.
+  for (const auto &[key, card] : cards_) {
+    static_cast<void>(key);
+    ConversationCard *owner = nullptr;
+    for (QWidget *parent = card->parentWidget(); parent;
+         parent = parent->parentWidget()) {
+      owner = dynamic_cast<ConversationCard *>(parent);
+      if (owner)
+        break;
     }
+    if (!owner)
+      continue;
+    const std::string ownerKey =
+        owner->property("conversationCardKey").toString().toStdString();
+    const auto desiredOwner = desiredCards.find(ownerKey);
+    const bool ownerRetained =
+        desiredOwner != desiredCards.end() &&
+        owner->canApply(*desiredOwner->second.data);
+    if (ownerRetained)
+      continue;
+    const auto desiredCard = desiredCards.find(key);
+    QWidget *safeParent = desiredCard == desiredCards.end()
+                              ? owner->parentWidget()
+                              : desiredCard->second.section;
+    card->setParent(safeParent);
   }
 
   for (auto iterator = cards_.begin(); iterator != cards_.end();) {
@@ -382,7 +391,6 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
     for (const VisibleCardData &cardData : sectionData.cards) {
       const std::string &key =
           desiredSection.cardKeys[static_cast<std::size_t>(cardIndex)];
-      DesiredCard &desired = desiredCards.at(key);
 
       ConversationCard *card = nullptr;
       const auto existingCard = cards_.find(key);
@@ -409,23 +417,54 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
           commandOutputStates_.erase(saved);
         }
         cards_.emplace(key, card);
-        desired.insert = true;
         visualChange = true;
       }
 
-      if (card->parentWidget() != section) {
-        card->setParent(section);
-        desired.insert = true;
-        visualChange = true;
-      }
-      if (desired.insert)
-        section->cards->insertWidget(cardIndex, card);
       const bool visible = cardVisible(cardData);
       if (card->isHidden() == visible) {
         card->setVisible(visible);
         visualChange = true;
       }
       ++cardIndex;
+    }
+
+    ConversationCard *prompt = nullptr;
+    std::vector<ConversationCard *> orderedCards;
+    orderedCards.reserve(sectionData.cards.size());
+    for (const VisibleCardData &cardData : sectionData.cards) {
+      ConversationCard *card = cards_.at(stableKey(cardData.key));
+      orderedCards.push_back(card);
+      if (!prompt && (cardData.kind == CardKind::UserMessage ||
+                      cardData.kind == CardKind::LocalPrompt))
+        prompt = card;
+    }
+    if (prompt) {
+      for (ConversationCard *card : orderedCards) {
+        if (card != prompt && card->property("turnContainer").toBool())
+          card->setNestedCards({});
+        card->setProperty("turnContainer", false);
+      }
+      std::vector<ConversationCard *> nestedCards;
+      nestedCards.reserve(orderedCards.size() - 1);
+      for (ConversationCard *card : orderedCards)
+        if (card != prompt)
+          nestedCards.push_back(card);
+      prompt->setProperty("nestedConversationCard", false);
+      prompt->setProperty("turnContainer", true);
+      prompt->setNestedCards(nestedCards);
+      if (section->cards->indexOf(prompt) != 0)
+        section->cards->insertWidget(0, prompt);
+    } else {
+      for (std::size_t position = 0; position < orderedCards.size(); ++position) {
+        ConversationCard *card = orderedCards[position];
+        if (card->property("turnContainer").toBool())
+          card->setNestedCards({});
+        card->setProperty("nestedConversationCard", false);
+        card->setProperty("turnContainer", false);
+        card->setMinimumHeight(0);
+        if (section->cards->indexOf(card) != static_cast<int>(position))
+          section->cards->insertWidget(static_cast<int>(position), card);
+      }
     }
     section->cardKeys = std::move(desiredSection.cardKeys);
     const bool sectionVisible =
@@ -474,7 +513,6 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
   } else {
     restoreAnchor(anchor);
   }
-
   applying_ = false;
   content_->setUpdatesEnabled(true);
   viewport()->setUpdatesEnabled(true);
@@ -507,6 +545,15 @@ void ConversationView::setCardCollapsed(const std::string &key,
   mode_ = Mode::Paused;
   pausedByComposerGrowth_ = false;
   cardCollapsedStates_[key] = collapsed;
+  ConversationCard *turnContainer =
+      card->property("turnContainer").toBool() ? card : nullptr;
+  for (QWidget *parent = card->parentWidget(); !turnContainer && parent;
+       parent = parent->parentWidget())
+    if (auto *candidate = dynamic_cast<ConversationCard *>(parent);
+        candidate && candidate->property("turnContainer").toBool())
+      turnContainer = candidate;
+  if (turnContainer)
+    turnContainer->setMinimumHeight(0);
   card->setCollapsed(collapsed);
   recomputeGeometry();
   const int visibleHeight =
@@ -716,6 +763,10 @@ void ConversationView::recomputeGeometry() {
   const int width = std::max(0, viewport()->width());
   trailingSpace_->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
   contentLayout_->invalidate();
+  for (const auto &[key, section] : sections_) {
+    static_cast<void>(key);
+    section->setMinimumHeight(0);
+  }
 
   // Give every nested layout its final width before asking for height.  This
   // makes wrapped labels and command output contribute to the same range
@@ -726,21 +777,94 @@ void ConversationView::recomputeGeometry() {
     static_cast<void>(key);
     section->layout()->activate();
   }
+  const auto activateCard = [](ConversationCard *card) {
+    if (!card)
+      return;
+    if (QWidget *cardContent = card->findChild<QWidget *>(
+            QStringLiteral("conversationCardContent"),
+            Qt::FindDirectChildrenOnly);
+        cardContent && cardContent->layout())
+      cardContent->layout()->activate();
+    if (card->layout())
+      card->layout()->activate();
+  };
   for (const auto &[key, card] : cards_) {
     static_cast<void>(key);
-    if (QWidget *cardContent = card->findChild<QWidget *>(
-            QStringLiteral("conversationCardContent"));
-        cardContent && cardContent->layout()) {
-      cardContent->layout()->activate();
-    }
-    if (card->layout()) {
+    activateCard(card);
+  }
+  // A You turn container adds one real layout depth. Settle that depth in
+  // dependency order so newly nested cards reach their final height inside
+  // this transaction instead of posting a second visible LayoutRequest.
+  for (const auto &[key, card] : cards_) {
+    static_cast<void>(key);
+    if (!card->property("turnContainer").toBool())
+      continue;
+    card->setMinimumHeight(0);
+    QWidget *nested = card->findChild<QWidget *>(
+        QStringLiteral("conversationNestedCards"),
+        Qt::FindDirectChildrenOnly);
+    if (!nested || !nested->layout())
+      continue;
+    if (card->layout())
       card->layout()->activate();
+    nested->layout()->activate();
+    for (int index = 0; index < nested->layout()->count(); ++index) {
+      auto *nestedCard = dynamic_cast<ConversationCard *>(
+          nested->layout()->itemAt(index)->widget());
+      if (!nestedCard)
+        continue;
+      nestedCard->setMinimumHeight(0);
+      if (nestedCard->layout())
+        nestedCard->layout()->invalidate();
+      activateCard(nestedCard);
+      nestedCard->updateGeometry();
+      const int nestedWidth = nested->contentsRect().width();
+      const bool nestedHasHeightForWidth =
+          nestedCard->layout() && nestedCard->layout()->hasHeightForWidth();
+      const int childHeight = nestedHasHeightForWidth
+                                  ? nestedCard->layout()->heightForWidth(
+                                        nestedWidth) +
+                                        2 * nestedCard->frameWidth()
+                                  : nestedCard->sizeHint().height();
+      nestedCard->setMinimumHeight(childHeight);
+      nestedCard->resize(nestedWidth, childHeight);
+    }
+    nested->layout()->invalidate();
+    const int nestedHeight =
+        nested->isHidden() ? 0 : nested->layout()->minimumSize().height();
+    nested->setFixedHeight(nestedHeight);
+    nested->layout()->setGeometry(nested->contentsRect());
+    nested->updateGeometry();
+    nested->layout()->invalidate();
+    nested->layout()->activate();
+    if (card->layout()) {
+      card->layout()->invalidate();
+      card->layout()->activate();
+      card->updateGeometry();
+      const int cardWidth = card->width();
+      const int measuredCardHeight =
+          card->layout()->hasHeightForWidth()
+              ? card->layout()->heightForWidth(cardWidth) +
+                    2 * card->frameWidth()
+              : card->sizeHint().height();
+      const int cardHeight = measuredCardHeight;
+      card->setMinimumHeight(cardHeight);
+      card->resize(cardWidth, cardHeight);
+      card->layout()->setGeometry(card->contentsRect());
     }
   }
   for (const auto &[key, section] : sections_) {
     static_cast<void>(key);
+    section->layout()->invalidate();
+    const int sectionHeight = section->layout()->minimumSize().height();
+    section->setMinimumHeight(sectionHeight);
+    section->resize(section->width(), sectionHeight);
+    section->layout()->setGeometry(section->contentsRect());
+    section->updateGeometry();
     section->layout()->activate();
   }
+  contentLayout_->invalidate();
+  contentLayout_->setGeometry(content_->rect());
   contentLayout_->activate();
 
   int wanted = contentLayout_->hasHeightForWidth()
@@ -766,6 +890,18 @@ void ConversationView::recomputeGeometry() {
       0, std::max(0, contentHeight_ - viewport()->height()));
   positionContent();
 
+  for (const auto &[key, card] : cards_) {
+    static_cast<void>(key);
+    if (QWidget *nested = card->findChild<QWidget *>(
+            QStringLiteral("conversationNestedCards"),
+            Qt::FindDirectChildrenOnly))
+      QCoreApplication::sendPostedEvents(nested, QEvent::LayoutRequest);
+    QCoreApplication::sendPostedEvents(card, QEvent::LayoutRequest);
+  }
+  for (const auto &[key, section] : sections_) {
+    static_cast<void>(key);
+    QCoreApplication::sendPostedEvents(section, QEvent::LayoutRequest);
+  }
   QCoreApplication::sendPostedEvents(content_, QEvent::LayoutRequest);
 }
 

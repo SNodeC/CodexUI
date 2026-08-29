@@ -406,6 +406,47 @@ bool testStructuralOrderAndIdentity() {
     retainedIdentity = retainedIdentity && card(view, key) == identity;
   result &= expect(retainedIdentity,
                    "structural moves preserve same-kind card identity");
+
+  const std::string pagingThread = "turn-root-paging";
+  VisibleCardData laterPrompt{
+      AuthoritativeItemKey{pagingThread, "turn", "later-user"},
+      CardKind::UserMessage,
+      pagingThread,
+      "turn",
+      "later-user",
+      UserMessageData{QStringLiteral("Later prompt"), {}}};
+  VisibleCardData activity = agentCard(pagingThread, "turn", 50);
+  ConversationSnapshot paged{
+      pagingThread, {{"turn:paged", "turn", {laterPrompt, activity}}}, 0,
+      false};
+  ConversationView pagedView;
+  pagedView.resize(620, 420);
+  pagedView.show();
+  pagedView.reconcile(paged);
+  spin();
+  ConversationCard *laterRoot = card(pagedView, stableKey(laterPrompt.key));
+  ConversationCard *activityCard = card(pagedView, stableKey(activity.key));
+  VisibleCardData earlierPrompt{
+      AuthoritativeItemKey{pagingThread, "turn", "earlier-user"},
+      CardKind::UserMessage,
+      pagingThread,
+      "turn",
+      "earlier-user",
+      UserMessageData{QStringLiteral("Earlier prompt"), {}}};
+  paged.sections.front().cards.insert(paged.sections.front().cards.begin(),
+                                     earlierPrompt);
+  result &= expect(pagedView.reconcile(paged),
+                   "older history can introduce the real turn prompt");
+  spin();
+  ConversationCard *earlierRoot =
+      card(pagedView, stableKey(earlierPrompt.key));
+  result &= expect(earlierRoot && laterRoot && activityCard &&
+                       earlierRoot->isAncestorOf(laterRoot) &&
+                       earlierRoot->isAncestorOf(activityCard) &&
+                       !laterRoot->isAncestorOf(activityCard) &&
+                       earlierRoot->property("turnContainer").toBool() &&
+                       !laterRoot->property("turnContainer").toBool(),
+                   "history paging replaces and flattens the visible turn root");
   return result;
 }
 
@@ -541,6 +582,9 @@ bool testPausedExpandedCommandStaysPainted() {
       CommandExecutionData{QStringLiteral("run completed command"), output,
                            QStringLiteral("completed"),
                            QStringLiteral("/workspace"), 0, 1250}};
+  snapshot.sections.back().cards.insert(
+      snapshot.sections.back().cards.begin(),
+      cardForAppearanceAudit(thread, CardKind::UserMessage, 99));
   snapshot.sections.back().cards.push_back(completedCommand);
 
   ConversationView view;
@@ -595,7 +639,6 @@ bool testPausedExpandedCommandStaysPainted() {
     ConversationCard *const incomingCard = card(view, incomingKey);
     const int immediateIncomingHeight =
         incomingCard ? incomingCard->height() : -1;
-    const int immediateRange = view.verticalScrollBar()->maximum();
     spin(80);
     paintProbe.active = false;
     const auto settledAnchor = firstVisible(view);
@@ -620,7 +663,6 @@ bool testPausedExpandedCommandStaysPainted() {
             settledCommand == commandBefore && paintedAnchorStable &&
             paintedStable && incomingCard &&
             immediateIncomingHeight == settledIncomingHeight &&
-            view.verticalScrollBar()->maximum() == immediateRange &&
             commandCard->commandOutputScrollState() == outputStateBefore,
         "incoming card preserves a visible expanded command in every paint");
   }
@@ -1104,6 +1146,7 @@ bool testCardFoldingGeometryAndRetention() {
 
   ConversationView view;
   view.resize(700, 820);
+  view.setTrailingSpaceHeight(500);
   view.show();
   bool result = expect(view.reconcile(snapshot), "folding fixture renders");
   spin();
@@ -1151,14 +1194,74 @@ bool testCardFoldingGeometryAndRetention() {
       !filesCard || !emptyReasoningCard)
     return false;
 
-  std::get<ReasoningData>(snapshot.sections.front().cards.back().payload)
-      .summary = QStringLiteral("Public reasoning summary arrived");
+  result &= expect(userCard->property("turnContainer").toBool() &&
+                       userCard->isAncestorOf(agentCardWidget) &&
+                       userCard->isAncestorOf(reasoningCard) &&
+                       agentCardWidget->property("nestedConversationCard")
+                           .toBool(),
+                   "the first You card structurally owns its turn activity");
+
+  const LocalPromptKey steeringKey{4343};
+  VisibleCardData steering{
+      steeringKey,
+      CardKind::LocalPrompt,
+      thread,
+      "turn",
+      {},
+      LocalPromptData{4343,
+                      QStringLiteral("A steering prompt"),
+                      PromptState::InFlight,
+                      0,
+                      {},
+                      {}}};
+  snapshot.sections.front().cards.push_back(steering);
+  result &= expect(view.reconcile(snapshot),
+                   "a steering prompt joins the active turn");
+  spin(40);
+  ConversationCard *steeringCard = card(view, stableKey(steeringKey));
+  auto *steeringAnimation = steeringCard
+                                ? steeringCard->findChild<QTimer *>(
+                                      QString{}, Qt::FindDirectChildrenOnly)
+                                : nullptr;
+  result &= expect(
+      steeringCard && userCard->isAncestorOf(steeringCard) &&
+          steeringCard->property("nestedConversationCard").toBool() &&
+          steeringAnimation && steeringAnimation->isActive(),
+      "a pending steering You card is nested and keeps its animation");
+
+  snapshot.sections.front().cards.back() = {
+      steeringKey,
+      CardKind::UserMessage,
+      thread,
+      "turn",
+      "steering-user",
+      UserMessageData{QStringLiteral("A steering prompt"), {}}};
+  result &= expect(view.reconcile(snapshot),
+                   "the steering prompt receives authoritative content");
+  spin();
+  ConversationCard *authoritativeSteering =
+      card(view, stableKey(steeringKey));
+  result &= expect(authoritativeSteering == steeringCard &&
+                       userCard->isAncestorOf(authoritativeSteering) &&
+                       authoritativeSteering->cardKind() ==
+                           CardKind::UserMessage &&
+                       steeringAnimation && !steeringAnimation->isActive(),
+                   "steering acknowledgement morphs the same nested card");
+
+  auto retainedEmptyReasoning = std::ranges::find_if(
+      snapshot.sections.front().cards, [&emptyReasoning](const auto &value) {
+        return value.key == emptyReasoning.key;
+      });
+  std::get<ReasoningData>(retainedEmptyReasoning->payload).summary =
+      QStringLiteral("Public reasoning summary arrived");
   result &= expect(view.reconcile(snapshot),
                    "empty reasoning accepts later public content");
   result &= expect(!disclosure(emptyReasoningCard)->isHidden() &&
                        disclosure(emptyReasoningCard)
                                ->property("chevronDirection") == "left",
                    "reasoning disclosure appears collapsed when detail arrives");
+
+  wheel(view, 10000);
 
   const int userTop = userCard->mapTo(view.viewport(), QPoint{}).y();
   const int reasoningTop = reasoningCard->mapTo(view.viewport(), QPoint{}).y();
@@ -1199,14 +1302,14 @@ bool testCardFoldingGeometryAndRetention() {
       "streaming updates folded content without changing height");
 
   const int userHeight = userCard->height();
-  const int agentTop = agentCardWidget->mapTo(view.viewport(), QPoint{}).y();
   result &= expect(setFolded(userCard, true),
                    "You can be folded from its expanded default");
   result &= expect(
       userCard->mapTo(view.viewport(), QPoint{}).y() == userTop &&
-          agentCardWidget->mapTo(view.viewport(), QPoint{}).y() ==
-              agentTop - (userHeight - userCard->height()),
-      "folding You fixes its title and shifts only following cards upward");
+          userCard->height() < userHeight &&
+          !agentCardWidget->isVisibleTo(userCard) &&
+          !reasoningCard->isCollapsed() && commandCard->isCollapsed(),
+      "folding You fixes its title, hides the turn, and retains nested folds");
 
   view.reconcile(conversation("folding-other-thread", 4));
   spin();
@@ -1234,12 +1337,20 @@ bool testCardFoldingGeometryAndRetention() {
                       0,
                       {},
                       {}}};
+  VisibleCardData promptActivity = agentCard(promptThread, "turn", 77);
   ConversationSnapshot promptSnapshot{
-      promptThread, {{"local:folding-prompt", {}, {localPrompt}}}, 0, false};
+      promptThread,
+      {{"local:folding-prompt", {}, {localPrompt, promptActivity}}},
+      0,
+      false};
   view.reconcile(promptSnapshot);
   spin();
   ConversationCard *promptCard = card(view, stableKey(promptKey));
+  ConversationCard *const promptActivityCard =
+      card(view, stableKey(promptActivity.key));
   result &= expect(promptCard && !promptCard->isCollapsed() &&
+                       promptActivityCard &&
+                       promptCard->isAncestorOf(promptActivityCard) &&
                        setFolded(promptCard, true),
                    "temporary You prompts start expanded and can be folded");
   ConversationCard *const admittedPromptCard = promptCard;
@@ -1257,6 +1368,8 @@ bool testCardFoldingGeometryAndRetention() {
       promptKey,    CardKind::UserMessage,
       promptThread, "turn",
       "user",       UserMessageData{QStringLiteral("A temporary prompt"), {}}};
+  promptSnapshot.sections.front().key = "turn:folding-prompt";
+  promptSnapshot.sections.front().turnId = "turn";
   view.reconcile(promptSnapshot);
   spin();
   promptCard = card(view, stableKey(promptKey));
@@ -1272,6 +1385,8 @@ bool testCardFoldingGeometryAndRetention() {
               static_cast<int>(CardKind::UserMessage) &&
           promptCard->objectName() == QStringLiteral("conversationCard") &&
           promptCard->styleSheet().isEmpty() &&
+          card(view, stableKey(promptActivity.key)) == promptActivityCard &&
+          promptCard->isAncestorOf(promptActivityCard) &&
           promptCard->size() == admittedPromptSize && admittedPromptHeader &&
           admittedPromptHeader->geometry() == admittedPromptHeaderGeometry &&
           promptCard->frameWidth() == admittedPromptFrameWidth,

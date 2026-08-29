@@ -227,6 +227,7 @@ QString applicationStyleSheet() {
         QFrame[kind="raised"][tone="warning"] { background: #fff6df; border-color: #e5c77d; }
         QFrame[messageRole="user"] { background: #eaf2ff; border: 1px solid #bfd3f9; border-radius: 8px; }
         QFrame[messageRole="user"] QLabel[kind="title"] { color: #285fca; }
+        QFrame[messageRole="user"][nestedConversationCard="true"] { background: #f3f7ff; border-color: #cfddf4; }
         QFrame[messageRole="agent"][messagePhase="final"] { background: #f4f0ff; border: 1px solid #d4c5f2; border-radius: 8px; }
         QFrame[messageRole="agent"][messagePhase="final"] QLabel[kind="title"] { color: #53389e; }
         QFrame[messageRole="agent"][messagePhase="update"] { background: #ffffff; border: 1px solid #d7dee8; border-radius: 8px; }

@@ -83,8 +83,9 @@ Conversation activity cards remain neutral so supporting process information
 does not compete with the user/Codex exchange. Color on those cards is reserved
 for authoritative running, completed, warning/interrupted, and failed status.
 Conversation cards with detail use one disclosure-header grammar; title-only
-cards omit the control. Message cards open expanded and activity cards open
-collapsed by default; user choices remain session-local. Native and web expose
+cards omit the control. Message, Command execution, and Image cards open
+expanded; other activity cards open collapsed by default. User choices remain
+session-local. Native and web expose
 the same persistent icon-only Conversation-header controls for Reasoning cards,
 interim Codex updates, and the initial Command execution and Image folds. Filtering never
 removes retained content, final answers remain visible, and changing the Command
@@ -107,9 +108,14 @@ at an edge, the conversation receives the event.
 
 `PresentationModel` is the retained normalized presentation source. The
 conversation projects it into one transparent section per app-server turn,
-with cards in server order. Stable turn/item and local-submission keys drive a
-single reconcile path for both first display and updates. Retained cards mutate
-in place, and identical visible projections do not trigger layout work.
+with cards in server order. The first You card is the visible turn container;
+later process, Codex, and steering You cards are nested inside it. The outer
+turn remains foldable, and restoring it preserves every child's independent
+fold state. A pending steering card uses the animated blue identity and morphs
+in place to a softer blue authoritative steering surface. Stable turn/item and
+local-submission keys drive a single reconcile path for both first display and
+updates. Retained cards mutate in place, and identical visible projections do
+not trigger layout work.
 
 The active thread name and its smaller `workspace | state` metadata form one
 baseline-aligned lockup, following the application brand/titlebar pattern

@@ -17,7 +17,11 @@ client-local prompt admissions; cards and inspectors do not maintain a second
 domain store.
 
 The conversation has one semantic grouping level: an app-server turn contains
-its items in server order. Authoritative cards are keyed by stable thread,
+its items in server order. When a turn has a prompt, its first You card is the
+visible turn container and owns all later cards from that turn. Steering You
+cards are nested with the activity they steer rather than starting a second
+visual turn. History pages that do not contain the prompt retain a flat fallback
+until that prompt is available. Authoritative cards are keyed by stable thread,
 turn, and item IDs; local prompt cards are keyed by their submission IDs. The
 same keyed reconcile path handles initial display and updates, mutating a card
 in place when its visible data changes. An identical visible projection does
@@ -92,6 +96,13 @@ unique `clientUserMessageId`, which binds the authoritative user item without
 confusing identical prompt text. A failed submission remains visible with an
 explicit error state.
 
+A prompt that starts a turn is the outer soft-blue turn card. A prompt admitted
+through `turn.steer` appears immediately inside the active turn as an animated
+blue You card; after acknowledgment the same widget becomes a softer blue
+authoritative steering card. No optimistic card is exchanged for a second
+widget, and the turn grows around it without changing existing nested card
+identity.
+
 The composer is cleared immediately after local admission and remains enabled.
 Users may enter additional prompts while earlier prompts await acknowledgment.
 Unsubmitted composer text and attachments form one shared local draft: ordinary
@@ -136,11 +147,16 @@ Every conversation card with visible detail uses the same keyboard-focusable
 disclosure chevron: down when expanded and left when collapsed. Title-only
 cards, including Reasoning without a public summary, omit the chevron until
 detail arrives.
-You, Codex, and temporary You cards initially render expanded; Reasoning,
-Command execution, File changes, Agent activity, Image, Plan, and fallback
-activity cards initially render collapsed. A user-selected state survives
+You, Codex, temporary You, Command execution, and Image cards initially render
+expanded; Reasoning, File changes, Agent activity, Plan, and fallback activity
+cards initially render collapsed. A user-selected state survives
 streaming updates, authoritative prompt replacement, and thread switching for
 the lifetime of the CodexUI process.
+
+The outer You turn card is itself foldable. Collapsing it hides the complete
+nested turn; expanding it restores every child with its independently retained
+fold state. Inner disclosure gestures retain their existing title-anchor and
+growth rules.
 
 The native and web Conversation headers expose persistent, matching icon-only
 controls for Reasoning visibility, interim Codex-update visibility, and the
