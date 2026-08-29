@@ -1724,6 +1724,62 @@ bool testInspectorDetailParity() {
   return result;
 }
 
+bool testTerminalPlanStatusReconciliation() {
+  PresentationModel model;
+  model.applyEvent(presentation::event(
+      1, 1, "thread.upsert",
+      {{"thread", {{"id", "plan-thread"}, {"status", "active"}}}},
+      presentation::Authority::Merge, {{"threadId", "plan-thread"}}));
+  model.applyEvent(presentation::event(
+      2, 1, "turn.upsert",
+      {{"turn", {{"id", "plan-turn"}, {"status", "inProgress"}}}},
+      presentation::Authority::Merge,
+      {{"threadId", "plan-thread"}, {"turnId", "plan-turn"}}));
+  model.applyEvent(presentation::event(
+      3, 1, "plan.replaced",
+      {{"explanation", "Lifecycle plan"},
+       {"steps", nlohmann::json::array(
+                     {{{"step", "Active step"}, {"status", "inProgress"}},
+                      {{"step", "Pending step"}, {"status", "pending"}}})}},
+      presentation::Authority::Replace,
+      {{"threadId", "plan-thread"}, {"turnId", "plan-turn"}}));
+
+  InspectorPane inspector;
+  inspector.refresh(model, "plan-thread");
+  const auto hasExactLabel = [&inspector](const QString &value) {
+    return std::ranges::any_of(
+        inspector.findChildren<QLabel *>(), [&value](const QLabel *label) {
+          return label->text() == value;
+        });
+  };
+  bool result = expect(hasExactLabel(QStringLiteral("Running")) &&
+                           hasExactLabel(QStringLiteral("pending")),
+                       "active plans preserve Running and Pending statuses");
+
+  const auto setThreadStatus = [&](std::uint64_t sequence,
+                                   const char *status) {
+    model.applyEvent(presentation::event(
+        sequence, 1, "thread.upsert",
+        {{"thread", {{"id", "plan-thread"}, {"status", status}}}},
+        presentation::Authority::Merge, {{"threadId", "plan-thread"}}));
+    inspector.refresh(model, "plan-thread");
+  };
+  setThreadStatus(4, "completed");
+  result &= expect(!hasExactLabel(QStringLiteral("Running")) &&
+                       hasExactLabel(QStringLiteral("Completed")) &&
+                       hasExactLabel(QStringLiteral("pending")),
+                   "a terminal thread reconciles stale Running to Completed without changing Pending");
+  setThreadStatus(5, "failed");
+  result &= expect(hasExactLabel(QStringLiteral("Failed")) &&
+                       hasExactLabel(QStringLiteral("pending")),
+                   "a failed thread reconciles stale Running to Failed");
+  setThreadStatus(6, "interrupted");
+  result &= expect(hasExactLabel(QStringLiteral("Interrupted")) &&
+                       hasExactLabel(QStringLiteral("pending")),
+                   "an interrupted thread reconciles stale Running to Interrupted");
+  return result;
+}
+
 bool testGitDiffScopes() {
   QTemporaryDir repositoryDirectory;
   if (!expect(repositoryDirectory.isValid(),
@@ -1952,6 +2008,7 @@ int main(int argc, char **argv) {
   result &= testNestedCommandScrollOwnership();
   result &= testInfoViewerLayout();
   result &= testInspectorDetailParity();
+  result &= testTerminalPlanStatusReconciliation();
   result &= testGitDiffScopes();
   result &= testStableComposerLayoutRequests();
   if (result)

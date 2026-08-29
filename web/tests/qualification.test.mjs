@@ -5,7 +5,7 @@ import {createElement} from "react";
 
 import {App} from "../dist/app/App.js";
 import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
-import {humanizeProtocolLabel, result} from "../dist/index.js";
+import {event, humanizeProtocolLabel, result} from "../dist/index.js";
 
 test("server-rendered shell exposes keyboard and landmark semantics", () => {
     const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("not connected"); });
@@ -105,5 +105,26 @@ test("conversation presentation preferences retain filtered cards and initialize
     assert.match(filtered, /aria-label="Show Codex update cards"/u);
     assert.match(filtered, /aria-label="New command cards start collapsed"/u);
     assert.match(filtered, /aria-label="New image cards start collapsed"/u);
+    session.dispose();
+});
+
+test("Plan reconciles stale Running against terminal lifecycle without changing Pending", () => {
+    const session = new BrowserFrontendSession("ws://bridge.test/codex", () => { throw new Error("not connected"); });
+    session.model.applyEvent(event(1, 1, "thread.upsert", {thread: {id: "plan-thread", status: "active"}}, "merge", {threadId: "plan-thread"}));
+    session.model.applyEvent(event(2, 1, "turn.upsert", {turn: {id: "plan-turn", status: "inProgress"}}, "merge", {threadId: "plan-thread", turnId: "plan-turn"}));
+    session.model.applyEvent(event(3, 1, "plan.replaced", {
+        explanation: "Lifecycle plan",
+        steps: [{step: "Active step", status: "inProgress"}, {step: "Pending step", status: "pending"}],
+    }, "replace", {threadId: "plan-thread", turnId: "plan-turn"}));
+    session.selectThread("plan-thread");
+    const render = () => renderToStaticMarkup(createElement(App, {session}));
+    assert.match(render(), /<small>Running<\/small>[\s\S]*<small>Pending<\/small>/u);
+
+    for (const [sequence, source, display] of [[4, "completed", "Completed"], [5, "failed", "Failed"], [6, "interrupted", "Interrupted"]]) {
+        session.model.applyEvent(event(sequence, 1, "thread.upsert", {thread: {id: "plan-thread", status: source}}, "merge", {threadId: "plan-thread"}));
+        const markup = render();
+        assert.doesNotMatch(markup, /<small>Running<\/small>/u);
+        assert.match(markup, new RegExp(`<small>${display}</small>[\\s\\S]*<small>Pending</small>`, "u"));
+    }
     session.dispose();
 });

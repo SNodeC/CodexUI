@@ -54,6 +54,11 @@ bottom or is owned by the user.
   override, not a fabricated provider timestamp; it retires when updated
   authoritative ordering data arrives. `Created` and `Alphanumeric` remain
   unaffected.
+- The Plan inspector preserves app-server step states while the owning turn is
+  active. If a stale step still reports `inProgress` after its owning turn or
+  thread becomes terminal, the display reconciles that step to Completed,
+  Failed, or Interrupted. Pending steps remain Pending, and retained protocol
+  data is not rewritten.
 - Each visible thread is presented as a compact card. Its status indicator is
   part of that card, and hover and selection strengthen the same card surface
   instead of introducing a separate row treatment. The Sort and Transport

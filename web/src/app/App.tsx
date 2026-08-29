@@ -69,6 +69,18 @@ function persistConversationPresentation(options: ConversationPresentationOption
 
 function StatusDot({tone}: {tone: string}) { return <span className={`status-dot ${tone}`} aria-hidden="true" />; }
 
+function effectivePlanStepStatus(stepStatus: string, turnStatus: string, threadStatus: string): string {
+    if (classifyStatus(stepStatus).kind !== "active") return stepStatus;
+    let outcome = classifyStatus(turnStatus).kind;
+    if (!["completed", "failed", "interrupted"].includes(outcome)) outcome = classifyStatus(threadStatus).kind;
+    return outcome === "completed" ? "completed" : outcome === "failed" ? "failed" : outcome === "interrupted" ? "interrupted" : stepStatus;
+}
+
+function displayStatus(status: string): string {
+    const classified = classifyStatus(status);
+    return classified.kind === "unknown" ? humanize(status) : classified.text;
+}
+
 function ThreadPane({session, revision}: {session: BrowserFrontendSession; revision: number}) {
     void revision;
     const snapshot = session.getSnapshot();
@@ -431,7 +443,10 @@ function Inspector({session, revision}: {session: BrowserFrontendSession; revisi
         <div className="inspector-content">
             {tab === "plan" && (!selected ? <p className="muted-copy">Select a thread to inspect its plan.</p> : latestPlan ? <div className="plan-view">
                 {typeof latestPlan.plan.explanation === "string" && <p>{latestPlan.plan.explanation}</p>}
-                {Array.isArray(latestPlan.plan.steps) && latestPlan.plan.steps.map((step, index) => <div key={index}><StatusDot tone={String((step as {status?: string}).status) === "completed" ? "success" : "active"} /><span>{String((step as {step?: string}).step ?? "")}</span><small>{humanize(String((step as {status?: string}).status ?? ""))}</small></div>)}
+                {Array.isArray(latestPlan.plan.steps) && latestPlan.plan.steps.map((step, index) => {
+                    const status = effectivePlanStepStatus(String((step as {status?: string}).status ?? ""), latestPlan.status, selected.status);
+                    return <div key={index}><StatusDot tone={classifyStatus(status).tone} /><span>{String((step as {step?: string}).step ?? "")}</span><small>{displayStatus(status)}</small></div>;
+                })}
             </div> : <p className="muted-copy">No structured plan is available for this thread.</p>)}
             {tab === "agents" && (!selected || selected.agentOrder.length === 0 ? <p className="muted-copy">No correlated agents are present.</p> : selected.agentOrder.map(id => { const agent = selected.agents.get(id)!; return <div className="agent-card" key={id}>
                 <strong>{agent.raw.agentPath ? String(agent.raw.agentPath) : id}</strong><span>{humanize(agent.status)}</span>

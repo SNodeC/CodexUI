@@ -84,6 +84,24 @@ QLabel *statusLabel(const std::string &status) {
   return label;
 }
 
+std::string effectivePlanStepStatus(const std::string &stepStatus,
+                                    const std::string &turnStatus,
+                                    const std::string &threadStatus) {
+  if (!isActiveStatus(stepStatus))
+    return stepStatus;
+  StatusKind outcome = classifyStatus(turnStatus).kind;
+  if (outcome != StatusKind::Completed && outcome != StatusKind::Failed &&
+      outcome != StatusKind::Interrupted)
+    outcome = classifyStatus(threadStatus).kind;
+  if (outcome == StatusKind::Completed)
+    return "completed";
+  if (outcome == StatusKind::Failed)
+    return "failed";
+  if (outcome == StatusKind::Interrupted)
+    return "interrupted";
+  return stepStatus;
+}
+
 QLabel *makeMarkdownLabel(const QString &value) {
   QTextDocument document;
   document.setMarkdown(
@@ -469,8 +487,11 @@ void InspectorPane::refreshPlan() {
         plan.explanation = stringValue(turn->second.plan, "explanation");
         for (const auto &step :
              turn->second.plan.value("steps", nlohmann::json::array())) {
-          plan.steps.push_back(
-              {stringValue(step, "step"), stringValue(step, "status")});
+          const std::string status = stringValue(step, "status");
+          plan.steps.push_back({
+              stringValue(step, "step"),
+              effectivePlanStepStatus(status, turn->second.status,
+                                      thread->status)});
         }
         next.plan = std::move(plan);
         break;
