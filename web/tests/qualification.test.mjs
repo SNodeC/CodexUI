@@ -63,7 +63,9 @@ test("conversation presentation preferences retain filtered cards and initialize
             {id: "update-1", type: "agentMessage", phase: "commentary", text: "Retained Codex update"},
             {id: "final-1", type: "agentMessage", phase: "final_answer", text: "Final answer always visible"},
             {id: "command-1", type: "commandExecution", command: "printf retained-command", status: "completed"},
+            {id: "command-running", type: "commandExecution", command: "printf running-command", status: "inProgress"},
             {id: "image-1", type: "imageGeneration", path: "/missing/image.png", status: "completed", revisedPrompt: "Retained generated image"},
+            {id: "image-running", type: "imageGeneration", path: "", status: "inProgress", revisedPrompt: "Loading generated image"},
         ],
     }]};
     session.model.applyEvent(result(2, 1, "thread.read", "read", true, {thread}, "replace", {threadId: "thread-1"}));
@@ -76,6 +78,9 @@ test("conversation presentation preferences retain filtered cards and initialize
     assert.match(defaults, /printf retained-command/u);
     assert.match(defaults, /Retained generated image/u);
     assert.doesNotMatch(defaults, /conversation-card imageGeneration\s+collapsed/u);
+    assert.equal((defaults.match(/active-work/gu) ?? []).length, 2);
+    assert.match(defaults, /conversation-card commandExecution[^"]*active-work[^>]*>[\s\S]*?running-command/u);
+    assert.match(defaults, /conversation-card imageGeneration[^"]*active-work[^>]*>[\s\S]*?Loading generated image/u);
 
     const values = new Map([
         ["codexui.conversation.showReasoning", "true"],

@@ -240,6 +240,42 @@ bool testMessageIdentityPalette() {
   return result;
 }
 
+bool testActiveWorkBordersFollowStatus() {
+  VisibleCardData command{
+      AuthoritativeItemKey{"active-border", "turn", "command"},
+      CardKind::CommandExecution,
+      "active-border",
+      "turn",
+      "command",
+      CommandExecutionData{QStringLiteral("sleep 1"), {},
+                           QStringLiteral("inProgress"), {}, {}, {}}};
+  ConversationCard commandCard(command);
+  bool result = expect(commandCard.property("activeWork").toBool(),
+                       "a running command uses the emphasized card border");
+  std::get<CommandExecutionData>(command.payload).status =
+      QStringLiteral("completed");
+  result &= expect(commandCard.apply(command) &&
+                       !commandCard.property("activeWork").toBool(),
+                   "a completed command returns to the normal card border");
+
+  VisibleCardData image{
+      AuthoritativeItemKey{"active-border", "turn", "image"},
+      CardKind::ImageGeneration,
+      "active-border",
+      "turn",
+      "image",
+      ImageGenerationData{{}, QStringLiteral("inProgress"), {}}};
+  ConversationCard imageCard(image);
+  result &= expect(imageCard.property("activeWork").toBool(),
+                   "a loading figure uses the emphasized card border");
+  std::get<ImageGenerationData>(image.payload).status =
+      QStringLiteral("completed");
+  result &= expect(imageCard.apply(image) &&
+                       !imageCard.property("activeWork").toBool(),
+                   "a loaded figure returns to the normal card border");
+  return result;
+}
+
 ConversationCard *card(ConversationView &view, const std::string &key) {
   for (QWidget *widget : view.findChildren<QWidget *>()) {
     auto *candidate = dynamic_cast<ConversationCard *>(widget);
@@ -2388,6 +2424,7 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   using namespace codexui::codex::middle;
   bool result = testMessageIdentityPalette();
+  result &= testActiveWorkBordersFollowStatus();
   result &= testStructuralOrderAndIdentity();
   result &= testFollowPauseAndStableAnchor();
   result &= testPausedExpandedCommandStaysPainted();

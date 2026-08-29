@@ -81,6 +81,7 @@ h1, h2, h3, p { margin: 0; }
 .turn-nested > .conversation-card.userMessage { background: #f3f7ff; border-color: #cfddf4; }
 .conversation-card.localPrompt { background: linear-gradient(100deg, #eaf2ff, #dbe7f8, #eaf2ff); background-size: 200% 100%; animation: awaiting 1.7s linear infinite; }
 .conversation-card.userMessage.turn-container.active-turn { border-color: #6f98e8; }
+.conversation-card.active-work { border-width: 2px; }
 .conversation-card.reasoning { border-left: 3px solid #7896df; }
 .conversation-card.agentMessage.update { background: #fff; border-color: #dce2eb; }
 .conversation-card.agentMessage.final { background: #f4f0ff; border-color: #d4c5f2; }

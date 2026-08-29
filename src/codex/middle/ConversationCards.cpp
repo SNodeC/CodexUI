@@ -996,6 +996,13 @@ public:
     copy->setVisible(!cardCopyContent(current).text.isEmpty());
   }
 
+  void setActiveWork(bool active) {
+    if (owner->property("activeWork").toBool() == active)
+      return;
+    owner->setProperty("activeWork", active);
+    owner->update();
+  }
+
   void createImageContainer() {
     images = new ImageRibbon(content);
     contentLayout->addWidget(images);
@@ -1079,6 +1086,9 @@ public:
   }
 
   void updateComposition(const CommandExecutionData &execution) {
+    const QByteArray status = execution.status.toUtf8();
+    setActiveWork(isActiveStatus(std::string_view(
+        status.constData(), static_cast<std::size_t>(status.size()))));
     const QString displayCommand = trimTrailingEmptyLines(execution.command);
     command->setContent(displayCommand);
     command->setVisible(!displayCommand.isEmpty());
@@ -1175,6 +1185,9 @@ public:
   }
 
   void updateComposition(const ImageGenerationData &image) {
+    const QByteArray status = image.status.toUtf8();
+    setActiveWork(isActiveStatus(std::string_view(
+        status.constData(), static_cast<std::size_t>(status.size()))));
     const bool generated =
         !image.status.isEmpty() || !image.revisedPrompt.isEmpty();
     title->setText(generated ? QStringLiteral("Generated image")
@@ -1351,6 +1364,15 @@ bool ConversationCard::canApply(const VisibleCardData &data) const noexcept {
 
 void ConversationCard::paintEvent(QPaintEvent *event) {
   QFrame::paintEvent(event);
+  if (property("activeWork").toBool()) {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(QStringLiteral("#d7dee8")), 2.0));
+    painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0),
+                            9.0, 9.0);
+    return;
+  }
   if (impl_->current.kind == CardKind::UserMessage &&
       impl_->authoritativeTurnActive) {
     QPainter painter(this);
