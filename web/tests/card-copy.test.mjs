@@ -50,6 +50,8 @@ test("Copy precedes folding and remains available on collapsed cards", () => {
     }));
     assert.ok(markup.includes("Copy card content"));
     assert.ok(markup.indexOf("Copy card content") < markup.indexOf("Expand card"));
+    assert.match(markup, /card-copy-button[^>]*><svg/u);
+    assert.ok(!markup.includes(">Copy</button>"));
     assert.ok(!markup.includes("Source **Markdown**"));
 
     const emptyReasoning = itemCard("reasoning", "reasoning", {summary: ""});

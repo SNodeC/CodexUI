@@ -71,7 +71,7 @@ h1, h2, h3, p { margin: 0; }
 .conversation-card > header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; color: #667085; }
 .conversation-card > header span { color: #38445a; font-size: 11px; font-weight: 750; text-transform: uppercase; letter-spacing: .07em; }
 .conversation-card > header small { font-size: 9px; opacity: .55; }
-.card-meta { display: flex; align-items: center; gap: 6px; }.card-meta button { height: 20px; padding: 0; border: 1px solid #dce2eb; border-radius: 5px; background: #fff; color: #778194; cursor: pointer; }.card-meta .card-copy-button { width: auto; padding: 0 5px; border-color: transparent; background: transparent; font-size: 10px; }.card-meta .card-copy-button:hover { background: #f1f5fb; border-color: #dce2eb; }.card-meta .card-fold-button { width: 20px; }
+.card-meta { display: flex; align-items: center; gap: 4px; }.card-meta button { height: 20px; padding: 0; border: 1px solid #dce2eb; border-radius: 5px; background: #fff; color: #778194; cursor: pointer; }.card-meta .card-copy-button { display: grid; place-items: center; width: 16px; border-color: transparent; background: transparent; }.card-meta .card-copy-button svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }.card-meta .card-copy-button:hover { border-color: transparent; background: transparent; color: #1d2633; }.card-meta .card-fold-button { width: 20px; }
 .conversation-card.collapsed > header { margin-bottom: 0; }
 .conversation-card.userMessage, .conversation-card.localPrompt { background: #eaf2ff; border-color: #bfd3f9; }
 .conversation-card.userMessage > header span, .conversation-card.localPrompt > header span { color: #285fca; }

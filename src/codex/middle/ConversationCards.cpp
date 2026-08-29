@@ -22,7 +22,6 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
-#include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -54,6 +53,7 @@ constexpr int ThumbnailMaximumWidth = 280;
 constexpr int ThumbnailMaximumHeight = 180;
 constexpr int ViewerMaximumImageExtent = 4096;
 constexpr qsizetype MaximumGenericActivityCharacters = 4096;
+constexpr int CardHeaderActionSpacing = 4;
 
 bool initiallyCollapsed(CardKind kind, bool commandInitiallyCollapsed,
                         bool imageInitiallyCollapsed) {
@@ -71,7 +71,7 @@ public:
       : QToolButton(parent) {
     setObjectName(QStringLiteral("cardDisclosureButton"));
     setProperty("kind", "subtle");
-    setFixedSize(24, 24);
+    setFixedSize(14, 24);
     setCursor(Qt::PointingHandCursor);
     setFocusPolicy(Qt::StrongFocus);
     setAccessibleName(QStringLiteral("Expand card"));
@@ -93,11 +93,11 @@ public:
 protected:
   void paintEvent(QPaintEvent *event) override {
     static_cast<void>(event);
-    QRect indicator = rect().adjusted(3, 3, -3, -3);
-    // Keep the full 24 px hit target while aligning the visible stroke with
-    // the card's canonical right inset. The narrower left glyph needs two
-    // pixels more optical compensation than the down glyph.
-    indicator.translate(expanded_ ? 7 : 9, 0);
+    QRect indicator(0, 3, 12, height() - 6);
+    // Keep the visible stroke at the accepted card-right inset. The narrower
+    // left glyph needs two pixels more optical compensation than the down
+    // glyph, while the compact control width avoids artificial action gaps.
+    indicator.translate(expanded_ ? 3 : 5, 0);
     UiStyle::drawChevron(this, indicator, isEnabled(),
                          underMouse() || hasFocus(),
                          expanded_ ? UiStyle::ChevronDirection::Down
@@ -106,6 +106,36 @@ protected:
 
 private:
   bool expanded_ = false;
+};
+
+class CardCopyButton final : public QToolButton {
+public:
+  explicit CardCopyButton(QWidget *parent = nullptr) : QToolButton(parent) {
+    setObjectName(QStringLiteral("cardCopyButton"));
+    setFixedSize(16, 24);
+    setCursor(Qt::PointingHandCursor);
+    setFocusPolicy(Qt::StrongFocus);
+    setAccessibleName(QStringLiteral("Copy card content"));
+    setToolTip(accessibleName());
+  }
+
+protected:
+  void paintEvent(QPaintEvent *event) override {
+    static_cast<void>(event);
+    QColor color(QStringLiteral("#667085"));
+    if (!isEnabled())
+      color = QColor(QStringLiteral("#98a2b3"));
+    else if (underMouse() || hasFocus())
+      color = QColor(QStringLiteral("#1d2633"));
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(
+        QPen(color, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.drawRoundedRect(QRectF(4.5, 5.5, 8.0, 9.0), 1.2, 1.2);
+    painter.drawRoundedRect(QRectF(7.5, 8.5, 8.0, 9.0), 1.2, 1.2);
+  }
 };
 
 void openImageViewer(const QString &path);
@@ -727,16 +757,10 @@ public:
     header->setObjectName(QStringLiteral("conversationCardHeader"));
     headerLayout = new QHBoxLayout(header);
     headerLayout->setContentsMargins(0, 0, 0, 0);
-    headerLayout->setSpacing(6);
+    headerLayout->setSpacing(CardHeaderActionSpacing);
     title = makeLabel({}, "title", header);
     title->setWordWrap(false);
-    copy = new QPushButton(QStringLiteral("Copy"), header);
-    copy->setObjectName(QStringLiteral("cardCopyButton"));
-    copy->setProperty("kind", "subtle");
-    copy->setFixedHeight(24);
-    copy->setCursor(Qt::PointingHandCursor);
-    copy->setToolTip(QStringLiteral("Copy card content"));
-    copy->setAccessibleName(copy->toolTip());
+    copy = new CardCopyButton(header);
     disclosure = new CardDisclosureButton(header);
     headerLayout->addWidget(title, 1);
     headerLayout->addWidget(copy, 0, Qt::AlignRight | Qt::AlignVCenter);
@@ -760,7 +784,7 @@ public:
 
     QObject::connect(disclosure, &QToolButton::clicked, owner,
                      [this] { emit this->owner->foldRequested(!collapsed); });
-    QObject::connect(copy, &QPushButton::clicked, owner, [this] {
+    QObject::connect(copy, &QToolButton::clicked, owner, [this] {
       const CardCopyContent content = cardCopyContent(current);
       if (content.text.isEmpty())
         return;
@@ -1204,7 +1228,7 @@ public:
   QLabel *title = nullptr;
   QLabel *phaseSeparator = nullptr;
   QLabel *phase = nullptr;
-  QPushButton *copy = nullptr;
+  CardCopyButton *copy = nullptr;
   CardDisclosureButton *disclosure = nullptr;
   QWidget *content = nullptr;
   QVBoxLayout *contentLayout = nullptr;

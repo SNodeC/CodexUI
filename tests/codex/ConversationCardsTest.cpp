@@ -277,12 +277,12 @@ QToolButton *disclosure(ConversationCard *card) {
               : nullptr;
 }
 
-QPushButton *copyButton(ConversationCard *card) {
+QToolButton *copyButton(ConversationCard *card) {
   if (!card)
     return nullptr;
   QWidget *header = card->findChild<QWidget *>(
       QStringLiteral("conversationCardHeader"), Qt::FindDirectChildrenOnly);
-  return header ? header->findChild<QPushButton *>(
+  return header ? header->findChild<QToolButton *>(
                       QStringLiteral("cardCopyButton"),
                       Qt::FindDirectChildrenOnly)
                 : nullptr;
@@ -888,7 +888,7 @@ bool testCardCopyControls() {
     ConversationCard card(cases[index].card);
     card.show();
     spin();
-    QPushButton *button = copyButton(&card);
+    QToolButton *button = copyButton(&card);
     if (index == 0)
       card.setCollapsed(true);
     QApplication::clipboard()->clear();
@@ -908,6 +908,20 @@ bool testCardCopyControls() {
           button->parentWidget()->layout()->indexOf(button) <
               button->parentWidget()->layout()->indexOf(disclosure(&card)),
           "Copy precedes the disclosure control in the card header");
+    if (index == 0) {
+      QToolButton *fold = disclosure(&card);
+      const QRect copyInk = paintedDisclosureBounds(button).translated(
+          button->mapTo(button->parentWidget(), QPoint{}));
+      const QRect foldInk = paintedDisclosureBounds(fold).translated(
+          fold->mapTo(fold->parentWidget(), QPoint{}));
+      result &= expect(
+          button->text().isEmpty() && button->height() == fold->height() &&
+              std::abs(copyInk.center().y() - foldInk.center().y()) <= 1 &&
+              foldInk.left() - copyInk.right() - 1 <= 14 &&
+              button->parentWidget()->layout()->spacing() == 4,
+          "copy and disclosure are backgroundless, vertically aligned, and "
+          "use canonical compact spacing");
+    }
   }
 
   VisibleCardData mutableMessage = cases.front().card;
@@ -1354,7 +1368,7 @@ bool testCardFoldingGeometryAndRetention() {
       paintedDisclosureBounds(disclosure(reasoningCard));
   result &= expect(
       collapsedDisclosure.isValid() &&
-          collapsedDisclosure.left() > disclosure(reasoningCard)->width() / 2 &&
+          collapsedDisclosure.width() <= 8 &&
           collapsedDisclosure.right() >= disclosure(reasoningCard)->width() - 3,
       "collapsed disclosure paints only a right-inset left chevron");
   result &= expect(
@@ -1460,7 +1474,7 @@ bool testCardFoldingGeometryAndRetention() {
       paintedDisclosureBounds(disclosure(reasoningCard));
   result &= expect(
       expandedDisclosure.isValid() &&
-          expandedDisclosure.left() > disclosure(reasoningCard)->width() / 2 &&
+          expandedDisclosure.width() <= 10 &&
           expandedDisclosure.right() >= disclosure(reasoningCard)->width() - 3,
       "expanded disclosure paints only a right-inset down chevron");
 

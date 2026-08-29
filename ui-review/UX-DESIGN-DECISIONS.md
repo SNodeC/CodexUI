@@ -92,10 +92,12 @@ removes retained content, final answers remain visible, and changing the Command
 default does not override an existing card's user-owned state.
 
 Cards with content use one header action order: title/phase, flexible space,
-**Copy**, then disclosure. Copy remains reachable on a collapsed card, while a
-contentless card omits it. Authored Markdown copies from the retained source
-with `text/markdown` and identical plain text; non-Markdown cards copy their
-deterministic primary-content text rather than rendered widget text.
+backgroundless copy icon, then disclosure. The two icons share a vertical
+center and the canonical compact 4 px action gap. Copy remains reachable on a
+collapsed card, while a contentless card omits it. Authored Markdown copies
+from the retained source with `text/markdown` and identical plain text;
+non-Markdown cards copy their deterministic primary-content text rather than
+rendered widget text.
 Folding is immediate rather than animated and anchors the selected title row,
 so content only contracts upward or grows downward below the interaction point.
 
