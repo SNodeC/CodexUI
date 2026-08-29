@@ -158,6 +158,13 @@ nested turn; expanding it restores every child with its independently retained
 fold state. Inner disclosure gestures retain their existing title-anchor and
 growth rules.
 
+Every card with copyable content places a **Copy** control at the right of its
+header, immediately before the disclosure chevron. The control remains
+available while that card is collapsed; contentless cards omit it. Markdown
+cards copy their exact retained source as both plain clipboard text and
+`text/markdown`, never reconstructed rendered text. Structured cards copy a
+deterministic plain-text representation of their primary content.
+
 The native and web Conversation headers expose persistent, matching icon-only
 controls for Reasoning visibility, interim Codex-update visibility, and the
 initial folding state of newly appearing Command execution and Image cards. Final Codex

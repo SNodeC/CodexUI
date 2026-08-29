@@ -5,6 +5,8 @@
 #include "codex/PresentationStatus.h"
 #include "codex/ui/UiStyle.h"
 
+#include <QApplication>
+#include <QClipboard>
 #include <QColor>
 #include <QDateTime>
 #include <QDialog>
@@ -14,11 +16,13 @@
 #include <QImageReader>
 #include <QLabel>
 #include <QLinearGradient>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -34,6 +38,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 
@@ -358,6 +363,16 @@ struct DiffCounts {
   int deletions = 0;
 };
 
+struct CardCopyContent {
+  QString text;
+  bool markdown = false;
+};
+
+QString joinedCopyText(QStringList parts) {
+  parts.removeAll(QString{});
+  return parts.join(QStringLiteral("\n\n"));
+}
+
 QString fileChangesText(const FileChangesData &data) {
   QStringList rows;
   for (const FileChangeData &change : data.changes) {
@@ -411,6 +426,43 @@ QString boundedGenericActivity(const nlohmann::json &raw) {
     return rendered;
   rendered.truncate(MaximumGenericActivityCharacters);
   return rendered + QStringLiteral("\n\n[Activity details truncated]");
+}
+
+CardCopyContent cardCopyContent(const VisibleCardData &card) {
+  return std::visit(
+      [](const auto &payload) -> CardCopyContent {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, UserMessageData>) {
+          return payload.text.isEmpty()
+                     ? CardCopyContent{
+                           payload.imagePaths.join(QLatin1Char('\n')), false}
+                     : CardCopyContent{payload.text, true};
+        } else if constexpr (std::is_same_v<Payload, AgentMessageData>) {
+          return {payload.text, true};
+        } else if constexpr (std::is_same_v<Payload, CommandExecutionData>) {
+          return {joinedCopyText({trimTrailingEmptyLines(payload.command),
+                                  trimTrailingEmptyLines(payload.output)}),
+                  false};
+        } else if constexpr (std::is_same_v<Payload, AgentActivityData>) {
+          return {joinedCopyText({payload.prompt, payload.resultText}), true};
+        } else if constexpr (std::is_same_v<Payload, ReasoningData>) {
+          return {payload.summary, true};
+        } else if constexpr (std::is_same_v<Payload, FileChangesData>) {
+          return {fileChangesText(payload), false};
+        } else if constexpr (std::is_same_v<Payload, PlanData>) {
+          return {planMarkdown(payload), true};
+        } else if constexpr (std::is_same_v<Payload, ImageGenerationData>) {
+          return {joinedCopyText({payload.revisedPrompt, payload.path}), false};
+        } else if constexpr (std::is_same_v<Payload, GenericActivityData>) {
+          return {boundedGenericActivity(payload.raw), false};
+        } else {
+          return payload.prompt.isEmpty()
+                     ? CardCopyContent{
+                           payload.imagePaths.join(QLatin1Char('\n')), false}
+                     : CardCopyContent{payload.prompt, true};
+        }
+      },
+      card.payload);
 }
 
 bool acceptedTransitionActive(const LocalPromptData &prompt, qint64 now) {
@@ -631,8 +683,16 @@ public:
     headerLayout->setSpacing(6);
     title = makeLabel({}, "title", header);
     title->setWordWrap(false);
+    copy = new QPushButton(QStringLiteral("Copy"), header);
+    copy->setObjectName(QStringLiteral("cardCopyButton"));
+    copy->setProperty("kind", "subtle");
+    copy->setFixedHeight(24);
+    copy->setCursor(Qt::PointingHandCursor);
+    copy->setToolTip(QStringLiteral("Copy card content"));
+    copy->setAccessibleName(copy->toolTip());
     disclosure = new CardDisclosureButton(header);
     headerLayout->addWidget(title, 1);
+    headerLayout->addWidget(copy, 0, Qt::AlignRight | Qt::AlignVCenter);
     headerLayout->addWidget(disclosure, 0, Qt::AlignRight | Qt::AlignVCenter);
     layout->addWidget(header);
 
@@ -653,9 +713,20 @@ public:
 
     QObject::connect(disclosure, &QToolButton::clicked, owner,
                      [this] { emit this->owner->foldRequested(!collapsed); });
+    QObject::connect(copy, &QPushButton::clicked, owner, [this] {
+      const CardCopyContent content = cardCopyContent(current);
+      if (content.text.isEmpty())
+        return;
+      auto *mime = new QMimeData;
+      mime->setText(content.text);
+      if (content.markdown)
+        mime->setData("text/markdown", content.text.toUtf8());
+      QApplication::clipboard()->setMimeData(mime);
+    });
     owner->setProperty("kind", "raised");
     std::visit([this](const auto &payload) { createComposition(payload); },
                initial.payload);
+    refreshCopyPresentation();
     refreshFoldPresentation();
   }
 
@@ -683,6 +754,7 @@ public:
       return false;
     std::visit([this](const auto &payload) { updateComposition(payload); },
                next.payload);
+    refreshCopyPresentation();
     refreshFoldPresentation();
     owner->updateGeometry();
     owner->update();
@@ -762,6 +834,10 @@ public:
     disclosure->setVisible(expandable);
     content->setVisible(expandable && !collapsed);
     nestedCards->setVisible(hasVisibleNestedCards && !collapsed);
+  }
+
+  void refreshCopyPresentation() {
+    copy->setVisible(!cardCopyContent(current).text.isEmpty());
   }
 
   void createImageContainer() {
@@ -1071,6 +1147,7 @@ public:
   QLabel *title = nullptr;
   QLabel *phaseSeparator = nullptr;
   QLabel *phase = nullptr;
+  QPushButton *copy = nullptr;
   CardDisclosureButton *disclosure = nullptr;
   QWidget *content = nullptr;
   QVBoxLayout *contentLayout = nullptr;

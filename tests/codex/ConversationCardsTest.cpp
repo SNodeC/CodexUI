@@ -5,6 +5,7 @@
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QColor>
 #include <QCoreApplication>
 #include <QDateTime>
@@ -13,7 +14,10 @@
 #include <QFont>
 #include <QImage>
 #include <QLabel>
+#include <QLayout>
+#include <QMimeData>
 #include <QPointer>
+#include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QTemporaryDir>
@@ -271,6 +275,17 @@ QToolButton *disclosure(ConversationCard *card) {
   return card ? card->findChild<QToolButton *>(
                     QStringLiteral("cardDisclosureButton"))
               : nullptr;
+}
+
+QPushButton *copyButton(ConversationCard *card) {
+  if (!card)
+    return nullptr;
+  QWidget *header = card->findChild<QWidget *>(
+      QStringLiteral("conversationCardHeader"), Qt::FindDirectChildrenOnly);
+  return header ? header->findChild<QPushButton *>(
+                      QStringLiteral("cardCopyButton"),
+                      Qt::FindDirectChildrenOnly)
+                : nullptr;
 }
 
 QRect paintedDisclosureBounds(QToolButton *button) {
@@ -778,6 +793,158 @@ bool testPromptAdmissionFollowOwnership() {
                  retainedAnchor.first == userAnchor.first &&
                  std::abs(retainedAnchor.second - userAnchor.second) <= 1,
              "local admission never overrides an explicit user scroll pause");
+  return result;
+}
+
+bool testCardCopyControls() {
+  const std::string thread = "copy-controls";
+  struct CopyCase {
+    VisibleCardData card;
+    QString expected;
+    bool markdown = false;
+  };
+  const std::vector<CopyCase> cases{
+      {{AuthoritativeItemKey{thread, "turn", "user"}, CardKind::UserMessage,
+        thread, "turn", "user",
+        UserMessageData{QStringLiteral("# Prompt\n\n**bold**"),
+                        {QStringLiteral("/tmp/first.png"),
+                         QStringLiteral("/tmp/second.png")}}},
+       QStringLiteral("# Prompt\n\n**bold**"),
+       true},
+      {{AuthoritativeItemKey{thread, "turn", "image-only-user"},
+        CardKind::UserMessage, thread, "turn", "image-only-user",
+        UserMessageData{{}, {QStringLiteral("/tmp/only-image.png")}}},
+       QStringLiteral("/tmp/only-image.png"),
+       false},
+      {{AuthoritativeItemKey{thread, "turn", "agent"},
+        CardKind::AgentMessage, thread, "turn", "agent",
+        AgentMessageData{QStringLiteral("## Answer\n\n- item"), true}},
+       QStringLiteral("## Answer\n\n- item"),
+       true},
+      {{AuthoritativeItemKey{thread, "turn", "command"},
+        CardKind::CommandExecution, thread, "turn", "command",
+        CommandExecutionData{QStringLiteral("printf copy\n\n"),
+                             QStringLiteral("one\n\n"),
+                             QStringLiteral("completed"),
+                             {},
+                             0}},
+       QStringLiteral("printf copy\n\none"),
+       false},
+      {{AuthoritativeItemKey{thread, "turn", "activity"},
+        CardKind::AgentActivity, thread, "turn", "activity",
+        AgentActivityData{QStringLiteral("tool"),
+                          QStringLiteral("completed"),
+                          {},
+                          QStringLiteral("Inspect"),
+                          QStringLiteral("**result**")}},
+       QStringLiteral("Inspect\n\n**result**"),
+       true},
+      {{AuthoritativeItemKey{thread, "turn", "reasoning"},
+        CardKind::Reasoning, thread, "turn", "reasoning",
+        ReasoningData{QStringLiteral("Reasoning *summary*")}},
+       QStringLiteral("Reasoning *summary*"),
+       true},
+      {{AuthoritativeItemKey{thread, "turn", "files"},
+        CardKind::FileChanges, thread, "turn", "files",
+        FileChangesData{QStringLiteral("completed"),
+                        {{QStringLiteral("src/card.cpp"),
+                          QStringLiteral("update"), 2, 1}}}},
+       QStringLiteral("src/card.cpp  ·  Update  +2 −1"),
+       false},
+      {{TurnPlanKey{thread, "turn"}, CardKind::Plan, thread, "turn", {},
+        PlanData{QStringLiteral("Plan explanation"),
+                 {{QStringLiteral("Inspect"), QStringLiteral("completed")},
+                  {QStringLiteral("Implement"),
+                   QStringLiteral("inProgress")}},
+                 {}}},
+       QStringLiteral("Plan explanation\n\n✓ Inspect  \n◉ Implement  "),
+       true},
+      {{AuthoritativeItemKey{thread, "turn", "image"},
+        CardKind::ImageGeneration, thread, "turn", "image",
+        ImageGenerationData{QStringLiteral("/tmp/generated.png"),
+                            QStringLiteral("completed"),
+                            QStringLiteral("A revised prompt")}},
+       QStringLiteral("A revised prompt\n\n/tmp/generated.png"),
+       false},
+      {{AuthoritativeItemKey{thread, "turn", "generic"},
+        CardKind::GenericActivity, thread, "turn", "generic",
+        GenericActivityData{QStringLiteral("custom"),
+                            {{"detail", "value"}}}},
+       QStringLiteral("{\n  \"detail\": \"value\"\n}"),
+       false},
+      {{LocalPromptKey{99}, CardKind::LocalPrompt, thread, {}, {},
+        LocalPromptData{99,
+                        QStringLiteral("Pending `prompt`"),
+                        PromptState::InFlight,
+                        0,
+                        {},
+                        {QStringLiteral("/tmp/pending.png")}}},
+       QStringLiteral("Pending `prompt`"),
+       true},
+  };
+
+  bool result = true;
+  for (std::size_t index = 0; index < cases.size(); ++index) {
+    ConversationCard card(cases[index].card);
+    card.show();
+    spin();
+    QPushButton *button = copyButton(&card);
+    if (index == 0)
+      card.setCollapsed(true);
+    QApplication::clipboard()->clear();
+    if (button)
+      button->click();
+    const QMimeData *mime = QApplication::clipboard()->mimeData();
+    result &= expect(
+        button && !button->isHidden() && mime &&
+            mime->text() == cases[index].expected &&
+            mime->hasFormat("text/markdown") == cases[index].markdown &&
+            (!cases[index].markdown ||
+             mime->data("text/markdown") == cases[index].expected.toUtf8()),
+        "each content card copies its canonical source while collapsed or "
+        "expanded");
+    if (index == 0)
+      result &= expect(
+          button->parentWidget()->layout()->indexOf(button) <
+              button->parentWidget()->layout()->indexOf(disclosure(&card)),
+          "Copy precedes the disclosure control in the card header");
+  }
+
+  VisibleCardData mutableMessage = cases.front().card;
+  ConversationCard mutableCard(mutableMessage);
+  std::get<UserMessageData>(mutableMessage.payload).text =
+      QStringLiteral("Updated **Markdown**");
+  result &= expect(mutableCard.apply(mutableMessage),
+                   "copy fixture accepts an in-place content update");
+  QApplication::clipboard()->clear();
+  copyButton(&mutableCard)->click();
+  result &= expect(
+      QApplication::clipboard()->text() ==
+          QStringLiteral("Updated **Markdown**"),
+      "copy reads the latest retained card data after an in-place update");
+
+  ConversationCard emptyReasoning(
+      VisibleCardData{AuthoritativeItemKey{thread, "turn", "empty"},
+                      CardKind::Reasoning, thread, "turn", "empty",
+                      ReasoningData{}});
+  emptyReasoning.show();
+  spin();
+  result &= expect(copyButton(&emptyReasoning) &&
+                       copyButton(&emptyReasoning)->isHidden(),
+                   "contentless cards omit the Copy control");
+  VisibleCardData populatedReasoning = emptyReasoning.data();
+  std::get<ReasoningData>(populatedReasoning.payload).summary =
+      QStringLiteral("Late **summary**");
+  result &= expect(emptyReasoning.apply(populatedReasoning) &&
+                       !copyButton(&emptyReasoning)->isHidden(),
+                   "Copy appears when retained card content arrives later");
+  QApplication::clipboard()->clear();
+  copyButton(&emptyReasoning)->click();
+  result &= expect(QApplication::clipboard()->text() ==
+                       QStringLiteral("Late **summary**") &&
+                       QApplication::clipboard()->mimeData()->hasFormat(
+                           "text/markdown"),
+                   "late Markdown content copies from the updated source");
   return result;
 }
 
@@ -2157,6 +2324,7 @@ int main(int argc, char **argv) {
   result &= testPausedExpandedCommandStaysPainted();
   result &= testThreadLocalScrollAndComposerExtent();
   result &= testPromptAdmissionFollowOwnership();
+  result &= testCardCopyControls();
   result &= testMutableCardsAndCommandOutput();
   result &= testCardFoldingGeometryAndRetention();
   result &= testPresentationOptionsRetainCardsAndInitialFolding();

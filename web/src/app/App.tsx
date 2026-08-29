@@ -8,7 +8,8 @@ import {
 import type {PendingRequestPresentation, SettingField, SettingValues} from "../index.js";
 import type {
     AgentActivityData, CommandExecutionData, FileChangesData, LocalPromptData,
-    ReasoningData, UserMessageData, AgentMessageData, VisibleCardData,
+    ReasoningData, UserMessageData, AgentMessageData, GenericActivityData,
+    ImageGenerationData, PlanData, VisibleCardData,
 } from "../index.js";
 import type {BrowserFrontendSession} from "./BrowserFrontendSession.js";
 import {humanizeProtocolLabel as humanize} from "./Humanize.js";
@@ -133,7 +134,74 @@ function SafeMarkdown({text}: {text: string}) {
     return <div className="safe-markdown">{blocks}</div>;
 }
 
-function Card({card, active, collapsed, onToggle, nested}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; nested?: ReactNode}) {
+export interface CardCopyContent {text: string; markdown: boolean}
+
+function joinCopyText(parts: string[]): string {
+    return parts.filter(Boolean).join("\n\n");
+}
+
+function planMarkdown(plan: PlanData): string {
+    if (plan.legacyText) return plan.legacyText;
+    const rows = plan.explanation ? [plan.explanation] : [];
+    if (plan.steps.length > 0 && rows.length > 0) rows.push("");
+    for (const step of plan.steps) {
+        const marker = step.status === "completed" ? "✓" : step.status === "inProgress" ? "◉" : "○";
+        rows.push(`${marker} ${step.text}  `);
+    }
+    return rows.join("\n");
+}
+
+export function cardCopyContent(card: VisibleCardData): CardCopyContent {
+    if (card.kind === "userMessage") {
+        const data = card.payload as UserMessageData;
+        return data.text ? {text: data.text, markdown: true} : {text: data.imagePaths.join("\n"), markdown: false};
+    }
+    if (card.kind === "localPrompt") {
+        const data = card.payload as LocalPromptData;
+        return data.prompt ? {text: data.prompt, markdown: true} : {text: data.imagePaths.join("\n"), markdown: false};
+    }
+    if (card.kind === "agentMessage") return {text: (card.payload as AgentMessageData).text, markdown: true};
+    if (card.kind === "reasoning") return {text: (card.payload as ReasoningData).summary, markdown: true};
+    if (card.kind === "commandExecution") {
+        const data = card.payload as CommandExecutionData;
+        return {text: joinCopyText([data.command.trimEnd(), data.output.trimEnd()]), markdown: false};
+    }
+    if (card.kind === "agentActivity") {
+        const data = card.payload as AgentActivityData;
+        return {text: joinCopyText([data.prompt, data.resultText]), markdown: true};
+    }
+    if (card.kind === "fileChanges") {
+        const data = card.payload as FileChangesData;
+        return {text: data.changes.filter(change => change.path).map(change => {
+            const counts = change.additions !== undefined && change.deletions !== undefined
+                ? `  +${change.additions} −${change.deletions}` : "";
+            return `${change.path}  ·  ${humanize(change.kind || "changed")}${counts}`;
+        }).join("\n"), markdown: false};
+    }
+    if (card.kind === "plan") return {text: planMarkdown(card.payload as PlanData), markdown: true};
+    if (card.kind === "imageGeneration") {
+        const data = card.payload as ImageGenerationData;
+        return {text: joinCopyText([data.revisedPrompt, data.path]), markdown: false};
+    }
+    const data = card.payload as GenericActivityData;
+    return {text: JSON.stringify(data.raw, null, 2), markdown: false};
+}
+
+async function writeCardClipboard(content: CardCopyContent): Promise<void> {
+    if (!content.text || !navigator.clipboard) return;
+    if (content.markdown && typeof ClipboardItem !== "undefined" && navigator.clipboard.write) {
+        try {
+            await navigator.clipboard.write([new ClipboardItem({
+                "text/plain": new Blob([content.text], {type: "text/plain"}),
+                "text/markdown": new Blob([content.text], {type: "text/markdown"}),
+            })]);
+            return;
+        } catch { /* Fall back to portable plain-text clipboard transport. */ }
+    }
+    await navigator.clipboard.writeText(content.text);
+}
+
+export function Card({card, active, collapsed, onToggle, nested}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; nested?: ReactNode}) {
     let title = humanize(card.kind);
     let body: ReactNode;
     let phaseClass = "";
@@ -170,10 +238,11 @@ function Card({card, active, collapsed, onToggle, nested}: {card: VisibleCardDat
         const data = card.payload as {type: string; raw: unknown}; title = humanize(data.type);
         body = <details><summary>Protocol data</summary><pre>{JSON.stringify(data.raw, null, 2)}</pre></details>;
     }
+    const copyContent = cardCopyContent(card);
     const foldable = ["userMessage", "localPrompt", "agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "imageGeneration", "genericActivity"].includes(card.kind)
         && !(card.kind === "reasoning" && !(card.payload as ReasoningData).summary);
     return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""} ${nested ? "turn-container" : ""}`} data-card-key={stableKey(card.key)}>
-        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{foldable && <button onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}>{collapsed ? "＋" : "−"}</button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
+        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{copyContent.text && <button className="card-copy-button" onClick={() => void writeCardClipboard(copyContent)} aria-label="Copy card content">Copy</button>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}>{collapsed ? "＋" : "−"}</button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
 
