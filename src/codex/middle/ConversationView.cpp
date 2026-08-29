@@ -446,6 +446,9 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
       for (ConversationCard *card : orderedCards) {
         if (card != prompt && card->property("turnContainer").toBool())
           card->setNestedCards({});
+        if (card != prompt)
+          visualChange =
+              card->setAuthoritativeTurnActive(false) || visualChange;
         card->setProperty("turnContainer", false);
       }
       std::vector<ConversationCard *> nestedCards;
@@ -456,6 +459,11 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
       prompt->setProperty("nestedConversationCard", false);
       prompt->setProperty("turnContainer", true);
       prompt->setNestedCards(nestedCards);
+      visualChange =
+          prompt->setAuthoritativeTurnActive(
+              snapshot.activeTurnId &&
+              sectionData.turnId == *snapshot.activeTurnId) ||
+          visualChange;
       if (section->cards->indexOf(prompt) != 0)
         section->cards->insertWidget(0, prompt);
     } else {
@@ -465,6 +473,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
           card->setNestedCards({});
         card->setProperty("nestedConversationCard", false);
         card->setProperty("turnContainer", false);
+        visualChange = card->setAuthoritativeTurnActive(false) || visualChange;
         card->setMinimumHeight(0);
         if (section->cards->indexOf(card) != static_cast<int>(position))
           section->cards->insertWidget(static_cast<int>(position), card);

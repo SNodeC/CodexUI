@@ -58,3 +58,30 @@ test("Copy precedes folding and remains available on collapsed cards", () => {
     }));
     assert.ok(!emptyMarkup.includes("Copy card content"));
 });
+
+test("only an authoritative running-turn You container receives breathing", () => {
+    const user = itemCard("userMessage", "prompt", {
+        text: "Prompt", imagePaths: [],
+    });
+    const running = renderToStaticMarkup(createElement(Card, {
+        card: user, active: true, collapsed: false, turnContainer: true,
+        onToggle() {},
+    }));
+    assert.match(running, /userMessage[^"]*turn-container[^"]*active-turn/u);
+
+    const finished = renderToStaticMarkup(createElement(Card, {
+        card: user, active: false, collapsed: false, turnContainer: true,
+        onToggle() {},
+    }));
+    assert.doesNotMatch(finished, /active-turn/u);
+
+    const pending = itemCard("localPrompt", "pending", {
+        submissionId: 1, prompt: "Pending", state: "inFlight",
+        acceptedAtMilliseconds: 0, error: "", imagePaths: [],
+    });
+    const awaiting = renderToStaticMarkup(createElement(Card, {
+        card: pending, active: true, collapsed: false, turnContainer: true,
+        onToggle() {},
+    }));
+    assert.doesNotMatch(awaiting, /active-turn/u);
+});

@@ -161,6 +161,12 @@ acknowledges it. Each request carries a unique `clientUserMessageId`; after a
 successful callback the card keeps a 500-millisecond accepted transition before
 normal message presentation. Failure produces an explicit error state.
 
+The authoritative outer You card carries a slow, subtle breathing blue border
+only while its turn is active. Its static surface and low-amplitude border pulse
+must remain visually distinct from the stronger moving pending-prompt sweep.
+The background and shadow do not animate. Turn completion stops the pulse in
+place without changing card geometry.
+
 The input remains enabled after admission. Multiple prompts can be composed
 while earlier cards are pending. They are dispatched sequentially per thread.
 

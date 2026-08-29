@@ -77,12 +77,14 @@ h1, h2, h3, p { margin: 0; }
 .conversation-card.userMessage > header span, .conversation-card.localPrompt > header span { color: #285fca; }
 .turn-nested > .conversation-card.userMessage { background: #f3f7ff; border-color: #cfddf4; }
 .conversation-card.localPrompt { background: linear-gradient(100deg, #eaf2ff, #dbe7f8, #eaf2ff); background-size: 200% 100%; animation: awaiting 1.7s linear infinite; }
+.conversation-card.userMessage.turn-container.active-turn { animation: active-turn-breathe 2.4s ease-in-out infinite; }
 .conversation-card.reasoning { border-left: 3px solid #7896df; }
 .conversation-card.agentMessage.update { background: #fff; border-color: #dce2eb; }
 .conversation-card.agentMessage.final { background: #f4f0ff; border-color: #d4c5f2; }
 .conversation-card.agentMessage.final > header span { color: #53389e; }
 .conversation-card.fileChanges { border-left: 3px solid #28a56c; }
 @keyframes awaiting { to { background-position: -200% 0; } }
+@keyframes active-turn-breathe { 0%, 100% { border-color: #bfd3f9; } 50% { border-color: #85a8ec; } }
 .card-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.55; }
 .markdown-text { font-size: 14px; }
 .safe-markdown { font-size: 14px; line-height: 1.58; overflow-wrap: anywhere; }.safe-markdown p { white-space: pre-wrap; margin: 0 0 9px; }.safe-markdown p:last-child { margin-bottom: 0; }.safe-markdown h3 { margin: 12px 0 6px; font-size: 15px; }.safe-markdown a { color: #2956bd; }.markdown-list { padding-left: 8px; }.inline-code { padding: 1px 4px; border-radius: 4px; background: #edf1f7; color: #b2354c; font-size: .9em; }

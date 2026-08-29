@@ -201,7 +201,7 @@ async function writeCardClipboard(content: CardCopyContent): Promise<void> {
     await navigator.clipboard.writeText(content.text);
 }
 
-export function Card({card, active, collapsed, onToggle, nested}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; nested?: ReactNode}) {
+export function Card({card, active, collapsed, onToggle, nested, turnContainer = false}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; nested?: ReactNode; turnContainer?: boolean}) {
     let title = humanize(card.kind);
     let body: ReactNode;
     let phaseClass = "";
@@ -241,7 +241,8 @@ export function Card({card, active, collapsed, onToggle, nested}: {card: Visible
     const copyContent = cardCopyContent(card);
     const foldable = ["userMessage", "localPrompt", "agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "imageGeneration", "genericActivity"].includes(card.kind)
         && !(card.kind === "reasoning" && !(card.payload as ReasoningData).summary);
-    return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""} ${nested ? "turn-container" : ""}`} data-card-key={stableKey(card.key)}>
+    const activeTurn = active && turnContainer && card.kind === "userMessage";
+    return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${activeTurn ? "active-turn" : ""}`} data-card-key={stableKey(card.key)}>
         <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{copyContent.text && <button className="card-copy-button" onClick={() => void writeCardClipboard(copyContent)} aria-label="Copy card content">Copy</button>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}>{collapsed ? "＋" : "−"}</button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
@@ -294,9 +295,9 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
     const visibleSections = conversation.sections
         .map(section => ({...section, cards: section.cards.filter(cardVisible)}))
         .filter(section => section.cards.length > 0);
-    const renderCard = (card: VisibleCardData, nested?: ReactNode) => {
+    const renderCard = (card: VisibleCardData, nested?: ReactNode, turnContainer = false) => {
         const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
-        return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} nested={nested} />;
+        return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} nested={nested} turnContainer={turnContainer} />;
     };
     return <main className="conversation-pane">
         <div className="conversation-heading"><div><span className="eyebrow">Conversation</span>
@@ -320,7 +321,7 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
                 const nestedCards = prompt ? section.cards.filter(card => card !== prompt) : [];
                 const nested = nestedCards.length > 0 ? nestedCards.map(card => renderCard(card)) : undefined;
                 return <section key={section.key} className="turn-section">
-                    {prompt ? renderCard(prompt, nested) : section.cards.map(card => renderCard(card))}
+                    {prompt ? renderCard(prompt, nested, true) : section.cards.map(card => renderCard(card))}
                 </section>;
             })}
         </div>

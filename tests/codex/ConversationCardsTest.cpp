@@ -1310,6 +1310,7 @@ bool testCardFoldingGeometryAndRetention() {
                                    emptyReasoning}}},
                                 0,
                                 false};
+  snapshot.activeTurnId = "turn";
 
   ConversationView view;
   view.resize(700, 820);
@@ -1323,6 +1324,11 @@ bool testCardFoldingGeometryAndRetention() {
   ConversationCard *reasoningCard = card(view, stableKey(reasoning.key));
   ConversationCard *commandCard = card(view, stableKey(command.key));
   ConversationCard *filesCard = card(view, stableKey(files.key));
+  auto *activeTurnAnimation =
+      userCard ? userCard->findChild<QTimer *>(
+                     QStringLiteral("activeTurnAnimation"),
+                     Qt::FindDirectChildrenOnly)
+               : nullptr;
   const std::vector<ConversationCard *> additionalActionCards{
       card(view, stableKey(activity.key)), card(view, stableKey(image.key)),
       card(view, stableKey(plan.key)), card(view, stableKey(generic.key))};
@@ -1339,6 +1345,17 @@ bool testCardFoldingGeometryAndRetention() {
           disclosure(userCard)->property("chevronDirection") == "down" &&
           disclosure(reasoningCard)->property("chevronDirection") == "left",
       "all cards share disclosure controls with role-correct initial state");
+  result &= expect(
+      userCard && userCard->property("authoritativeTurnActive").toBool() &&
+          activeTurnAnimation && activeTurnAnimation->isActive() &&
+          !agentCardWidget->property("authoritativeTurnActive").toBool(),
+      "only the authoritative outer You card breathes while its turn runs");
+  snapshot.activeTurnId.reset();
+  result &= expect(view.reconcile(snapshot) &&
+                       userCard == card(view, stableKey(user.key)) &&
+                       !userCard->property("authoritativeTurnActive").toBool() &&
+                       !activeTurnAnimation->isActive(),
+                   "turn completion stops breathing without replacing the card");
   const QRect collapsedDisclosure =
       paintedDisclosureBounds(disclosure(reasoningCard));
   result &= expect(
@@ -1393,8 +1410,9 @@ bool testCardFoldingGeometryAndRetention() {
   result &= expect(
       steeringCard && userCard->isAncestorOf(steeringCard) &&
           steeringCard->property("nestedConversationCard").toBool() &&
+          !steeringCard->property("authoritativeTurnActive").toBool() &&
           steeringAnimation && steeringAnimation->isActive(),
-      "a pending steering You card is nested and keeps its animation");
+      "a pending steering You card keeps its distinct acknowledgement sweep");
 
   snapshot.sections.front().cards.back() = {
       steeringKey,
