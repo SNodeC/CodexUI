@@ -50,6 +50,11 @@ export interface OptimisticThreadSnapshot {
     readonly state: "awaiting" | "failed" | "confirmed";
 }
 
+interface PromptPromotion {
+    readonly rootThreadId: string;
+    readonly recencyAt: number | undefined;
+}
+
 type RawRequest = (method: string, params: unknown, handler: (response: unknown) => void) => string;
 type RegisterNotification = (method: string, handler: (notification: JsonObject) => void) => void;
 type RegisterRequest = (method: string, handler: (request: JsonObject) => void) => void;
@@ -69,6 +74,7 @@ export class BrowserFrontendSession {
     private newThreadIntent = false;
     private optimisticThreads: OptimisticThreadSnapshot[] = [];
     private readonly threadVisualKeys = new Map<string, string>();
+    private promptPromotion: PromptPromotion | undefined;
     private nextOptimisticThread = 1;
     private newThreadCreationInFlight = false;
     private notice = "";
@@ -184,6 +190,15 @@ export class BrowserFrontendSession {
         this.publish();
     }
     threadVisualKey(threadId: string): string { return this.threadVisualKeys.get(threadId) ?? threadId; }
+    threadOrder(): readonly string[] {
+        const order = [...this.model.threadOrder()];
+        const promotion = this.promptPromotion;
+        if (!promotion || this.model.thread(promotion.rootThreadId)?.recencyAt !== promotion.recencyAt)
+            return order;
+        const index = order.indexOf(promotion.rootThreadId);
+        if (index > 0) order.unshift(...order.splice(index, 1));
+        return order;
+    }
     loadMore(): void { /* Default parity window is sufficient until viewport pausing is introduced. */ }
 
     async submitPrompt(prompt: string, attachments: AttachmentDraft[] = [], turnOptions: JsonObject = {}, threadOptions: JsonObject = {}): Promise<boolean> {
@@ -197,6 +212,7 @@ export class BrowserFrontendSession {
         }
         this.prompts.admit(destination, canonicalPrompt, attachments, turnOptions, thread,
             destination === DraftThreadId ? undefined : this.model.activeTurnId(destination), Date.now());
+        if (destination !== DraftThreadId) this.promotePromptedThread(destination);
         this.publish();
         if (destination === DraftThreadId) {
             if (this.newThreadCreationInFlight) return true;
@@ -317,6 +333,20 @@ export class BrowserFrontendSession {
             this.publish();
             queueMicrotask(() => this.dispatchNextPrompt(dispatch.threadId));
         });
+    }
+    private promotePromptedThread(threadId: string): void {
+        let rootThreadId = threadId;
+        const visited = new Set<string>();
+        while (!visited.has(rootThreadId)) {
+            visited.add(rootThreadId);
+            const ownership = this.model.childOwnership(rootThreadId);
+            if (!ownership) break;
+            rootThreadId = ownership.parentThreadId;
+        }
+        this.promptPromotion = {
+            rootThreadId,
+            recencyAt: this.model.thread(rootThreadId)?.recencyAt,
+        };
     }
     private errorMessage(response: {error?: unknown}): string {
         return stringMember(response.error, "message") || "Codex operation failed";

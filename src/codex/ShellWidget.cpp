@@ -1283,6 +1283,8 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
         newThreadName.isEmpty() ? std::string("New thread")
                                 : newThreadName.toStdString(),
         newThreadWorkspace.toStdString());
+  else
+    middleRegion->threads().promotePromptedThread(destination);
 
   // Admission is a synchronous UI fact. Transport dispatch is queued below so
   // this awaiting projection is committed without forcing paint reentrancy.

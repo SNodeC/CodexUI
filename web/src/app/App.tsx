@@ -110,7 +110,7 @@ function ThreadPane({session, revision}: {session: BrowserFrontendSession; revis
             <button className="icon-button" onClick={() => session.beginNewThread()} title="New thread">＋</button></div>
         <div className="thread-list">
             {snapshot.optimisticThreads.map(thread => renderThread(thread.id, 0))}
-            {session.model.threadOrder().filter(id => !snapshot.optimisticThreads.some(thread => thread.id === id)).map(id => renderThread(id, 0))}
+            {session.threadOrder().filter(id => !snapshot.optimisticThreads.some(thread => thread.id === id)).map(id => renderThread(id, 0))}
         </div>
         <button className="refresh-button" onClick={() => session.requestThreads()}>↻ Refresh threads</button>
     </aside>;

@@ -489,6 +489,25 @@ bool ThreadPane::isOptimisticThread(const std::string &threadId) const {
                              });
 }
 
+void ThreadPane::promotePromptedThread(const std::string &threadId) {
+  if (!currentModel || threadId.empty())
+    return;
+  std::string rootId = threadId;
+  std::unordered_set<std::string> visited;
+  while (visited.insert(rootId).second) {
+    const ChildThreadOwnership *ownership = currentModel->childOwnership(rootId);
+    if (!ownership)
+      break;
+    rootId = ownership->parentThreadId;
+  }
+  const ThreadPresentation *root = currentModel->thread(rootId);
+  if (!root)
+    return;
+  promptPromotion = PromptPromotion{rootId, root->updatedAt, root->recencyAt};
+  visibleSnapshot.reset();
+  refresh(*currentModel, projectedSelectedThreadId);
+}
+
 void ThreadPane::setSortCriterion(SortCriterion criterion) {
   if (sortCriterion == criterion)
     return;
@@ -541,8 +560,23 @@ void ThreadPane::sortRootThreads(std::vector<std::string> &ids,
   collator.setCaseSensitivity(Qt::CaseInsensitive);
   collator.setIgnorePunctuation(true);
   collator.setNumericMode(true);
+  std::string promotedRoot;
+  if (promptPromotion && (sortCriterion == SortCriterion::LastChanged ||
+                          sortCriterion == SortCriterion::Recency)) {
+    if (const ThreadPresentation *thread =
+            model.thread(promptPromotion->rootThreadId)) {
+      const auto observed = sortCriterion == SortCriterion::LastChanged
+                                ? promptPromotion->updatedAt
+                                : promptPromotion->recencyAt;
+      if (timestampFor(*thread, sortCriterion) == observed)
+        promotedRoot = promptPromotion->rootThreadId;
+    }
+  }
   std::sort(ids.begin(), ids.end(),
             [&](const std::string &leftId, const std::string &rightId) {
+              if (leftId != rightId &&
+                  (leftId == promotedRoot || rightId == promotedRoot))
+                return leftId == promotedRoot;
               const ThreadPresentation *left = model.thread(leftId);
               const ThreadPresentation *right = model.thread(rightId);
               if (!left || !right)

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
-import {cardKeys, stableKey} from "../dist/index.js";
+import {cardKeys, result, stableKey} from "../dist/index.js";
 
 class FakeSocket {
     protocol = "codex";
@@ -137,6 +137,28 @@ test("new threads retain one optimistic row through first-turn acknowledgment", 
     assert.notEqual(session.getSnapshot().optimisticThreads[0]?.state, "awaiting");
     assert.equal(session.threadVisualKey("created-thread"), draft?.visualKey,
         "canonical styling retains the optimistic row's React identity");
+    session.dispose();
+});
+
+test("prompt admission immediately promotes the effective recent thread", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open();
+    session.model.applyEvent(result(100, 1, "threads.list", "list", true, {threads: [
+        {id: "older", recencyAt: 10}, {id: "recent", recencyAt: 30},
+    ]}, "merge"));
+    assert.deepEqual(session.threadOrder(), ["older", "recent"],
+        "the browser retains the provider order before local prompt admission");
+
+    session.selectThread("recent");
+    await session.submitPrompt("promote recent thread");
+    assert.deepEqual(session.threadOrder(), ["recent", "older"],
+        "the admitted prompt moves its thread to the first visible position");
+
+    session.model.applyEvent(result(101, 1, "thread.read", "read", true,
+        {thread: {id: "recent", recencyAt: 31}}, "merge", {threadId: "recent"}));
+    assert.deepEqual(session.threadOrder(), ["older", "recent"],
+        "new authoritative recency data retires the transient promotion");
     session.dispose();
 });
 

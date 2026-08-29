@@ -1072,6 +1072,54 @@ bool testThreadRecencySort() {
       "Recent is the default and preserves selection");
 }
 
+bool testPromptAdmissionPromotesThread() {
+  PresentationModel model;
+  model.applyEvent(presentation::result(
+      1, 1, "threads.list", "prompt-promotion", true,
+      {{"threads",
+        nlohmann::json::array(
+            {{{"id", "older"},
+              {"name", "Older"},
+              {"createdAt", 10},
+              {"updatedAt", 10},
+              {"recencyAt", 10}},
+             {{"id", "recent"},
+              {"name", "Recent"},
+              {"createdAt", 30},
+              {"updatedAt", 30},
+              {"recencyAt", 30}}})}},
+      presentation::Authority::Merge));
+  ThreadPane pane;
+  pane.refresh(model, "older");
+  bool result = expect(
+      threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
+      "provider recency initially determines thread order");
+
+  pane.promotePromptedThread("older");
+  result &= expect(
+      threadOrder(pane) == std::vector<std::string>({"older", "recent"}),
+      "prompt admission immediately promotes the thread under Recent");
+  pane.setSortCriterion(ThreadPane::SortCriterion::LastChanged);
+  result &= expect(
+      threadOrder(pane) == std::vector<std::string>({"older", "recent"}),
+      "the same admission promotes the thread under Last changed");
+  pane.setSortCriterion(ThreadPane::SortCriterion::Created);
+  result &= expect(
+      threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
+      "prompt admission does not affect Created ordering");
+
+  pane.setSortCriterion(ThreadPane::SortCriterion::Recency);
+  model.applyEvent(presentation::event(
+      2, 1, "thread.upsert",
+      {{"thread", {{"id", "older"}, {"recencyAt", 20}}}},
+      presentation::Authority::Merge, {{"threadId", "older"}}));
+  pane.refresh(model, "older");
+  result &= expect(
+      threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
+      "authoritative recency changes retire the local promotion");
+  return result;
+}
+
 bool testOptimisticThreadRowLifecycle() {
   PresentationModel model;
   ThreadPane pane;
@@ -1898,6 +1946,7 @@ int main(int argc, char **argv) {
   result &= testThreadCreatedSort();
   result &= testThreadLastChangedSort();
   result &= testThreadRecencySort();
+  result &= testPromptAdmissionPromotesThread();
   result &= testOptimisticThreadRowLifecycle();
   result &= testThreadRowReorderOwnership();
   result &= testNestedCommandScrollOwnership();

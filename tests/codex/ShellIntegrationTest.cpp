@@ -448,6 +448,12 @@ bool ShellFlow::verifyPromptLifecycle() {
                    "returning to hydrated B does not reread its history");
   result &= expect(submit(editor, QStringLiteral("prompt B1")),
                    "B1 is admitted while A1 is in flight");
+  result &= expect(
+      list && list->item(0) &&
+          list->item(0)->data(Qt::UserRole).toString().toStdString() ==
+              "thread-b" &&
+          list->currentItem() == list->item(0),
+      "real prompt admission immediately promotes B under Recent");
   const auto startB = peer.waitFor("turn.start", "thread-b");
   result &=
       expect(startB.has_value(), "different threads dispatch independently");

@@ -49,6 +49,11 @@ bottom or is owned by the user.
   beginning with numbers precede other titles. Timestamp values that are not
   available sort after timestamped threads. The directions are fixed; the UI
   does not provide a separate ascending/descending control.
+- Admitting a prompt immediately promotes its root thread group to the first
+  position under `Recent` and `Last changed`. This is a transient presentation
+  override, not a fabricated provider timestamp; it retires when updated
+  authoritative ordering data arrives. `Created` and `Alphanumeric` remain
+  unaffected.
 - Each visible thread is presented as a compact card. Its status indicator is
   part of that card, and hover and selection strengthen the same card surface
   instead of introducing a separate row treatment. The Sort and Transport
