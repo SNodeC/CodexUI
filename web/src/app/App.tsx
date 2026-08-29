@@ -1,5 +1,5 @@
 import {useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
-import type {FormEvent, ReactNode} from "react";
+import type {FormEvent, ReactNode, RefObject} from "react";
 import {
     ConversationViewportState, DefaultSetting, applySettingChange, canonicalSettingValues, canonicalThreadSettings, classifyStatus,
     indexAuthoritativeItems, negativePendingResponse, permissionProfileLabel, positivePendingResponse, projectConversation, stableKey,
@@ -15,6 +15,55 @@ import type {BrowserFrontendSession} from "./BrowserFrontendSession.js";
 import {humanizeProtocolLabel as humanize} from "./Humanize.js";
 
 const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+export type ResponsiveMode = "desktop" | "tablet" | "mobile";
+
+export function responsiveModeForWidth(width: number): ResponsiveMode {
+    if (width <= 760) return "mobile";
+    if (width <= 1160) return "tablet";
+    return "desktop";
+}
+
+function currentResponsiveMode(): ResponsiveMode {
+    if (typeof window === "undefined") return "desktop";
+    if (typeof window.matchMedia === "function") {
+        if (window.matchMedia("(max-width: 760px)").matches) return "mobile";
+        if (window.matchMedia("(max-width: 1160px)").matches) return "tablet";
+        return "desktop";
+    }
+    return Number.isFinite(window.innerWidth) ? responsiveModeForWidth(window.innerWidth) : "desktop";
+}
+
+function useResponsiveMode(): ResponsiveMode {
+    const [mode, setMode] = useState(currentResponsiveMode);
+    useEffect(() => {
+        const update = () => setMode(currentResponsiveMode());
+        if (typeof window.matchMedia !== "function") {
+            window.addEventListener("resize", update);
+            return () => window.removeEventListener("resize", update);
+        }
+        const mobile = window.matchMedia("(max-width: 760px)");
+        const tablet = window.matchMedia("(max-width: 1160px)");
+        mobile.addEventListener("change", update);
+        tablet.addEventListener("change", update);
+        return () => {
+            mobile.removeEventListener("change", update);
+            tablet.removeEventListener("change", update);
+        };
+    }, []);
+    return mode;
+}
+
+interface DrawerPaneProps {
+    drawer?: boolean;
+    paneRef?: RefObject<HTMLElement>;
+    onClose?: () => void;
+}
+
+export function runThreadPaneNavigation(navigate: () => void, onClose?: () => void): void {
+    navigate();
+    onClose?.();
+}
 
 interface ConversationPresentationOptions {
     showReasoning: boolean;
@@ -81,7 +130,7 @@ function displayStatus(status: string): string {
     return classified.kind === "unknown" ? humanize(status) : classified.text;
 }
 
-function ThreadPane({session, revision}: {session: BrowserFrontendSession; revision: number}) {
+function ThreadPane({session, revision, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; revision: number} & DrawerPaneProps) {
     void revision;
     const snapshot = session.getSnapshot();
     const selected = snapshot.selectedThreadId || (snapshot.newThreadIntent ? "__codexui_new_thread__" : "");
@@ -100,7 +149,7 @@ function ThreadPane({session, revision}: {session: BrowserFrontendSession; revis
         return <div key={session.threadVisualKey(id)}>
             <div className={`thread-row-wrap ${selected === id ? "selected" : ""}${optimisticClass}`} style={{paddingLeft: `${8 + depth * 14}px`}}>
                 <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id)} aria-label={expanded.has(id) ? "Collapse child threads" : "Expand child threads"}>{hasChildren ? (expanded.has(id) ? "⌄" : "›") : ""}</button>
-                <button className="thread-row" onClick={() => session.selectThread(id)}>
+                <button className="thread-row" onClick={() => runThreadPaneNavigation(() => session.selectThread(id), onClose)}>
                     <StatusDot tone={optimistic?.state === "failed" ? "danger" : optimistic ? "warning" : status.tone || "muted"} /><span><strong>{thread?.title || optimistic?.title || id}</strong><small>{optimistic ? optimistic.state === "failed" ? "Not created" : optimistic.state === "confirmed" ? "Created" : "Creating" : thread?.cwd || thread?.preview || id}</small></span>
                 </button>
                 {thread && selected === id && <div className="thread-actions">
@@ -117,9 +166,11 @@ function ThreadPane({session, revision}: {session: BrowserFrontendSession; revis
             {thread && hasChildren && expanded.has(id) && thread.childThreadOrder.map(child => renderThread(child, depth + 1))}
         </div>;
     };
-    return <aside className="thread-pane">
-        <div className="pane-heading"><div><span className="eyebrow">Workspace</span><h2>Threads</h2></div>
-            <button className="icon-button" onClick={() => session.beginNewThread()} title="New thread">＋</button></div>
+    return <aside ref={paneRef} className={`thread-pane${drawer ? " responsive-drawer drawer-left" : ""}`} id={drawer ? "thread-pane" : undefined}
+        role={drawer ? "dialog" : undefined} aria-modal={drawer || undefined} aria-labelledby={drawer ? "thread-pane-title" : undefined}>
+        <div className="pane-heading"><div><span className="eyebrow">Workspace</span><h2 id={drawer ? "thread-pane-title" : undefined}>Threads</h2></div>
+            <div className="pane-heading-actions"><button className="icon-button" onClick={() => runThreadPaneNavigation(() => session.beginNewThread(), onClose)} title="New thread" aria-label="New thread">＋</button>
+                {drawer && <button type="button" className="drawer-close" data-drawer-close onClick={onClose} aria-label="Close Threads drawer">×</button>}</div></div>
         <div className="thread-list">
             {snapshot.optimisticThreads.map(thread => renderThread(thread.id, 0))}
             {session.threadOrder().filter(id => !snapshot.optimisticThreads.some(thread => thread.id === id)).map(id => renderThread(id, 0))}
@@ -273,7 +324,7 @@ export function Card({card, active, collapsed, onToggle, nested, turnContainer =
     </article>;
 }
 
-function Conversation({session, revision}: {session: BrowserFrontendSession; revision: number}) {
+function Conversation({session, revision, paneControls}: {session: BrowserFrontendSession; revision: number; paneControls?: ReactNode}) {
     void revision;
     const snapshot = session.getSnapshot();
     const thread = session.model.thread(snapshot.selectedThreadId);
@@ -326,14 +377,17 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
         return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} nested={nested} turnContainer={turnContainer} />;
     };
     return <main className="conversation-pane">
-        <div className="conversation-heading"><div><span className="eyebrow">Conversation</span>
+        <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">Conversation</span>
             <h1>{thread?.title ?? (snapshot.newThreadIntent ? "New thread" : "Select a thread")}</h1>
             <p>{thread ? `${thread.cwd} · ${classifyStatus(thread.status).text}` : snapshot.newThreadIntent ? "Send a message to create this thread." : "Choose a thread from the left."}</p></div>
-            <div className="conversation-view-controls" aria-label="Conversation presentation">
-                <button className={presentation.showReasoning ? "active" : ""} aria-label={presentation.showReasoning ? "Hide reasoning cards" : "Show reasoning cards"} data-tooltip={presentation.showReasoning ? "Hide reasoning cards" : "Show reasoning cards"} aria-pressed={presentation.showReasoning} onClick={() => updatePresentation({showReasoning: !presentation.showReasoning})}><PresentationIcon kind="reasoning" /></button>
-                <button className={presentation.showCodexUpdates ? "active" : ""} aria-label={presentation.showCodexUpdates ? "Hide Codex update cards" : "Show Codex update cards"} data-tooltip={presentation.showCodexUpdates ? "Hide Codex update cards" : "Show Codex update cards"} aria-pressed={presentation.showCodexUpdates} onClick={() => updatePresentation({showCodexUpdates: !presentation.showCodexUpdates})}><PresentationIcon kind="updates" /></button>
-                <button className={presentation.commandsInitiallyExpanded ? "active" : ""} aria-label={presentation.commandsInitiallyExpanded ? "New command cards start expanded" : "New command cards start collapsed"} data-tooltip={presentation.commandsInitiallyExpanded ? "New command cards start expanded" : "New command cards start collapsed"} aria-pressed={presentation.commandsInitiallyExpanded} onClick={() => updatePresentation({commandsInitiallyExpanded: !presentation.commandsInitiallyExpanded})}><PresentationIcon kind="command" /></button>
-                <button className={presentation.imagesInitiallyExpanded ? "active" : ""} aria-label={presentation.imagesInitiallyExpanded ? "New image cards start expanded" : "New image cards start collapsed"} data-tooltip={presentation.imagesInitiallyExpanded ? "New image cards start expanded" : "New image cards start collapsed"} aria-pressed={presentation.imagesInitiallyExpanded} onClick={() => updatePresentation({imagesInitiallyExpanded: !presentation.imagesInitiallyExpanded})}><PresentationIcon kind="image" /></button>
+            <div className={`conversation-heading-actions${paneControls ? " responsive" : ""}`}>
+                {paneControls && <div className="responsive-pane-controls">{paneControls}</div>}
+                <div className="conversation-view-controls" aria-label="Conversation presentation">
+                    <button className={presentation.showReasoning ? "active" : ""} aria-label={presentation.showReasoning ? "Hide reasoning cards" : "Show reasoning cards"} data-tooltip={presentation.showReasoning ? "Hide reasoning cards" : "Show reasoning cards"} aria-pressed={presentation.showReasoning} onClick={() => updatePresentation({showReasoning: !presentation.showReasoning})}><PresentationIcon kind="reasoning" /></button>
+                    <button className={presentation.showCodexUpdates ? "active" : ""} aria-label={presentation.showCodexUpdates ? "Hide Codex update cards" : "Show Codex update cards"} data-tooltip={presentation.showCodexUpdates ? "Hide Codex update cards" : "Show Codex update cards"} aria-pressed={presentation.showCodexUpdates} onClick={() => updatePresentation({showCodexUpdates: !presentation.showCodexUpdates})}><PresentationIcon kind="updates" /></button>
+                    <button className={presentation.commandsInitiallyExpanded ? "active" : ""} aria-label={presentation.commandsInitiallyExpanded ? "New command cards start expanded" : "New command cards start collapsed"} data-tooltip={presentation.commandsInitiallyExpanded ? "New command cards start expanded" : "New command cards start collapsed"} aria-pressed={presentation.commandsInitiallyExpanded} onClick={() => updatePresentation({commandsInitiallyExpanded: !presentation.commandsInitiallyExpanded})}><PresentationIcon kind="command" /></button>
+                    <button className={presentation.imagesInitiallyExpanded ? "active" : ""} aria-label={presentation.imagesInitiallyExpanded ? "New image cards start expanded" : "New image cards start collapsed"} data-tooltip={presentation.imagesInitiallyExpanded ? "New image cards start expanded" : "New image cards start collapsed"} aria-pressed={presentation.imagesInitiallyExpanded} onClick={() => updatePresentation({imagesInitiallyExpanded: !presentation.imagesInitiallyExpanded})}><PresentationIcon kind="image" /></button>
+                </div>
             </div>
         </div>
         <div className="conversation-scroll" ref={scroll} onScroll={event => {
@@ -424,7 +478,7 @@ function Composer({session, active, draftKey, drafts, optionsRef}: {session: Bro
     </form>;
 }
 
-function Inspector({session, revision}: {session: BrowserFrontendSession; revision: number}) {
+function Inspector({session, revision, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; revision: number} & DrawerPaneProps) {
     void revision;
     const [tab, setTab] = useState<"plan" | "agents" | "requests" | "state" | "protocol">("plan");
     const selected = session.model.thread(session.getSnapshot().selectedThreadId);
@@ -436,8 +490,10 @@ function Inspector({session, revision}: {session: BrowserFrontendSession; revisi
             items: turn.itemOrder.map(itemId => turn.items.get(itemId)?.raw)}; }),
         agents: selected.agentOrder.map(id => selected.agents.get(id)), domains: Object.fromEntries(selected.domains),
     } : null;
-    return <aside className="inspector-pane">
-        <div className="pane-heading"><div><span className="eyebrow">Details</span><h2>Inspector</h2></div></div>
+    return <aside ref={paneRef} className={`inspector-pane${drawer ? " responsive-drawer drawer-right" : ""}`} id={drawer ? "inspector-pane" : undefined}
+        role={drawer ? "dialog" : undefined} aria-modal={drawer || undefined} aria-labelledby={drawer ? "inspector-pane-title" : undefined}>
+        <div className="pane-heading"><div><span className="eyebrow">Details</span><h2 id={drawer ? "inspector-pane-title" : undefined}>Inspector</h2></div>
+            {drawer && <button type="button" className="drawer-close" data-drawer-close onClick={onClose} aria-label="Close Inspector drawer">×</button>}</div>
         <nav className="inspector-tabs">{(["plan", "agents", "requests", "state", "protocol"] as const).map(value =>
             <button key={value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{humanize(value)}{value === "requests" && requests.length > 0 ? ` ${requests.length}` : ""}</button>)}</nav>
         <div className="inspector-content">
@@ -514,8 +570,47 @@ export function App({session}: {session: BrowserFrontendSession}) {
         : connection.retrying ? "Connecting" : "Offline";
     const [url, setUrl] = useState(snapshot.bridgeUrl);
     const canControl = connection.role === "controller";
-    return <div className="app-shell">
-        <header className="top-bar"><div className="brand"><span className="brand-mark">C</span><span><b>CodexUI</b><small>Codex, clearly.</small></span></div>
+    const responsiveMode = useResponsiveMode();
+    const [drawer, setDrawer] = useState<"threads" | "inspector" | null>(null);
+    const threadTrigger = useRef<HTMLButtonElement>(null);
+    const inspectorTrigger = useRef<HTMLButtonElement>(null);
+    const threadDrawer = useRef<HTMLElement>(null);
+    const inspectorDrawer = useRef<HTMLElement>(null);
+    const threadsOverlay = responsiveMode === "mobile";
+    const inspectorOverlay = responsiveMode !== "desktop";
+    const activeDrawer = drawer === "threads" && threadsOverlay || drawer === "inspector" && inspectorOverlay ? drawer : null;
+    const closeDrawer = () => setDrawer(null);
+    useEffect(() => setDrawer(null), [responsiveMode]);
+    useEffect(() => {
+        if (!activeDrawer || typeof document === "undefined") return;
+        const pane = activeDrawer === "threads" ? threadDrawer.current : inspectorDrawer.current;
+        const trigger = activeDrawer === "threads" ? threadTrigger.current : inspectorTrigger.current;
+        if (!pane) return;
+        const focusableSelector = "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex=\"-1\"])";
+        const focusables = () => [...pane.querySelectorAll<HTMLElement>(focusableSelector)].filter(element => element.offsetParent !== null);
+        const frame = window.requestAnimationFrame(() => (pane.querySelector<HTMLElement>("[data-drawer-close]") ?? pane).focus());
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") { event.preventDefault(); closeDrawer(); return; }
+            if (event.key !== "Tab") return;
+            const available = focusables();
+            if (available.length === 0) { event.preventDefault(); pane.focus(); return; }
+            const first = available[0]!; const last = available[available.length - 1]!;
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+        };
+        document.addEventListener("keydown", onKeyDown);
+        return () => {
+            window.cancelAnimationFrame(frame);
+            document.removeEventListener("keydown", onKeyDown);
+            if (trigger?.isConnected) trigger.focus();
+        };
+    }, [activeDrawer]);
+    const paneControls = <>
+        {threadsOverlay && <button ref={threadTrigger} type="button" className="responsive-pane-button" aria-haspopup="dialog" aria-controls="thread-pane" aria-expanded={activeDrawer === "threads"} onClick={() => setDrawer("threads")}><span aria-hidden="true">☰</span> Threads</button>}
+        {inspectorOverlay && <button ref={inspectorTrigger} type="button" className="responsive-pane-button" aria-haspopup="dialog" aria-controls="inspector-pane" aria-expanded={activeDrawer === "inspector"} onClick={() => setDrawer("inspector")}><span aria-hidden="true">ⓘ</span> Inspector</button>}
+    </>;
+    return <div className={`app-shell${activeDrawer ? " drawer-visible" : ""}`}>
+        <header className="top-bar" aria-hidden={activeDrawer ? true : undefined}><div className="brand"><span className="brand-mark">C</span><span><b>CodexUI</b><small>Codex, clearly.</small></span></div>
             <div className="workspace-breadcrumb">{session.model.thread(snapshot.selectedThreadId)?.cwd || "No workspace"}</div>
             <div className="top-actions">
                 {connection.connected && <button className="subtle-button" onClick={() => canControl ? session.releaseController() : session.claimController()}>{canControl ? "Release control" : "Claim control"}</button>}
@@ -523,11 +618,18 @@ export function App({session}: {session: BrowserFrontendSession}) {
                     <button onClick={() => connection.connected || connection.retrying ? session.disconnect() : session.connect(url)}>{connection.connected ? "Disconnect" : "Connect"}</button><StatusDot tone={connectionTone} /></label>
             </div>
         </header>
-        {snapshot.notice && <div className="notice-banner" role="alert"><span>{snapshot.notice}</span><button onClick={() => session.dismissNotice()} aria-label="Dismiss notice">×</button></div>}
-        <div className="workspace-grid"><ThreadPane session={session} revision={snapshot.revision} /><Conversation session={session} revision={snapshot.revision} /><Inspector session={session} revision={snapshot.revision} /></div>
-        <footer className="status-bar"><div><strong>© Volker Christian @ Codex</strong><span> | </span>
+        {snapshot.notice && <div className="notice-banner" role="alert" aria-hidden={activeDrawer ? true : undefined}><span>{snapshot.notice}</span><button onClick={() => session.dismissNotice()} aria-label="Dismiss notice">×</button></div>}
+        <div className="workspace-grid" aria-hidden={activeDrawer ? true : undefined}>
+            {!threadsOverlay && <ThreadPane session={session} revision={snapshot.revision} />}
+            <Conversation session={session} revision={snapshot.revision} paneControls={responsiveMode === "desktop" ? undefined : paneControls} />
+            {!inspectorOverlay && <Inspector session={session} revision={snapshot.revision} />}
+        </div>
+        <footer className="status-bar" aria-hidden={activeDrawer ? true : undefined}><div><strong>© Volker Christian @ Codex</strong><span> | </span>
             <a href="https://github.com/SNodeC/CodexUI">CodexUI</a><span> • </span><a href="https://github.com/SNodeC/AISuite">AISuite</a><span> • </span>
             <small>Powered by</small> <a href="https://github.com/SNodeC/snode.c">SNode.C</a></div>
             <div className="global-status"><span>Status:</span><StatusDot tone={connectionTone} /><strong>{globalStatus}</strong></div></footer>
+        {activeDrawer && <button type="button" className="drawer-backdrop" tabIndex={-1} onClick={closeDrawer} aria-label={`Close ${activeDrawer === "threads" ? "Threads" : "Inspector"} drawer`} />}
+        {activeDrawer === "threads" && <ThreadPane session={session} revision={snapshot.revision} drawer paneRef={threadDrawer} onClose={closeDrawer} />}
+        {activeDrawer === "inspector" && <Inspector session={session} revision={snapshot.revision} drawer paneRef={inspectorDrawer} onClose={closeDrawer} />}
     </div>;
 }

@@ -160,6 +160,13 @@ card folding, safe Markdown, bounded command output, controller eligibility,
 and reconnect hydration follow the native behavior documents. Visual geometry
 may be browser-native; the behavioral invariant may not silently change.
 
+The responsive shell keeps Threads, Conversation, and Inspector visible above
+1160 px. At tablet widths it keeps Threads and Conversation in-flow and exposes
+Inspector as an accessible overlay drawer; at 760 px and below Conversation is
+the single in-flow column and both side panes use accessible overlay drawers.
+The page itself must not overflow horizontally; narrow controls wrap or compact
+while intentionally scrollable card content retains its local overflow.
+
 ### Browser-specific representation
 
 These capabilities remain required but use an honest browser representation:
