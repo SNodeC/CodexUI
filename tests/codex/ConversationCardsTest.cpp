@@ -1503,9 +1503,15 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
     for (int index = 0; index < 12; ++index)
       followingSection.cards.push_back(
           agentCard(followingThread, "turn", index));
+    followingSection.cards.insert(
+        followingSection.cards.begin() + 6,
+        {AuthoritativeItemKey{followingThread, "turn", "reasoning"},
+         CardKind::Reasoning, followingThread, "turn", "reasoning",
+         ReasoningData{QStringLiteral("Initially hidden reasoning detail")}});
     followingSnapshot.sections.push_back(std::move(followingSection));
 
     ConversationView followingView;
+    followingView.setPresentationOptions({false, true, true, true});
     followingView.resize(520, 320);
     followingView.show();
     bool followingResult = followingView.reconcile(followingSnapshot);
@@ -1538,6 +1544,19 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
                     immediateTop == settledTop,
                 "new nested cards paint directly at their final followed "
                 "position"))
+      return false;
+
+    followingView.setPresentationOptions({true, true, true, true});
+    const int immediateToggleTop =
+        incoming->mapTo(followingView.viewport(), QPoint{}).y();
+    const bool toggleImmediatelyAtBottom = followingView.isAtBottom();
+    spin(320);
+    const int settledToggleTop =
+        incoming->mapTo(followingView.viewport(), QPoint{}).y();
+    if (!expect(toggleImmediatelyAtBottom &&
+                    immediateToggleTop == settledToggleTop,
+                "presentation toggles relayout atomically without a follow "
+                "animation"))
       return false;
   }
 

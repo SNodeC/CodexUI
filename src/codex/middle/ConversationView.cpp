@@ -175,7 +175,7 @@ void ConversationView::setPresentationOptions(PresentationOptions options) {
   if (presentationOptions_ == options)
     return;
   presentationOptions_ = options;
-  static_cast<void>(reconcile(snapshot_, true));
+  static_cast<void>(reconcile(snapshot_, true, true));
 }
 
 bool ConversationView::cardVisible(const VisibleCardData &card) const noexcept {
@@ -207,11 +207,11 @@ void ConversationView::setThread(const std::string &threadId) {
 }
 
 bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
-  return reconcile(snapshot, false);
+  return reconcile(snapshot, false, false);
 }
 
 bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
-                                 bool force) {
+                                 bool force, bool settleFollowImmediately) {
   if (!force && snapshot == snapshot_ && snapshot.threadId == threadId_)
     return false;
 
@@ -507,7 +507,8 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
   for (const auto &[card, state] : commandOutputRestorations)
     card->restoreCommandOutputScrollState(state);
   if (follow) {
-    if (switchedThread || outputGrew || appendedVisibleCards) {
+    if (switchedThread || outputGrew || appendedVisibleCards ||
+        settleFollowImmediately) {
       setScrollValue(verticalScrollBar()->maximum());
     } else {
       // Reflow above the viewport must preserve the same painted card/pixel
@@ -522,7 +523,8 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
   viewport()->setUpdatesEnabled(true);
   viewport()->update();
 
-  if (follow && !switchedThread && !outputGrew && !appendedVisibleCards) {
+  if (follow && !switchedThread && !outputGrew && !appendedVisibleCards &&
+      !settleFollowImmediately) {
     const int stableValue = verticalScrollBar()->value();
     if (verticalScrollBar()->maximum() > stableValue + 3)
       animateToBottom(stableValue);

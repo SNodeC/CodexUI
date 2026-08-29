@@ -95,7 +95,8 @@ private:
 
   class TurnSectionWidget;
 
-  bool reconcile(const ConversationSnapshot &snapshot, bool force);
+  bool reconcile(const ConversationSnapshot &snapshot, bool force,
+                 bool settleFollowImmediately);
   [[nodiscard]] bool cardVisible(const VisibleCardData &card) const noexcept;
   void setThread(const std::string &threadId);
   void setCardCollapsed(const std::string &key, ConversationCard *card,
