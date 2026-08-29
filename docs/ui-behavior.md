@@ -103,6 +103,10 @@ authoritative steering card. No optimistic card is exchanged for a second
 widget, and the turn grows around it without changing existing nested card
 identity.
 
+After acknowledgment, the authoritative outer You card uses a stronger static
+blue border while its turn remains active. It has no animation, glow, shading,
+or geometry change. Completion restores the canonical border in place.
+
 The composer is cleared immediately after local admission and remains enabled.
 Users may enter additional prompts while earlier prompts await acknowledgment.
 Unsubmitted composer text and attachments form one shared local draft: ordinary

@@ -787,6 +787,16 @@ public:
     owner->update();
   }
 
+  bool setAuthoritativeTurnActive(bool active) {
+    const bool next = active && current.kind == CardKind::UserMessage;
+    if (authoritativeTurnActive == next)
+      return false;
+    authoritativeTurnActive = next;
+    owner->setProperty("authoritativeTurnActive", next);
+    owner->update();
+    return true;
+  }
+
   void setNestedCards(const std::vector<ConversationCard *> &cards) {
     const std::unordered_set<ConversationCard *> retained(cards.begin(),
                                                            cards.end());
@@ -1162,6 +1172,7 @@ public:
   QWidget *nestedCards = nullptr;
   QVBoxLayout *nestedLayout = nullptr;
   bool hasVisibleNestedCards = false;
+  bool authoritativeTurnActive = false;
 };
 
 ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent,
@@ -1185,6 +1196,10 @@ bool ConversationCard::isCollapsed() const noexcept { return impl_->collapsed; }
 
 void ConversationCard::setCollapsed(bool collapsed) {
   impl_->setCollapsed(collapsed);
+}
+
+bool ConversationCard::setAuthoritativeTurnActive(bool active) {
+  return impl_->setAuthoritativeTurnActive(active);
 }
 
 void ConversationCard::setNestedCards(
@@ -1215,6 +1230,16 @@ bool ConversationCard::canApply(const VisibleCardData &data) const noexcept {
 
 void ConversationCard::paintEvent(QPaintEvent *event) {
   QFrame::paintEvent(event);
+  if (impl_->current.kind == CardKind::UserMessage &&
+      impl_->authoritativeTurnActive) {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(QStringLiteral("#6f98e8")), 1.5));
+    painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0),
+                            8.0, 8.0);
+    return;
+  }
   if (impl_->current.kind != CardKind::LocalPrompt)
     return;
   const auto *prompt = std::get_if<LocalPromptData>(&impl_->current.payload);

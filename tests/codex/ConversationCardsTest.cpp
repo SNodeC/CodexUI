@@ -1310,6 +1310,7 @@ bool testCardFoldingGeometryAndRetention() {
                                    emptyReasoning}}},
                                 0,
                                 false};
+  snapshot.activeTurnId = "turn";
 
   ConversationView view;
   view.resize(700, 820);
@@ -1339,6 +1340,16 @@ bool testCardFoldingGeometryAndRetention() {
           disclosure(userCard)->property("chevronDirection") == "down" &&
           disclosure(reasoningCard)->property("chevronDirection") == "left",
       "all cards share disclosure controls with role-correct initial state");
+  result &= expect(
+      userCard && userCard->property("authoritativeTurnActive").toBool() &&
+          !agentCardWidget->property("authoritativeTurnActive").toBool() &&
+          !userCard->findChild<QTimer *>(QStringLiteral("activeTurnAnimation")),
+      "only the running outer You card receives a static emphasized border");
+  snapshot.activeTurnId.reset();
+  result &= expect(view.reconcile(snapshot) &&
+                       userCard == card(view, stableKey(user.key)) &&
+                       !userCard->property("authoritativeTurnActive").toBool(),
+                   "turn completion restores the same card's canonical border");
   const QRect collapsedDisclosure =
       paintedDisclosureBounds(disclosure(reasoningCard));
   result &= expect(

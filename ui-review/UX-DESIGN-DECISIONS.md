@@ -161,6 +161,10 @@ acknowledges it. Each request carries a unique `clientUserMessageId`; after a
 successful callback the card keeps a 500-millisecond accepted transition before
 normal message presentation. Failure produces an explicit error state.
 
+The authoritative outer You card uses a stronger static blue border while its
+turn is active. This state must not animate or alter card geometry; the moving
+highlight remains exclusive to local prompts awaiting acknowledgment.
+
 The input remains enabled after admission. Multiple prompts can be composed
 while earlier cards are pending. They are dispatched sequentially per thread.
 

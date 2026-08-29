@@ -211,6 +211,7 @@ struct ConversationSnapshot {
   std::vector<TurnSection> sections;
   std::size_t hiddenAuthoritativeItemCount = 0;
   bool hasMore = false;
+  std::optional<std::string> activeTurnId;
 
   [[nodiscard]] std::vector<CardKey> cardKeys() const;
   [[nodiscard]] const VisibleCardData *find(const CardKey &key) const noexcept;

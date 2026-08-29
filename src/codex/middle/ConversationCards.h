@@ -85,6 +85,7 @@ public:
   [[nodiscard]] const VisibleCardData &data() const noexcept;
   [[nodiscard]] bool isCollapsed() const noexcept;
   void setCollapsed(bool collapsed);
+  bool setAuthoritativeTurnActive(bool active);
   void setNestedCards(const std::vector<ConversationCard *> &cards);
   [[nodiscard]] std::optional<CommandOutputView::ScrollState>
   commandOutputScrollState() const;
