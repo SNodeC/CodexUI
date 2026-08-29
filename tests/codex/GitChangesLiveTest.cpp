@@ -10,6 +10,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QLabel>
 #include <QListWidget>
 #include <QSaveFile>
 #include <QTemporaryDir>
@@ -99,6 +100,40 @@ bool hasFile(const GitDiffSnapshot &snapshot, const QString &path,
       return true;
   }
   return false;
+}
+
+bool testEmptySnapshotLoadingState() {
+  DiffViewer viewer;
+  auto *provider = viewer.findChild<GitDiffProvider *>();
+  auto *summary =
+      viewer.findChild<QLabel *>(QStringLiteral("codexDiffSummary"));
+  if (!provider || !summary)
+    return expect(false, "diff loading-state controls are discoverable");
+
+  provider->loadingChanged(true);
+  const bool initialLoading =
+      summary->text() == QStringLiteral("Loading changes…");
+
+  GitDiffSnapshot empty;
+  empty.workspace = QStringLiteral("/workspace");
+  empty.repositoryRoot = QStringLiteral("/workspace");
+  empty.repositoryRoots = {empty.repositoryRoot};
+  empty.repository = true;
+  provider->loadingChanged(false);
+  provider->snapshotReady(empty);
+  const bool emptyRendered = summary->text() == QStringLiteral("No changes");
+
+  provider->loadingChanged(true);
+  const bool backgroundRetained =
+      summary->text() == QStringLiteral("No changes");
+  provider->loadingChanged(false);
+  provider->snapshotReady(empty);
+  const bool identicalRetained =
+      summary->text() == QStringLiteral("No changes");
+
+  return expect(initialLoading && emptyRendered && backgroundRetained &&
+                    identicalRetained,
+                "background refreshes retain a valid empty diff state");
 }
 
 bool testSnapshotMetadataRefresh() {
@@ -312,7 +347,8 @@ bool testLiveWorkingTreeChanges() {
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
   git_libgit2_init();
-  bool result = testSnapshotMetadataRefresh();
+  bool result = testEmptySnapshotLoadingState();
+  result &= testSnapshotMetadataRefresh();
   result &= testLiveWorkingTreeChanges();
   git_libgit2_shutdown();
   return result ? 0 : 1;

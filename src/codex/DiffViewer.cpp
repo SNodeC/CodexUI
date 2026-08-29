@@ -611,6 +611,7 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   fileSummary->setContentsMargins(10, 0, 10, 0);
   fileSummary->setSpacing(8);
   summary = label(QStringLiteral("No changes"), "meta");
+  summary->setObjectName(QStringLiteral("codexDiffSummary"));
   authority = label({}, "meta");
   authority->setWordWrap(false);
   authority->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -655,9 +656,7 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
                       scopeValue(scope), GitDiffContext::Compact);
   });
   connect(provider, &GitDiffProvider::loadingChanged, this, [this](bool loading) {
-    if (loading &&
-        (!snapshot ||
-         (snapshot->files.empty() && snapshot->error.isEmpty()))) {
+    if (loading && !snapshot) {
       summary->setText(QStringLiteral("Loading changes…"));
     }
   });
