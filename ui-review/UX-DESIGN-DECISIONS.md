@@ -84,7 +84,11 @@ does not compete with the user/Codex exchange. Color on those cards is reserved
 for authoritative running, completed, warning/interrupted, and failed status.
 Conversation cards with detail use one disclosure-header grammar; title-only
 cards omit the control. Message cards open expanded and activity cards open
-collapsed; user choices remain session-local.
+collapsed by default; user choices remain session-local. Native and web expose
+the same persistent icon-only Conversation-header controls for Reasoning cards,
+interim Codex updates, and the initial Command execution and Image folds. Filtering never
+removes retained content, final answers remain visible, and changing the Command
+default does not override an existing card's user-owned state.
 Folding is immediate rather than animated and anchors the selected title row,
 so content only contracts upward or grows downward below the interaction point.
 

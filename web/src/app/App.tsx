@@ -15,6 +15,49 @@ import {humanizeProtocolLabel as humanize} from "./Humanize.js";
 
 const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
+interface ConversationPresentationOptions {
+    showReasoning: boolean;
+    showCodexUpdates: boolean;
+    commandsInitiallyExpanded: boolean;
+    imagesInitiallyExpanded: boolean;
+}
+
+function PresentationIcon({kind}: {kind: "reasoning" | "updates" | "command" | "image"}) {
+    if (kind === "reasoning") return <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="6" r="4"/><path d="M5.5 9 6.5 11h3L10.5 9M7 13h2"/></svg>;
+    if (kind === "updates") return <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 11.5 4 14l4-2.5h3.5A2.5 2.5 0 0 0 14 9V5a2.5 2.5 0 0 0-2.5-2.5h-7A2.5 2.5 0 0 0 2 5v4a2.5 2.5 0 0 0 2.5 2.5Z"/><path d="M5.5 7h.01M8 7h.01M10.5 7h.01"/></svg>;
+    if (kind === "command") return <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="m4.5 6 2 2-2 2M8.5 10h3"/></svg>;
+    return <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><circle cx="10.5" cy="5.5" r="1"/><path d="m3.5 11 3-3.5 2 2L10 8l2.5 3"/></svg>;
+}
+
+const defaultConversationPresentation: ConversationPresentationOptions = {
+    showReasoning: false,
+    showCodexUpdates: true,
+    commandsInitiallyExpanded: true,
+    imagesInitiallyExpanded: true,
+};
+
+function storedConversationPresentation(): ConversationPresentationOptions {
+    if (typeof window === "undefined") return defaultConversationPresentation;
+    const boolean = (key: string, fallback: boolean) => {
+        const stored = window.localStorage.getItem(key);
+        return stored === null ? fallback : stored === "true";
+    };
+    return {
+        showReasoning: boolean("codexui.conversation.showReasoning", false),
+        showCodexUpdates: boolean("codexui.conversation.showCodexUpdates", true),
+        commandsInitiallyExpanded: boolean("codexui.conversation.commandsInitiallyExpanded", true),
+        imagesInitiallyExpanded: boolean("codexui.conversation.imagesInitiallyExpanded", true),
+    };
+}
+
+function persistConversationPresentation(options: ConversationPresentationOptions): void {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("codexui.conversation.showReasoning", String(options.showReasoning));
+    window.localStorage.setItem("codexui.conversation.showCodexUpdates", String(options.showCodexUpdates));
+    window.localStorage.setItem("codexui.conversation.commandsInitiallyExpanded", String(options.commandsInitiallyExpanded));
+    window.localStorage.setItem("codexui.conversation.imagesInitiallyExpanded", String(options.imagesInitiallyExpanded));
+}
+
 function StatusDot({tone}: {tone: string}) { return <span className={`status-dot ${tone}`} aria-hidden="true" />; }
 
 function ThreadPane({session, revision}: {session: BrowserFrontendSession; revision: number}) {
@@ -127,7 +170,7 @@ function Card({card, active, collapsed, onToggle}: {card: VisibleCardData; activ
         const data = card.payload as {type: string; raw: unknown}; title = humanize(data.type);
         body = <details><summary>Protocol data</summary><pre>{JSON.stringify(data.raw, null, 2)}</pre></details>;
     }
-    const foldable = ["agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "genericActivity"].includes(card.kind)
+    const foldable = ["agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "imageGeneration", "genericActivity"].includes(card.kind)
         && !(card.kind === "reasoning" && !(card.payload as ReasoningData).summary);
     return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""}`} data-card-key={stableKey(card.key)}>
         <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{foldable && <button onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}>{collapsed ? "＋" : "−"}</button>}</span></header>{!collapsed && body}
@@ -145,8 +188,9 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
     const conversation = projectConversation(index, session.prompts.submissions(projectionId), limit, Date.now(), thread);
     const scroll = useRef<HTMLDivElement>(null);
     const previousThread = useRef(projectionId);
-    const collapsed = useRef(new Set<string>());
+    const folding = useRef(new Map<string, boolean>());
     const [, forceCardState] = useState(0);
+    const [presentation, setPresentation] = useState(storedConversationPresentation);
     const drafts = useRef(new Map<string, string>());
     const settingsOptions = useRef<PromptOptions>({turn: {}, thread: {}});
     useEffect(() => {
@@ -160,19 +204,46 @@ function Conversation({session, revision}: {session: BrowserFrontendSession; rev
         const saved = viewport.scroll(projectionId);
         if (saved.following && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
     }, [revision, projectionId, viewport]);
-    const toggleCard = (key: string) => { if (collapsed.current.has(key)) collapsed.current.delete(key); else collapsed.current.add(key); forceCardState(value => value + 1); };
+    const updatePresentation = (change: Partial<ConversationPresentationOptions>) => setPresentation(current => {
+        const next = {...current, ...change}; persistConversationPresentation(next); return next;
+    });
+    const cardVisible = (card: VisibleCardData) => {
+        if (card.kind === "reasoning") return presentation.showReasoning;
+        if (card.kind !== "agentMessage") return true;
+        return (card.payload as AgentMessageData).finalAnswer || presentation.showCodexUpdates;
+    };
+    const cardCollapsed = (card: VisibleCardData, key: string) => {
+        if (!folding.current.has(key))
+            folding.current.set(key,
+                (card.kind === "commandExecution" && !presentation.commandsInitiallyExpanded)
+                || (card.kind === "imageGeneration" && !presentation.imagesInitiallyExpanded));
+        return folding.current.get(key) ?? false;
+    };
+    const toggleCard = (key: string, collapsed: boolean) => {
+        folding.current.set(key, !collapsed); forceCardState(value => value + 1);
+    };
+    const visibleSections = conversation.sections
+        .map(section => ({...section, cards: section.cards.filter(cardVisible)}))
+        .filter(section => section.cards.length > 0);
     return <main className="conversation-pane">
         <div className="conversation-heading"><div><span className="eyebrow">Conversation</span>
             <h1>{thread?.title ?? (snapshot.newThreadIntent ? "New thread" : "Select a thread")}</h1>
-            <p>{thread ? `${thread.cwd} · ${classifyStatus(thread.status).text}` : snapshot.newThreadIntent ? "Send a message to create this thread." : "Choose a thread from the left."}</p></div></div>
+            <p>{thread ? `${thread.cwd} · ${classifyStatus(thread.status).text}` : snapshot.newThreadIntent ? "Send a message to create this thread." : "Choose a thread from the left."}</p></div>
+            <div className="conversation-view-controls" aria-label="Conversation presentation">
+                <button className={presentation.showReasoning ? "active" : ""} aria-label={presentation.showReasoning ? "Hide reasoning cards" : "Show reasoning cards"} data-tooltip={presentation.showReasoning ? "Hide reasoning cards" : "Show reasoning cards"} aria-pressed={presentation.showReasoning} onClick={() => updatePresentation({showReasoning: !presentation.showReasoning})}><PresentationIcon kind="reasoning" /></button>
+                <button className={presentation.showCodexUpdates ? "active" : ""} aria-label={presentation.showCodexUpdates ? "Hide Codex update cards" : "Show Codex update cards"} data-tooltip={presentation.showCodexUpdates ? "Hide Codex update cards" : "Show Codex update cards"} aria-pressed={presentation.showCodexUpdates} onClick={() => updatePresentation({showCodexUpdates: !presentation.showCodexUpdates})}><PresentationIcon kind="updates" /></button>
+                <button className={presentation.commandsInitiallyExpanded ? "active" : ""} aria-label={presentation.commandsInitiallyExpanded ? "New command cards start expanded" : "New command cards start collapsed"} data-tooltip={presentation.commandsInitiallyExpanded ? "New command cards start expanded" : "New command cards start collapsed"} aria-pressed={presentation.commandsInitiallyExpanded} onClick={() => updatePresentation({commandsInitiallyExpanded: !presentation.commandsInitiallyExpanded})}><PresentationIcon kind="command" /></button>
+                <button className={presentation.imagesInitiallyExpanded ? "active" : ""} aria-label={presentation.imagesInitiallyExpanded ? "New image cards start expanded" : "New image cards start collapsed"} data-tooltip={presentation.imagesInitiallyExpanded ? "New image cards start expanded" : "New image cards start collapsed"} aria-pressed={presentation.imagesInitiallyExpanded} onClick={() => updatePresentation({imagesInitiallyExpanded: !presentation.imagesInitiallyExpanded})}><PresentationIcon kind="image" /></button>
+            </div>
+        </div>
         <div className="conversation-scroll" ref={scroll} onScroll={event => {
             const element = event.currentTarget; const following = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
             viewport.updateScroll(projectionId, element.scrollTop, following);
         }}>
             {conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId); forceCardState(value => value + 1); }}>Load earlier activity</button>}
-            {conversation.sections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
-            {conversation.sections.map(section => <section key={section.key} className="turn-section">
-                {section.cards.map(card => { const key = stableKey(card.key); return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === section.turnId} collapsed={collapsed.current.has(key)} onToggle={() => toggleCard(key)} />; })}
+            {visibleSections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
+            {visibleSections.map(section => <section key={section.key} className="turn-section">
+                {section.cards.map(card => { const key = stableKey(card.key); const collapsed = cardCollapsed(card, key); return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === section.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} />; })}
             </section>)}
         </div>
         <div className="composer-dock">

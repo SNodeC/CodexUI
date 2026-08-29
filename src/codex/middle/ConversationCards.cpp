@@ -49,7 +49,12 @@ constexpr int ThumbnailMaximumHeight = 180;
 constexpr int ViewerMaximumImageExtent = 4096;
 constexpr qsizetype MaximumGenericActivityCharacters = 4096;
 
-bool initiallyCollapsed(CardKind kind) {
+bool initiallyCollapsed(CardKind kind, bool commandInitiallyCollapsed,
+                        bool imageInitiallyCollapsed) {
+  if (kind == CardKind::CommandExecution)
+    return commandInitiallyCollapsed;
+  if (kind == CardKind::ImageGeneration)
+    return imageInitiallyCollapsed;
   return kind != CardKind::UserMessage && kind != CardKind::AgentMessage &&
          kind != CardKind::LocalPrompt;
 }
@@ -604,9 +609,11 @@ bool CommandOutputView::isAtBottom() const {
 
 class ConversationCard::Impl final {
 public:
-  Impl(ConversationCard *owner, const VisibleCardData &initial)
+  Impl(ConversationCard *owner, const VisibleCardData &initial,
+       bool commandInitiallyCollapsed, bool imageInitiallyCollapsed)
       : owner(owner), current(initial),
-        collapsed(initiallyCollapsed(initial.kind)) {
+        collapsed(initiallyCollapsed(initial.kind, commandInitiallyCollapsed,
+                                     imageInitiallyCollapsed)) {
     owner->setObjectName(QStringLiteral("conversationCard"));
     owner->setProperty("conversationCardKey",
                        QString::fromStdString(stableKey(initial.key)));
@@ -1034,8 +1041,12 @@ public:
   QVBoxLayout *imageLayout = nullptr;
 };
 
-ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent)
-    : QFrame(parent), impl_(std::make_unique<Impl>(this, data)) {}
+ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent,
+                                   bool commandInitiallyCollapsed,
+                                   bool imageInitiallyCollapsed)
+    : QFrame(parent),
+      impl_(std::make_unique<Impl>(this, data, commandInitiallyCollapsed,
+                                   imageInitiallyCollapsed)) {}
 
 ConversationCard::~ConversationCard() = default;
 
@@ -1133,8 +1144,11 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
 }
 
 ConversationCard *createConversationCard(const VisibleCardData &data,
-                                         QWidget *parent) {
-  return new ConversationCard(data, parent);
+                                         QWidget *parent,
+                                         bool commandInitiallyCollapsed,
+                                         bool imageInitiallyCollapsed) {
+  return new ConversationCard(data, parent, commandInitiallyCollapsed,
+                              imageInitiallyCollapsed);
 }
 
 } // namespace codexui::codex::middle

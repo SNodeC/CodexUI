@@ -31,10 +31,12 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSettings>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTemporaryDir>
+#include <QToolButton>
 #include <QThread>
 #include <QToolButton>
 #include <QWheelEvent>
@@ -220,6 +222,18 @@ bool testOverlayGeometryAndRegionRouting() {
   auto *conversationMetadata =
       splitter->widget(1)->findChild<QLabel *>(
           QStringLiteral("conversationMetadata"));
+  auto *reasoningToggle =
+      splitter->widget(1)->findChild<QToolButton *>(
+          QStringLiteral("conversationReasoningToggle"));
+  auto *updatesToggle =
+      splitter->widget(1)->findChild<QToolButton *>(
+          QStringLiteral("conversationUpdatesToggle"));
+  auto *commandFoldingToggle =
+      splitter->widget(1)->findChild<QToolButton *>(
+          QStringLiteral("conversationCommandFoldingToggle"));
+  auto *imageFoldingToggle =
+      splitter->widget(1)->findChild<QToolButton *>(
+          QStringLiteral("conversationImageFoldingToggle"));
   const auto paneRect = [](QWidget *widget, QWidget *pane) {
     return QRect(widget->mapTo(pane, QPoint()), widget->size());
   };
@@ -246,6 +260,49 @@ bool testOverlayGeometryAndRegionRouting() {
           std::abs(conversationMetadata->geometry().bottom() -
                    conversationTitle->geometry().bottom()) <= 1,
       "thread title and metadata form one baseline-aligned lockup");
+  result &= expect(
+          reasoningToggle && updatesToggle && commandFoldingToggle &&
+          imageFoldingToggle &&
+          !reasoningToggle->isChecked() && updatesToggle->isChecked() &&
+          commandFoldingToggle->isChecked() &&
+          imageFoldingToggle->isChecked() &&
+          reasoningToggle->text().isEmpty() &&
+          updatesToggle->text().isEmpty() &&
+          commandFoldingToggle->text().isEmpty() &&
+          imageFoldingToggle->text().isEmpty() &&
+          reasoningToggle->accessibleName() ==
+              QStringLiteral("Show reasoning cards") &&
+          commandFoldingToggle->accessibleName() ==
+              QStringLiteral("New command cards start expanded") &&
+          imageFoldingToggle->accessibleName() ==
+              QStringLiteral("New image cards start expanded"),
+      "Conversation header exposes the three canonical default presentation "
+      "controls");
+  if (reasoningToggle && commandFoldingToggle) {
+    reasoningToggle->click();
+    commandFoldingToggle->click();
+    const auto options = region.conversation().presentationOptions();
+    const QSettings persisted;
+    result &= expect(
+        options.showReasoning && options.showCodexUpdates &&
+            !options.commandsInitiallyExpanded &&
+            reasoningToggle->accessibleName() ==
+                QStringLiteral("Hide reasoning cards") &&
+            commandFoldingToggle->accessibleName() ==
+                QStringLiteral("New command cards start collapsed") &&
+            persisted
+                 .value(QStringLiteral("conversation/showReasoning"), false)
+                 .toBool() &&
+            !persisted
+                .value(QStringLiteral(
+                           "conversation/commandsInitiallyExpanded"),
+                       true)
+                .toBool(),
+        "Conversation presentation controls update the view and persistent "
+        "settings together");
+    reasoningToggle->click();
+    commandFoldingToggle->click();
+  }
 
   ConversationView &view = region.conversation();
   view.reconcile(longConversation("layout-thread"));
@@ -1693,6 +1750,9 @@ bool testGitDiffScopes() {
 
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
+  QTemporaryDir settingsDirectory;
+  QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope,
+                     settingsDirectory.path());
   using namespace codexui::codex::middle;
   bool result = testOverlayGeometryAndRegionRouting();
   result &= testThreadSelectionProjection();

@@ -170,6 +170,27 @@ QString applicationStyleSheet() {
           color: #1d2633;
         }
         QPushButton[kind="segment"]:hover:!checked { background: #f1f5fb; }
+        QToolButton[kind="presentationToggle"] {
+          background: #ffffff;
+          border: 1px solid #d7dee8;
+          border-radius: 7px;
+          padding: 0;
+        }
+        QToolButton[kind="presentationToggle"]:checked {
+          background: #e5eeff;
+          border-color: #bfd3f9;
+        }
+        QToolButton[kind="presentationToggle"]:hover:!checked {
+          background: #f1f5fb;
+          border-color: #b9c4d2;
+        }
+        QToolTip {
+          color: #ffffff;
+          background: #1d2633;
+          border: 1px solid #344054;
+          border-radius: 6px;
+          padding: 5px 8px;
+        }
         QToolButton[kind="composerAction"] {
             background: #ffffff;
             border: 1px solid #d7dee8;

@@ -16,6 +16,11 @@ test("server-rendered shell exposes keyboard and landmark semantics", () => {
     assert.match(markup, /<aside class="inspector-pane">/u);
     assert.match(markup, /<footer class="status-bar">/u);
     assert.match(markup, /aria-label="Bridge WebSocket URL"/u);
+    assert.match(markup, /aria-label="Conversation presentation"/u);
+    assert.match(markup, /aria-label="Show reasoning cards"/u);
+    assert.match(markup, /aria-label="Hide Codex update cards"/u);
+    assert.match(markup, /aria-label="New command cards start expanded"/u);
+    assert.match(markup, /aria-label="New image cards start expanded"/u);
     assert.match(markup, /aria-expanded="false"/u);
     session.dispose();
 });
@@ -28,6 +33,10 @@ test("protocol labels are humanized only at the render boundary", () => {
 });
 
 test("empty reasoning spins only while its authoritative turn is active", () => {
+    globalThis.window = {localStorage: {
+        getItem: key => key === "codexui.conversation.showReasoning" ? "true" : null,
+        setItem: () => {},
+    }};
     const session = new BrowserFrontendSession("ws://bridge.test/codex", () => { throw new Error("not connected"); });
     session.model.applyEvent(result(1, 1, "threads.list", "list", true, {threads: [{id: "thread-1"}]}, "replace"));
     session.selectThread("thread-1");
@@ -40,5 +49,56 @@ test("empty reasoning spins only while its authoritative turn is active", () => 
     session.model.applyEvent(result(3, 1, "thread.read", "completed", true, {thread: thread("completed")}, "replace", {threadId: "thread-1"}));
     const completed = renderToStaticMarkup(createElement(App, {session}));
     assert.doesNotMatch(completed, /Working…|activity-line/u);
+    delete globalThis.window;
+    session.dispose();
+});
+
+test("conversation presentation preferences retain filtered cards and initialize commands", () => {
+    const session = new BrowserFrontendSession("ws://bridge.test/codex", () => { throw new Error("not connected"); });
+    session.model.applyEvent(result(1, 1, "threads.list", "list", true, {threads: [{id: "thread-1"}]}, "replace"));
+    session.selectThread("thread-1");
+    const thread = {id: "thread-1", status: {type: "idle"}, turns: [{
+        id: "turn-1", status: "completed", items: [
+            {id: "reasoning-1", type: "reasoning", summary: ["Retained reasoning detail"]},
+            {id: "update-1", type: "agentMessage", phase: "commentary", text: "Retained Codex update"},
+            {id: "final-1", type: "agentMessage", phase: "final_answer", text: "Final answer always visible"},
+            {id: "command-1", type: "commandExecution", command: "printf retained-command", status: "completed"},
+            {id: "image-1", type: "imageGeneration", path: "/missing/image.png", status: "completed", revisedPrompt: "Retained generated image"},
+        ],
+    }]};
+    session.model.applyEvent(result(2, 1, "thread.read", "read", true, {thread}, "replace", {threadId: "thread-1"}));
+
+    const defaults = renderToStaticMarkup(createElement(App, {session}));
+    assert.doesNotMatch(defaults, /Retained reasoning detail/u);
+    assert.match(defaults, /Retained Codex update/u);
+    assert.match(defaults, /Final answer always visible/u);
+    assert.doesNotMatch(defaults, /conversation-card commandExecution\s+collapsed/u);
+    assert.match(defaults, /printf retained-command/u);
+    assert.match(defaults, /Retained generated image/u);
+    assert.doesNotMatch(defaults, /conversation-card imageGeneration\s+collapsed/u);
+
+    const values = new Map([
+        ["codexui.conversation.showReasoning", "true"],
+        ["codexui.conversation.showCodexUpdates", "false"],
+        ["codexui.conversation.commandsInitiallyExpanded", "false"],
+        ["codexui.conversation.imagesInitiallyExpanded", "false"],
+    ]);
+    globalThis.window = {localStorage: {
+        getItem: key => values.get(key) ?? null,
+        setItem: (key, value) => values.set(key, value),
+    }};
+    const filtered = renderToStaticMarkup(createElement(App, {session}));
+    delete globalThis.window;
+    assert.match(filtered, /Retained reasoning detail/u);
+    assert.doesNotMatch(filtered, /Retained Codex update/u);
+    assert.match(filtered, /Final answer always visible/u);
+    assert.match(filtered, /conversation-card commandExecution\s+collapsed/u);
+    assert.doesNotMatch(filtered, /printf retained-command/u);
+    assert.doesNotMatch(filtered, /Retained generated image/u);
+    assert.match(filtered, /conversation-card imageGeneration\s+collapsed/u);
+    assert.match(filtered, /aria-label="Hide reasoning cards"/u);
+    assert.match(filtered, /aria-label="Show Codex update cards"/u);
+    assert.match(filtered, /aria-label="New command cards start collapsed"/u);
+    assert.match(filtered, /aria-label="New image cards start collapsed"/u);
     session.dispose();
 });

@@ -1344,6 +1344,137 @@ bool testCardFoldingGeometryAndRetention() {
   return result;
 }
 
+bool testPresentationOptionsRetainCardsAndInitialFolding() {
+  const std::string thread = "presentation-options";
+  const AuthoritativeItemKey updateKey{thread, "turn", "update"};
+  const AuthoritativeItemKey finalKey{thread, "turn", "final"};
+  const AuthoritativeItemKey reasoningKey{thread, "turn", "reasoning"};
+  const AuthoritativeItemKey firstCommandKey{thread, "turn", "command-1"};
+  const AuthoritativeItemKey firstImageKey{thread, "turn", "image-1"};
+  ConversationSnapshot snapshot;
+  snapshot.threadId = thread;
+  snapshot.sections.push_back(
+      {"turn:presentation-options:turn",
+       "turn",
+       {{updateKey, CardKind::AgentMessage, thread, "turn", "update",
+         AgentMessageData{QStringLiteral("First retained update"), false}},
+        {finalKey, CardKind::AgentMessage, thread, "turn", "final",
+         AgentMessageData{QStringLiteral("Final answer remains visible"),
+                          true}},
+        {reasoningKey, CardKind::Reasoning, thread, "turn", "reasoning",
+         ReasoningData{QStringLiteral("First retained reasoning")}},
+        {firstCommandKey, CardKind::CommandExecution, thread, "turn",
+         "command-1",
+         CommandExecutionData{QStringLiteral("printf first"),
+                              {},
+                              QStringLiteral("completed"),
+                              {},
+                              0}},
+        {firstImageKey, CardKind::ImageGeneration, thread, "turn", "image-1",
+         ImageGenerationData{QStringLiteral("/missing/image-1.png"),
+                             QStringLiteral("completed"),
+                             QStringLiteral("First image")}}}});
+  const auto containsText = [](QWidget *widget, const QString &needle) {
+    return std::ranges::any_of(
+        widget->findChildren<QLabel *>(),
+        [&needle](QLabel *label) { return label->text().contains(needle); });
+  };
+
+  ConversationView view;
+  view.setPresentationOptions({false, true, true, true});
+  view.resize(700, 700);
+  view.show();
+  bool result =
+      expect(view.reconcile(snapshot), "presentation-options fixture renders");
+  spin();
+  ConversationCard *update = card(view, stableKey(updateKey));
+  ConversationCard *final = card(view, stableKey(finalKey));
+  ConversationCard *reasoning = card(view, stableKey(reasoningKey));
+  ConversationCard *firstCommand = card(view, stableKey(firstCommandKey));
+  ConversationCard *firstImage = card(view, stableKey(firstImageKey));
+  result &=
+      expect(update && final && reasoning && firstCommand && firstImage &&
+                 !update->isHidden() && !final->isHidden() &&
+                 reasoning->isHidden() && !firstCommand->isCollapsed() &&
+                 !firstImage->isCollapsed(),
+             "default presentation hides reasoning and opens commands and images");
+  if (!update || !final || !reasoning || !firstCommand || !firstImage)
+    return false;
+
+  view.setPresentationOptions({false, false, false, false});
+  spin();
+  result &= expect(update->isHidden() && reasoning->isHidden() &&
+                       !final->isHidden() && !firstCommand->isCollapsed(),
+                   "filters hide reasoning and updates without changing final "
+                   "answers or existing folds");
+
+  std::get<AgentMessageData>(snapshot.sections.front().cards[0].payload).text =
+      QStringLiteral("Updated while hidden");
+  std::get<ReasoningData>(snapshot.sections.front().cards[2].payload).summary =
+      QStringLiteral("Reasoning updated while hidden");
+  const AuthoritativeItemKey secondCommandKey{thread, "turn", "command-2"};
+  const AuthoritativeItemKey secondImageKey{thread, "turn", "image-2"};
+  snapshot.sections.front().cards.push_back(
+      {secondCommandKey, CardKind::CommandExecution, thread, "turn",
+       "command-2",
+       CommandExecutionData{QStringLiteral("printf second"),
+                            {},
+                            QStringLiteral("completed"),
+                            {},
+                            0}});
+  snapshot.sections.front().cards.push_back(
+      {secondImageKey, CardKind::ImageGeneration, thread, "turn", "image-2",
+       ImageGenerationData{QStringLiteral("/missing/image-2.png"),
+                           QStringLiteral("completed"),
+                           QStringLiteral("Second image")}});
+  result &= expect(view.reconcile(snapshot),
+                   "hidden cards and a new command accept updates");
+  spin();
+  ConversationCard *secondCommand = card(view, stableKey(secondCommandKey));
+  ConversationCard *secondImage = card(view, stableKey(secondImageKey));
+  result &= expect(card(view, stableKey(updateKey)) == update &&
+                       card(view, stableKey(reasoningKey)) == reasoning &&
+                       update->isHidden() && reasoning->isHidden() &&
+                       secondCommand && secondCommand->isCollapsed() &&
+                       secondImage && secondImage->isCollapsed(),
+                   "hidden widgets retain identity and new commands and images "
+                   "use their current initial preferences");
+
+  result &= expect(setFolded(firstCommand, true),
+                   "an existing command records a user-owned collapsed state");
+  view.setPresentationOptions({true, true, true, true});
+  spin();
+  result &= expect(
+      !update->isHidden() && !reasoning->isHidden() &&
+          containsText(update, QStringLiteral("Updated while hidden")) &&
+          containsText(reasoning,
+                       QStringLiteral("Reasoning updated while hidden")) &&
+          firstCommand->isCollapsed() && secondCommand &&
+          secondCommand->isCollapsed() && !firstImage->isCollapsed() &&
+          secondImage && secondImage->isCollapsed(),
+      "restoring visibility reveals latest content and preserves existing "
+      "folds");
+
+  const AuthoritativeItemKey thirdCommandKey{thread, "turn", "command-3"};
+  snapshot.sections.front().cards.push_back(
+      {thirdCommandKey, CardKind::CommandExecution, thread, "turn", "command-3",
+       CommandExecutionData{QStringLiteral("printf third"),
+                            {},
+                            QStringLiteral("completed"),
+                            {},
+                            0}});
+  result &= expect(view.reconcile(snapshot),
+                   "a command arrives after restoring expanded-by-default");
+  spin();
+  ConversationCard *thirdCommand = card(view, stableKey(thirdCommandKey));
+  result &=
+      expect(thirdCommand && !thirdCommand->isCollapsed() &&
+                 firstCommand->isCollapsed() && secondCommand->isCollapsed(),
+             "only newly appearing commands use the changed initial folding "
+             "preference");
+  return result;
+}
+
 bool testInitialCommandGeometrySettlement() {
   const std::string thread = "initial-command-thread";
   QString output;
@@ -1813,6 +1944,7 @@ int main(int argc, char **argv) {
   result &= testPromptAdmissionFollowOwnership();
   result &= testMutableCardsAndCommandOutput();
   result &= testCardFoldingGeometryAndRetention();
+  result &= testPresentationOptionsRetainCardsAndInitialFolding();
   result &= testInitialCommandGeometrySettlement();
   result &= testBottomAnchoredCommandOutputGrowth();
   result &= testCommandOutputStateAcrossNavigation();

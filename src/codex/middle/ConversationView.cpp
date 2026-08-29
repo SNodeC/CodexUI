@@ -171,6 +171,23 @@ void ConversationView::setEmptyMessage(QString message) {
   viewport()->update();
 }
 
+void ConversationView::setPresentationOptions(PresentationOptions options) {
+  if (presentationOptions_ == options)
+    return;
+  presentationOptions_ = options;
+  static_cast<void>(reconcile(snapshot_, true));
+}
+
+bool ConversationView::cardVisible(const VisibleCardData &card) const noexcept {
+  if (card.kind == CardKind::Reasoning)
+    return presentationOptions_.showReasoning;
+  if (card.kind != CardKind::AgentMessage)
+    return true;
+  const auto *message = std::get_if<AgentMessageData>(&card.payload);
+  return !message || message->finalAnswer ||
+         presentationOptions_.showCodexUpdates;
+}
+
 void ConversationView::storeCurrentThreadState() {
   if (threadId_.empty())
     return;
@@ -190,7 +207,12 @@ void ConversationView::setThread(const std::string &threadId) {
 }
 
 bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
-  if (snapshot == snapshot_ && snapshot.threadId == threadId_)
+  return reconcile(snapshot, false);
+}
+
+bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
+                                 bool force) {
+  if (!force && snapshot == snapshot_ && snapshot.threadId == threadId_)
     return false;
 
   const bool switchedThread = snapshot.threadId != threadId_;
@@ -300,7 +322,8 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
     for (const VisibleCardData &cardData : sectionData.cards) {
       desiredSection.cardKeys.push_back(stableKey(cardData.key));
       const std::string &key = desiredSection.cardKeys.back();
-      displayedKeys.push_back(key);
+      if (cardVisible(cardData))
+        displayedKeys.push_back(key);
       desiredCards.emplace(key, DesiredCard{section, cardIndex++, &cardData});
     }
     desiredSections.emplace(sectionData.key, std::move(desiredSection));
@@ -367,7 +390,9 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
         card = existingCard->second;
         visualChange = card->apply(cardData) || visualChange;
       } else {
-        card = createConversationCard(cardData, section);
+        card = createConversationCard(
+            cardData, section, !presentationOptions_.commandsInitiallyExpanded,
+            !presentationOptions_.imagesInitiallyExpanded);
         card->setProperty("conversationAnchorKey", QString::fromStdString(key));
         if (const auto collapsed = cardCollapsedStates_.find(key);
             collapsed != cardCollapsedStates_.end())
@@ -393,14 +418,24 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
         desired.insert = true;
         visualChange = true;
       }
-      if (desired.insert) {
+      if (desired.insert)
         section->cards->insertWidget(cardIndex, card);
-        card->show();
+      const bool visible = cardVisible(cardData);
+      if (card->isHidden() == visible) {
+        card->setVisible(visible);
+        visualChange = true;
       }
       ++cardIndex;
     }
     section->cardKeys = std::move(desiredSection.cardKeys);
-    section->setVisible(!sectionData.cards.empty());
+    const bool sectionVisible =
+        std::ranges::any_of(sectionData.cards, [this](const auto &card) {
+          return cardVisible(card);
+        });
+    if (section->isHidden() == sectionVisible) {
+      section->setVisible(sectionVisible);
+      visualChange = true;
+    }
     if (desiredSection.insert)
       contentLayout_->insertWidget(1 + desiredSection.position, section);
   }

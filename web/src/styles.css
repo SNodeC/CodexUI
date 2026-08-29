@@ -53,9 +53,17 @@ h1, h2, h3, p { margin: 0; }
 .action-popover button { border: 0; border-radius: 5px; padding: 6px 8px; background: transparent; text-align: left; font-size: 11px; }.action-popover button:hover { background: #f0f3f8; }.action-popover .danger { color: #b93647; }
 .refresh-button { margin: 8px; color: #667085; background: transparent; }
 .conversation-pane { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: #f2f5f9; }
-.conversation-heading { padding: 16px 26px 14px; background: #fff; border-bottom: 1px solid #e0e5ed; }
+.conversation-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 26px 14px; background: #fff; border-bottom: 1px solid #e0e5ed; }
 .conversation-heading h1 { margin: 2px 0 3px; font-size: 20px; letter-spacing: -.02em; }
 .conversation-heading p { color: #778194; font-size: 11px; }
+.conversation-view-controls { display: flex; flex: 0 0 auto; justify-content: flex-end; gap: 5px; }
+.conversation-view-controls button { position: relative; display: grid; place-items: center; width: 28px; height: 24px; border: 1px solid #d7dee8; border-radius: 7px; padding: 0; background: #fff; color: #667085; cursor: pointer; }
+.conversation-view-controls svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.conversation-view-controls button::after { content: attr(data-tooltip); position: absolute; z-index: 20; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); pointer-events: none; opacity: 0; white-space: nowrap; padding: 5px 8px; border: 1px solid #344054; border-radius: 6px; background: #1d2633; color: #fff; font-size: 10px; line-height: 1.3; transition: opacity 80ms ease-out; }
+.conversation-view-controls button:last-child::after { right: 0; left: auto; transform: none; }
+.conversation-view-controls button:hover::after, .conversation-view-controls button:focus-visible::after { opacity: 1; }
+.conversation-view-controls button:hover { background: #f1f5fb; border-color: #b9c4d2; }
+.conversation-view-controls button.active { background: #e5eeff; border-color: #bfd3f9; color: #1d2633; }
 .conversation-scroll { overflow: auto; padding: 22px max(24px, calc((100% - 780px) / 2)); scroll-behavior: smooth; }
 .turn-section { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
 .conversation-card { border: 1px solid #dce2eb; border-radius: 11px; background: #fff; padding: 13px 15px; box-shadow: 0 2px 5px #1720330a; overflow: hidden; }

@@ -13,11 +13,16 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSettings>
 #include <QSplitter>
 #include <QStyle>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -26,6 +31,70 @@
 
 namespace codexui::codex::middle {
 namespace {
+
+constexpr auto ShowReasoningKey = "conversation/showReasoning";
+constexpr auto ShowCodexUpdatesKey = "conversation/showCodexUpdates";
+constexpr auto CommandsInitiallyExpandedKey =
+    "conversation/commandsInitiallyExpanded";
+constexpr auto ImagesInitiallyExpandedKey =
+    "conversation/imagesInitiallyExpanded";
+
+enum class PresentationIcon { Reasoning, Updates, Command, Image };
+
+QPixmap presentationIconPixmap(PresentationIcon kind, QColor color) {
+  QPixmap pixmap(16, 16);
+  pixmap.fill(Qt::transparent);
+  QPainter painter(&pixmap);
+  painter.setRenderHint(QPainter::Antialiasing);
+  painter.setBrush(Qt::NoBrush);
+  painter.setPen(QPen(std::move(color), 1.5, Qt::SolidLine, Qt::RoundCap,
+                      Qt::RoundJoin));
+
+  if (kind == PresentationIcon::Reasoning) {
+    painter.drawEllipse(QRectF(4.0, 2.0, 8.0, 8.0));
+    painter.drawLine(QPointF(5.5, 9.0), QPointF(6.5, 11.0));
+    painter.drawLine(QPointF(10.5, 9.0), QPointF(9.5, 11.0));
+    painter.drawLine(QPointF(6.5, 11.0), QPointF(9.5, 11.0));
+    painter.drawLine(QPointF(7.0, 13.0), QPointF(9.0, 13.0));
+  } else if (kind == PresentationIcon::Updates) {
+    QPainterPath bubble;
+    bubble.addRoundedRect(QRectF(2.0, 2.5, 12.0, 9.0), 2.5, 2.5);
+    bubble.moveTo(5.0, 11.0);
+    bubble.lineTo(4.0, 14.0);
+    bubble.lineTo(8.0, 11.5);
+    painter.drawPath(bubble);
+    painter.drawPoint(QPointF(5.5, 7.0));
+    painter.drawPoint(QPointF(8.0, 7.0));
+    painter.drawPoint(QPointF(10.5, 7.0));
+  } else if (kind == PresentationIcon::Command) {
+    painter.drawRoundedRect(QRectF(1.5, 2.5, 13.0, 11.0), 2.0, 2.0);
+    painter.drawLine(QPointF(4.5, 6.0), QPointF(6.5, 8.0));
+    painter.drawLine(QPointF(6.5, 8.0), QPointF(4.5, 10.0));
+    painter.drawLine(QPointF(8.5, 10.0), QPointF(11.5, 10.0));
+  } else {
+    painter.drawRoundedRect(QRectF(1.5, 2.5, 13.0, 11.0), 2.0, 2.0);
+    painter.drawEllipse(QRectF(9.5, 4.5, 2.0, 2.0));
+    QPainterPath landscape;
+    landscape.moveTo(3.5, 11.0);
+    landscape.lineTo(6.5, 7.5);
+    landscape.lineTo(8.5, 9.5);
+    landscape.lineTo(10.0, 8.0);
+    landscape.lineTo(12.5, 11.0);
+    painter.drawPath(landscape);
+  }
+  return pixmap;
+}
+
+QIcon presentationIcon(PresentationIcon kind) {
+  QIcon icon;
+  icon.addPixmap(presentationIconPixmap(
+                     kind, QColor(QStringLiteral("#667085"))),
+                 QIcon::Normal, QIcon::Off);
+  icon.addPixmap(presentationIconPixmap(
+                     kind, QColor(QStringLiteral("#1d2633"))),
+                 QIcon::Normal, QIcon::On);
+  return icon;
+}
 
 QLabel *makeLabel(QString value, const char *kind = "body") {
   auto *label = new QLabel(std::move(value));
@@ -97,6 +166,58 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   sectionTitle->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
   context->addWidget(sectionTitle);
   context->addStretch();
+  const QSettings settings;
+  const auto presentationToggle = [&context](QString objectName,
+                                              PresentationIcon icon) {
+    auto *button = new QToolButton;
+    button->setObjectName(std::move(objectName));
+    button->setProperty("kind", "presentationToggle");
+    button->setCheckable(true);
+    button->setIcon(presentationIcon(icon));
+    button->setIconSize(QSize(16, 16));
+    button->setFixedSize(28, 24);
+    context->addWidget(button);
+    return button;
+  };
+  reasoningVisibility = presentationToggle(
+      QStringLiteral("conversationReasoningToggle"),
+      PresentationIcon::Reasoning);
+  reasoningVisibility->setChecked(
+      settings.value(ShowReasoningKey, false).toBool());
+  updateVisibility = presentationToggle(
+      QStringLiteral("conversationUpdatesToggle"), PresentationIcon::Updates);
+  updateVisibility->setChecked(
+      settings.value(ShowCodexUpdatesKey, true).toBool());
+  commandInitialFolding = presentationToggle(
+      QStringLiteral("conversationCommandFoldingToggle"),
+      PresentationIcon::Command);
+  commandInitialFolding->setChecked(
+      settings.value(CommandsInitiallyExpandedKey, true).toBool());
+  imageInitialFolding = presentationToggle(
+      QStringLiteral("conversationImageFoldingToggle"),
+      PresentationIcon::Image);
+  imageInitialFolding->setChecked(
+      settings.value(ImagesInitiallyExpandedKey, true).toBool());
+  const auto persistPresentation = [this](const char *key, bool checked) {
+    QSettings().setValue(QString::fromLatin1(key), checked);
+    applyConversationPresentationOptions();
+  };
+  connect(reasoningVisibility, &QToolButton::toggled, this,
+          [persistPresentation](bool checked) {
+            persistPresentation(ShowReasoningKey, checked);
+          });
+  connect(updateVisibility, &QToolButton::toggled, this,
+          [persistPresentation](bool checked) {
+            persistPresentation(ShowCodexUpdatesKey, checked);
+          });
+  connect(commandInitialFolding, &QToolButton::toggled, this,
+          [persistPresentation](bool checked) {
+            persistPresentation(CommandsInitiallyExpandedKey, checked);
+          });
+  connect(imageInitialFolding, &QToolButton::toggled, this,
+          [persistPresentation](bool checked) {
+            persistPresentation(ImagesInitiallyExpandedKey, checked);
+          });
   center->addLayout(context);
   center->addWidget(divider("conversationHeaderDivider"));
   center->addSpacing(8);
@@ -148,6 +269,7 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   contentLayout->addWidget(noticeBar);
 
   conversationView = new ConversationView;
+  applyConversationPresentationOptions();
   contentLayout->addWidget(conversationView, 1);
   composerPane = new ComposerPane(conversationRegion);
   composerPane->setExtraOverlayHeightAction(
@@ -165,6 +287,33 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   root->addWidget(splitter);
 
   inspectorPane->setHideAction([this] { showInspector(false); });
+}
+
+void MiddleRegionWidget::applyConversationPresentationOptions() {
+  const bool showReasoning = reasoningVisibility->isChecked();
+  const bool showUpdates = updateVisibility->isChecked();
+  const bool expandCommands = commandInitialFolding->isChecked();
+  const bool expandImages = imageInitialFolding->isChecked();
+  reasoningVisibility->setToolTip(showReasoning
+                                      ? QStringLiteral("Hide reasoning cards")
+                                      : QStringLiteral("Show reasoning cards"));
+  updateVisibility->setToolTip(showUpdates
+                                   ? QStringLiteral("Hide Codex update cards")
+                                   : QStringLiteral("Show Codex update cards"));
+  commandInitialFolding->setToolTip(
+      expandCommands ? QStringLiteral("New command cards start expanded")
+                     : QStringLiteral("New command cards start collapsed"));
+  imageInitialFolding->setToolTip(
+      expandImages ? QStringLiteral("New image cards start expanded")
+                   : QStringLiteral("New image cards start collapsed"));
+  reasoningVisibility->setAccessibleName(reasoningVisibility->toolTip());
+  updateVisibility->setAccessibleName(updateVisibility->toolTip());
+  commandInitialFolding->setAccessibleName(
+      commandInitialFolding->toolTip());
+  imageInitialFolding->setAccessibleName(imageInitialFolding->toolTip());
+  if (conversationView)
+    conversationView->setPresentationOptions(
+        {showReasoning, showUpdates, expandCommands, expandImages});
 }
 
 ThreadPane &MiddleRegionWidget::threads() const noexcept { return *threadPane; }

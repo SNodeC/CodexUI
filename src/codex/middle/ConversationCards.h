@@ -75,7 +75,9 @@ class ConversationCard : public QFrame {
 
 public:
   explicit ConversationCard(const VisibleCardData &data,
-                            QWidget *parent = nullptr);
+                            QWidget *parent = nullptr,
+                            bool commandInitiallyCollapsed = true,
+                            bool imageInitiallyCollapsed = true);
   ~ConversationCard() override;
 
   [[nodiscard]] CardKind cardKind() const noexcept;
@@ -106,7 +108,9 @@ private:
 };
 
 [[nodiscard]] ConversationCard *
-createConversationCard(const VisibleCardData &data, QWidget *parent = nullptr);
+createConversationCard(const VisibleCardData &data, QWidget *parent = nullptr,
+                       bool commandInitiallyCollapsed = true,
+                       bool imageInitiallyCollapsed = true);
 
 } // namespace codexui::codex::middle
 

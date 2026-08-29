@@ -142,6 +142,14 @@ activity cards initially render collapsed. A user-selected state survives
 streaming updates, authoritative prompt replacement, and thread switching for
 the lifetime of the CodexUI process.
 
+The native and web Conversation headers expose persistent, matching icon-only
+controls for Reasoning visibility, interim Codex-update visibility, and the
+initial folding state of newly appearing Command execution and Image cards. Final Codex
+answers are never filtered. Visibility is a presentation choice only: filtered
+cards remain in the retained projection, continue accepting updates, and reappear
+with their latest content and user-owned folding state. Changing the Command
+preference never refolds an existing card.
+
 Folding is an explicit geometry transaction. Collapsing keeps the selected
 title row fixed while the natural scroll range permits and shifts following
 cards upward. Expanding grows downward when the complete card remains visible;
@@ -151,8 +159,9 @@ overlaying the conversation. The gesture pauses follow-latest. At the lower
 scroll limit, the viewport accepts the natural clamp instead of retaining
 artificial blank space.
 
-Reasoning items remain visible as stable progress cards even when the app-server
-provides no public summary; later content updates the same card in place.
+When enabled, Reasoning items remain stable progress cards even when the
+app-server provides no public summary; later content updates the same retained
+card in place.
 File-change cards list each supplied path and change kind and derive compact
 addition and deletion totals from the supplied per-file unified diffs. They do
 not duplicate the full review surface owned by the Changes inspector. Optional
