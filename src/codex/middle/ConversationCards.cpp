@@ -1368,7 +1368,7 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QColor(QStringLiteral("#d7dee8")), 2.0));
+    painter.setPen(QPen(QColor(QStringLiteral("#98a2b3")), 1.5));
     painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0),
                             9.0, 9.0);
     return;
