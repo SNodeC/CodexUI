@@ -106,9 +106,10 @@ sidebar, the center conversation/composer region, a hideable Inspector, and a
 40-pixel status bar. Horizontal splitters resize the three main regions.
 
 The center region is wheel- and touchpad-scroll sensitive across its full
-width, including non-scrollable chrome and the splitter handles. Nested
-scrollable controls consume wheel events while they can move in that direction;
-at an edge, the conversation receives the event.
+width, including non-scrollable chrome and the splitter handles. Scrollable
+Command text and output retain a gesture that began while they could move, even
+after reaching an edge. A new outward gesture begun at that edge scrolls the
+conversation.
 
 ## Conversation structure
 

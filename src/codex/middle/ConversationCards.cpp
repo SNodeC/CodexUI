@@ -509,6 +509,44 @@ bool ContentSizedTextView::setContent(const QString &content) {
   return true;
 }
 
+bool ContentSizedTextView::retainsWheelGesture(QWheelEvent *event) {
+  if (!event)
+    return false;
+  const int delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
+                                                  : event->angleDelta().y();
+  QScrollBar *bar = verticalScrollBar();
+  const bool canScroll = bar->maximum() > bar->minimum() &&
+                         ((delta > 0 && bar->value() > bar->minimum()) ||
+                          (delta < 0 && bar->value() < bar->maximum()));
+
+  const bool hasDirection = delta != 0;
+  if (event->phase() == Qt::ScrollBegin) {
+    wheelGestureActive_ = true;
+    wheelGestureDecided_ = hasDirection;
+    wheelGestureOwned_ = hasDirection && canScroll;
+  } else if (event->phase() == Qt::ScrollEnd) {
+    const bool retained =
+        wheelGestureActive_ && wheelGestureDecided_ && wheelGestureOwned_;
+    wheelGestureActive_ = false;
+    wheelGestureDecided_ = false;
+    wheelGestureOwned_ = false;
+    return retained;
+  } else if (event->phase() == Qt::NoScrollPhase) {
+    // A discrete mouse-wheel notch is a complete gesture. At an existing
+    // boundary it may therefore scroll the enclosing conversation.
+    return canScroll;
+  } else if (!wheelGestureActive_) {
+    // Some platforms omit ScrollBegin and start with ScrollUpdate.
+    wheelGestureActive_ = true;
+    wheelGestureDecided_ = hasDirection;
+    wheelGestureOwned_ = hasDirection && canScroll;
+  } else if (!wheelGestureDecided_ && hasDirection) {
+    wheelGestureDecided_ = true;
+    wheelGestureOwned_ = canScroll;
+  }
+  return wheelGestureDecided_ && wheelGestureOwned_;
+}
+
 QSize ContentSizedTextView::sizeHint() const {
   QSize result = QTextEdit::sizeHint();
   result.setHeight(preferredHeight_);
@@ -519,6 +557,22 @@ QSize ContentSizedTextView::minimumSizeHint() const {
   QSize result = QTextEdit::minimumSizeHint();
   result.setHeight(0);
   return result;
+}
+
+void ContentSizedTextView::wheelEvent(QWheelEvent *event) {
+  QScrollBar *bar = verticalScrollBar();
+  const int delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
+                                                  : event->angleDelta().y();
+  const bool atBoundary = bar->maximum() <= bar->minimum() ||
+                          (delta > 0 && bar->value() <= bar->minimum()) ||
+                          (delta < 0 && bar->value() >= bar->maximum());
+  if (atBoundary) {
+    // If this nested view owned the gesture when it began, reaching an edge
+    // must not leak the remaining updates into the conversation viewport.
+    event->accept();
+    return;
+  }
+  QTextEdit::wheelEvent(event);
 }
 
 void ContentSizedTextView::resizeEvent(QResizeEvent *event) {
@@ -619,16 +673,9 @@ void CommandOutputView::wheelEvent(QWheelEvent *event) {
   QScrollBar *bar = verticalScrollBar();
   const int delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
                                                   : event->angleDelta().y();
-  if (bar->maximum() <= bar->minimum() ||
-      (delta > 0 && bar->value() <= bar->minimum()) ||
-      (delta < 0 && bar->value() >= bar->maximum())) {
-    event->accept();
-    return;
-  }
-
   if (delta > 0)
     followsLatest_ = false;
-  QTextEdit::wheelEvent(event);
+  ContentSizedTextView::wheelEvent(event);
   preservedScrollValue_ = bar->value();
   followsLatest_ = isAtBottom();
 }

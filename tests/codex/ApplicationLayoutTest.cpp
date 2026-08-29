@@ -159,11 +159,12 @@ ConversationSnapshot longConversation(const std::string &thread) {
   return snapshot;
 }
 
-QWheelEvent wheelFor(QWidget *target, int pixelDelta) {
+QWheelEvent wheelFor(QWidget *target, int pixelDelta,
+                     Qt::ScrollPhase phase = Qt::ScrollUpdate) {
   const QPointF local(target->rect().center());
   return QWheelEvent(local, target->mapToGlobal(local.toPoint()), QPoint(),
                      QPoint(0, pixelDelta), Qt::NoButton, Qt::NoModifier,
-                     Qt::ScrollUpdate, false);
+                     phase, false);
 }
 
 std::vector<std::string> threadOrder(const ThreadPane &pane) {
@@ -1171,10 +1172,13 @@ bool testNestedCommandScrollOwnership() {
   QString output;
   for (int line = 0; line < 100; ++line)
     output += QStringLiteral("command output line %1\n").arg(line);
+  QString command;
+  for (int line = 0; line < 30; ++line)
+    command += QStringLiteral("command argument line %1\n").arg(line);
   snapshot.sections.back().cards.push_back(
       {AuthoritativeItemKey{"command-thread", "turn-2", "command"},
        CardKind::CommandExecution, "command-thread", "turn-2", "command",
-       CommandExecutionData{QStringLiteral("run-command"),
+       CommandExecutionData{command,
                             output,
                             QStringLiteral("inProgress"),
                             {},
@@ -1183,31 +1187,91 @@ bool testNestedCommandScrollOwnership() {
   spin(30);
 
   CommandOutputView *commandOutput = nullptr;
+  ContentSizedTextView *commandText = nullptr;
   for (QWidget *widget : region.findChildren<QWidget *>())
     if (auto *candidate = dynamic_cast<CommandOutputView *>(widget)) {
       commandOutput = candidate;
-      break;
+    } else if (auto *candidate = dynamic_cast<ContentSizedTextView *>(widget);
+               candidate && candidate->objectName() ==
+                                QStringLiteral("commandTextView")) {
+      commandText = candidate;
     }
-  bool result =
-      expect(commandOutput && commandOutput->verticalScrollBar()->maximum() > 0,
-             "long command output owns a real nested scrollbar");
-  if (!commandOutput)
+  bool result = expect(
+      commandOutput && commandOutput->verticalScrollBar()->maximum() > 0 &&
+          commandText && commandText->verticalScrollBar()->maximum() > 0,
+      "long command and output own real nested scrollbars");
+  if (!commandOutput || !commandText)
     return false;
-  commandOutput->verticalScrollBar()->setValue(
-      commandOutput->verticalScrollBar()->maximum() / 2);
-  spin();
-  QWheelEvent owned = wheelFor(commandOutput, 120);
-  result &= expect(!region.routeScrollEvent(commandOutput, &owned),
-                   "a nested output consumes input while it can scroll");
-  commandOutput->verticalScrollBar()->setValue(
-      commandOutput->verticalScrollBar()->minimum());
-  spin();
-  const int outerBefore = region.conversation().verticalScrollBar()->value();
-  QWheelEvent boundary = wheelFor(commandOutput, 120);
-  result &= expect(!region.routeScrollEvent(commandOutput, &boundary) &&
-                       region.conversation().verticalScrollBar()->value() ==
-                           outerBefore,
-                   "nested output retains input at its scroll boundary");
+
+  auto verifyBoundaryOwnership = [&](ContentSizedTextView *view,
+                                     const char *description) {
+    QScrollBar *inner = view->verticalScrollBar();
+    QScrollBar *outer = region.conversation().verticalScrollBar();
+
+    inner->setValue(inner->maximum() / 2);
+    outer->setValue(outer->maximum());
+    spin();
+    QWheelEvent begin = wheelFor(view, 0, Qt::ScrollBegin);
+    region.routeScrollEvent(view, &begin);
+    QWheelEvent firstUpdate = wheelFor(view, 120, Qt::ScrollUpdate);
+    bool passed =
+        expect(!region.routeScrollEvent(view, &firstUpdate), description);
+
+    inner->setValue(inner->minimum());
+    const int outerBeforeOverscroll = outer->value();
+    QWheelEvent sameGesture = wheelFor(view, 120, Qt::ScrollUpdate);
+    passed &= expect(!region.routeScrollEvent(view, &sameGesture) &&
+                         outer->value() == outerBeforeOverscroll,
+                     "a gesture reaching the top cannot leak to the conversation");
+    QWheelEvent end = wheelFor(view, 0, Qt::ScrollEnd);
+    region.routeScrollEvent(view, &end);
+
+    QWheelEvent freshAtTop = wheelFor(view, 120, Qt::ScrollBegin);
+    passed &= expect(region.routeScrollEvent(view, &freshAtTop) &&
+                         outer->value() < outerBeforeOverscroll,
+                     "a fresh outward gesture at the top scrolls the conversation");
+    QWheelEvent topEnd = wheelFor(view, 0, Qt::ScrollEnd);
+    region.routeScrollEvent(view, &topEnd);
+
+    inner->setValue(inner->maximum() / 2);
+    outer->setValue(outer->minimum());
+    QWheelEvent downBegin = wheelFor(view, -120, Qt::ScrollBegin);
+    passed &= expect(!region.routeScrollEvent(view, &downBegin), description);
+    inner->setValue(inner->maximum());
+    const int outerBeforeBottomOverscroll = outer->value();
+    QWheelEvent sameDownGesture = wheelFor(view, -120, Qt::ScrollUpdate);
+    passed &= expect(!region.routeScrollEvent(view, &sameDownGesture) &&
+                         outer->value() == outerBeforeBottomOverscroll,
+                     "a gesture reaching the bottom cannot leak to the conversation");
+    QWheelEvent downEnd = wheelFor(view, 0, Qt::ScrollEnd);
+    region.routeScrollEvent(view, &downEnd);
+
+    QWheelEvent freshAtBottom = wheelFor(view, -120, Qt::ScrollBegin);
+    passed &= expect(region.routeScrollEvent(view, &freshAtBottom) &&
+                         outer->value() > outerBeforeBottomOverscroll,
+                     "a fresh outward gesture at the bottom scrolls the conversation");
+    QWheelEvent bottomEnd = wheelFor(view, 0, Qt::ScrollEnd);
+    region.routeScrollEvent(view, &bottomEnd);
+
+    inner->setValue(inner->maximum() / 2);
+    outer->setValue(outer->maximum());
+    const int outerBeforeMouseWheel = outer->value();
+    QWheelEvent innerNotch = wheelFor(view, 120, Qt::NoScrollPhase);
+    passed &= expect(!region.routeScrollEvent(view, &innerNotch) &&
+                         outer->value() == outerBeforeMouseWheel,
+                     "a mouse-wheel notch scrolls a movable nested view");
+    inner->setValue(inner->minimum());
+    QWheelEvent boundaryNotch = wheelFor(view, 120, Qt::NoScrollPhase);
+    passed &= expect(region.routeScrollEvent(view, &boundaryNotch) &&
+                         outer->value() < outerBeforeMouseWheel,
+                     "a mouse-wheel notch at the boundary scrolls the conversation");
+    return passed;
+  };
+
+  result &= verifyBoundaryOwnership(commandText,
+                                    "command text owns a scrollable gesture");
+  result &= verifyBoundaryOwnership(commandOutput,
+                                    "command output owns a scrollable gesture");
   return result;
 }
 

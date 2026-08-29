@@ -27,15 +27,20 @@ public:
                                 QWidget *parent = nullptr);
 
   bool setContent(const QString &content);
+  [[nodiscard]] bool retainsWheelGesture(QWheelEvent *event);
   QSize sizeHint() const override;
   QSize minimumSizeHint() const override;
 
 protected:
+  void wheelEvent(QWheelEvent *event) override;
   void resizeEvent(QResizeEvent *event) override;
   void measureAtCurrentWidth(bool notifyParent);
 
 private:
   int preferredHeight_ = 0;
+  bool wheelGestureActive_ = false;
+  bool wheelGestureDecided_ = false;
+  bool wheelGestureOwned_ = false;
 };
 
 class CommandOutputView final : public ContentSizedTextView {

@@ -414,8 +414,12 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
            ancestor = ancestor->parentWidget()) {
         if (auto *nested = qobject_cast<QAbstractScrollArea *>(ancestor);
             nested && nested != conversationView) {
-          if (dynamic_cast<CommandOutputView *>(nested))
-            return false;
+          if (auto *commandView =
+                  dynamic_cast<ContentSizedTextView *>(nested)) {
+            if (commandView->retainsWheelGesture(wheel))
+              return false;
+            break;
+          }
           if (canConsume(nested, verticalIntent(wheel)))
             return false;
           break;
@@ -428,8 +432,12 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
            ancestor && ancestor != conversationRegion;
            ancestor = ancestor->parentWidget()) {
         if (auto *nested = qobject_cast<QAbstractScrollArea *>(ancestor)) {
-          if (dynamic_cast<CommandOutputView *>(nested))
-            return false;
+          if (auto *commandView =
+                  dynamic_cast<ContentSizedTextView *>(nested)) {
+            if (commandView->retainsWheelGesture(wheel))
+              return false;
+            break;
+          }
           if (canConsume(nested, verticalIntent(wheel)))
             return false;
           break;

@@ -625,8 +625,10 @@ range clamps from card reflow do not change this user-owned state. While paused,
 the first visible stable card and its viewport offset anchor the reading position
 across appends, card reflow, and reconstruction. Wheel and touchpad events over
 non-scrollable center-pane chrome and splitter handles are forwarded to the
-conversation. Nested scrollable controls consume an event only while they can
-move in that direction and return edge events to the conversation.
+conversation. Command text and output retain a gesture that began while they
+could move in its direction, including later updates at the reached boundary.
+A fresh outward gesture begun at an existing boundary is routed to the
+conversation.
 Follow/pause mode and the stable anchor are stored per thread and restored when
 the user returns to that thread.
 
@@ -669,7 +671,8 @@ place; a protocol update with an unchanged visible fingerprint touches neither
 the widget nor scroll state. Beyond the maximum the output control uses the
 shared styled vertical scrollbar. It follows appended output only while already
 at its bottom; manual upward scrolling pauses following, and the state is
-retained across in-place output updates.
+retained across in-place output updates. The bounded command-text control uses
+the same gesture-boundary ownership as the output control.
 
 The Info tab's State and Protocol viewers use the same scrollbar styling and
 show vertical scrollbars only when required. The Protocol log owns the tab's

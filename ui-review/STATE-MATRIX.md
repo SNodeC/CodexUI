@@ -38,7 +38,8 @@
 | Command execution output | Fits below 220 px | Box grows to content without a minimum blank area. |
 | Command execution output | Exceeds 220 px at bottom | Scrollbar appears and appended output follows the bottom. |
 | Command execution output | User scrolled upward | Output following pauses until its scrollbar returns to the bottom. |
-| Center chrome | Wheel or touchpad input | Message view scrolls unless a nested control can scroll in that direction; edge events return to the message view. |
+| Command text or output | Gesture reaches its scroll boundary | The nested view retains that gesture; a fresh outward gesture at the boundary scrolls the message view. |
+| Center chrome | Wheel or touchpad input | Message view scrolls unless a nested command view owns the current gesture. |
 | Info / State | Content exceeds viewport | Common styled vertical scrollbar appears as needed. |
 | Info / Protocol | Content exceeds viewport | Styled log scrollbar appears; statistics remain below the expanding log. |
 | Pending request | Unresolved | Thread and global attention surfaces identify required user action. |

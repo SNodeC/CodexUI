@@ -211,9 +211,10 @@ Returning to the bottom re-enables following.
 
 Follow/pause mode and the visible-card/pixel-offset anchor are retained per
 thread and restored when the user switches back.
-Scrollable Command output owns wheel and touchpad gestures while the pointer is
-over it, including overscroll at either boundary; those gestures never chain to
-the outer message view.
+Scrollable Command text and output own a wheel or touchpad gesture that begins
+while they can move in its direction. Reaching a boundary during that gesture
+does not chain into the outer message view. A fresh outward gesture begun at an
+already-reached boundary scrolls the conversation instead.
 
 This policy applies to new messages, streaming updates, pending prompt cards,
 and card reconstruction. It is based on the scroll bar's actual bottom state,
@@ -243,9 +244,9 @@ position is the new bottom.
 
 The complete center region is wheel- and touchpad-scroll sensitive. Wheel
 events over non-scrollable center chrome and the horizontal splitter handles
-are forwarded to the message view. A nested scrollable control, such as Command
-execution output, consumes an event while it can scroll in that direction and
-hands an edge event back to the conversation.
+are forwarded to the message view. Command text and output retain a gesture
+that started while they could scroll; only a fresh gesture begun at their
+current boundary is handed to the conversation.
 
 ## Composer geometry
 
