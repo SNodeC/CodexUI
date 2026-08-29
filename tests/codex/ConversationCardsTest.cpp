@@ -1460,6 +1460,87 @@ bool testCardFoldingGeometryAndRetention() {
 }
 
 bool testPresentationOptionsRetainCardsAndInitialFolding() {
+  {
+    const std::string nestedThread = "nested-presentation-options";
+    const AuthoritativeItemKey nestedUserKey{nestedThread, "turn", "user"};
+    const AuthoritativeItemKey nestedReasoningKey{nestedThread, "turn",
+                                                   "reasoning"};
+    ConversationSnapshot nestedSnapshot;
+    nestedSnapshot.threadId = nestedThread;
+    nestedSnapshot.sections.push_back(
+        {"turn:nested-presentation-options:turn",
+         "turn",
+         {{nestedUserKey, CardKind::UserMessage, nestedThread, "turn", "user",
+           UserMessageData{QStringLiteral("Prompt"), {}}}}});
+    ConversationView nestedView;
+    nestedView.setPresentationOptions({false, true, true, true});
+    nestedView.resize(700, 700);
+    nestedView.show();
+    bool nestedResult = nestedView.reconcile(nestedSnapshot);
+    spin();
+    nestedSnapshot.sections.front().cards.push_back(
+        {nestedReasoningKey, CardKind::Reasoning, nestedThread, "turn",
+         "reasoning", ReasoningData{QStringLiteral("Hidden reasoning")}});
+    nestedResult &= nestedView.reconcile(nestedSnapshot);
+    spin();
+    ConversationCard *nestedReasoning =
+        card(nestedView, stableKey(nestedReasoningKey));
+    if (!expect(nestedResult && nestedReasoning && nestedReasoning->isHidden(),
+                "new nested reasoning obeys the disabled visibility filter"))
+      return false;
+  }
+
+  {
+    const std::string followingThread = "following-nested-insertion";
+    ConversationSnapshot followingSnapshot;
+    followingSnapshot.threadId = followingThread;
+    TurnSection followingSection{"turn:following-nested-insertion:turn",
+                                 "turn", {}};
+    followingSection.cards.push_back(
+        {AuthoritativeItemKey{followingThread, "turn", "user"},
+         CardKind::UserMessage, followingThread, "turn", "user",
+         UserMessageData{QStringLiteral("Prompt"), {}}});
+    for (int index = 0; index < 12; ++index)
+      followingSection.cards.push_back(
+          agentCard(followingThread, "turn", index));
+    followingSnapshot.sections.push_back(std::move(followingSection));
+
+    ConversationView followingView;
+    followingView.resize(520, 320);
+    followingView.show();
+    bool followingResult = followingView.reconcile(followingSnapshot);
+    spin();
+    const AuthoritativeItemKey incomingKey{followingThread, "turn",
+                                            "incoming"};
+    followingSnapshot.sections.front().cards.push_back(
+        {incomingKey, CardKind::AgentActivity, followingThread, "turn",
+         "incoming",
+         AgentActivityData{QStringLiteral("tool"),
+                           QStringLiteral("completed"),
+                           QStringLiteral("tool"),
+                           QStringLiteral("New nested activity"),
+                           {},
+                           {},
+                           {},
+                           {},
+                           {},
+                           {},
+                           {}}});
+    followingResult &= followingView.reconcile(followingSnapshot);
+    ConversationCard *incoming = card(followingView, stableKey(incomingKey));
+    const int immediateTop =
+        incoming ? incoming->mapTo(followingView.viewport(), QPoint{}).y() : -1;
+    const bool immediatelyAtBottom = followingView.isAtBottom();
+    spin(320);
+    const int settledTop =
+        incoming ? incoming->mapTo(followingView.viewport(), QPoint{}).y() : -1;
+    if (!expect(followingResult && incoming && immediatelyAtBottom &&
+                    immediateTop == settledTop,
+                "new nested cards paint directly at their final followed "
+                "position"))
+      return false;
+  }
+
   const std::string thread = "presentation-options";
   const AuthoritativeItemKey updateKey{thread, "turn", "update"};
   const AuthoritativeItemKey finalKey{thread, "turn", "final"};

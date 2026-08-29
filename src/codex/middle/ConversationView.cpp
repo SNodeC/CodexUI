@@ -326,6 +326,10 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
     }
     desiredSections.emplace(sectionData.key, std::move(desiredSection));
   }
+  const bool appendedVisibleCards =
+      displayedKeys.size() > displayedCardKeys_.size() &&
+      std::equal(displayedCardKeys_.begin(), displayedCardKeys_.end(),
+                 displayedKeys.begin());
 
   for (std::size_t offset = displayedSectionKeys_.size(); offset > 0;
        --offset) {
@@ -503,7 +507,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
   for (const auto &[card, state] : commandOutputRestorations)
     card->restoreCommandOutputScrollState(state);
   if (follow) {
-    if (switchedThread || outputGrew) {
+    if (switchedThread || outputGrew || appendedVisibleCards) {
       setScrollValue(verticalScrollBar()->maximum());
     } else {
       // Reflow above the viewport must preserve the same painted card/pixel
@@ -518,7 +522,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
   viewport()->setUpdatesEnabled(true);
   viewport()->update();
 
-  if (follow && !switchedThread && !outputGrew) {
+  if (follow && !switchedThread && !outputGrew && !appendedVisibleCards) {
     const int stableValue = verticalScrollBar()->value();
     if (verticalScrollBar()->maximum() > stableValue + 3)
       animateToBottom(stableValue);

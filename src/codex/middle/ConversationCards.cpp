@@ -733,9 +733,11 @@ public:
       ConversationCard *card = cards[index];
       if (!card)
         continue;
+      const bool explicitlyHidden = card->isHidden();
       const int position = static_cast<int>(index);
       if (nestedLayout->indexOf(card) != position)
         nestedLayout->insertWidget(position, card);
+      card->setVisible(!explicitlyHidden);
       card->setProperty("nestedConversationCard", true);
     }
     hasVisibleNestedCards =
