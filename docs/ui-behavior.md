@@ -113,6 +113,14 @@ Unsubmitted composer text and attachments form one shared local draft: ordinary
 thread navigation retains them, and submission sends them to the thread that is
 visibly selected at that moment. Explicit new-thread creation still starts with
 a deliberately cleared composer.
+
+Accepting New Thread immediately inserts one selected orange animated row in
+the thread list. It is a presentation-only draft, not a synthetic app-server
+thread. Sending the first prompt promotes the same row to the ID returned by
+`thread/start`; animation continues until that prompt's `turn/start` callback
+succeeds, then the same row adopts canonical styling. Creation or first-prompt
+failure stops animation and leaves the row visibly failed. No duplicate row or
+replacement transition is permitted.
 CodexUI queues submissions per thread and dispatches them in order: only one
 unacknowledged prompt operation is in flight for a thread. After each result,
 the next queued prompt is sent using the app-server state produced by the

@@ -536,6 +536,10 @@ void ShellWidget::Impl::connectUi() {
   threadActions.refresh = [this] { session.listThreads(); };
   threadActions.hide = [this] { middleRegion->showSidebar(false); };
   threadActions.select = [this](const std::string &id) {
+    if (id == DraftThreadId && newThreadIntent) {
+      render();
+      return;
+    }
     if (id != selectedThreadId)
       selectThread(id);
   };
@@ -734,7 +738,11 @@ void ShellWidget::Impl::scheduleRender() {
 }
 
 void ShellWidget::Impl::render() {
-  middleRegion->threads().refresh(model, selectedThreadId);
+  const std::string visibleThreadId =
+      selectedThreadId.empty() && newThreadIntent
+          ? std::string(DraftThreadId)
+          : selectedThreadId;
+  middleRegion->threads().refresh(model, visibleThreadId);
   renderConversation();
   middleRegion->inspector().refresh(model, selectedThreadId);
   refreshSettings();
@@ -984,6 +992,9 @@ void ShellWidget::Impl::selectThread(std::string threadId) {
     hydrateThreadForSelection(threadId);
     return;
   }
+  if (middleRegion->threads().isOptimisticThread(DraftThreadId) &&
+      prompts.submissions(DraftThreadId).empty())
+    middleRegion->threads().confirmOptimisticThread(DraftThreadId);
   selectedThreadId = std::move(threadId);
   newThreadIntent = false;
   newThreadOptions = nlohmann::json::object();
@@ -1012,6 +1023,11 @@ void ShellWidget::Impl::beginNewThread() {
   newThreadIntent = true;
   newThreadName = draft.name;
   newThreadWorkspace = draft.workspace;
+  middleRegion->threads().beginOptimisticThread(
+      DraftThreadId,
+      draft.name.isEmpty() ? std::string("New thread")
+                           : draft.name.toStdString(),
+      draft.workspace.toStdString());
   newThreadOptions = nlohmann::json::object();
   if (!draft.baseInstructions.isEmpty())
     newThreadOptions["baseInstructions"] = draft.baseInstructions.toStdString();
@@ -1215,7 +1231,10 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
   prompt = middle::promptWithFileLinks(std::move(prompt), attachments);
   const std::string visiblySelected =
       middleRegion->threads().visiblySelectedThreadId();
-  if (!visiblySelected.empty() && visiblySelected != selectedThreadId) {
+  const bool selectedNewThreadDraft =
+      visiblySelected == DraftThreadId && newThreadIntent;
+  if (!visiblySelected.empty() && visiblySelected != selectedThreadId &&
+      !selectedNewThreadDraft) {
     if (!model.thread(visiblySelected)) {
       showNotice(QStringLiteral("The visibly selected thread is no longer "
                                 "available. Your message was not sent."));
@@ -1258,6 +1277,13 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
                     thread, activeTurn, QDateTime::currentMSecsSinceEpoch());
   static_cast<void>(submissionId);
 
+  if (destination == DraftThreadId)
+    middleRegion->threads().beginOptimisticThread(
+        DraftThreadId,
+        newThreadName.isEmpty() ? std::string("New thread")
+                                : newThreadName.toStdString(),
+        newThreadWorkspace.toStdString());
+
   // Admission is a synchronous UI fact. Transport dispatch is queued below so
   // this awaiting projection is committed without forcing paint reentrancy.
   middleRegion->conversation().prepareForLocalPromptAdmission();
@@ -1297,6 +1323,7 @@ void ShellWidget::Impl::startThreadForDraft() {
         ids.push_back(submission.id);
       for (const std::uint64_t id : ids)
         static_cast<void>(prompts.fail(DraftThreadId, id, error));
+      middleRegion->threads().failOptimisticThread(DraftThreadId);
       showNotice(error);
       render();
       return;
@@ -1314,12 +1341,14 @@ void ShellWidget::Impl::startThreadForDraft() {
         ids.push_back(submission.id);
       for (const std::uint64_t id : ids)
         static_cast<void>(prompts.fail(DraftThreadId, id, error));
+      middleRegion->threads().failOptimisticThread(DraftThreadId);
       showNotice(error);
       render();
       return;
     }
 
     if (!prompts.reassignThread(DraftThreadId, threadId)) {
+      middleRegion->threads().failOptimisticThread(DraftThreadId);
       showNotice(QStringLiteral("Could not attach the draft prompts to "
                                 "the created thread."));
       render();
@@ -1329,6 +1358,7 @@ void ShellWidget::Impl::startThreadForDraft() {
     runtime.hydration = Hydration::Hydrated;
     runtime.settingsHydration = SettingsHydration::Hydrated;
     runtime.operationReady = true;
+    middleRegion->threads().promoteOptimisticThread(DraftThreadId, threadId);
     const bool viewingDraft = selectedThreadId.empty() && newThreadIntent;
     if (viewingDraft) {
       selectedThreadId = threadId;
@@ -1491,12 +1521,14 @@ void ShellWidget::Impl::completePrompt(const std::string &threadId,
                                           resultTurnId(result),
                                           QDateTime::currentMSecsSinceEpoch()));
     scheduleAcceptedTransition(threadId, submissionId);
+    middleRegion->threads().confirmOptimisticThread(threadId);
   } else {
     const std::string message =
         safeMessage(result.value("error", nlohmann::json::object()));
     const QString displayed =
         text(message.empty() ? std::string("Submission failed") : message);
     static_cast<void>(prompts.fail(threadId, submissionId, displayed));
+    middleRegion->threads().failOptimisticThread(threadId);
     showNotice(text(message.empty() ? std::string("Turn submission failed")
                                     : message));
   }

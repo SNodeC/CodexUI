@@ -12,12 +12,15 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDialog>
 #include <QElapsedTimer>
 #include <QFrame>
 #include <QLabel>
 #include <QListWidget>
+#include <QPushButton>
 #include <QTabWidget>
 #include <QThread>
+#include <QTimer>
 
 #include <algorithm>
 #include <cerrno>
@@ -313,12 +316,13 @@ struct ShellFlow {
   bool verifyBoundedChildHydration();
   bool verifyNotFoundRecovery();
   bool verifyFailedHydration();
+  bool verifyOptimisticNewThread();
 
   bool run() {
     return verifyHydrationAndNavigation() && verifyPromptLifecycle() &&
            verifyReconnectHydration() && verifyTerminalCallback() &&
            verifyBoundedChildHydration() && verifyNotFoundRecovery() &&
-           verifyFailedHydration();
+           verifyFailedHydration() && verifyOptimisticNewThread();
   }
 };
 
@@ -771,6 +775,83 @@ bool ShellFlow::verifyFailedHydration() {
       expect(!peer.waitFor("turn.start", "thread-e", 100).has_value() &&
                  !peer.waitFor("thread.read", "thread-e", 100).has_value(),
              "failed hydration cannot send or enter an automatic read loop");
+  return result;
+}
+
+bool ShellFlow::verifyOptimisticNewThread() {
+  bool result = true;
+  peer.discard();
+
+  auto *newThread =
+      shell.findChild<QPushButton *>(QStringLiteral("threadNewButton"));
+  bool dialogOpened = false;
+  QTimer::singleShot(0, &shell, [&dialogOpened] {
+    if (auto *dialog = qobject_cast<QDialog *>(
+            QApplication::activeModalWidget())) {
+      dialogOpened = true;
+      dialog->accept();
+    }
+  });
+  result &= expect(newThread, "the real New thread action is available");
+  if (!newThread)
+    return false;
+  newThread->click();
+  spin(10);
+
+  auto findThreadItem = [this](std::string_view id) -> QListWidgetItem * {
+    if (!list)
+      return nullptr;
+    for (int row = 0; row < list->count(); ++row) {
+      QListWidgetItem *item = list->item(row);
+      if (item && item->data(Qt::UserRole).toString().toStdString() == id)
+        return item;
+    }
+    return nullptr;
+  };
+  QListWidgetItem *draft = findThreadItem("draft:new-thread");
+  result &= expect(
+      dialogOpened && draft && list->currentItem() == draft &&
+          draft->data(Qt::UserRole + 6).toBool(),
+      "accepting the dialog immediately selects one animated draft row");
+  if (!draft)
+    return false;
+
+  result &= expect(submit(editor, QStringLiteral("first new-thread prompt")),
+                   "the selected optimistic draft admits its first prompt");
+  const auto create = peer.waitFor("thread.create");
+  result &= expect(create.has_value(),
+                   "the optimistic draft dispatches thread.create");
+  if (!create)
+    return false;
+  result &= peer.send(presentation::result(
+      sequence++, generation, "thread.create",
+      create->value("correlationId", std::string{}), true,
+      {{"thread", {{"id", "thread-new"},
+                    {"name", "New thread"},
+                    {"cwd", "/workspace/new"},
+                    {"status", "idle"}}}},
+      Authority::Merge, {{"threadId", "thread-new"}}));
+
+  const auto start = peer.waitFor("turn.start", "thread-new");
+  result &= expect(start.has_value(),
+                   "thread.create promotion dispatches the retained prompt");
+  if (!start)
+    return false;
+  QListWidgetItem *promoted = findThreadItem("thread-new");
+  result &= expect(
+      promoted == draft && promoted->data(Qt::UserRole + 6).toBool(),
+      "thread.create rekeys the same visible item while acknowledgment is pending");
+
+  result &= peer.send(presentation::result(
+      sequence++, generation, "turn.start",
+      start->value("correlationId", std::string{}), true,
+      {{"turn", {{"id", "turn-new"}, {"status", "inProgress"}}}},
+      Authority::Merge,
+      {{"threadId", "thread-new"}, {"turnId", "turn-new"}}));
+  spin(10);
+  result &= expect(findThreadItem("thread-new") == draft &&
+                       !draft->data(Qt::UserRole + 6).toBool(),
+                   "turn acknowledgment canonicalizes the same thread item");
   return result;
 }
 

@@ -36,6 +36,7 @@
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QToolButton>
 #include <QThread>
 #include <QToolButton>
@@ -1071,6 +1072,77 @@ bool testThreadRecencySort() {
       "Recent is the default and preserves selection");
 }
 
+bool testOptimisticThreadRowLifecycle() {
+  PresentationModel model;
+  ThreadPane pane;
+  pane.resize(320, 520);
+  pane.show();
+  pane.beginOptimisticThread("draft:new-thread", "Draft title",
+                             "/workspace/draft");
+  pane.refresh(model, "draft:new-thread");
+  spin();
+
+  auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
+  auto *animation =
+      pane.findChild<QTimer *>(QStringLiteral("optimisticThreadAnimation"));
+  QListWidgetItem *draft = threadItem(list, "draft:new-thread");
+  bool result = expect(
+      draft && pane.visiblySelectedThreadId() == "draft:new-thread" &&
+          draft->data(Qt::UserRole + 6).toBool() &&
+          !draft->data(Qt::UserRole + 7).toBool() && animation &&
+          animation->isActive(),
+      "a new-thread intent immediately presents one selected animated row");
+  if (!draft)
+    return false;
+
+  model.applyEvent(presentation::event(
+      1, 1, "thread.upsert",
+      {{"thread", {{"id", "thread-created"},
+                    {"name", "Created title"},
+                    {"cwd", "/workspace/created"},
+                    {"status", "idle"}}}},
+      presentation::Authority::Merge, {{"threadId", "thread-created"}}));
+  pane.promoteOptimisticThread("draft:new-thread", "thread-created");
+  pane.refresh(model, "thread-created");
+  spin();
+  QListWidgetItem *promoted = threadItem(list, "thread-created");
+  result &= expect(
+      promoted == draft && promoted->data(Qt::UserRole + 6).toBool() &&
+          pane.visiblySelectedThreadId() == "thread-created" &&
+          animation->isActive(),
+      "thread/start rekeys the existing row without replacing its item or animation");
+
+  pane.beginOptimisticThread("draft:second", "Second draft",
+                             "/workspace/second");
+  pane.refresh(model, "draft:second");
+  spin();
+  QListWidgetItem *second = threadItem(list, "draft:second");
+  result &= expect(
+      second && threadItem(list, "thread-created") == draft &&
+          animation->isActive(),
+      "a second draft can animate while the first created thread still awaits acknowledgment");
+
+  pane.confirmOptimisticThread("thread-created");
+  pane.refresh(model, "draft:second");
+  spin();
+  result &= expect(
+      threadItem(list, "thread-created") == draft &&
+          !draft->data(Qt::UserRole + 6).toBool() &&
+          !pane.isOptimisticThread("thread-created") &&
+          threadItem(list, "draft:second") == second &&
+          second->data(Qt::UserRole + 6).toBool() && animation->isActive(),
+      "acknowledging one new thread canonicalizes only that row");
+
+  pane.failOptimisticThread("draft:second");
+  pane.refresh(model, "draft:second");
+  spin();
+  result &= expect(
+      threadItem(list, "draft:second") == second &&
+          second->data(Qt::UserRole + 7).toBool() && !animation->isActive(),
+      "a failed new thread retains its row and stops only its animation");
+  return result;
+}
+
 bool testThreadRowReorderOwnership() {
   PresentationModel model;
   model.applyEvent(presentation::event(
@@ -1826,6 +1898,7 @@ int main(int argc, char **argv) {
   result &= testThreadCreatedSort();
   result &= testThreadLastChangedSort();
   result &= testThreadRecencySort();
+  result &= testOptimisticThreadRowLifecycle();
   result &= testThreadRowReorderOwnership();
   result &= testNestedCommandScrollOwnership();
   result &= testInfoViewerLayout();

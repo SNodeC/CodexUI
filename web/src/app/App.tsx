@@ -71,7 +71,8 @@ function StatusDot({tone}: {tone: string}) { return <span className={`status-dot
 
 function ThreadPane({session, revision}: {session: BrowserFrontendSession; revision: number}) {
     void revision;
-    const selected = session.getSnapshot().selectedThreadId;
+    const snapshot = session.getSnapshot();
+    const selected = snapshot.selectedThreadId || (snapshot.newThreadIntent ? "__codexui_new_thread__" : "");
     const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
     const [actionOpen, setActionOpen] = useState("");
     const toggle = (id: string) => setExpanded(current => {
@@ -79,16 +80,18 @@ function ThreadPane({session, revision}: {session: BrowserFrontendSession; revis
     });
     const renderThread = (id: string, depth: number): ReactNode => {
         const thread = session.model.thread(id);
-        if (!thread) return null;
-        const status = classifyStatus(thread.status);
-        const hasChildren = thread.childThreadOrder.length > 0;
-        return <div key={id}>
-            <div className={`thread-row-wrap ${selected === id ? "selected" : ""}`} style={{paddingLeft: `${8 + depth * 14}px`}}>
+        const optimistic = snapshot.optimisticThreads.find(candidate => candidate.id === id);
+        if (!thread && !optimistic) return null;
+        const status = classifyStatus(thread?.status ?? "");
+        const hasChildren = (thread?.childThreadOrder.length ?? 0) > 0;
+        const optimisticClass = optimistic ? ` optimistic-${optimistic.state}` : "";
+        return <div key={session.threadVisualKey(id)}>
+            <div className={`thread-row-wrap ${selected === id ? "selected" : ""}${optimisticClass}`} style={{paddingLeft: `${8 + depth * 14}px`}}>
                 <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id)} aria-label={expanded.has(id) ? "Collapse child threads" : "Expand child threads"}>{hasChildren ? (expanded.has(id) ? "⌄" : "›") : ""}</button>
                 <button className="thread-row" onClick={() => session.selectThread(id)}>
-                    <StatusDot tone={status.tone || "muted"} /><span><strong>{thread.title}</strong><small>{thread.cwd || thread.preview || id}</small></span>
+                    <StatusDot tone={optimistic?.state === "failed" ? "danger" : optimistic ? "warning" : status.tone || "muted"} /><span><strong>{thread?.title || optimistic?.title || id}</strong><small>{optimistic ? optimistic.state === "failed" ? "Not created" : optimistic.state === "confirmed" ? "Created" : "Creating" : thread?.cwd || thread?.preview || id}</small></span>
                 </button>
-                {selected === id && <div className="thread-actions">
+                {thread && selected === id && <div className="thread-actions">
                     <button title="Reload" onClick={() => session.reloadThread(id)}>↻</button>
                     <button title="Fork" onClick={() => session.forkThread(id)}>⑂</button>
                     <button title={thread.archived ? "Unarchive" : "Archive"} onClick={() => session.archiveThread(id, thread.archived)}>□</button>
@@ -99,14 +102,15 @@ function ThreadPane({session, revision}: {session: BrowserFrontendSession; revis
                     </div>}
                 </div>}
             </div>
-            {hasChildren && expanded.has(id) && thread.childThreadOrder.map(child => renderThread(child, depth + 1))}
+            {thread && hasChildren && expanded.has(id) && thread.childThreadOrder.map(child => renderThread(child, depth + 1))}
         </div>;
     };
     return <aside className="thread-pane">
         <div className="pane-heading"><div><span className="eyebrow">Workspace</span><h2>Threads</h2></div>
             <button className="icon-button" onClick={() => session.beginNewThread()} title="New thread">＋</button></div>
         <div className="thread-list">
-            {session.model.threadOrder().map(id => renderThread(id, 0))}
+            {snapshot.optimisticThreads.map(thread => renderThread(thread.id, 0))}
+            {session.model.threadOrder().filter(id => !snapshot.optimisticThreads.some(thread => thread.id === id)).map(id => renderThread(id, 0))}
         </div>
         <button className="refresh-button" onClick={() => session.requestThreads()}>↻ Refresh threads</button>
     </aside>;

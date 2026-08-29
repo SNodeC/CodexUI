@@ -78,6 +78,11 @@ Thread dots continue to describe activity rather than outcome, so completed or
 otherwise inactive threads retain the canonical light-gray dot. Reasoning prose
 and metadata without an authoritative status remain neutral because their
 content does not provide a reliable success, warning, or failure classification.
+An optimistic new-thread row is the deliberate pending-state exception: its
+soft-orange sweep distinguishes local intent from an authoritative active blue
+thread. The row retains one visual identity across draft creation, authoritative
+ID promotion, and first-prompt acknowledgment; failure switches that identity
+to the canonical soft-red error treatment.
 
 Conversation activity cards remain neutral so supporting process information
 does not compete with the user/Codex exchange. Color on those cards is reserved

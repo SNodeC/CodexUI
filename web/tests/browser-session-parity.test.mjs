@@ -100,6 +100,46 @@ test("browser session uses the C++ action routing and preserves prompt-response 
     session.dispose();
 });
 
+test("new threads retain one optimistic row through first-turn acknowledgment", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open();
+    socket.receive({kind: "bridge.connection", event: "opened", connectionId: "new-thread", role: "controller"});
+    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+
+    session.beginNewThread();
+    const draft = session.getSnapshot().optimisticThreads[0];
+    assert.equal(draft?.id, "__codexui_new_thread__");
+    assert.equal(draft?.state, "awaiting");
+
+    const submitted = session.submitPrompt("first prompt", [], {}, {cwd: "/workspace"});
+    const create = requests(socket, "thread/start").at(-1);
+    assert.ok(create);
+    assert.equal(await session.submitPrompt("queued during creation"), true);
+    session.beginNewThread();
+    assert.equal(session.getSnapshot().optimisticThreads[0]?.visualKey, draft?.visualKey);
+    assert.equal(requests(socket, "thread/start").length, 1,
+        "additional prompts and New Thread cannot duplicate an in-flight creation");
+    respond(socket, create, {thread: {id: "created-thread", name: "Created thread", cwd: "/workspace", status: {type: "idle"}}});
+    assert.equal(await submitted, true);
+    await Promise.resolve();
+
+    const promoted = session.getSnapshot().optimisticThreads[0];
+    assert.equal(promoted?.id, "created-thread");
+    assert.equal(promoted?.visualKey, draft?.visualKey);
+    assert.equal(promoted?.state, "awaiting");
+    assert.equal(session.threadVisualKey("created-thread"), draft?.visualKey);
+
+    const start = requests(socket, "turn/start").at(-1);
+    assert.ok(start);
+    respond(socket, start, {turn: {id: "created-turn", status: "inProgress"}});
+    await Promise.resolve(); await waitForPublish();
+    assert.notEqual(session.getSnapshot().optimisticThreads[0]?.state, "awaiting");
+    assert.equal(session.threadVisualKey("created-thread"), draft?.visualKey,
+        "canonical styling retains the optimistic row's React identity");
+    session.dispose();
+});
+
 test("browser transport reconnects cleanly across provider generations", async () => {
     const sockets = [];
     const session = new BrowserFrontendSession("ws://bridge.test/", () => {

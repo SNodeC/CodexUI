@@ -35,10 +35,19 @@ export interface BrowserSessionSnapshot {
     readonly revision: number;
     readonly selectedThreadId: string;
     readonly newThreadIntent: boolean;
+    readonly optimisticThreads: readonly OptimisticThreadSnapshot[];
     readonly conversation: ConversationSnapshot;
     readonly protocolFrames: readonly unknown[];
     readonly notice: string;
     readonly bridgeUrl: string;
+}
+
+export interface OptimisticThreadSnapshot {
+    readonly id: string;
+    readonly visualKey: string;
+    readonly title: string;
+    readonly cwd: string;
+    readonly state: "awaiting" | "failed" | "confirmed";
 }
 
 type RawRequest = (method: string, params: unknown, handler: (response: unknown) => void) => string;
@@ -58,6 +67,10 @@ export class BrowserFrontendSession {
     private transport: WebSocketTransport | undefined;
     private selectedThreadId = "";
     private newThreadIntent = false;
+    private optimisticThreads: OptimisticThreadSnapshot[] = [];
+    private readonly threadVisualKeys = new Map<string, string>();
+    private nextOptimisticThread = 1;
+    private newThreadCreationInFlight = false;
     private notice = "";
     private revision = 0;
     private nextCorrelation = 1;
@@ -155,10 +168,22 @@ export class BrowserFrontendSession {
     releaseController(): boolean { return this.sdk.releaseController(); }
 
     selectThread(threadId: string): void {
+        if (threadId === DraftThreadId && this.newThreadIntent) { this.publish(); return; }
+        if (this.prompts.submissions(DraftThreadId).length === 0)
+            this.optimisticThreads = this.optimisticThreads.filter(thread => thread.id !== DraftThreadId);
         this.selectedThreadId = threadId; this.newThreadIntent = false; this.publish();
         if (threadId !== "") this.request("thread.read", {threadId, includeTurns: true});
     }
-    beginNewThread(): void { this.selectedThreadId = ""; this.newThreadIntent = true; this.publish(); }
+    beginNewThread(): void {
+        if (this.newThreadCreationInFlight) { this.setNotice("The current new thread is still being created.", false); return; }
+        this.selectedThreadId = ""; this.newThreadIntent = true;
+        this.optimisticThreads = [{
+            id: DraftThreadId, visualKey: `optimistic-thread-${this.nextOptimisticThread++}`,
+            title: "New thread", cwd: "", state: "awaiting",
+        }, ...this.optimisticThreads.filter(thread => thread.id !== DraftThreadId)];
+        this.publish();
+    }
+    threadVisualKey(threadId: string): string { return this.threadVisualKeys.get(threadId) ?? threadId; }
     loadMore(): void { /* Default parity window is sufficient until viewport pausing is introduced. */ }
 
     async submitPrompt(prompt: string, attachments: AttachmentDraft[] = [], turnOptions: JsonObject = {}, threadOptions: JsonObject = {}): Promise<boolean> {
@@ -174,13 +199,29 @@ export class BrowserFrontendSession {
             destination === DraftThreadId ? undefined : this.model.activeTurnId(destination), Date.now());
         this.publish();
         if (destination === DraftThreadId) {
+            if (this.newThreadCreationInFlight) return true;
+            this.newThreadCreationInFlight = true;
+            this.optimisticThreads = this.optimisticThreads.map(thread =>
+                thread.id === DraftThreadId ? {...thread, state: "awaiting"} : thread);
             const created = await this.requestPromise("thread.create", threadOptions);
+            this.newThreadCreationInFlight = false;
             const createdThread = isObject(created.data) ? member(created.data, "thread", {}) : {};
             const id = stringMember(createdThread, "id");
             if (!created.ok || id === "" || !this.prompts.reassignThread(DraftThreadId, id)) {
+                this.optimisticThreads = this.optimisticThreads.map(thread =>
+                    thread.id === DraftThreadId ? {...thread, state: "failed"} : thread);
                 this.prompts.failQueued(DraftThreadId, this.errorMessage(created)); this.setNotice(this.errorMessage(created)); return false;
             }
+            const draft = this.optimisticThreads.find(thread => thread.id === DraftThreadId);
+            if (draft) this.threadVisualKeys.set(id, draft.visualKey);
+            this.optimisticThreads = this.optimisticThreads.map(thread =>
+                thread.id === DraftThreadId ? {
+                    ...thread, id,
+                    title: stringMember(createdThread, "name") || thread.title,
+                    cwd: stringMember(createdThread, "cwd") || thread.cwd,
+                } : thread);
             this.selectedThreadId = id; this.newThreadIntent = false; destination = id;
+            this.publish();
         }
         queueMicrotask(() => this.dispatchNextPrompt(destination));
         return true;
@@ -265,9 +306,13 @@ export class BrowserFrontendSession {
                 const turn = isObject(response.data) ? member(response.data, "turn", {}) : {};
                 this.prompts.acknowledge(dispatch.threadId, dispatch.id, stringMember(turn, "id") || undefined, Date.now());
                 this.scheduleAcceptedTransition(dispatch.threadId, dispatch.id);
+                this.optimisticThreads = this.optimisticThreads.map(thread =>
+                    thread.id === dispatch.threadId ? {...thread, state: "confirmed"} : thread);
             } else {
                 this.prompts.fail(dispatch.threadId, dispatch.id, this.errorMessage(response));
                 this.setNotice(this.errorMessage(response));
+                this.optimisticThreads = this.optimisticThreads.map(thread =>
+                    thread.id === dispatch.threadId ? {...thread, state: "failed"} : thread);
             }
             this.publish();
             queueMicrotask(() => this.dispatchNextPrompt(dispatch.threadId));
@@ -325,12 +370,15 @@ export class BrowserFrontendSession {
         for (const listener of this.listeners) listener();
     }
     private makeSnapshot(): BrowserSessionSnapshot {
+        this.optimisticThreads = this.optimisticThreads.filter(thread =>
+            thread.state !== "confirmed" || !this.model.thread(thread.id));
         const projectionId = this.selectedThreadId === "" && this.newThreadIntent ? DraftThreadId : this.selectedThreadId;
         const thread = this.model.thread(this.selectedThreadId);
         const index = indexAuthoritativeItems(projectionId, thread);
         if (thread) this.prompts.reconcile(this.selectedThreadId, index, Date.now());
         return {
             revision: this.revision, selectedThreadId: this.selectedThreadId, newThreadIntent: this.newThreadIntent,
+            optimisticThreads: this.optimisticThreads,
             conversation: projectConversation(index, this.prompts.submissions(projectionId), DefaultAuthoritativeItemLimit, Date.now(), thread),
             protocolFrames: this.protocolFrames, notice: this.notice, bridgeUrl: this.bridgeUrl,
         };

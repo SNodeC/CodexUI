@@ -477,6 +477,15 @@ thread. Model, reasoning, access, permission, style, service-tier, reviewer,
 and collaboration choices remain in the shared upcoming-turn controls rather
 than being duplicated in the dialog.
 
+Accepting the dialog immediately creates one optimistic thread-list row without
+inserting a synthetic thread into `PresentationModel`. The row uses a stable
+visual identity and an orange pending sweep. A successful `thread/start`
+rekeys that same row to the authoritative thread ID, but it remains pending
+until the matching first `turn/start` callback succeeds. That callback switches
+the existing row to canonical presentation; failures stop animation and retain
+the row with an explicit failure state. Native and web follow the same
+lifecycle.
+
 Workspace selection uses the shared custom file browser in directory-only
 mode. It validates that the selected directory exists and returns an absolute
 local path. The accepted workspace is encoded as the native `thread/start`

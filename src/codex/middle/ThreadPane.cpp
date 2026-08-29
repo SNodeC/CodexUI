@@ -9,6 +9,7 @@
 #include <QAbstractItemView>
 #include <QActionGroup>
 #include <QCollator>
+#include <QDateTime>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
 #include <QKeyEvent>
@@ -17,8 +18,11 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPaintEvent>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QStyledItemDelegate>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -34,6 +38,8 @@ constexpr int DepthRole = Qt::UserRole + 2;
 constexpr int HasChildrenRole = Qt::UserRole + 3;
 constexpr int ExpandedRole = Qt::UserRole + 4;
 constexpr int ParentIdRole = Qt::UserRole + 5;
+constexpr int OptimisticRole = Qt::UserRole + 6;
+constexpr int OptimisticFailedRole = Qt::UserRole + 7;
 constexpr int ChildIndent = 16;
 constexpr int DisclosureWidth = 16;
 constexpr int DisclosureExtent = 24;
@@ -61,10 +67,9 @@ protected:
     if (event->button() == Qt::LeftButton && item &&
         item->data(HasChildrenRole).toBool()) {
       QWidget *row = itemWidget(item);
-      QWidget *indicator =
-          row ? row->findChild<QWidget *>(
-                    QStringLiteral("threadExpansionIndicator"))
-              : nullptr;
+      QWidget *indicator = row ? row->findChild<QWidget *>(
+                                     QStringLiteral("threadExpansionIndicator"))
+                               : nullptr;
       const QRect indicatorRect =
           indicator
               ? QRect(indicator->mapTo(viewport(), QPoint()), indicator->size())
@@ -73,8 +78,7 @@ protected:
               : QRect{};
       if (indicatorRect.contains(event->position().toPoint())) {
         if (toggleExpansion)
-          toggleExpansion(
-              item->data(Qt::UserRole).toString().toStdString());
+          toggleExpansion(item->data(Qt::UserRole).toString().toStdString());
         event->accept();
         return;
       }
@@ -103,6 +107,39 @@ public:
     if (index.data(ContextMenuRole).toBool())
       effective.state |= QStyle::State_MouseOver;
     QStyledItemDelegate::paint(painter, effective, index);
+    if (!index.data(OptimisticRole).toBool())
+      return;
+
+    const QRectF bounds = QRectF(option.rect).adjusted(1.0, 4.0, -1.0, -4.0);
+    const bool failed = index.data(OptimisticFailedRole).toBool();
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing);
+    painter->setBrush(failed ? QColor(QStringLiteral("#fff0f2"))
+                             : QColor(QStringLiteral("#fff7e8")));
+    painter->setPen(QPen(failed ? QColor(QStringLiteral("#efb8c0"))
+                                : QColor(QStringLiteral("#dca45a")),
+                         1.0));
+    painter->drawRoundedRect(bounds, 8.0, 8.0);
+    if (!failed) {
+      constexpr qint64 HalfCycleMilliseconds = 900;
+      const qint64 phase =
+          QDateTime::currentMSecsSinceEpoch() % (2 * HalfCycleMilliseconds);
+      const qreal position = phase <= HalfCycleMilliseconds
+                                 ? qreal(phase) / HalfCycleMilliseconds
+                                 : qreal(2 * HalfCycleMilliseconds - phase) /
+                                       HalfCycleMilliseconds;
+      const qreal center = bounds.left() + position * bounds.width();
+      const qreal radius = std::max(24.0, bounds.width() * 0.22);
+      QLinearGradient sweep(center - radius, 0.0, center + radius, 0.0);
+      sweep.setColorAt(0.0, QColor(220, 164, 90, 0));
+      sweep.setColorAt(0.5, QColor(236, 188, 112, 105));
+      sweep.setColorAt(1.0, QColor(220, 164, 90, 0));
+      QPainterPath clip;
+      clip.addRoundedRect(bounds, 8.0, 8.0);
+      painter->setClipPath(clip);
+      painter->fillRect(bounds, sweep);
+    }
+    painter->restore();
   }
 };
 
@@ -120,16 +157,14 @@ public:
       return;
     hasChildren_ = hasChildren;
     expanded_ = expanded;
-    const QString action = !hasChildren
-                               ? QString{}
-                           : expanded ? QStringLiteral("Collapse branch")
-                                      : QStringLiteral("Expand branch");
+    const QString action = !hasChildren ? QString{}
+                           : expanded   ? QStringLiteral("Collapse branch")
+                                        : QStringLiteral("Expand branch");
     setAccessibleName(action);
     setToolTip(action);
-    setProperty("chevronDirection",
-                !hasChildren ? QString{}
-                : expanded  ? QStringLiteral("down")
-                            : QStringLiteral("right"));
+    setProperty("chevronDirection", !hasChildren ? QString{}
+                                    : expanded   ? QStringLiteral("down")
+                                                 : QStringLiteral("right"));
     update();
   }
 
@@ -139,8 +174,9 @@ protected:
     if (!hasChildren_)
       return;
     UiStyle::drawChevron(this, rect().adjusted(3, 3, -3, -3), isEnabled(),
-                         false, expanded_ ? UiStyle::ChevronDirection::Down
-                                          : UiStyle::ChevronDirection::Right);
+                         false,
+                         expanded_ ? UiStyle::ChevronDirection::Down
+                                   : UiStyle::ChevronDirection::Right);
   }
 
 private:
@@ -171,16 +207,15 @@ QFrame *statusDot() {
 }
 
 void updateRow(QWidget *row, const std::string &threadId,
-               const std::string &threadTitle,
-               const std::string &threadStatus, std::size_t requestCount,
-               std::size_t depth, bool hasChildren, bool expanded) {
+               const std::string &threadTitle, const std::string &threadStatus,
+               std::size_t requestCount, std::size_t depth, bool hasChildren,
+               bool expanded, bool optimistic, bool optimisticFailed) {
   auto *title = row->findChild<QLabel *>(QStringLiteral("threadTitle"));
   auto *status = row->findChild<QLabel *>(QStringLiteral("threadStatus"));
   auto *dot = row->findChild<QFrame *>(QStringLiteral("threadStatusDot"));
   auto *indent = row->findChild<QWidget *>(QStringLiteral("threadIndent"));
   auto *indicator = static_cast<ThreadDisclosureIndicator *>(
-      row->findChild<QWidget *>(
-          QStringLiteral("threadExpansionIndicator")));
+      row->findChild<QWidget *>(QStringLiteral("threadExpansionIndicator")));
   indent->setFixedWidth(static_cast<int>(depth) * ChildIndent);
   indicator->setState(hasChildren, expanded);
   QString titleText = text(threadTitle);
@@ -190,9 +225,13 @@ void updateRow(QWidget *row, const std::string &threadId,
     titleText.prepend(QStringLiteral("! "));
   title->setText(titleText);
   const PresentationStatus classified = classifyStatus(threadStatus);
-  status->setText(text(classified.text));
-  const QString tone =
-      requestCount != 0 ? QStringLiteral("warning") : text(classified.tone);
+  status->setText(optimistic ? optimisticFailed ? QStringLiteral("Not created")
+                                                : QStringLiteral("Creating")
+                             : text(classified.text));
+  const QString tone = optimistic ? optimisticFailed ? QStringLiteral("danger")
+                                                     : QStringLiteral("warning")
+                       : requestCount != 0 ? QStringLiteral("warning")
+                                           : text(classified.tone);
   if (status->property("tone").toString() != tone) {
     status->setProperty("tone", tone);
     status->style()->unpolish(status);
@@ -200,7 +239,10 @@ void updateRow(QWidget *row, const std::string &threadId,
     status->update();
   }
   QString color = QStringLiteral("#cacccf");
-  if (requestCount != 0)
+  if (optimistic)
+    color = optimisticFailed ? QStringLiteral("#c43d4d")
+                             : QStringLiteral("#d17b16");
+  else if (requestCount != 0)
     color = QStringLiteral("#a85d0c");
   else if (classified.kind == StatusKind::Active)
     color = QStringLiteral("#2f6feb");
@@ -285,6 +327,7 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   layout->addSpacing(8);
 
   auto *create = new QPushButton(QStringLiteral("+  New thread"));
+  create->setObjectName(QStringLiteral("threadNewButton"));
   create->setFixedHeight(36);
   create->setStyleSheet(QStringLiteral(
       "QPushButton{background:#ffffff;color:#2f6feb;border:1px solid #bfd3f9;"
@@ -342,12 +385,22 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
 
   list = new ThreadListWidget;
   auto *threadList = static_cast<ThreadListWidget *>(list);
-  threadList->toggleExpansion =
-      [this](const std::string &id) { toggleExpanded(id); };
-  threadList->navigateHierarchy =
-      [this](int key) { navigateHierarchy(key); };
+  threadList->toggleExpansion = [this](const std::string &id) {
+    toggleExpanded(id);
+  };
+  threadList->navigateHierarchy = [this](int key) { navigateHierarchy(key); };
   list->setObjectName(QStringLiteral("threadList"));
   list->setItemDelegate(new ThreadItemDelegate(list));
+  optimisticAnimation = new QTimer(list);
+  optimisticAnimation->setObjectName(
+      QStringLiteral("optimisticThreadAnimation"));
+  optimisticAnimation->setInterval(32);
+  connect(optimisticAnimation, &QTimer::timeout, list, [this] {
+    if (std::ranges::any_of(
+            optimisticThreads,
+            [](const OptimisticThread &thread) { return !thread.failed; }))
+      list->viewport()->update();
+  });
   list->setSelectionMode(QAbstractItemView::SingleSelection);
   list->setContextMenuPolicy(Qt::CustomContextMenu);
   list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -374,6 +427,67 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
 }
 
 void ThreadPane::setActions(Actions next) { actions = std::move(next); }
+
+void ThreadPane::beginOptimisticThread(std::string id, std::string title,
+                                       std::string cwd) {
+  std::erase_if(optimisticThreads, [&id](const OptimisticThread &thread) {
+    return thread.id == id;
+  });
+  optimisticThreads.insert(
+      optimisticThreads.begin(),
+      OptimisticThread{std::move(id), std::move(title), std::move(cwd), false});
+  optimisticAnimation->start();
+  visibleSnapshot.reset();
+}
+
+void ThreadPane::promoteOptimisticThread(const std::string &draftId,
+                                         const std::string &authoritativeId) {
+  const auto optimistic =
+      std::ranges::find(optimisticThreads, draftId, &OptimisticThread::id);
+  if (optimistic == optimisticThreads.end() || authoritativeId.empty() ||
+      draftId == authoritativeId)
+    return;
+  if (auto node = rows.extract(draftId); !node.empty()) {
+    node.key() = authoritativeId;
+    node.mapped()->setData(Qt::UserRole, text(authoritativeId));
+    rows.insert(std::move(node));
+  }
+  optimistic->id = authoritativeId;
+  visibleSnapshot.reset();
+}
+
+void ThreadPane::confirmOptimisticThread(const std::string &threadId) {
+  if (!isOptimisticThread(threadId))
+    return;
+  std::erase_if(optimisticThreads, [&threadId](const OptimisticThread &thread) {
+    return thread.id == threadId;
+  });
+  if (std::ranges::none_of(
+          optimisticThreads,
+          [](const OptimisticThread &thread) { return !thread.failed; }))
+    optimisticAnimation->stop();
+  visibleSnapshot.reset();
+}
+
+void ThreadPane::failOptimisticThread(const std::string &threadId) {
+  const auto optimistic =
+      std::ranges::find(optimisticThreads, threadId, &OptimisticThread::id);
+  if (optimistic == optimisticThreads.end())
+    return;
+  optimistic->failed = true;
+  if (std::ranges::none_of(
+          optimisticThreads,
+          [](const OptimisticThread &thread) { return !thread.failed; }))
+    optimisticAnimation->stop();
+  visibleSnapshot.reset();
+}
+
+bool ThreadPane::isOptimisticThread(const std::string &threadId) const {
+  return std::ranges::any_of(optimisticThreads,
+                             [&threadId](const OptimisticThread &thread) {
+                               return thread.id == threadId;
+                             });
+}
 
 void ThreadPane::setSortCriterion(SortCriterion criterion) {
   if (sortCriterion == criterion)
@@ -463,8 +577,8 @@ void ThreadPane::sortRootThreads(std::vector<std::string> &ids,
 void ThreadPane::appendVisibleThread(
     ThreadPaneSnapshot &snapshot, const PresentationModel &model,
     const std::unordered_map<std::string, std::size_t> &pendingByThread,
-    const std::string &threadId, const std::string &parentId,
-    std::size_t depth, std::unordered_set<std::string> &visited) const {
+    const std::string &threadId, const std::string &parentId, std::size_t depth,
+    std::unordered_set<std::string> &visited) const {
   if (!visited.insert(threadId).second)
     return;
   const ThreadPresentation *thread = model.thread(threadId);
@@ -500,8 +614,7 @@ void ThreadPane::navigateHierarchy(int key) {
   QListWidgetItem *current = list->currentItem();
   if (!current)
     return;
-  const std::string id =
-      current->data(Qt::UserRole).toString().toStdString();
+  const std::string id = current->data(Qt::UserRole).toString().toStdString();
   const bool hasChildren = current->data(HasChildrenRole).toBool();
   const bool expanded = current->data(ExpandedRole).toBool();
   if (key == Qt::Key_Right && hasChildren) {
@@ -563,14 +676,41 @@ void ThreadPane::refresh(const PresentationModel &model,
 
   std::unordered_map<std::string, std::size_t> pendingByThread;
   pendingByThread.reserve(model.pendingRequestCount());
-  for (const auto &[requestId, request] :
-       model.pendingRequestPresentations()) {
+  for (const auto &[requestId, request] : model.pendingRequestPresentations()) {
     static_cast<void>(requestId);
     ++pendingByThread[request.threadId];
   }
   ThreadPaneSnapshot next{selectedThreadId, sortCriterion, {}};
   std::unordered_set<std::string> visited;
   visited.reserve(rootOrder.size());
+  for (const OptimisticThread &optimisticThread : optimisticThreads) {
+    if (const ThreadPresentation *thread = model.thread(optimisticThread.id)) {
+      next.rows.push_back({thread->id,
+                           thread->title,
+                           thread->cwd,
+                           thread->status,
+                           {},
+                           0,
+                           0,
+                           false,
+                           false,
+                           true,
+                           optimisticThread.failed});
+    } else {
+      next.rows.push_back({optimisticThread.id,
+                           optimisticThread.title,
+                           optimisticThread.cwd,
+                           {},
+                           {},
+                           0,
+                           0,
+                           false,
+                           false,
+                           true,
+                           optimisticThread.failed});
+    }
+    visited.insert(optimisticThread.id);
+  }
   for (const std::string &id : rootOrder)
     appendVisibleThread(next, model, pendingByThread, id, {}, 0, visited);
   if (visibleSnapshot && *visibleSnapshot == next)
@@ -591,8 +731,7 @@ void ThreadPane::refresh(const PresentationModel &model,
     wanted.insert(row.id);
   for (int index = list->count() - 1; index >= 0; --index) {
     QListWidgetItem *item = list->item(index);
-    const std::string id =
-        item->data(Qt::UserRole).toString().toStdString();
+    const std::string id = item->data(Qt::UserRole).toString().toStdString();
     if (wanted.contains(id))
       continue;
     rows.erase(id);
@@ -611,8 +750,7 @@ void ThreadPane::refresh(const PresentationModel &model,
   moved.reserve(rows.size());
   for (int index = list->count() - 1; index >= 0; --index) {
     QListWidgetItem *item = list->item(index);
-    const std::string id =
-        item->data(Qt::UserRole).toString().toStdString();
+    const std::string id = item->data(Qt::UserRole).toString().toStdString();
     if (existingPositions.at(id) == index)
       continue;
     // Removing an index widget transfers it into Qt's deferred-deletion path.
@@ -641,8 +779,11 @@ void ThreadPane::refresh(const PresentationModel &model,
     item->setData(HasChildrenRole, row.hasChildren);
     item->setData(ExpandedRole, row.expanded);
     item->setData(ParentIdRole, text(row.parentId));
+    item->setData(OptimisticRole, row.optimistic);
+    item->setData(OptimisticFailedRole, row.optimisticFailed);
     updateRow(list->itemWidget(item), row.id, row.title, row.status,
-              row.pending, row.depth, row.hasChildren, row.expanded);
+              row.pending, row.depth, row.hasChildren, row.expanded,
+              row.optimistic, row.optimisticFailed);
     if (row.id == contextThreadId)
       setContextHighlight(row.id, true);
     if (row.id == snapshot.selectedThreadId)
@@ -704,11 +845,10 @@ void ThreadPane::showContextMenu(const QPoint &position) {
                           actions.toggleArchive(id);
                       });
   menu->addSeparator();
-  QAction *remove =
-      menu->addAction(QStringLiteral("Delete"), this, [this, id] {
-        if (actions.remove)
-          actions.remove(id);
-      });
+  QAction *remove = menu->addAction(QStringLiteral("Delete"), this, [this, id] {
+    if (actions.remove)
+      actions.remove(id);
+  });
   rename->setEnabled(canControl);
   fork->setEnabled(canControl);
   archive->setEnabled(canControl);
