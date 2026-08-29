@@ -765,10 +765,9 @@ void ShellWidget::Impl::renderConversation() {
     history.effective = history.requested;
   }
   history.lastAuthoritativeCount = authoritativeCount;
-  middle::ConversationSnapshot snapshot =
+  const middle::ConversationSnapshot snapshot =
       middle::ConversationProjection::project(
           authoritativeItems, thread, submissions, history.effective, now);
-  snapshot.activeTurnId = model.activeTurnId(selectedThreadId);
   if (!thread && newThreadIntent)
     middleRegion->conversation().setEmptyMessage(
         QStringLiteral("Send a message to create this thread."));

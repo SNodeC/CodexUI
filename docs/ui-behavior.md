@@ -103,13 +103,6 @@ authoritative steering card. No optimistic card is exchanged for a second
 widget, and the turn grows around it without changing existing nested card
 identity.
 
-After acknowledgment, the authoritative outer You card uses a slow, low-
-contrast breathing accent border while its turn remains active. The background
-and shadow stay static; only the border color breathes. This clearly
-distinguishes active processing from the brighter moving highlight used while
-any local prompt still awaits acknowledgment. Completion stops the border
-animation without replacing or resizing the card.
-
 The composer is cleared immediately after local admission and remains enabled.
 Users may enter additional prompts while earlier prompts await acknowledgment.
 Unsubmitted composer text and attachments form one shared local draft: ordinary

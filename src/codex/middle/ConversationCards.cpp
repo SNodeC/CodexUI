@@ -24,7 +24,6 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QResizeEvent>
-#include <QRegion>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QShowEvent>
@@ -51,8 +50,6 @@ constexpr int MaximumCommandTextHeight = 90;
 constexpr int CommandTextPadding = 7;
 constexpr int PendingAnimationIntervalMilliseconds = 32;
 constexpr qint64 PendingHalfCycleMilliseconds = 850;
-constexpr int ActiveTurnAnimationIntervalMilliseconds = 50;
-constexpr qint64 ActiveTurnCycleMilliseconds = 2400;
 constexpr int ThumbnailMaximumWidth = 280;
 constexpr int ThumbnailMaximumHeight = 180;
 constexpr int ViewerMaximumImageExtent = 4096;
@@ -790,35 +787,6 @@ public:
     owner->update();
   }
 
-  bool setAuthoritativeTurnActive(bool active) {
-    const bool next = active && current.kind == CardKind::UserMessage;
-    if (authoritativeTurnActive == next)
-      return false;
-    authoritativeTurnActive = next;
-    owner->setProperty("authoritativeTurnActive", next);
-    if (next) {
-      if (!animationTimer) {
-        animationTimer = new QTimer(owner);
-        QObject::connect(animationTimer, &QTimer::timeout, owner,
-                         [this] { repaintActiveTurnBorder(); });
-      }
-      animationTimer->setObjectName(QStringLiteral("activeTurnAnimation"));
-      animationTimer->setInterval(ActiveTurnAnimationIntervalMilliseconds);
-      animationTimer->start();
-    } else if (animationTimer) {
-      animationTimer->stop();
-    }
-    repaintActiveTurnBorder();
-    return true;
-  }
-
-  void repaintActiveTurnBorder() {
-    const QRect outer = owner->rect();
-    const QRegion border =
-        QRegion(outer).subtracted(QRegion(outer.adjusted(3, 3, -3, -3)));
-    owner->update(border);
-  }
-
   void setNestedCards(const std::vector<ConversationCard *> &cards) {
     const std::unordered_set<ConversationCard *> retained(cards.begin(),
                                                            cards.end());
@@ -1194,7 +1162,6 @@ public:
   QWidget *nestedCards = nullptr;
   QVBoxLayout *nestedLayout = nullptr;
   bool hasVisibleNestedCards = false;
-  bool authoritativeTurnActive = false;
 };
 
 ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent,
@@ -1218,10 +1185,6 @@ bool ConversationCard::isCollapsed() const noexcept { return impl_->collapsed; }
 
 void ConversationCard::setCollapsed(bool collapsed) {
   impl_->setCollapsed(collapsed);
-}
-
-bool ConversationCard::setAuthoritativeTurnActive(bool active) {
-  return impl_->setAuthoritativeTurnActive(active);
 }
 
 void ConversationCard::setNestedCards(
@@ -1252,23 +1215,6 @@ bool ConversationCard::canApply(const VisibleCardData &data) const noexcept {
 
 void ConversationCard::paintEvent(QPaintEvent *event) {
   QFrame::paintEvent(event);
-  if (impl_->current.kind == CardKind::UserMessage &&
-      impl_->authoritativeTurnActive) {
-    QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing);
-    const QRectF bounds = QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0);
-    const qreal phase =
-        qreal(QDateTime::currentMSecsSinceEpoch() % ActiveTurnCycleMilliseconds) /
-        ActiveTurnCycleMilliseconds;
-    const qreal intensity =
-        0.5 - 0.5 * std::cos(phase * 6.28318530717958647692);
-    QColor border(QStringLiteral("#2f6feb"));
-    border.setAlphaF(0.24 + intensity * 0.34);
-    painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(border, 1.5));
-    painter.drawRoundedRect(bounds, 8.0, 8.0);
-    return;
-  }
   if (impl_->current.kind != CardKind::LocalPrompt)
     return;
   const auto *prompt = std::get_if<LocalPromptData>(&impl_->current.payload);
