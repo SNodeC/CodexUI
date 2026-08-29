@@ -21,6 +21,10 @@ test("server-rendered shell exposes keyboard and landmark semantics", () => {
     assert.match(markup, /aria-label="Hide Codex update cards"/u);
     assert.match(markup, /aria-label="New command cards start expanded"/u);
     assert.match(markup, /aria-label="New image cards start expanded"/u);
+    assert.match(markup, /aria-label="Message Codex"/u);
+    assert.match(markup, /aria-describedby="composer-keyboard-hint"/u);
+    assert.match(markup, /aria-keyshortcuts="Enter Control\+Enter Meta\+Enter"/u);
+    assert.match(markup, /id="composer-keyboard-hint">Enter to send · Shift\+Enter for a new line/u);
     assert.match(markup, /aria-expanded="false"/u);
     session.dispose();
 });

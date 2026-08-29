@@ -12,6 +12,7 @@ import type {
     ImageGenerationData, PlanData, VisibleCardData,
 } from "../index.js";
 import type {BrowserFrontendSession} from "./BrowserFrontendSession.js";
+import {shouldSubmitPromptFromKey} from "./ComposerKeyboard.js";
 import {humanizeProtocolLabel as humanize} from "./Humanize.js";
 
 const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -470,9 +471,14 @@ function Composer({session, active, draftKey, drafts, optionsRef}: {session: Bro
     };
     return <form className="composer" onSubmit={submit}>
         <textarea value={prompt} disabled={!active} onChange={event => { setPrompt(event.target.value); drafts.set(draftKey, event.target.value); }}
-            onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}
+            aria-label="Message Codex" aria-describedby="composer-keyboard-hint" aria-keyshortcuts="Enter Control+Enter Meta+Enter"
+            onKeyDown={event => { if (shouldSubmitPromptFromKey({
+                key: event.key, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey,
+                shiftKey: event.shiftKey, repeat: event.repeat,
+                isComposing: event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229,
+            })) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}
             placeholder={active ? "Message Codex…" : "Select or create a thread"} rows={3} />
-        <div className="composer-actions"><span>Enter to send · Shift+Enter for a new line</span>
+        <div className="composer-actions"><span id="composer-keyboard-hint">Enter to send · Shift+Enter for a new line</span>
             {running ? <button type="button" className="stop-button" onClick={() => session.interrupt()}>■ Stop</button>
                 : <button type="submit" className="send-button" disabled={!active || prompt.trim() === ""}>Send ↑</button>}</div>
     </form>;

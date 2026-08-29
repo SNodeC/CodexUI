@@ -84,6 +84,13 @@ bottom or is owned by the user.
 
 ## Prompt submission and acknowledgment
 
+With the prompt editor focused, Enter (including keypad Enter) submits through
+the same admission path as the Send button. Shift+Enter always inserts a new
+line, including when Control or Meta is also held; Control+Enter and Meta+Enter
+remain submission aliases, while Alt+Enter does not submit. Auto-repeated Enter
+events and Enter used to confirm an active input-method composition never
+submit a prompt.
+
 Submitting a prompt creates a client-local pending prompt card at the bottom of
 the destination thread immediately. The card uses a muted version of the normal
 blue user-card treatment, with a brighter blue highlight sweeping left and

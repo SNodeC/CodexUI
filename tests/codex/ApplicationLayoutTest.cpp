@@ -22,6 +22,7 @@
 #include <QFile>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QListWidget>
@@ -36,6 +37,7 @@
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QTemporaryDir>
+#include <QTextCursor>
 #include <QTimer>
 #include <QToolButton>
 #include <QThread>
@@ -70,6 +72,88 @@ bool expect(bool condition, const char *message) {
     return true;
   std::cerr << "FAILED: " << message << '\n';
   return false;
+}
+
+void sendPromptKey(codexui::ExpandingPromptEditor &editor, int key,
+                   Qt::KeyboardModifiers modifiers = Qt::NoModifier,
+                   bool autoRepeat = false) {
+  QKeyEvent event(QEvent::KeyPress, key, modifiers, QString(), autoRepeat, 1);
+  QCoreApplication::sendEvent(&editor, &event);
+}
+
+bool testPromptKeyboardSubmission() {
+  codexui::ExpandingPromptEditor editor;
+  editor.resize(480, 80);
+  editor.show();
+  editor.setFocus();
+  QCoreApplication::processEvents();
+
+  int submissions = 0;
+  QObject::connect(&editor,
+                   &codexui::ExpandingPromptEditor::submitRequested,
+                   [&submissions] { ++submissions; });
+  const auto resetDraft = [&editor] {
+    editor.setPlainText(QStringLiteral("draft"));
+    editor.moveCursor(QTextCursor::End);
+  };
+
+  bool result =
+      expect(editor.accessibleName() == QStringLiteral("Message Codex") &&
+                 editor.accessibleDescription().contains(
+                     QStringLiteral("Shift+Enter")),
+             "the prompt editor exposes its name and keyboard hint");
+
+  resetDraft();
+  sendPromptKey(editor, Qt::Key_Return);
+  result &= expect(submissions == 1,
+                   "Return submits the focused prompt editor");
+  resetDraft();
+  sendPromptKey(editor, Qt::Key_Enter, Qt::KeypadModifier);
+  result &= expect(submissions == 2,
+                   "keypad Enter submits the focused prompt editor");
+  resetDraft();
+  sendPromptKey(editor, Qt::Key_Return, Qt::ControlModifier);
+  result &= expect(submissions == 3,
+                   "Control+Enter remains a prompt submission alias");
+  resetDraft();
+  sendPromptKey(editor, Qt::Key_Return, Qt::MetaModifier);
+  result &= expect(submissions == 4,
+                   "Meta+Enter is a prompt submission alias");
+
+  resetDraft();
+  sendPromptKey(editor, Qt::Key_Return, Qt::ShiftModifier);
+  result &= expect(submissions == 4 &&
+                       editor.toPlainText() == QStringLiteral("draft\n"),
+                   "Shift+Enter inserts a newline without submitting");
+  resetDraft();
+  sendPromptKey(editor, Qt::Key_Return,
+                Qt::ControlModifier | Qt::ShiftModifier);
+  result &= expect(
+      submissions == 4 && editor.toPlainText() == QStringLiteral("draft\n"),
+      "Shift takes precedence over the Control+Enter submission alias");
+
+  resetDraft();
+  sendPromptKey(editor, Qt::Key_Return, Qt::AltModifier);
+  result &= expect(submissions == 4, "Alt+Enter does not submit a prompt");
+  resetDraft();
+  sendPromptKey(editor, Qt::Key_Return, Qt::ControlModifier, true);
+  result &= expect(submissions == 4,
+                   "an auto-repeated Enter chord does not submit a prompt");
+
+  resetDraft();
+  QInputMethodEvent preedit(QStringLiteral("candidate"), {});
+  QCoreApplication::sendEvent(&editor, &preedit);
+  sendPromptKey(editor, Qt::Key_Return);
+  result &= expect(submissions == 4,
+                   "Enter does not submit while IME preedit is active");
+  QInputMethodEvent commit;
+  commit.setCommitString(QStringLiteral("candidate"));
+  QCoreApplication::sendEvent(&editor, &commit);
+  resetDraft();
+  sendPromptKey(editor, Qt::Key_Return);
+  result &= expect(submissions == 5,
+                   "Enter submits again after IME composition completes");
+  return result;
 }
 
 bool commitPath(git_repository *repository, const char *path) {
@@ -1994,7 +2078,8 @@ int main(int argc, char **argv) {
   QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope,
                      settingsDirectory.path());
   using namespace codexui::codex::middle;
-  bool result = testOverlayGeometryAndRegionRouting();
+  bool result = testPromptKeyboardSubmission();
+  result &= testOverlayGeometryAndRegionRouting();
   result &= testThreadSelectionProjection();
   result &= testThreadHierarchyExpansionAndNavigation();
   result &= testIncrementalThreadSettings();

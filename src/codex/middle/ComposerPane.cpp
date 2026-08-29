@@ -173,6 +173,7 @@ ComposerPane::ComposerPane(QWidget *anchor)
   promptEditor_ = new codexui::ExpandingPromptEditor(composerBody_);
   sendButton_ = new QPushButton(QStringLiteral("Send"), composerBody_);
   sendButton_->setProperty("kind", "primary");
+  sendButton_->setToolTip(QStringLiteral("Send prompt (Enter)"));
   sendButton_->setFixedSize(62, ControlHeight);
   stopButton_ = new QPushButton(QStringLiteral("Stop"), composerBody_);
   stopButton_->setProperty("kind", "stop");
