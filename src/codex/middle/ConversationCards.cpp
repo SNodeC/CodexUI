@@ -192,6 +192,81 @@ private:
   QString path_;
 };
 
+class ImageRibbon final : public QScrollArea {
+public:
+  explicit ImageRibbon(QWidget *parent = nullptr) : QScrollArea(parent) {
+    setObjectName(QStringLiteral("messageImages"));
+    setFrameShape(QFrame::StyledPanel);
+    setWidgetResizable(false);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    setStyleSheet(QStringLiteral(
+        "QScrollArea#messageImages{background:#fbfcfe;"
+        "border:1px solid #d7dee8;border-radius:6px;}"
+        "QWidget#messageImageStrip{background:transparent;}"));
+
+    strip_ = new QWidget;
+    strip_->setObjectName(QStringLiteral("messageImageStrip"));
+    layout_ = new QHBoxLayout(strip_);
+    layout_->setContentsMargins(4, 4, 4, 4);
+    layout_->setSpacing(8);
+    layout_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    setWidget(strip_);
+    hide();
+  }
+
+  void setPaths(const QStringList &paths, bool forceRebuild = false) {
+    bool matches = !forceRebuild && layout_->count() == paths.size();
+    for (qsizetype index = 0; matches && index < paths.size(); ++index) {
+      const auto *thumbnail = dynamic_cast<ImageThumbnail *>(
+          layout_->itemAt(static_cast<int>(index))->widget());
+      matches = thumbnail && thumbnail->represents(paths.at(index));
+    }
+    if (matches) {
+      setVisible(!paths.isEmpty());
+      return;
+    }
+
+    while (QLayoutItem *item = layout_->takeAt(0)) {
+      delete item->widget();
+      delete item;
+    }
+    for (const QString &path : paths)
+      layout_->addWidget(new ImageThumbnail(path, strip_), 0, Qt::AlignTop);
+
+    layout_->activate();
+    naturalSize_ = layout_->sizeHint().expandedTo(QSize(0, 0));
+    strip_->setFixedSize(naturalSize_);
+    horizontalScrollBar()->setValue(0);
+    refreshHeight();
+    setVisible(!paths.isEmpty());
+  }
+
+protected:
+  void resizeEvent(QResizeEvent *event) override {
+    QScrollArea::resizeEvent(event);
+    refreshHeight();
+  }
+
+private:
+  void refreshHeight() {
+    const int availableWidth = std::max(0, viewport()->width());
+    const bool overflows = naturalSize_.width() > availableWidth;
+    const int scrollBarHeight =
+        overflows ? style()->pixelMetric(QStyle::PM_ScrollBarExtent) : 0;
+    const int target = std::max(
+        0, naturalSize_.height() + scrollBarHeight + 2 * frameWidth());
+    if (height() != target)
+      setFixedHeight(target);
+  }
+
+  QWidget *strip_ = nullptr;
+  QHBoxLayout *layout_ = nullptr;
+  QSize naturalSize_;
+};
+
 class ImageViewer final : public QDialog {
 public:
   explicit ImageViewer(const QString &path) : QDialog(nullptr, Qt::Window) {
@@ -922,36 +997,12 @@ public:
   }
 
   void createImageContainer() {
-    images = new QWidget(content);
-    images->setObjectName(QStringLiteral("messageImages"));
-    imageLayout = new QVBoxLayout(images);
-    imageLayout->setContentsMargins(0, 0, 0, 0);
-    imageLayout->setSpacing(8);
-    imageLayout->setAlignment(Qt::AlignLeft);
-    images->hide();
+    images = new ImageRibbon(content);
     contentLayout->addWidget(images);
   }
 
   void setImages(const QStringList &paths, bool forceRebuild = false) {
-    bool matches = !forceRebuild && imageLayout->count() == paths.size();
-    for (qsizetype index = 0; matches && index < paths.size(); ++index) {
-      const auto *thumbnail = dynamic_cast<ImageThumbnail *>(
-          imageLayout->itemAt(static_cast<int>(index))->widget());
-      matches = thumbnail && thumbnail->represents(paths.at(index));
-    }
-    if (matches) {
-      images->setVisible(!paths.isEmpty());
-      return;
-    }
-    while (QLayoutItem *item = imageLayout->takeAt(0)) {
-      delete item->widget();
-      delete item;
-    }
-    for (const QString &path : paths) {
-      auto *thumbnail = new ImageThumbnail(path, images);
-      imageLayout->addWidget(thumbnail, 0, Qt::AlignLeft);
-    }
-    images->setVisible(!paths.isEmpty());
+    images->setPaths(paths, forceRebuild);
   }
 
   void createComposition(const UserMessageData &message) {
@@ -1238,8 +1289,7 @@ public:
   ContentSizedTextView *command = nullptr;
   CommandOutputView *output = nullptr;
   QTimer *animationTimer = nullptr;
-  QWidget *images = nullptr;
-  QVBoxLayout *imageLayout = nullptr;
+  ImageRibbon *images = nullptr;
   QWidget *nestedCards = nullptr;
   QVBoxLayout *nestedLayout = nullptr;
   bool hasVisibleNestedCards = false;

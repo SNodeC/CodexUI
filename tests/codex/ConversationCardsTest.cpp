@@ -2122,10 +2122,19 @@ bool testPendingPromptAnimation() {
 bool testMessageImagePresentation() {
   QTemporaryDir directory;
   const QString path = directory.filePath(QStringLiteral("sample.png"));
+  const QString portraitPath =
+      directory.filePath(QStringLiteral("portrait.png"));
+  const QString squarePath = directory.filePath(QStringLiteral("square.png"));
   QImage source(640, 360, QImage::Format_ARGB32_Premultiplied);
   source.fill(QColor(QStringLiteral("#2f6feb")));
-  bool result = expect(directory.isValid() && source.save(path),
-                       "image test fixture is a real readable image");
+  QImage portrait(320, 640, QImage::Format_ARGB32_Premultiplied);
+  portrait.fill(QColor(QStringLiteral("#6941c6")));
+  QImage square(420, 420, QImage::Format_ARGB32_Premultiplied);
+  square.fill(QColor(QStringLiteral("#18865e")));
+  bool result =
+      expect(directory.isValid() && source.save(path) &&
+                 portrait.save(portraitPath) && square.save(squarePath),
+             "image test fixtures are real readable images");
 
   VisibleCardData message{
       AuthoritativeItemKey{"images", "turn", "message"},
@@ -2133,18 +2142,53 @@ bool testMessageImagePresentation() {
       "images",
       "turn",
       "message",
-      UserMessageData{QStringLiteral("attached image"), {path}}};
+      UserMessageData{QStringLiteral("attached images"),
+                      {path, portraitPath, squarePath}}};
   auto *card = new ConversationCard(message);
+  card->resize(430, 400);
   card->show();
   spin();
-  auto *thumbnail =
-      card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
+  auto *ribbon =
+      card->findChild<QScrollArea *>(QStringLiteral("messageImages"));
+  auto thumbnails =
+      card->findChildren<QLabel *>(QStringLiteral("messageImageThumbnail"));
+  std::ranges::sort(thumbnails, [ribbon](QLabel *left, QLabel *right) {
+    return left->mapTo(ribbon, QPoint{}).x() <
+           right->mapTo(ribbon, QPoint{}).x();
+  });
+  auto *thumbnail = thumbnails.empty() ? nullptr : thumbnails.front();
   const QPixmap thumbnailPixmap = thumbnail ? thumbnail->pixmap() : QPixmap{};
   result &=
-      expect(thumbnail && thumbnail->property("imageAvailable").toBool() &&
+      expect(ribbon && thumbnails.size() == 3 && thumbnail &&
+                 thumbnail->property("imageAvailable").toBool() &&
                  !thumbnailPixmap.isNull() && thumbnailPixmap.width() <= 280 &&
-                 thumbnailPixmap.height() <= 180,
-             "a local image is decoded directly to a bounded thumbnail");
+                 thumbnailPixmap.height() <= 180 &&
+                 thumbnails[0]->mapTo(ribbon, QPoint{}).y() ==
+                     thumbnails[1]->mapTo(ribbon, QPoint{}).y() &&
+                 thumbnails[1]->mapTo(ribbon, QPoint{}).y() ==
+                     thumbnails[2]->mapTo(ribbon, QPoint{}).y() &&
+                 thumbnails[0]->mapTo(ribbon, QPoint{}).x() <
+                     thumbnails[1]->mapTo(ribbon, QPoint{}).x() &&
+                 thumbnails[1]->mapTo(ribbon, QPoint{}).x() <
+                     thumbnails[2]->mapTo(ribbon, QPoint{}).x() &&
+                 ribbon->horizontalScrollBar()->maximum() > 0 &&
+                 ribbon->verticalScrollBar()->maximum() == 0 &&
+                 ribbon->frameWidth() == 1 && ribbon->widget() &&
+                 ribbon->widget()->layout() &&
+                 ribbon->widget()->layout()->contentsMargins() ==
+                     QMargins(4, 4, 4, 4),
+             "multiple bounded thumbnails form one horizontally scrollable "
+             "and canonically bounded ribbon");
+  const int narrowRibbonHeight = ribbon ? ribbon->height() : 0;
+  card->resize(1000, card->height());
+  spin();
+  result &= expect(ribbon && ribbon->horizontalScrollBar()->maximum() == 0 &&
+                       ribbon->height() < narrowRibbonHeight,
+                   "a wide ribbon removes unnecessary horizontal overflow");
+  card->resize(430, card->height());
+  spin();
+  result &= expect(ribbon && ribbon->horizontalScrollBar()->maximum() > 0,
+                   "narrowing restores accessible horizontal overflow");
   auto &payload = std::get<UserMessageData>(message.payload);
   payload.text = QStringLiteral("attached image with edited text");
   result &= expect(card->apply(message),

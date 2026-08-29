@@ -34,6 +34,10 @@ function CopyIcon() {
     return <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="2.5" width="8" height="9" rx="1.5"/><rect x="6" y="5.5" width="8" height="9" rx="1.5"/></svg>;
 }
 
+function ImageRibbon({paths}: {paths: string[]}) {
+    return paths.length > 0 ? <div className="image-ribbon">{paths.map(path => <code key={path}>{path}</code>)}</div> : null;
+}
+
 const defaultConversationPresentation: ConversationPresentationOptions = {
     showReasoning: false,
     showCodexUpdates: true,
@@ -211,10 +215,10 @@ export function Card({card, active, collapsed, onToggle, nested, turnContainer =
     let phaseClass = "";
     if (card.kind === "userMessage") {
         const data = card.payload as UserMessageData; title = "You";
-        body = <><div className="card-text">{data.text}</div>{data.imagePaths.map(path => <code key={path}>{path}</code>)}</>;
+        body = <><div className="card-text">{data.text}</div><ImageRibbon paths={data.imagePaths} /></>;
     } else if (card.kind === "localPrompt") {
         const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You";
-        body = <><div className="card-text">{data.prompt}</div>{data.error && <div className="error-text">{data.error}</div>}</>;
+        body = <><div className="card-text">{data.prompt}</div><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}</>;
     } else if (card.kind === "agentMessage") {
         const data = card.payload as AgentMessageData; title = "Codex"; phaseClass = data.finalAnswer ? "final" : "update";
         body = <SafeMarkdown text={data.text} />;
@@ -235,7 +239,7 @@ export function Card({card, active, collapsed, onToggle, nested, turnContainer =
         body = <><div className="card-text">{data.prompt || data.resultText || data.childThreadId}</div><small>{humanize(data.status)}</small></>;
     } else if (card.kind === "imageGeneration") {
         const data = card.payload as {path: string; status: string; revisedPrompt: string}; title = "Generated image";
-        body = <><div className="card-text">{data.revisedPrompt}</div><code>{data.path}</code></>;
+        body = <><div className="card-text">{data.revisedPrompt}</div><ImageRibbon paths={data.path ? [data.path] : []} /></>;
     } else if (card.kind === "plan") {
         const data = card.payload as {legacyText: string}; title = "Plan"; body = <div className="card-text">{data.legacyText}</div>;
     } else {

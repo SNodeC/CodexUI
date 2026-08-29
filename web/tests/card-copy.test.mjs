@@ -76,3 +76,15 @@ test("only an authoritative running-turn You container is emphasized", () => {
     }));
     assert.doesNotMatch(finished, /active-turn/u);
 });
+
+test("message attachments retain one horizontal ribbon in source order", () => {
+    const user = itemCard("userMessage", "prompt", {
+        text: "Prompt", imagePaths: ["/tmp/one.png", "/tmp/two.png", "/tmp/three.png"],
+    });
+    const markup = renderToStaticMarkup(createElement(Card, {
+        card: user, active: false, collapsed: false, onToggle() {},
+    }));
+    assert.match(markup, /class="image-ribbon"/u);
+    assert.ok(markup.indexOf("one.png") < markup.indexOf("two.png"));
+    assert.ok(markup.indexOf("two.png") < markup.indexOf("three.png"));
+});

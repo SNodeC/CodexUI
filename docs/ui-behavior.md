@@ -140,6 +140,12 @@ plain-text transitional card until its authoritative item arrives.
 Generated-image items show the app-server-saved image as a bounded thumbnail.
 Selecting it opens the shared non-modal image viewer; encoded image data is
 never displayed as generic activity text.
+Multiple message attachments retain source order in one horizontal ribbon.
+The ribbon never wraps or grows the card beyond its available width; horizontal
+overflow appears only when required, while its vertical size remains bounded by
+the tallest thumbnail. A standard 1 px neutral border, 6 px radius, 4 px inner
+padding, and soft-neutral surface enclose both thumbnails and scrollbar. The
+ribbon remains subordinate content of its existing card, never a nested card.
 
 User messages use the canonical soft-blue identity surface. Final Codex
 messages use the canonical soft-violet identity surface, while interim Codex

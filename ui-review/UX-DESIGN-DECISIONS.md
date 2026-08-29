@@ -100,6 +100,11 @@ non-Markdown cards copy their deterministic primary-content text rather than
 rendered widget text.
 Folding is immediate rather than animated and anchors the selected title row,
 so content only contracts upward or grows downward below the interaction point.
+Multiple message images form one source-ordered horizontal ribbon. It keeps the
+height of the tallest bounded thumbnail, never wraps, and exposes horizontal
+overflow only when the row exceeds the available card width. Its standard 1 px
+neutral border, 6 px radius, 4 px padding, and soft-neutral surface contain the
+scrollbar without turning the ribbon into a nested card.
 
 ## Application layout
 

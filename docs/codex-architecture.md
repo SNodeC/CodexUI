@@ -507,9 +507,10 @@ bounded protocol and security design.
 
 Image paths are retained in pending and authoritative user-message
 presentation. The conversation shows bounded thumbnails below the Markdown
-prompt; selecting one opens a non-modal, fit-to-window viewer. CodexUI never
-fetches remote image URLs implicitly, and missing local images remain visible
-as unavailable placeholders.
+prompt in one source-ordered horizontal ribbon; overflow scrolls horizontally
+without wrapping or widening the card. Selecting a thumbnail opens a non-modal,
+fit-to-window viewer. CodexUI never fetches remote image URLs implicitly, and
+missing local images remain visible as unavailable placeholders.
 
 Authoritative `imageGeneration` items use their app-server `savedPath` and the
 same thumbnail/viewer. Their Base64 `result` is transport data and is never
