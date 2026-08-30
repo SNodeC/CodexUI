@@ -15,6 +15,7 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 
+#include <string_view>
 #include <vector>
 
 namespace codexui::codex {
@@ -35,6 +36,7 @@ std::string stringValue(const nlohmann::json &object, const char *key) {
 
 QLabel *wrapped(QString value, const char *kind = "body") {
   auto *label = new QLabel(std::move(value));
+  label->setTextFormat(Qt::PlainText);
   label->setProperty("kind", kind);
   label->setWordWrap(true);
   label->setMinimumWidth(0);
@@ -74,6 +76,70 @@ void addDetail(QVBoxLayout *layout, const QString &label,
   if (!value.empty())
     layout->addWidget(
         wrapped(QStringLiteral("%1: %2").arg(label, text(value)), "meta"));
+}
+
+QString permissionKey(std::string_view key) {
+  if (key == "fileSystem")
+    return QStringLiteral("File system");
+  if (key == "network")
+    return QStringLiteral("Network");
+  if (key == "globScanMaxDepth")
+    return QStringLiteral("glob scan maximum depth");
+  return text(std::string(key));
+}
+
+QString permissionValue(const nlohmann::json &value) {
+  if (value.is_boolean())
+    return value.get<bool>() ? QStringLiteral("Yes") : QStringLiteral("No");
+  if (value.is_string())
+    return text(value.get<std::string>());
+  if (value.is_null())
+    return QStringLiteral("None");
+  return text(value.dump());
+}
+
+void addPermissionValue(QVBoxLayout *layout, const nlohmann::json &value,
+                        const QString &path) {
+  if (value.is_object()) {
+    if (value.empty()) {
+      layout->addWidget(wrapped(path.isEmpty()
+                                    ? QStringLiteral("None specified")
+                                    : QStringLiteral("%1: None").arg(path),
+                                "meta"));
+      return;
+    }
+    for (auto iterator = value.begin(); iterator != value.end(); ++iterator) {
+      const QString key = permissionKey(iterator.key());
+      addPermissionValue(layout, iterator.value(),
+                         path.isEmpty()
+                             ? key
+                             : QStringLiteral("%1 / %2").arg(path, key));
+    }
+    return;
+  }
+  if (value.is_array()) {
+    if (value.empty()) {
+      layout->addWidget(wrapped(path.isEmpty()
+                                    ? QStringLiteral("None specified")
+                                    : QStringLiteral("%1: None").arg(path),
+                                "meta"));
+      return;
+    }
+    for (qsizetype index = 0; index < static_cast<qsizetype>(value.size());
+         ++index) {
+      addPermissionValue(
+          layout, value[static_cast<std::size_t>(index)],
+          path.isEmpty()
+              ? QStringLiteral("Permission %1").arg(index + 1)
+              : QStringLiteral("%1 / %2").arg(path).arg(index + 1));
+    }
+    return;
+  }
+  layout->addWidget(
+      wrapped(QStringLiteral("%1: %2")
+                  .arg(path.isEmpty() ? QStringLiteral("Value") : path,
+                       permissionValue(value)),
+              "meta"));
 }
 
 void addChoice(QComboBox *combo, const QString &label, const char *value) {
@@ -216,8 +282,10 @@ PendingRequestDialog::present(const PendingRequestPresentation &request,
       contentLayout->addWidget(wrapped(text(message)));
     const std::string url = stringValue(raw, "url");
     if (!url.empty()) {
-      auto *link = wrapped(
-          QStringLiteral("<a href=\"%1\">%1</a>").arg(text(url)), "body");
+      const QString escapedUrl = text(url).toHtmlEscaped();
+      auto *link = wrapped(QStringLiteral("<a href=\"%1\">%1</a>")
+                               .arg(escapedUrl),
+                           "body");
       link->setTextFormat(Qt::RichText);
       contentLayout->addWidget(link);
     }
@@ -241,9 +309,11 @@ PendingRequestDialog::present(const PendingRequestPresentation &request,
               stringValue(raw, "reason"));
     addDetail(contentLayout, QStringLiteral("Working directory"),
               stringValue(raw, "cwd"));
-    contentLayout->addWidget(wrapped(
-        QStringLiteral("Codex requests additional filesystem or network "
-                       "permissions. Review the reason before approving.")));
+    contentLayout->addWidget(wrapped(QStringLiteral("Requested permissions"),
+                                     "title"));
+    addPermissionValue(
+        contentLayout,
+        raw.value("permissions", nlohmann::json::object()), QString{});
     decision = new QComboBox;
     addChoice(decision, QStringLiteral("Approve for this turn"), "turn");
     addChoice(decision, QStringLiteral("Approve for this session"), "session");
@@ -276,8 +346,42 @@ PendingRequestDialog::present(const PendingRequestPresentation &request,
   auto *buttons =
       new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
   buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Submit"));
-  QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog,
-                   &QDialog::accept);
+  nlohmann::json acceptedAnswers = nlohmann::json::object();
+  nlohmann::json acceptedStructuredContent = nullptr;
+  QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+    if (request.kind == "user-input") {
+      nlohmann::json answers = nlohmann::json::object();
+      for (const QuestionEditor &question : questions) {
+        nlohmann::json values = nlohmann::json::array();
+        for (const auto &[label, choice] : question.choices) {
+          if (choice->isChecked())
+            values.push_back(label);
+        }
+        if (question.other && !question.other->text().trimmed().isEmpty())
+          values.push_back(question.other->text().toStdString());
+        if (values.empty()) {
+          QMessageBox::warning(&dialog, QStringLiteral("Incomplete response"),
+                               QStringLiteral("Answer every question before "
+                                              "submitting."));
+          return;
+        }
+        answers[question.id] = {{"answers", std::move(values)}};
+      }
+      acceptedAnswers = std::move(answers);
+    } else if (request.kind == "mcp-elicitation" && structuredContent &&
+               decision->currentData().toString() == QStringLiteral("accept")) {
+      nlohmann::json content = nlohmann::json::parse(
+          structuredContent->toPlainText().toStdString(), nullptr, false);
+      if (content.is_discarded() || !content.is_object()) {
+        QMessageBox::warning(&dialog, QStringLiteral("Invalid response"),
+                             QStringLiteral("The MCP response must be a valid "
+                                            "JSON object."));
+        return;
+      }
+      acceptedStructuredContent = std::move(content);
+    }
+    dialog.accept();
+  });
   QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog,
                    &QDialog::reject);
   root->addWidget(buttons);
@@ -290,39 +394,11 @@ PendingRequestDialog::present(const PendingRequestPresentation &request,
     response.result = {
         {"decision", decision->currentData().toString().toStdString()}};
   } else if (request.kind == "user-input") {
-    nlohmann::json answers = nlohmann::json::object();
-    for (const QuestionEditor &question : questions) {
-      nlohmann::json values = nlohmann::json::array();
-      for (const auto &[label, choice] : question.choices) {
-        if (choice->isChecked())
-          values.push_back(label);
-      }
-      if (question.other && !question.other->text().trimmed().isEmpty())
-        values.push_back(question.other->text().toStdString());
-      if (values.empty()) {
-        QMessageBox::warning(parent, QStringLiteral("Incomplete response"),
-                             QStringLiteral("Answer every question before "
-                                            "submitting."));
-        return std::nullopt;
-      }
-      answers[question.id] = {{"answers", std::move(values)}};
-    }
-    response.result = {{"answers", std::move(answers)}};
+    response.result = {{"answers", std::move(acceptedAnswers)}};
   } else if (request.kind == "mcp-elicitation") {
     const std::string action = decision->currentData().toString().toStdString();
-    nlohmann::json content = nullptr;
-    if (action == "accept" && structuredContent) {
-      content = nlohmann::json::parse(
-          structuredContent->toPlainText().toStdString(), nullptr, false);
-      if (content.is_discarded() || !content.is_object()) {
-        QMessageBox::warning(parent, QStringLiteral("Invalid response"),
-                             QStringLiteral("The MCP response must be a valid "
-                                            "JSON object."));
-        return std::nullopt;
-      }
-    }
     response.result = {{"action", action},
-                       {"content", std::move(content)},
+                       {"content", std::move(acceptedStructuredContent)},
                        {"_meta", nullptr}};
   } else if (request.kind == "permissions-approval") {
     const std::string scope = decision->currentData().toString().toStdString();

@@ -493,11 +493,9 @@ nlohmann::json TurnSettingsWidget::turnStartOptions() const {
       (touched(Field::Sandbox) || touched(Field::Network))) {
     result["sandboxPolicy"] = sandboxPolicy();
   }
-  if (touched(Field::Collaboration)) {
-    const nlohmann::json mode = collaborationMode();
-    if (!mode.is_null())
-      result["collaborationMode"] = mode;
-  }
+  const nlohmann::json mode = collaborationMode();
+  if (!mode.is_null())
+    result["collaborationMode"] = mode;
   return result;
 }
 

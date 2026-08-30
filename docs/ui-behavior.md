@@ -17,11 +17,18 @@ client-local prompt admissions; cards and inspectors do not maintain a second
 domain store.
 
 The conversation has one semantic grouping level: an app-server turn contains
-its items in server order. Authoritative cards are keyed by stable thread,
-turn, and item IDs; local prompt cards are keyed by their submission IDs. The
-same keyed reconcile path handles initial display and updates, mutating a card
-in place when its visible data changes. An identical visible projection does
-not rebuild widgets or change geometry.
+its items in server order. When a turn has a prompt, its first You card is the
+visible turn container and owns all later cards from that turn. Steering You
+cards are nested with the activity they steer rather than starting a second
+visual turn. For every turn represented in the retained activity window, the
+projection identifies that opening prompt from the complete authoritative turn
+and pins it outside the activity budget. History paging therefore never
+promotes a later steering You card to turn ownership; loading earlier activity
+retains the same root identity without duplication. Authoritative cards are
+keyed by stable thread, turn, and item IDs; local prompt cards are keyed by
+their submission IDs. The same keyed reconcile path handles initial display
+and updates, mutating a card in place when its visible data changes. An
+identical visible projection does not rebuild widgets or change geometry.
 
 Local prompt admission resumes bottom following when the only pause was caused
 by composer overlay growth, so the complete pending prompt becomes visible.
@@ -45,6 +52,16 @@ bottom or is owned by the user.
   beginning with numbers precede other titles. Timestamp values that are not
   available sort after timestamped threads. The directions are fixed; the UI
   does not provide a separate ascending/descending control.
+- Admitting a prompt immediately promotes its root thread group to the first
+  position under `Recent` and `Last changed`. This is a transient presentation
+  override, not a fabricated provider timestamp; it retires when updated
+  authoritative ordering data arrives. `Created` and `Alphanumeric` remain
+  unaffected.
+- The Plan inspector preserves app-server step states while the owning turn is
+  active. If a stale step still reports `inProgress` after its owning turn or
+  thread becomes terminal, the display reconciles that step to Completed,
+  Failed, or Interrupted. Pending steps remain Pending, and retained protocol
+  data is not rewritten.
 - Each visible thread is presented as a compact card. Its status indicator is
   part of that card, and hover and selection strengthen the same card surface
   instead of introducing a separate row treatment. The Sort and Transport
@@ -60,8 +77,13 @@ bottom or is owned by the user.
   fallback for missing or inconsistent selection state.
 - A new thread is created only from an explicit New Thread intent. Its dialog
   captures the workspace, optional name, instructions, and ephemeral state.
+  In the browser, the workspace is an app-server-local path entered as text;
+  browser file pickers cannot truthfully select an arbitrary server directory.
 - Background thread activity, list refreshes, reconnects, and creation by
-  another frontend never change the user's selected thread.
+  another frontend never change the user's selected thread. Completion of a
+  locally started creation likewise selects the returned thread only while
+  its optimistic draft remains visibly selected; later navigation is
+  preserved while the draft's queued prompts continue independently.
 - Selecting a thread hydrates it once per bridge connection even when the
   discovery result already contains an active turn. The full read is merged
   into the retained per-thread presentation, so live Plan and Agents state
@@ -70,6 +92,13 @@ bottom or is owned by the user.
 
 ## Prompt submission and acknowledgment
 
+With the prompt editor focused, Enter (including keypad Enter) submits through
+the same admission path as the Send button. Shift+Enter always inserts a new
+line, including when Control or Meta is also held; Control+Enter and Meta+Enter
+remain submission aliases, while Alt+Enter does not submit. Auto-repeated Enter
+events and Enter used to confirm an active input-method composition never
+submit a prompt.
+
 Submitting a prompt creates a client-local pending prompt card at the bottom of
 the destination thread immediately. The card uses a muted version of the normal
 blue user-card treatment, with a brighter blue highlight sweeping left and
@@ -77,7 +106,8 @@ right across it until the app-server acknowledges the operation.
 Ordinary attached files appear as local Markdown links at the bottom of that
 card from its first frame. The same composed Markdown is sent to app-server and
 retained by the authoritative user message, so acknowledgment does not reflow
-the attachment presentation.
+the attachment presentation. Filename URL delimiters such as `#` and `?` are
+encoded as path content rather than being misread as a fragment or query.
 
 Each pending prompt has a process-wide client-local submission ID and remains
 associated with its destination thread. It therefore remains visible when the
@@ -92,12 +122,31 @@ unique `clientUserMessageId`, which binds the authoritative user item without
 confusing identical prompt text. A failed submission remains visible with an
 explicit error state.
 
+A prompt that starts a turn is the outer soft-blue turn card. A prompt admitted
+through `turn.steer` appears immediately inside the active turn as an animated
+blue You card; after acknowledgment the same widget becomes a softer blue
+authoritative steering card. No optimistic card is exchanged for a second
+widget, and the turn grows around it without changing existing nested card
+identity.
+
+After acknowledgment, the authoritative outer You card uses a stronger static
+blue border while its turn remains active. It has no animation, glow, shading,
+or geometry change. Completion restores the canonical border in place.
+
 The composer is cleared immediately after local admission and remains enabled.
 Users may enter additional prompts while earlier prompts await acknowledgment.
 Unsubmitted composer text and attachments form one shared local draft: ordinary
 thread navigation retains them, and submission sends them to the thread that is
 visibly selected at that moment. Explicit new-thread creation still starts with
 a deliberately cleared composer.
+
+Accepting New Thread immediately inserts one selected orange animated row in
+the thread list. It is a presentation-only draft, not a synthetic app-server
+thread. Sending the first prompt promotes the same row to the ID returned by
+`thread/start`; animation continues until that prompt's `turn/start` callback
+succeeds, then the same row adopts canonical styling. Creation or first-prompt
+failure stops animation and leaves the row visibly failed. No duplicate row or
+replacement transition is permitted.
 CodexUI queues submissions per thread and dispatches them in order: only one
 unacknowledged prompt operation is in flight for a thread. After each result,
 the next queued prompt is sent using the app-server state produced by the
@@ -109,10 +158,11 @@ the turn operation. If a submission still receives a transient thread-not-found
 result, CodexUI performs one bounded resume-and-retry; a repeated failure is
 shown on the pending card rather than retried indefinitely. If hydration has
 failed, submission is rejected without clearing the composer draft; Reload
-must succeed before that prompt can be admitted. A disconnect between admission
-and dispatch leaves the pending card in place and unsent until bridge-open
-re-drives it. An active resume prevents a concurrent hydration read or turn
-operation for the same thread.
+must succeed before that prompt can be admitted. A disconnect after admission
+leaves the pending card in place; a dispatched prompt is returned to its queue,
+and bridge-open re-drives queued work only after fresh thread hydration. Real
+app-server operation failures remain terminal. An active resume prevents a
+concurrent hydration read or turn operation for the same thread.
 
 For an explicit new-thread draft, prompts entered while `thread.create` is in
 flight remain attached to that draft. When creation succeeds, all pending
@@ -125,6 +175,15 @@ plain-text transitional card until its authoritative item arrives.
 Generated-image items show the app-server-saved image as a bounded thumbnail.
 Selecting it opens the shared non-modal image viewer; encoded image data is
 never displayed as generic activity text.
+Multiple message attachments retain source order in one horizontal ribbon.
+The ribbon never wraps or grows the card beyond its available width; horizontal
+overflow appears only when required, while its vertical size remains bounded by
+the tallest thumbnail. A standard 1 px neutral border, 6 px radius, 4 px inner
+padding, and soft-neutral surface enclose both thumbnails and scrollbar. The
+ribbon remains subordinate content of its existing card, never a nested card.
+Available thumbnails are named keyboard targets and open with Enter or Space;
+unavailable placeholders remain announced but are not focusable. Markdown
+links in Conversation and Inspector content are reachable by keyboard.
 
 User messages use the canonical soft-blue identity surface. Final Codex
 messages use the canonical soft-violet identity surface, while interim Codex
@@ -136,11 +195,46 @@ Every conversation card with visible detail uses the same keyboard-focusable
 disclosure chevron: down when expanded and left when collapsed. Title-only
 cards, including Reasoning without a public summary, omit the chevron until
 detail arrives.
-You, Codex, and temporary You cards initially render expanded; Reasoning,
-Command execution, File changes, Agent activity, Image, Plan, and fallback
-activity cards initially render collapsed. A user-selected state survives
+You, Codex, temporary You, Command execution, and Image cards initially render
+expanded; Reasoning, File changes, Agent activity, Plan, and fallback activity
+cards initially render collapsed. A user-selected state survives
 streaming updates, authoritative prompt replacement, and thread switching for
 the lifetime of the CodexUI process.
+
+The outer You turn card is itself foldable. Collapsing it hides the complete
+nested turn; expanding it restores every child with its independently retained
+fold state. Inner disclosure gestures retain their existing title-anchor and
+growth rules.
+
+Every card with copyable content places a backgroundless copy icon at the right
+of its header, immediately before the disclosure chevron with the canonical
+compact 4 px action gap. Both icons share one vertical center; tooltip and
+accessible text provide the action label. Copy remains available while that
+card is collapsed; contentless cards omit it. Markdown cards copy their exact
+retained source as both plain clipboard text and `text/markdown`, never
+reconstructed rendered text. Structured cards copy a deterministic plain-text
+representation of their primary content.
+The web copy action reports success, unsupported clipboard access, and write
+failure through the canonical notice surface instead of failing silently.
+
+Pending-request dialogs validate required answers and structured MCP content
+before accepting the modal. Invalid input keeps the dialog and all entered
+content open for correction.
+
+The native and web Conversation headers expose persistent, matching icon-only
+controls for Reasoning visibility, interim Codex-update visibility, and the
+initial folding state of newly appearing Command execution and Image cards. Final Codex
+answers are never filtered. Visibility is a presentation choice only: filtered
+cards remain in the retained projection, continue accepting updates, and reappear
+with their latest content and user-owned folding state. Changing the Command
+preference never refolds an existing card.
+Browser persistence is an optional convenience: unavailable or denied local
+storage falls back to canonical defaults and never prevents the UI from
+starting or accepting preference changes.
+Web thread refresh, rename, fork, archive, and delete actions are single-flight.
+Mutation controls require current controller readiness, remain disabled while
+their operation is pending, and report operation failures through the canonical
+notice surface.
 
 Folding is an explicit geometry transaction. Collapsing keeps the selected
 title row fixed while the natural scroll range permits and shifts following
@@ -151,8 +245,9 @@ overlaying the conversation. The gesture pauses follow-latest. At the lower
 scroll limit, the viewport accepts the natural clamp instead of retaining
 artificial blank space.
 
-Reasoning items remain visible as stable progress cards even when the app-server
-provides no public summary; later content updates the same card in place.
+When enabled, Reasoning items remain stable progress cards even when the
+app-server provides no public summary; later content updates the same retained
+card in place.
 File-change cards list each supplied path and change kind and derive compact
 addition and deletion totals from the supplied per-file unified diffs. They do
 not duplicate the full review surface owned by the Changes inspector. Optional
@@ -175,9 +270,10 @@ Returning to the bottom re-enables following.
 
 Follow/pause mode and the visible-card/pixel-offset anchor are retained per
 thread and restored when the user switches back.
-Scrollable Command output owns wheel and touchpad gestures while the pointer is
-over it, including overscroll at either boundary; those gestures never chain to
-the outer message view.
+Scrollable Command text and output own a wheel or touchpad gesture that begins
+while they can move in its direction. Reaching a boundary during that gesture
+does not chain into the outer message view. A fresh outward gesture begun at an
+already-reached boundary scrolls the conversation instead.
 
 This policy applies to new messages, streaming updates, pending prompt cards,
 and card reconstruction. It is based on the scroll bar's actual bottom state,
@@ -207,9 +303,9 @@ position is the new bottom.
 
 The complete center region is wheel- and touchpad-scroll sensitive. Wheel
 events over non-scrollable center chrome and the horizontal splitter handles
-are forwarded to the message view. A nested scrollable control, such as Command
-execution output, consumes an event while it can scroll in that direction and
-hands an edge event back to the conversation.
+are forwarded to the message view. Command text and output retain a gesture
+that started while they could scroll; only a fresh gesture begun at their
+current boundary is handed to the conversation.
 
 ## Composer geometry
 
@@ -253,6 +349,10 @@ Command execution card in place; they do not replace it. Output follows its
 bottom while already at the bottom. A manual upward scroll pauses following
 until the user returns to the bottom. Each output card retains its own
 follow/pause position across in-place output updates.
+When retained stream text exceeds its canonical byte budget, the card shows an
+explicit omitted-byte notice followed by the newest retained tail. The same
+notice is included when copying the card, so bounded history is never presented
+as the complete command output, response, reasoning, or plan text.
 
 ## Inspector and Info presentation
 

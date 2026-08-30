@@ -12,6 +12,7 @@ class QFrame;
 class QLabel;
 class QSplitter;
 class QTimer;
+class QToolButton;
 
 namespace codexui::codex::middle {
 
@@ -47,11 +48,17 @@ public:
   bool routeScrollEvent(QObject *watched, QEvent *event);
 
 private:
+  void applyConversationPresentationOptions();
+
   QSplitter *splitter = nullptr;
   ThreadPane *threadPane = nullptr;
   QFrame *conversationRegion = nullptr;
   QLabel *conversationTitle = nullptr;
   QLabel *conversationMetadata = nullptr;
+  QToolButton *reasoningVisibility = nullptr;
+  QToolButton *updateVisibility = nullptr;
+  QToolButton *commandInitialFolding = nullptr;
+  QToolButton *imageInitialFolding = nullptr;
   QFrame *noticeBar = nullptr;
   QLabel *noticeLabel = nullptr;
   QTimer *noticeTimer = nullptr;

@@ -10,6 +10,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QLabel>
 #include <QListWidget>
 #include <QSaveFile>
 #include <QTemporaryDir>
@@ -101,6 +102,40 @@ bool hasFile(const GitDiffSnapshot &snapshot, const QString &path,
   return false;
 }
 
+bool testEmptySnapshotLoadingState() {
+  DiffViewer viewer;
+  auto *provider = viewer.findChild<GitDiffProvider *>();
+  auto *summary =
+      viewer.findChild<QLabel *>(QStringLiteral("codexDiffSummary"));
+  if (!provider || !summary)
+    return expect(false, "diff loading-state controls are discoverable");
+
+  provider->loadingChanged(true);
+  const bool initialLoading =
+      summary->text() == QStringLiteral("Loading changes…");
+
+  GitDiffSnapshot empty;
+  empty.workspace = QStringLiteral("/workspace");
+  empty.repositoryRoot = QStringLiteral("/workspace");
+  empty.repositoryRoots = {empty.repositoryRoot};
+  empty.repository = true;
+  provider->loadingChanged(false);
+  provider->snapshotReady(empty);
+  const bool emptyRendered = summary->text() == QStringLiteral("No changes");
+
+  provider->loadingChanged(true);
+  const bool backgroundRetained =
+      summary->text() == QStringLiteral("No changes");
+  provider->loadingChanged(false);
+  provider->snapshotReady(empty);
+  const bool identicalRetained =
+      summary->text() == QStringLiteral("No changes");
+
+  return expect(initialLoading && emptyRendered && backgroundRetained &&
+                    identicalRetained,
+                "background refreshes retain a valid empty diff state");
+}
+
 bool testSnapshotMetadataRefresh() {
   DiffViewer viewer;
   auto *provider = viewer.findChild<GitDiffProvider *>();
@@ -140,6 +175,58 @@ bool testSnapshotMetadataRefresh() {
   }();
   return expect(updated,
                 "diff presentation updates when only line totals change");
+}
+
+bool testContextSwitchCancelsOldSnapshot() {
+  QTemporaryDir firstDirectory;
+  QTemporaryDir secondDirectory;
+  if (!expect(firstDirectory.isValid() && secondDirectory.isValid(),
+              "creates repositories for context cancellation"))
+    return false;
+  git_repository *firstRepository = nullptr;
+  git_repository *secondRepository = nullptr;
+  const bool initialized =
+      git_repository_init(&firstRepository,
+                          firstDirectory.path().toUtf8().constData(), 0) == 0 &&
+      git_repository_init(&secondRepository,
+                          secondDirectory.path().toUtf8().constData(), 0) == 0 &&
+      createInitialCommit(firstRepository, firstDirectory.path()) &&
+      createInitialCommit(secondRepository, secondDirectory.path());
+  if (!expect(initialized, "initializes context cancellation repositories")) {
+    git_repository_free(firstRepository);
+    git_repository_free(secondRepository);
+    return false;
+  }
+
+  DiffViewer viewer;
+  viewer.resize(700, 500);
+  viewer.show();
+  auto *provider = viewer.findChild<GitDiffProvider *>();
+  QStringList deliveredWorkspaces;
+  QObject::connect(provider, &GitDiffProvider::snapshotReady, &viewer,
+                   [&deliveredWorkspaces](const GitDiffSnapshot &snapshot) {
+                     deliveredWorkspaces.push_back(snapshot.workspace);
+                   });
+  provider->request(firstDirectory.path(), {firstDirectory.path()}, {}, {},
+                    false, codexui::codex::GitDiffScope::Unstaged,
+                    codexui::codex::GitDiffContext::Compact);
+  viewer.setRepositoryContext(QStringLiteral("second-context"),
+                              secondDirectory.path(),
+                              {secondDirectory.path()}, {});
+  const bool secondApplied = waitFor(
+      [&] {
+        return viewer.currentSnapshot().workspace == secondDirectory.path() &&
+               viewer.currentSnapshot().repository;
+      },
+      1500);
+  for (QTimer *timer : viewer.findChildren<QTimer *>())
+    timer->stop();
+  const bool oldSuppressed =
+      !deliveredWorkspaces.contains(firstDirectory.path());
+  git_repository_free(firstRepository);
+  git_repository_free(secondRepository);
+  return expect(secondApplied && oldSuppressed,
+                "a context switch synchronously suppresses the old Git result");
 }
 
 bool testLiveWorkingTreeChanges() {
@@ -312,7 +399,9 @@ bool testLiveWorkingTreeChanges() {
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
   git_libgit2_init();
-  bool result = testSnapshotMetadataRefresh();
+  bool result = testEmptySnapshotLoadingState();
+  result &= testSnapshotMetadataRefresh();
+  result &= testContextSwitchCancelsOldSnapshot();
   result &= testLiveWorkingTreeChanges();
   git_libgit2_shutdown();
   return result ? 0 : 1;

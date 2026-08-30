@@ -48,6 +48,14 @@ function unifiedDiffCounts(diff: string): [number, number] {
     }
     return [additions, deletions];
 }
+function omittedTextBytes(item: ItemPresentation, field: string): number {
+    return item.textRetention?.get(field)?.discardedBytes ?? 0;
+}
+function withTruncationNotice(value: string, omitted: number, subject: string, markdown: boolean): string {
+    if (omitted === 0) return value;
+    const notice = `Earlier ${subject} was truncated (${omitted} bytes omitted).`;
+    return markdown ? `> ${notice}\n\n${value}` : `[${notice}]\n${value}`;
+}
 function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPresentation, visualKey: CardKey): VisibleCardData {
     const item = presentation.raw;
     const type = stringMember(item, "type");
@@ -57,10 +65,12 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
         kind = "userMessage"; payload = {text: messageText(item), imagePaths: messageImagePaths(item)} satisfies UserMessageData;
     } else if (type === "agentMessage") {
         kind = "agentMessage";
-        payload = {text: messageText(item), finalAnswer: stringMember(item, "phase") === "final_answer"} satisfies AgentMessageData;
+        payload = {text: withTruncationNotice(messageText(item), omittedTextBytes(presentation, "text"), "Codex response", true),
+            finalAnswer: stringMember(item, "phase") === "final_answer"} satisfies AgentMessageData;
     } else if (type === "commandExecution") {
         kind = "commandExecution";
-        let output = stringMember(item, "aggregatedOutput") || stringMember(item, "output");
+        const outputField = stringMember(item, "aggregatedOutput") !== "" ? "aggregatedOutput" : "output";
+        let output = withTruncationNotice(stringMember(item, outputField), omittedTextBytes(presentation, outputField), "command output", false);
         if (!terminalOutputHasVisibleText(output)) output = "";
         const exitCode = integerValue(item, "exitCode");
         const durationMilliseconds = integerValue(item, "durationMs") ?? integerValue(item, "duration_ms");
@@ -79,7 +89,8 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
             agentPath: stringMember(item, "agentPath"), senderThreadId: stringMember(item, "senderThreadId"),
         } satisfies AgentActivityData;
     } else if (type === "reasoning") {
-        kind = "reasoning"; payload = {summary: stringList(member(item, "summary", [])).join(", ")} satisfies ReasoningData;
+        kind = "reasoning"; payload = {summary: withTruncationNotice(
+            stringList(member(item, "summary", [])).join(", "), omittedTextBytes(presentation, "summary"), "reasoning", true)} satisfies ReasoningData;
     } else if (type === "fileChange") {
         kind = "fileChanges";
         const rawChanges = member(item, "changes", []);
@@ -98,7 +109,8 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
             revisedPrompt: stringMember(item, "revisedPrompt") || stringMember(item, "revised_prompt"),
         } satisfies ImageGenerationData;
     } else if (type === "plan" && messageText(item) !== "") {
-        kind = "plan"; payload = {explanation: "", steps: [], legacyText: messageText(item)};
+        kind = "plan"; payload = {explanation: "", steps: [], legacyText: withTruncationNotice(
+            messageText(item), omittedTextBytes(presentation, "text"), "plan text", true)};
     }
     return {key: visualKey, kind, threadId: identity.threadId, turnId: identity.turnId, itemId: identity.itemId, payload};
 }
@@ -117,7 +129,7 @@ function submissionPosition(submission: PromptSubmission, index: AuthoritativeIt
     return index.ordered.length * 2 + 2;
 }
 interface ProjectedNode {
-    position: number; tieBreaker: number; sectionKey: string; turnId: string; card: VisibleCardData;
+    position: number; tieBreaker: number; sectionKey: string; turnId: string; turnRoot: boolean; card: VisibleCardData;
 }
 
 export function projectConversation(
@@ -129,7 +141,15 @@ export function projectConversation(
 ): ConversationSnapshot {
     const authoritativeItems = "ordered" in source ? source : indexAuthoritativeItems(source.id, source);
     const authoritativeThread = "ordered" in source ? thread : source;
-    const hidden = Math.max(0, authoritativeItems.ordered.length - authoritativeItemLimit);
+    const suffixStart = Math.max(0, authoritativeItems.ordered.length - authoritativeItemLimit);
+    const pinnedRoots = new Set<number>();
+    for (let index = suffixStart; index < authoritativeItems.ordered.length; ++index) {
+        const root = authoritativeItems.turnRoots.get(authoritativeItems.ordered[index]!.key.turnId);
+        if (root !== undefined && root < suffixStart) pinnedRoots.add(root);
+    }
+    const retainedPositions = [...pinnedRoots].sort((left, right) => left - right);
+    for (let index = suffixStart; index < authoritativeItems.ordered.length; ++index) retainedPositions.push(index);
+    const hidden = suffixStart - pinnedRoots.size;
     const result: ConversationSnapshot = {
         threadId: authoritativeItems.threadId, sections: [], hiddenAuthoritativeItemCount: hidden, hasMore: hidden > 0,
     };
@@ -137,7 +157,7 @@ export function projectConversation(
     for (const submission of localSubmissions) if (submission.materializedItem)
         bindings.set(`${submission.materializedItem.threadId}\0${submission.materializedItem.turnId}\0${submission.materializedItem.itemId}`, submission);
     const nodes: ProjectedNode[] = [];
-    for (let index = hidden; index < authoritativeItems.ordered.length; ++index) {
+    for (const index of retainedPositions) {
         const item = authoritativeItems.ordered[index]!;
         const identity = `${item.key.threadId}\0${item.key.turnId}\0${item.key.itemId}`;
         const binding = bindings.get(identity);
@@ -153,7 +173,8 @@ export function projectConversation(
             tieBreaker = item.promptAlias.admissionOrdinal;
         }
         nodes.push({position, tieBreaker, sectionKey: sectionComponent("turn:", authoritativeItems.threadId, item.key.turnId),
-            turnId: item.key.turnId, card: authoritativeCard(item.key, item.presentation, visualKey)});
+            turnId: item.key.turnId, turnRoot: authoritativeItems.turnRoots.get(item.key.turnId) === index,
+            card: authoritativeCard(item.key, item.presentation, visualKey)});
     }
     for (const submission of localSubmissions) {
         if (!localCardVisible(submission, nowMilliseconds)) continue;
@@ -170,7 +191,10 @@ export function projectConversation(
             acceptedAtMilliseconds: submission.acceptedAtMilliseconds, error: submission.error,
             imagePaths: localImagePaths(submission),
         };
-        nodes.push({position, tieBreaker: submission.admissionOrdinal, sectionKey, turnId, card: {
+        const turnRootPosition = authoritativeItems.turnRoots.get(turnId);
+        const turnRoot = turnRootPosition !== undefined
+            ? materialized === turnRootPosition : submission.startsTurn;
+        nodes.push({position, tieBreaker: submission.admissionOrdinal, sectionKey, turnId, turnRoot, card: {
             key: {kind: "prompt", submissionId: submission.id}, kind: "localPrompt", threadId: authoritativeItems.threadId,
             turnId, itemId: "", payload,
         }});
@@ -183,7 +207,9 @@ export function projectConversation(
             sectionIndex = result.sections.length; sectionIndexes.set(node.sectionKey, sectionIndex);
             result.sections.push({key: node.sectionKey, turnId: node.turnId, cards: []});
         }
-        result.sections[sectionIndex]!.cards.push(node.card);
+        const section = result.sections[sectionIndex]!;
+        section.cards.push(node.card);
+        if (node.turnRoot) section.rootCardKey = node.card.key;
     }
     return result;
 }

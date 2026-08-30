@@ -100,6 +100,12 @@ The application uses:
 No general-purpose state framework is introduced. A typed presentation model
 is the sole retained normalized store. React subscribes to snapshots from that
 model; components retain only interaction state they own.
+The session snapshot does not retain a second conversation projection. The
+Conversation component requests one typed projection for its current history
+window, and prompt reconciliation scans authoritative history only when a
+thread read or user-message event can materialize a local prompt alias.
+Inspector diagnostics likewise project full retained item state only while
+the State tab is selected.
 
 ## Presentation boundary
 
@@ -159,6 +165,24 @@ Prompt admission, stable first-response placement, per-thread scroll ownership,
 card folding, safe Markdown, bounded command output, controller eligibility,
 and reconnect hydration follow the native behavior documents. Visual geometry
 may be browser-native; the behavioral invariant may not silently change.
+Conversation paging pins each represented turn's complete-history root prompt
+as structural context outside the activity budget; steering prompts never
+become turn roots.
+
+The responsive shell keeps Threads, Conversation, and Inspector visible above
+1160 px. At tablet widths it keeps Threads and Conversation in-flow and exposes
+Inspector as an accessible overlay drawer; at 760 px and below Conversation is
+the single in-flow column and both side panes use accessible overlay drawers.
+The page itself must not overflow horizontally; narrow controls wrap or compact
+while intentionally scrollable card content retains its local overflow.
+
+Pending-request cards disclose literal structured fields rather than exposing
+the retained raw request object. Their controls are generated per request
+family: declared approval decisions, multi-answer user input, MCP
+accept/decline/cancel, permission turn/session scope, legacy decisions, and
+explicit unavailable/unsupported results. Responses require a ready provider,
+current controller ownership, and the current request generation and identity;
+one sent response disables that request until authoritative removal.
 
 ### Browser-specific representation
 

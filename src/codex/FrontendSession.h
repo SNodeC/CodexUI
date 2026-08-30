@@ -115,7 +115,8 @@ private:
   void receiveMessage(nlohmann::json message);
   void reportLocalError(std::string message);
   void terminalFailure(std::string message);
-  void failAllPending(int code, std::string message) noexcept;
+  void failAllPending(int code, std::string message,
+                      bool transient = false) noexcept;
   void notifyRuntimeStopped() noexcept;
 
   std::unique_ptr<ipc::QtSocketPairEndpoint> endpoint;

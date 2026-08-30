@@ -6,6 +6,7 @@
 #include "codex/PresentationStatus.h"
 
 #include <algorithm>
+#include <iterator>
 #include <unordered_set>
 
 namespace codexui::codex {
@@ -13,6 +14,8 @@ namespace {
 
 constexpr std::size_t MaximumRetainedTelemetry = 256;
 constexpr std::size_t MaximumIndexedTextParts = 4096;
+constexpr std::size_t MaximumRetainedStreamBytes = 256 * 1024;
+constexpr std::size_t RetainedStreamTailBytes = 192 * 1024;
 
 std::string stringValue(const nlohmann::json &object, const char *key) {
   if (!object.is_object())
@@ -169,19 +172,157 @@ void mergeExplicitMembers(nlohmann::json &target,
   }
 }
 
-void appendText(nlohmann::json &item, const char *field,
+std::size_t utf8TailStart(const std::string &value,
+                          std::size_t retainedBytes) {
+  if (value.size() <= retainedBytes)
+    return 0;
+  std::size_t start = value.size() - retainedBytes;
+  while (start < value.size() &&
+         (static_cast<unsigned char>(value[start]) & 0xc0u) == 0x80u)
+    ++start;
+  return start;
+}
+
+void recordDiscardedText(ItemPresentation &item, const std::string &field,
+                         std::size_t bytes) {
+  if (bytes == 0)
+    return;
+  auto value = std::find_if(
+      item.textRetention.begin(), item.textRetention.end(),
+      [&field](const TextRetentionPresentation &entry) {
+        return entry.field == field;
+      });
+  if (value == item.textRetention.end()) {
+    item.textRetention.push_back({field});
+    value = std::prev(item.textRetention.end());
+  }
+  value->discardedBytes += bytes;
+}
+
+TextRetentionPresentation *textRetention(ItemPresentation &item,
+                                         const std::string &field) {
+  const auto value = std::find_if(
+      item.textRetention.begin(), item.textRetention.end(),
+      [&field](const TextRetentionPresentation &entry) {
+        return entry.field == field;
+      });
+  return value == item.textRetention.end() ? nullptr : &*value;
+}
+
+void setRetainedTextBytes(ItemPresentation &item, const std::string &field,
+                          std::size_t bytes) {
+  TextRetentionPresentation *value = textRetention(item, field);
+  if (!value) {
+    item.textRetention.push_back({field});
+    value = &item.textRetention.back();
+  }
+  value->retainedBytes = bytes;
+}
+
+void boundScalarText(ItemPresentation &item, const std::string &field,
+                     std::string &value) {
+  if (value.size() > MaximumRetainedStreamBytes) {
+    const std::size_t discarded = utf8TailStart(value, RetainedStreamTailBytes);
+    value.erase(0, discarded);
+    recordDiscardedText(item, field, discarded);
+  }
+  if (textRetention(item, field))
+    setRetainedTextBytes(item, field, value.size());
+}
+
+void boundIndexedText(ItemPresentation &item, const std::string &field,
+                      nlohmann::json &parts) {
+  std::size_t retained = 0;
+  for (const nlohmann::json &part : parts)
+    if (part.is_string())
+      retained += part.get_ref<const std::string &>().size();
+  if (retained > MaximumRetainedStreamBytes) {
+    std::size_t toDiscard = retained - RetainedStreamTailBytes;
+    for (nlohmann::json &part : parts) {
+      if (toDiscard == 0 || !part.is_string())
+        continue;
+      std::string &value = part.get_ref<std::string &>();
+      const std::size_t discarded =
+          value.size() <= toDiscard
+              ? value.size()
+              : utf8TailStart(value, value.size() - toDiscard);
+      value.erase(0, discarded);
+      toDiscard = discarded >= toDiscard ? 0 : toDiscard - discarded;
+      retained -= discarded;
+      recordDiscardedText(item, field, discarded);
+    }
+  }
+  if (textRetention(item, field))
+    setRetainedTextBytes(item, field, retained);
+}
+
+void resetIncomingTextBounds(ItemPresentation &item,
+                             const nlohmann::json &incoming) {
+  for (const char *field : {"text", "output", "aggregatedOutput", "summary",
+                            "content"}) {
+    if (incoming.contains(field)) {
+      std::erase_if(item.textRetention,
+                    [field](const TextRetentionPresentation &entry) {
+                      return entry.field == field;
+                    });
+    }
+  }
+}
+
+void boundRetainedItemText(ItemPresentation &item) {
+  const auto boundScalar = [&item](const char *field) {
+    auto value = item.raw.find(field);
+    if (value != item.raw.end() && value->is_string())
+      boundScalarText(item, field, value->get_ref<std::string &>());
+  };
+  const auto boundIndexed = [&item](const char *field) {
+    auto parts = item.raw.find(field);
+    if (parts != item.raw.end() && parts->is_array())
+      boundIndexedText(item, field, *parts);
+  };
+
+  const std::string type = stringValue(item.raw, "type");
+  if (type == "commandExecution") {
+    boundScalar("aggregatedOutput");
+    boundScalar("output");
+  } else if (type == "agentMessage" || type == "plan") {
+    boundScalar("text");
+  } else if (type == "reasoning") {
+    boundIndexed("summary");
+    boundIndexed("content");
+  } else if (type == "fileChange") {
+    boundScalar("output");
+  } else if (type == "userMessage") {
+    return;
+  } else {
+    for (const char *field : {"text", "output", "aggregatedOutput"})
+      boundScalar(field);
+    for (const char *field : {"summary", "content"})
+      boundIndexed(field);
+  }
+}
+
+void appendText(ItemPresentation &item, const char *field,
                 const nlohmann::json &params) {
   const std::string delta = stringValue(params, "delta");
   if (delta.empty())
     return;
-  nlohmann::json &stored = item[field];
+  nlohmann::json &stored = item.raw[field];
   if (!stored.is_string())
     stored = "";
   std::string &existing = stored.get_ref<std::string &>();
+  if (delta.size() > MaximumRetainedStreamBytes) {
+    const std::size_t start = utf8TailStart(delta, RetainedStreamTailBytes);
+    recordDiscardedText(item, field, existing.size() + start);
+    existing.assign(delta, start, std::string::npos);
+    setRetainedTextBytes(item, field, existing.size());
+    return;
+  }
   existing += delta;
+  boundScalarText(item, field, existing);
 }
 
-void appendIndexedText(nlohmann::json &item, const char *field,
+void appendIndexedText(ItemPresentation &item, const char *field,
                        const nlohmann::json &params, const char *indexField) {
   const auto index = params.find(indexField);
   const bool hasIndex = index != params.end() && index->is_number_integer() &&
@@ -189,7 +330,7 @@ void appendIndexedText(nlohmann::json &item, const char *field,
   const std::size_t position = hasIndex ? index->get<std::size_t>() : 0;
   if (position >= MaximumIndexedTextParts)
     return;
-  nlohmann::json &parts = item[field];
+  nlohmann::json &parts = item.raw[field];
   if (!parts.is_array())
     parts = nlohmann::json::array();
   while (parts.size() <= position)
@@ -201,6 +342,7 @@ void appendIndexedText(nlohmann::json &item, const char *field,
     delta = stringValue(params, "text");
   std::string &existing = parts[position].get_ref<std::string &>();
   existing += delta;
+  boundIndexedText(item, field, parts);
 }
 
 void applyDomainAuthority(
@@ -251,9 +393,18 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
       generation < connectionState.generation)
     return;
   if (generation > connectionState.generation) {
+    const bool replacesConnection = connectionState.generation != 0;
     connectionState.generation = generation;
     lastSequence = 0;
     pendingRequests.clear();
+    if (replacesConnection) {
+      connectionState.connectionId.clear();
+      connectionState.role.clear();
+      connectionState.controllerConnectionId.clear();
+      connectionState.providerGeneration = 0;
+      connectionState.providerState.clear();
+      connectionState.providerDetail.clear();
+    }
   }
   const auto sequenceMember = event.find("sequence");
   const std::uint64_t sequence =
@@ -311,7 +462,9 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
     return;
 
   const std::string type = presentation::stringMember(event, "type");
-  if (presentation::stringMember(event, "authority") == "none") {
+  const std::string authority =
+      presentation::stringMember(event, "authority");
+  if (authority == "none") {
     if (retainedTelemetry.size() == MaximumRetainedTelemetry)
       retainedTelemetry.erase(retainedTelemetry.begin());
     retainedTelemetry.push_back(TelemetryPresentation{
@@ -332,7 +485,9 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
       connectionState.role.clear();
       connectionState.controllerConnectionId.clear();
       connectionState.detail = stringValue(data, "detail");
-      pendingRequests.clear();
+      connectionState.providerState.clear();
+      connectionState.providerDetail.clear();
+      clearProviderState();
     } else if (lifecycle == "disconnected" || lifecycle == "failure") {
       connectionState.connected = false;
       connectionState.retrying = false;
@@ -340,7 +495,9 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
       connectionState.role.clear();
       connectionState.controllerConnectionId.clear();
       connectionState.detail = stringValue(data, "detail");
-      pendingRequests.clear();
+      connectionState.providerState.clear();
+      connectionState.providerDetail.clear();
+      clearProviderState();
     }
     return;
   }
@@ -440,12 +597,13 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
 
   const std::string threadId = stringValue(scope, "threadId");
   if (threadId.empty()) {
-    retainDomainEvent(type, data, scope,
-                      presentation::stringMember(event, "authority"));
+    retainDomainEvent(type, data, scope, authority);
     return;
   }
   auto threadIterator = threads.find(threadId);
   if (threadIterator == threads.end()) {
+    if (authority == "none" || authority == "remove")
+      return;
     nlohmann::json minimal{{"id", threadId}};
     upsertThread(minimal, false);
     threadIterator = threads.find(threadId);
@@ -454,8 +612,9 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
   }
   ThreadPresentation &thread = threadIterator->second;
 
-  retainDomainEvent(type, data, scope,
-                    presentation::stringMember(event, "authority"));
+  retainDomainEvent(type, data, scope, authority);
+  if (authority == "none" || authority == "remove")
+    return;
 
   if (type == "thread.settings.changed" && data.is_object()) {
     thread.latestSettingsUpdate = data.value("threadSettings", data);
@@ -520,7 +679,7 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
   if (type == "conversation.file-change.output-appended") {
     if (ItemPresentation *item = findItem(scope)) {
       nlohmann::json delta{{"delta", stringValue(data, "delta")}};
-      appendText(item->raw, "output", delta);
+      appendText(*item, "output", delta);
     }
     return;
   }
@@ -552,11 +711,11 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
     return;
   const std::string field = stringValue(data, "field");
   if (field == "summary")
-    appendIndexedText(item->raw, "summary", data, "summaryIndex");
+    appendIndexedText(*item, "summary", data, "summaryIndex");
   else if (field == "content")
-    appendIndexedText(item->raw, "content", data, "contentIndex");
+    appendIndexedText(*item, "content", data, "contentIndex");
   else if (!field.empty())
-    appendText(item->raw, field.c_str(), identity);
+    appendText(*item, field.c_str(), identity);
   if (stringValue(item->raw, "type") == "agentMessage")
     updateOwningAgentResult(threadId, stringValue(item->raw, "text"));
 }
@@ -807,6 +966,7 @@ ItemPresentation &PresentationModel::upsertItem(ThreadPresentation &thread,
   }
   auto [iterator, inserted] = turn.items.try_emplace(id);
   ItemPresentation &result = iterator->second;
+  resetIncomingTextBounds(result, raw);
   if (inserted) {
     result.id = id;
     result.raw = raw;
@@ -814,6 +974,7 @@ ItemPresentation &PresentationModel::upsertItem(ThreadPresentation &thread,
   } else {
     mergePreservingCompleteness(result.raw, raw);
   }
+  boundRetainedItemText(result);
   const std::string type = stringValue(result.raw, "type");
   retainRepositoryHints(thread, result.raw);
   if (type == "subAgentActivity" || type == "collabAgentToolCall") {

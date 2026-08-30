@@ -4,6 +4,7 @@
 #include "codex/PresentationProtocol.h"
 #include "codex/ProtocolNormalizer.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <string>
@@ -21,6 +22,17 @@ std::string stringMember(const nlohmann::json &value, const char *name) {
   return member != value.end() && member->is_string()
              ? member->get<std::string>()
              : std::string{};
+}
+
+const codexui::codex::TextRetentionPresentation *
+textRetention(const codexui::codex::ItemPresentation &item,
+              const std::string &field) {
+  const auto value = std::find_if(
+      item.textRetention.begin(), item.textRetention.end(),
+      [&field](const codexui::codex::TextRetentionPresentation &entry) {
+        return entry.field == field;
+      });
+  return value == item.textRetention.end() ? nullptr : &*value;
 }
 
 } // namespace
@@ -614,6 +626,51 @@ int main() {
                        ownershipModel.childOwnership("child-two") == nullptr,
                    "provider loss clears threads and ownership atomically");
 
+  PresentationModel authorityModel;
+  authorityModel.applyEvent(codexui::codex::presentation::event(
+      1, 1, "notice.added", {{"message", "scoped telemetry"}},
+      codexui::codex::presentation::Authority::None,
+      {{"threadId", "phantom-none"}}));
+  passed &= expect(
+      authorityModel.thread("phantom-none") == nullptr &&
+          authorityModel.telemetry().size() == 1,
+      "authority-none scoped telemetry cannot materialize a thread");
+  authorityModel.applyEvent(codexui::codex::presentation::event(
+      2, 1, "thread.goal.changed", nlohmann::json::object(),
+      codexui::codex::presentation::Authority::Remove,
+      {{"threadId", "phantom-remove"}}));
+  passed &= expect(
+      authorityModel.thread("phantom-remove") == nullptr,
+      "authority-remove cannot materialize an absent scoped thread");
+  authorityModel.applyEvent(codexui::codex::presentation::event(
+      3, 1, "turn.upsert",
+      {{"turn", {{"id", "real-turn"}, {"status", "inProgress"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "real-thread"}, {"turnId", "real-turn"}}));
+  passed &= expect(
+      authorityModel.thread("real-thread") != nullptr,
+      "authoritative merge still materializes represented thread state");
+
+  PresentationModel transportLossModel;
+  transportLossModel.applyEvent(codexui::codex::presentation::event(
+      1, 1, "connection.lifecycle", {{"state", "connected"}},
+      codexui::codex::presentation::Authority::Replace));
+  transportLossModel.applyEvent(codexui::codex::presentation::event(
+      2, 1, "connection.provider",
+      {{"generation", std::uint64_t{1}}, {"state", "ready"}},
+      codexui::codex::presentation::Authority::Replace));
+  transportLossModel.applyEvent(codexui::codex::presentation::result(
+      3, 1, "threads.list", "transport-threads", true,
+      {{"threads", nlohmann::json::array({{{"id", "transport-thread"}}})}},
+      codexui::codex::presentation::Authority::Merge));
+  transportLossModel.applyEvent(codexui::codex::presentation::event(
+      4, 1, "connection.lifecycle", {{"state", "disconnected"}},
+      codexui::codex::presentation::Authority::Replace));
+  passed &= expect(
+      transportLossModel.threadOrder().empty() &&
+          transportLossModel.connection().providerState.empty(),
+      "transport loss invalidates stale provider readiness and authority");
+
   PresentationModel reconnectOwnershipModel;
   reconnectOwnershipModel.applyEvent(codexui::codex::presentation::result(
       1, 1, "thread.read", "hydrate-owner", true,
@@ -913,5 +970,123 @@ int main() {
   passed &= expect(model.connection().providerGeneration == 2 &&
                        model.connection().providerState == "ready",
                    "a new provider generation is accepted for rehydration");
+
+  PresentationModel connectionGenerationModel;
+  connectionGenerationModel.applyEvent(codexui::codex::presentation::event(
+      1, 1, "connection.lifecycle", {{"state", "connected"}},
+      codexui::codex::presentation::Authority::Replace));
+  connectionGenerationModel.applyEvent(codexui::codex::presentation::event(
+      2, 1, "connection.provider",
+      {{"generation", std::uint64_t{10}}, {"state", "ready"}},
+      codexui::codex::presentation::Authority::Replace));
+  connectionGenerationModel.applyEvent(codexui::codex::presentation::event(
+      3, 1, "thread.upsert", {{"thread", {{"id", "old-provider"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "old-provider"}}));
+  connectionGenerationModel.applyEvent(codexui::codex::presentation::event(
+      1, 2, "connection.lifecycle", {{"state", "connected"}},
+      codexui::codex::presentation::Authority::Replace));
+  connectionGenerationModel.applyEvent(codexui::codex::presentation::event(
+      2, 2, "connection.provider",
+      {{"generation", std::uint64_t{1}}, {"state", "ready"}},
+      codexui::codex::presentation::Authority::Replace));
+  passed &= expect(
+      connectionGenerationModel.thread("old-provider") != nullptr &&
+          connectionGenerationModel.connection().providerGeneration == 1 &&
+          connectionGenerationModel.connection().providerState == "ready",
+      "a new connection resets the provider generation floor without discarding retained ownership");
+
+  const std::string oversizedText(300 * 1024, 'A');
+  PresentationModel boundedStreamModel;
+  boundedStreamModel.applyEvent(codexui::codex::presentation::event(
+      1, 1, "conversation.item.upsert",
+      {{"item",
+        {{"id", "bounded-command"},
+         {"type", "commandExecution"},
+         {"aggregatedOutput", oversizedText}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "bounded-thread"},
+       {"turnId", "bounded-turn"},
+       {"itemId", "bounded-command"}}));
+  const auto *boundedThread = boundedStreamModel.thread("bounded-thread");
+  const auto *boundedCommand =
+      boundedThread
+          ? &boundedThread->turns.at("bounded-turn").items.at("bounded-command")
+          : nullptr;
+  passed &= expect(
+      boundedCommand &&
+          stringMember(boundedCommand->raw, "aggregatedOutput").size() <=
+              256 * 1024 &&
+          textRetention(*boundedCommand, "aggregatedOutput") &&
+          textRetention(*boundedCommand, "aggregatedOutput")->discardedBytes >
+              0,
+      "authoritative command output retains a bounded tail with explicit discarded bytes");
+  boundedStreamModel.applyEvent(codexui::codex::presentation::event(
+      2, 1, "conversation.item.append",
+      {{"field", "aggregatedOutput"},
+       {"text", std::string(300 * 1024, 'B')}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "bounded-thread"},
+       {"turnId", "bounded-turn"},
+       {"itemId", "bounded-command"}}));
+  boundedThread = boundedStreamModel.thread("bounded-thread");
+  boundedCommand =
+      boundedThread
+          ? &boundedThread->turns.at("bounded-turn").items.at("bounded-command")
+          : nullptr;
+  passed &= expect(
+      boundedCommand &&
+          stringMember(boundedCommand->raw, "aggregatedOutput").size() <=
+              256 * 1024 &&
+          stringMember(boundedCommand->raw, "aggregatedOutput").front() ==
+              'B' &&
+          textRetention(*boundedCommand, "aggregatedOutput") &&
+          textRetention(*boundedCommand, "aggregatedOutput")->discardedBytes >=
+              300 * 1024,
+      "oversized live deltas replace the retained tail without unbounded concatenation");
+  boundedStreamModel.applyEvent(codexui::codex::presentation::event(
+      3, 1, "conversation.item.upsert",
+      {{"item",
+        {{"id", "bounded-reasoning"},
+         {"type", "reasoning"},
+         {"summary",
+          nlohmann::json::array(
+              {std::string(160 * 1024, 'C'),
+               std::string(160 * 1024, 'D')})}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "bounded-thread"},
+       {"turnId", "bounded-turn"},
+       {"itemId", "bounded-reasoning"}}));
+  boundedThread = boundedStreamModel.thread("bounded-thread");
+  const auto *boundedReasoning =
+      boundedThread ? &boundedThread->turns.at("bounded-turn")
+                           .items.at("bounded-reasoning")
+                    : nullptr;
+  passed &= expect(
+      boundedReasoning &&
+          textRetention(*boundedReasoning, "summary") &&
+          textRetention(*boundedReasoning, "summary")->retainedBytes <=
+              256 * 1024 &&
+          textRetention(*boundedReasoning, "summary")->discardedBytes > 0,
+      "indexed reasoning streams share one bounded retained-text budget");
+  boundedStreamModel.applyEvent(codexui::codex::presentation::event(
+      4, 1, "conversation.item.upsert",
+      {{"item",
+        {{"id", "large-prompt"},
+         {"type", "userMessage"},
+         {"text", oversizedText}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "bounded-thread"},
+       {"turnId", "bounded-turn"},
+       {"itemId", "large-prompt"}}));
+  boundedThread = boundedStreamModel.thread("bounded-thread");
+  const auto *largePrompt =
+      boundedThread ? &boundedThread->turns.at("bounded-turn")
+                           .items.at("large-prompt")
+                    : nullptr;
+  passed &= expect(
+      largePrompt && stringMember(largePrompt->raw, "text") == oversizedText &&
+          largePrompt->textRetention.empty(),
+      "complete user-authored prompts are not treated as disposable streams");
   return passed ? 0 : 1;
 }

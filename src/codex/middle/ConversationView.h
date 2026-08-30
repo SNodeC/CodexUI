@@ -31,10 +31,23 @@ class ConversationView final : public QAbstractScrollArea {
 public:
   enum class Mode { Following, Paused };
 
+  struct PresentationOptions {
+    bool showReasoning = true;
+    bool showCodexUpdates = true;
+    bool commandsInitiallyExpanded = false;
+    bool imagesInitiallyExpanded = false;
+
+    bool operator==(const PresentationOptions &) const = default;
+  };
+
   explicit ConversationView(QWidget *parent = nullptr);
 
   void setLoadMoreAction(std::function<void()> action);
   void setEmptyMessage(QString message);
+  void setPresentationOptions(PresentationOptions options);
+  [[nodiscard]] PresentationOptions presentationOptions() const noexcept {
+    return presentationOptions_;
+  }
 
   // Returns false for a typed projection no-op.  Existing cards are mutated by
   // key; first render and later updates use this same reconciliation path.
@@ -82,6 +95,9 @@ private:
 
   class TurnSectionWidget;
 
+  bool reconcile(const ConversationSnapshot &snapshot, bool force,
+                 bool settleFollowImmediately);
+  [[nodiscard]] bool cardVisible(const VisibleCardData &card) const noexcept;
   void setThread(const std::string &threadId);
   void setCardCollapsed(const std::string &key, ConversationCard *card,
                         bool collapsed);
@@ -116,6 +132,7 @@ private:
   std::unordered_map<std::string, CommandOutputView::ScrollState>
       commandOutputStates_;
   std::unordered_map<std::string, bool> cardCollapsedStates_;
+  PresentationOptions presentationOptions_;
 
   Mode mode_ = Mode::Following;
   int trailingSpaceHeight_ = 0;

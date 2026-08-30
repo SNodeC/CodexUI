@@ -36,12 +36,13 @@ namespace middle {
 class InspectorPane final : public QFrame {
 public:
   using RequestAction = std::function<void(const std::string &)>;
+  using RequestEligibility = std::function<bool(const std::string &)>;
 
   explicit InspectorPane(QWidget *parent = nullptr);
 
   void setHideAction(std::function<void()> hide);
   void setRequestActions(RequestAction review, RequestAction accept,
-                         RequestAction reject);
+                         RequestAction reject, RequestEligibility eligible);
   void refresh(const PresentationModel &model,
                const std::string &selectedThreadId);
   void appendProtocolFrame(const nlohmann::json &frame);
@@ -100,6 +101,7 @@ private:
     std::string reason;
     std::string message;
     std::optional<std::size_t> questionCount;
+    bool actionable = false;
 
     bool operator==(const RequestSnapshot &) const = default;
   };
@@ -120,6 +122,7 @@ private:
   RequestAction reviewRequest;
   RequestAction acceptRequest;
   RequestAction rejectRequest;
+  RequestEligibility requestEligible;
   std::function<void()> hideAction;
 
   QTabWidget *inspectorTabs = nullptr;

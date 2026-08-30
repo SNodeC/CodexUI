@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-    applySettingChange, canonicalSettingValues, canonicalThreadSettings, collaborationMode, negativePendingResponse,
-    permissionProfileLabel, positivePendingResponse, sandboxPolicy, threadStartOptions, turnStartOptions,
+    applySettingChange, canonicalSettingValues, canonicalThreadSettings, changeSettingDraft, collaborationMode, negativePendingResponse,
+    pendingDecisionOptions, pendingRequestDetails, pendingResponse, permissionProfileLabel, positivePendingResponse,
+    sandboxPolicy, threadStartOptions, turnStartOptions,
+    settingDraftFor, settingPromptOptions,
 } from "../dist/index.js";
 
 test("native turn-setting option shaping", () => {
@@ -60,6 +62,32 @@ test("explicit access replaces a named permission profile", () => {
     });
 });
 
+test("turn-setting drafts and submitted options remain isolated by thread", () => {
+    const drafts = new Map();
+    const canonicalA = {model: "gpt-a", approvalPolicy: "on-request", sandboxPolicy: {type: "workspaceWrite"}};
+    const canonicalB = {model: "gpt-b", approvalPolicy: "never", sandboxPolicy: {type: "readOnly"}};
+    changeSettingDraft(drafts, "thread-a", canonicalA, 1, "sandbox", "danger-full-access");
+    changeSettingDraft(drafts, "thread-a", canonicalA, 1, "approval", "untrusted");
+
+    const threadB = settingDraftFor(drafts, "thread-b", canonicalB, 1);
+    assert.equal(threadB.values.model, "gpt-b");
+    assert.equal(threadB.values.sandbox, "read-only");
+    assert.equal(threadB.touched.size, 0);
+    assert.deepEqual(settingPromptOptions(threadB, []), {turn: {}, thread: {}});
+
+    const threadA = settingDraftFor(drafts, "thread-a", canonicalA, 1);
+    assert.equal(threadA.values.sandbox, "danger-full-access");
+    assert.equal(threadA.values.approval, "untrusted");
+    assert.deepEqual(settingPromptOptions(threadA, []), {
+        turn: {approvalPolicy: "untrusted", sandboxPolicy: {type: "dangerFullAccess"}},
+        thread: {approvalPolicy: "untrusted", sandbox: "danger-full-access"},
+    });
+
+    const refreshedA = settingDraftFor(drafts, "thread-a", {...canonicalA, model: "gpt-a-new"}, 2);
+    assert.equal(refreshedA.values.model, "gpt-a-new");
+    assert.equal(refreshedA.values.sandbox, "danger-full-access");
+});
+
 test("supported individual settings override retained values without discarding permissions", () => {
     let change = {
         values: canonicalSettingValues({
@@ -104,4 +132,25 @@ test("native pending-request positive and negative response shapes", () => {
     assert.deepEqual(positivePendingResponse(request("attestation")), {
         error: {code: -32601, message: "CodexUI does not support this server request"},
     });
+
+    const declared = request("command-approval", {availableDecisions: ["decline", "cancel", "future"]});
+    assert.deepEqual(pendingDecisionOptions(declared).map(choice => choice.value), ["decline", "cancel"],
+        "the web UI offers only declared, schema-supported command decisions");
+    assert.deepEqual(pendingResponse(request("permissions-approval", {permissions: {network: {enabled: true}}}), "session"), {
+        result: {permissions: {network: {enabled: true}}, scope: "session"},
+    });
+    assert.deepEqual(pendingResponse(request("mcp-elicitation"), "cancel"), {
+        result: {action: "cancel", content: null, _meta: null},
+    });
+
+    const disclosed = pendingRequestDetails(request("permissions-approval", {
+        permissions: {fileSystem: {write: ["/tmp/<literal>"]}, network: {enabled: true}},
+        futureCapability: {mode: "bounded"},
+    }));
+    assert.equal(disclosed.truncated, false);
+    assert.deepEqual(disclosed.entries, [
+        {path: "permissions / fileSystem / write / 1", value: "/tmp/<literal>"},
+        {path: "permissions / network / enabled", value: "Yes"},
+        {path: "futureCapability / mode", value: "bounded"},
+    ], "request disclosure preserves known and future fields without a raw JSON projection");
 });

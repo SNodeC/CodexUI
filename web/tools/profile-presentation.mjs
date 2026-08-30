@@ -1,5 +1,6 @@
 import {performance} from "node:perf_hooks";
-import {PresentationModel, event, projectConversation, result} from "../dist/index.js";
+import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
+import {event, result} from "../dist/index.js";
 
 const turns = Array.from({length: 100}, (_, turn) => ({
     id: `turn-${turn}`, status: turn === 99 ? "inProgress" : "completed",
@@ -9,7 +10,8 @@ const turns = Array.from({length: 100}, (_, turn) => ({
         command: item % 3 === 2 ? "true" : undefined, status: "completed",
     })),
 }));
-const model = new PresentationModel();
+const session = new BrowserFrontendSession("ws://profile.invalid/", () => { throw new Error("profile does not connect"); });
+const model = session.model;
 let started = performance.now();
 model.applyEvent(result(1, 1, "thread.read", "profile-read", true, {
     thread: {id: "profile", status: {type: "active"}, turns},
@@ -17,8 +19,9 @@ model.applyEvent(result(1, 1, "thread.read", "profile-read", true, {
 const hydrateMilliseconds = performance.now() - started;
 
 const thread = model.thread("profile");
+session.selectThread("profile");
 started = performance.now();
-const projection = projectConversation(thread, [], 10_000, Date.now());
+const projection = session.conversation(10_000);
 const projectMilliseconds = performance.now() - started;
 
 started = performance.now();
@@ -27,6 +30,7 @@ for (let sequence = 2; sequence < 2_002; ++sequence) model.applyEvent(event(
     {threadId: "profile", turnId: "turn-99", itemId: "item-99-99"},
 ));
 const streamMilliseconds = performance.now() - started;
+session.dispose();
 
 process.stdout.write(`${JSON.stringify({
     authoritativeItems: 10_000,

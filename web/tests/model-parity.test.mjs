@@ -115,7 +115,17 @@ test("C++ ordering, domains, telemetry, generation, and repository hints", () =>
     assert.equal(model.telemetry().length, 1);
     assert.equal(model.globalDomains().has("catalog.models.changed"), false);
 
-    model.applyEvent(result(7, 1, "thread.read", "hints", true, {thread: {
+    model.applyEvent(event(7, 1, "notice.added", {message: "scoped telemetry"}, "none", {threadId: "phantom-none"}));
+    model.applyEvent(event(8, 1, "thread.goal.changed", {}, "remove", {threadId: "phantom-remove"}));
+    assert.equal(model.thread("phantom-none"), undefined);
+    assert.equal(model.thread("phantom-remove"), undefined);
+    assert.equal(model.telemetry().length, 2);
+    model.applyEvent(event(9, 1, "turn.upsert", {turn: {id: "real-turn", status: "inProgress"}}, "merge", {
+        threadId: "real-thread", turnId: "real-turn",
+    }));
+    assert.notEqual(model.thread("real-thread"), undefined);
+
+    model.applyEvent(result(10, 1, "thread.read", "hints", true, {thread: {
         id: "repository-thread", cwd: "/workspace", turns: [{id: "repository-turn", items: [
             {id: "command", type: "commandExecution", cwd: "/workspace/project/src"},
             {id: "change", type: "fileChange", changes: [{path: "lib/example.cpp"}, {path: "removed.txt"}]},
@@ -125,7 +135,7 @@ test("C++ ordering, domains, telemetry, generation, and repository hints", () =>
     assert.deepEqual(model.thread("repository-thread").changedPaths, ["lib/example.cpp", "removed.txt"]);
 
     model.applyEvent(event(1, 2, "connection.lifecycle", {state: "connected"}, "replace"));
-    model.applyEvent(event(8, 1, "thread.upsert", {thread: {id: "stale"}}, "merge", {threadId: "stale"}));
+    model.applyEvent(event(11, 1, "thread.upsert", {thread: {id: "stale"}}, "merge", {threadId: "stale"}));
     assert.equal(model.thread("stale"), undefined);
     model.applyEvent(event(2, 2, "pending-request.upsert", {requestId: 42, category: "approval", request: {}}, "merge", {threadId: "provider-a"}));
     assert.equal(model.pendingRequestCount(), 1);
@@ -220,4 +230,49 @@ test("C++ live agent rebind and cycle protection invariants", () => {
     }}, "merge", {threadId: "new-child", turnId: "cycle-turn", itemId: "cycle-agent"}));
     assert.equal(model.childOwnership("rebind-parent"), undefined);
     assert.deepEqual(model.thread("new-child").childThreadOrder, []);
+});
+
+test("provider generations are scoped to one frontend connection generation", () => {
+    const model = new PresentationModel();
+    model.applyEvent(event(1, 1, "connection.lifecycle", {state: "connected"}, "replace"));
+    model.applyEvent(event(2, 1, "connection.provider", {generation: 10, state: "ready"}, "replace"));
+    model.applyEvent(event(3, 1, "thread.upsert", {thread: {id: "old-provider"}}, "merge", {threadId: "old-provider"}));
+    model.applyEvent(event(1, 2, "connection.lifecycle", {state: "connected"}, "replace"));
+    model.applyEvent(event(2, 2, "connection.provider", {generation: 1, state: "ready"}, "replace"));
+    assert.notEqual(model.thread("old-provider"), undefined);
+    assert.equal(model.connection().providerGeneration, 1);
+    assert.equal(model.connection().providerState, "ready");
+});
+
+test("stream text retains bounded tails and explicit discarded-byte metadata", () => {
+    const model = new PresentationModel();
+    const oversized = "A".repeat(300 * 1024);
+    model.applyEvent(event(1, 1, "conversation.item.upsert", {item: {
+        id: "bounded-command", type: "commandExecution", aggregatedOutput: oversized,
+    }}, "merge", {threadId: "bounded-thread", turnId: "bounded-turn", itemId: "bounded-command"}));
+    let item = model.thread("bounded-thread").turns.get("bounded-turn").items.get("bounded-command");
+    assert.ok(new TextEncoder().encode(item.raw.aggregatedOutput).length <= 256 * 1024);
+    assert.ok(item.textRetention.get("aggregatedOutput").discardedBytes > 0);
+
+    model.applyEvent(event(2, 1, "conversation.item.append", {
+        field: "aggregatedOutput", text: "B".repeat(300 * 1024),
+    }, "merge", {threadId: "bounded-thread", turnId: "bounded-turn", itemId: "bounded-command"}));
+    item = model.thread("bounded-thread").turns.get("bounded-turn").items.get("bounded-command");
+    assert.ok(new TextEncoder().encode(item.raw.aggregatedOutput).length <= 256 * 1024);
+    assert.equal(item.raw.aggregatedOutput.startsWith("B"), true);
+    assert.ok(item.textRetention.get("aggregatedOutput").discardedBytes >= 300 * 1024);
+
+    model.applyEvent(event(3, 1, "conversation.item.upsert", {item: {
+        id: "bounded-reasoning", type: "reasoning", summary: ["C".repeat(160 * 1024), "D".repeat(160 * 1024)],
+    }}, "merge", {threadId: "bounded-thread", turnId: "bounded-turn", itemId: "bounded-reasoning"}));
+    const reasoning = model.thread("bounded-thread").turns.get("bounded-turn").items.get("bounded-reasoning");
+    assert.ok(reasoning.textRetention.get("summary").retainedBytes <= 256 * 1024);
+    assert.ok(reasoning.textRetention.get("summary").discardedBytes > 0);
+
+    model.applyEvent(event(4, 1, "conversation.item.upsert", {item: {
+        id: "large-prompt", type: "userMessage", text: oversized,
+    }}, "merge", {threadId: "bounded-thread", turnId: "bounded-turn", itemId: "large-prompt"}));
+    const prompt = model.thread("bounded-thread").turns.get("bounded-turn").items.get("large-prompt");
+    assert.equal(prompt.raw.text, oversized);
+    assert.equal(prompt.textRetention, undefined);
 });

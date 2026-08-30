@@ -5,6 +5,8 @@
 #include "codex/PresentationStatus.h"
 #include "codex/ui/UiStyle.h"
 
+#include <QApplication>
+#include <QClipboard>
 #include <QColor>
 #include <QDateTime>
 #include <QDialog>
@@ -12,8 +14,10 @@
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QImageReader>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLinearGradient>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
@@ -34,6 +38,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
+#include <unordered_set>
 #include <utility>
 
 namespace codexui::codex::middle {
@@ -48,8 +54,14 @@ constexpr int ThumbnailMaximumWidth = 280;
 constexpr int ThumbnailMaximumHeight = 180;
 constexpr int ViewerMaximumImageExtent = 4096;
 constexpr qsizetype MaximumGenericActivityCharacters = 4096;
+constexpr int CardHeaderActionSpacing = 4;
 
-bool initiallyCollapsed(CardKind kind) {
+bool initiallyCollapsed(CardKind kind, bool commandInitiallyCollapsed,
+                        bool imageInitiallyCollapsed) {
+  if (kind == CardKind::CommandExecution)
+    return commandInitiallyCollapsed;
+  if (kind == CardKind::ImageGeneration)
+    return imageInitiallyCollapsed;
   return kind != CardKind::UserMessage && kind != CardKind::AgentMessage &&
          kind != CardKind::LocalPrompt;
 }
@@ -60,7 +72,7 @@ public:
       : QToolButton(parent) {
     setObjectName(QStringLiteral("cardDisclosureButton"));
     setProperty("kind", "subtle");
-    setFixedSize(24, 24);
+    setFixedSize(14, 24);
     setCursor(Qt::PointingHandCursor);
     setFocusPolicy(Qt::StrongFocus);
     setAccessibleName(QStringLiteral("Expand card"));
@@ -82,11 +94,11 @@ public:
 protected:
   void paintEvent(QPaintEvent *event) override {
     static_cast<void>(event);
-    QRect indicator = rect().adjusted(3, 3, -3, -3);
-    // Keep the full 24 px hit target while aligning the visible stroke with
-    // the card's canonical right inset. The narrower left glyph needs two
-    // pixels more optical compensation than the down glyph.
-    indicator.translate(expanded_ ? 7 : 9, 0);
+    QRect indicator(0, 3, 12, height() - 6);
+    // Keep the visible stroke at the accepted card-right inset. The narrower
+    // left glyph needs two pixels more optical compensation than the down
+    // glyph, while the compact control width avoids artificial action gaps.
+    indicator.translate(expanded_ ? 3 : 5, 0);
     UiStyle::drawChevron(this, indicator, isEnabled(),
                          underMouse() || hasFocus(),
                          expanded_ ? UiStyle::ChevronDirection::Down
@@ -95,6 +107,36 @@ protected:
 
 private:
   bool expanded_ = false;
+};
+
+class CardCopyButton final : public QToolButton {
+public:
+  explicit CardCopyButton(QWidget *parent = nullptr) : QToolButton(parent) {
+    setObjectName(QStringLiteral("cardCopyButton"));
+    setFixedSize(16, 24);
+    setCursor(Qt::PointingHandCursor);
+    setFocusPolicy(Qt::StrongFocus);
+    setAccessibleName(QStringLiteral("Copy card content"));
+    setToolTip(accessibleName());
+  }
+
+protected:
+  void paintEvent(QPaintEvent *event) override {
+    static_cast<void>(event);
+    QColor color(QStringLiteral("#667085"));
+    if (!isEnabled())
+      color = QColor(QStringLiteral("#98a2b3"));
+    else if (underMouse() || hasFocus())
+      color = QColor(QStringLiteral("#1d2633"));
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(
+        QPen(color, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.drawRoundedRect(QRectF(4.5, 5.5, 8.0, 9.0), 1.2, 1.2);
+    painter.drawRoundedRect(QRectF(7.5, 8.5, 8.0, 9.0), 1.2, 1.2);
+  }
 };
 
 void openImageViewer(const QString &path);
@@ -107,6 +149,7 @@ public:
     setProperty("kind", "imageThumbnail");
     setCursor(Qt::PointingHandCursor);
     setToolTip(QDir::toNativeSeparators(path_));
+    setAccessibleDescription(QDir::toNativeSeparators(path_));
     setAlignment(Qt::AlignCenter);
     setMinimumSize(72, 48);
     setMaximumSize(ThumbnailMaximumWidth, ThumbnailMaximumHeight);
@@ -120,12 +163,18 @@ public:
                                          Qt::KeepAspectRatio));
     const QImage image = reader.read();
     if (image.isNull()) {
+      setAccessibleName(QStringLiteral("Image unavailable: %1")
+                            .arg(QFileInfo(path_).fileName()));
       setText(QStringLiteral("Image unavailable\n%1")
                   .arg(QFileInfo(path_).fileName()));
       setProperty("imageAvailable", false);
+      setFocusPolicy(Qt::NoFocus);
       unsetCursor();
       return;
     }
+    setAccessibleName(
+        QStringLiteral("Open image: %1").arg(QFileInfo(path_).fileName()));
+    setFocusPolicy(Qt::StrongFocus);
     setProperty("imageAvailable", true);
     setPixmap(QPixmap::fromImage(image));
     setFixedSize(image.size() + QSize(8, 8));
@@ -138,17 +187,107 @@ public:
 
 protected:
   void mousePressEvent(QMouseEvent *event) override {
-    if (event->button() == Qt::LeftButton &&
-        property("imageAvailable").toBool()) {
-      openImageViewer(path_);
+    if (event->button() == Qt::LeftButton && activate()) {
       event->accept();
       return;
     }
     QLabel::mousePressEvent(event);
   }
 
+  void keyPressEvent(QKeyEvent *event) override {
+    if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
+         event->key() == Qt::Key_Space) &&
+        activate()) {
+      event->accept();
+      return;
+    }
+    QLabel::keyPressEvent(event);
+  }
+
 private:
+  bool activate() {
+    if (!property("imageAvailable").toBool())
+      return false;
+    openImageViewer(path_);
+    return true;
+  }
+
   QString path_;
+};
+
+class ImageRibbon final : public QScrollArea {
+public:
+  explicit ImageRibbon(QWidget *parent = nullptr) : QScrollArea(parent) {
+    setObjectName(QStringLiteral("messageImages"));
+    setFrameShape(QFrame::StyledPanel);
+    setWidgetResizable(false);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    setStyleSheet(QStringLiteral(
+        "QScrollArea#messageImages{background:#fbfcfe;"
+        "border:1px solid #d7dee8;border-radius:6px;}"
+        "QWidget#messageImageStrip{background:transparent;}"));
+
+    strip_ = new QWidget;
+    strip_->setObjectName(QStringLiteral("messageImageStrip"));
+    layout_ = new QHBoxLayout(strip_);
+    layout_->setContentsMargins(4, 4, 4, 4);
+    layout_->setSpacing(8);
+    layout_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    setWidget(strip_);
+    hide();
+  }
+
+  void setPaths(const QStringList &paths, bool forceRebuild = false) {
+    bool matches = !forceRebuild && layout_->count() == paths.size();
+    for (qsizetype index = 0; matches && index < paths.size(); ++index) {
+      const auto *thumbnail = dynamic_cast<ImageThumbnail *>(
+          layout_->itemAt(static_cast<int>(index))->widget());
+      matches = thumbnail && thumbnail->represents(paths.at(index));
+    }
+    if (matches) {
+      setVisible(!paths.isEmpty());
+      return;
+    }
+
+    while (QLayoutItem *item = layout_->takeAt(0)) {
+      delete item->widget();
+      delete item;
+    }
+    for (const QString &path : paths)
+      layout_->addWidget(new ImageThumbnail(path, strip_), 0, Qt::AlignTop);
+
+    layout_->activate();
+    naturalSize_ = layout_->sizeHint().expandedTo(QSize(0, 0));
+    strip_->setFixedSize(naturalSize_);
+    horizontalScrollBar()->setValue(0);
+    refreshHeight();
+    setVisible(!paths.isEmpty());
+  }
+
+protected:
+  void resizeEvent(QResizeEvent *event) override {
+    QScrollArea::resizeEvent(event);
+    refreshHeight();
+  }
+
+private:
+  void refreshHeight() {
+    const int availableWidth = std::max(0, viewport()->width());
+    const bool overflows = naturalSize_.width() > availableWidth;
+    const int scrollBarHeight =
+        overflows ? style()->pixelMetric(QStyle::PM_ScrollBarExtent) : 0;
+    const int target = std::max(
+        0, naturalSize_.height() + scrollBarHeight + 2 * frameWidth());
+    if (height() != target)
+      setFixedHeight(target);
+  }
+
+  QWidget *strip_ = nullptr;
+  QHBoxLayout *layout_ = nullptr;
+  QSize naturalSize_;
 };
 
 class ImageViewer final : public QDialog {
@@ -244,7 +383,8 @@ QLabel *makeMarkdownLabel(const QString &value, QWidget *parent = nullptr) {
   label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   label->setOpenExternalLinks(true);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse |
-                                 Qt::LinksAccessibleByMouse);
+                                 Qt::LinksAccessibleByMouse |
+                                 Qt::LinksAccessibleByKeyboard);
   label->setProperty("markdownSource", value);
   label->setText(markdownHtml(value));
   return label;
@@ -352,6 +492,16 @@ struct DiffCounts {
   int deletions = 0;
 };
 
+struct CardCopyContent {
+  QString text;
+  bool markdown = false;
+};
+
+QString joinedCopyText(QStringList parts) {
+  parts.removeAll(QString{});
+  return parts.join(QStringLiteral("\n\n"));
+}
+
 QString fileChangesText(const FileChangesData &data) {
   QStringList rows;
   for (const FileChangeData &change : data.changes) {
@@ -407,6 +557,43 @@ QString boundedGenericActivity(const nlohmann::json &raw) {
   return rendered + QStringLiteral("\n\n[Activity details truncated]");
 }
 
+CardCopyContent cardCopyContent(const VisibleCardData &card) {
+  return std::visit(
+      [](const auto &payload) -> CardCopyContent {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, UserMessageData>) {
+          return payload.text.isEmpty()
+                     ? CardCopyContent{
+                           payload.imagePaths.join(QLatin1Char('\n')), false}
+                     : CardCopyContent{payload.text, true};
+        } else if constexpr (std::is_same_v<Payload, AgentMessageData>) {
+          return {payload.text, true};
+        } else if constexpr (std::is_same_v<Payload, CommandExecutionData>) {
+          return {joinedCopyText({trimTrailingEmptyLines(payload.command),
+                                  trimTrailingEmptyLines(payload.output)}),
+                  false};
+        } else if constexpr (std::is_same_v<Payload, AgentActivityData>) {
+          return {joinedCopyText({payload.prompt, payload.resultText}), true};
+        } else if constexpr (std::is_same_v<Payload, ReasoningData>) {
+          return {payload.summary, true};
+        } else if constexpr (std::is_same_v<Payload, FileChangesData>) {
+          return {fileChangesText(payload), false};
+        } else if constexpr (std::is_same_v<Payload, PlanData>) {
+          return {planMarkdown(payload), true};
+        } else if constexpr (std::is_same_v<Payload, ImageGenerationData>) {
+          return {joinedCopyText({payload.revisedPrompt, payload.path}), false};
+        } else if constexpr (std::is_same_v<Payload, GenericActivityData>) {
+          return {boundedGenericActivity(payload.raw), false};
+        } else {
+          return payload.prompt.isEmpty()
+                     ? CardCopyContent{
+                           payload.imagePaths.join(QLatin1Char('\n')), false}
+                     : CardCopyContent{payload.prompt, true};
+        }
+      },
+      card.payload);
+}
+
 bool acceptedTransitionActive(const LocalPromptData &prompt, qint64 now) {
   return prompt.acceptedTransitionActive(now);
 }
@@ -451,6 +638,44 @@ bool ContentSizedTextView::setContent(const QString &content) {
   return true;
 }
 
+bool ContentSizedTextView::retainsWheelGesture(QWheelEvent *event) {
+  if (!event)
+    return false;
+  const int delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
+                                                  : event->angleDelta().y();
+  QScrollBar *bar = verticalScrollBar();
+  const bool canScroll = bar->maximum() > bar->minimum() &&
+                         ((delta > 0 && bar->value() > bar->minimum()) ||
+                          (delta < 0 && bar->value() < bar->maximum()));
+
+  const bool hasDirection = delta != 0;
+  if (event->phase() == Qt::ScrollBegin) {
+    wheelGestureActive_ = true;
+    wheelGestureDecided_ = hasDirection;
+    wheelGestureOwned_ = hasDirection && canScroll;
+  } else if (event->phase() == Qt::ScrollEnd) {
+    const bool retained =
+        wheelGestureActive_ && wheelGestureDecided_ && wheelGestureOwned_;
+    wheelGestureActive_ = false;
+    wheelGestureDecided_ = false;
+    wheelGestureOwned_ = false;
+    return retained;
+  } else if (event->phase() == Qt::NoScrollPhase) {
+    // A discrete mouse-wheel notch is a complete gesture. At an existing
+    // boundary it may therefore scroll the enclosing conversation.
+    return canScroll;
+  } else if (!wheelGestureActive_) {
+    // Some platforms omit ScrollBegin and start with ScrollUpdate.
+    wheelGestureActive_ = true;
+    wheelGestureDecided_ = hasDirection;
+    wheelGestureOwned_ = hasDirection && canScroll;
+  } else if (!wheelGestureDecided_ && hasDirection) {
+    wheelGestureDecided_ = true;
+    wheelGestureOwned_ = canScroll;
+  }
+  return wheelGestureDecided_ && wheelGestureOwned_;
+}
+
 QSize ContentSizedTextView::sizeHint() const {
   QSize result = QTextEdit::sizeHint();
   result.setHeight(preferredHeight_);
@@ -461,6 +686,22 @@ QSize ContentSizedTextView::minimumSizeHint() const {
   QSize result = QTextEdit::minimumSizeHint();
   result.setHeight(0);
   return result;
+}
+
+void ContentSizedTextView::wheelEvent(QWheelEvent *event) {
+  QScrollBar *bar = verticalScrollBar();
+  const int delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
+                                                  : event->angleDelta().y();
+  const bool atBoundary = bar->maximum() <= bar->minimum() ||
+                          (delta > 0 && bar->value() <= bar->minimum()) ||
+                          (delta < 0 && bar->value() >= bar->maximum());
+  if (atBoundary) {
+    // If this nested view owned the gesture when it began, reaching an edge
+    // must not leak the remaining updates into the conversation viewport.
+    event->accept();
+    return;
+  }
+  QTextEdit::wheelEvent(event);
 }
 
 void ContentSizedTextView::resizeEvent(QResizeEvent *event) {
@@ -561,16 +802,9 @@ void CommandOutputView::wheelEvent(QWheelEvent *event) {
   QScrollBar *bar = verticalScrollBar();
   const int delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
                                                   : event->angleDelta().y();
-  if (bar->maximum() <= bar->minimum() ||
-      (delta > 0 && bar->value() <= bar->minimum()) ||
-      (delta < 0 && bar->value() >= bar->maximum())) {
-    event->accept();
-    return;
-  }
-
   if (delta > 0)
     followsLatest_ = false;
-  QTextEdit::wheelEvent(event);
+  ContentSizedTextView::wheelEvent(event);
   preservedScrollValue_ = bar->value();
   followsLatest_ = isAtBottom();
 }
@@ -604,10 +838,13 @@ bool CommandOutputView::isAtBottom() const {
 
 class ConversationCard::Impl final {
 public:
-  Impl(ConversationCard *owner, const VisibleCardData &initial)
+  Impl(ConversationCard *owner, const VisibleCardData &initial,
+       bool commandInitiallyCollapsed, bool imageInitiallyCollapsed)
       : owner(owner), current(initial),
-        collapsed(initiallyCollapsed(initial.kind)) {
+        collapsed(initiallyCollapsed(initial.kind, commandInitiallyCollapsed,
+                                     imageInitiallyCollapsed)) {
     owner->setObjectName(QStringLiteral("conversationCard"));
+    owner->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     owner->setProperty("conversationCardKey",
                        QString::fromStdString(stableKey(initial.key)));
     owner->setProperty("conversationCardKind", static_cast<int>(initial.kind));
@@ -619,11 +856,13 @@ public:
     header->setObjectName(QStringLiteral("conversationCardHeader"));
     headerLayout = new QHBoxLayout(header);
     headerLayout->setContentsMargins(0, 0, 0, 0);
-    headerLayout->setSpacing(6);
+    headerLayout->setSpacing(CardHeaderActionSpacing);
     title = makeLabel({}, "title", header);
     title->setWordWrap(false);
+    copy = new CardCopyButton(header);
     disclosure = new CardDisclosureButton(header);
     headerLayout->addWidget(title, 1);
+    headerLayout->addWidget(copy, 0, Qt::AlignRight | Qt::AlignVCenter);
     headerLayout->addWidget(disclosure, 0, Qt::AlignRight | Qt::AlignVCenter);
     layout->addWidget(header);
 
@@ -634,11 +873,30 @@ public:
     contentLayout->setSpacing(6);
     layout->addWidget(content);
 
+    nestedCards = new QWidget(owner);
+    nestedCards->setObjectName(QStringLiteral("conversationNestedCards"));
+    nestedLayout = new QVBoxLayout(nestedCards);
+    nestedLayout->setContentsMargins(0, 0, 0, 0);
+    nestedLayout->setSpacing(8);
+    nestedCards->hide();
+    layout->addWidget(nestedCards);
+
     QObject::connect(disclosure, &QToolButton::clicked, owner,
                      [this] { emit this->owner->foldRequested(!collapsed); });
+    QObject::connect(copy, &QToolButton::clicked, owner, [this] {
+      const CardCopyContent content = cardCopyContent(current);
+      if (content.text.isEmpty())
+        return;
+      auto *mime = new QMimeData;
+      mime->setText(content.text);
+      if (content.markdown)
+        mime->setData("text/markdown", content.text.toUtf8());
+      QApplication::clipboard()->setMimeData(mime);
+    });
     owner->setProperty("kind", "raised");
     std::visit([this](const auto &payload) { createComposition(payload); },
                initial.payload);
+    refreshCopyPresentation();
     refreshFoldPresentation();
   }
 
@@ -666,6 +924,7 @@ public:
       return false;
     std::visit([this](const auto &payload) { updateComposition(payload); },
                next.payload);
+    refreshCopyPresentation();
     refreshFoldPresentation();
     owner->updateGeometry();
     owner->update();
@@ -698,6 +957,48 @@ public:
     owner->update();
   }
 
+  bool setAuthoritativeTurnActive(bool active) {
+    const bool next = active && current.kind == CardKind::UserMessage;
+    if (authoritativeTurnActive == next)
+      return false;
+    authoritativeTurnActive = next;
+    owner->setProperty("authoritativeTurnActive", next);
+    owner->update();
+    return true;
+  }
+
+  void setNestedCards(const std::vector<ConversationCard *> &cards) {
+    const std::unordered_set<ConversationCard *> retained(cards.begin(),
+                                                           cards.end());
+    for (int index = nestedLayout->count() - 1; index >= 0; --index) {
+      auto *card = dynamic_cast<ConversationCard *>(
+          nestedLayout->itemAt(index)->widget());
+      if (!card || retained.contains(card))
+        continue;
+      const bool explicitlyHidden = card->isHidden();
+      nestedLayout->removeWidget(card);
+      card->setParent(owner->parentWidget());
+      card->setVisible(!explicitlyHidden);
+      card->setProperty("nestedConversationCard", false);
+    }
+    for (std::size_t index = 0; index < cards.size(); ++index) {
+      ConversationCard *card = cards[index];
+      if (!card)
+        continue;
+      const bool explicitlyHidden = card->isHidden();
+      const int position = static_cast<int>(index);
+      if (nestedLayout->indexOf(card) != position)
+        nestedLayout->insertWidget(position, card);
+      card->setVisible(!explicitlyHidden);
+      card->setProperty("nestedConversationCard", true);
+    }
+    hasVisibleNestedCards =
+        std::ranges::any_of(cards, [](const ConversationCard *card) {
+          return card && !card->isHidden();
+        });
+    refreshFoldPresentation();
+  }
+
   [[nodiscard]] bool hasVisibleContent() const {
     for (int index = 0; index < contentLayout->count(); ++index) {
       if (QWidget *widget = contentLayout->itemAt(index)->widget();
@@ -708,43 +1009,31 @@ public:
   }
 
   void refreshFoldPresentation() {
-    const bool expandable = hasVisibleContent();
+    const bool expandable = hasVisibleContent() || hasVisibleNestedCards;
     disclosure->setExpanded(!collapsed);
     disclosure->setVisible(expandable);
     content->setVisible(expandable && !collapsed);
+    nestedCards->setVisible(hasVisibleNestedCards && !collapsed);
+  }
+
+  void refreshCopyPresentation() {
+    copy->setVisible(!cardCopyContent(current).text.isEmpty());
+  }
+
+  void setActiveWork(bool active) {
+    if (owner->property("activeWork").toBool() == active)
+      return;
+    owner->setProperty("activeWork", active);
+    owner->update();
   }
 
   void createImageContainer() {
-    images = new QWidget(content);
-    images->setObjectName(QStringLiteral("messageImages"));
-    imageLayout = new QVBoxLayout(images);
-    imageLayout->setContentsMargins(0, 0, 0, 0);
-    imageLayout->setSpacing(8);
-    imageLayout->setAlignment(Qt::AlignLeft);
-    images->hide();
+    images = new ImageRibbon(content);
     contentLayout->addWidget(images);
   }
 
   void setImages(const QStringList &paths, bool forceRebuild = false) {
-    bool matches = !forceRebuild && imageLayout->count() == paths.size();
-    for (qsizetype index = 0; matches && index < paths.size(); ++index) {
-      const auto *thumbnail = dynamic_cast<ImageThumbnail *>(
-          imageLayout->itemAt(static_cast<int>(index))->widget());
-      matches = thumbnail && thumbnail->represents(paths.at(index));
-    }
-    if (matches) {
-      images->setVisible(!paths.isEmpty());
-      return;
-    }
-    while (QLayoutItem *item = imageLayout->takeAt(0)) {
-      delete item->widget();
-      delete item;
-    }
-    for (const QString &path : paths) {
-      auto *thumbnail = new ImageThumbnail(path, images);
-      imageLayout->addWidget(thumbnail, 0, Qt::AlignLeft);
-    }
-    images->setVisible(!paths.isEmpty());
+    images->setPaths(paths, forceRebuild);
   }
 
   void createComposition(const UserMessageData &message) {
@@ -821,6 +1110,9 @@ public:
   }
 
   void updateComposition(const CommandExecutionData &execution) {
+    const QByteArray status = execution.status.toUtf8();
+    setActiveWork(isActiveStatus(std::string_view(
+        status.constData(), static_cast<std::size_t>(status.size()))));
     const QString displayCommand = trimTrailingEmptyLines(execution.command);
     command->setContent(displayCommand);
     command->setVisible(!displayCommand.isEmpty());
@@ -917,6 +1209,9 @@ public:
   }
 
   void updateComposition(const ImageGenerationData &image) {
+    const QByteArray status = image.status.toUtf8();
+    setActiveWork(isActiveStatus(std::string_view(
+        status.constData(), static_cast<std::size_t>(status.size()))));
     const bool generated =
         !image.status.isEmpty() || !image.revisedPrompt.isEmpty();
     title->setText(generated ? QStringLiteral("Generated image")
@@ -1021,6 +1316,7 @@ public:
   QLabel *title = nullptr;
   QLabel *phaseSeparator = nullptr;
   QLabel *phase = nullptr;
+  CardCopyButton *copy = nullptr;
   CardDisclosureButton *disclosure = nullptr;
   QWidget *content = nullptr;
   QVBoxLayout *contentLayout = nullptr;
@@ -1030,12 +1326,19 @@ public:
   ContentSizedTextView *command = nullptr;
   CommandOutputView *output = nullptr;
   QTimer *animationTimer = nullptr;
-  QWidget *images = nullptr;
-  QVBoxLayout *imageLayout = nullptr;
+  ImageRibbon *images = nullptr;
+  QWidget *nestedCards = nullptr;
+  QVBoxLayout *nestedLayout = nullptr;
+  bool hasVisibleNestedCards = false;
+  bool authoritativeTurnActive = false;
 };
 
-ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent)
-    : QFrame(parent), impl_(std::make_unique<Impl>(this, data)) {}
+ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent,
+                                   bool commandInitiallyCollapsed,
+                                   bool imageInitiallyCollapsed)
+    : QFrame(parent),
+      impl_(std::make_unique<Impl>(this, data, commandInitiallyCollapsed,
+                                   imageInitiallyCollapsed)) {}
 
 ConversationCard::~ConversationCard() = default;
 
@@ -1051,6 +1354,15 @@ bool ConversationCard::isCollapsed() const noexcept { return impl_->collapsed; }
 
 void ConversationCard::setCollapsed(bool collapsed) {
   impl_->setCollapsed(collapsed);
+}
+
+bool ConversationCard::setAuthoritativeTurnActive(bool active) {
+  return impl_->setAuthoritativeTurnActive(active);
+}
+
+void ConversationCard::setNestedCards(
+    const std::vector<ConversationCard *> &cards) {
+  impl_->setNestedCards(cards);
 }
 
 std::optional<CommandOutputView::ScrollState>
@@ -1076,6 +1388,25 @@ bool ConversationCard::canApply(const VisibleCardData &data) const noexcept {
 
 void ConversationCard::paintEvent(QPaintEvent *event) {
   QFrame::paintEvent(event);
+  if (property("activeWork").toBool()) {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(QStringLiteral("#98a2b3")), 1.5));
+    painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0),
+                            9.0, 9.0);
+    return;
+  }
+  if (impl_->current.kind == CardKind::UserMessage &&
+      impl_->authoritativeTurnActive) {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(QStringLiteral("#6f98e8")), 1.5));
+    painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0),
+                            8.0, 8.0);
+    return;
+  }
   if (impl_->current.kind != CardKind::LocalPrompt)
     return;
   const auto *prompt = std::get_if<LocalPromptData>(&impl_->current.payload);
@@ -1133,8 +1464,11 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
 }
 
 ConversationCard *createConversationCard(const VisibleCardData &data,
-                                         QWidget *parent) {
-  return new ConversationCard(data, parent);
+                                         QWidget *parent,
+                                         bool commandInitiallyCollapsed,
+                                         bool imageInitiallyCollapsed) {
+  return new ConversationCard(data, parent, commandInitiallyCollapsed,
+                              imageInitiallyCollapsed);
 }
 
 } // namespace codexui::codex::middle

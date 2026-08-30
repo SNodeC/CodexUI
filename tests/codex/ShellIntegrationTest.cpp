@@ -5,6 +5,7 @@
 
 #include "codex/Configuration.h"
 #include "codex/FrontendSession.h"
+#include "codex/PendingRequestDialog.h"
 #include "codex/PresentationProtocol.h"
 #include "codex/ShellWidget.h"
 #include "codex/middle/ConversationCards.h"
@@ -12,12 +13,19 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QElapsedTimer>
 #include <QFrame>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
+#include <QMessageBox>
+#include <QPlainTextEdit>
+#include <QPushButton>
 #include <QTabWidget>
 #include <QThread>
+#include <QTimer>
 
 #include <algorithm>
 #include <cerrno>
@@ -313,12 +321,15 @@ struct ShellFlow {
   bool verifyBoundedChildHydration();
   bool verifyNotFoundRecovery();
   bool verifyFailedHydration();
+  bool verifyOptimisticNewThread();
+  bool verifyPendingResolutionBoundary();
 
   bool run() {
     return verifyHydrationAndNavigation() && verifyPromptLifecycle() &&
            verifyReconnectHydration() && verifyTerminalCallback() &&
            verifyBoundedChildHydration() && verifyNotFoundRecovery() &&
-           verifyFailedHydration();
+           verifyFailedHydration() && verifyOptimisticNewThread() &&
+           verifyPendingResolutionBoundary();
   }
 };
 
@@ -333,6 +344,10 @@ bool ShellFlow::verifyHydrationAndNavigation() {
                                            {"connectionId", "test-controller"},
                                            {"role", "controller"}},
                                           Authority::Merge));
+  result &= peer.send(presentation::event(
+      sequence++, 1, "connection.provider",
+      {{"generation", std::uint64_t{1}}, {"state", "ready"}},
+      Authority::Replace));
   result &= peer.send(presentation::event(
       sequence++, 1, "thread.upsert", {{"thread", thread("thread-a", "A")}},
       Authority::Merge, {{"threadId", "thread-a"}}));
@@ -444,6 +459,12 @@ bool ShellFlow::verifyPromptLifecycle() {
                    "returning to hydrated B does not reread its history");
   result &= expect(submit(editor, QStringLiteral("prompt B1")),
                    "B1 is admitted while A1 is in flight");
+  result &= expect(
+      list && list->item(0) &&
+          list->item(0)->data(Qt::UserRole).toString().toStdString() ==
+              "thread-b" &&
+          list->currentItem() == list->item(0),
+      "real prompt admission immediately promotes B under Recent");
   const auto startB = peer.waitFor("turn.start", "thread-b");
   result &=
       expect(startB.has_value(), "different threads dispatch independently");
@@ -493,6 +514,27 @@ bool ShellFlow::verifyReconnectHydration() {
   result &= expect(readC1.has_value(), "C issues its first hydration read");
   if (!readC1)
     return false;
+  result &= expect(submit(editor, QStringLiteral("prompt C queued across restart")),
+                   "a prompt can queue behind C's in-flight hydration");
+  result &= expect(!peer.waitFor("turn.start", "thread-c", 100).has_value(),
+                   "the queued prompt waits for authoritative hydration");
+
+  result &= peer.send(presentation::event(
+      sequence++, 1, "connection.provider",
+      {{"generation", std::uint64_t{1}}, {"state", "disconnected"}},
+      Authority::Replace));
+  spin(10);
+  const auto *status =
+      shell.findChild<QLabel *>(QStringLiteral("globalStatusLabel"));
+  result &= expect(status && status->text() == QStringLiteral("Provider unavailable"),
+                   "provider loss cannot leave the shell visibly Ready");
+  peer.discard();
+  result &= expect(submit(editor, QStringLiteral("provider unavailable")),
+                   "the editable composer reaches the guarded admission boundary");
+  spin(5);
+  result &= expect(editor->toPlainText() == QStringLiteral("provider unavailable") &&
+                       !peer.has("turn.start") && !peer.has("turn.steer"),
+                   "provider loss rejects a stale hidden-thread destination without clearing the draft");
 
   generation = 2;
   result &= peer.send(presentation::event(sequence++, 2, "connection.lifecycle",
@@ -507,11 +549,45 @@ bool ShellFlow::verifyReconnectHydration() {
                                      {"connectionId", "test-controller-2"},
                                      {"role", "controller"}},
                                     Authority::Merge));
+  result &= peer.send(presentation::event(
+      sequence++, 2, "connection.provider",
+      {{"generation", std::uint64_t{2}}, {"state", "ready"}},
+      Authority::Replace));
+  const auto reconnectedList = peer.waitFor("threads.list");
+  result &= expect(reconnectedList.has_value(),
+                   "the ready provider requests a fresh authoritative list");
+  if (!reconnectedList)
+    return false;
+  result &= peer.send(presentation::result(
+      sequence++, 2, "threads.list",
+      reconnectedList->value("correlationId", std::string{}), true,
+      {{"threads",
+        nlohmann::json::array({thread("thread-a", "A"),
+                               thread("thread-b", "B"),
+                               thread("thread-c", "C")})}},
+      Authority::Merge));
   const auto readC2 = peer.waitFor("thread.read", "thread-c");
   result &= expect(readC2.has_value(),
                    "the new connection owns a fresh hydration read");
   if (!readC2)
     return false;
+  const auto readB2 = peer.waitFor("thread.read", "thread-b");
+  result &= expect(readB2.has_value(),
+                   "the restart also rehydrates B's interrupted prompt queue");
+  if (!readB2)
+    return false;
+  result &= peer.send(presentation::result(
+      sequence++, 2, "thread.read",
+      readB2->value("correlationId", std::string{}), true,
+      {{"thread", thread("thread-b", "B")}}, Authority::Replace,
+      {{"threadId", "thread-b"}}));
+  const auto resumedStartB = peer.waitFor("turn.start", "thread-b");
+  result &= expect(resumedStartB.has_value(),
+                   "B's interrupted in-flight prompt is reissued after hydration");
+  if (!resumedStartB)
+    return false;
+  startBCorrelation =
+      resumedStartB->value("correlationId", std::string{});
   result &= peer.send(presentation::result(
       sequence++, 2, "thread.read",
       readC2->value("correlationId", std::string{}), true,
@@ -523,7 +599,23 @@ bool ShellFlow::verifyReconnectHydration() {
                            {{"thread", thread("thread-c", "stale C")}},
                            Authority::Replace, {{"threadId", "thread-c"}}));
   result &= completeSettingsRefresh("thread-c");
+  const auto resumedStartC = peer.waitFor("turn.start", "thread-c");
+  result &= expect(
+      resumedStartC.has_value(),
+      "a transient provider restart preserves and dispatches C's queued prompt");
+  if (!resumedStartC)
+    return false;
+  result &= peer.send(presentation::result(
+      sequence++, 2, "turn.start",
+      resumedStartC->value("correlationId", std::string{}), true,
+      {{"turn", {{"id", "turn-c-reconnected"}, {"status", "completed"}}}},
+      Authority::Replace,
+      {{"threadId", "thread-c"}, {"turnId", "turn-c-reconnected"}}));
   spin(10);
+  const middle::LocalPromptData *preserved =
+      localPrompt(shell, QStringLiteral("prompt C queued across restart"));
+  result &= expect(preserved && preserved->state == middle::PromptState::Accepted,
+                   "the reconnected turn result acknowledges the preserved prompt");
   result &= expect(hasAgentMessage(shell, QStringLiteral("current C marker")),
                    "a late successful stale read cannot replace newer cards");
   peer.discard();
@@ -548,7 +640,7 @@ bool ShellFlow::verifyTerminalCallback() {
   const middle::LocalPromptData *cancelled =
       localPrompt(shell, QStringLiteral("prompt B1"));
   result &= expect(cancelled && cancelled->state == middle::PromptState::Failed,
-                   "an exact terminal callback after reconnect is never lost");
+                   "a real failure of the reissued request remains terminal");
   return result;
 }
 
@@ -774,8 +866,336 @@ bool ShellFlow::verifyFailedHydration() {
   return result;
 }
 
+bool ShellFlow::verifyOptimisticNewThread() {
+  bool result = true;
+  peer.discard();
+
+  auto *newThread =
+      shell.findChild<QPushButton *>(QStringLiteral("threadNewButton"));
+  bool dialogOpened = false;
+  QTimer::singleShot(0, &shell, [&dialogOpened] {
+    if (auto *dialog = qobject_cast<QDialog *>(
+            QApplication::activeModalWidget())) {
+      dialogOpened = true;
+      dialog->accept();
+    }
+  });
+  result &= expect(newThread, "the real New thread action is available");
+  if (!newThread)
+    return false;
+  newThread->click();
+  spin(10);
+
+  auto findThreadItem = [this](std::string_view id) -> QListWidgetItem * {
+    if (!list)
+      return nullptr;
+    for (int row = 0; row < list->count(); ++row) {
+      QListWidgetItem *item = list->item(row);
+      if (item && item->data(Qt::UserRole).toString().toStdString() == id)
+        return item;
+    }
+    return nullptr;
+  };
+  QListWidgetItem *draft = findThreadItem("draft:new-thread");
+  result &= expect(
+      dialogOpened && draft && list->currentItem() == draft &&
+          draft->data(Qt::UserRole + 6).toBool(),
+      "accepting the dialog immediately selects one animated draft row");
+  if (!draft)
+    return false;
+
+  result &= expect(submit(editor, QStringLiteral("first new-thread prompt")),
+                   "the selected optimistic draft admits its first prompt");
+  const auto create = peer.waitFor("thread.create");
+  result &= expect(create.has_value(),
+                   "the optimistic draft dispatches thread.create");
+  if (!create)
+    return false;
+  result &= peer.send(presentation::result(
+      sequence++, generation, "thread.create",
+      create->value("correlationId", std::string{}), true,
+      {{"thread", {{"id", "thread-new"},
+                    {"name", "New thread"},
+                    {"cwd", "/workspace/new"},
+                    {"status", "idle"}}}},
+      Authority::Merge, {{"threadId", "thread-new"}}));
+
+  const auto start = peer.waitFor("turn.start", "thread-new");
+  result &= expect(start.has_value(),
+                   "thread.create promotion dispatches the retained prompt");
+  if (!start)
+    return false;
+  QListWidgetItem *promoted = findThreadItem("thread-new");
+  result &= expect(
+      promoted == draft && promoted->data(Qt::UserRole + 6).toBool(),
+      "thread.create rekeys the same visible item while acknowledgment is pending");
+
+  result &= peer.send(presentation::result(
+      sequence++, generation, "turn.start",
+      start->value("correlationId", std::string{}), true,
+      {{"turn", {{"id", "turn-new"}, {"status", "inProgress"}}}},
+      Authority::Merge,
+      {{"threadId", "thread-new"}, {"turnId", "turn-new"}}));
+  spin(10);
+  result &= expect(findThreadItem("thread-new") == draft &&
+                       !draft->data(Qt::UserRole + 6).toBool(),
+                   "turn acknowledgment canonicalizes the same thread item");
+  return result;
+}
+
+bool ShellFlow::verifyPendingResolutionBoundary() {
+  bool result = true;
+  peer.discard();
+  auto pending = [this](int id, const char *command) {
+    return peer.send(presentation::event(
+        sequence++, generation, "pending-request.upsert",
+        {{"requestId", id},
+         {"category", "command-approval"},
+         {"request", {{"command", command}, {"cwd", "/tmp"}}}},
+        Authority::Merge,
+        {{"threadId", "thread-new"}, {"requestId", id}}));
+  };
+  auto *accept = shell.findChild<QPushButton *>(
+      QStringLiteral("pendingRequestAcceptButton"));
+  auto *reject = shell.findChild<QPushButton *>(
+      QStringLiteral("pendingRequestRejectButton"));
+  result &= expect(accept && reject,
+                   "the selected request exposes typed response actions");
+  if (!accept || !reject)
+    return false;
+
+  result &= pending(91, "first approval");
+  spin(30);
+  result &= expect(accept->isEnabled(),
+                   "the current controller can answer a current request");
+  accept->click();
+  accept->click();
+  const auto accepted = peer.waitFor("pending-request.resolve");
+  result &= expect(
+      accepted && accepted->value("data", nlohmann::json::object())
+                              .value("requestId", 0) == 91 &&
+          accepted->value("data", nlohmann::json::object())
+                  .value("result", nlohmann::json::object())
+                  .value("decision", std::string{}) == "accept",
+      "the first response preserves the native request identity and decision");
+  result &= expect(!peer.waitFor("pending-request.resolve", {}, 100).has_value(),
+                   "a repeated click cannot resolve the same request twice");
+  spin(30);
+  result &= expect(!accept->isEnabled() && !reject->isEnabled(),
+                   "a resolving request disables all response actions");
+  result &= peer.send(presentation::event(
+      sequence++, generation, "pending-request.removed",
+      nlohmann::json::object(), Authority::Remove,
+      {{"threadId", "thread-new"}, {"requestId", 91}}));
+
+  result &= pending(92, "observer approval");
+  result &= peer.send(presentation::event(
+      sequence++, generation, "connection.controller",
+      {{"controllerConnectionId", "different-controller"}},
+      Authority::Replace));
+  spin(30);
+  result &= expect(!accept->isEnabled() && !reject->isEnabled(),
+                   "an observer can inspect but cannot answer a request");
+  accept->click();
+  result &= expect(!peer.waitFor("pending-request.resolve", {}, 100).has_value(),
+                   "disabled observer actions emit no response");
+
+  result &= peer.send(presentation::event(
+      sequence++, generation, "connection.controller",
+      {{"controllerConnectionId", "test-controller-2"}}, Authority::Replace));
+  spin(30);
+  result &= expect(accept->isEnabled() && reject->isEnabled(),
+                   "current controller ownership restores request actions");
+  reject->click();
+  const auto rejected = peer.waitFor("pending-request.resolve");
+  result &= expect(
+      rejected && rejected->value("data", nlohmann::json::object())
+                          .value("requestId", 0) == 92,
+      "the restored controller can resolve the retained request");
+  return result;
+}
+
 bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
   return ShellFlow(session, peer).run();
+}
+
+bool verifyPendingRequestTextBoundaries() {
+  bool inspected = false;
+  bool plainText = false;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    inspected = true;
+    const auto labels = dialog->findChildren<QLabel *>();
+    const auto command = std::ranges::find_if(labels, [](QLabel *label) {
+      return label && label->text().contains(
+                          QStringLiteral("<b>untrusted command</b>"));
+    });
+    plainText = command != labels.end() &&
+                (*command)->textFormat() == Qt::PlainText;
+    dialog->reject();
+  });
+  const PendingRequestPresentation request{
+      "unsafe-command", "command-approval", "thread-a", 1,
+      {{"command", "<b>untrusted command</b>"}}};
+  static_cast<void>(PendingRequestDialog::present(request, nullptr));
+
+  bool escapedLink = false;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    const auto labels = dialog->findChildren<QLabel *>();
+    escapedLink = std::ranges::any_of(labels, [](QLabel *label) {
+      return label && label->textFormat() == Qt::RichText &&
+             label->text().contains(QStringLiteral("&lt;img")) &&
+             !label->text().contains(QStringLiteral("<img"));
+    });
+    dialog->reject();
+  });
+  const PendingRequestPresentation elicitation{
+      "unsafe-link", "mcp-elicitation", "thread-a", 1,
+      {{"url", "https://example.invalid/\"><img src=x>"}}};
+  static_cast<void>(PendingRequestDialog::present(elicitation, nullptr));
+
+  return expect(inspected && plainText,
+                "request text is always rendered literally") &&
+         expect(escapedLink, "the explicit MCP link escapes untrusted markup");
+}
+
+bool verifyPendingRequestValidationRetainsInput() {
+  bool incompleteWarning = false;
+  bool questionDialogRetained = false;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    const auto edits = dialog->findChildren<QLineEdit *>();
+    auto *buttons = dialog->findChild<QDialogButtonBox *>();
+    auto *submit = buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
+    if (edits.size() != 2 || !submit)
+      return;
+    edits.front()->setText(QStringLiteral("Retained first answer"));
+    QTimer::singleShot(0, [&] {
+      auto *warning =
+          qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+      incompleteWarning = warning &&
+                          warning->windowTitle() ==
+                              QStringLiteral("Incomplete response");
+      if (warning)
+        warning->done(QMessageBox::Ok);
+    });
+    submit->click();
+    questionDialogRetained =
+        dialog->isVisible() &&
+        edits.front()->text() == QStringLiteral("Retained first answer");
+    edits.back()->setText(QStringLiteral("Second answer"));
+    submit->click();
+  });
+  const PendingRequestPresentation questions{
+      "questions", "user-input", "thread-a", 1,
+      {{"questions",
+        nlohmann::json::array(
+            {{{"id", "first"},
+              {"question", "First?"},
+              {"options", nlohmann::json::array()}},
+             {{"id", "second"},
+              {"question", "Second?"},
+              {"options", nlohmann::json::array()}}})}}};
+  const auto questionResponse =
+      PendingRequestDialog::present(questions, nullptr);
+  const bool answersPreserved =
+      questionResponse &&
+      questionResponse->result["answers"]["first"]["answers"] ==
+          nlohmann::json::array({"Retained first answer"}) &&
+      questionResponse->result["answers"]["second"]["answers"] ==
+          nlohmann::json::array({"Second answer"});
+
+  bool invalidJsonWarning = false;
+  bool mcpDialogRetained = false;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    auto *editor = dialog->findChild<QPlainTextEdit *>();
+    auto *buttons = dialog->findChild<QDialogButtonBox *>();
+    auto *submit = buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
+    if (!editor || !submit)
+      return;
+    editor->setPlainText(QStringLiteral("["));
+    QTimer::singleShot(0, [&] {
+      auto *warning =
+          qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+      invalidJsonWarning = warning &&
+                           warning->windowTitle() ==
+                               QStringLiteral("Invalid response");
+      if (warning)
+        warning->done(QMessageBox::Ok);
+    });
+    submit->click();
+    mcpDialogRetained = dialog->isVisible() &&
+                        editor->toPlainText() == QStringLiteral("[");
+    editor->setPlainText(QStringLiteral("{\"accepted\":true}"));
+    submit->click();
+  });
+  const PendingRequestPresentation elicitation{
+      "elicitation", "mcp-elicitation", "thread-a", 1,
+      {{"message", "Structured response"},
+       {"requestedSchema", {{"type", "object"}}}}};
+  const auto mcpResponse = PendingRequestDialog::present(elicitation, nullptr);
+  const bool validJsonReturned =
+      mcpResponse && mcpResponse->result.value("action", std::string{}) ==
+                         "accept" &&
+      mcpResponse->result["content"] == nlohmann::json({{"accepted", true}});
+
+  return expect(incompleteWarning && questionDialogRetained && answersPreserved,
+                "incomplete questions keep the modal and prior answers open") &&
+         expect(invalidJsonWarning && mcpDialogRetained && validJsonReturned,
+                "invalid MCP JSON remains editable until a valid object is "
+                "submitted");
+}
+
+bool verifyPermissionRequestDisclosure() {
+  const nlohmann::json permissions =
+      {{"fileSystem",
+        {{"write", nlohmann::json::array({"/tmp/<untrusted>"})},
+         {"entries",
+          nlohmann::json::array(
+              {{{"access", "read"},
+                {"path", {{"type", "glob_pattern"}, {"pattern", "*.md"}}}}})}}},
+       {"network", {{"enabled", true}}},
+       {"futureCapability", {{"mode", "bounded"}}}};
+  bool completeDisclosure = false;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    QStringList displayed;
+    for (QLabel *label : dialog->findChildren<QLabel *>()) {
+      if (label)
+        displayed.push_back(label->text());
+    }
+    const QString all = displayed.join(QLatin1Char('\n'));
+    completeDisclosure =
+        all.contains(QStringLiteral("File system / write / 1: "
+                                    "/tmp/<untrusted>")) &&
+        all.contains(QStringLiteral("Network / enabled: Yes")) &&
+        all.contains(
+            QStringLiteral("futureCapability / mode: bounded"));
+    dialog->accept();
+  });
+  const PendingRequestPresentation request{
+      "permissions", "permissions-approval", "thread-a", 1,
+      {{"permissions", permissions}, {"reason", "test disclosure"}}};
+  const auto response = PendingRequestDialog::present(request, nullptr);
+  return expect(completeDisclosure,
+                "permission approval discloses known and future fields") &&
+         expect(response && response->error.is_null() &&
+                    response->result.value("permissions", nlohmann::json{}) ==
+                        permissions &&
+                    response->result.value("scope", std::string{}) == "turn",
+                "permission approval returns the exact disclosed object");
 }
 
 } // namespace
@@ -790,7 +1210,12 @@ int main(int argc, char **argv) {
   codexui::codex::FrontendSession session(*configuration);
   codexui::codex::PresentationPeer peer(
       codexui::codex::FrontendSessionTestPeer::takeClientDescriptor(session));
-  const bool result = codexui::codex::runShellFlow(session, peer);
+  const bool validationRetainsInput =
+      codexui::codex::verifyPendingRequestValidationRetainsInput();
+  const bool result = codexui::codex::verifyPendingRequestTextBoundaries() &&
+                      validationRetainsInput &&
+                      codexui::codex::verifyPermissionRequestDisclosure() &&
+                      codexui::codex::runShellFlow(session, peer);
   if (result)
     std::cout << "Shell integration test passed\n";
   return result ? 0 : 1;

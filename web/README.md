@@ -3,7 +3,8 @@
 CodexWebUI is the static browser application for CodexUI 1.0. It connects
 directly to an AISuite `codex-bridge` WebSocket endpoint with the `codex`
 subprotocol. It contains no web server, bridge router, controller authority,
-or persistent Codex state.
+or persistent Codex state. Its reproducible build and browser qualification
+require Node.js 22 or newer.
 
 ## Reproducible source layout
 
@@ -32,15 +33,28 @@ no standalone Node development or production server.
 ## Deployment
 
 `npm run build:app` creates the relocatable static artifact in `app-dist/`.
-The CodexUI CMake install places it in `share/codexui/web`. The existing
-`codex-bridge` HTTP/WebSocket listener serves `/`, `/index.html`, and the
-generated `/assets/` files from that directory while `/codex` remains the
-WebSocket upgrade route. A page delivered over HTTPS automatically derives the
-corresponding same-origin `wss://.../codex` URL.
+The standalone packaging project verifies and installs it with:
+
+```sh
+cmake -S . -B package-build -DCMAKE_INSTALL_PREFIX=/desired/prefix
+cmake --build package-build --target codexui-web-artifact
+cmake --install package-build --component CodexWebUI
+```
+
+The combined CodexUI build includes this project by default and installs the
+artifact in `share/codexui/web`; native-only builds must explicitly configure
+`-DCODEXUI_INSTALL_WEB=OFF`. The existing `codex-bridge` HTTP/WebSocket
+listener serves `/`, `/index.html`, and the generated `/assets/` files from
+that directory while `/codex` remains the WebSocket upgrade route. A page
+delivered over HTTPS automatically derives the corresponding same-origin
+`wss://.../codex` URL.
 
 The configured bridge URL is retained in browser local storage. Provider-side
 workspace paths and generated-image paths are displayed as remote metadata;
 the application does not imply access to the browser machine's filesystem.
+Failed WebSocket openings release their transport through the SDK detach
+callback; an explicit retry waits for that release before constructing its
+replacement.
 
 ## Verification
 
@@ -48,10 +62,13 @@ the application does not imply access to the browser machine's filesystem.
   lifecycle, viewport, supporting-surface, and server-render qualification
   tests.
 - `npm run build:app` verifies the production Vite bundle.
+- `npm run qualify:browser` serves that bundle only for the duration of a
+  headless-Chromium responsive, focus, drawer, and target-size qualification.
 - `npm run verify:artifact` proves that the output is non-empty and relocatable
   below an arbitrary static base path.
 - The repository CI checks the pinned SDK independently, runs the web suite,
-  records the performance profile, and uploads `app-dist` as `codexui-web`.
+  records the performance profile, installs the artifact through CMake, and
+  uploads the verified staged tree as `codexui-web`.
 
 The authoritative scope and exceptions are in
 [`../docs/web-1.0-contract.md`](../docs/web-1.0-contract.md).

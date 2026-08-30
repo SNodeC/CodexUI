@@ -104,6 +104,12 @@ ComposerPane::ComposerPane(QWidget *anchor)
   attentionRejectButton_ = new QPushButton(QStringLiteral("Reject"), attention_);
   attentionAcceptButton_ = new QPushButton(QStringLiteral("Accept"), attention_);
   attentionReviewButton_ = new QPushButton(QStringLiteral("Review"), attention_);
+  attentionRejectButton_->setObjectName(
+      QStringLiteral("pendingRequestRejectButton"));
+  attentionAcceptButton_->setObjectName(
+      QStringLiteral("pendingRequestAcceptButton"));
+  attentionReviewButton_->setObjectName(
+      QStringLiteral("pendingRequestReviewButton"));
   attentionRejectButton_->setProperty("kind", "destructive");
   attentionAcceptButton_->setProperty("kind", "request");
   attentionReviewButton_->setProperty("kind", "request");
@@ -173,6 +179,7 @@ ComposerPane::ComposerPane(QWidget *anchor)
   promptEditor_ = new codexui::ExpandingPromptEditor(composerBody_);
   sendButton_ = new QPushButton(QStringLiteral("Send"), composerBody_);
   sendButton_->setProperty("kind", "primary");
+  sendButton_->setToolTip(QStringLiteral("Send prompt (Enter)"));
   sendButton_->setFixedSize(62, ControlHeight);
   stopButton_ = new QPushButton(QStringLiteral("Stop"), composerBody_);
   stopButton_->setProperty("kind", "stop");
@@ -268,6 +275,12 @@ void ComposerPane::setAttentionRequest(QString title, QString detail,
   attentionAcceptButton_->setVisible(directAccept);
   attentionReviewButton_->setVisible(!directAccept);
   synchronizeGeometry();
+}
+
+void ComposerPane::setAttentionEnabled(bool enabled) {
+  attentionRejectButton_->setEnabled(enabled);
+  attentionAcceptButton_->setEnabled(enabled);
+  attentionReviewButton_->setEnabled(enabled);
 }
 
 void ComposerPane::setActiveTurn(bool active) {

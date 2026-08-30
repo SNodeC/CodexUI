@@ -17,6 +17,7 @@ class QListWidget;
 class QListWidgetItem;
 class QMenu;
 class QToolButton;
+class QTimer;
 
 namespace codexui::codex {
 class PresentationModel;
@@ -44,6 +45,14 @@ public:
   void setActions(Actions actions);
   void refresh(const PresentationModel &model,
                const std::string &selectedThreadId);
+  void beginOptimisticThread(std::string id, std::string title,
+                             std::string cwd);
+  void promoteOptimisticThread(const std::string &draftId,
+                               const std::string &authoritativeId);
+  void confirmOptimisticThread(const std::string &threadId);
+  void failOptimisticThread(const std::string &threadId);
+  [[nodiscard]] bool isOptimisticThread(const std::string &threadId) const;
+  void promotePromptedThread(const std::string &threadId);
   void setSortCriterion(SortCriterion criterion);
   [[nodiscard]] SortCriterion currentSortCriterion() const noexcept;
   [[nodiscard]] std::string visiblySelectedThreadId() const;
@@ -59,6 +68,8 @@ private:
     std::size_t depth = 0;
     bool hasChildren = false;
     bool expanded = false;
+    bool optimistic = false;
+    bool optimisticFailed = false;
 
     bool operator==(const ThreadRowSnapshot &) const = default;
   };
@@ -68,6 +79,17 @@ private:
     std::vector<ThreadRowSnapshot> rows;
 
     bool operator==(const ThreadPaneSnapshot &) const = default;
+  };
+  struct OptimisticThread {
+    std::string id;
+    std::string title;
+    std::string cwd;
+    bool failed = false;
+  };
+  struct PromptPromotion {
+    std::string rootThreadId;
+    std::optional<std::int64_t> updatedAt;
+    std::optional<std::int64_t> recencyAt;
   };
 
   void updateSortButton();
@@ -93,6 +115,9 @@ private:
   std::string projectedSelectedThreadId;
   std::string contextThreadId;
   QMenu *contextMenu = nullptr;
+  QTimer *optimisticAnimation = nullptr;
+  std::vector<OptimisticThread> optimisticThreads;
+  std::optional<PromptPromotion> promptPromotion;
   std::optional<ThreadPaneSnapshot> visibleSnapshot;
 };
 

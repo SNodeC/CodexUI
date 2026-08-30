@@ -78,15 +78,38 @@ Thread dots continue to describe activity rather than outcome, so completed or
 otherwise inactive threads retain the canonical light-gray dot. Reasoning prose
 and metadata without an authoritative status remain neutral because their
 content does not provide a reliable success, warning, or failure classification.
+An optimistic new-thread row is the deliberate pending-state exception: its
+soft-orange sweep distinguishes local intent from an authoritative active blue
+thread. The row retains one visual identity across draft creation, authoritative
+ID promotion, and first-prompt acknowledgment; failure switches that identity
+to the canonical soft-red error treatment.
 
 Conversation activity cards remain neutral so supporting process information
 does not compete with the user/Codex exchange. Color on those cards is reserved
 for authoritative running, completed, warning/interrupted, and failed status.
 Conversation cards with detail use one disclosure-header grammar; title-only
-cards omit the control. Message cards open expanded and activity cards open
-collapsed; user choices remain session-local.
+cards omit the control. Message, Command execution, and Image cards open
+expanded; other activity cards open collapsed by default. User choices remain
+session-local. Native and web expose
+the same persistent icon-only Conversation-header controls for Reasoning cards,
+interim Codex updates, and the initial Command execution and Image folds. Filtering never
+removes retained content, final answers remain visible, and changing the Command
+default does not override an existing card's user-owned state.
+
+Cards with content use one header action order: title/phase, flexible space,
+backgroundless copy icon, then disclosure. The two icons share a vertical
+center and the canonical compact 4 px action gap. Copy remains reachable on a
+collapsed card, while a contentless card omits it. Authored Markdown copies
+from the retained source with `text/markdown` and identical plain text;
+non-Markdown cards copy their deterministic primary-content text rather than
+rendered widget text.
 Folding is immediate rather than animated and anchors the selected title row,
 so content only contracts upward or grows downward below the interaction point.
+Multiple message images form one source-ordered horizontal ribbon. It keeps the
+height of the tallest bounded thumbnail, never wraps, and exposes horizontal
+overflow only when the row exceeds the available card width. Its standard 1 px
+neutral border, 6 px radius, 4 px padding, and soft-neutral surface contain the
+scrollbar without turning the ribbon into a nested card.
 
 ## Application layout
 
@@ -95,17 +118,23 @@ sidebar, the center conversation/composer region, a hideable Inspector, and a
 40-pixel status bar. Horizontal splitters resize the three main regions.
 
 The center region is wheel- and touchpad-scroll sensitive across its full
-width, including non-scrollable chrome and the splitter handles. Nested
-scrollable controls consume wheel events while they can move in that direction;
-at an edge, the conversation receives the event.
+width, including non-scrollable chrome and the splitter handles. Scrollable
+Command text and output retain a gesture that began while they could move, even
+after reaching an edge. A new outward gesture begun at that edge scrolls the
+conversation.
 
 ## Conversation structure
 
 `PresentationModel` is the retained normalized presentation source. The
 conversation projects it into one transparent section per app-server turn,
-with cards in server order. Stable turn/item and local-submission keys drive a
-single reconcile path for both first display and updates. Retained cards mutate
-in place, and identical visible projections do not trigger layout work.
+with cards in server order. The first You card is the visible turn container;
+later process, Codex, and steering You cards are nested inside it. The outer
+turn remains foldable, and restoring it preserves every child's independent
+fold state. A pending steering card uses the animated blue identity and morphs
+in place to a softer blue authoritative steering surface. Stable turn/item and
+local-submission keys drive a single reconcile path for both first display and
+updates. Retained cards mutate in place, and identical visible projections do
+not trigger layout work.
 
 The active thread name and its smaller `workspace | state` metadata form one
 baseline-aligned lockup, following the application brand/titlebar pattern
@@ -144,6 +173,10 @@ Only the correlated `turn.start` or `turn.steer` completion callback
 acknowledges it. Each request carries a unique `clientUserMessageId`; after a
 successful callback the card keeps a 500-millisecond accepted transition before
 normal message presentation. Failure produces an explicit error state.
+
+The authoritative outer You card uses a stronger static blue border while its
+turn is active. This state must not animate or alter card geometry; the moving
+highlight remains exclusive to local prompts awaiting acknowledgment.
 
 The input remains enabled after admission. Multiple prompts can be composed
 while earlier cards are pending. They are dispatched sequentially per thread.

@@ -6,6 +6,7 @@
 #include <QPlainTextEdit>
 
 class QFocusEvent;
+class QInputMethodEvent;
 class QKeyEvent;
 class QResizeEvent;
 
@@ -32,6 +33,7 @@ signals:
 protected:
     void focusInEvent(QFocusEvent* event) override;
     void focusOutEvent(QFocusEvent* event) override;
+    void inputMethodEvent(QInputMethodEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
 
@@ -41,6 +43,7 @@ private:
 
     int maximumEditorHeight = compactHeight();
     int currentContentHeight = compactHeight();
+    bool preeditActive = false;
     bool remeasureScheduled = false;
 };
 

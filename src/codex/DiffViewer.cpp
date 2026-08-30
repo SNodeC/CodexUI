@@ -151,7 +151,6 @@ QPlainTextEdit *diffView(const QString &objectName) {
   view->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
   auto *scrollBar = new DiffScrollBar(view);
   view->setVerticalScrollBar(scrollBar);
-  view->verticalScrollBar()->setProperty("kind", "infoViewer");
   new DiffHighlighter(view->document());
   QObject::connect(view, &QPlainTextEdit::textChanged, view,
                    [view, scrollBar] {
@@ -452,6 +451,7 @@ public:
                  QStringList nextPaths, QString nextRepository,
                  bool nextIncludeHiddenRepositories,
                  GitDiffScope nextScope, QString preferredPath) {
+    provider->cancel();
     workspace = std::move(nextWorkspace);
     commandDirectories = std::move(nextDirectories);
     changedPaths = std::move(nextPaths);
@@ -611,6 +611,7 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
   fileSummary->setContentsMargins(10, 0, 10, 0);
   fileSummary->setSpacing(8);
   summary = label(QStringLiteral("No changes"), "meta");
+  summary->setObjectName(QStringLiteral("codexDiffSummary"));
   authority = label({}, "meta");
   authority->setWordWrap(false);
   authority->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -655,9 +656,7 @@ DiffViewer::DiffViewer(QWidget *parent) : QWidget(parent) {
                       scopeValue(scope), GitDiffContext::Compact);
   });
   connect(provider, &GitDiffProvider::loadingChanged, this, [this](bool loading) {
-    if (loading &&
-        (!snapshot ||
-         (snapshot->files.empty() && snapshot->error.isEmpty()))) {
+    if (loading && !snapshot) {
       summary->setText(QStringLiteral("Loading changes…"));
     }
   });
@@ -718,6 +717,8 @@ void DiffViewer::setRepositoryContext(QString nextThreadId,
       commandDirectories == nextCommandDirectories &&
       changedPaths == nextChangedPaths)
     return;
+  refreshTimer->stop();
+  provider->cancel();
   const bool changedThread = threadId != nextThreadId;
   threadId = std::move(nextThreadId);
   workspace = std::move(nextWorkspace);

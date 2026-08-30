@@ -8,7 +8,7 @@ export interface PromptSubmission {
     id: number; admissionOrdinal: number; threadId: string; clientUserMessageId: string; prompt: string;
     attachments: AttachmentDraft[]; turnOptions: Record<string, unknown>; state: PromptState;
     acceptedAtMilliseconds: number; error: string; admissionAnchor?: AuthoritativeItemKey;
-    admissionAtStart: boolean; expectedTurnId?: string; materializedItem?: AuthoritativeItemKey;
+    admissionAtStart: boolean; startsTurn: boolean; expectedTurnId?: string; materializedItem?: AuthoritativeItemKey;
 }
 export interface PromptDispatch {
     id: number; threadId: string; clientUserMessageId: string; prompt: string; attachments: AttachmentDraft[];
@@ -21,6 +21,7 @@ export interface UserMessageByText {turnId: string; text: string; position: numb
 export interface AuthoritativeItemIndex {
     threadId: string; ordered: AuthoritativeItem[]; positions: Map<string, number>;
     userMessagesByClientId: Map<string, number>; userMessagesByText: UserMessageByText[];
+    turnRoots: Map<string, number>;
 }
 
 export function authoritativeKey(key: AuthoritativeItemKey): string {
@@ -42,6 +43,7 @@ function userMessageText(item: unknown): string {
 export function indexAuthoritativeItems(threadId: string, thread?: ThreadPresentation): AuthoritativeItemIndex {
     const result: AuthoritativeItemIndex = {
         threadId, ordered: [], positions: new Map(), userMessagesByClientId: new Map(), userMessagesByText: [],
+        turnRoots: new Map(),
     };
     if (!thread) return result;
     for (const turnId of thread.turnOrder) {
@@ -55,6 +57,7 @@ export function indexAuthoritativeItems(threadId: string, thread?: ThreadPresent
             result.ordered.push({key, presentation});
             result.positions.set(authoritativeKey(key), position);
             if (stringMember(presentation.raw, "type") === "userMessage") {
+                if (!result.turnRoots.has(turnId)) result.turnRoots.set(turnId, position);
                 const clientId = stringMember(presentation.raw, "clientId");
                 if (clientId !== "" && !result.userMessagesByClientId.has(clientId))
                     result.userMessagesByClientId.set(clientId, position);
@@ -72,8 +75,9 @@ export function promptWithFileLinks(prompt: string, attachments: readonly Attach
         .map(file => {
             const label = file.name.replaceAll("\\", "\\\\").replaceAll("[", "\\[").replaceAll("]", "\\]")
                 .replace(/[\r\n]/gu, " ");
-            const target = new URL(`file://${file.path.startsWith("/") ? "" : "/"}${file.path}`).href
-                .replaceAll("[", "%5B").replaceAll("]", "%5D").replaceAll("(", "%28").replaceAll(")", "%29");
+            const absolutePath = file.path.startsWith("/") ? file.path : `/${file.path}`;
+            const target = `file://${absolutePath.split("/").map(segment => encodeURIComponent(segment)
+                .replaceAll("(", "%28").replaceAll(")", "%29")).join("/")}`;
             return `- [${label}](${target})`;
         });
     return links.length === 0 ? prompt : `${prompt}\n\nAttached files:\n${links.join("\n")}`;
@@ -102,7 +106,7 @@ export class PromptCoordinator {
             id: this.nextSubmissionId++, admissionOrdinal: this.nextAdmissionOrdinal++, threadId,
             clientUserMessageId: `codexui-${now}-${this.nextSubmissionId - 1}`, prompt, attachments: structuredClone(attachments),
             turnOptions: structuredClone(turnOptions), state: "queued", acceptedAtMilliseconds: 0, error: "",
-            admissionAtStart: false,
+            admissionAtStart: false, startsTurn: activeTurnId === undefined,
         };
         if (activeTurnId !== undefined) submission.expectedTurnId = activeTurnId;
         if (authoritativeThread) {
@@ -123,6 +127,7 @@ export class PromptCoordinator {
         if (!next) return undefined;
         next.admissionAtStart = next.admissionAnchor === undefined;
         next.state = "inFlight";
+        next.startsTurn = activeTurnId === undefined;
         if (activeTurnId === undefined) delete next.expectedTurnId; else next.expectedTurnId = activeTurnId;
         const dispatch: PromptDispatch = {
             id: next.id, threadId: next.threadId, clientUserMessageId: next.clientUserMessageId,
@@ -228,6 +233,11 @@ export class PromptCoordinator {
         this.visualAliasesByThread.set(threadId, aliases);
         this.byThread.set(threadId, submissions.filter(submission => submission.state !== "accepted"
             || !submission.materializedItem || acceptedTransitionActive(submission, now)));
+        this.applyVisualAliases(threadId, index);
+        return index;
+    }
+
+    decorate(threadId: string, index: AuthoritativeItemIndex): AuthoritativeItemIndex {
         this.applyVisualAliases(threadId, index);
         return index;
     }

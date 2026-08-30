@@ -6,7 +6,9 @@
 #include <map>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -47,6 +49,27 @@ std::optional<QString> optionalText(const nlohmann::json &object,
   if (value == object.end() || !value->is_string())
     return std::nullopt;
   return text(value->get<std::string>());
+}
+
+std::uint64_t omittedTextBytes(const ItemPresentation &item,
+                               const char *field) {
+  const auto value = std::find_if(
+      item.textRetention.begin(), item.textRetention.end(),
+      [field](const TextRetentionPresentation &entry) {
+        return entry.field == field;
+      });
+  return value == item.textRetention.end() ? 0 : value->discardedBytes;
+}
+
+QString withTruncationNotice(QString value, std::uint64_t omitted,
+                             const QString &subject, bool markdown) {
+  if (omitted == 0)
+    return value;
+  const QString notice =
+      QStringLiteral("Earlier %1 was truncated (%2 bytes omitted).")
+          .arg(subject, QString::number(omitted));
+  return markdown ? QStringLiteral("> %1\n\n%2").arg(notice, value)
+                  : QStringLiteral("[%1]\n%2").arg(notice, value);
 }
 
 std::pair<int, int> unifiedDiffCounts(QStringView diff) {
@@ -183,12 +206,21 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
   } else if (type == "agentMessage") {
     result.kind = CardKind::AgentMessage;
     result.payload = AgentMessageData{
-        messageText(item), stringValue(item, "phase") == "final_answer"};
+        withTruncationNotice(messageText(item),
+                             omittedTextBytes(presentation, "text"),
+                             QStringLiteral("Codex response"), true),
+        stringValue(item, "phase") == "final_answer"};
   } else if (type == "commandExecution") {
     result.kind = CardKind::CommandExecution;
+    const char *outputField = "aggregatedOutput";
     QString output = text(stringValue(item, "aggregatedOutput"));
-    if (output.isEmpty())
+    if (output.isEmpty()) {
+      outputField = "output";
       output = text(stringValue(item, "output"));
+    }
+    output = withTruncationNotice(
+        output, omittedTextBytes(presentation, outputField),
+        QStringLiteral("command output"), false);
     if (!terminalOutputHasVisibleText(output))
       output.clear();
     std::optional<int> exitCode;
@@ -221,7 +253,10 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
   } else if (type == "reasoning") {
     result.kind = CardKind::Reasoning;
     result.payload = ReasoningData{
-        joinedStrings(item.value("summary", nlohmann::json::array()))};
+        withTruncationNotice(
+            joinedStrings(item.value("summary", nlohmann::json::array())),
+            omittedTextBytes(presentation, "summary"),
+            QStringLiteral("reasoning"), true)};
   } else if (type == "fileChange") {
     result.kind = CardKind::FileChanges;
     const nlohmann::json changes =
@@ -255,7 +290,9 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
     result.payload = ImageGenerationData{
         text(path), text(stringValue(item, "status")), text(revisedPrompt)};
   } else if (type == "plan") {
-    const QString plan = messageText(item);
+    const QString plan = withTruncationNotice(
+        messageText(item), omittedTextBytes(presentation, "text"),
+        QStringLiteral("plan text"), true);
     if (!plan.isEmpty()) {
       result.kind = CardKind::Plan;
       result.payload = PlanData{{}, {}, plan};
@@ -270,6 +307,7 @@ struct ProjectedNode {
   std::string sectionKey;
   std::string turnId;
   VisibleCardData card;
+  bool turnRoot = false;
 };
 
 std::optional<std::size_t> admissionBoundaryPosition(
@@ -311,12 +349,30 @@ ConversationSnapshot ConversationProjection::project(
   ConversationSnapshot result;
   result.threadId = authoritativeItems.threadId;
 
-  result.hiddenAuthoritativeItemCount =
+  const std::size_t firstVisible =
       authoritativeItems.ordered.size() > authoritativeItemLimit
           ? authoritativeItems.ordered.size() - authoritativeItemLimit
           : 0;
+  std::unordered_set<std::string> representedTurns;
+  for (std::size_t index = firstVisible;
+       index < authoritativeItems.ordered.size(); ++index)
+    representedTurns.insert(authoritativeItems.ordered[index].key.turnId);
+
+  // Roots are structural context, not activity-window budget. Pin the real
+  // opening userMessage for every turn represented by the retained suffix.
+  // This keeps long active and completed turns owned by the same You card and
+  // prevents a later steering message from becoming an inferred root.
+  std::set<std::size_t> pinnedRootIndexes;
+  for (const std::string &turnId : representedTurns) {
+    const auto root =
+        authoritativeItems.turnRootUserMessagePositions.find(turnId);
+    if (root != authoritativeItems.turnRootUserMessagePositions.end() &&
+        root->second < firstVisible)
+      pinnedRootIndexes.insert(root->second);
+  }
+  result.hiddenAuthoritativeItemCount =
+      firstVisible - pinnedRootIndexes.size();
   result.hasMore = result.hiddenAuthoritativeItemCount > 0;
-  const std::size_t firstVisible = result.hiddenAuthoritativeItemCount;
 
   std::map<AuthoritativeItemKey, const PromptSubmission *> bindings;
   for (const PromptSubmission &submission : localSubmissions)
@@ -325,9 +381,12 @@ ConversationSnapshot ConversationProjection::project(
 
   std::vector<ProjectedNode> nodes;
   nodes.reserve(authoritativeItems.ordered.size() - firstVisible +
+                pinnedRootIndexes.size() +
                 localSubmissions.size());
-  for (std::size_t index = firstVisible;
-       index < authoritativeItems.ordered.size(); ++index) {
+  for (std::size_t index = 0; index < authoritativeItems.ordered.size();
+       ++index) {
+    if (index < firstVisible && !pinnedRootIndexes.contains(index))
+      continue;
     const AuthoritativeItem &item = authoritativeItems.ordered[index];
     const auto binding = bindings.find(item.key);
     if (binding != bindings.end() &&
@@ -352,10 +411,15 @@ ConversationSnapshot ConversationProjection::project(
     }
     VisibleCardData card =
         authoritativeCard(item.key, *item.presentation, std::move(visualKey));
+    const auto root = authoritativeItems.turnRootUserMessagePositions.find(
+        item.key.turnId);
+    const bool turnRoot =
+        root != authoritativeItems.turnRootUserMessagePositions.end() &&
+        root->second == index;
     nodes.push_back({position, tieBreaker,
                      sectionComponent("turn:", authoritativeItems.threadId,
                                       item.key.turnId),
-                     item.key.turnId, std::move(card)});
+                     item.key.turnId, std::move(card), turnRoot});
   }
 
   if (projectStructuredPlansInConversation && authoritativeThread) {
@@ -407,7 +471,8 @@ ConversationSnapshot ConversationProjection::project(
             authoritativeItems.threadId,
             turnId,
             {},
-            structuredPlan(turn->second)}});
+            structuredPlan(turn->second)},
+           false});
     }
   }
 
@@ -445,8 +510,21 @@ ConversationSnapshot ConversationProjection::project(
                                          submission.acceptedAtMilliseconds,
                                          submission.error,
                                          localImagePaths(submission)}};
+    const bool authoritativeRootExists =
+        !turnId.empty() && authoritativeItems.turnRootUserMessagePositions
+                               .contains(turnId);
+    bool turnRoot = (!knownTurn || submission.startsTurn) &&
+                    !authoritativeRootExists;
+    if (submission.materializedItem) {
+      const auto root = authoritativeItems.turnRootUserMessagePositions.find(
+          submission.materializedItem->turnId);
+      const auto materialized =
+          authoritativeItems.position(*submission.materializedItem);
+      turnRoot = root != authoritativeItems.turnRootUserMessagePositions.end() &&
+                 materialized && root->second == *materialized;
+    }
     nodes.push_back({position, submission.admissionOrdinal, sectionKey, turnId,
-                     std::move(card)});
+                     std::move(card), turnRoot});
   }
 
   std::ranges::sort(nodes,
@@ -464,10 +542,13 @@ ConversationSnapshot ConversationProjection::project(
     if (section == sectionIndexes.end()) {
       const std::size_t index = result.sections.size();
       sectionIndexes.emplace(node.sectionKey, index);
-      result.sections.push_back({node.sectionKey, node.turnId, {}});
+      result.sections.push_back({node.sectionKey, node.turnId, {}, std::nullopt});
       section = sectionIndexes.find(node.sectionKey);
     }
-    result.sections[section->second].cards.push_back(std::move(node.card));
+    TurnSection &projectedSection = result.sections[section->second];
+    if (node.turnRoot)
+      projectedSection.rootCardKey = node.card.key;
+    projectedSection.cards.push_back(std::move(node.card));
   }
   return result;
 }

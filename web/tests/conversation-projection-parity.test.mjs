@@ -29,6 +29,16 @@ function append(thread, turnId, id, raw) {
     const turn = thread.turns.get(turnId); turn.itemOrder.push(id); turn.items.set(id, item(id, raw));
 }
 function keys(snapshot) { return cardKeys(snapshot).map(stableKey); }
+function cleanThread(id) {
+    return {
+        ...baseThread(id), turnOrder: [], turns: new Map(),
+    };
+}
+function sectionRoot(section) {
+    if (!section.rootCardKey) return undefined;
+    const rootKey = stableKey(section.rootCardKey);
+    return section.cards.find(card => stableKey(card.key) === rootKey);
+}
 
 test("C++ canonical grouping, payload projection, and history limit", () => {
     const thread = baseThread("thread-a");
@@ -93,7 +103,9 @@ test("C++ first response order remains at the local prompt admission boundary", 
     prompts.reconcile(thread.id, thread, 601);
     const promptKey = stableKey({kind: "prompt", submissionId: promptId});
     const reasoningKey = stableKey({kind: "item", threadId: thread.id, turnId: "turn-new", itemId: "reasoning"});
-    assert.deepEqual(keys(projectConversation(thread, prompts.submissions(thread.id), 80, 601)), [promptKey, reasoningKey]);
+    const reasoningFirst = projectConversation(thread, prompts.submissions(thread.id), 80, 601);
+    assert.deepEqual(keys(reasoningFirst), [promptKey, reasoningKey]);
+    assert.equal(stableKey(reasoningFirst.sections[0].rootCardKey), promptKey);
 
     append(thread, "turn-new", "user-new", {
         type: "userMessage", clientId: dispatch.clientUserMessageId, content: [{type: "text", text: "new prompt"}],
@@ -130,6 +142,110 @@ test("C++ duplicate prompts bind in admission order and share one turn section",
     assert.equal(snapshot.sections[1].cards.length, 2);
 });
 
+test("a local steering prompt remains nested under the authoritative turn root", () => {
+    const thread = cleanThread("local-steering");
+    addTurn(thread, "turn-active", "inProgress");
+    append(thread, "turn-active", "root", {type: "userMessage", content: [{type: "text", text: "root prompt"}]});
+    append(thread, "turn-active", "reasoning", {type: "reasoning", summary: ["working"]});
+    const prompts = new PromptCoordinator();
+    const steeringId = prompts.admit(thread.id, "steer", [], {}, thread, "turn-active", 100);
+    prompts.beginNext(thread.id, "turn-active");
+
+    const snapshot = projectConversation(thread, prompts.submissions(thread.id), 80, 101);
+    assert.equal(sectionRoot(snapshot.sections[0]).itemId, "root");
+    assert.equal(snapshot.sections[0].cards.at(-1).kind, "localPrompt");
+    assert.equal(snapshot.sections[0].cards.at(-1).payload.submissionId, steeringId);
+    assert.notEqual(stableKey(snapshot.sections[0].cards.at(-1).key), stableKey(snapshot.sections[0].rootCardKey));
+});
+
+test("retained long completed turn pins its complete-history root and keeps steering nested", () => {
+    const thread = cleanThread("long-completed");
+    addTurn(thread, "turn-long", "completed");
+    append(thread, "turn-long", "root", {type: "userMessage", content: [{type: "text", text: "root prompt"}]});
+    for (let index = 0; index < 85; ++index)
+        append(thread, "turn-long", `activity-${index}`, {type: "reasoning", summary: [`activity ${index}`]});
+    append(thread, "turn-long", "steer", {type: "userMessage", content: [{type: "text", text: "steering prompt"}]});
+    for (let index = 85; index < 89; ++index)
+        append(thread, "turn-long", `activity-${index}`, {type: "reasoning", summary: [`activity ${index}`]});
+
+    const snapshot = projectConversation(thread, [], 80, 100);
+    assert.equal(snapshot.sections.length, 1);
+    assert.equal(snapshot.sections[0].cards.length, 81, "the root is structural context outside the 80-item suffix");
+    assert.equal(snapshot.hiddenAuthoritativeItemCount, 10, "the pinned root is not reported as hidden");
+    assert.equal(snapshot.hasMore, true);
+    assert.equal(sectionRoot(snapshot.sections[0]).itemId, "root");
+    assert.equal(snapshot.sections[0].cards.filter(card => card.itemId === "root").length, 1);
+    assert.equal(snapshot.sections[0].cards.find(card => card.itemId === "steer").kind, "userMessage");
+    assert.notEqual(stableKey(snapshot.sections[0].rootCardKey),
+        stableKey(snapshot.sections[0].cards.find(card => card.itemId === "steer").key));
+});
+
+test("history boundary pins only roots of retained turns and preserves per-turn root identity", () => {
+    const thread = cleanThread("multiple-turns");
+    addTurn(thread, "turn-one", "completed");
+    append(thread, "turn-one", "root-one", {type: "userMessage", content: [{type: "text", text: "first root"}]});
+    for (let index = 0; index < 84; ++index)
+        append(thread, "turn-one", `one-${index}`, {type: "commandExecution", command: "true", status: "completed"});
+    addTurn(thread, "turn-two", "completed");
+    append(thread, "turn-two", "root-two", {type: "userMessage", content: [{type: "text", text: "second root"}]});
+    append(thread, "turn-two", "answer-two", {type: "agentMessage", phase: "final_answer", text: "second answer"});
+
+    const snapshot = projectConversation(thread, [], 80, 100);
+    assert.deepEqual(snapshot.sections.map(section => section.turnId), ["turn-one", "turn-two"]);
+    assert.deepEqual(snapshot.sections.map(section => sectionRoot(section)?.itemId), ["root-one", "root-two"]);
+    assert.equal(snapshot.sections[0].cards.filter(card => card.kind === "userMessage").length, 1);
+    assert.equal(snapshot.sections[1].cards.filter(card => card.kind === "userMessage").length, 1);
+    assert.equal(snapshot.hiddenAuthoritativeItemCount, 6);
+    assert.equal(snapshot.hasMore, true);
+});
+
+test("history boundary at a later turn does not pin an entirely hidden completed turn", () => {
+    const thread = cleanThread("turn-boundary");
+    addTurn(thread, "turn-one", "completed");
+    append(thread, "turn-one", "root-one", {type: "userMessage", content: [{type: "text", text: "hidden root"}]});
+    append(thread, "turn-one", "answer-one", {type: "agentMessage", phase: "final_answer", text: "hidden answer"});
+    addTurn(thread, "turn-two", "completed");
+    append(thread, "turn-two", "root-two", {type: "userMessage", content: [{type: "text", text: "visible root"}]});
+    append(thread, "turn-two", "answer-two", {type: "agentMessage", phase: "final_answer", text: "visible answer"});
+
+    const snapshot = projectConversation(thread, [], 2, 100);
+    assert.deepEqual(snapshot.sections.map(section => section.turnId), ["turn-two"]);
+    assert.equal(sectionRoot(snapshot.sections[0]).itemId, "root-two");
+    assert.equal(snapshot.hiddenAuthoritativeItemCount, 2);
+    assert.equal(snapshot.hasMore, true);
+});
+
+test("pinning the only item outside the activity budget clears hidden history", () => {
+    const thread = cleanThread("root-only-hidden");
+    addTurn(thread, "turn-one", "completed");
+    append(thread, "turn-one", "root", {type: "userMessage", content: [{type: "text", text: "root"}]});
+    append(thread, "turn-one", "answer", {type: "agentMessage", phase: "final_answer", text: "answer"});
+
+    const snapshot = projectConversation(thread, [], 1, 100);
+    assert.deepEqual(snapshot.sections[0].cards.map(card => card.itemId), ["root", "answer"]);
+    assert.equal(snapshot.hiddenAuthoritativeItemCount, 0);
+    assert.equal(snapshot.hasMore, false, "Load earlier is unnecessary when the only prior item is pinned");
+});
+
+test("the first authoritative user message is the unique root after restart without local aliases", () => {
+    const thread = cleanThread("restart-root");
+    addTurn(thread, "turn-one", "completed");
+    append(thread, "turn-one", "root", {type: "userMessage", content: [{type: "text", text: "original"}]});
+    append(thread, "turn-one", "steer-one", {type: "userMessage", content: [{type: "text", text: "first steering"}]});
+    append(thread, "turn-one", "steer-two", {type: "userMessage", content: [{type: "text", text: "second steering"}]});
+    append(thread, "turn-one", "answer", {type: "agentMessage", phase: "final_answer", text: "done"});
+
+    const index = indexAuthoritativeItems(thread.id, thread);
+    assert.equal(index.turnRoots.get("turn-one"), 0);
+    const snapshot = projectConversation(index, [], 80, 100, thread);
+    assert.equal(sectionRoot(snapshot.sections[0]).itemId, "root");
+    assert.equal(snapshot.sections[0].cards.filter(card => stableKey(card.key) === stableKey(snapshot.sections[0].rootCardKey)).length, 1);
+    assert.deepEqual(snapshot.sections[0].cards.filter(card => card.kind === "userMessage").map(card => card.itemId),
+        ["root", "steer-one", "steer-two"]);
+    assert.equal(snapshot.hiddenAuthoritativeItemCount, 0);
+    assert.equal(snapshot.hasMore, false);
+});
+
 test("C++ terminal text and canonical attachment links", () => {
     assert.equal(terminalOutputHasVisibleText(""), false);
     assert.equal(terminalOutputHasVisibleText(" \n\t"), false);
@@ -141,4 +257,22 @@ test("C++ terminal text and canonical attachment links", () => {
         {path: "/tmp/review notes [final] (2).pdf", name: "review notes [final] (2).pdf", mimeType: "application/pdf", size: 10},
         {path: "/tmp/image.png", name: "image.png", mimeType: "image/png", size: 10},
     ]), "Review this\n\nAttached files:\n- [review notes \\[final\\] (2).pdf](file:///tmp/review%20notes%20%5Bfinal%5D%20%282%29.pdf)");
+    assert.equal(promptWithFileLinks("Inspect", [
+        {path: "/tmp/review #1?.md", name: "review #1?.md", mimeType: "text/markdown", size: 10},
+    ]), "Inspect\n\nAttached files:\n- [review #1?.md](file:///tmp/review%20%231%3F.md)");
+});
+
+test("bounded stream projection visibly discloses omitted output", () => {
+    const thread = cleanThread("bounded-projection");
+    addTurn(thread, "turn-one", "completed");
+    append(thread, "turn-one", "command", {
+        type: "commandExecution", command: "generate output", status: "completed", aggregatedOutput: "retained tail",
+    });
+    thread.turns.get("turn-one").items.get("command").textRetention = new Map([
+        ["aggregatedOutput", {retainedBytes: 13, discardedBytes: 4096}],
+    ]);
+    const projected = findCard(projectConversation(thread, [], 80, 100), {
+        kind: "item", threadId: thread.id, turnId: "turn-one", itemId: "command",
+    }).payload;
+    assert.match(projected.output, /^\[Earlier command output was truncated \(4096 bytes omitted\)\.\]\nretained tail$/u);
 });

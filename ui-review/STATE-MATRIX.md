@@ -7,8 +7,10 @@
 | Connection | Connected controller | Thread, turn, and request mutations are enabled. |
 | Thread list | Background activity | Status changes without changing the user's selection. |
 | Thread list | Selected thread removed | Selection clears and the conversation returns to its empty state. |
-| New Thread | Draft | Dialog values and prompt remain local until the first admission starts creation. |
-| New Thread | Creation pending | Admitted prompts appear as animated pending cards and remain bound to the draft. |
+| New Thread | Draft | Dialog values and prompt remain local; one selected orange animated row appears immediately without creating an app-server thread. |
+| New Thread | Thread created, first prompt pending | The same row is rekeyed to the authoritative ID and remains animated through the first `turn/start` callback. |
+| New Thread | First prompt acknowledged | The same row switches to canonical styling without duplication or replacement. |
+| New Thread | Creation or first prompt failed | Animation stops and the retained row adopts explicit failure styling. |
 | Prompt | Locally admitted | Composer clears immediately; a muted-blue card with a sweeping highlight appears in the destination thread. |
 | Prompt | Additional prompt admitted | Composer remains enabled; the card is queued behind the in-flight prompt for that thread. |
 | Prompt | Authoritative item arrives before result | Exact `clientUserMessageId` correlation may bind the item, but the card remains pending until its operation callback. |
@@ -38,7 +40,8 @@
 | Command execution output | Fits below 220 px | Box grows to content without a minimum blank area. |
 | Command execution output | Exceeds 220 px at bottom | Scrollbar appears and appended output follows the bottom. |
 | Command execution output | User scrolled upward | Output following pauses until its scrollbar returns to the bottom. |
-| Center chrome | Wheel or touchpad input | Message view scrolls unless a nested control can scroll in that direction; edge events return to the message view. |
+| Command text or output | Gesture reaches its scroll boundary | The nested view retains that gesture; a fresh outward gesture at the boundary scrolls the message view. |
+| Center chrome | Wheel or touchpad input | Message view scrolls unless a nested command view owns the current gesture. |
 | Info / State | Content exceeds viewport | Common styled vertical scrollbar appears as needed. |
 | Info / Protocol | Content exceeds viewport | Styled log scrollbar appears; statistics remain below the expanding log. |
 | Pending request | Unresolved | Thread and global attention surfaces identify required user action. |

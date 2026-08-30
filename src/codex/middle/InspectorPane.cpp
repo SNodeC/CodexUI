@@ -84,6 +84,24 @@ QLabel *statusLabel(const std::string &status) {
   return label;
 }
 
+std::string effectivePlanStepStatus(const std::string &stepStatus,
+                                    const std::string &turnStatus,
+                                    const std::string &threadStatus) {
+  if (!isActiveStatus(stepStatus))
+    return stepStatus;
+  StatusKind outcome = classifyStatus(turnStatus).kind;
+  if (outcome != StatusKind::Completed && outcome != StatusKind::Failed &&
+      outcome != StatusKind::Interrupted)
+    outcome = classifyStatus(threadStatus).kind;
+  if (outcome == StatusKind::Completed)
+    return "completed";
+  if (outcome == StatusKind::Failed)
+    return "failed";
+  if (outcome == StatusKind::Interrupted)
+    return "interrupted";
+  return stepStatus;
+}
+
 QLabel *makeMarkdownLabel(const QString &value) {
   QTextDocument document;
   document.setMarkdown(
@@ -98,7 +116,8 @@ QLabel *makeMarkdownLabel(const QString &value) {
   label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   label->setOpenExternalLinks(true);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse |
-                                 Qt::LinksAccessibleByMouse);
+                                 Qt::LinksAccessibleByMouse |
+                                 Qt::LinksAccessibleByKeyboard);
   return label;
 }
 
@@ -314,7 +333,6 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    scroll->verticalScrollBar()->setProperty("kind", "infoViewer");
     scroll->setWidget(content);
     return scroll;
   };
@@ -326,7 +344,6 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   stateView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
   stateView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   stateView->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-  stateView->verticalScrollBar()->setProperty("kind", "infoViewer");
   auto *protocolContent = new QWidget;
   auto *protocolLayout = new QVBoxLayout(protocolContent);
   protocolLayout->setContentsMargins(0, 0, 0, 0);
@@ -338,7 +355,6 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   protocolLog->setLineWrapMode(QPlainTextEdit::WidgetWidth);
   protocolLog->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   protocolLog->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-  protocolLog->verticalScrollBar()->setProperty("kind", "infoViewer");
   protocolLog->document()->setMaximumBlockCount(MaximumProtocolLines);
   connect(protocolLog->verticalScrollBar(), &QScrollBar::valueChanged, this,
           [this](int value) {
@@ -410,10 +426,12 @@ void InspectorPane::setHideAction(std::function<void()> hide) {
 
 void InspectorPane::setRequestActions(RequestAction review,
                                       RequestAction accept,
-                                      RequestAction reject) {
+                                      RequestAction reject,
+                                      RequestEligibility eligible) {
   reviewRequest = std::move(review);
   acceptRequest = std::move(accept);
   rejectRequest = std::move(reject);
+  requestEligible = std::move(eligible);
 }
 
 void InspectorPane::refresh(const PresentationModel &model,
@@ -469,8 +487,11 @@ void InspectorPane::refreshPlan() {
         plan.explanation = stringValue(turn->second.plan, "explanation");
         for (const auto &step :
              turn->second.plan.value("steps", nlohmann::json::array())) {
-          plan.steps.push_back(
-              {stringValue(step, "step"), stringValue(step, "status")});
+          const std::string status = stringValue(step, "status");
+          plan.steps.push_back({
+              stringValue(step, "step"),
+              effectivePlanStepStatus(status, turn->second.status,
+                                      thread->status)});
         }
         next.plan = std::move(plan);
         break;
@@ -608,6 +629,7 @@ void InspectorPane::refreshRequests() {
     const auto questions = request.raw.find("questions");
     if (questions != request.raw.end() && questions->is_array())
       snapshot.questionCount = questions->size();
+    snapshot.actionable = requestEligible && requestEligible(id);
     next.push_back(std::move(snapshot));
   }
   if (requestsSnapshot && *requestsSnapshot == next)
@@ -657,6 +679,7 @@ void InspectorPane::refreshRequests() {
     auto *reject = new QPushButton(QStringLiteral("Reject"));
     reject->setProperty("kind", "destructive");
     reject->setFixedHeight(28);
+    reject->setEnabled(request.actionable);
     connect(reject, &QPushButton::clicked, this, [this, id = request.id] {
       if (rejectRequest)
         rejectRequest(id);
@@ -667,6 +690,7 @@ void InspectorPane::refreshRequests() {
       auto *accept = new QPushButton(directAcceptText(request.kind));
       accept->setProperty("kind", "request");
       accept->setFixedHeight(28);
+      accept->setEnabled(request.actionable);
       connect(accept, &QPushButton::clicked, this, [this, id = request.id] {
         if (acceptRequest)
           acceptRequest(id);
@@ -676,6 +700,7 @@ void InspectorPane::refreshRequests() {
       auto *review = new QPushButton(QStringLiteral("Review"));
       review->setProperty("kind", "request");
       review->setFixedHeight(28);
+      review->setEnabled(request.actionable);
       connect(review, &QPushButton::clicked, this, [this, id = request.id] {
         if (reviewRequest)
           reviewRequest(id);

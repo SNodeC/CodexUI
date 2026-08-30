@@ -37,7 +37,9 @@ listed in the [1.0 contract](docs/web-1.0-contract.md).
 Qt 6 Widgets, Threads, libgit2 development files (discoverable as `libgit2`
 through pkg-config), SNode.C `master`/HEAD, and an installed canonical AISuite
 package exporting `AISuite::OpenAICodex` are required. On Debian and Ubuntu,
-the libgit2 package is `libgit2-dev`.
+the libgit2 package is `libgit2-dev`. A combined install also requires the
+`web/app-dist/` artifact produced by the Browser build below. For a deliberately
+native-only build, add `-DCODEXUI_INSTALL_WEB=OFF` to the configure command.
 
 ```sh
 cmake -S . -B "${BUILD_DIR}" -G Ninja \
@@ -55,7 +57,7 @@ with the installed CodexUI application.
 
 ## Browser build
 
-Node.js 20 or newer and the exact AISuite revision recorded in
+Node.js 22 or newer and the exact AISuite revision recorded in
 [`web/AISUITE_REVISION`](web/AISUITE_REVISION) are required. The source
 dependency expects the release/CI checkout layout shown below.
 
@@ -72,10 +74,12 @@ npm ci --prefix web
 npm run release --prefix web
 ```
 
-The production artifact is `web/app-dist/`. CMake installs it below
-`${CMAKE_INSTALL_DATADIR}/codexui/web`; `codex-bridge` serves those files and
-its `/codex` WebSocket endpoint from the same listener. Node is not part of the
-installed runtime. Deployment details are in [`web/README.md`](web/README.md).
+The production artifact is `web/app-dist/`. Combined CMake configuration
+requires and installs it below `${CMAKE_INSTALL_DATADIR}/codexui/web`; the
+standalone `web/CMakeLists.txt` provides the same verified packaging path.
+`codex-bridge` serves those files and its `/codex` WebSocket endpoint from the
+same listener. Node is not part of the installed runtime. Deployment details
+are in [`web/README.md`](web/README.md).
 
 ## Architecture
 

@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <optional>
+#include <vector>
 
 class QLabel;
 class QPaintEvent;
@@ -26,15 +27,20 @@ public:
                                 QWidget *parent = nullptr);
 
   bool setContent(const QString &content);
+  [[nodiscard]] bool retainsWheelGesture(QWheelEvent *event);
   QSize sizeHint() const override;
   QSize minimumSizeHint() const override;
 
 protected:
+  void wheelEvent(QWheelEvent *event) override;
   void resizeEvent(QResizeEvent *event) override;
   void measureAtCurrentWidth(bool notifyParent);
 
 private:
   int preferredHeight_ = 0;
+  bool wheelGestureActive_ = false;
+  bool wheelGestureDecided_ = false;
+  bool wheelGestureOwned_ = false;
 };
 
 class CommandOutputView final : public ContentSizedTextView {
@@ -75,13 +81,17 @@ class ConversationCard : public QFrame {
 
 public:
   explicit ConversationCard(const VisibleCardData &data,
-                            QWidget *parent = nullptr);
+                            QWidget *parent = nullptr,
+                            bool commandInitiallyCollapsed = true,
+                            bool imageInitiallyCollapsed = true);
   ~ConversationCard() override;
 
   [[nodiscard]] CardKind cardKind() const noexcept;
   [[nodiscard]] const VisibleCardData &data() const noexcept;
   [[nodiscard]] bool isCollapsed() const noexcept;
   void setCollapsed(bool collapsed);
+  bool setAuthoritativeTurnActive(bool active);
+  void setNestedCards(const std::vector<ConversationCard *> &cards);
   [[nodiscard]] std::optional<CommandOutputView::ScrollState>
   commandOutputScrollState() const;
   void
@@ -106,7 +116,9 @@ private:
 };
 
 [[nodiscard]] ConversationCard *
-createConversationCard(const VisibleCardData &data, QWidget *parent = nullptr);
+createConversationCard(const VisibleCardData &data, QWidget *parent = nullptr,
+                       bool commandInitiallyCollapsed = true,
+                       bool imageInitiallyCollapsed = true);
 
 } // namespace codexui::codex::middle
 

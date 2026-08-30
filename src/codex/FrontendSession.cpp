@@ -388,7 +388,7 @@ void FrontendSession::receiveMessage(nlohmann::json message) {
     if (activeGeneration != 0 && incoming < activeGeneration)
       return;
     if (activeGeneration != 0 && incoming > activeGeneration) {
-      failAllPending(-32020, "bridge connection generation changed");
+      failAllPending(-32020, "bridge connection generation changed", true);
       lastSequenceReceived = 0;
     }
     activeGeneration = incoming;
@@ -432,7 +432,7 @@ void FrontendSession::receiveMessage(nlohmann::json message) {
     if (type == "connection.lifecycle") {
       const std::string state = presentation::stringMember(data, "state");
       if (state == "disconnected" || state == "failure")
-        failAllPending(-32020, "bridge connection was lost");
+        failAllPending(-32020, "bridge connection was lost", true);
     } else if (type == "connection.provider") {
       const auto provider = data.find("generation");
       if (provider == data.end() || !provider->is_number_unsigned()) {
@@ -443,10 +443,10 @@ void FrontendSession::receiveMessage(nlohmann::json message) {
       if (incoming < providerGeneration)
         return;
       if (providerGeneration != 0 && incoming > providerGeneration)
-        failAllPending(-32002, "app-server provider generation changed");
+        failAllPending(-32002, "app-server provider generation changed", true);
       providerGeneration = incoming;
       if (presentation::stringMember(data, "state") == "disconnected")
-        failAllPending(-32002, "app-server provider was restarted");
+        failAllPending(-32002, "app-server provider was restarted", true);
     }
   }
   if (eventHandler) {
@@ -481,7 +481,8 @@ void FrontendSession::terminalFailure(std::string message) {
   notifyRuntimeStopped();
 }
 
-void FrontendSession::failAllPending(int code, std::string message) noexcept {
+void FrontendSession::failAllPending(int code, std::string message,
+                                     bool transient) noexcept {
   outstanding.clear();
   auto failed = std::move(pending);
   pending.clear();
@@ -489,12 +490,15 @@ void FrontendSession::failAllPending(int code, std::string message) noexcept {
     if (!handler)
       continue;
     try {
+      nlohmann::json error{{"code", code}, {"message", message}};
+      if (transient)
+        error["transient"] = true;
       handler({{"protocol", presentation::ProtocolName},
                {"version", presentation::ProtocolVersion},
                {"kind", "result"},
                {"correlationId", correlationId},
                {"ok", false},
-               {"error", {{"code", code}, {"message", message}}}});
+               {"error", std::move(error)}});
     } catch (...) {
     }
   }

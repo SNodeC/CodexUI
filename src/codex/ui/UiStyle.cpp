@@ -82,6 +82,18 @@ QString applicationStyleSheet() {
         QMainWindow, QWidget#applicationShell { background: #f6f8fb; }
         QWidget#codexTurnSettings { background: #ffffff; border-top: 1px solid #d7dee8; }
         QFrame#inspector { background: #fbfcfe; }
+        QFrame#inspector QScrollBar:vertical {
+            background: #fbfcfe;
+            border: 2px solid #fbfcfe;
+            width: 8px;
+            margin: 0;
+        }
+        QFrame#inspector QScrollBar:horizontal {
+            background: #fbfcfe;
+            border: 2px solid #fbfcfe;
+            height: 8px;
+            margin: 0;
+        }
         QLabel { background: transparent; font-weight: 400; }
         QLabel[kind="muted"] { color: #667085; font-size: %1pt; }
         QLabel[kind="section"] {
@@ -170,6 +182,27 @@ QString applicationStyleSheet() {
           color: #1d2633;
         }
         QPushButton[kind="segment"]:hover:!checked { background: #f1f5fb; }
+        QToolButton[kind="presentationToggle"] {
+          background: #ffffff;
+          border: 1px solid #d7dee8;
+          border-radius: 7px;
+          padding: 0;
+        }
+        QToolButton[kind="presentationToggle"]:checked {
+          background: #e5eeff;
+          border-color: #bfd3f9;
+        }
+        QToolButton[kind="presentationToggle"]:hover:!checked {
+          background: #f1f5fb;
+          border-color: #b9c4d2;
+        }
+        QToolTip {
+          color: #ffffff;
+          background: #1d2633;
+          border: 1px solid #344054;
+          border-radius: 6px;
+          padding: 5px 8px;
+        }
         QToolButton[kind="composerAction"] {
             background: #ffffff;
             border: 1px solid #d7dee8;
@@ -206,6 +239,7 @@ QString applicationStyleSheet() {
         QFrame[kind="raised"][tone="warning"] { background: #fff6df; border-color: #e5c77d; }
         QFrame[messageRole="user"] { background: #eaf2ff; border: 1px solid #bfd3f9; border-radius: 8px; }
         QFrame[messageRole="user"] QLabel[kind="title"] { color: #285fca; }
+        QFrame[messageRole="user"][nestedConversationCard="true"] { background: #f3f7ff; border-color: #cfddf4; }
         QFrame[messageRole="agent"][messagePhase="final"] { background: #f4f0ff; border: 1px solid #d4c5f2; border-radius: 8px; }
         QFrame[messageRole="agent"][messagePhase="final"] QLabel[kind="title"] { color: #53389e; }
         QFrame[messageRole="agent"][messagePhase="update"] { background: #ffffff; border: 1px solid #d7dee8; border-radius: 8px; }
@@ -380,36 +414,6 @@ QString applicationStyleSheet() {
             height: 0;
         }
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-            background: none;
-            border: 0;
-        }
-        QScrollBar[kind="infoViewer"]:vertical {
-            background: transparent;
-            border: 0;
-            width: 8px;
-            margin: 2px;
-        }
-        QScrollBar[kind="infoViewer"]::handle:vertical {
-            background: #b9c4d2;
-            min-height: 28px;
-            border-radius: 3px;
-        }
-        QScrollBar[kind="infoViewer"]::handle:vertical:hover { background: #98a2b3; }
-        QScrollBar[kind="infoViewer"]::add-line:vertical,
-        QScrollBar[kind="infoViewer"]::sub-line:vertical {
-            background: transparent;
-            border: 0;
-            height: 0;
-        }
-        QScrollBar[kind="infoViewer"]::up-arrow:vertical,
-        QScrollBar[kind="infoViewer"]::down-arrow:vertical {
-            background: none;
-            border: 0;
-            width: 0;
-            height: 0;
-        }
-        QScrollBar[kind="infoViewer"]::add-page:vertical,
-        QScrollBar[kind="infoViewer"]::sub-page:vertical {
             background: none;
             border: 0;
         }

@@ -4,6 +4,13 @@ export const DefaultSetting = "default";
 export type SettingField = "model" | "effort" | "personality" | "sandbox" | "network" | "approval"
     | "reviewer" | "cwd" | "permissionProfile" | "serviceTier" | "summary" | "collaboration";
 export type SettingValues = Record<SettingField, string>;
+export interface SettingDraft {
+    values: SettingValues;
+    touched: Set<SettingField>;
+    canonicalSignature: string;
+    settingsRevision: number;
+}
+export interface SettingPromptOptions {turn: Record<string, unknown>; thread: Record<string, unknown>}
 
 export function permissionProfileLabel(id: string): string {
     if (id === ":workspace") return "Workspace";
@@ -65,6 +72,39 @@ export function canonicalSettingValues(canonical: unknown): SettingValues {
         permissionProfile: profile || DefaultSetting, serviceTier: optional("serviceTier"), summary: optional("summary"),
         collaboration: collaboration || "default",
     };
+}
+
+export function settingDraftFor(drafts: Map<string, SettingDraft>, key: string, canonical: unknown,
+    settingsRevision: number): SettingDraft {
+    const canonicalSignature = JSON.stringify(canonical) ?? "";
+    const current = drafts.get(key);
+    if (!current) {
+        const created = {values: canonicalSettingValues(canonical), touched: new Set<SettingField>(),
+            canonicalSignature, settingsRevision};
+        drafts.set(key, created);
+        return created;
+    }
+    if (current.canonicalSignature === canonicalSignature && current.settingsRevision === settingsRevision) return current;
+    const fresh = canonicalSettingValues(canonical);
+    const values = {...current.values};
+    for (const field of Object.keys(fresh) as SettingField[]) if (!current.touched.has(field)) values[field] = fresh[field];
+    const reconciled = {...current, values, canonicalSignature, settingsRevision};
+    drafts.set(key, reconciled);
+    return reconciled;
+}
+
+export function changeSettingDraft(drafts: Map<string, SettingDraft>, key: string, canonical: unknown,
+    settingsRevision: number, field: SettingField, value: string): SettingDraft {
+    const current = settingDraftFor(drafts, key, canonical, settingsRevision);
+    const changed = applySettingChange(current.values, current.touched, field, value);
+    const next = {...current, ...changed};
+    drafts.set(key, next);
+    return next;
+}
+
+export function settingPromptOptions(draft: SettingDraft, models: unknown): SettingPromptOptions {
+    return {turn: turnStartOptions(draft.values, draft.touched, models),
+        thread: threadStartOptions(draft.values, draft.touched)};
 }
 
 function choice(values: SettingValues, touched: ReadonlySet<SettingField>, field: SettingField, name: string,

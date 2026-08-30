@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -13,10 +14,17 @@
 
 namespace codexui::codex {
 
+struct TextRetentionPresentation {
+  std::string field;
+  std::size_t retainedBytes = 0;
+  std::uint64_t discardedBytes = 0;
+};
+
 struct ItemPresentation {
   std::string id;
   nlohmann::json raw = nlohmann::json::object();
   std::unordered_map<std::string, nlohmann::json> domains;
+  std::vector<TextRetentionPresentation> textRetention;
 };
 
 struct TurnPresentation {

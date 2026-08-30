@@ -78,6 +78,7 @@ indexAuthoritativeItems(const std::string &threadId,
           {AuthoritativeItemKey{threadId, turnId, itemId}, &item->second});
       result.positions.emplace(result.ordered.back().key, position);
       if (stringValue(item->second.raw, "type") == "userMessage") {
+        result.turnRootUserMessagePositions.try_emplace(turnId, position);
         const std::string clientId = stringValue(item->second.raw, "clientId");
         if (!clientId.empty())
           result.userMessagesByClientId.try_emplace(clientId, position);
@@ -173,6 +174,7 @@ PromptCoordinator::beginNext(const std::string &threadId,
   if (next == found->second.end())
     return std::nullopt;
   next->admissionAtStart = !next->admissionAnchor;
+  next->startsTurn = !activeTurnId;
   next->state = PromptState::InFlight;
   // Start versus steer is an operation-time fact. A turn which was active
   // when the prompt entered the local queue may have completed meanwhile.

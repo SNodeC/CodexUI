@@ -210,6 +210,11 @@ through the reducer using stable IDs in `scope` and domain data.
 Sequence zero is reserved for a Qt-local diagnostic that did not cross the
 socketpair. Such a diagnostic has no state authority.
 
+Provider generation is scoped to one frontend connection generation. A new
+frontend connection invalidates former provider readiness and accepts the new
+bridge's provider counter from its own initial value. Explicit transport or
+provider loss remains the authority that clears provider-owned projection.
+
 ### 5.3 Authority
 
 Authority has one meaning across all domains:
@@ -222,7 +227,9 @@ Authority has one meaning across all domains:
 An omitted field is unchanged. It is never an implicit deletion. Empty data is
 authoritative only when accompanied by `replace` or `remove` for an explicit
 scope. Unknown event types and diagnostics never mutate retained conversation
-state.
+state. Authority-free telemetry is retained only in its bounded diagnostic
+buffer and never materializes domain or thread state. Removal may delete
+existing scoped state, but never creates an absent scoped owner.
 
 ### 5.4 UI-to-SNode.C Commands
 
@@ -358,7 +365,9 @@ presentation category, and typed request data. Categories are:
 
 Resolution uses `pending-request.resolve` in the other direction and
 `pending-request.removed` when authoritative resolution is observed. Secret
-request content is not copied into diagnostics.
+request content is not copied into diagnostics. The web Protocol history keeps
+only request identity, category, and a redaction marker; the transient typed
+request remains available exclusively through the Requests decision surface.
 
 ### 5.8 Raw JSON and Compatibility
 
@@ -477,6 +486,15 @@ thread. Model, reasoning, access, permission, style, service-tier, reviewer,
 and collaboration choices remain in the shared upcoming-turn controls rather
 than being duplicated in the dialog.
 
+Accepting the dialog immediately creates one optimistic thread-list row without
+inserting a synthetic thread into `PresentationModel`. The row uses a stable
+visual identity and an orange pending sweep. A successful `thread/start`
+rekeys that same row to the authoritative thread ID, but it remains pending
+until the matching first `turn/start` callback succeeds. That callback switches
+the existing row to canonical presentation; failures stop animation and retain
+the row with an explicit failure state. Native and web follow the same
+lifecycle.
+
 Workspace selection uses the shared custom file browser in directory-only
 mode. It validates that the selected directory exists and returns an absolute
 local path. The accepted workspace is encoded as the native `thread/start`
@@ -485,7 +503,10 @@ local path. The accepted workspace is encoded as the native `thread/start`
 The visual shell's thread sidebar has no global More menu. A right-click
 context menu is created for the stable thread ID under the pointer and exposes
 Reload, Rename, Fork, Archive/Unarchive, and Delete. Read-only Reload remains
-available to an observer; mutations require the connected controller role.
+available to an observer while the app-server provider is ready; mutations
+require a provider-ready connected controller. Provider loss keeps the selected
+stable ID only as a rehydration hint, disables admission, and cannot route a
+prompt to a thread that is no longer present in provider authority.
 Opening or invoking the menu does not select the row or disturb the thread
 currently being reviewed.
 
@@ -507,9 +528,10 @@ bounded protocol and security design.
 
 Image paths are retained in pending and authoritative user-message
 presentation. The conversation shows bounded thumbnails below the Markdown
-prompt; selecting one opens a non-modal, fit-to-window viewer. CodexUI never
-fetches remote image URLs implicitly, and missing local images remain visible
-as unavailable placeholders.
+prompt in one source-ordered horizontal ribbon; overflow scrolls horizontally
+without wrapping or widening the card. Selecting a thumbnail opens a non-modal,
+fit-to-window viewer. CodexUI never fetches remote image URLs implicitly, and
+missing local images remain visible as unavailable placeholders.
 
 Authoritative `imageGeneration` items use their app-server `savedPath` and the
 same thumbnail/viewer. Their Base64 `result` is transport data and is never
@@ -562,8 +584,11 @@ addition/deletion counts, Copy, Open review, and file-double-click review. The
 modeless Change Review window remains usable beside the conversation and offers
 Unified or Side by side layout plus Compact or Expanded context. Preferences
 persist across threads. Repository collection runs outside the UI thread,
-superseded results are discarded, and rendered diff content is bounded to 16
-MiB with an explicit truncation state. Every returned file carries its resolved
+superseded results are discarded, and a thread/workspace context change
+synchronously cancels the prior generation before adopting the new identity.
+An old result therefore cannot be rendered or persisted under the newly
+selected thread. Rendered diff content is bounded to 16 MiB with an explicit
+truncation state. Every returned file carries its resolved
 absolute pathname. CodexUI watches existing changed files and their parent
 directories, then debounces filesystem events into a fresh libgit2 snapshot.
 Parent-directory watches keep deletion, recreation, rename, and atomic file
@@ -613,9 +638,12 @@ provider-marked `notLoaded` thread is resumed first, and a transient
 thread-not-found submission result permits exactly one resume-and-retry before
 becoming a terminal error. Failed hydration rejects local admission without
 clearing the composer draft; an explicit reload is required before sending.
-Transport eligibility is rechecked at the queued dispatch boundary: a
-disconnect leaves the prompt queued until bridge-open re-drives dispatch, and
-an in-flight resume gates both hydration reads and turn operations.
+Transport eligibility is rechecked at the queued dispatch boundary. Internal
+session cancellations caused by provider or bridge generation loss are marked
+as transient: an in-flight prompt returns to its queue, fresh hydration runs,
+and bridge-open then re-drives dispatch. Ordinary app-server error results are
+not marked and remain terminal. An in-flight resume gates both hydration reads
+and turn operations.
 
 The conversation smoothly follows new content only while its vertical scrollbar
 is at the bottom. Geometry bursts retarget a short monotonic animation to the
@@ -625,8 +653,10 @@ range clamps from card reflow do not change this user-owned state. While paused,
 the first visible stable card and its viewport offset anchor the reading position
 across appends, card reflow, and reconstruction. Wheel and touchpad events over
 non-scrollable center-pane chrome and splitter handles are forwarded to the
-conversation. Nested scrollable controls consume an event only while they can
-move in that direction and return edge events to the conversation.
+conversation. Command text and output retain a gesture that began while they
+could move in its direction, including later updates at the reached boundary.
+A fresh outward gesture begun at an existing boundary is routed to the
+conversation.
 Follow/pause mode and the stable anchor are stored per thread and restored when
 the user returns to that thread.
 
@@ -640,6 +670,14 @@ server-ordered layout position without rebuilding retained cards. While
 following is paused, the effective history window expands with appends so its
 stable visual anchor cannot be evicted; the requested bound is restored when
 following resumes.
+
+Streamed scalar text and indexed reasoning/content parts share a 256 KiB
+retained budget per item field in both reducers. Crossing that threshold drops
+the oldest complete UTF-8 prefix and retains a 192 KiB tail, leaving amortized
+space for further deltas. Full item hydration and completion payloads pass
+through the same bound. The item retains the discarded-byte count separately,
+and projection visibly places that count before the retained tail; truncation
+is therefore bounded, explicit, and never mistaken for complete output.
 
 The bottom composer overlay has a canonical in-layout reservation. As multiline
 input, attachments, settings, or attention controls grow beyond that height,
@@ -669,7 +707,8 @@ place; a protocol update with an unchanged visible fingerprint touches neither
 the widget nor scroll state. Beyond the maximum the output control uses the
 shared styled vertical scrollbar. It follows appended output only while already
 at its bottom; manual upward scrolling pauses following, and the state is
-retained across in-place output updates.
+retained across in-place output updates. The bounded command-text control uses
+the same gesture-boundary ownership as the output control.
 
 The Info tab's State and Protocol viewers use the same scrollbar styling and
 show vertical scrollbars only when required. The Protocol log owns the tab's
@@ -747,15 +786,23 @@ The Requests view presents each pending request independently. Command and
 file-change approvals use native decision enums, user-input answers preserve
 question IDs and support options/free text/secret input, MCP form responses
 return structured JSON, and permission approvals preserve the requested
-permission object and selected turn/session scope. Dynamic tools unavailable
+permission object and selected turn/session scope. Every requested permission
+field, including unknown future fields, is disclosed as literal structured
+detail before approval. Dynamic tools unavailable
 in CodexUI return a typed failed-tool response. Authentication, attestation,
 and unknown capabilities receive an explicit JSON-RPC error rather than
 remaining pending indefinitely. Canceling the dialog itself does not resolve
-the request.
+the request. Provider-supplied request text is always rendered literally; the
+explicit MCP URL link is the only rich-text label and its URL is HTML-escaped.
 
 The UI attention/brown state is derived only from currently unresolved pending
 requests associated with that thread. It is not inferred from historical item
 status or retained across process restart without fresh provider evidence.
+Response actions require a ready provider, current controller ownership, and
+an exact match of request identity, connection generation, provider generation,
+kind, thread, and content. After one response is sent, the request remains
+authoritative but visibly disabled until its removal arrives; repeated clicks
+cannot emit duplicate responses.
 
 A pending request is retired exactly once when:
 
@@ -1202,7 +1249,8 @@ transient card rasters only to prove that motion exists.
 `FrontendSession` across their real socketpair presentation boundary. It
 verifies exact visible-thread routing, independent prompt queues, real result
 acknowledgment, background completion, retained Plan/Agents state, monotonic
-hydration across reconnect, terminal callbacks, failed-hydration draft
+hydration across reconnect, queued and in-flight prompt retention across a
+provider restart, terminal current-provider callbacks, failed-hydration draft
 retention, bounded child-thread reads, and one-shot thread-not-found recovery.
 
 #### Git Changes Integration
@@ -1212,7 +1260,8 @@ retention, bounded child-thread reads, and one-shot thread-not-found recovery.
 repository. It performs filesystem writes rather than UI interaction. The test
 verifies polling discovery of a manually created nested untracked file and
 native watcher refresh after removal, content reversion, deletion restoration,
-and atomic replacement. `codexui-application-layout-test` complements it with
+atomic replacement, and suppression of an in-flight result across a context
+switch. `codexui-application-layout-test` complements it with
 in-process repository-resolution coverage for all scopes, duplicate candidates,
 ambiguous and absolute paths, All and individual repository selection, hidden
 repository exclusion/inclusion, stale hints/selections, and preference for an

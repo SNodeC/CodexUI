@@ -4,6 +4,7 @@
 
 #include <QAbstractTextDocumentLayout>
 #include <QFocusEvent>
+#include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QResizeEvent>
 #include <QTextBlock>
@@ -20,6 +21,9 @@ ExpandingPromptEditor::ExpandingPromptEditor(QWidget *parent)
     : QPlainTextEdit(parent) {
   setObjectName(QStringLiteral("upcomingPromptEditor"));
   setPlaceholderText(QStringLiteral("Message Codex"));
+  setAccessibleName(QStringLiteral("Message Codex"));
+  setAccessibleDescription(QStringLiteral(
+      "Enter to send. Shift+Enter inserts a new line."));
   setLineWrapMode(QPlainTextEdit::WidgetWidth);
   setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -63,13 +67,31 @@ void ExpandingPromptEditor::focusInEvent(QFocusEvent *event) {
 
 void ExpandingPromptEditor::focusOutEvent(QFocusEvent *event) {
   QPlainTextEdit::focusOutEvent(event);
+  preeditActive = false;
   emit focusStateChanged(false);
 }
 
+void ExpandingPromptEditor::inputMethodEvent(QInputMethodEvent *event) {
+  preeditActive = !event->preeditString().isEmpty();
+  QPlainTextEdit::inputMethodEvent(event);
+}
+
 void ExpandingPromptEditor::keyPressEvent(QKeyEvent *event) {
-  if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) &&
-      event->modifiers().testFlag(Qt::ControlModifier) &&
-      !event->isAutoRepeat()) {
+  const bool enter =
+      event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter;
+  if (!enter || preeditActive) {
+    QPlainTextEdit::keyPressEvent(event);
+    return;
+  }
+
+  const Qt::KeyboardModifiers modifiers = event->modifiers();
+  if (modifiers.testFlag(Qt::ShiftModifier)) {
+    insertPlainText(QStringLiteral("\n"));
+    event->accept();
+    return;
+  }
+
+  if (!modifiers.testFlag(Qt::AltModifier) && !event->isAutoRepeat()) {
     emit submitRequested();
     event->accept();
     return;
