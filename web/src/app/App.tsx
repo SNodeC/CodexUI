@@ -3,7 +3,7 @@ import type {FormEvent, ReactNode, RefObject} from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-    ConversationViewportState, DefaultSetting, anchoredScrollTop, changeSettingDraft, canonicalThreadSettings, classifyStatus,
+    ConversationViewportState, DefaultSetting, anchoredScrollTop, changeSettingDraft, canonicalThreadSettings, classifyStatus, displayStatus,
     foldedCardScrollTop, nestedScrollConsumes,
     pendingDecisionOptions, pendingRequestDetails, pendingResponse, permissionProfileLabel, stableKey,
     settingDraftFor, settingPromptOptions, trimTrailingEmptyLines,
@@ -141,11 +141,6 @@ function effectivePlanStepStatus(stepStatus: string, turnStatus: string, threadS
     return outcome === "completed" ? "completed" : outcome === "failed" ? "failed" : outcome === "interrupted" ? "interrupted" : stepStatus;
 }
 
-function displayStatus(status: string): string {
-    const classified = classifyStatus(status);
-    return classified.kind === "unknown" ? humanize(status) : classified.text;
-}
-
 function ThreadPane({session, revision, onRequestNewThread, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; revision: number; onRequestNewThread: () => void} & DrawerPaneProps) {
     void revision;
     const snapshot = session.getSnapshot();
@@ -204,7 +199,7 @@ function ThreadPane({session, revision, onRequestNewThread, drawer = false, pane
         const hasChildren = (thread?.childThreadOrder.length ?? 0) > 0;
         const optimisticClass = optimistic ? ` optimistic-${optimistic.state}` : "";
         const title = thread?.title || optimistic?.title || id;
-        const detail = optimistic ? optimistic.state === "failed" ? "Not created" : optimistic.state === "confirmed" ? "Created" : "Creating" : thread?.cwd || thread?.preview || id;
+        const detail = optimistic ? optimistic.state === "failed" ? "not created" : optimistic.state === "confirmed" ? "created" : "creating" : thread?.cwd || thread?.preview || id;
         return <div key={session.threadVisualKey(id)} role="treeitem" aria-level={depth + 1} aria-selected={selected === id}
             aria-expanded={hasChildren ? expanded.has(id) : undefined} aria-label={`${title}, ${detail}`}>
             <div className={`thread-row-wrap ${selected === id ? "selected" : ""}${contextMenu?.threadId === id ? " context-open" : ""}${optimisticClass}`} style={{paddingLeft: `${8 + depth * 14}px`}}
@@ -330,7 +325,7 @@ function boundedGenericActivity(raw: unknown): string {
 }
 
 function commandMetadata(command: CommandExecutionData): string {
-    const values = [displayStatus(command.status)];
+    const values: string[] = [];
     if (command.exitCode !== undefined) values.push(`exit ${command.exitCode}`);
     if (command.cwd) values.push(command.cwd);
     if (command.durationMilliseconds !== undefined) {
@@ -341,8 +336,7 @@ function commandMetadata(command: CommandExecutionData): string {
 }
 
 function agentMetadata(activity: AgentActivityData): string {
-    const status = activity.status || activity.kind;
-    return [activity.tool, displayStatus(status), activity.receivers.join(", "), activity.model,
+    return [activity.tool, !activity.status && activity.kind ? displayStatus(activity.kind) : "", activity.receivers.join(", "), activity.model,
         activity.reasoningEffort, activity.childThreadId ? `thread ${activity.childThreadId}` : "",
         activity.agentPath, activity.senderThreadId ? `sender ${activity.senderThreadId}` : ""]
         .filter(Boolean).join("  |  ");
@@ -353,7 +347,7 @@ function fileChangeMetadata(changes: FileChangesData): string {
     for (const change of changes.changes) if (change.additions !== undefined && change.deletions !== undefined) {
         additions += change.additions; deletions += change.deletions; countsAvailable = true;
     }
-    return [displayStatus(changes.status), `${changes.changes.length} paths`, countsAvailable ? `+${additions} −${deletions}` : ""]
+    return [`${changes.changes.length} paths`, countsAvailable ? `+${additions} −${deletions}` : ""]
         .filter(Boolean).join("  |  ");
 }
 
@@ -440,6 +434,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     };
     let title = humanize(card.kind);
     let body: ReactNode;
+    let cardVariant = "";
     let phaseClass = "";
     let phaseLabel = "";
     if (card.kind === "userMessage") {
@@ -449,29 +444,30 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You"; phaseLabel = nestedCard && data.state !== "failed" ? "steering" : "";
         body = <><div className="card-text">{data.prompt}</div><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}</>;
     } else if (card.kind === "agentMessage") {
-        const data = card.payload as AgentMessageData; title = "Codex"; phaseClass = data.finalAnswer ? "final" : "update"; phaseLabel = data.finalAnswer ? "final answer" : "update";
+        const data = card.payload as AgentMessageData; title = "Codex"; cardVariant = data.finalAnswer ? "final" : "update"; phaseClass = cardVariant; phaseLabel = data.finalAnswer ? "final answer" : "update";
         body = <SafeMarkdown text={data.text} />;
     } else if (card.kind === "reasoning") {
         const data = card.payload as ReasoningData; title = "Reasoning";
         body = data.summary ? <SafeMarkdown text={data.summary} /> : active ? <div className="activity-line"><i />Working…</div> : null;
     } else if (card.kind === "commandExecution") {
-        const data = card.payload as CommandExecutionData; title = "Command execution";
+        const data = card.payload as CommandExecutionData; title = "Command execution"; phaseLabel = displayStatus(data.status); phaseClass = `status ${classifyStatus(data.status).tone}`;
+        const metadata = commandMetadata(data);
         body = <><ScrollableCode className="command-line" label="Command" text={trimTrailingEmptyLines(data.command)} />
             {data.output && <ScrollableCode className="command-output" label="Command output" text={trimTrailingEmptyLines(data.output)} />}
-            <small className={`card-status ${classifyStatus(data.status).tone}`}>{commandMetadata(data)}</small></>;
+            {metadata && <small className="card-status">{metadata}</small>}</>;
     } else if (card.kind === "fileChanges") {
-        const data = card.payload as FileChangesData; title = "File changes";
+        const data = card.payload as FileChangesData; title = "File changes"; phaseLabel = displayStatus(data.status); phaseClass = `status ${classifyStatus(data.status).tone}`;
         body = <><div className="file-list">{data.changes.map(change => <div key={`${change.path}:${change.kind}`}>
             <span>{change.path}</span><small>{humanize(change.kind)} {change.additions !== undefined && <b className="plus">+{change.additions}</b>} {change.deletions !== undefined && <b className="minus">−{change.deletions}</b>}</small>
-        </div>)}</div><small className={`card-status ${classifyStatus(data.status).tone}`}>{fileChangeMetadata(data)}</small></>;
+        </div>)}</div><small className="card-status">{fileChangeMetadata(data)}</small></>;
     } else if (card.kind === "agentActivity") {
-        const data = card.payload as AgentActivityData; title = "Agent activity";
-        body = <><small className={`card-status ${classifyStatus(data.status || data.kind).tone}`}>{agentMetadata(data)}</small>
+        const data = card.payload as AgentActivityData; title = "Agent activity"; phaseLabel = data.status ? displayStatus(data.status) : ""; phaseClass = data.status ? `status ${classifyStatus(data.status).tone}` : "";
+        const metadata = agentMetadata(data);
+        body = <>{metadata && <small className="card-status">{metadata}</small>}
             {data.prompt && <div className="card-text">{data.prompt}</div>}{data.resultText && <SafeMarkdown text={data.resultText} />}</>;
     } else if (card.kind === "imageGeneration") {
-        const data = card.payload as ImageGenerationData; title = data.status || data.revisedPrompt ? "Generated image" : "Image";
-        body = <>{data.status && <small className={`card-status ${classifyStatus(data.status).tone}`}>{displayStatus(data.status)}</small>}
-            {data.revisedPrompt && <div className="card-text">{data.revisedPrompt}</div>}<ImageRibbon paths={data.path ? [data.path] : []} /></>;
+        const data = card.payload as ImageGenerationData; title = data.status || data.revisedPrompt ? "Generated image" : "Image"; phaseLabel = data.status ? displayStatus(data.status) : ""; phaseClass = data.status ? `status ${classifyStatus(data.status).tone}` : "";
+        body = <>{data.revisedPrompt && <div className="card-text">{data.revisedPrompt}</div>}<ImageRibbon paths={data.path ? [data.path] : []} /></>;
     } else if (card.kind === "plan") {
         const data = card.payload as PlanData; title = "Plan"; body = <SafeMarkdown text={planMarkdown(data)} />;
     } else {
@@ -481,10 +477,11 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     const copyContent = cardCopyContent(card);
     const foldable = ["userMessage", "localPrompt", "agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "imageGeneration", "plan", "genericActivity"].includes(card.kind)
         && !(card.kind === "reasoning" && !(card.payload as ReasoningData).summary);
-    const activeTurn = active && turnContainer && card.kind === "userMessage";
+    const activeTurn = active && turnContainer && (card.kind === "localPrompt" || card.kind === "userMessage");
     const activeWork = (card.kind === "commandExecution" || card.kind === "imageGeneration")
         && ["active", "inProgress", "running", "started"].includes((card.payload as CommandExecutionData | ImageGenerationData).status);
-    return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${nestedCard ? "steering" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""}`} data-card-key={stableKey(card.key)}>
+    const delayedPending = card.kind === "localPrompt" && (card.payload as LocalPromptData).showPendingAnimation;
+    return <article className={`conversation-card ${card.kind} ${cardVariant} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${nestedCard ? "steering" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""} ${delayedPending ? "delayed-pending" : ""}`} data-card-key={stableKey(card.key)}>
         <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{phaseLabel && <span className={`card-phase ${phaseClass || "steering"}`}>{phaseLabel}</span>}{copyContent.text && <span className="card-copy-control"><button className={`card-copy-button${copyFeedback ? " feedback-active" : ""}`} onClick={() => void copy(copyContent)} aria-label="Copy card content"><CopyIcon key={copyFeedback?.sequence ?? 0} /></button>{copyFeedback && <span className={`card-copy-overlay${copyFeedback.failed ? " failed" : ""}`} role="status" aria-live="polite">{copyFeedback.text}</span>}</span>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
@@ -648,14 +645,14 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
         .filter(section => section.cards.length > 0);
     const renderCard = (card: VisibleCardData, nested?: ReactNode, turnContainer = false, nestedCard = false) => {
         const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
-        return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
+        return <Card key={key} card={card} active={conversation.activeTurnId === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
     };
     return <main ref={pane} className="conversation-pane" tabIndex={-1}>
         <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">Conversation</span>
             <div className="conversation-lockup"><h1>{thread?.title ?? (snapshot.newThreadIntent ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
                 <p className="conversation-meta">{thread ? thread.cwd
                     : snapshot.newThreadIntent ? `${snapshot.newThreadDraft?.workspace ?? ""} | Send a message to create this thread.` : "Choose a thread from the left."}</p>
-                {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)} <span aria-hidden="true">|</span> <strong className={classifyStatus(thread.status).tone}>{classifyStatus(thread.status).text}</strong></p>}</div></div>
+                {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)} <span aria-hidden="true">|</span> <strong className={classifyStatus(thread.status).tone}>{displayStatus(thread.status)}</strong></p>}</div></div>
             <div className={`conversation-heading-actions${paneControls ? " responsive" : ""}`}>
                 {paneControls && <div className="responsive-pane-controls">{paneControls}</div>}
                 <div className="conversation-view-controls" aria-label="Conversation presentation">
@@ -723,7 +720,7 @@ function SettingsPanel({session, draft, onChange}: {session: BrowserFrontendSess
 function Composer({session, active, draftKey, drafts, options}: {session: BrowserFrontendSession; active: boolean; draftKey: string; drafts: Map<string, string>; options: SettingPromptOptions}) {
     const [prompt, setPrompt] = useState(drafts.get(draftKey) ?? "");
     const editor = useRef<HTMLTextAreaElement>(null);
-    const running = session.model.activeTurnId(session.getSnapshot().selectedThreadId) !== undefined;
+    const running = session.activeTurnId(session.getSnapshot().selectedThreadId) !== undefined;
     useBrowserLayoutEffect(() => {
         const element = editor.current;
         if (!element) return;
@@ -787,11 +784,11 @@ function Inspector({session, revision, drawer = false, paneRef, onClose}: {sessi
                 })}
             </div> : <p className="muted-copy">No structured plan is available for this thread.</p>)}
             {tab === "agents" && (!selected || selected.agentOrder.length === 0 ? <p className="muted-copy">No correlated agents are present.</p> : selected.agentOrder.map(id => { const agent = selected.agents.get(id)!; return <div className="agent-card" key={id}>
-                <strong>{agent.raw.agentPath ? String(agent.raw.agentPath) : id}</strong><span>{humanize(agent.status)}</span>
+                <strong>{agent.raw.agentPath ? String(agent.raw.agentPath) : id}</strong><span>{displayStatus(agent.status)}</span>
                 {agent.childThreadId && <small>Thread {agent.childThreadId}</small>}{typeof agent.raw.resultText === "string" && <p>{agent.raw.resultText}</p>}
             </div>; }))}
             {tab === "requests" && (requests.length === 0 ? <p className="muted-copy">No pending approval or input requests.</p> : requests.map(request => <RequestCard key={request.id} request={request} session={session} />))}
-            {tab === "state" && <>{selected && <div className="state-summary"><Info label="Thread" value={selected.id} /><Info label="Status" value={humanize(selected.status)} /><Info label="Workspace" value={selected.cwd} /><Info label="Turns" value={String(selected.turnOrder.length)} /><Info label="Changed files" value={String(selected.changedPaths.length)} /></div>}<pre className="state-json">{JSON.stringify(plainState, null, 2)}</pre></>}
+            {tab === "state" && <>{selected && <div className="state-summary"><Info label="Thread" value={selected.id} /><Info label="Status" value={displayStatus(selected.status)} /><Info label="Workspace" value={selected.cwd} /><Info label="Turns" value={String(selected.turnOrder.length)} /><Info label="Changed files" value={String(selected.changedPaths.length)} /></div>}<pre className="state-json">{JSON.stringify(plainState, null, 2)}</pre></>}
             {tab === "protocol" && <div className="protocol-list">{[...session.getSnapshot().protocolFrames].reverse().map((frame, index) => <details key={index}><summary>{humanize(String((frame as Record<string, unknown>).type ?? (frame as Record<string, unknown>).action ?? "Frame"))}</summary><pre>{JSON.stringify(frame, null, 2)}</pre></details>)}</div>}
         </div>
     </aside>;

@@ -1,13 +1,12 @@
 import type {ThreadPresentation, ItemPresentation} from "../presentation/PresentationModel.js";
 import {isObject, stringMember} from "../presentation/PresentationProtocol.js";
-import {AcknowledgementTransitionMilliseconds} from "./MiddleTypes.js";
 import type {AuthoritativeItemKey, LocalPromptKey, PromptState} from "./MiddleTypes.js";
 
 export interface AttachmentDraft {path: string; name: string; mimeType: string; size: number}
 export interface PromptSubmission {
     id: number; admissionOrdinal: number; threadId: string; clientUserMessageId: string; prompt: string;
     attachments: AttachmentDraft[]; turnOptions: Record<string, unknown>; state: PromptState;
-    acceptedAtMilliseconds: number; error: string; admissionAnchor?: AuthoritativeItemKey;
+    admittedAtMilliseconds: number; error: string; admissionAnchor?: AuthoritativeItemKey;
     admissionAtStart: boolean; startsTurn: boolean; expectedTurnId?: string; materializedItem?: AuthoritativeItemKey;
 }
 export interface PromptDispatch {
@@ -83,14 +82,9 @@ export function promptWithFileLinks(prompt: string, attachments: readonly Attach
     return links.length === 0 ? prompt : `${prompt}\n\nAttached files:\n${links.join("\n")}`;
 }
 
-export function acceptedTransitionActive(submission: PromptSubmission, now: number): boolean {
-    return submission.state === "accepted" && submission.acceptedAtMilliseconds > 0
-        && now >= submission.acceptedAtMilliseconds
-        && now - submission.acceptedAtMilliseconds < AcknowledgementTransitionMilliseconds;
-}
-export function localCardVisible(submission: PromptSubmission, now: number): boolean {
+export function localCardVisible(submission: PromptSubmission): boolean {
     return submission.state === "queued" || submission.state === "inFlight" || submission.state === "failed"
-        || submission.materializedItem === undefined || acceptedTransitionActive(submission, now);
+        || submission.materializedItem === undefined;
 }
 function cloneKey(key: AuthoritativeItemKey): AuthoritativeItemKey { return {...key}; }
 
@@ -105,7 +99,7 @@ export class PromptCoordinator {
         const submission: PromptSubmission = {
             id: this.nextSubmissionId++, admissionOrdinal: this.nextAdmissionOrdinal++, threadId,
             clientUserMessageId: `codexui-${now}-${this.nextSubmissionId - 1}`, prompt, attachments: structuredClone(attachments),
-            turnOptions: structuredClone(turnOptions), state: "queued", acceptedAtMilliseconds: 0, error: "",
+            turnOptions: structuredClone(turnOptions), state: "queued", admittedAtMilliseconds: now, error: "",
             admissionAtStart: false, startsTurn: activeTurnId === undefined,
         };
         if (activeTurnId !== undefined) submission.expectedTurnId = activeTurnId;
@@ -137,10 +131,10 @@ export class PromptCoordinator {
         return dispatch;
     }
 
-    acknowledge(threadId: string, id: number, turnId: string | undefined, now: number): boolean {
+    acknowledge(threadId: string, id: number, turnId: string | undefined): boolean {
         const pending = this.find(threadId, id);
         if (!pending || pending.state !== "inFlight") return false;
-        pending.state = "accepted"; pending.acceptedAtMilliseconds = now; pending.error = "";
+        pending.state = "accepted"; pending.error = "";
         if (turnId !== undefined) pending.expectedTurnId = turnId;
         return true;
     }
@@ -189,7 +183,7 @@ export class PromptCoordinator {
         return true;
     }
 
-    reconcile(threadId: string, threadOrIndex: ThreadPresentation | AuthoritativeItemIndex, now: number): AuthoritativeItemIndex {
+    reconcile(threadId: string, threadOrIndex: ThreadPresentation | AuthoritativeItemIndex): AuthoritativeItemIndex {
         const index = "ordered" in threadOrIndex ? threadOrIndex : indexAuthoritativeItems(threadId, threadOrIndex);
         this.applyVisualAliases(threadId, index);
         const submissions = this.byThread.get(threadId);
@@ -223,7 +217,7 @@ export class PromptCoordinator {
         }
         const aliases = this.visualAliasesByThread.get(threadId) ?? new Map<string, RetainedPromptVisualAlias>();
         for (const submission of submissions) {
-            if (submission.state !== "accepted" || !submission.materializedItem || acceptedTransitionActive(submission, now)) continue;
+            if (submission.state !== "accepted" || !submission.materializedItem) continue;
             aliases.set(authoritativeKey(submission.materializedItem), {
                 key: {kind: "prompt", submissionId: submission.id}, admissionOrdinal: submission.admissionOrdinal,
                 materializedItem: cloneKey(submission.materializedItem),
@@ -232,7 +226,7 @@ export class PromptCoordinator {
         }
         this.visualAliasesByThread.set(threadId, aliases);
         this.byThread.set(threadId, submissions.filter(submission => submission.state !== "accepted"
-            || !submission.materializedItem || acceptedTransitionActive(submission, now)));
+            || !submission.materializedItem));
         this.applyVisualAliases(threadId, index);
         return index;
     }

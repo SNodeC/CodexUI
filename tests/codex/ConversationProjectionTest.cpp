@@ -228,7 +228,7 @@ bool testTurnRootSurvivesHistoryPaging() {
       nlohmann::json::object(), nullptr, std::nullopt, 200);
   result &= expect(prompts.beginNext(conflicting.id).has_value() &&
                        prompts.acknowledge(conflicting.id, localId,
-                                           std::string("turn"), 201),
+                                           std::string("turn")),
                    "a locally admitted turn start reaches acknowledgment");
   addTurn(conflicting, "turn");
   appendItem(conflicting, "turn",
@@ -237,7 +237,7 @@ bool testTurnRootSurvivesHistoryPaging() {
                    {"content",
                     {{{"type", "text"},
                            {"text", "Different authoritative prompt"}}}}}));
-  prompts.reconcile(conflicting.id, conflicting, 202);
+  prompts.reconcile(conflicting.id, conflicting);
   const ConversationSnapshot uniqueRoot = ConversationProjection::project(
       conflicting, prompts.submissions(conflicting.id), 80, 202);
   const AuthoritativeItemKey authoritativeRoot{conflicting.id, "turn",
@@ -271,43 +271,55 @@ bool testQueueIsolationAndRealAcknowledgement() {
   result &= expect(secondDispatch && secondDispatch->id == secondId,
                    "different threads have independent in-flight queues");
 
+  const auto pendingAnimationAt = [&first, &prompts, firstId](
+                                      std::int64_t now) {
+    const ConversationSnapshot snapshot = ConversationProjection::project(
+        first, prompts.submissions(first.id), 80, now);
+    const VisibleCardData *card = snapshot.find(LocalPromptKey{firstId});
+    const auto *prompt =
+        card ? std::get_if<LocalPromptData>(&card->payload) : nullptr;
+    return prompt && prompt->showPendingAnimation;
+  };
+  result &= expect(!pendingAnimationAt(1099),
+                   "pending feedback stays calm during the first second");
+  result &= expect(pendingAnimationAt(1100),
+                   "pending feedback starts at the one-second boundary");
+
   addTurn(first, "turn-2");
   appendItem(
       first, "turn-2",
       item("user-new", {{"type", "userMessage"},
                         {"content", {{{"type", "text"}, {"text", "same"}}}}}));
-  prompts.reconcile(first.id, first, 199);
+  prompts.reconcile(first.id, first);
   result &= expect(prompts.submission(first.id, firstId)->state ==
                            PromptState::InFlight &&
                        !prompts.submission(first.id, firstId)->materializedItem,
                    "events and elapsed time cannot manufacture an ack");
 
-  result &= expect(prompts.acknowledge(first.id, firstId, "turn-2", 200),
+  result &= expect(prompts.acknowledge(first.id, firstId, "turn-2"),
                    "the matching completion acknowledges the in-flight prompt");
-  prompts.reconcile(first.id, first, 200);
+  prompts.reconcile(first.id, first);
   const PromptSubmission *accepted = prompts.submission(first.id, firstId);
-  result &= expect(accepted && accepted->state == PromptState::Accepted &&
-                       accepted->materializedItem &&
-                       accepted->materializedItem->itemId == "user-new",
-                   "an acknowledged prompt binds to its authoritative item");
+  result &= expect(!accepted,
+                   "a correlated acknowledgement promotes a materialized "
+                   "prompt immediately");
 
-  const ConversationSnapshot transitioning = ConversationProjection::project(
-      first, prompts.submissions(first.id), 80, 699);
-  const VisibleCardData *local = cardForSubmission(transitioning, firstId);
-  result &= expect(local && local->kind == CardKind::LocalPrompt,
-                   "the accepted presentation transition lasts 500ms");
+  auto materializedItems = indexAuthoritativeItems(first.id, &first);
+  prompts.reconcile(first.id, materializedItems);
   const ConversationSnapshot materialized = ConversationProjection::project(
-      first, prompts.submissions(first.id), 80, 700);
+      materializedItems, &first, prompts.submissions(first.id), 80, 200);
   const VisibleCardData *authoritative =
       cardForSubmission(materialized, firstId);
   result &=
       expect(authoritative && authoritative->kind == CardKind::UserMessage &&
                  authoritative->itemId == "user-new",
              "the authoritative user item assumes the local stable key");
-  result &= expect(stableKey(local->key) == stableKey(authoritative->key),
+  result &= expect(authoritative &&
+                       stableKey(authoritative->key) ==
+                           stableKey(LocalPromptKey{firstId}),
                    "materialization does not change the visual identity");
   auto compactedItems = indexAuthoritativeItems(first.id, &first);
-  prompts.reconcile(first.id, compactedItems, 700);
+  prompts.reconcile(first.id, compactedItems);
   accepted = prompts.submission(first.id, firstId);
   const ConversationSnapshot compacted = ConversationProjection::project(
       compactedItems, &first, prompts.submissions(first.id), 80, 701);
@@ -319,7 +331,7 @@ bool testQueueIsolationAndRealAcknowledgement() {
           !compacted.find(AuthoritativeItemKey{first.id, "turn-2", "user-new"}),
       "submission cleanup retains the compact local visual identity alias");
   auto retainedAliasItems = indexAuthoritativeItems(first.id, &first);
-  prompts.reconcile(first.id, retainedAliasItems, 701);
+  prompts.reconcile(first.id, retainedAliasItems);
   const ConversationSnapshot retainedAlias = ConversationProjection::project(
       retainedAliasItems, &first, prompts.submissions(first.id), 80, 702);
   result &=
@@ -346,7 +358,7 @@ bool testDispatchChoiceAndPreHydrationTail() {
       "thread-tail", "after retained history", {}, nlohmann::json::object(),
       nullptr, std::nullopt, 400);
   ThreadPresentation retained = baseThread("thread-tail");
-  beforeHydration.reconcile(retained.id, retained, 401);
+  beforeHydration.reconcile(retained.id, retained);
   const ConversationSnapshot atTail = ConversationProjection::project(
       retained, beforeHydration.submissions(retained.id), 80, 401);
   const auto keys = atTail.cardKeys();
@@ -392,7 +404,7 @@ bool testClientIdentityBindsBeforeAcknowledgement() {
            {{"type", "userMessage"},
             {"clientId", dispatch->clientUserMessageId},
             {"content", {{{"type", "text"}, {"text", "identity matched"}}}}}));
-  prompts.reconcile(thread.id, thread, 501);
+  prompts.reconcile(thread.id, thread);
   const PromptSubmission *pending = prompts.submission(thread.id, id);
   result &= expect(pending && pending->state == PromptState::InFlight &&
                        pending->materializedItem &&
@@ -435,7 +447,7 @@ bool testFirstResponseOrderIsAdmissionStable() {
   appendItem(reasoningFirst, "turn-new",
              item("reasoning", {{"type", "reasoning"},
                                 {"summary", nlohmann::json::array()}}));
-  prompts.reconcile(reasoningFirst.id, reasoningFirst, 601);
+  prompts.reconcile(reasoningFirst.id, reasoningFirst);
   const AuthoritativeItemKey reasoningKey{reasoningFirst.id, "turn-new",
                                           "reasoning"};
   const auto beforeUser = ConversationProjection::project(
@@ -450,7 +462,7 @@ bool testFirstResponseOrderIsAdmissionStable() {
                   {{"type", "userMessage"},
                    {"clientId", dispatch->clientUserMessageId},
                    {"content", {{{"type", "text"}, {"text", "new prompt"}}}}}));
-  prompts.reconcile(reasoningFirst.id, reasoningFirst, 602);
+  prompts.reconcile(reasoningFirst.id, reasoningFirst);
   const auto materialized = ConversationProjection::project(
       reasoningFirst, prompts.submissions(reasoningFirst.id), 80, 602);
   result &=
@@ -459,19 +471,23 @@ bool testFirstResponseOrderIsAdmissionStable() {
              "early user-message materialization cannot invert the cards");
 
   result &= expect(prompts.acknowledge(reasoningFirst.id, promptId,
-                                       std::string("turn-new"), 700),
+                                       std::string("turn-new")),
                    "the reasoning-first prompt is acknowledged");
-  prompts.reconcile(reasoningFirst.id, reasoningFirst, 700);
+  prompts.reconcile(reasoningFirst.id, reasoningFirst);
+  auto promotedItems =
+      indexAuthoritativeItems(reasoningFirst.id, &reasoningFirst);
+  prompts.reconcile(reasoningFirst.id, promotedItems);
   const auto transitioning = ConversationProjection::project(
-      reasoningFirst, prompts.submissions(reasoningFirst.id), 80, 700);
+      promotedItems, &reasoningFirst, prompts.submissions(reasoningFirst.id),
+      80, 700);
   result &=
       expect(transitioning.cardKeys() ==
                  std::vector<CardKey>{LocalPromptKey{promptId}, reasoningKey},
-             "the animated-to-blue transition retains prompt order");
+             "immediate promotion retains prompt order");
 
   auto compactedItems =
       indexAuthoritativeItems(reasoningFirst.id, &reasoningFirst);
-  prompts.reconcile(reasoningFirst.id, compactedItems, 1200);
+  prompts.reconcile(reasoningFirst.id, compactedItems);
   const auto compacted = ConversationProjection::project(
       compactedItems, &reasoningFirst, prompts.submissions(reasoningFirst.id),
       80, 1200);
@@ -503,13 +519,13 @@ bool testFirstResponseOrderIsAdmissionStable() {
            {{"type", "userMessage"},
             {"clientId", continuedDispatch->clientUserMessageId},
             {"content", {{{"type", "text"}, {"text", "continued prompt"}}}}}));
-  continuedPrompts.reconcile(continued.id, continued, 751);
+  continuedPrompts.reconcile(continued.id, continued);
   result &=
       expect(continuedPrompts.acknowledge(continued.id, continuedId,
-                                          std::string("turn-continued"), 800),
+                                          std::string("turn-continued")),
              "the continued-thread prompt is acknowledged");
   auto continuedItems = indexAuthoritativeItems(continued.id, &continued);
-  continuedPrompts.reconcile(continued.id, continuedItems, 1300);
+  continuedPrompts.reconcile(continued.id, continuedItems);
   const auto continuedCompacted = ConversationProjection::project(
       continuedItems, &continued, continuedPrompts.submissions(continued.id),
       80, 1300);
@@ -548,7 +564,7 @@ bool testFirstResponseOrderIsAdmissionStable() {
       userFirst, "turn-ordinary",
       item("reasoning-ordinary",
            {{"type", "reasoning"}, {"summary", nlohmann::json::array()}}));
-  ordinaryPrompts.reconcile(userFirst.id, userFirst, 801);
+  ordinaryPrompts.reconcile(userFirst.id, userFirst);
   const auto userBeforeReasoning = ConversationProjection::project(
       userFirst, ordinaryPrompts.submissions(userFirst.id), 80, 801);
   result &= expect(userBeforeReasoning.cardKeys() ==
@@ -572,11 +588,11 @@ bool testAnchoredDuplicatePrompts() {
 
   bool result = expect(prompts.beginNext(thread.id).has_value(),
                        "first duplicate dispatches");
-  result &= expect(prompts.acknowledge(thread.id, firstId, "turn-2", 1010),
+  result &= expect(prompts.acknowledge(thread.id, firstId, "turn-2"),
                    "first duplicate is acknowledged by id");
   result &= expect(prompts.beginNext(thread.id, "turn-2").has_value(),
                    "second duplicate dispatches only after first ack");
-  result &= expect(prompts.acknowledge(thread.id, secondId, "turn-2", 1020),
+  result &= expect(prompts.acknowledge(thread.id, secondId, "turn-2"),
                    "second duplicate is acknowledged by id");
 
   addTurn(thread, "turn-2");
@@ -584,10 +600,12 @@ bool testAnchoredDuplicatePrompts() {
              item("repeat-1",
                   {{"type", "userMessage"},
                    {"content", {{{"type", "text"}, {"text", "repeat"}}}}}));
-  prompts.reconcile(thread.id, thread, 1020);
+  prompts.reconcile(thread.id, thread);
+  auto partialItems = indexAuthoritativeItems(thread.id, &thread);
+  prompts.reconcile(thread.id, partialItems);
   const ConversationSnapshot partiallyMaterialized =
-      ConversationProjection::project(thread, prompts.submissions(thread.id),
-                                      80, 1600);
+      ConversationProjection::project(partialItems, &thread,
+                                      prompts.submissions(thread.id), 80, 1600);
   const auto partialKeys = partiallyMaterialized.cardKeys();
   const auto materializedFirst =
       std::ranges::find(partialKeys, CardKey{LocalPromptKey{firstId}});
@@ -602,17 +620,17 @@ bool testAnchoredDuplicatePrompts() {
              item("repeat-2",
                   {{"type", "userMessage"},
                    {"content", {{{"type", "text"}, {"text", "repeat"}}}}}));
-  prompts.reconcile(thread.id, thread, 1021);
+  prompts.reconcile(thread.id, thread);
   const PromptSubmission *first = prompts.submission(thread.id, firstId);
   const PromptSubmission *second = prompts.submission(thread.id, secondId);
-  result &= expect(
-      first && second && first->materializedItem && second->materializedItem &&
-          first->materializedItem->itemId == "repeat-1" &&
-          second->materializedItem->itemId == "repeat-2",
-      "identical prompts bind in admission order without collision");
+  result &= expect(!first && !second,
+                   "identical acknowledged prompts bind and promote without "
+                   "collision");
 
+  auto waitingItems = indexAuthoritativeItems(thread.id, &thread);
+  prompts.reconcile(thread.id, waitingItems);
   const ConversationSnapshot waiting = ConversationProjection::project(
-      thread, prompts.submissions(thread.id), 80, 1021);
+      waitingItems, &thread, prompts.submissions(thread.id), 80, 1021);
   const auto keys = waiting.cardKeys();
   const auto firstPosition =
       std::ranges::find(keys, CardKey{LocalPromptKey{firstId}});
@@ -718,7 +736,7 @@ bool testUserMessageImages() {
   const auto dispatch = prompts.beginNext(replacement.id);
   result &=
       expect(dispatch && prompts.acknowledge(replacement.id, submissionId,
-                                             std::string("turn-image"), 200),
+                                             std::string("turn-image")),
              "image prompt receives a real acknowledgement");
   appendItem(
       replacement, "turn-image",
@@ -728,8 +746,7 @@ bool testUserMessageImages() {
             {"content",
              {{{"type", "text"}, {"text", "replacement image"}},
               {{"type", "localImage"}, {"path", "/tmp/replacement.png"}}}}}));
-  prompts.reconcile(replacement.id, replacement, 200);
-  prompts.reconcile(replacement.id, replacement, 800);
+  prompts.reconcile(replacement.id, replacement);
   const ConversationSnapshot replaced = ConversationProjection::project(
       replacement, prompts.submissions(replacement.id), 80, 800);
   const VisibleCardData *replacedCard = replaced.find(AuthoritativeItemKey{

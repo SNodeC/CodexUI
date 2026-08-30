@@ -297,11 +297,10 @@ bool testOverlayGeometryAndRegionRouting() {
              "composer construction reports no pre-canonical trailing space");
   region.resize(1500, 820);
   region.show();
-  region.setThreadHeading(QStringLiteral("Thread title"),
-                          QStringLiteral("/workspace"),
-                          QStringLiteral("Last activity: 14:15:51"),
-                          QStringLiteral("Completed"),
-                          QStringLiteral("success"));
+  region.setThreadHeading(
+      QStringLiteral("Thread title"), QStringLiteral("/workspace"),
+      QStringLiteral("Last activity: 14:15:51"), QStringLiteral("completed"),
+      QStringLiteral("success"));
   spin(20);
 
   QSplitter *splitter = region.splitterWidget();
@@ -352,38 +351,37 @@ bool testOverlayGeometryAndRegionRouting() {
           conversationDividerRect.left() == 10 &&
           conversationDividerRect.right() == splitter->widget(1)->width() - 11,
       "Threads and Conversation header dividers share the 10 px inset");
-  result &=
-      expect(conversationTitle && conversationMetadata &&
-                 conversationTrailingMetadata && conversationState &&
-                 conversationMetadata->geometry().left() >
-                     conversationTitle->geometry().right() &&
-                 conversationTrailingMetadata->geometry().right() <
-                     conversationState->geometry().left() &&
-                 conversationState->geometry().right() >=
-                     conversationState->parentWidget()->width() - 16 &&
-                 conversationTrailingMetadata->text() ==
-                     QStringLiteral("Last activity: 14:15:51") &&
-                 conversationTrailingMetadata->property("tone").toString() ==
-                     QStringLiteral("strong") &&
-                 conversationState->text() == QStringLiteral("Completed") &&
-                 conversationState->property("tone").toString() ==
-                     QStringLiteral("success") &&
-                 conversationState->width() >=
-                     conversationState->fontMetrics().horizontalAdvance(
-                         conversationState->text()) &&
-                 conversationTrailingMetadata->width() >=
-                     conversationTrailingMetadata->fontMetrics()
-                         .horizontalAdvance(
-                             conversationTrailingMetadata->text()) &&
-                 std::abs((conversationMetadata->geometry().top() +
-                           conversationMetadata->contentsMargins().top() +
-                           conversationMetadata->fontMetrics().ascent()) -
-                          (conversationTitle->geometry().top() +
-                           conversationTitle->contentsMargins().top() +
-                           conversationTitle->fontMetrics().ascent())) <= 1,
+  result &= expect(
+      conversationTitle && conversationMetadata &&
+          conversationTrailingMetadata && conversationState &&
+          conversationMetadata->geometry().left() >
+              conversationTitle->geometry().right() &&
+          conversationTrailingMetadata->geometry().right() <
+              conversationState->geometry().left() &&
+          conversationState->geometry().right() >=
+              conversationState->parentWidget()->width() - 16 &&
+          conversationTrailingMetadata->text() ==
+              QStringLiteral("Last activity: 14:15:51") &&
+          conversationTrailingMetadata->property("tone").toString() ==
+              QStringLiteral("strong") &&
+          conversationState->text() == QStringLiteral("completed") &&
+          conversationState->property("tone").toString() ==
+              QStringLiteral("success") &&
+          conversationState->width() >=
+              conversationState->fontMetrics().horizontalAdvance(
+                  conversationState->text()) &&
+          conversationTrailingMetadata->width() >=
+              conversationTrailingMetadata->fontMetrics().horizontalAdvance(
+                  conversationTrailingMetadata->text()) &&
+          std::abs((conversationMetadata->geometry().top() +
+                    conversationMetadata->contentsMargins().top() +
+                    conversationMetadata->fontMetrics().ascent()) -
+                   (conversationTitle->geometry().top() +
+                    conversationTitle->contentsMargins().top() +
+                    conversationTitle->fontMetrics().ascent())) <= 1,
       "thread title metadata align by baseline and activity aligns right");
   result &= expect(
-          reasoningToggle && updatesToggle && commandFoldingToggle &&
+      reasoningToggle && updatesToggle && commandFoldingToggle &&
           imageFoldingToggle && !reasoningToggle->isChecked() &&
           updatesToggle->isChecked() && commandFoldingToggle->isChecked() &&
           imageFoldingToggle->isChecked() &&
@@ -714,7 +712,7 @@ bool testThreadSelectionProjection() {
           sortButton->property("codexChevron").toBool() &&
           title->property("kind").toString() == QStringLiteral("title") &&
           selected->data(Qt::DisplayRole).toString().isEmpty() &&
-          selectedAccessible.contains(QStringLiteral("B, Running")) &&
+          selectedAccessible.contains(QStringLiteral("B, running")) &&
           selectedAccessible.contains(QStringLiteral("level 2")) &&
           parentAccessible.contains(QStringLiteral("A")) &&
           parentAccessible.contains(QStringLiteral("expanded")) &&
@@ -788,6 +786,9 @@ bool testIncrementalThreadSettings() {
       models, nlohmann::json::array(), 1, {{"approvalPolicy", "on-request"}});
   bool result = expect(canonicalSettingsStyle,
                        "thread settings use canonical application styling");
+  result &= expect(UiStyle::humanizeLabel(QStringLiteral("xhigh")) ==
+                       QStringLiteral("Extra high"),
+                   "the fallback reasoning effort uses a human-readable label");
   result &= expect(
       model->currentData().toString() == QStringLiteral("gpt-b") &&
           approval->currentData().toString() == QStringLiteral("on-request"),
@@ -796,7 +797,7 @@ bool testIncrementalThreadSettings() {
   settings.setContext("thread-a",
                       {{"model", "gpt-b"}, {"approvalPolicy", "on-request"}},
                       models, nlohmann::json::array(), 2,
-      {{"model", "gpt-b"}, {"approvalPolicy", "on-request"}});
+                      {{"model", "gpt-b"}, {"approvalPolicy", "on-request"}});
   result &= expect(!settings.turnStartOptions().contains("model") &&
                        !settings.turnStartOptions().contains("approvalPolicy"),
                    "authoritative settings clear their pending overrides");
@@ -1755,7 +1756,7 @@ bool testInspectorDetailParity() {
       "Agents show child, sender, and receiver thread identities");
   QLabel *agentStatus = nullptr;
   for (QLabel *label : inspector.findChildren<QLabel *>()) {
-    if (label->text() == QStringLiteral("Running")) {
+    if (label->text() == QStringLiteral("running")) {
       agentStatus = label;
       break;
     }
@@ -1960,9 +1961,9 @@ bool testTerminalPlanStatusReconciliation() {
         inspector.findChildren<QLabel *>(),
         [&value](const QLabel *label) { return label->text() == value; });
   };
-  bool result = expect(hasExactLabel(QStringLiteral("Running")) &&
+  bool result = expect(hasExactLabel(QStringLiteral("running")) &&
                            hasExactLabel(QStringLiteral("pending")),
-                       "active plans preserve Running and Pending statuses");
+                       "active plans preserve running and pending statuses");
   const auto markdownLabels = inspector.findChildren<QLabel *>();
   result &=
       expect(std::ranges::any_of(
@@ -1983,20 +1984,20 @@ bool testTerminalPlanStatusReconciliation() {
     refresh(inspector, model, "plan-thread");
   };
   setThreadStatus(4, "completed");
-  result &= expect(!hasExactLabel(QStringLiteral("Running")) &&
-                       hasExactLabel(QStringLiteral("Completed")) &&
+  result &= expect(!hasExactLabel(QStringLiteral("running")) &&
+                       hasExactLabel(QStringLiteral("completed")) &&
                        hasExactLabel(QStringLiteral("pending")),
-                   "a terminal thread reconciles stale Running to Completed "
-                   "without changing Pending");
+                   "a terminal thread reconciles stale running to completed "
+                   "without changing pending");
   setThreadStatus(5, "failed");
-  result &= expect(hasExactLabel(QStringLiteral("Failed")) &&
+  result &= expect(hasExactLabel(QStringLiteral("failed")) &&
                        hasExactLabel(QStringLiteral("pending")),
-                   "a failed thread reconciles stale Running to Failed");
+                   "a failed thread reconciles stale running to failed");
   setThreadStatus(6, "interrupted");
   result &=
-      expect(hasExactLabel(QStringLiteral("Interrupted")) &&
-                       hasExactLabel(QStringLiteral("pending")),
-                   "an interrupted thread reconciles stale Running to Interrupted");
+      expect(hasExactLabel(QStringLiteral("interrupted")) &&
+                 hasExactLabel(QStringLiteral("pending")),
+             "an interrupted thread reconciles stale running to interrupted");
   return result;
 }
 

@@ -61,7 +61,7 @@ test("Copy precedes folding and remains available on collapsed cards", () => {
     assert.ok(!emptyMarkup.includes("Copy card content"));
 });
 
-test("only an authoritative running-turn You container is emphasized", () => {
+test("the retained running-turn You container stays emphasized", () => {
     const user = itemCard("userMessage", "prompt", {
         text: "Prompt", imagePaths: [],
     });
@@ -75,6 +75,16 @@ test("only an authoritative running-turn You container is emphasized", () => {
         onToggle() {},
     }));
     assert.doesNotMatch(finished, /active-turn/u);
+
+    const acknowledged = itemCard("localPrompt", "local", {
+        submissionId: 7, prompt: "pending", state: "accepted",
+        showPendingAnimation: false, error: "", imagePaths: [],
+    });
+    const retained = renderToStaticMarkup(createElement(Card, {
+        card: acknowledged, active: true, collapsed: false,
+        turnContainer: true, onToggle() {},
+    }));
+    assert.match(retained, /localPrompt.*turn-container.*active-turn/u);
 });
 
 test("nested user messages expose the steering identity", () => {
@@ -89,6 +99,23 @@ test("nested user messages expose the steering identity", () => {
     assert.match(markup, />You<\/span>[\s\S]*card-phase steering">steering</u);
     assert.ok(markup.indexOf("card-phase steering") < markup.indexOf("card-copy-button"));
     assert.doesNotMatch(markup, /[·•]\s*steering/u);
+});
+
+test("local prompt sweep is rendered only after delayed feedback activates", () => {
+    const card = showPendingAnimation => itemCard("localPrompt", "local", {
+        submissionId: 8, prompt: "pending", state: "inFlight",
+        showPendingAnimation, error: "", imagePaths: [],
+    });
+    const calm = renderToStaticMarkup(createElement(Card, {
+        card: card(false), active: true, collapsed: false, turnContainer: true,
+        onToggle() {},
+    }));
+    assert.doesNotMatch(calm, /delayed-pending/u);
+    const overdue = renderToStaticMarkup(createElement(Card, {
+        card: card(true), active: true, collapsed: false, turnContainer: true,
+        onToggle() {},
+    }));
+    assert.match(overdue, /localPrompt[^"]*delayed-pending/u);
 });
 
 test("Codex phases are plain right-side metadata before Copy", () => {
@@ -148,7 +175,10 @@ test("typed activity cards retain complete metadata and bounded diagnostics", ()
         card: command, active: false, collapsed: false, onToggle() {}, onCopy() {},
     }));
     assert.match(commandMarkup, /Command execution/u);
-    assert.match(commandMarkup, /Completed  \|  exit 0  \|  \/workspace  \|  1\.5 s/u);
+    assert.match(commandMarkup, /card-phase status success">completed/u);
+    assert.match(commandMarkup, /exit 0  \|  \/workspace  \|  1\.5 s/u);
+    assert.doesNotMatch(commandMarkup, /completed  \|  exit 0/u);
+    assert.ok(commandMarkup.indexOf("card-phase status success") < commandMarkup.indexOf("card-copy-button"));
     assert.doesNotMatch(commandMarkup, /done\n\n/u);
 
     const agent = itemCard("agentActivity", "agent", {
@@ -161,6 +191,7 @@ test("typed activity cards retain complete metadata and bounded diagnostics", ()
     }));
     for (const value of ["spawn_agent", "worker", "gpt-test", "medium", "thread child", "root/worker", "sender root", "Inspect this"])
         assert.match(agentMarkup, new RegExp(value, "u"));
+    assert.match(agentMarkup, /card-phase status success">completed/u);
     assert.match(agentMarkup, /<strong>Done<\/strong>/u);
 
     const files = itemCard("fileChanges", "files", {status: "completed", changes: [
@@ -170,7 +201,18 @@ test("typed activity cards retain complete metadata and bounded diagnostics", ()
     const filesMarkup = renderToStaticMarkup(createElement(Card, {
         card: files, active: false, collapsed: false, onToggle() {}, onCopy() {},
     }));
-    assert.match(filesMarkup, /Completed  \|  2 paths  \|  \+5 −1/u);
+    assert.match(filesMarkup, /card-phase status success">completed/u);
+    assert.match(filesMarkup, /2 paths  \|  \+5 −1/u);
+    assert.doesNotMatch(filesMarkup, /completed  \|  2 paths/u);
+
+    const image = itemCard("imageGeneration", "image", {
+        path: "/tmp/generated.png", status: "completed", revisedPrompt: "A generated image",
+    });
+    const imageMarkup = renderToStaticMarkup(createElement(Card, {
+        card: image, active: false, collapsed: false, onToggle() {}, onCopy() {},
+    }));
+    assert.match(imageMarkup, /card-phase status success">completed/u);
+    assert.equal((imageMarkup.match(/>completed</gu) ?? []).length, 1);
 
     const generic = itemCard("genericActivity", "generic", {type: "futureThing", raw: {text: "x".repeat(5000)}});
     assert.match(cardCopyContent(generic).text, /\[Activity details truncated\]$/u);

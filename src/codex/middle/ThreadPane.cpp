@@ -224,9 +224,9 @@ void updateRow(QWidget *row, const std::string &threadId,
     titleText.prepend(QStringLiteral("! "));
   title->setText(titleText);
   const PresentationStatus classified = classifyStatus(threadStatus);
-  status->setText(optimistic ? optimisticFailed ? QStringLiteral("Not created")
-                                                : QStringLiteral("Creating")
-                             : text(classified.text));
+  status->setText(optimistic ? optimisticFailed ? QStringLiteral("not created")
+                                                : QStringLiteral("creating")
+                             : text(displayStatus(threadStatus)));
   const QString tone = optimistic ? optimisticFailed ? QStringLiteral("danger")
                                                      : QStringLiteral("warning")
                        : requestCount != 0 ? QStringLiteral("warning")
@@ -821,7 +821,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
     }
     QListWidgetItem *item = found->second;
     const QString title = text(row.title);
-    const QString status = text(classifyStatus(row.status).text);
+    const QString status = text(displayStatus(row.status));
     QStringList accessibleParts{title, status,
                                 QStringLiteral("level %1").arg(row.depth + 1)};
     if (row.hasChildren)

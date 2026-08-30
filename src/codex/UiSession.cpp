@@ -35,9 +35,8 @@ std::string stringValue(const nlohmann::json &object, const char *key) {
   if (!object.is_object())
     return {};
   const auto found = object.find(key);
-  return found != object.end() && found->is_string()
-             ? found->get<std::string>()
-             : std::string{};
+  return found != object.end() && found->is_string() ? found->get<std::string>()
+                                                     : std::string{};
 }
 
 std::string safeMessage(const nlohmann::json &value) {
@@ -81,8 +80,7 @@ std::optional<std::string> resultTurnId(const nlohmann::json &result) {
     return id;
   const nlohmann::json turn = data.value("turn", nlohmann::json::object());
   id = stringValue(turn, "id");
-  return id.empty() ? std::nullopt
-                    : std::optional<std::string>{std::move(id)};
+  return id.empty() ? std::nullopt : std::optional<std::string>{std::move(id)};
 }
 
 std::string trimAscii(std::string value) {
@@ -116,6 +114,7 @@ public:
     std::uint64_t readRevision = 0;
     bool operationReady = false;
     bool resumeInFlight = false;
+    std::optional<std::string> provisionalActiveTurnId;
     std::unordered_set<std::uint64_t> recoveryAttemptedSubmissions;
 
     void resetForConnection() noexcept {
@@ -124,6 +123,7 @@ public:
       readRevision = 0;
       operationReady = false;
       resumeInFlight = false;
+      provisionalActiveTurnId.reset();
     }
   };
 
@@ -139,8 +139,8 @@ public:
        UiSession::Clock clock)
       : client(std::move(client)),
         defaultWorkspace(std::move(defaultWorkspace)),
-        clock(clock ? std::move(clock) : UiSession::Clock{
-                                             systemClockMilliseconds}),
+        clock(clock ? std::move(clock)
+                    : UiSession::Clock{systemClockMilliseconds}),
         alive(std::make_shared<bool>(true)) {}
 
   ~Impl() { *alive = false; }
@@ -177,6 +177,25 @@ public:
     return providerReady() && model.connection().role == "controller";
   }
 
+  [[nodiscard]] std::optional<std::string>
+  activeTurnId(const std::string &threadId) const {
+    if (const auto authoritative = model.activeTurnId(threadId))
+      return authoritative;
+    const auto runtime = runtimeByThread.find(threadId);
+    if (runtime == runtimeByThread.end() ||
+        !runtime->second.provisionalActiveTurnId)
+      return std::nullopt;
+    const ThreadPresentation *thread = model.thread(threadId);
+    if (!thread)
+      return runtime->second.provisionalActiveTurnId;
+    const auto turn =
+        thread->turns.find(*runtime->second.provisionalActiveTurnId);
+    if (turn != thread->turns.end() &&
+        isTerminalTurnStatus(turn->second.status))
+      return std::nullopt;
+    return runtime->second.provisionalActiveTurnId;
+  }
+
   void resetRuntimeForConnection() {
     resolvingRequests.clear();
     deferredPromptDispatch.clear();
@@ -211,8 +230,7 @@ public:
     const std::string action = stringValue(event, "action");
     const std::string correlationId = stringValue(event, "correlationId");
     const bool staleReadResult =
-        kind == "result" && action == "thread.read" &&
-        !correlationId.empty() &&
+        kind == "result" && action == "thread.read" && !correlationId.empty() &&
         staleReadResultCorrelations.erase(correlationId) > 0;
     if (!staleReadResult)
       model.applyEvent(event);
@@ -228,10 +246,8 @@ public:
     }
 
     const std::string type = stringValue(event, "type");
-    const nlohmann::json data =
-        event.value("data", nlohmann::json::object());
-    const nlohmann::json scope =
-        event.value("scope", nlohmann::json::object());
+    const nlohmann::json data = event.value("data", nlohmann::json::object());
+    const nlohmann::json scope = event.value("scope", nlohmann::json::object());
     const std::string eventThreadId = stringValue(scope, "threadId");
     const bool hydrationResult =
         kind == "result" && presentation::isThreadHydrationAction(action);
@@ -276,8 +292,8 @@ public:
          (type == "connection.bridge" &&
           stringValue(data, "state") == "opened" && providerReady())))
       hydrateProvider();
-    if (kind == "event" && type == "connection.controller" &&
-        providerReady() && model.connection().role == "controller") {
+    if (kind == "event" && type == "connection.controller" && providerReady() &&
+        model.connection().role == "controller") {
       ensureThreadSettingsHydrated(selectedThreadId);
       for (const std::string &threadId : prompts.queuedThreadIds())
         schedulePromptDispatch(threadId);
@@ -293,7 +309,7 @@ public:
       }
     } else if (!eventThreadId.empty()) {
       if (const ThreadPresentation *thread = model.thread(eventThreadId))
-        prompts.reconcile(eventThreadId, *thread, now());
+        prompts.reconcile(eventThreadId, *thread);
     }
 
     if (!staleReadResult && kind == "result" && action == "thread.read" &&
@@ -361,22 +377,22 @@ public:
     selectedThreadId.clear();
     newThreadIntent = true;
     newThreadName = std::move(draft.name);
-    newThreadWorkspace = draft.workspace.empty()
-                             ? defaultWorkspace
-                             : std::move(draft.workspace);
+    newThreadWorkspace =
+        draft.workspace.empty() ? defaultWorkspace : std::move(draft.workspace);
     newThreadOptions = nlohmann::json::object();
     if (!draft.baseInstructions.empty())
-      newThreadOptions["baseInstructions"] =
-          std::move(draft.baseInstructions);
+      newThreadOptions["baseInstructions"] = std::move(draft.baseInstructions);
     if (!draft.developerInstructions.empty())
       newThreadOptions["developerInstructions"] =
           std::move(draft.developerInstructions);
     if (draft.ephemeral)
       newThreadOptions["ephemeral"] = true;
     optimisticThread = UiOptimisticThreadView{
-        std::string(DraftThreadId), {},
+        std::string(DraftThreadId),
+        {},
         newThreadName.empty() ? "New thread" : newThreadName,
-        newThreadWorkspace, UiOptimisticThreadPhase::Awaiting};
+        newThreadWorkspace,
+        UiOptimisticThreadPhase::Awaiting};
     effects.push_back(UiEffect::ClearComposerDraft);
     effects.push_back(UiEffect::FocusComposer);
     changed();
@@ -398,8 +414,7 @@ public:
     runtime.readRevision = revision;
     client.execute(
         "thread.read", {{"threadId", threadId}, {"includeTurns", true}},
-        [this, token, threadId,
-         revision](const nlohmann::json &result) {
+        [this, token, threadId, revision](const nlohmann::json &result) {
           if (!*token)
             return;
           const auto current = runtimeByThread.find(threadId);
@@ -414,16 +429,14 @@ public:
           ThreadRuntimeState &runtime = current->second;
           if (result.value("ok", false)) {
             runtime.hydration = Hydration::Hydrated;
-            if (runtime.settingsHydration ==
-                SettingsHydration::WaitingForRead)
+            if (runtime.settingsHydration == SettingsHydration::WaitingForRead)
               resumeThreadForSettings(threadId);
             schedulePromptDispatch(threadId);
             return;
           }
           if (isTransientCancellation(result)) {
             runtime.hydration = Hydration::NotHydrated;
-            if (runtime.settingsHydration ==
-                SettingsHydration::WaitingForRead)
+            if (runtime.settingsHydration == SettingsHydration::WaitingForRead)
               runtime.settingsHydration = SettingsHydration::Unknown;
             return;
           }
@@ -477,8 +490,8 @@ public:
             }
             runtime.settingsHydration = SettingsHydration::Failed;
             if (selectedThreadId == threadId) {
-              const std::string message = safeMessage(
-                  result.value("error", nlohmann::json::object()));
+              const std::string message =
+                  safeMessage(result.value("error", nlohmann::json::object()));
               showNotice(message.empty() ? "Thread settings refresh failed"
                                          : message);
             }
@@ -522,8 +535,8 @@ public:
                  "not sent.");
       return false;
     }
-    draft.text = middle::promptWithFileLinks(std::move(draft.text),
-                                             draft.attachments);
+    draft.text =
+        middle::promptWithFileLinks(std::move(draft.text), draft.attachments);
     const bool selectedNewThreadDraft =
         draft.visiblySelectedThreadId == DraftThreadId && newThreadIntent;
     if (!draft.visiblySelectedThreadId.empty() &&
@@ -565,13 +578,17 @@ public:
       }
     }
 
-    const auto activeTurn =
-        destination == DraftThreadId
-            ? std::optional<std::string>{}
-            : model.activeTurnId(destination);
-    static_cast<void>(prompts.admit(
+    const auto activeTurn = destination == DraftThreadId
+                                ? std::optional<std::string>{}
+                                : activeTurnId(destination);
+    const std::int64_t admittedAt = now();
+    const std::uint64_t submissionId = prompts.admit(
         destination, std::move(draft.text), std::move(draft.attachments),
-        std::move(draft.turnStartOptions), thread, activeTurn, now()));
+        std::move(draft.turnStartOptions), thread, activeTurn, admittedAt);
+    const std::int64_t animationAt =
+        admittedAt + middle::PendingAnimationDelayMilliseconds;
+    pendingAnimationDeadlines[submissionId] = animationAt;
+    scheduleWakeup(animationAt);
     effects.push_back(UiEffect::PrepareLocalPromptAdmission);
     if (destination == DraftThreadId) {
       pendingThreadStartOptions = std::move(draft.threadStartOptions);
@@ -627,10 +644,10 @@ public:
             showNotice(error);
             return;
           }
-          const std::string threadId = stringValue(
-              result.value("data", nlohmann::json::object())
-                  .value("thread", nlohmann::json::object()),
-              "id");
+          const std::string threadId =
+              stringValue(result.value("data", nlohmann::json::object())
+                              .value("thread", nlohmann::json::object()),
+                          "id");
           if (threadId.empty()) {
             const std::string error =
                 "Thread creation returned no thread identifier";
@@ -672,8 +689,7 @@ public:
           pendingThreadWorkspace.clear();
           if (!requestedName.empty())
             client.execute("thread.rename",
-                           {{"threadId", threadId},
-                            {"name", requestedName}});
+                           {{"threadId", threadId}, {"name", requestedName}});
           changed();
           schedulePromptDispatch(threadId);
         });
@@ -714,24 +730,21 @@ public:
       resumePromptQueue(threadId);
       return;
     }
-    const auto dispatch =
-        prompts.beginNext(threadId, model.activeTurnId(threadId));
+    const auto dispatch = prompts.beginNext(threadId, activeTurnId(threadId));
     if (dispatch)
       dispatchPrompt(*dispatch);
   }
 
   void dispatchPrompt(middle::PromptDispatch dispatch) {
-    nlohmann::json input = nlohmann::json::array(
-        {{{"type", "text"},
-          {"text", dispatch.prompt},
-          {"text_elements", nlohmann::json::array()}}});
+    nlohmann::json input =
+        nlohmann::json::array({{{"type", "text"},
+                                {"text", dispatch.prompt},
+                                {"text_elements", nlohmann::json::array()}}});
     for (const AttachmentDraft &attachment : dispatch.attachments) {
       if (attachment.mimeType.starts_with("image/"))
-        input.push_back({{"type", "localImage"},
-                         {"path", attachment.path}});
+        input.push_back({{"type", "localImage"}, {"path", attachment.path}});
       else if (attachment.mimeType.starts_with("audio/"))
-        input.push_back({{"type", "localAudio"},
-                         {"path", attachment.path}});
+        input.push_back({{"type", "localAudio"}, {"path", attachment.path}});
     }
     const std::string threadId = dispatch.threadId;
     const std::uint64_t submissionId = dispatch.id;
@@ -797,8 +810,7 @@ public:
         });
   }
 
-  void completePrompt(const std::string &threadId,
-                      std::uint64_t submissionId,
+  void completePrompt(const std::string &threadId, std::uint64_t submissionId,
                       const nlohmann::json &result) {
     if (isTransientCancellation(result)) {
       if (prompts.requeue(threadId, submissionId)) {
@@ -819,9 +831,14 @@ public:
     if (result.value("ok", false)) {
       if (runtime != runtimeByThread.end())
         runtime->second.operationReady = true;
-      static_cast<void>(prompts.acknowledge(
-          threadId, submissionId, resultTurnId(result), now()));
-      scheduleAcceptedTransition(threadId, submissionId);
+      const middle::PromptSubmission *submission =
+          prompts.submission(threadId, submissionId);
+      const bool startsTurn = submission && submission->startsTurn;
+      const std::optional<std::string> turnId = resultTurnId(result);
+      static_cast<void>(
+          prompts.acknowledge(threadId, submissionId, turnId));
+      if (startsTurn && turnId && runtime != runtimeByThread.end())
+        runtime->second.provisionalActiveTurnId = *turnId;
       if (optimisticThread && optimisticThread->threadId == threadId)
         optimisticThread->phase = UiOptimisticThreadPhase::Confirmed;
     } else {
@@ -834,6 +851,7 @@ public:
         optimisticThread->phase = UiOptimisticThreadPhase::Failed;
       showNotice(message.empty() ? "Turn submission failed" : message);
     }
+    pendingAnimationDeadlines.erase(submissionId);
     changed();
     schedulePromptDispatch(threadId);
   }
@@ -890,57 +908,30 @@ public:
     return true;
   }
 
-  void scheduleAcceptedTransition(const std::string &threadId,
-                                  std::uint64_t submissionId) {
-    const middle::PromptSubmission *submission =
-        prompts.submission(threadId, submissionId);
-    if (!submission || submission->state != middle::PromptState::Accepted)
-      return;
-    const std::int64_t deadline =
-        submission->acceptedAtMilliseconds +
-        middle::AcknowledgementTransitionMilliseconds;
-    acceptedTransitionDeadlines[{threadId, submissionId}] = deadline;
-    scheduleWakeup(deadline);
-  }
-
   void tick() {
     nextWakeupAt.reset();
-    const auto deferred = std::exchange(deferredPromptDispatch,
-                                        std::set<std::string>{});
+    const auto deferred =
+        std::exchange(deferredPromptDispatch, std::set<std::string>{});
     for (const std::string &threadId : deferred)
       dispatchNextPrompt(threadId);
 
     const std::int64_t current = now();
     bool projectionChanged = false;
-    for (auto iterator = acceptedTransitionDeadlines.begin();
-         iterator != acceptedTransitionDeadlines.end();) {
+    for (auto iterator = pendingAnimationDeadlines.begin();
+         iterator != pendingAnimationDeadlines.end();) {
       if (iterator->second > current) {
         scheduleWakeup(iterator->second);
         ++iterator;
         continue;
       }
-      const auto &[threadId, submissionId] = iterator->first;
-      const middle::PromptSubmission *submission =
-          prompts.submission(threadId, submissionId);
-      if (submission && submission->state == middle::PromptState::Accepted &&
-          submission->acceptedTransitionActive(current)) {
-        iterator->second = submission->acceptedAtMilliseconds +
-                           middle::AcknowledgementTransitionMilliseconds;
-        scheduleWakeup(iterator->second);
-        ++iterator;
-        continue;
-      }
-      if (const ThreadPresentation *thread = model.thread(threadId))
-        prompts.reconcile(threadId, *thread, current);
-      iterator = acceptedTransitionDeadlines.erase(iterator);
+      iterator = pendingAnimationDeadlines.erase(iterator);
       projectionChanged = true;
     }
     if (projectionChanged)
       changed();
   }
 
-  [[nodiscard]] bool isPendingActionable(
-      const std::string &requestKey) const {
+  [[nodiscard]] bool isPendingActionable(const std::string &requestKey) const {
     const auto request = model.pendingRequestPresentations().find(requestKey);
     return canControlProvider() &&
            request != model.pendingRequestPresentations().end() &&
@@ -948,19 +939,19 @@ public:
            !resolvingRequests.contains(requestKey);
   }
 
-  [[nodiscard]] UiPendingRequestView pendingView(
-      const PendingRequestPresentation &request) const {
-    return {request.id,
-            request.kind,
-            request.threadId,
-            request.generation,
-            request.raw,
-            PendingRequestPolicy::title(request.kind),
-            PendingRequestPolicy::detail(request.id, request.threadId,
-                                         request.raw),
-            PendingRequestPolicy::directAcceptLabel(request.kind),
-            PendingRequestPolicy::supportsDirectAccept(request.kind),
-            isPendingActionable(request.id)};
+  [[nodiscard]] UiPendingRequestView
+  pendingView(const PendingRequestPresentation &request) const {
+    return {
+        request.id,
+        request.kind,
+        request.threadId,
+        request.generation,
+        request.raw,
+        PendingRequestPolicy::title(request.kind),
+        PendingRequestPolicy::detail(request.id, request.threadId, request.raw),
+        PendingRequestPolicy::directAcceptLabel(request.kind),
+        PendingRequestPolicy::supportsDirectAccept(request.kind),
+        isPendingActionable(request.id)};
   }
 
   bool resolvePending(UiPendingRequestView request,
@@ -1018,9 +1009,8 @@ public:
       }
     } else if (newThreadIntent) {
       result.identity = DraftThreadId;
-      result.canonical["cwd"] = newThreadWorkspace.empty()
-                                     ? defaultWorkspace
-                                     : newThreadWorkspace;
+      result.canonical["cwd"] =
+          newThreadWorkspace.empty() ? defaultWorkspace : newThreadWorkspace;
     } else {
       result.canonical["cwd"] = defaultWorkspace;
     }
@@ -1036,17 +1026,14 @@ public:
                              std::string draftWorkspace) {
     const std::int64_t current = now();
     const std::string visibleThreadId =
-        selectedThreadId.empty() && newThreadIntent
-            ? std::string(DraftThreadId)
-            : selectedThreadId;
+        selectedThreadId.empty() && newThreadIntent ? std::string(DraftThreadId)
+                                                    : selectedThreadId;
     viewState = UiSessionView{};
     viewState.selectedThreadId = selectedThreadId;
     viewState.newThreadIntent = newThreadIntent;
-    viewState.threads =
-        ui::projectThreadListSnapshot(model, visibleThreadId);
+    viewState.threads = ui::projectThreadListSnapshot(model, visibleThreadId);
     viewState.inspector = ui::projectInspectorSnapshot(
-        model, selectedThreadId,
-        [this](std::string_view requestId) {
+        model, selectedThreadId, [this](std::string_view requestId) {
           return isPendingActionable(std::string(requestId));
         });
     viewState.settings = projectSettings();
@@ -1056,13 +1043,12 @@ public:
     middle::AuthoritativeItemIndex authoritativeItems =
         middle::indexAuthoritativeItems(visibleThreadId, thread);
     if (thread)
-      prompts.reconcile(selectedThreadId, authoritativeItems, current);
+      prompts.reconcile(selectedThreadId, authoritativeItems);
     const std::size_t authoritativeCount = authoritativeItems.ordered.size();
     HistoryWindow &history = historyWindows[visibleThreadId];
     if (!conversationFollowing &&
         authoritativeCount > history.lastAuthoritativeCount)
-      history.effective +=
-          authoritativeCount - history.lastAuthoritativeCount;
+      history.effective += authoritativeCount - history.lastAuthoritativeCount;
     else if (conversationFollowing)
       history.effective = history.requested;
     history.lastAuthoritativeCount = authoritativeCount;
@@ -1071,14 +1057,13 @@ public:
     conversation.snapshot = middle::ConversationProjection::project(
         authoritativeItems, thread, prompts.submissions(visibleThreadId),
         history.effective, current);
-    conversation.snapshot.activeTurnId =
-        model.activeTurnId(selectedThreadId);
+    conversation.snapshot.activeTurnId = activeTurnId(selectedThreadId);
     if (thread) {
       conversation.mode = UiConversationMode::Thread;
       conversation.title = thread->title;
       conversation.workspace = thread->cwd;
       const PresentationStatus status = classifyStatus(thread->status);
-      conversation.status = std::string(status.text);
+      conversation.status = displayStatus(thread->status);
       conversation.statusTone = std::string(status.tone);
       conversation.lastActivityAt = thread->lastActivityAt;
       conversation.emptyMessage = "No materialized activity.";
@@ -1106,10 +1091,10 @@ public:
     status.providerState = connection.providerState;
     status.connectionSettings = connection.settings;
     status.workspace = conversation.workspace;
-    status.activeTurn =
-        model.activeTurnId(selectedThreadId).has_value();
+    status.activeTurn = activeTurnId(selectedThreadId).has_value();
     status.totalPending = model.pendingRequestCount();
-    const std::string selectedKey = stringValue(connection.settings, "selected");
+    const std::string selectedKey =
+        stringValue(connection.settings, "selected");
     const nlohmann::json available =
         connection.settings.value("available", nlohmann::json::array());
     if (available.is_array()) {
@@ -1163,8 +1148,7 @@ public:
   std::uint64_t observedConnectionGeneration = 0;
   std::uint64_t observedProviderGeneration = 0;
   std::set<std::string> deferredPromptDispatch;
-  std::map<std::pair<std::string, std::uint64_t>, std::int64_t>
-      acceptedTransitionDeadlines;
+  std::map<std::uint64_t, std::int64_t> pendingAnimationDeadlines;
 
   std::vector<UiNotice> notices;
   std::vector<UiEffect> effects;
@@ -1174,9 +1158,8 @@ public:
 
 UiSession::UiSession(PresentationClient client, std::string defaultWorkspace,
                      Clock clock)
-    : impl(std::make_unique<Impl>(std::move(client),
-                                  std::move(defaultWorkspace),
-                                  std::move(clock))) {}
+    : impl(std::make_unique<Impl>(
+          std::move(client), std::move(defaultWorkspace), std::move(clock))) {}
 
 UiSession::~UiSession() = default;
 
@@ -1210,9 +1193,8 @@ std::string UiSession::conversationKey() const {
              : impl->selectedThreadId;
 }
 
-const UiSessionView &
-UiSession::refreshView(bool conversationFollowing,
-                       std::string draftWorkspace) {
+const UiSessionView &UiSession::refreshView(bool conversationFollowing,
+                                            std::string draftWorkspace) {
   return impl->refreshView(conversationFollowing, std::move(draftWorkspace));
 }
 
@@ -1229,9 +1211,7 @@ void UiSession::refreshThreads() {
     impl->client.execute("threads.list", nlohmann::json::object());
 }
 
-void UiSession::connectTransport() {
-  impl->client.send("connection.connect");
-}
+void UiSession::connectTransport() { impl->client.send("connection.connect"); }
 
 void UiSession::disconnectTransport() {
   impl->client.send("connection.disconnect");
@@ -1294,10 +1274,10 @@ void UiSession::forkThread(const std::string &threadId) {
       [implementation = impl.get(), token](const nlohmann::json &result) {
         if (!*token || !result.value("ok", false))
           return;
-        const std::string id = stringValue(
-            result.value("data", nlohmann::json::object())
-                .value("thread", nlohmann::json::object()),
-            "id");
+        const std::string id =
+            stringValue(result.value("data", nlohmann::json::object())
+                            .value("thread", nlohmann::json::object()),
+                        "id");
         if (!id.empty())
           implementation->selectThread(id);
       });
@@ -1309,8 +1289,7 @@ void UiSession::toggleThreadArchive(const std::string &threadId) {
   const ThreadPresentation *thread = impl->model.thread(threadId);
   if (!thread)
     return;
-  impl->client.execute(thread->archived ? "thread.unarchive"
-                                        : "thread.archive",
+  impl->client.execute(thread->archived ? "thread.unarchive" : "thread.archive",
                        {{"threadId", threadId}});
 }
 
@@ -1324,18 +1303,18 @@ bool UiSession::submitPrompt(UiPromptDraft draft) {
 }
 
 void UiSession::interruptTurn() {
-  const auto turn = impl->model.activeTurnId(impl->selectedThreadId);
+  const auto turn = impl->activeTurnId(impl->selectedThreadId);
   if (turn)
-    impl->client.execute("turn.interrupt",
-                         {{"threadId", impl->selectedThreadId},
-                          {"turnId", *turn}});
+    impl->client.execute(
+        "turn.interrupt",
+        {{"threadId", impl->selectedThreadId}, {"turnId", *turn}});
 }
 
 void UiSession::loadEarlierConversation() {
-  const std::string key = impl->selectedThreadId.empty() &&
-                                  impl->newThreadIntent
-                              ? std::string(DraftThreadId)
-                              : impl->selectedThreadId;
+  const std::string key =
+      impl->selectedThreadId.empty() && impl->newThreadIntent
+          ? std::string(DraftThreadId)
+          : impl->selectedThreadId;
   Impl::HistoryWindow &history = impl->historyWindows[key];
   history.requested +=
       middle::ConversationProjection::DefaultAuthoritativeItemLimit;

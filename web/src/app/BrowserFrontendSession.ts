@@ -10,10 +10,12 @@ import type {JsonObject} from "../presentation/PresentationProtocol.js";
 import {isObject, member, stringMember} from "../presentation/PresentationProtocol.js";
 import {PresentationModel} from "../presentation/PresentationModel.js";
 import type {PendingRequestPresentation} from "../presentation/PresentationModel.js";
+import {isTerminalTurnStatus} from "../presentation/PresentationStatus.js";
 import {ProtocolNormalizer} from "../presentation/ProtocolNormalizer.js";
 import {PromptCoordinator, indexAuthoritativeItems, promptWithFileLinks} from "../conversation/PromptCoordinator.js";
 import type {AttachmentDraft, PromptDispatch} from "../conversation/PromptCoordinator.js";
 import {DefaultAuthoritativeItemLimit, projectConversation} from "../conversation/ConversationProjection.js";
+import {PendingAnimationDelayMilliseconds} from "../conversation/MiddleTypes.js";
 import type {ConversationSnapshot} from "../conversation/MiddleTypes.js";
 import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
 
@@ -92,6 +94,7 @@ interface ThreadRuntimeState {
     operationReady: boolean;
     resumeInFlight: boolean;
     readRevision: number;
+    provisionalActiveTurnId: string | undefined;
     readonly recoveryAttemptedSubmissions: Set<number>;
 }
 interface OperationResponse {ok: boolean; data?: unknown; error?: unknown; stale?: boolean}
@@ -111,7 +114,7 @@ export class BrowserFrontendSession {
     private readonly runtimeByThread = new Map<string, ThreadRuntimeState>();
     private readonly resolvingRequests = new Set<string>();
     private readonly pendingUserOperations = new Set<string>();
-    private readonly acceptedTransitionTimers = new Map<number, ReturnType<typeof setTimeout>>();
+    private readonly pendingAnimationTimers = new Map<number, ReturnType<typeof setTimeout>>();
     private transport: WebSocketTransport | undefined;
     private selectedThreadId = "";
     private newThreadIntent = false;
@@ -233,8 +236,8 @@ export class BrowserFrontendSession {
     dispose(): void {
         this.disposed = true;
         this.connection.dispose(); this.transport = undefined;
-        for (const timer of this.acceptedTransitionTimers.values()) clearTimeout(timer);
-        this.acceptedTransitionTimers.clear();
+        for (const timer of this.pendingAnimationTimers.values()) clearTimeout(timer);
+        this.pendingAnimationTimers.clear();
         if (this.noticeTimer) clearTimeout(this.noticeTimer);
         this.noticeTimer = undefined;
     }
@@ -324,7 +327,9 @@ export class BrowserFrontendSession {
         const thread = this.model.thread(this.selectedThreadId);
         const index = indexAuthoritativeItems(projectionId, thread);
         if (thread) this.prompts.decorate(this.selectedThreadId, index);
-        return projectConversation(index, this.prompts.submissions(projectionId), limit, Date.now(), thread);
+        const conversation = projectConversation(index, this.prompts.submissions(projectionId), limit, Date.now(), thread);
+        conversation.activeTurnId = this.activeTurnId(this.selectedThreadId);
+        return conversation;
     }
     loadMore(): void { /* Default parity window is sufficient until viewport pausing is introduced. */ }
 
@@ -341,8 +346,9 @@ export class BrowserFrontendSession {
             if (!this.newThreadIntent) { this.setNotice("Select a thread or choose New thread before sending."); return false; }
             destination = DraftThreadId; thread = undefined;
         }
-        this.prompts.admit(destination, canonicalPrompt, attachments, turnOptions, thread,
-            destination === DraftThreadId ? undefined : this.model.activeTurnId(destination), Date.now());
+        const submissionId = this.prompts.admit(destination, canonicalPrompt, attachments, turnOptions, thread,
+            destination === DraftThreadId ? undefined : this.activeTurnId(destination), Date.now());
+        this.schedulePendingAnimation(submissionId);
         if (destination !== DraftThreadId) {
             this.threadRuntime(destination);
             this.promotePromptedThread(destination);
@@ -391,7 +397,7 @@ export class BrowserFrontendSession {
     }
 
     interrupt(): void {
-        const turnId = this.model.activeTurnId(this.selectedThreadId);
+        const turnId = this.activeTurnId(this.selectedThreadId);
         if (turnId) this.request("turn.interrupt", {threadId: this.selectedThreadId, turnId});
     }
     operationPending(action: string, threadId = ""): boolean {
@@ -451,11 +457,19 @@ export class BrowserFrontendSession {
         const connection = this.model.connection();
         return connection.connected && connection.providerState === "ready";
     }
+    activeTurnId(threadId: string): string | undefined {
+        const authoritative = this.model.activeTurnId(threadId);
+        if (authoritative !== undefined) return authoritative;
+        const provisional = this.runtimeByThread.get(threadId)?.provisionalActiveTurnId;
+        const turn = provisional === undefined ? undefined : this.model.thread(threadId)?.turns.get(provisional);
+        return turn && isTerminalTurnStatus(turn.status) ? undefined : provisional;
+    }
     private threadRuntime(threadId: string): ThreadRuntimeState {
         let runtime = this.runtimeByThread.get(threadId);
         if (!runtime) {
             runtime = {hydration: "notHydrated", operationReady: false, resumeInFlight: false,
-                readRevision: 0, recoveryAttemptedSubmissions: new Set()};
+                readRevision: 0, provisionalActiveTurnId: undefined,
+                recoveryAttemptedSubmissions: new Set()};
             this.runtimeByThread.set(threadId, runtime);
         }
         return runtime;
@@ -469,6 +483,7 @@ export class BrowserFrontendSession {
             runtime.hydration = "notHydrated";
             runtime.operationReady = false;
             runtime.resumeInFlight = false;
+            runtime.provisionalActiveTurnId = undefined;
             runtime.recoveryAttemptedSubmissions.clear();
             for (const submission of this.prompts.submissions(threadId))
                 if (submission.state === "inFlight") this.prompts.requeue(threadId, submission.id);
@@ -625,7 +640,7 @@ export class BrowserFrontendSession {
             this.ensureThreadHydrated(threadId);
             return;
         }
-        const dispatch = this.prompts.beginNext(threadId, this.model.activeTurnId(threadId));
+        const dispatch = this.prompts.beginNext(threadId, this.activeTurnId(threadId));
         if (!dispatch) return;
         this.dispatchPrompt(dispatch);
     }
@@ -649,8 +664,12 @@ export class BrowserFrontendSession {
             if (response.ok) {
                 if (runtime) runtime.operationReady = true;
                 const turn = isObject(response.data) ? member(response.data, "turn", {}) : {};
-                this.prompts.acknowledge(dispatch.threadId, dispatch.id, stringMember(turn, "id") || undefined, Date.now());
-                this.scheduleAcceptedTransition(dispatch.threadId, dispatch.id);
+                const turnId = stringMember(turn, "id") || undefined;
+                const startsTurn = this.prompts.submission(dispatch.threadId, dispatch.id)?.startsTurn === true;
+                this.prompts.acknowledge(dispatch.threadId, dispatch.id, turnId);
+                if (startsTurn && turnId !== undefined) {
+                    if (runtime) runtime.provisionalActiveTurnId = turnId;
+                }
                 this.optimisticThreads = this.optimisticThreads.map(thread =>
                     thread.id === dispatch.threadId ? {...thread, state: "confirmed"} : thread);
             } else {
@@ -659,6 +678,7 @@ export class BrowserFrontendSession {
                 this.optimisticThreads = this.optimisticThreads.map(thread =>
                     thread.id === dispatch.threadId ? {...thread, state: "failed"} : thread);
             }
+            this.cancelPendingAnimation(dispatch.id);
             this.publish();
             queueMicrotask(() => this.dispatchNextPrompt(dispatch.threadId));
         });
@@ -692,20 +712,22 @@ export class BrowserFrontendSession {
             const itemId = stringMember(scope, "itemId");
             if (stringMember(thread.turns.get(turnId)?.items.get(itemId)?.raw, "type") !== "userMessage") return;
         }
-        this.prompts.reconcile(threadId, thread, Date.now());
+        this.prompts.reconcile(threadId, thread);
     }
     private errorMessage(response: {error?: unknown}): string {
         return stringMember(response.error, "message") || "Codex operation failed";
     }
-    private scheduleAcceptedTransition(threadId: string, submissionId: number): void {
-        const previous = this.acceptedTransitionTimers.get(submissionId);
-        if (previous) clearTimeout(previous);
-        this.acceptedTransitionTimers.set(submissionId, setTimeout(() => {
-            this.acceptedTransitionTimers.delete(submissionId);
-            const thread = this.model.thread(threadId);
-            if (thread) this.prompts.reconcile(threadId, thread, Date.now());
+    private schedulePendingAnimation(submissionId: number): void {
+        this.cancelPendingAnimation(submissionId);
+        this.pendingAnimationTimers.set(submissionId, setTimeout(() => {
+            this.pendingAnimationTimers.delete(submissionId);
             this.publish();
-        }, 500));
+        }, PendingAnimationDelayMilliseconds));
+    }
+    private cancelPendingAnimation(submissionId: number): void {
+        const timer = this.pendingAnimationTimers.get(submissionId);
+        if (timer) clearTimeout(timer);
+        this.pendingAnimationTimers.delete(submissionId);
     }
     private handlePresentationFrame(frame: JsonObject): void {
         if (frame.kind !== "event") return;

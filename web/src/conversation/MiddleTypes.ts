@@ -1,6 +1,6 @@
 import type {JsonObject} from "../presentation/PresentationProtocol.js";
 
-export const AcknowledgementTransitionMilliseconds = 500;
+export const PendingAnimationDelayMilliseconds = 1000;
 export const AuthoritativeHistoryPageSize = 80;
 
 export interface AuthoritativeItemKey {kind: "item"; threadId: string; turnId: string; itemId: string}
@@ -28,7 +28,7 @@ export interface PlanStepData {text: string; status: string}
 export interface PlanData {explanation: string; steps: PlanStepData[]; legacyText: string}
 export interface GenericActivityData {type: string; raw: JsonObject}
 export interface LocalPromptData {
-    submissionId: number; prompt: string; state: PromptState; acceptedAtMilliseconds: number;
+    submissionId: number; prompt: string; state: PromptState; showPendingAnimation: boolean;
     error: string; imagePaths: string[];
 }
 export type CardPayload = UserMessageData | AgentMessageData | CommandExecutionData | AgentActivityData
@@ -39,6 +39,7 @@ export interface VisibleCardData {
 export interface TurnSection {key: string; turnId: string; cards: VisibleCardData[]; rootCardKey?: CardKey}
 export interface ConversationSnapshot {
     threadId: string; sections: TurnSection[]; hiddenAuthoritativeItemCount: number; hasMore: boolean;
+    activeTurnId: string | undefined;
 }
 
 function component(value: string): string { return `${value.length}:${value}`; }

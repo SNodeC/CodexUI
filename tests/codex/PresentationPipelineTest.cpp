@@ -2,6 +2,7 @@
 
 #include "codex/PresentationModel.h"
 #include "codex/PresentationProtocol.h"
+#include "codex/PresentationStatus.h"
 #include "codex/ProtocolNormalizer.h"
 
 #include <algorithm>
@@ -206,6 +207,12 @@ int main() {
   }();
 
   bool passed = true;
+  passed &= expect(
+      codexui::codex::displayStatus("inProgress") == "running" &&
+          codexui::codex::displayStatus("notLoaded") == "not loaded" &&
+          codexui::codex::displayStatus("futureProviderState") ==
+              "future provider state",
+      "status presentation is lowercase, semantic, and never leaks camelCase");
   passed &= expect(validFrames,
                    "normalizer emits ordered versioned generation frames");
   passed &= expect(

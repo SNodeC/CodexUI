@@ -15,7 +15,7 @@
 
 namespace codexui::codex::middle {
 
-inline constexpr std::int64_t AcknowledgementTransitionMilliseconds = 500;
+inline constexpr std::int64_t PendingAnimationDelayMilliseconds = 1000;
 inline constexpr std::size_t AuthoritativeHistoryPageSize = 80;
 
 struct AuthoritativeItemKey {
@@ -161,17 +161,9 @@ struct LocalPromptData {
   std::uint64_t submissionId = 0;
   std::string prompt;
   PromptState state = PromptState::Queued;
-  std::int64_t acceptedAtMilliseconds = 0;
+  bool showPendingAnimation = false;
   std::string error;
   std::vector<std::string> imagePaths;
-
-  [[nodiscard]] bool
-  acceptedTransitionActive(std::int64_t nowMilliseconds) const noexcept {
-    return state == PromptState::Accepted && acceptedAtMilliseconds > 0 &&
-           nowMilliseconds >= acceptedAtMilliseconds &&
-           nowMilliseconds - acceptedAtMilliseconds <
-               AcknowledgementTransitionMilliseconds;
-  }
 
   bool operator==(const LocalPromptData &) const = default;
 };

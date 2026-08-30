@@ -77,7 +77,7 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
 
 QLabel *statusLabel(const std::string &status) {
   const PresentationStatus classified = classifyStatus(status);
-  auto *label = makeLabel(text(classified.text), "meta");
+  auto *label = makeLabel(text(displayStatus(status)), "meta");
   if (!classified.tone.empty())
     label->setProperty("tone", classified.tone.data());
   return label;

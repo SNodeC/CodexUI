@@ -34,7 +34,7 @@ struct PromptSubmission {
   std::vector<AttachmentDraft> attachments;
   nlohmann::json turnOptions = nlohmann::json::object();
   PromptState state = PromptState::Queued;
-  std::int64_t acceptedAtMilliseconds = 0;
+  std::int64_t admittedAtMilliseconds = 0;
   std::string error;
   std::optional<AuthoritativeItemKey> admissionAnchor;
   bool admissionAtStart = false;
@@ -42,10 +42,7 @@ struct PromptSubmission {
   std::optional<std::string> expectedTurnId;
   std::optional<AuthoritativeItemKey> materializedItem;
 
-  [[nodiscard]] bool
-  acceptedTransitionActive(std::int64_t nowMilliseconds) const noexcept;
-  [[nodiscard]] bool
-  localCardVisible(std::int64_t nowMilliseconds) const noexcept;
+  [[nodiscard]] bool localCardVisible() const noexcept;
 };
 
 struct PromptDispatch {
@@ -107,8 +104,7 @@ public:
 
   [[nodiscard]] bool acknowledge(const std::string &threadId,
                                  std::uint64_t submissionId,
-                                 std::optional<std::string> authoritativeTurnId,
-                                 std::int64_t nowMilliseconds);
+                                 std::optional<std::string> authoritativeTurnId);
   [[nodiscard]] bool fail(const std::string &threadId,
                           std::uint64_t submissionId, std::string error);
   [[nodiscard]] bool requeue(const std::string &threadId,
@@ -123,14 +119,12 @@ public:
   // Correlates prompts with authoritative userMessage items. Exact client ids
   // may bind before acknowledgement so the awaiting card is never duplicated;
   // the content fallback is used only after the real operation callback. Fully
-  // resolved submissions are removed after their accepted transition while a
-  // compact visual alias retains the admitted card identity and boundary.
+  // resolved submissions are removed immediately while a compact visual alias
+  // retains the admitted card identity and boundary.
   void reconcile(const std::string &threadId,
-                 const ThreadPresentation &authoritativeThread,
-                 std::int64_t nowMilliseconds);
+                 const ThreadPresentation &authoritativeThread);
   void reconcile(const std::string &threadId,
-                 AuthoritativeItemIndex &authoritativeItems,
-                 std::int64_t nowMilliseconds);
+                 AuthoritativeItemIndex &authoritativeItems);
 
   [[nodiscard]] std::span<const PromptSubmission>
   submissions(const std::string &threadId) const noexcept;

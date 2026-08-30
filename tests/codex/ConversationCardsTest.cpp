@@ -236,26 +236,42 @@ bool testActiveWorkBordersFollowStatus() {
       "command",
       CommandExecutionData{"sleep 1", {}, "inProgress", {}, {}, {}}};
   ConversationCard commandCard(command);
-  bool result = expect(commandCard.property("activeWork").toBool(),
-                       "a running command uses the emphasized card border");
+  auto *commandStatus =
+      commandCard.findChild<QLabel *>(QStringLiteral("commandStatus"));
+  bool result = expect(
+      commandCard.property("activeWork").toBool() && commandStatus &&
+          commandStatus->property("tone").toString() ==
+              QStringLiteral("active"),
+      "a running command uses the emphasized card border and active header "
+      "status");
   std::get<CommandExecutionData>(command.payload).status = "completed";
   result &= expect(commandCard.apply(command) &&
                        !commandCard.property("activeWork").toBool(),
                    "a completed command returns to the normal card border");
 
   VisibleCardData image{AuthoritativeItemKey{"active-border", "turn", "image"},
-      CardKind::ImageGeneration,
-      "active-border",
-      "turn",
-      "image",
+                        CardKind::ImageGeneration,
+                        "active-border",
+                        "turn",
+                        "image",
                         ImageGenerationData{{}, "inProgress", {}}};
   ConversationCard imageCard(image);
-  result &= expect(imageCard.property("activeWork").toBool(),
-                   "a loading figure uses the emphasized card border");
+  auto *imageStatus =
+      imageCard.findChild<QLabel *>(QStringLiteral("imageGenerationStatus"));
+  result &= expect(
+      imageCard.property("activeWork").toBool() && imageStatus &&
+          imageStatus->font().capitalization() == QFont::MixedCase &&
+          imageStatus->text() == QStringLiteral("running") &&
+          imageStatus->property("tone").toString() == QStringLiteral("active"),
+      "a loading figure uses the emphasized card border and active header "
+      "status");
   std::get<ImageGenerationData>(image.payload).status = "completed";
-  result &= expect(imageCard.apply(image) &&
-                       !imageCard.property("activeWork").toBool(),
-                   "a loaded figure returns to the normal card border");
+  result &= expect(
+      imageCard.apply(image) && !imageCard.property("activeWork").toBool() &&
+          imageStatus->text() == QStringLiteral("completed") &&
+          imageStatus->property("tone").toString() == QStringLiteral("success"),
+      "a loaded figure returns to the normal card border and success header "
+      "status");
   return result;
 }
 
@@ -325,7 +341,7 @@ QToolButton *copyButton(ConversationCard *card) {
   return header
              ? header->findChild<QToolButton *>(
                    QStringLiteral("cardCopyButton"), Qt::FindDirectChildrenOnly)
-                : nullptr;
+             : nullptr;
 }
 
 QRect paintedDisclosureBounds(QToolButton *button) {
@@ -492,7 +508,7 @@ bool testStructuralOrderAndIdentity() {
       "earlier-user",
       UserMessageData{"Earlier prompt", {}}};
   paged.sections.front().cards.insert(paged.sections.front().cards.begin(),
-                                     earlierPrompt);
+                                      earlierPrompt);
   paged.sections.front().rootCardKey = earlierPrompt.key;
   result &= expect(pagedView.reconcile(paged),
                    "older history can introduce the real turn prompt");
@@ -500,12 +516,12 @@ bool testStructuralOrderAndIdentity() {
   ConversationCard *earlierRoot = card(pagedView, stableKey(earlierPrompt.key));
   result &=
       expect(earlierRoot && laterRoot && activityCard &&
-                       earlierRoot->isAncestorOf(laterRoot) &&
-                       earlierRoot->isAncestorOf(activityCard) &&
-                       !laterRoot->isAncestorOf(activityCard) &&
-                       earlierRoot->property("turnContainer").toBool() &&
-                       !laterRoot->property("turnContainer").toBool(),
-                   "history paging replaces and flattens the visible turn root");
+                 earlierRoot->isAncestorOf(laterRoot) &&
+                 earlierRoot->isAncestorOf(activityCard) &&
+                 !laterRoot->isAncestorOf(activityCard) &&
+                 earlierRoot->property("turnContainer").toBool() &&
+                 !laterRoot->property("turnContainer").toBool(),
+             "history paging replaces and flattens the visible turn root");
 
   paged.sections.front().cards.erase(paged.sections.front().cards.begin());
   result &= expect(pagedView.reconcile(paged),
@@ -513,13 +529,13 @@ bool testStructuralOrderAndIdentity() {
   spin();
   result &=
       expect(card(pagedView, stableKey(laterPrompt.key)) == laterRoot &&
-          card(pagedView, stableKey(activity.key)) == activityCard &&
-          !laterRoot->property("turnContainer").toBool() &&
-          !laterRoot->isAncestorOf(activityCard),
-      "a retained steering message never becomes an inferred turn root");
+                 card(pagedView, stableKey(activity.key)) == activityCard &&
+                 !laterRoot->property("turnContainer").toBool() &&
+                 !laterRoot->isAncestorOf(activityCard),
+             "a retained steering message never becomes an inferred turn root");
 
   paged.sections.front().cards.insert(paged.sections.front().cards.begin(),
-                                     earlierPrompt);
+                                      earlierPrompt);
   result &=
       expect(pagedView.reconcile(paged), "the declared turn root can return");
   spin();
@@ -527,10 +543,10 @@ bool testStructuralOrderAndIdentity() {
       card(pagedView, stableKey(earlierPrompt.key));
   result &=
       expect(restoredRoot && restoredRoot->property("turnContainer").toBool() &&
-          restoredRoot->isAncestorOf(laterRoot) &&
-          restoredRoot->isAncestorOf(activityCard) &&
-          card(pagedView, stableKey(laterPrompt.key)) == laterRoot &&
-          card(pagedView, stableKey(activity.key)) == activityCard,
+                 restoredRoot->isAncestorOf(laterRoot) &&
+                 restoredRoot->isAncestorOf(activityCard) &&
+                 card(pagedView, stableKey(laterPrompt.key)) == laterRoot &&
+                 card(pagedView, stableKey(activity.key)) == activityCard,
              "root restoration reparents retained cards without changing their "
              "identity");
   return result;
@@ -817,15 +833,15 @@ bool testPromptAdmissionFollowOwnership() {
                        "composer growth preserves the painted viewport");
   view.prepareForLocalPromptAdmission();
   VisibleCardData pending{LocalPromptKey{1001},
-      CardKind::LocalPrompt,
-      "prompt-follow",
-      {},
-      {},
-      LocalPromptData{1001,
+                          CardKind::LocalPrompt,
+                          "prompt-follow",
+                          {},
+                          {},
+                          LocalPromptData{1001,
                                           "a newly admitted pending prompt",
-                      PromptState::InFlight,
-                      0,
-                      {}}};
+                                          PromptState::InFlight,
+                                          0,
+                                          {}}};
   snapshot.sections.back().cards.push_back(pending);
   view.reconcile(snapshot);
   view.setTrailingSpaceHeight(0);
@@ -1033,7 +1049,7 @@ bool testCardCopyControls() {
   result &= expect(
       QApplication::clipboard()->text() == QStringLiteral("Late **summary**") &&
           QApplication::clipboard()->mimeData()->hasFormat("text/markdown"),
-                   "late Markdown content copies from the updated source");
+      "late Markdown content copies from the updated source");
   return result;
 }
 
@@ -1046,7 +1062,7 @@ bool testMutableCardsAndCommandOutput() {
       {AuthoritativeItemKey{thread, "turn", "user"}, CardKind::UserMessage,
        thread, "turn", "user",
        UserMessageData{"hello **Markdown**\n\n| Value | Rating "
-                                      "|\n|---|---|\n| State | 10 |\n\n"
+                       "|\n|---|---|\n| State | 10 |\n\n"
                        "[Docs](https://example.com)"}},
       {AuthoritativeItemKey{thread, "turn", "agent"}, CardKind::AgentMessage,
        thread, "turn", "agent", AgentMessageData{"answer", false}},
@@ -1066,7 +1082,7 @@ bool testMutableCardsAndCommandOutput() {
        "turn", "plan",
        PlanData{"Keep the card compact",
                 {{"Inspect data", "completed"}, {"Render cards", "inProgress"}},
-           {}}},
+                {}}},
       {AuthoritativeItemKey{thread, "turn", "generic"},
        CardKind::GenericActivity, thread, "turn", "generic",
        GenericActivityData{"custom activity", {{"detail", "initial"}}}},
@@ -1113,14 +1129,32 @@ bool testMutableCardsAndCommandOutput() {
       commandCard->findChild<QTextEdit *>(QStringLiteral("commandOutputView")));
   auto *commandText = dynamic_cast<ContentSizedTextView *>(
       commandCard->findChild<QTextEdit *>(QStringLiteral("commandTextView")));
-  bool result = expect(output && output->isHidden(),
-                       "empty-line command output has no black surface");
+  auto *commandStatus =
+      commandCard->findChild<QLabel *>(QStringLiteral("commandStatus"));
+  auto *commandMeta =
+      commandCard->findChild<QLabel *>(QStringLiteral("commandMetadata"));
+  bool result = expect(
+      output && output->isHidden() && commandStatus && commandMeta &&
+          commandMeta->isHidden() &&
+          commandStatus->property("tone").toString() ==
+              QStringLiteral("active") &&
+          commandStatus->font().capitalization() == QFont::MixedCase &&
+          commandStatus->text() == QStringLiteral("running") &&
+          commandStatus->parentWidget()->layout()->indexOf(commandStatus) <
+              commandStatus->parentWidget()->layout()->indexOf(
+                  copyButton(commandCard)),
+      "empty-line command output has no black surface and exposes its "
+      "lowercase status before Copy");
   auto *userCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "user"}})];
   auto *agentCardWidget = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "agent"}})];
   auto *agentPhase =
       agentCardWidget->findChild<QLabel *>(QStringLiteral("agentMessagePhase"));
+  auto *activityCard = identities[stableKey(
+      CardKey{AuthoritativeItemKey{thread, "turn", "activity"}})];
+  auto *activityStatus =
+      activityCard->findChild<QLabel *>(QStringLiteral("agentActivityStatus"));
   const auto userLabels = userCard->findChildren<QLabel *>();
   result &=
       expect(std::ranges::any_of(
@@ -1147,15 +1181,29 @@ bool testMutableCardsAndCommandOutput() {
                   copyButton(agentCardWidget)),
       "interim agent messages show a right-aligned normal-weight update "
       "phase before Copy");
+  result &= expect(
+      activityStatus &&
+          activityStatus->font().capitalization() == QFont::MixedCase &&
+          activityStatus->text() == QStringLiteral("running") &&
+          activityStatus->property("tone").toString() ==
+              QStringLiteral("active"),
+      "agent activity exposes its canonical lowercase status in the header");
   auto *filesCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "files"}})];
+  auto *filesStatus =
+      filesCard->findChild<QLabel *>(QStringLiteral("fileChangesStatus"));
   auto *planCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "plan"}})];
-  result &=
-      expect(containsLabelText(
-                 filesCard, QStringLiteral("src/card.cpp  ·  Update  +2 −1")) &&
-                 containsLabelText(filesCard, QStringLiteral("+2 −1")),
-             "file-change cards show paths, kinds, and truthful diff counts");
+  result &= expect(
+      containsLabelText(filesCard,
+                        QStringLiteral("src/card.cpp  ·  Update  +2 −1")) &&
+          containsLabelText(filesCard, QStringLiteral("+2 −1")) &&
+          filesStatus &&
+          filesStatus->font().capitalization() == QFont::MixedCase &&
+          filesStatus->text() == QStringLiteral("running") &&
+          filesStatus->property("tone").toString() == QStringLiteral("active"),
+      "file-change cards keep counts below and expose status in the "
+      "header");
   result &= expect(
       containsLabelText(planCard, QStringLiteral("Keep the card compact")) &&
           containsLabelText(planCard, QStringLiteral("✓ Inspect data")) &&
@@ -1189,6 +1237,9 @@ bool testMutableCardsAndCommandOutput() {
   command.output =
       utf8(QString(120, QLatin1Char('x')) + QStringLiteral("\nvisible\n\n \t"));
   command.status = "completed";
+  command.exitCode = 0;
+  command.cwd = "/workspace";
+  command.durationMilliseconds = 1500;
   std::get<AgentActivityData>(cards[3].payload).resultText = "result";
   std::get<ReasoningData>(cards[4].payload).summary += " more";
   std::get<FileChangesData>(cards[5].payload)
@@ -1221,6 +1272,15 @@ bool testMutableCardsAndCommandOutput() {
               QStringLiteral("success") &&
           agentPhase->font().weight() == QFont::Normal,
       "final agent messages show a normal-weight success answer phase");
+  result &= expect(
+      commandStatus->text() == QStringLiteral("completed") &&
+          commandStatus->property("tone").toString() ==
+              QStringLiteral("success") &&
+          commandMeta->text() ==
+              QStringLiteral("exit 0  |  /workspace  |  1.5 s") &&
+          !commandMeta->text().contains(QStringLiteral("completed")),
+      "command completion moves only lifecycle status while retaining exit, "
+      "cwd, and duration below output");
   result &=
       expect(!output->isHidden() && output->minimumHeight() == 0 &&
                  output->maximumHeight() == 220 &&
@@ -1306,8 +1366,8 @@ bool testCardFoldingGeometryAndRetention() {
       "turn",
       "reasoning",
       ReasoningData{"A retained public summary with enough "
-                                   "detail to create real height.\n\n"
-                                   "The second paragraph proves expansion uses "
+                    "detail to create real height.\n\n"
+                    "The second paragraph proves expansion uses "
                     "the final wrapped size."}};
   const VisibleCardData command{
       AuthoritativeItemKey{thread, "turn", "command"},
@@ -1337,19 +1397,19 @@ bool testCardFoldingGeometryAndRetention() {
                         "Inspection complete",
                         {}}};
   const VisibleCardData image{AuthoritativeItemKey{thread, "turn", "image"},
-      CardKind::ImageGeneration,
-      thread,
-      "turn",
-      "image",
+                              CardKind::ImageGeneration,
+                              thread,
+                              "turn",
+                              "image",
                               ImageGenerationData{"/tmp/folding-preview.png",
                                                   "completed",
                                                   "A folding preview"}};
   const VisibleCardData plan{
       AuthoritativeItemKey{thread, "turn", "plan"},
-                             CardKind::Plan,
-                             thread,
-                             "turn",
-                             "plan",
+      CardKind::Plan,
+      thread,
+      "turn",
+      "plan",
       PlanData{"Verify folding", {{"Inspect geometry", "completed"}}, {}}};
   const VisibleCardData generic{
       AuthoritativeItemKey{thread, "turn", "generic"},
@@ -1367,13 +1427,13 @@ bool testCardFoldingGeometryAndRetention() {
       ReasoningData{}};
   ConversationSnapshot snapshot{
       thread,
-                                {{"turn:folding",
-                                  "turn",
+      {{"turn:folding",
+        "turn",
         {user, agent, reasoning, command, files, activity, image, plan, generic,
-                                   emptyReasoning},
-                                  user.key}},
-                                0,
-                                false};
+         emptyReasoning},
+        user.key}},
+      0,
+      false};
   snapshot.activeTurnId = "turn";
 
   ConversationView view;
@@ -1437,10 +1497,10 @@ bool testCardFoldingGeometryAndRetention() {
 
   result &=
       expect(userCard->property("turnContainer").toBool() &&
-                       userCard->isAncestorOf(agentCardWidget) &&
-                       userCard->isAncestorOf(reasoningCard) &&
+                 userCard->isAncestorOf(agentCardWidget) &&
+                 userCard->isAncestorOf(reasoningCard) &&
                  agentCardWidget->property("nestedConversationCard").toBool(),
-                   "the first You card structurally owns its turn activity");
+             "the first You card structurally owns its turn activity");
 
   const LocalPromptKey steeringKey{4343};
   VisibleCardData steering{
@@ -1450,7 +1510,7 @@ bool testCardFoldingGeometryAndRetention() {
       "turn",
       {},
       LocalPromptData{
-          4343, "A steering prompt", PromptState::InFlight, 0, {}, {}}};
+          4343, "A steering prompt", PromptState::InFlight, true, {}, {}}};
   snapshot.sections.front().cards.push_back(steering);
   result &= expect(view.reconcile(snapshot),
                    "a steering prompt joins the active turn");
@@ -1508,7 +1568,7 @@ bool testCardFoldingGeometryAndRetention() {
       expect(!disclosure(emptyReasoningCard)->isHidden() &&
                  disclosure(emptyReasoningCard)->property("chevronDirection") ==
                      "left",
-                   "reasoning disclosure appears collapsed when detail arrives");
+             "reasoning disclosure appears collapsed when detail arrives");
 
   wheel(view, 10000);
 
@@ -1594,9 +1654,9 @@ bool testCardFoldingGeometryAndRetention() {
       card(view, stableKey(promptActivity.key));
   result &=
       expect(promptCard && !promptCard->isCollapsed() && promptActivityCard &&
-                       promptCard->isAncestorOf(promptActivityCard) &&
-                       setFolded(promptCard, true),
-                   "temporary You prompts start expanded and can be folded");
+                 promptCard->isAncestorOf(promptActivityCard) &&
+                 setFolded(promptCard, true),
+             "temporary You prompts start expanded and can be folded");
   ConversationCard *const admittedPromptCard = promptCard;
   QWidget *const admittedPromptHeader =
       admittedPromptCard ? admittedPromptCard->findChild<QWidget *>(
@@ -1679,7 +1739,7 @@ bool testCardFoldingGeometryAndRetention() {
   result &= expect(
       edgeCard &&
           edgeCard->mapTo(edgeView.viewport(), QPoint{}).y() >
-                      followedTitleTop &&
+              followedTitleTop &&
           edgeView.verticalScrollBar()->maximum() < expandedScrollMaximum &&
           edgeView.isAtBottom() &&
           edgeView.mode() == ConversationView::Mode::Paused,
@@ -1706,7 +1766,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
     const std::string nestedThread = "nested-presentation-options";
     const AuthoritativeItemKey nestedUserKey{nestedThread, "turn", "user"};
     const AuthoritativeItemKey nestedReasoningKey{nestedThread, "turn",
-                                                   "reasoning"};
+                                                  "reasoning"};
     ConversationSnapshot nestedSnapshot;
     nestedSnapshot.threadId = nestedThread;
     nestedSnapshot.sections.push_back(
@@ -1848,7 +1908,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
       update && final && reasoning && firstCommand && firstImage &&
           !update->isHidden() && !final->isHidden() && reasoning->isHidden() &&
           !firstCommand->isCollapsed() && !firstImage->isCollapsed(),
-             "default presentation hides reasoning and opens commands and images");
+      "default presentation hides reasoning and opens commands and images");
   if (!update || !final || !reasoning || !firstCommand || !firstImage)
     return false;
 
@@ -2008,18 +2068,22 @@ bool testBottomAnchoredCommandOutputGrowth() {
       commandCard
           ? commandCard->findChild<QLabel *>(QStringLiteral("commandMetadata"))
           : nullptr;
+  auto *status =
+      commandCard
+          ? commandCard->findChild<QLabel *>(QStringLiteral("commandStatus"))
+          : nullptr;
   auto *output = commandCard ? dynamic_cast<CommandOutputView *>(
                                    commandCard->findChild<QTextEdit *>(
                                        QStringLiteral("commandOutputView")))
                              : nullptr;
-  result &=
-      expect(commandCard && metadata && output && output->isHidden() &&
-                 view.isAtBottom() && metadata->property("tone") == "active",
-             "live command starts with a hidden zero-line output");
-  if (!commandCard || !metadata || !output)
+  result &= expect(commandCard && metadata && metadata->isHidden() && status &&
+                       output && output->isHidden() && view.isAtBottom() &&
+                       status->property("tone") == "active",
+                   "live command starts with a hidden zero-line output");
+  if (!commandCard || !metadata || !status || !output)
     return false;
-  const int metadataBottomBefore =
-      metadata->mapTo(view.viewport(), QPoint(0, metadata->height())).y();
+  const int cardBottomBefore =
+      commandCard->mapTo(view.viewport(), QPoint(0, commandCard->height())).y();
 
   auto &live = std::get<CommandExecutionData>(
       snapshot.sections.back().cards.back().payload);
@@ -2027,12 +2091,11 @@ bool testBottomAnchoredCommandOutputGrowth() {
       "first wrapped output line with enough words to use real width\n"
       "second output line\nthird output line\n\n";
   result &= expect(view.reconcile(snapshot), "live output becomes visible");
-  const int metadataBottomAfter =
-      metadata->mapTo(view.viewport(), QPoint(0, metadata->height())).y();
+  const int cardBottomAfter =
+      commandCard->mapTo(view.viewport(), QPoint(0, commandCard->height())).y();
   result &= expect(!output->isHidden() && output->height() > 2 * 20 &&
                        output->height() == output->sizeHint().height() &&
-                       metadataBottomAfter == metadataBottomBefore &&
-                       view.isAtBottom(),
+                       cardBottomAfter == cardBottomBefore && view.isAtBottom(),
                    "multiline output takes its needed height and grows upward");
 
   QString cappedOutput;
@@ -2042,8 +2105,8 @@ bool testBottomAnchoredCommandOutputGrowth() {
   result &= expect(view.reconcile(snapshot), "live output reaches its cap");
   result &= expect(
       output->height() == 220 && output->verticalScrollBar()->maximum() > 0 &&
-          metadata->mapTo(view.viewport(), QPoint(0, metadata->height())).y() ==
-              metadataBottomBefore,
+          commandCard->mapTo(view.viewport(), QPoint(0, commandCard->height()))
+                  .y() == cardBottomBefore,
       "capped output keeps its scrollbar and fixed card bottom");
   return result;
 }
@@ -2111,7 +2174,8 @@ bool testPendingPromptAnimation() {
       "prompt-thread",
       {},
       {},
-      LocalPromptData{901, "pending prompt", PromptState::InFlight, 0, {}}};
+      LocalPromptData{901, "pending prompt", PromptState::InFlight, false, {},
+                      {}}};
   ConversationCard card(pending);
   card.resize(560, 92);
   card.show();
@@ -2119,25 +2183,91 @@ bool testPendingPromptAnimation() {
   const QImage first = card.grab().toImage();
   spin(110);
   const QImage second = card.grab().toImage();
-  bool result =
-      expect(first != second,
-             "an unacknowledged prompt visibly animates its blue sweep");
+  bool result = expect(first == second,
+                       "a newly admitted prompt begins as a calm static card");
   result &= expect(first.pixelColor(10, first.height() - 10).blue() >
-              first.pixelColor(10, first.height() - 10).red() &&
-          first.pixelColor(10, first.height() - 10).blue() >
-              first.pixelColor(10, first.height() - 10).green(),
-      "the temporary You card stays in the blue identity family");
+                           first.pixelColor(10, first.height() - 10).red() &&
+                       first.pixelColor(10, first.height() - 10).blue() >
+                           first.pixelColor(10, first.height() - 10).green(),
+                   "the temporary You card stays in the blue identity family");
 
-  auto &accepted = std::get<LocalPromptData>(pending.payload);
-  accepted.state = PromptState::Accepted;
-  accepted.acceptedAtMilliseconds = QDateTime::currentMSecsSinceEpoch();
+  auto &prompt = std::get<LocalPromptData>(pending.payload);
+  prompt.showPendingAnimation = true;
   result &= expect(card.apply(pending),
-                   "the real acknowledged state updates the pending card");
-  spin(560);
+                   "the delayed pending state starts the feedback sweep");
+  const QImage animatedFirst = card.grab().toImage();
+  spin(110);
+  result &= expect(animatedFirst != card.grab().toImage(),
+                   "an overdue unacknowledged prompt visibly animates");
+
+  result &= expect(card.setAuthoritativeTurnActive(true),
+                   "the retained prompt immediately owns the active border");
+  const auto activeBorderVisible = [&card] {
+    const QImage frame = card.grab().toImage();
+    return frame.pixelColor(1, frame.height() / 2).red() < 175;
+  };
+  for (int frame = 0; frame < 10; ++frame) {
+    spin(50);
+    result &= expect(activeBorderVisible(),
+                     "pending feedback never weakens the active border");
+  }
+
+  prompt.state = PromptState::Accepted;
+  prompt.showPendingAnimation = false;
+  result &= expect(card.apply(pending),
+                   "the correlated acknowledgement stops pending feedback");
   const QImage settled = card.grab().toImage();
   spin(100);
   result &= expect(settled == card.grab().toImage(),
-                   "the acknowledgment transition stops after 500ms");
+                   "acknowledgement leaves a stable retained card");
+
+  VisibleCardData steering{
+      LocalPromptKey{902},
+      CardKind::LocalPrompt,
+      "prompt-thread",
+      "turn",
+      {},
+      LocalPromptData{902, "steering prompt", PromptState::InFlight, false,
+                      {}, {}}};
+  ConversationCard steeringCard(steering);
+  steeringCard.setProperty("nestedConversationCard", true);
+  steeringCard.resize(520, 92);
+  steeringCard.show();
+  spin(40);
+  const QImage steeringStatic = steeringCard.grab().toImage();
+  spin(100);
+  result &= expect(steeringStatic == steeringCard.grab().toImage(),
+                   "steering uses the same calm initial timing");
+  auto &steeringPrompt = std::get<LocalPromptData>(steering.payload);
+  steeringPrompt.showPendingAnimation = true;
+  result &= expect(steeringCard.apply(steering),
+                   "overdue steering starts its teal feedback sweep");
+  const QImage steeringAnimated = steeringCard.grab().toImage();
+  spin(110);
+  result &= expect(steeringAnimated != steeringCard.grab().toImage(),
+                   "the delayed steering sweep is visibly animated");
+  result &= expect(
+      steeringAnimated.pixelColor(10, steeringAnimated.height() - 10).green() >
+          steeringAnimated.pixelColor(10, steeringAnimated.height() - 10)
+              .red(),
+      "the steering feedback stays in the teal identity family");
+  steeringPrompt.state = PromptState::Accepted;
+  steeringPrompt.showPendingAnimation = false;
+  result &= expect(steeringCard.apply(steering),
+                   "steering acknowledgement stops its feedback sweep");
+  const QImage steeringSettled = steeringCard.grab().toImage();
+  spin(100);
+  result &= expect(steeringSettled == steeringCard.grab().toImage(),
+                   "acknowledged steering remains visually stable");
+
+  pending = {LocalPromptKey{901},
+             CardKind::UserMessage,
+             "prompt-thread",
+             "turn",
+             "user",
+             UserMessageData{"pending prompt", {}}};
+  result &= expect(card.apply(pending) && activeBorderVisible(),
+                   "authoritative promotion retains the same active border");
   return result;
 }
 
@@ -2182,24 +2312,24 @@ bool testMessageImagePresentation() {
   const QPixmap thumbnailPixmap = thumbnail ? thumbnail->pixmap() : QPixmap{};
   result &= expect(
       ribbon && thumbnails.size() == 3 && thumbnail &&
-                 thumbnail->property("imageAvailable").toBool() &&
-                 !thumbnailPixmap.isNull() && thumbnailPixmap.width() <= 280 &&
-                 thumbnailPixmap.height() <= 180 &&
-                 thumbnails[0]->mapTo(ribbon, QPoint{}).y() ==
-                     thumbnails[1]->mapTo(ribbon, QPoint{}).y() &&
-                 thumbnails[1]->mapTo(ribbon, QPoint{}).y() ==
-                     thumbnails[2]->mapTo(ribbon, QPoint{}).y() &&
-                 thumbnails[0]->mapTo(ribbon, QPoint{}).x() <
-                     thumbnails[1]->mapTo(ribbon, QPoint{}).x() &&
-                 thumbnails[1]->mapTo(ribbon, QPoint{}).x() <
-                     thumbnails[2]->mapTo(ribbon, QPoint{}).x() &&
-                 ribbon->horizontalScrollBar()->maximum() > 0 &&
-                 ribbon->verticalScrollBar()->maximum() == 0 &&
-                 ribbon->frameWidth() == 1 && ribbon->widget() &&
-                 ribbon->widget()->layout() &&
+          thumbnail->property("imageAvailable").toBool() &&
+          !thumbnailPixmap.isNull() && thumbnailPixmap.width() <= 280 &&
+          thumbnailPixmap.height() <= 180 &&
+          thumbnails[0]->mapTo(ribbon, QPoint{}).y() ==
+              thumbnails[1]->mapTo(ribbon, QPoint{}).y() &&
+          thumbnails[1]->mapTo(ribbon, QPoint{}).y() ==
+              thumbnails[2]->mapTo(ribbon, QPoint{}).y() &&
+          thumbnails[0]->mapTo(ribbon, QPoint{}).x() <
+              thumbnails[1]->mapTo(ribbon, QPoint{}).x() &&
+          thumbnails[1]->mapTo(ribbon, QPoint{}).x() <
+              thumbnails[2]->mapTo(ribbon, QPoint{}).x() &&
+          ribbon->horizontalScrollBar()->maximum() > 0 &&
+          ribbon->verticalScrollBar()->maximum() == 0 &&
+          ribbon->frameWidth() == 1 && ribbon->widget() &&
+          ribbon->widget()->layout() &&
           ribbon->widget()->layout()->contentsMargins() == QMargins(4, 4, 4, 4),
-             "multiple bounded thumbnails form one horizontally scrollable "
-             "and canonically bounded ribbon");
+      "multiple bounded thumbnails form one horizontally scrollable "
+      "and canonically bounded ribbon");
   const int narrowRibbonHeight = ribbon ? ribbon->height() : 0;
   card->resize(1000, card->height());
   spin();

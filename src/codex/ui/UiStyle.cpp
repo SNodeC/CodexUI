@@ -507,6 +507,8 @@ QString applicationStyleSheet() {
 
 QString humanizeLabel(QString value) {
   value = value.trimmed();
+  if (value.compare(QStringLiteral("xhigh"), Qt::CaseInsensitive) == 0)
+    return QStringLiteral("Extra high");
   QString result;
   result.reserve(value.size() + 4);
   bool space = false;
