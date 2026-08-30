@@ -43,7 +43,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: 5aeedb2c21d7da0d611219365294cc3fb052cddf
+          ref: 53b3d03014a7cdea68fd47a05cb100b9a1094c80
           path: _deps/aisuite
 
       - name: Install build dependencies
@@ -156,7 +156,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: SNodeC/AISuite
-          ref: 5aeedb2c21d7da0d611219365294cc3fb052cddf
+          ref: 53b3d03014a7cdea68fd47a05cb100b9a1094c80
           path: AISuite-extraction/AISuite-final
 
       - name: Set up Node.js
