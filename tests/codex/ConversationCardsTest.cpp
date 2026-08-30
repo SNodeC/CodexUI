@@ -269,6 +269,28 @@ ConversationCard *card(ConversationView &view, const std::string &key) {
   return nullptr;
 }
 
+QString cardTitle(const ConversationCard *card) {
+  if (!card)
+    return {};
+  const auto labels = card->findChildren<QLabel *>();
+  const auto title = std::ranges::find_if(labels, [](QLabel *label) {
+    return label->property("kind").toString() == QStringLiteral("title");
+  });
+  return title == labels.end() ? QString{} : (*title)->text();
+}
+
+QColor cardTitleColor(const ConversationCard *card) {
+  if (!card)
+    return {};
+  const auto labels = card->findChildren<QLabel *>();
+  const auto title = std::ranges::find_if(labels, [](QLabel *label) {
+    return label->property("kind").toString() == QStringLiteral("title");
+  });
+  return title == labels.end()
+             ? QColor{}
+             : (*title)->palette().color(QPalette::WindowText);
+}
+
 std::vector<std::string> visualCardKeys(ConversationView &view) {
   std::vector<ConversationCard *> cards;
   for (QWidget *widget : view.findChildren<QWidget *>())
@@ -1426,6 +1448,9 @@ bool testCardFoldingGeometryAndRetention() {
   result &=
       expect(steeringCard && userCard->isAncestorOf(steeringCard) &&
           steeringCard->property("nestedConversationCard").toBool() &&
+          cardTitle(steeringCard) == QStringLiteral("You · steering") &&
+          cardTitleColor(steeringCard) ==
+              QColor(QStringLiteral("#146f73")) &&
           steeringAnimation && steeringAnimation->isActive(),
       "a pending steering You card is nested and keeps its animation");
 
@@ -1441,6 +1466,10 @@ bool testCardFoldingGeometryAndRetention() {
       expect(authoritativeSteering == steeringCard &&
                        userCard->isAncestorOf(authoritativeSteering) &&
                  authoritativeSteering->cardKind() == CardKind::UserMessage &&
+                       cardTitle(authoritativeSteering) ==
+                           QStringLiteral("You · steering") &&
+                       authoritativeSteering->palette().color(
+                           QPalette::Window) == QColor(QStringLiteral("#eefafa")) &&
                        steeringAnimation && !steeringAnimation->isActive(),
                    "steering acknowledgement morphs the same nested card");
 

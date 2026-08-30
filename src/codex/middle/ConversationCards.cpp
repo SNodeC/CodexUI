@@ -992,6 +992,19 @@ public:
     return true;
   }
 
+  void setNestedConversationCard(bool nested) {
+    owner->setProperty("nestedConversationCard", nested);
+    if (current.kind == CardKind::UserMessage ||
+        current.kind == CardKind::LocalPrompt)
+      title->setText(nested ? QStringLiteral("You · steering")
+                            : QStringLiteral("You"));
+    if (current.kind == CardKind::LocalPrompt)
+      refreshPendingPresentation();
+    owner->style()->unpolish(owner);
+    owner->style()->polish(owner);
+    owner->update();
+  }
+
   void setNestedCards(const std::vector<ConversationCard *> &cards) {
     const std::unordered_set<ConversationCard *> retained(cards.begin(),
                                                            cards.end());
@@ -1004,7 +1017,7 @@ public:
       nestedLayout->removeWidget(card);
       card->setParent(owner->parentWidget());
       card->setVisible(!explicitlyHidden);
-      card->setProperty("nestedConversationCard", false);
+      card->impl_->setNestedConversationCard(false);
     }
     for (std::size_t index = 0; index < cards.size(); ++index) {
       ConversationCard *card = cards[index];
@@ -1015,7 +1028,7 @@ public:
       if (nestedLayout->indexOf(card) != position)
         nestedLayout->insertWidget(position, card);
       card->setVisible(!explicitlyHidden);
-      card->setProperty("nestedConversationCard", true);
+      card->impl_->setNestedConversationCard(true);
     }
     hasVisibleNestedCards =
         std::ranges::any_of(cards, [](const ConversationCard *card) {
@@ -1301,8 +1314,10 @@ public:
     const bool waiting = prompt->state == PromptState::Queued ||
                          prompt->state == PromptState::InFlight;
     const bool failed = prompt->state == PromptState::Failed;
+    const bool steering = owner->property("nestedConversationCard").toBool();
     const QString foreground = waiting || transitioning
-                                   ? QStringLiteral("#536b8f")
+                                   ? steering ? QStringLiteral("#146f73")
+                                              : QStringLiteral("#536b8f")
                                : failed ? QStringLiteral("#982f3d")
                                         : QStringLiteral("#1d2633");
     const QString style =
@@ -1446,14 +1461,21 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
                        prompt->state == PromptState::InFlight;
   const bool transitioning = acceptedTransitionActive(*prompt, now);
   const bool failed = prompt->state == PromptState::Failed;
+  const bool steering = property("nestedConversationCard").toBool();
   const QColor background = waiting || transitioning
-                                ? QColor(QStringLiteral("#dbe7f8"))
+                                ? QColor(steering ? QStringLiteral("#d9efef")
+                                                  : QStringLiteral("#dbe7f8"))
                             : failed ? QColor(QStringLiteral("#fff0f2"))
-                                     : QColor(QStringLiteral("#eaf2ff"));
+                                     : QColor(steering
+                                                  ? QStringLiteral("#eefafa")
+                                                  : QStringLiteral("#eaf2ff"));
   const QColor border = waiting || transitioning
-                            ? QColor(QStringLiteral("#9eb9df"))
+                            ? QColor(steering ? QStringLiteral("#78bdc0")
+                                              : QStringLiteral("#9eb9df"))
                         : failed ? QColor(QStringLiteral("#efb8c0"))
-                                 : QColor(QStringLiteral("#bfd3f9"));
+                                 : QColor(steering
+                                              ? QStringLiteral("#9fd7d8")
+                                              : QStringLiteral("#bfd3f9"));
   painter.setBrush(background);
   painter.setPen(QPen(border, 1.0));
   painter.drawRoundedRect(bounds, 8.0, 8.0);
@@ -1473,9 +1495,12 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
   const qreal center = bounds.left() + position * bounds.width();
   const qreal radius = std::max(28.0, bounds.width() * 0.24);
   QLinearGradient sweep(center - radius, 0.0, center + radius, 0.0);
-  sweep.setColorAt(0.0, QColor(47, 111, 235, 0));
-  sweep.setColorAt(0.5, QColor(117, 160, 239, 105));
-  sweep.setColorAt(1.0, QColor(47, 111, 235, 0));
+  sweep.setColorAt(0.0, steering ? QColor(22, 123, 128, 0)
+                                 : QColor(47, 111, 235, 0));
+  sweep.setColorAt(0.5, steering ? QColor(92, 180, 184, 105)
+                                 : QColor(117, 160, 239, 105));
+  sweep.setColorAt(1.0, steering ? QColor(22, 123, 128, 0)
+                                 : QColor(47, 111, 235, 0));
   QPainterPath clip;
   clip.addRoundedRect(bounds, 8.0, 8.0);
   painter.save();
@@ -1484,7 +1509,9 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
   painter.restore();
 
   painter.setBrush(Qt::NoBrush);
-  painter.setPen(QPen(QColor(QStringLiteral("#79a0d7")), 1.5));
+  painter.setPen(QPen(QColor(steering ? QStringLiteral("#5caeb1")
+                                      : QStringLiteral("#79a0d7")),
+                      1.5));
   painter.drawRoundedRect(bounds, 8.0, 8.0);
 }
 

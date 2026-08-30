@@ -423,15 +423,15 @@ function ScrollableCode({text, className, label}: {text: string; className: stri
         }}><code>{text}</code></pre>;
 }
 
-export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy: (content: CardCopyContent) => void; nested?: ReactNode; turnContainer?: boolean}) {
+export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false, nestedCard = false}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy: (content: CardCopyContent) => void; nested?: ReactNode; turnContainer?: boolean; nestedCard?: boolean}) {
     let title = humanize(card.kind);
     let body: ReactNode;
     let phaseClass = "";
     if (card.kind === "userMessage") {
-        const data = card.payload as UserMessageData; title = "You";
+        const data = card.payload as UserMessageData; title = nestedCard ? "You · steering" : "You";
         body = <><SafeMarkdown text={data.text} /><ImageRibbon paths={data.imagePaths} /></>;
     } else if (card.kind === "localPrompt") {
-        const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You";
+        const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : nestedCard ? "You · steering" : "You";
         body = <><div className="card-text">{data.prompt}</div><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}</>;
     } else if (card.kind === "agentMessage") {
         const data = card.payload as AgentMessageData; title = "Codex"; phaseClass = data.finalAnswer ? "final" : "update";
@@ -469,7 +469,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     const activeTurn = active && turnContainer && card.kind === "userMessage";
     const activeWork = (card.kind === "commandExecution" || card.kind === "imageGeneration")
         && ["active", "inProgress", "running", "started"].includes((card.payload as CommandExecutionData | ImageGenerationData).status);
-    return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""}`} data-card-key={stableKey(card.key)}>
+    return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${nestedCard ? "steering" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""}`} data-card-key={stableKey(card.key)}>
         <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{copyContent.text && <button className="card-copy-button" onClick={() => onCopy(copyContent)} aria-label="Copy card content"><CopyIcon /></button>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
@@ -635,9 +635,9 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
     const visibleSections = conversation.sections
         .map(section => ({...section, cards: section.cards.filter(cardVisible)}))
         .filter(section => section.cards.length > 0);
-    const renderCard = (card: VisibleCardData, nested?: ReactNode, turnContainer = false) => {
+    const renderCard = (card: VisibleCardData, nested?: ReactNode, turnContainer = false, nestedCard = false) => {
         const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
-        return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} nested={nested} turnContainer={turnContainer} />;
+        return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} nested={nested} turnContainer={turnContainer} nestedCard={nestedCard} />;
     };
     return <main ref={pane} className="conversation-pane" tabIndex={-1}>
         <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">Conversation</span>
@@ -665,7 +665,7 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
                 const rootKey = section.rootCardKey ? stableKey(section.rootCardKey) : "";
                 const prompt = rootKey === "" ? undefined : section.cards.find(card => stableKey(card.key) === rootKey);
                 const nestedCards = prompt ? section.cards.filter(card => card !== prompt) : [];
-                const nested = nestedCards.length > 0 ? nestedCards.map(card => renderCard(card)) : undefined;
+                const nested = nestedCards.length > 0 ? nestedCards.map(card => renderCard(card, undefined, false, true)) : undefined;
                 return <section key={section.key} className="turn-section">
                     {prompt ? renderCard(prompt, nested, true) : section.cards.map(card => renderCard(card))}
                 </section>;
@@ -737,8 +737,8 @@ function Composer({session, active, draftKey, drafts, options}: {session: Browse
             })) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}
             placeholder={active ? "Message Codex…" : "Select or create a thread"} rows={1} />
         <div className="composer-actions"><span id="composer-keyboard-hint">Enter to send · Shift+Enter for a new line</span>
-            {running ? <button type="button" className="stop-button" onClick={() => session.interrupt()}>■ Stop</button>
-                : <button type="submit" className="send-button" disabled={!active || prompt.trim() === ""}>Send ↑</button>}</div>
+            <span className="composer-submit-actions"><button type="submit" className={`send-button${running ? " steer" : ""}`} disabled={!active || prompt.trim() === ""}>{running ? "Steer ↑" : "Send ↑"}</button>
+                {running && <button type="button" className="stop-button" onClick={() => session.interrupt()}>■ Stop</button>}</span></div>
     </form>;
 }
 
