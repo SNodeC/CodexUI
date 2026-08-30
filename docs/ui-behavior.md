@@ -104,7 +104,8 @@ right across it until the app-server acknowledges the operation.
 Ordinary attached files appear as local Markdown links at the bottom of that
 card from its first frame. The same composed Markdown is sent to app-server and
 retained by the authoritative user message, so acknowledgment does not reflow
-the attachment presentation.
+the attachment presentation. Filename URL delimiters such as `#` and `?` are
+encoded as path content rather than being misread as a fragment or query.
 
 Each pending prompt has a process-wide client-local submission ID and remains
 associated with its destination thread. It therefore remains visible when the

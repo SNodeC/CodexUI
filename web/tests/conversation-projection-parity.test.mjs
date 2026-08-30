@@ -257,6 +257,9 @@ test("C++ terminal text and canonical attachment links", () => {
         {path: "/tmp/review notes [final] (2).pdf", name: "review notes [final] (2).pdf", mimeType: "application/pdf", size: 10},
         {path: "/tmp/image.png", name: "image.png", mimeType: "image/png", size: 10},
     ]), "Review this\n\nAttached files:\n- [review notes \\[final\\] (2).pdf](file:///tmp/review%20notes%20%5Bfinal%5D%20%282%29.pdf)");
+    assert.equal(promptWithFileLinks("Inspect", [
+        {path: "/tmp/review #1?.md", name: "review #1?.md", mimeType: "text/markdown", size: 10},
+    ]), "Inspect\n\nAttached files:\n- [review #1?.md](file:///tmp/review%20%231%3F.md)");
 });
 
 test("bounded stream projection visibly discloses omitted output", () => {

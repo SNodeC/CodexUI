@@ -75,8 +75,9 @@ export function promptWithFileLinks(prompt: string, attachments: readonly Attach
         .map(file => {
             const label = file.name.replaceAll("\\", "\\\\").replaceAll("[", "\\[").replaceAll("]", "\\]")
                 .replace(/[\r\n]/gu, " ");
-            const target = new URL(`file://${file.path.startsWith("/") ? "" : "/"}${file.path}`).href
-                .replaceAll("[", "%5B").replaceAll("]", "%5D").replaceAll("(", "%28").replaceAll(")", "%29");
+            const absolutePath = file.path.startsWith("/") ? file.path : `/${file.path}`;
+            const target = `file://${absolutePath.split("/").map(segment => encodeURIComponent(segment)
+                .replaceAll("(", "%28").replaceAll(")", "%29")).join("/")}`;
             return `- [${label}](${target})`;
         });
     return links.length === 0 ? prompt : `${prompt}\n\nAttached files:\n${links.join("\n")}`;
