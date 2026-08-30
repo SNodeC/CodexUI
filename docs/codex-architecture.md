@@ -778,6 +778,11 @@ explicit MCP URL link is the only rich-text label and its URL is HTML-escaped.
 The UI attention/brown state is derived only from currently unresolved pending
 requests associated with that thread. It is not inferred from historical item
 status or retained across process restart without fresh provider evidence.
+Response actions require a ready provider, current controller ownership, and
+an exact match of request identity, connection generation, provider generation,
+kind, thread, and content. After one response is sent, the request remains
+authoritative but visibly disabled until its removal arrives; repeated clicks
+cannot emit duplicate responses.
 
 A pending request is retired exactly once when:
 

@@ -287,6 +287,7 @@ struct ShellWidget::Impl final {
     bool active = false;
     std::size_t selectedPending = 0;
     std::size_t totalPending = 0;
+    bool selectedRequestActionable = false;
 
     bool operator==(const StatusUiSnapshot &) const = default;
   };
@@ -364,6 +365,11 @@ struct ShellWidget::Impl final {
   void acceptPending(const std::string &requestKey);
   void rejectPending(const std::string &requestKey);
   void respondToFirstPending(bool approve);
+  [[nodiscard]] bool
+  isPendingActionable(const std::string &requestKey) const;
+  void resolvePending(PendingRequestPresentation request,
+                      std::uint64_t providerGeneration,
+                      PendingRequestResponse response);
 
   ShellWidget *owner = nullptr;
   FrontendSession &session;
@@ -379,6 +385,7 @@ struct ShellWidget::Impl final {
   QString newThreadWorkspace;
 
   std::unordered_map<std::string, ThreadRuntimeState> runtimeByThread;
+  std::unordered_set<std::string> resolvingRequests;
   std::unordered_set<std::string> staleReadResultCorrelations;
   std::uint64_t nextReadRevision = 1;
   std::unordered_map<std::string, HistoryWindow> historyWindows;
@@ -596,7 +603,8 @@ void ShellWidget::Impl::connectUi() {
   middleRegion->inspector().setRequestActions(
       [this](const std::string &id) { reviewPending(id); },
       [this](const std::string &id) { acceptPending(id); },
-      [this](const std::string &id) { rejectPending(id); });
+      [this](const std::string &id) { rejectPending(id); },
+      [this](const std::string &id) { return isPendingActionable(id); });
   middleRegion->setPaneVisibilityAction(
       [this](bool sidebarVisible, bool inspectorVisible) {
         restoreSidebarButton->setVisible(!sidebarVisible);
@@ -625,6 +633,7 @@ void ShellWidget::Impl::showNotice(QString message, bool error) {
 }
 
 void ShellWidget::Impl::resetRuntimeForConnection() {
+  resolvingRequests.clear();
   for (auto &[threadId, runtime] : runtimeByThread) {
     static_cast<void>(threadId);
     runtime.resetForConnection();
@@ -685,6 +694,11 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
   const nlohmann::json data = event.value("data", nlohmann::json::object());
   const nlohmann::json scope = event.value("scope", nlohmann::json::object());
   const std::string eventThreadId = stringValue(scope, "threadId");
+  if (kind == "event" && type == "pending-request.removed") {
+    const auto requestId = scope.find("requestId");
+    if (requestId != scope.end() && !requestId->is_null())
+      resolvingRequests.erase(requestId->dump());
+  }
   if (kind == "event" && type == "connection.provider" &&
       stringValue(data, "state") == "disconnected") {
     resetRuntimeForConnection();
@@ -895,6 +909,13 @@ void ShellWidget::Impl::refreshStatus() {
         return entry.second.threadId == selectedThreadId;
       }));
   const std::size_t totalPending = model.pendingRequestCount();
+  const auto selectedRequest = std::ranges::find_if(
+      model.pendingRequestPresentations(), [this](const auto &entry) {
+        return entry.second.threadId == selectedThreadId;
+      });
+  const bool selectedRequestActionable =
+      selectedRequest != model.pendingRequestPresentations().end() &&
+      isPendingActionable(selectedRequest->first);
   QString selectedTransport;
   const std::string selectedKey = stringValue(connection.settings, "selected");
   const nlohmann::json available =
@@ -922,7 +943,8 @@ void ShellWidget::Impl::refreshStatus() {
                         std::move(workspace),
                         active,
                         selectedPending,
-                        totalPending};
+                        totalPending,
+                        selectedRequestActionable};
   if (statusSnapshot && *statusSnapshot == next)
     return;
   statusSnapshot = std::move(next);
@@ -959,10 +981,6 @@ void ShellWidget::Impl::refreshStatus() {
       QStringLiteral("Requests (%1)")
           .arg(static_cast<qulonglong>(snapshot.totalPending)));
   requestButton->setVisible(snapshot.totalPending != 0);
-  const auto selectedRequest = std::ranges::find_if(
-      model.pendingRequestPresentations(), [this](const auto &entry) {
-        return entry.second.threadId == selectedThreadId;
-      });
   if (selectedRequest != model.pendingRequestPresentations().end()) {
     const PendingRequestPresentation &request = selectedRequest->second;
     middleRegion->composer().setAttentionRequest(
@@ -971,6 +989,8 @@ void ShellWidget::Impl::refreshStatus() {
   }
   middleRegion->composer().setAttentionVisible(selectedRequest !=
                                                model.pendingRequestPresentations().end());
+  middleRegion->composer().setAttentionEnabled(
+      snapshot.selectedRequestActionable);
 
   QString globalStatus = QStringLiteral("Ready");
   QString globalTone = QStringLiteral("success");
@@ -1737,41 +1757,80 @@ void ShellWidget::Impl::respondToFirstPending(bool approve) {
     rejectPending(request->first);
 }
 
+bool ShellWidget::Impl::isPendingActionable(
+    const std::string &requestKey) const {
+  const auto request = model.pendingRequestPresentations().find(requestKey);
+  return canControlProvider() &&
+         request != model.pendingRequestPresentations().end() &&
+         request->second.generation == model.connection().generation &&
+         !resolvingRequests.contains(requestKey);
+}
+
+void ShellWidget::Impl::resolvePending(
+    PendingRequestPresentation request, std::uint64_t providerGeneration,
+    PendingRequestResponse response) {
+  const auto current = model.pendingRequestPresentations().find(request.id);
+  if (!canControlProvider() || providerGeneration != observedProviderGeneration ||
+      current == model.pendingRequestPresentations().end() ||
+      current->second.generation != request.generation ||
+      current->second.kind != request.kind ||
+      current->second.threadId != request.threadId ||
+      current->second.raw != request.raw ||
+      resolvingRequests.contains(request.id)) {
+    showNotice(QStringLiteral("The pending request is no longer actionable."),
+               false);
+    return;
+  }
+  const nlohmann::json nativeId =
+      nlohmann::json::parse(request.id, nullptr, false);
+  if (nativeId.is_discarded()) {
+    showNotice(QStringLiteral("The pending request has an invalid identity."));
+    return;
+  }
+  resolvingRequests.insert(request.id);
+  if (!session.respondToServerRequest(nativeId, std::move(response.result),
+                                      std::move(response.error))) {
+    resolvingRequests.erase(request.id);
+    showNotice(QStringLiteral("The pending response could not be sent."));
+  }
+  scheduleRender();
+}
+
 void ShellWidget::Impl::reviewPending(const std::string &requestKey) {
   const auto request = model.pendingRequestPresentations().find(requestKey);
-  if (request == model.pendingRequestPresentations().end())
+  if (!isPendingActionable(requestKey) ||
+      request == model.pendingRequestPresentations().end())
     return;
-  const auto response = PendingRequestDialog::present(request->second, owner);
+  const PendingRequestPresentation presented = request->second;
+  const std::uint64_t providerGeneration = observedProviderGeneration;
+  const auto response = PendingRequestDialog::present(presented, owner);
   if (!response)
     return;
-  session.respondToServerRequest(nlohmann::json::parse(requestKey),
-                                 response->result, response->error);
+  resolvePending(presented, providerGeneration, *response);
 }
 
 void ShellWidget::Impl::acceptPending(const std::string &requestKey) {
   const auto request = model.pendingRequestPresentations().find(requestKey);
-  if (request == model.pendingRequestPresentations().end())
+  if (!isPendingActionable(requestKey) ||
+      request == model.pendingRequestPresentations().end())
     return;
   if (!requestSupportsDirectAccept(request->second)) {
     reviewPending(requestKey);
     return;
   }
-  PendingRequestResponse response =
-      PendingRequestDialog::positiveResponse(request->second);
-  session.respondToServerRequest(nlohmann::json::parse(requestKey),
-                                 std::move(response.result),
-                                 std::move(response.error));
+  const PendingRequestPresentation presented = request->second;
+  resolvePending(presented, observedProviderGeneration,
+                 PendingRequestDialog::positiveResponse(presented));
 }
 
 void ShellWidget::Impl::rejectPending(const std::string &requestKey) {
   const auto request = model.pendingRequestPresentations().find(requestKey);
-  if (request == model.pendingRequestPresentations().end())
+  if (!isPendingActionable(requestKey) ||
+      request == model.pendingRequestPresentations().end())
     return;
-  PendingRequestResponse response =
-      PendingRequestDialog::negativeResponse(request->second);
-  session.respondToServerRequest(nlohmann::json::parse(requestKey),
-                                 std::move(response.result),
-                                 std::move(response.error));
+  const PendingRequestPresentation presented = request->second;
+  resolvePending(presented, observedProviderGeneration,
+                 PendingRequestDialog::negativeResponse(presented));
 }
 
 ShellWidget::ShellWidget(FrontendSession &session, QWidget *parent)

@@ -425,10 +425,12 @@ void InspectorPane::setHideAction(std::function<void()> hide) {
 
 void InspectorPane::setRequestActions(RequestAction review,
                                       RequestAction accept,
-                                      RequestAction reject) {
+                                      RequestAction reject,
+                                      RequestEligibility eligible) {
   reviewRequest = std::move(review);
   acceptRequest = std::move(accept);
   rejectRequest = std::move(reject);
+  requestEligible = std::move(eligible);
 }
 
 void InspectorPane::refresh(const PresentationModel &model,
@@ -626,6 +628,7 @@ void InspectorPane::refreshRequests() {
     const auto questions = request.raw.find("questions");
     if (questions != request.raw.end() && questions->is_array())
       snapshot.questionCount = questions->size();
+    snapshot.actionable = requestEligible && requestEligible(id);
     next.push_back(std::move(snapshot));
   }
   if (requestsSnapshot && *requestsSnapshot == next)
@@ -675,6 +678,7 @@ void InspectorPane::refreshRequests() {
     auto *reject = new QPushButton(QStringLiteral("Reject"));
     reject->setProperty("kind", "destructive");
     reject->setFixedHeight(28);
+    reject->setEnabled(request.actionable);
     connect(reject, &QPushButton::clicked, this, [this, id = request.id] {
       if (rejectRequest)
         rejectRequest(id);
@@ -685,6 +689,7 @@ void InspectorPane::refreshRequests() {
       auto *accept = new QPushButton(directAcceptText(request.kind));
       accept->setProperty("kind", "request");
       accept->setFixedHeight(28);
+      accept->setEnabled(request.actionable);
       connect(accept, &QPushButton::clicked, this, [this, id = request.id] {
         if (acceptRequest)
           acceptRequest(id);
@@ -694,6 +699,7 @@ void InspectorPane::refreshRequests() {
       auto *review = new QPushButton(QStringLiteral("Review"));
       review->setProperty("kind", "request");
       review->setFixedHeight(28);
+      review->setEnabled(request.actionable);
       connect(review, &QPushButton::clicked, this, [this, id = request.id] {
         if (reviewRequest)
           reviewRequest(id);

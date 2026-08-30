@@ -104,6 +104,12 @@ ComposerPane::ComposerPane(QWidget *anchor)
   attentionRejectButton_ = new QPushButton(QStringLiteral("Reject"), attention_);
   attentionAcceptButton_ = new QPushButton(QStringLiteral("Accept"), attention_);
   attentionReviewButton_ = new QPushButton(QStringLiteral("Review"), attention_);
+  attentionRejectButton_->setObjectName(
+      QStringLiteral("pendingRequestRejectButton"));
+  attentionAcceptButton_->setObjectName(
+      QStringLiteral("pendingRequestAcceptButton"));
+  attentionReviewButton_->setObjectName(
+      QStringLiteral("pendingRequestReviewButton"));
   attentionRejectButton_->setProperty("kind", "destructive");
   attentionAcceptButton_->setProperty("kind", "request");
   attentionReviewButton_->setProperty("kind", "request");
@@ -269,6 +275,12 @@ void ComposerPane::setAttentionRequest(QString title, QString detail,
   attentionAcceptButton_->setVisible(directAccept);
   attentionReviewButton_->setVisible(!directAccept);
   synchronizeGeometry();
+}
+
+void ComposerPane::setAttentionEnabled(bool enabled) {
+  attentionRejectButton_->setEnabled(enabled);
+  attentionAcceptButton_->setEnabled(enabled);
+  attentionReviewButton_->setEnabled(enabled);
 }
 
 void ComposerPane::setActiveTurn(bool active) {

@@ -318,12 +318,14 @@ struct ShellFlow {
   bool verifyNotFoundRecovery();
   bool verifyFailedHydration();
   bool verifyOptimisticNewThread();
+  bool verifyPendingResolutionBoundary();
 
   bool run() {
     return verifyHydrationAndNavigation() && verifyPromptLifecycle() &&
            verifyReconnectHydration() && verifyTerminalCallback() &&
            verifyBoundedChildHydration() && verifyNotFoundRecovery() &&
-           verifyFailedHydration() && verifyOptimisticNewThread();
+           verifyFailedHydration() && verifyOptimisticNewThread() &&
+           verifyPendingResolutionBoundary();
   }
 };
 
@@ -934,6 +936,78 @@ bool ShellFlow::verifyOptimisticNewThread() {
   result &= expect(findThreadItem("thread-new") == draft &&
                        !draft->data(Qt::UserRole + 6).toBool(),
                    "turn acknowledgment canonicalizes the same thread item");
+  return result;
+}
+
+bool ShellFlow::verifyPendingResolutionBoundary() {
+  bool result = true;
+  peer.discard();
+  auto pending = [this](int id, const char *command) {
+    return peer.send(presentation::event(
+        sequence++, generation, "pending-request.upsert",
+        {{"requestId", id},
+         {"category", "command-approval"},
+         {"request", {{"command", command}, {"cwd", "/tmp"}}}},
+        Authority::Merge,
+        {{"threadId", "thread-new"}, {"requestId", id}}));
+  };
+  auto *accept = shell.findChild<QPushButton *>(
+      QStringLiteral("pendingRequestAcceptButton"));
+  auto *reject = shell.findChild<QPushButton *>(
+      QStringLiteral("pendingRequestRejectButton"));
+  result &= expect(accept && reject,
+                   "the selected request exposes typed response actions");
+  if (!accept || !reject)
+    return false;
+
+  result &= pending(91, "first approval");
+  spin(30);
+  result &= expect(accept->isEnabled(),
+                   "the current controller can answer a current request");
+  accept->click();
+  accept->click();
+  const auto accepted = peer.waitFor("pending-request.resolve");
+  result &= expect(
+      accepted && accepted->value("data", nlohmann::json::object())
+                              .value("requestId", 0) == 91 &&
+          accepted->value("data", nlohmann::json::object())
+                  .value("result", nlohmann::json::object())
+                  .value("decision", std::string{}) == "accept",
+      "the first response preserves the native request identity and decision");
+  result &= expect(!peer.waitFor("pending-request.resolve", {}, 100).has_value(),
+                   "a repeated click cannot resolve the same request twice");
+  spin(30);
+  result &= expect(!accept->isEnabled() && !reject->isEnabled(),
+                   "a resolving request disables all response actions");
+  result &= peer.send(presentation::event(
+      sequence++, generation, "pending-request.removed",
+      nlohmann::json::object(), Authority::Remove,
+      {{"threadId", "thread-new"}, {"requestId", 91}}));
+
+  result &= pending(92, "observer approval");
+  result &= peer.send(presentation::event(
+      sequence++, generation, "connection.controller",
+      {{"controllerConnectionId", "different-controller"}},
+      Authority::Replace));
+  spin(30);
+  result &= expect(!accept->isEnabled() && !reject->isEnabled(),
+                   "an observer can inspect but cannot answer a request");
+  accept->click();
+  result &= expect(!peer.waitFor("pending-request.resolve", {}, 100).has_value(),
+                   "disabled observer actions emit no response");
+
+  result &= peer.send(presentation::event(
+      sequence++, generation, "connection.controller",
+      {{"controllerConnectionId", "test-controller-2"}}, Authority::Replace));
+  spin(30);
+  result &= expect(accept->isEnabled() && reject->isEnabled(),
+                   "current controller ownership restores request actions");
+  reject->click();
+  const auto rejected = peer.waitFor("pending-request.resolve");
+  result &= expect(
+      rejected && rejected->value("data", nlohmann::json::object())
+                          .value("requestId", 0) == 92,
+      "the restored controller can resolve the retained request");
   return result;
 }
 
