@@ -160,7 +160,11 @@ let chromeErrors = "";
 let devTools;
 
 try {
+    const constrainedRunnerArguments = process.env.CI
+        ? ["--no-sandbox", "--disable-dev-shm-usage"]
+        : [];
     chrome = spawn(executable, ["--headless=new", "--disable-gpu", "--no-first-run",
+        ...constrainedRunnerArguments,
         "--no-default-browser-check", "--remote-debugging-port=0", `--user-data-dir=${profile}`,
         "--window-size=760,900", "--noerrdialogs", url], {stdio: ["ignore", "ignore", "pipe"]});
     chrome.stderr.on("data", chunk => { chromeErrors = `${chromeErrors}${chunk}`.slice(-8000); });

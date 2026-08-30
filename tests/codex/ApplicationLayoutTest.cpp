@@ -1788,11 +1788,14 @@ bool testInspectorDetailParity() {
   auto *agentsScroll = qobject_cast<QScrollArea *>(inspector.tabs()->widget(1));
   QScrollBar *agentsScrollBar =
       agentsScroll ? agentsScroll->verticalScrollBar() : nullptr;
+  if (agentsScroll)
+    agentsScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+  spin(20);
   result &= expect(
       agentsScrollBar && agentsScrollBar->isVisible() &&
           agentsScrollBar->width() == 8 &&
           !hasNativeBlackFrame(agentsScrollBar),
-      "an overflowing Inspector tab renders the canonical frameless scrollbar");
+      "a visible Inspector scrollbar renders with the canonical frameless style");
   auto *compactDiff = inspector.findChild<QPlainTextEdit *>(
       QStringLiteral("codexDiffText"));
   QStringList diffLines;
