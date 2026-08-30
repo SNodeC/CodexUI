@@ -251,9 +251,18 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
       generation < connectionState.generation)
     return;
   if (generation > connectionState.generation) {
+    const bool replacesConnection = connectionState.generation != 0;
     connectionState.generation = generation;
     lastSequence = 0;
     pendingRequests.clear();
+    if (replacesConnection) {
+      connectionState.connectionId.clear();
+      connectionState.role.clear();
+      connectionState.controllerConnectionId.clear();
+      connectionState.providerGeneration = 0;
+      connectionState.providerState.clear();
+      connectionState.providerDetail.clear();
+    }
   }
   const auto sequenceMember = event.find("sequence");
   const std::uint64_t sequence =

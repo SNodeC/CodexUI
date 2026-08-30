@@ -293,9 +293,16 @@ export class PresentationModel {
         if (this.connectionState.generation !== 0 && generation !== 0
             && generation < this.connectionState.generation) return;
         if (generation > this.connectionState.generation) {
+            const replacesConnection = this.connectionState.generation !== 0;
             this.connectionState.generation = generation;
             this.lastSequence = 0;
             this.pendingRequests.clear();
+            if (replacesConnection) {
+                this.clearConnectionIdentity();
+                this.connectionState.providerGeneration = 0;
+                this.connectionState.providerState = "";
+                this.connectionState.providerDetail = "";
+            }
         }
         const sequence = unsignedValue(event.sequence);
         if (sequence !== 0) {

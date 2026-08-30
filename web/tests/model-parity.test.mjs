@@ -231,3 +231,15 @@ test("C++ live agent rebind and cycle protection invariants", () => {
     assert.equal(model.childOwnership("rebind-parent"), undefined);
     assert.deepEqual(model.thread("new-child").childThreadOrder, []);
 });
+
+test("provider generations are scoped to one frontend connection generation", () => {
+    const model = new PresentationModel();
+    model.applyEvent(event(1, 1, "connection.lifecycle", {state: "connected"}, "replace"));
+    model.applyEvent(event(2, 1, "connection.provider", {generation: 10, state: "ready"}, "replace"));
+    model.applyEvent(event(3, 1, "thread.upsert", {thread: {id: "old-provider"}}, "merge", {threadId: "old-provider"}));
+    model.applyEvent(event(1, 2, "connection.lifecycle", {state: "connected"}, "replace"));
+    model.applyEvent(event(2, 2, "connection.provider", {generation: 1, state: "ready"}, "replace"));
+    assert.notEqual(model.thread("old-provider"), undefined);
+    assert.equal(model.connection().providerGeneration, 1);
+    assert.equal(model.connection().providerState, "ready");
+});

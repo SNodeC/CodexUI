@@ -210,6 +210,11 @@ through the reducer using stable IDs in `scope` and domain data.
 Sequence zero is reserved for a Qt-local diagnostic that did not cross the
 socketpair. Such a diagnostic has no state authority.
 
+Provider generation is scoped to one frontend connection generation. A new
+frontend connection invalidates former provider readiness and accepts the new
+bridge's provider counter from its own initial value. Explicit transport or
+provider loss remains the authority that clears provider-owned projection.
+
 ### 5.3 Authority
 
 Authority has one meaning across all domains:

@@ -958,5 +958,30 @@ int main() {
   passed &= expect(model.connection().providerGeneration == 2 &&
                        model.connection().providerState == "ready",
                    "a new provider generation is accepted for rehydration");
+
+  PresentationModel connectionGenerationModel;
+  connectionGenerationModel.applyEvent(codexui::codex::presentation::event(
+      1, 1, "connection.lifecycle", {{"state", "connected"}},
+      codexui::codex::presentation::Authority::Replace));
+  connectionGenerationModel.applyEvent(codexui::codex::presentation::event(
+      2, 1, "connection.provider",
+      {{"generation", std::uint64_t{10}}, {"state", "ready"}},
+      codexui::codex::presentation::Authority::Replace));
+  connectionGenerationModel.applyEvent(codexui::codex::presentation::event(
+      3, 1, "thread.upsert", {{"thread", {{"id", "old-provider"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "old-provider"}}));
+  connectionGenerationModel.applyEvent(codexui::codex::presentation::event(
+      1, 2, "connection.lifecycle", {{"state", "connected"}},
+      codexui::codex::presentation::Authority::Replace));
+  connectionGenerationModel.applyEvent(codexui::codex::presentation::event(
+      2, 2, "connection.provider",
+      {{"generation", std::uint64_t{1}}, {"state", "ready"}},
+      codexui::codex::presentation::Authority::Replace));
+  passed &= expect(
+      connectionGenerationModel.thread("old-provider") != nullptr &&
+          connectionGenerationModel.connection().providerGeneration == 1 &&
+          connectionGenerationModel.connection().providerState == "ready",
+      "a new connection resets the provider generation floor without discarding retained ownership");
   return passed ? 0 : 1;
 }
