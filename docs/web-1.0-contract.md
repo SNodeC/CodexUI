@@ -104,6 +104,8 @@ The session snapshot does not retain a second conversation projection. The
 Conversation component requests one typed projection for its current history
 window, and prompt reconciliation scans authoritative history only when a
 thread read or user-message event can materialize a local prompt alias.
+Inspector diagnostics likewise project full retained item state only while
+the State tab is selected.
 
 ## Presentation boundary
 

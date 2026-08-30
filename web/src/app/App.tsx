@@ -5,7 +5,7 @@ import {
     pendingDecisionOptions, pendingRequestDetails, pendingResponse, permissionProfileLabel, stableKey,
     settingDraftFor, settingPromptOptions,
 } from "../index.js";
-import type {PendingRequestPresentation, SettingDraft, SettingField, SettingPromptOptions} from "../index.js";
+import type {PendingRequestPresentation, SettingDraft, SettingField, SettingPromptOptions, ThreadPresentation} from "../index.js";
 import type {
     AgentActivityData, CommandExecutionData, FileChangesData, LocalPromptData,
     ReasoningData, UserMessageData, AgentMessageData, GenericActivityData,
@@ -480,18 +480,25 @@ function Composer({session, active, draftKey, drafts, options}: {session: Browse
     </form>;
 }
 
+export function inspectorPlainState(selected: ThreadPresentation | undefined, enabled: boolean): unknown {
+    if (!enabled || !selected) return null;
+    return {
+        id: selected.id, title: selected.title, cwd: selected.cwd, status: selected.status, archived: selected.archived,
+        turns: selected.turnOrder.map(id => { const turn = selected.turns.get(id)!; return {id, status: turn.status, plan: turn.plan,
+            items: turn.itemOrder.map(itemId => turn.items.get(itemId)?.raw)}; }),
+        agents: selected.agentOrder.map(id => selected.agents.get(id)), domains: Object.fromEntries(selected.domains),
+    };
+}
+
 function Inspector({session, revision, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; revision: number} & DrawerPaneProps) {
     void revision;
     const [tab, setTab] = useState<"plan" | "agents" | "requests" | "state" | "protocol">("plan");
     const selected = session.model.thread(session.getSnapshot().selectedThreadId);
     const requests = [...session.model.pendingRequestPresentations().values()];
-    const latestPlan = selected && [...selected.turnOrder].reverse().map(id => selected.turns.get(id)).find(turn => turn && (Object.keys(turn.plan).length > 0 || turn.itemOrder.some(itemId => turn.items.get(itemId)?.raw.type === "plan")));
-    const plainState = selected ? {
-        id: selected.id, title: selected.title, cwd: selected.cwd, status: selected.status, archived: selected.archived,
-        turns: selected.turnOrder.map(id => { const turn = selected.turns.get(id)!; return {id, status: turn.status, plan: turn.plan,
-            items: turn.itemOrder.map(itemId => turn.items.get(itemId)?.raw)}; }),
-        agents: selected.agentOrder.map(id => selected.agents.get(id)), domains: Object.fromEntries(selected.domains),
-    } : null;
+    const latestPlan = tab === "plan" && selected
+        ? [...selected.turnOrder].reverse().map(id => selected.turns.get(id)).find(turn => turn && (Object.keys(turn.plan).length > 0 || turn.itemOrder.some(itemId => turn.items.get(itemId)?.raw.type === "plan")))
+        : undefined;
+    const plainState = inspectorPlainState(selected, tab === "state");
     return <aside ref={paneRef} className={`inspector-pane${drawer ? " responsive-drawer drawer-right" : ""}`} id={drawer ? "inspector-pane" : undefined}
         role={drawer ? "dialog" : undefined} aria-modal={drawer || undefined} aria-labelledby={drawer ? "inspector-pane-title" : undefined}>
         <div className="pane-heading"><div><span className="eyebrow">Details</span><h2 id={drawer ? "inspector-pane-title" : undefined}>Inspector</h2></div>

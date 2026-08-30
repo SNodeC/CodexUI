@@ -3,7 +3,7 @@ import test from "node:test";
 import {renderToStaticMarkup} from "react-dom/server";
 import {createElement} from "react";
 
-import {App} from "../dist/app/App.js";
+import {App, inspectorPlainState} from "../dist/app/App.js";
 import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
 import {event, humanizeProtocolLabel, result} from "../dist/index.js";
 
@@ -34,6 +34,21 @@ test("protocol labels are humanized only at the render boundary", () => {
     assert.equal(humanizeProtocolLabel("thread.settings.changed"), "Thread settings changed");
     assert.equal(humanizeProtocolLabel("commandExecution"), "Command execution");
     assert.equal("contextCompaction", "contextCompaction", "the protocol value remains unchanged");
+});
+
+test("Inspector state diagnostics read items only while State is selected", () => {
+    let itemReads = 0;
+    const item = {};
+    Object.defineProperty(item, "raw", {get: () => { ++itemReads; return {type: "agentMessage"}; }});
+    const thread = {
+        id: "thread", title: "", cwd: "", status: "", archived: false,
+        turnOrder: ["turn"], turns: new Map([["turn", {id: "turn", status: "", plan: {}, itemOrder: ["item"], items: new Map([["item", item]])}]]),
+        agentOrder: [], agents: new Map(), domains: new Map(),
+    };
+    assert.equal(inspectorPlainState(thread, false), null);
+    assert.equal(itemReads, 0);
+    assert.notEqual(inspectorPlainState(thread, true), null);
+    assert.equal(itemReads, 1);
 });
 
 test("empty reasoning spins only while its authoritative turn is active", () => {
