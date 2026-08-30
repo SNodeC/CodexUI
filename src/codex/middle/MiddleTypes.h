@@ -202,6 +202,10 @@ struct TurnSection {
   std::string key;
   std::string turnId;
   std::vector<VisibleCardData> cards;
+  // The projection, which sees the complete authoritative turn, identifies
+  // its actual opening prompt. Rendering must never infer ownership from the
+  // first user message that happens to survive history paging.
+  std::optional<CardKey> rootCardKey;
 
   bool operator==(const TurnSection &) const = default;
 };

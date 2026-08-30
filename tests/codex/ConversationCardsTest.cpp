@@ -468,7 +468,9 @@ bool testStructuralOrderAndIdentity() {
       UserMessageData{QStringLiteral("Later prompt"), {}}};
   VisibleCardData activity = agentCard(pagingThread, "turn", 50);
   ConversationSnapshot paged{
-      pagingThread, {{"turn:paged", "turn", {laterPrompt, activity}}}, 0,
+      pagingThread,
+      {{"turn:paged", "turn", {laterPrompt, activity}, laterPrompt.key}},
+      0,
       false};
   ConversationView pagedView;
   pagedView.resize(620, 420);
@@ -486,6 +488,7 @@ bool testStructuralOrderAndIdentity() {
       UserMessageData{QStringLiteral("Earlier prompt"), {}}};
   paged.sections.front().cards.insert(paged.sections.front().cards.begin(),
                                      earlierPrompt);
+  paged.sections.front().rootCardKey = earlierPrompt.key;
   result &= expect(pagedView.reconcile(paged),
                    "older history can introduce the real turn prompt");
   spin();
@@ -498,6 +501,32 @@ bool testStructuralOrderAndIdentity() {
                        earlierRoot->property("turnContainer").toBool() &&
                        !laterRoot->property("turnContainer").toBool(),
                    "history paging replaces and flattens the visible turn root");
+
+  paged.sections.front().cards.erase(paged.sections.front().cards.begin());
+  result &= expect(pagedView.reconcile(paged),
+                   "a transient projection can omit the declared root");
+  spin();
+  result &= expect(
+      card(pagedView, stableKey(laterPrompt.key)) == laterRoot &&
+          card(pagedView, stableKey(activity.key)) == activityCard &&
+          !laterRoot->property("turnContainer").toBool() &&
+          !laterRoot->isAncestorOf(activityCard),
+      "a retained steering message never becomes an inferred turn root");
+
+  paged.sections.front().cards.insert(paged.sections.front().cards.begin(),
+                                     earlierPrompt);
+  result &= expect(pagedView.reconcile(paged),
+                   "the declared turn root can return");
+  spin();
+  ConversationCard *restoredRoot =
+      card(pagedView, stableKey(earlierPrompt.key));
+  result &= expect(
+      restoredRoot && restoredRoot->property("turnContainer").toBool() &&
+          restoredRoot->isAncestorOf(laterRoot) &&
+          restoredRoot->isAncestorOf(activityCard) &&
+          card(pagedView, stableKey(laterPrompt.key)) == laterRoot &&
+          card(pagedView, stableKey(activity.key)) == activityCard,
+      "root restoration reparents retained cards without changing their identity");
   return result;
 }
 
@@ -1056,6 +1085,7 @@ bool testMutableCardsAndCommandOutput() {
                        0,
                        {}}},
   };
+  section.rootCardKey = section.cards.front().key;
   ConversationSnapshot snapshot{thread, {section}, 0, false};
   ConversationView view;
   view.resize(650, 520);
@@ -1357,7 +1387,8 @@ bool testCardFoldingGeometryAndRetention() {
                                   "turn",
                                   {user, agent, reasoning, command, files,
                                    activity, image, plan, generic,
-                                   emptyReasoning}}},
+                                   emptyReasoning},
+                                  user.key}},
                                 0,
                                 false};
   snapshot.activeTurnId = "turn";
@@ -1568,7 +1599,7 @@ bool testCardFoldingGeometryAndRetention() {
   VisibleCardData promptActivity = agentCard(promptThread, "turn", 77);
   ConversationSnapshot promptSnapshot{
       promptThread,
-      {{"local:folding-prompt", {}, {localPrompt, promptActivity}}},
+      {{"local:folding-prompt", {}, {localPrompt, promptActivity}, promptKey}},
       0,
       false};
   view.reconcile(promptSnapshot);
@@ -1699,7 +1730,8 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
         {"turn:nested-presentation-options:turn",
          "turn",
          {{nestedUserKey, CardKind::UserMessage, nestedThread, "turn", "user",
-           UserMessageData{QStringLiteral("Prompt"), {}}}}});
+           UserMessageData{QStringLiteral("Prompt"), {}}}},
+         nestedUserKey});
     ConversationView nestedView;
     nestedView.setPresentationOptions({false, true, true, true});
     nestedView.resize(700, 700);
@@ -1728,6 +1760,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
         {AuthoritativeItemKey{followingThread, "turn", "user"},
          CardKind::UserMessage, followingThread, "turn", "user",
          UserMessageData{QStringLiteral("Prompt"), {}}});
+    followingSection.rootCardKey = followingSection.cards.front().key;
     for (int index = 0; index < 12; ++index)
       followingSection.cards.push_back(
           agentCard(followingThread, "turn", index));

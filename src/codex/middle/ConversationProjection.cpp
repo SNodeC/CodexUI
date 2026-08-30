@@ -6,7 +6,9 @@
 #include <map>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -270,6 +272,7 @@ struct ProjectedNode {
   std::string sectionKey;
   std::string turnId;
   VisibleCardData card;
+  bool turnRoot = false;
 };
 
 std::optional<std::size_t> admissionBoundaryPosition(
@@ -311,12 +314,30 @@ ConversationSnapshot ConversationProjection::project(
   ConversationSnapshot result;
   result.threadId = authoritativeItems.threadId;
 
-  result.hiddenAuthoritativeItemCount =
+  const std::size_t firstVisible =
       authoritativeItems.ordered.size() > authoritativeItemLimit
           ? authoritativeItems.ordered.size() - authoritativeItemLimit
           : 0;
+  std::unordered_set<std::string> representedTurns;
+  for (std::size_t index = firstVisible;
+       index < authoritativeItems.ordered.size(); ++index)
+    representedTurns.insert(authoritativeItems.ordered[index].key.turnId);
+
+  // Roots are structural context, not activity-window budget. Pin the real
+  // opening userMessage for every turn represented by the retained suffix.
+  // This keeps long active and completed turns owned by the same You card and
+  // prevents a later steering message from becoming an inferred root.
+  std::set<std::size_t> pinnedRootIndexes;
+  for (const std::string &turnId : representedTurns) {
+    const auto root =
+        authoritativeItems.turnRootUserMessagePositions.find(turnId);
+    if (root != authoritativeItems.turnRootUserMessagePositions.end() &&
+        root->second < firstVisible)
+      pinnedRootIndexes.insert(root->second);
+  }
+  result.hiddenAuthoritativeItemCount =
+      firstVisible - pinnedRootIndexes.size();
   result.hasMore = result.hiddenAuthoritativeItemCount > 0;
-  const std::size_t firstVisible = result.hiddenAuthoritativeItemCount;
 
   std::map<AuthoritativeItemKey, const PromptSubmission *> bindings;
   for (const PromptSubmission &submission : localSubmissions)
@@ -325,9 +346,12 @@ ConversationSnapshot ConversationProjection::project(
 
   std::vector<ProjectedNode> nodes;
   nodes.reserve(authoritativeItems.ordered.size() - firstVisible +
+                pinnedRootIndexes.size() +
                 localSubmissions.size());
-  for (std::size_t index = firstVisible;
-       index < authoritativeItems.ordered.size(); ++index) {
+  for (std::size_t index = 0; index < authoritativeItems.ordered.size();
+       ++index) {
+    if (index < firstVisible && !pinnedRootIndexes.contains(index))
+      continue;
     const AuthoritativeItem &item = authoritativeItems.ordered[index];
     const auto binding = bindings.find(item.key);
     if (binding != bindings.end() &&
@@ -352,10 +376,15 @@ ConversationSnapshot ConversationProjection::project(
     }
     VisibleCardData card =
         authoritativeCard(item.key, *item.presentation, std::move(visualKey));
+    const auto root = authoritativeItems.turnRootUserMessagePositions.find(
+        item.key.turnId);
+    const bool turnRoot =
+        root != authoritativeItems.turnRootUserMessagePositions.end() &&
+        root->second == index;
     nodes.push_back({position, tieBreaker,
                      sectionComponent("turn:", authoritativeItems.threadId,
                                       item.key.turnId),
-                     item.key.turnId, std::move(card)});
+                     item.key.turnId, std::move(card), turnRoot});
   }
 
   if (projectStructuredPlansInConversation && authoritativeThread) {
@@ -407,7 +436,8 @@ ConversationSnapshot ConversationProjection::project(
             authoritativeItems.threadId,
             turnId,
             {},
-            structuredPlan(turn->second)}});
+            structuredPlan(turn->second)},
+           false});
     }
   }
 
@@ -445,8 +475,21 @@ ConversationSnapshot ConversationProjection::project(
                                          submission.acceptedAtMilliseconds,
                                          submission.error,
                                          localImagePaths(submission)}};
+    const bool authoritativeRootExists =
+        !turnId.empty() && authoritativeItems.turnRootUserMessagePositions
+                               .contains(turnId);
+    bool turnRoot = (!knownTurn || submission.startsTurn) &&
+                    !authoritativeRootExists;
+    if (submission.materializedItem) {
+      const auto root = authoritativeItems.turnRootUserMessagePositions.find(
+          submission.materializedItem->turnId);
+      const auto materialized =
+          authoritativeItems.position(*submission.materializedItem);
+      turnRoot = root != authoritativeItems.turnRootUserMessagePositions.end() &&
+                 materialized && root->second == *materialized;
+    }
     nodes.push_back({position, submission.admissionOrdinal, sectionKey, turnId,
-                     std::move(card)});
+                     std::move(card), turnRoot});
   }
 
   std::ranges::sort(nodes,
@@ -464,10 +507,13 @@ ConversationSnapshot ConversationProjection::project(
     if (section == sectionIndexes.end()) {
       const std::size_t index = result.sections.size();
       sectionIndexes.emplace(node.sectionKey, index);
-      result.sections.push_back({node.sectionKey, node.turnId, {}});
+      result.sections.push_back({node.sectionKey, node.turnId, {}, std::nullopt});
       section = sectionIndexes.find(node.sectionKey);
     }
-    result.sections[section->second].cards.push_back(std::move(node.card));
+    TurnSection &projectedSection = result.sections[section->second];
+    if (node.turnRoot)
+      projectedSection.rootCardKey = node.card.key;
+    projectedSection.cards.push_back(std::move(node.card));
   }
   return result;
 }

@@ -116,6 +116,117 @@ bool testCanonicalGroupingAndProjection() {
   return result;
 }
 
+bool testTurnRootSurvivesHistoryPaging() {
+  ThreadPresentation thread;
+  thread.id = "thread-long-turn";
+  addTurn(thread, "turn-long");
+  appendItem(
+      thread, "turn-long",
+      item("root-user",
+           {{"type", "userMessage"},
+            {"content", {{{"type", "text"}, {"text", "Root prompt"}}}}}));
+  for (int index = 0; index < 45; ++index)
+    appendItem(thread, "turn-long",
+               item("before-steer-" + std::to_string(index),
+                    {{"type", "agentMessage"}, {"text", "activity"}}));
+  appendItem(thread, "turn-long",
+             item("steering-user",
+                  {{"type", "userMessage"},
+                   {"content", {{{"type", "text"},
+                                  {"text", "Later steering prompt"}}}}}));
+  for (int index = 0; index < 45; ++index)
+    appendItem(thread, "turn-long",
+               item("after-steer-" + std::to_string(index),
+                    {{"type", "agentMessage"}, {"text", "activity"}}));
+
+  const AuthoritativeItemKey rootKey{thread.id, "turn-long", "root-user"};
+  const AuthoritativeItemKey steeringKey{thread.id, "turn-long",
+                                          "steering-user"};
+  const ConversationSnapshot limited =
+      ConversationProjection::project(thread, {}, 80, 100);
+  bool result = expect(
+      limited.sections.size() == 1 &&
+          limited.sections.front().rootCardKey == CardKey{rootKey} &&
+          limited.sections.front().cards.front().key == CardKey{rootKey} &&
+          limited.find(rootKey) && limited.find(steeringKey) &&
+          limited.cardKeys().size() == 81 &&
+          limited.hiddenAuthoritativeItemCount == 11 && limited.hasMore,
+      "a current long turn pins its real root outside the activity budget");
+
+  thread.turns.at("turn-long").status = "completed";
+  const ConversationSnapshot completed =
+      ConversationProjection::project(thread, {}, 80, 101);
+  result &= expect(
+      completed.sections.front().rootCardKey == CardKey{rootKey} &&
+          completed.find(rootKey) && completed.find(steeringKey) &&
+          completed.hiddenAuthoritativeItemCount == 11,
+      "turn completion cannot release the retained activity's root");
+
+  const ConversationSnapshot loaded =
+      ConversationProjection::project(thread, {}, 160, 102);
+  result &= expect(
+      loaded.sections.size() == 1 &&
+          loaded.sections.front().rootCardKey == CardKey{rootKey} &&
+          std::ranges::count(loaded.cardKeys(), CardKey{rootKey}) == 1 &&
+          loaded.find(steeringKey) && !loaded.hasMore &&
+          loaded.hiddenAuthoritativeItemCount == 0,
+      "loading older activity retains one stable root and ordinary paging semantics");
+
+  const auto indexed = indexAuthoritativeItems(thread.id, &thread);
+  result &= expect(
+      indexed.turnRootUserMessagePositions.at("turn-long") == 0,
+      "a cold-loaded thread indexes its root without local prompt state");
+
+  ThreadPresentation rootOnlyHidden;
+  rootOnlyHidden.id = "thread-root-only-hidden";
+  addTurn(rootOnlyHidden, "turn");
+  appendItem(
+      rootOnlyHidden, "turn",
+      item("root",
+           {{"type", "userMessage"},
+            {"content", {{{"type", "text"}, {"text", "Root"}}}}}));
+  appendItem(rootOnlyHidden, "turn",
+             item("answer", {{"type", "agentMessage"},
+                              {"text", "Answer"}}));
+  const ConversationSnapshot rootOnlyPinned =
+      ConversationProjection::project(rootOnlyHidden, {}, 1, 103);
+  result &= expect(
+      rootOnlyPinned.cardKeys().size() == 2 &&
+          rootOnlyPinned.hiddenAuthoritativeItemCount == 0 &&
+          !rootOnlyPinned.hasMore,
+      "pinning the only earlier root leaves no hidden activity to load");
+
+  ThreadPresentation conflicting;
+  conflicting.id = "thread-unique-root";
+  PromptCoordinator prompts;
+  const auto localId = prompts.admit(
+      conflicting.id, QStringLiteral("Locally admitted start"), {},
+      nlohmann::json::object(), nullptr, std::nullopt, 200);
+  result &= expect(prompts.beginNext(conflicting.id).has_value() &&
+                       prompts.acknowledge(conflicting.id, localId,
+                                           std::string("turn"), 201),
+                   "a locally admitted turn start reaches acknowledgment");
+  addTurn(conflicting, "turn");
+  appendItem(
+      conflicting, "turn",
+      item("authoritative-root",
+           {{"type", "userMessage"},
+            {"content", {{{"type", "text"},
+                           {"text", "Different authoritative prompt"}}}}}));
+  prompts.reconcile(conflicting.id, conflicting, 202);
+  const ConversationSnapshot uniqueRoot = ConversationProjection::project(
+      conflicting, prompts.submissions(conflicting.id), 80, 202);
+  const AuthoritativeItemKey authoritativeRoot{conflicting.id, "turn",
+                                                "authoritative-root"};
+  result &= expect(
+      uniqueRoot.sections.size() == 1 &&
+          uniqueRoot.sections.front().rootCardKey ==
+              CardKey{authoritativeRoot} &&
+          uniqueRoot.find(LocalPromptKey{localId}),
+      "an unmatched local start cannot compete with an existing authoritative root");
+  return result;
+}
+
 bool testQueueIsolationAndRealAcknowledgement() {
   ThreadPresentation first = baseThread("thread-a");
   ThreadPresentation second = baseThread("thread-b");
@@ -489,8 +600,9 @@ bool testAnchoredDuplicatePrompts() {
              "same-anchor local prompts retain admission order");
   result &= expect(
       waiting.sections.size() == 2 && waiting.sections[1].turnId == "turn-2" &&
-          waiting.sections[1].cards.size() == 2,
-      "acknowledged duplicates share one authoritative turn section");
+          waiting.sections[1].cards.size() == 2 &&
+          waiting.sections[1].rootCardKey == CardKey{LocalPromptKey{firstId}},
+      "acknowledged duplicates share one turn while steering stays nested");
 
   PromptCoordinator moved;
   const auto draftId =
@@ -792,6 +904,7 @@ bool testFileLinksArePartOfTheCanonicalPrompt() {
 int main() {
   using namespace codexui::codex::middle;
   bool result = testCanonicalGroupingAndProjection();
+  result &= testTurnRootSurvivesHistoryPaging();
   result &= testQueueIsolationAndRealAcknowledgement();
   result &= testDispatchChoiceAndPreHydrationTail();
   result &= testClientIdentityBindsBeforeAcknowledgement();

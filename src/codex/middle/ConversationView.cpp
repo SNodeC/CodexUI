@@ -433,14 +433,16 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
     }
 
     ConversationCard *prompt = nullptr;
+    if (sectionData.rootCardKey) {
+      const auto root = cards_.find(stableKey(*sectionData.rootCardKey));
+      if (root != cards_.end())
+        prompt = root->second;
+    }
     std::vector<ConversationCard *> orderedCards;
     orderedCards.reserve(sectionData.cards.size());
     for (const VisibleCardData &cardData : sectionData.cards) {
       ConversationCard *card = cards_.at(stableKey(cardData.key));
       orderedCards.push_back(card);
-      if (!prompt && (cardData.kind == CardKind::UserMessage ||
-                      cardData.kind == CardKind::LocalPrompt))
-        prompt = card;
     }
     if (prompt) {
       for (ConversationCard *card : orderedCards) {

@@ -41,6 +41,7 @@ struct PromptSubmission {
   QString error;
   std::optional<AuthoritativeItemKey> admissionAnchor;
   bool admissionAtStart = false;
+  bool startsTurn = false;
   std::optional<std::string> expectedTurnId;
   std::optional<AuthoritativeItemKey> materializedItem;
 
@@ -77,6 +78,7 @@ struct AuthoritativeItemIndex {
   std::map<AuthoritativeItemKey, std::size_t> positions;
   std::unordered_map<std::string, std::size_t> userMessagesByClientId;
   std::set<std::tuple<std::string, QString, std::size_t>> userMessagesByText;
+  std::unordered_map<std::string, std::size_t> turnRootUserMessagePositions;
 
   [[nodiscard]] std::optional<std::size_t>
   position(const AuthoritativeItemKey &key) const noexcept;

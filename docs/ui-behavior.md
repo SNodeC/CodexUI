@@ -20,12 +20,15 @@ The conversation has one semantic grouping level: an app-server turn contains
 its items in server order. When a turn has a prompt, its first You card is the
 visible turn container and owns all later cards from that turn. Steering You
 cards are nested with the activity they steer rather than starting a second
-visual turn. History pages that do not contain the prompt retain a flat fallback
-until that prompt is available. Authoritative cards are keyed by stable thread,
-turn, and item IDs; local prompt cards are keyed by their submission IDs. The
-same keyed reconcile path handles initial display and updates, mutating a card
-in place when its visible data changes. An identical visible projection does
-not rebuild widgets or change geometry.
+visual turn. For every turn represented in the retained activity window, the
+projection identifies that opening prompt from the complete authoritative turn
+and pins it outside the activity budget. History paging therefore never
+promotes a later steering You card to turn ownership; loading earlier activity
+retains the same root identity without duplication. Authoritative cards are
+keyed by stable thread, turn, and item IDs; local prompt cards are keyed by
+their submission IDs. The same keyed reconcile path handles initial display
+and updates, mutating a card in place when its visible data changes. An
+identical visible projection does not rebuild widgets or change geometry.
 
 Local prompt admission resumes bottom following when the only pause was caused
 by composer overlay growth, so the complete pending prompt becomes visible.
