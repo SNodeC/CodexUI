@@ -21,6 +21,12 @@ class FakeSocket {
     receiveText(data) { this.onmessage?.({data}); }
 }
 
+class DelayedCloseSocket extends FakeSocket {
+    closeReason = "";
+    close(_code, reason) { this.readyState = 2; this.closeReason = reason; }
+    finishClose() { this.readyState = 3; this.onclose?.({reason: this.closeReason}); }
+}
+
 function appserver(payload) { return {kind: "appserver", payload}; }
 function requests(socket, method) {
     return socket.sent.filter(message => message.kind === "appserver" && message.payload.method === method);
@@ -188,6 +194,24 @@ test("browser transport reconnects cleanly across provider generations", async (
     assert.ok(requests(sockets[1], "thread/list").length > 0);
     assert.equal(session.model.connection().providerGeneration, 2);
     assert.equal(session.model.connection().role, "controller");
+    session.dispose();
+});
+
+test("a pre-open WebSocket failure can retry after completed detach", async () => {
+    const sockets = [];
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => {
+        const socket = new DelayedCloseSocket(); sockets.push(socket); return socket;
+    });
+    session.connect();
+    sockets[0].onerror?.();
+    assert.equal(session.model.connection().detail, "bridge WebSocket transport failed");
+    session.connect();
+    assert.equal(sockets.length, 1, "replacement waits until the failed endpoint releases the connection");
+    sockets[0].finishClose();
+    await Promise.resolve();
+    assert.equal(sockets.length, 2, "the requested retry starts immediately after detach completion");
+    sockets[1].open();
+    assert.equal(session.model.connection().connected, true);
     session.dispose();
 });
 

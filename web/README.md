@@ -41,6 +41,9 @@ corresponding same-origin `wss://.../codex` URL.
 The configured bridge URL is retained in browser local storage. Provider-side
 workspace paths and generated-image paths are displayed as remote metadata;
 the application does not imply access to the browser machine's filesystem.
+Failed WebSocket openings release their transport through the SDK detach
+callback; an explicit retry waits for that release before constructing its
+replacement.
 
 ## Verification
 

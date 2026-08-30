@@ -95,6 +95,8 @@ export class BrowserFrontendSession {
     private noticeTimer: ReturnType<typeof setTimeout> | undefined;
     private publishScheduled = false;
     private disposed = false;
+    private transportFailed = false;
+    private reconnectAfterDetach = false;
     private lifecycleEpoch = 0;
     private catalogHydrationKey = "";
     private bridgeUrl: string;
@@ -117,9 +119,18 @@ export class BrowserFrontendSession {
             return true;
         });
         this.connection = new ClientConnection(this.sdk, {
-            onConnected: () => this.normalizer.transportEvent("connected"),
-            onDisconnected: () => { this.transport = undefined; this.normalizer.transportEvent("disconnected"); },
-            onFailure: reason => this.normalizer.transportEvent("failure", reason),
+            onConnected: () => { this.transportFailed = false; this.normalizer.transportEvent("connected"); },
+            onDetached: () => {
+                const failed = this.transportFailed;
+                this.transport = undefined;
+                this.transportFailed = false;
+                if (!failed) this.normalizer.transportEvent("disconnected");
+                this.finishReconnectAfterDetach();
+            },
+            onFailure: reason => {
+                this.transportFailed = true;
+                this.normalizer.transportEvent("failure", reason);
+            },
         });
         this.sdk.onRawJson((direction, message) => {
             if (direction === "from-app-server") this.normalizer.observeRawInbound(message);
@@ -155,7 +166,14 @@ export class BrowserFrontendSession {
     getSnapshot = (): BrowserSessionSnapshot => this.snapshot;
 
     connect(url = this.bridgeUrl): void {
-        if (this.transport) return;
+        if (this.disposed) return;
+        if (this.transport) {
+            if (this.transportFailed) {
+                this.reconnectAfterDetach = true;
+                this.connection.disconnect("replace failed transport");
+            }
+            return;
+        }
         this.bridgeUrl = url.trim();
         if (typeof window !== "undefined") window.localStorage.setItem("codexui.bridgeUrl", this.bridgeUrl);
         this.normalizer.transportEvent("connecting");
@@ -167,8 +185,15 @@ export class BrowserFrontendSession {
         }
         this.schedulePublish();
     }
-    disconnect(): void { this.connection.disconnect("local-disconnect"); this.transport = undefined; }
-    reconnect(): void { this.disconnect(); queueMicrotask(() => this.connect()); }
+    disconnect(): void {
+        this.reconnectAfterDetach = false;
+        this.connection.disconnect("local-disconnect");
+    }
+    reconnect(): void {
+        this.reconnectAfterDetach = true;
+        this.connection.disconnect("local-reconnect");
+        this.finishReconnectAfterDetach();
+    }
     dispose(): void {
         this.disposed = true;
         this.connection.dispose(); this.transport = undefined;
@@ -176,6 +201,12 @@ export class BrowserFrontendSession {
         this.acceptedTransitionTimers.clear();
         if (this.noticeTimer) clearTimeout(this.noticeTimer);
         this.noticeTimer = undefined;
+    }
+
+    private finishReconnectAfterDetach(): void {
+        if (!this.reconnectAfterDetach || this.connection.attached || this.disposed) return;
+        this.reconnectAfterDetach = false;
+        queueMicrotask(() => { if (!this.disposed) this.connect(); });
     }
     dismissNotice(): void {
         if (this.noticeTimer) clearTimeout(this.noticeTimer);
