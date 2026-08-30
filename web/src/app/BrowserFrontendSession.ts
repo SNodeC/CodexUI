@@ -73,7 +73,14 @@ export interface OptimisticThreadSnapshot {
 interface PromptPromotion {
     readonly rootThreadId: string;
     readonly recencyAt: number | undefined;
+    readonly updatedAt: number | undefined;
 }
+
+export type ThreadSortCriterion = "alphanumeric" | "created" | "updated" | "recent";
+
+const threadTitleCollator = new Intl.Collator(undefined, {
+    numeric: true, sensitivity: "base", ignorePunctuation: true,
+});
 
 type HydrationState = "notHydrated" | "inFlight" | "hydrated" | "failed";
 interface ThreadRuntimeState {
@@ -267,13 +274,39 @@ export class BrowserFrontendSession {
         this.publish();
     }
     threadVisualKey(threadId: string): string { return this.threadVisualKeys.get(threadId) ?? threadId; }
-    threadOrder(): readonly string[] {
-        const order = [...this.model.threadOrder()];
+    threadOrder(criterion: ThreadSortCriterion = "recent"): readonly string[] {
+        const order = this.model.threadOrder().filter(id => this.model.childOwnership(id) === undefined);
         const promotion = this.promptPromotion;
-        if (!promotion || this.model.thread(promotion.rootThreadId)?.recencyAt !== promotion.recencyAt)
-            return order;
-        const index = order.indexOf(promotion.rootThreadId);
-        if (index > 0) order.unshift(...order.splice(index, 1));
+        const promotedRoot = promotion && (criterion === "recent" || criterion === "updated")
+            && this.model.thread(promotion.rootThreadId)?.[criterion === "recent" ? "recencyAt" : "updatedAt"]
+                === promotion[criterion === "recent" ? "recencyAt" : "updatedAt"]
+            ? promotion.rootThreadId : "";
+        const timestamp = (threadId: string) => {
+            const thread = this.model.thread(threadId);
+            return criterion === "created" ? thread?.createdAt
+                : criterion === "updated" ? thread?.updatedAt : thread?.recencyAt;
+        };
+        order.sort((leftId, rightId) => {
+            if (leftId !== rightId && (leftId === promotedRoot || rightId === promotedRoot))
+                return leftId === promotedRoot ? -1 : 1;
+            const left = this.model.thread(leftId); const right = this.model.thread(rightId);
+            if (!left || !right) return leftId.localeCompare(rightId);
+            if (criterion === "alphanumeric") {
+                const leftTitle = left.title.trim(); const rightTitle = right.title.trim();
+                const leftNumeric = /^\p{Nd}/u.test(leftTitle); const rightNumeric = /^\p{Nd}/u.test(rightTitle);
+                if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+                const comparison = threadTitleCollator.compare(leftTitle, rightTitle);
+                if (comparison !== 0) return comparison;
+            } else {
+                const leftTimestamp = timestamp(leftId); const rightTimestamp = timestamp(rightId);
+                if (leftTimestamp !== rightTimestamp) {
+                    if (leftTimestamp === undefined) return 1;
+                    if (rightTimestamp === undefined) return -1;
+                    return rightTimestamp - leftTimestamp;
+                }
+            }
+            return leftId.localeCompare(rightId);
+        });
         return order;
     }
     conversation(limit = DefaultAuthoritativeItemLimit): ConversationSnapshot {
@@ -620,6 +653,7 @@ export class BrowserFrontendSession {
         this.promptPromotion = {
             rootThreadId,
             recencyAt: this.model.thread(rootThreadId)?.recencyAt,
+            updatedAt: this.model.thread(rootThreadId)?.updatedAt,
         };
     }
     private reconcilePromptsForFrame(frame: JsonObject): void {

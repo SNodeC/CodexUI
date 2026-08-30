@@ -247,7 +247,40 @@ test("new-thread completion preserves later navigation and explicit drafts start
     session.dispose();
 });
 
-test("prompt admission immediately promotes the effective recent thread", async () => {
+test("thread ordering is numeric-first and naturally alphanumeric", () => {
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => new FakeSocket());
+    session.model.applyEvent(result(96, 1, "threads.list", "list", true, {threads: [
+        {id: "beta", name: "Beta"}, {id: "ten", name: "10 tasks"},
+        {id: "alpha", name: "alpha"}, {id: "two", name: "2 tasks"},
+    ]}, "merge"));
+    assert.deepEqual(session.threadOrder("alphanumeric"), ["two", "ten", "alpha", "beta"]);
+    session.dispose();
+});
+
+test("thread ordering uses newest creation time and leaves missing values last", () => {
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => new FakeSocket());
+    session.model.applyEvent(result(97, 1, "threads.list", "list", true, {threads: [
+        {id: "missing"}, {id: "old", createdAt: 10}, {id: "new", createdAt: 30},
+    ]}, "merge"));
+    assert.deepEqual(session.threadOrder("created"), ["new", "old", "missing"]);
+    session.dispose();
+});
+
+test("thread ordering uses newest update time and promotes a prompted root transiently", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "updated-promotion");
+    session.model.applyEvent(result(98, 1, "threads.list", "list", true, {threads: [
+        {id: "old", updatedAt: 10}, {id: "new", updatedAt: 30},
+    ]}, "merge"));
+    assert.deepEqual(session.threadOrder("updated"), ["new", "old"]);
+    session.selectThread("old"); await session.submitPrompt("promote changed thread");
+    assert.deepEqual(session.threadOrder("updated"), ["old", "new"]);
+    assert.deepEqual(session.threadOrder("created"), ["new", "old"], "promotion does not affect Created");
+    session.dispose();
+});
+
+test("thread ordering uses newest recency and retires prompt promotion on authoritative change", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open();
@@ -255,17 +288,17 @@ test("prompt admission immediately promotes the effective recent thread", async 
     session.model.applyEvent(result(100, 1, "threads.list", "list", true, {threads: [
         {id: "older", recencyAt: 10}, {id: "recent", recencyAt: 30},
     ]}, "merge"));
-    assert.deepEqual(session.threadOrder(), ["older", "recent"],
-        "the browser retains the provider order before local prompt admission");
-
-    session.selectThread("recent");
-    await session.submitPrompt("promote recent thread");
     assert.deepEqual(session.threadOrder(), ["recent", "older"],
+        "Recent is explicit newest-first ordering");
+
+    session.selectThread("older");
+    await session.submitPrompt("promote older thread");
+    assert.deepEqual(session.threadOrder(), ["older", "recent"],
         "the admitted prompt moves its thread to the first visible position");
 
     session.model.applyEvent(result(101, 1, "thread.read", "read", true,
-        {thread: {id: "recent", recencyAt: 31}}, "merge", {threadId: "recent"}));
-    assert.deepEqual(session.threadOrder(), ["older", "recent"],
+        {thread: {id: "older", recencyAt: 11}}, "merge", {threadId: "older"}));
+    assert.deepEqual(session.threadOrder(), ["recent", "older"],
         "new authoritative recency data retires the transient promotion");
     session.dispose();
 });

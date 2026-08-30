@@ -11,7 +11,7 @@ import type {
     ReasoningData, UserMessageData, AgentMessageData, GenericActivityData,
     ImageGenerationData, PlanData, VisibleCardData,
 } from "../index.js";
-import type {BrowserFrontendSession, NewThreadDraft} from "./BrowserFrontendSession.js";
+import type {BrowserFrontendSession, NewThreadDraft, ThreadSortCriterion} from "./BrowserFrontendSession.js";
 import {shouldSubmitPromptFromKey} from "./ComposerKeyboard.js";
 import {humanizeProtocolLabel as humanize} from "./Humanize.js";
 import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
@@ -136,7 +136,48 @@ function ThreadPane({session, revision, onRequestNewThread, drawer = false, pane
     const snapshot = session.getSnapshot();
     const selected = snapshot.selectedThreadId || (snapshot.newThreadIntent ? "__codexui_new_thread__" : "");
     const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-    const [actionOpen, setActionOpen] = useState("");
+    const [sortCriterion, setSortCriterion] = useState<ThreadSortCriterion>("recent");
+    const [contextMenu, setContextMenu] = useState<{threadId: string; x: number; y: number; trigger: HTMLElement} | null>(null);
+    const contextMenuRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (!contextMenu) return;
+        const menu = contextMenuRef.current;
+        if (!menu) return;
+        const placeAndFocus = () => {
+            const bounds = menu.getBoundingClientRect();
+            menu.style.left = `${Math.max(8, Math.min(contextMenu.x, window.innerWidth - bounds.width - 8))}px`;
+            menu.style.top = `${Math.max(8, Math.min(contextMenu.y, window.innerHeight - bounds.height - 8))}px`;
+            menu.querySelector<HTMLElement>("button:not(:disabled)")?.focus();
+        };
+        const frame = requestAnimationFrame(placeAndFocus);
+        const dismiss = (event: PointerEvent) => {
+            if (!menu.contains(event.target as Node)) setContextMenu(null);
+        };
+        const keyDown = (event: KeyboardEvent) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault(); setContextMenu(null); contextMenu.trigger.focus();
+        };
+        document.addEventListener("pointerdown", dismiss);
+        document.addEventListener("keydown", keyDown);
+        return () => { cancelAnimationFrame(frame); document.removeEventListener("pointerdown", dismiss); document.removeEventListener("keydown", keyDown); };
+    }, [contextMenu]);
+    const openContextMenu = (threadId: string, x: number, y: number, trigger: HTMLElement) =>
+        setContextMenu({threadId, x, y, trigger});
+    const contextThread = contextMenu ? session.model.thread(contextMenu.threadId) : undefined;
+    const connection = session.model.connection();
+    const providerReady = connection.connected && connection.providerState === "ready";
+    const invokeContextAction = (action: () => void) => { setContextMenu(null); action(); };
+    const navigateContextMenu = (event: React.KeyboardEvent<HTMLDivElement>) => {
+        if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+        const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+        if (buttons.length === 0) return;
+        event.preventDefault();
+        const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+        const index = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+            : event.key === "ArrowDown" ? (current + 1) % buttons.length
+                : (current <= 0 ? buttons.length : current) - 1;
+        buttons[index]?.focus();
+    };
     const toggle = (id: string) => setExpanded(current => {
         const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next;
     });
@@ -148,21 +189,15 @@ function ThreadPane({session, revision, onRequestNewThread, drawer = false, pane
         const hasChildren = (thread?.childThreadOrder.length ?? 0) > 0;
         const optimisticClass = optimistic ? ` optimistic-${optimistic.state}` : "";
         return <div key={session.threadVisualKey(id)}>
-            <div className={`thread-row-wrap ${selected === id ? "selected" : ""}${optimisticClass}`} style={{paddingLeft: `${8 + depth * 14}px`}}>
+            <div className={`thread-row-wrap ${selected === id ? "selected" : ""}${contextMenu?.threadId === id ? " context-open" : ""}${optimisticClass}`} style={{paddingLeft: `${8 + depth * 14}px`}}
+                onContextMenu={event => { if (!thread) return; event.preventDefault(); event.stopPropagation(); openContextMenu(id, event.clientX, event.clientY, event.currentTarget); }}>
                 <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id)} aria-label={expanded.has(id) ? "Collapse child threads" : "Expand child threads"}>{hasChildren ? (expanded.has(id) ? "⌄" : "›") : ""}</button>
                 <button className="thread-row" onClick={() => runThreadPaneNavigation(() => session.selectThread(id), onClose)}>
                     <StatusDot tone={optimistic?.state === "failed" ? "danger" : optimistic ? "warning" : status.tone || "muted"} /><span><strong>{thread?.title || optimistic?.title || id}</strong><small>{optimistic ? optimistic.state === "failed" ? "Not created" : optimistic.state === "confirmed" ? "Created" : "Creating" : thread?.cwd || thread?.preview || id}</small></span>
                 </button>
-                {thread && selected === id && <div className="thread-actions">
-                    <button title="Reload" onClick={() => session.reloadThread(id)}>↻</button>
-                    <button title="Fork" disabled={!session.canSubmit() || session.operationPending("thread.fork", id)} onClick={() => session.forkThread(id)}>⑂</button>
-                    <button title={thread.archived ? "Unarchive" : "Archive"} disabled={!session.canSubmit() || session.operationPending("thread.archive", id)} onClick={() => session.archiveThread(id, thread.archived)}>□</button>
-                    <button title="More actions" onClick={() => setActionOpen(current => current === id ? "" : id)}>•••</button>
-                    {actionOpen === id && <div className="action-popover">
-                        <button disabled={!session.canSubmit() || session.operationPending("thread.rename", id)} onClick={() => { const name = window.prompt("Thread name", thread.title); if (name?.trim()) session.renameThread(id, name.trim()); }}>Rename</button>
-                        <button className="danger" disabled={!session.canSubmit() || session.operationPending("thread.delete", id)} onClick={() => { if (window.confirm("Delete the selected thread?")) session.deleteThread(id); }}>Delete</button>
-                    </div>}
-                </div>}
+                {thread && <button className="thread-menu-trigger" title="Thread actions" aria-label={`Actions for ${thread.title || id}`}
+                    aria-haspopup="menu" aria-expanded={contextMenu?.threadId === id}
+                    onClick={event => { event.stopPropagation(); const bounds = event.currentTarget.getBoundingClientRect(); openContextMenu(id, bounds.right, bounds.bottom, event.currentTarget); }}>•••</button>}
             </div>
             {thread && hasChildren && expanded.has(id) && thread.childThreadOrder.map(child => renderThread(child, depth + 1))}
         </div>;
@@ -172,11 +207,23 @@ function ThreadPane({session, revision, onRequestNewThread, drawer = false, pane
         <div className="pane-heading"><div><span className="eyebrow">Workspace</span><h2 id={drawer ? "thread-pane-title" : undefined}>Threads</h2></div>
             <div className="pane-heading-actions"><button className="icon-button" onClick={onRequestNewThread} title="New thread" aria-label="New thread">＋</button>
                 {drawer && <button type="button" className="drawer-close" data-drawer-close onClick={onClose} aria-label="Close Threads drawer">×</button>}</div></div>
+        <label className="thread-sort"><span>Sort</span><select aria-label="Thread sort order" value={sortCriterion}
+            onChange={event => setSortCriterion(event.target.value as ThreadSortCriterion)}>
+            <option value="recent">Recent</option><option value="created">Created</option>
+            <option value="updated">Last changed</option><option value="alphanumeric">Alphanumeric</option>
+        </select></label>
         <div className="thread-list">
             {snapshot.optimisticThreads.map(thread => renderThread(thread.id, 0))}
-            {session.threadOrder().filter(id => !snapshot.optimisticThreads.some(thread => thread.id === id)).map(id => renderThread(id, 0))}
+            {session.threadOrder(sortCriterion).filter(id => !snapshot.optimisticThreads.some(thread => thread.id === id)).map(id => renderThread(id, 0))}
         </div>
         <button className="refresh-button" disabled={session.operationPending("threads.refresh")} onClick={() => session.requestThreads()}>↻ Refresh threads</button>
+        {contextThread && contextMenu && <div ref={contextMenuRef} className="thread-context-menu" role="menu" aria-label={`Actions for ${contextThread.title || contextThread.id}`} onKeyDown={navigateContextMenu}>
+            <button role="menuitem" disabled={!providerReady} onClick={() => invokeContextAction(() => session.reloadThread(contextThread.id))}>Reload</button>
+            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.rename", contextThread.id)} onClick={() => invokeContextAction(() => { const name = window.prompt("Thread name", contextThread.title); if (name?.trim()) session.renameThread(contextThread.id, name.trim()); })}>Rename</button>
+            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.fork", contextThread.id)} onClick={() => invokeContextAction(() => session.forkThread(contextThread.id))}>Fork</button>
+            <button role="menuitem" disabled={!session.canSubmit() || session.operationPending("thread.archive", contextThread.id)} onClick={() => invokeContextAction(() => session.archiveThread(contextThread.id, contextThread.archived))}>{contextThread.archived ? "Unarchive" : "Archive"}</button>
+            <button role="menuitem" className="danger" disabled={!session.canSubmit() || session.operationPending("thread.delete", contextThread.id)} onClick={() => invokeContextAction(() => { if (window.confirm(`Delete “${contextThread.title || contextThread.id}”?`)) session.deleteThread(contextThread.id); })}>Delete</button>
+        </div>}
     </aside>;
 }
 
