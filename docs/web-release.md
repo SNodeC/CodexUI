@@ -21,6 +21,8 @@ following:
   routing/lifecycle, and WebSocket transport equality tests;
 - the browser application installs from its lockfile and passes the complete
   75-test suite across ten web test files;
+- the production bundle passes the real-Chromium responsive, focus, drawer,
+  overflow, and coarse-pointer qualification workflow;
 - the production Vite artifact builds, passes its relocatability check, and is
   installed through the standalone CMake packaging project;
 - CI asserts the staged `share/codexui/web/index.html` and generated assets

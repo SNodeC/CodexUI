@@ -79,9 +79,8 @@ normal 80-item window, so the native authority/index structure was retained.
   card/pixel anchors; a paused anchor is not evicted when streamed items
   arrive. The composer grows upward over an opaque reserved surface while
   command surfaces retain their own follow/pause and wheel-boundary ownership.
-- A real Chromium review at 760, 521, and 360 px confirmed zero document-width
-  overflow with the full connection-control shape. Drawer focus entered
-  synchronously, background regions became inert, Tab wrapped, Escape restored
-  the trigger, and breakpoint removal restored focus to Conversation. This is
-  retained review evidence; the deterministic CI assertions remain the test
-  authority.
+- The release gate starts a real headless Chromium at 760, 521, and 360 px and
+  confirms zero document-width overflow with the full connection-control
+  shape. It also verifies the visible focus ring, synchronous drawer focus,
+  inert background, bidirectional Tab wrapping, Escape focus return,
+  breakpoint-removal fallback, and 44 px coarse-pointer targets.

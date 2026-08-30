@@ -3,7 +3,8 @@
 CodexWebUI is the static browser application for CodexUI 1.0. It connects
 directly to an AISuite `codex-bridge` WebSocket endpoint with the `codex`
 subprotocol. It contains no web server, bridge router, controller authority,
-or persistent Codex state.
+or persistent Codex state. Its reproducible build and browser qualification
+require Node.js 22 or newer.
 
 ## Reproducible source layout
 
@@ -61,6 +62,8 @@ replacement.
   lifecycle, viewport, supporting-surface, and server-render qualification
   tests.
 - `npm run build:app` verifies the production Vite bundle.
+- `npm run qualify:browser` serves that bundle only for the duration of a
+  headless-Chromium responsive, focus, drawer, and target-size qualification.
 - `npm run verify:artifact` proves that the output is non-empty and relocatable
   below an arbitrary static base path.
 - The repository CI checks the pinned SDK independently, runs the web suite,

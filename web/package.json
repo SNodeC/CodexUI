@@ -3,11 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {"node": ">=22"},
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:app": "vite build",
+    "qualify:browser": "node tools/qualify-browser.mjs",
     "profile": "npm run build && node tools/profile-presentation.mjs",
-    "release": "npm test && npm run profile && npm run build:app && npm run verify:artifact",
+    "release": "npm test && npm run profile && npm run build:app && npm run qualify:browser && npm run verify:artifact",
     "test": "npm run build && node --test tests/*.test.mjs",
     "verify:artifact": "node tools/verify-artifact.mjs"
   },
