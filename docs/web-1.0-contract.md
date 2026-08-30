@@ -170,6 +170,14 @@ the single in-flow column and both side panes use accessible overlay drawers.
 The page itself must not overflow horizontally; narrow controls wrap or compact
 while intentionally scrollable card content retains its local overflow.
 
+Pending-request cards disclose literal structured fields rather than exposing
+the retained raw request object. Their controls are generated per request
+family: declared approval decisions, multi-answer user input, MCP
+accept/decline/cancel, permission turn/session scope, legacy decisions, and
+explicit unavailable/unsupported results. Responses require a ready provider,
+current controller ownership, and the current request generation and identity;
+one sent response disables that request until authoritative removal.
+
 ### Browser-specific representation
 
 These capabilities remain required but use an honest browser representation:

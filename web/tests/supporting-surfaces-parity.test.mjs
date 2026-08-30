@@ -3,7 +3,8 @@ import test from "node:test";
 
 import {
     applySettingChange, canonicalSettingValues, canonicalThreadSettings, changeSettingDraft, collaborationMode, negativePendingResponse,
-    permissionProfileLabel, positivePendingResponse, sandboxPolicy, threadStartOptions, turnStartOptions,
+    pendingDecisionOptions, pendingRequestDetails, pendingResponse, permissionProfileLabel, positivePendingResponse,
+    sandboxPolicy, threadStartOptions, turnStartOptions,
     settingDraftFor, settingPromptOptions,
 } from "../dist/index.js";
 
@@ -131,4 +132,25 @@ test("native pending-request positive and negative response shapes", () => {
     assert.deepEqual(positivePendingResponse(request("attestation")), {
         error: {code: -32601, message: "CodexUI does not support this server request"},
     });
+
+    const declared = request("command-approval", {availableDecisions: ["decline", "cancel", "future"]});
+    assert.deepEqual(pendingDecisionOptions(declared).map(choice => choice.value), ["decline", "cancel"],
+        "the web UI offers only declared, schema-supported command decisions");
+    assert.deepEqual(pendingResponse(request("permissions-approval", {permissions: {network: {enabled: true}}}), "session"), {
+        result: {permissions: {network: {enabled: true}}, scope: "session"},
+    });
+    assert.deepEqual(pendingResponse(request("mcp-elicitation"), "cancel"), {
+        result: {action: "cancel", content: null, _meta: null},
+    });
+
+    const disclosed = pendingRequestDetails(request("permissions-approval", {
+        permissions: {fileSystem: {write: ["/tmp/<literal>"]}, network: {enabled: true}},
+        futureCapability: {mode: "bounded"},
+    }));
+    assert.equal(disclosed.truncated, false);
+    assert.deepEqual(disclosed.entries, [
+        {path: "permissions / fileSystem / write / 1", value: "/tmp/<literal>"},
+        {path: "permissions / network / enabled", value: "Yes"},
+        {path: "futureCapability / mode", value: "bounded"},
+    ], "request disclosure preserves known and future fields without a raw JSON projection");
 });

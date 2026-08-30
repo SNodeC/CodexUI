@@ -2,7 +2,8 @@ import {useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalSt
 import type {FormEvent, ReactNode, RefObject} from "react";
 import {
     ConversationViewportState, DefaultSetting, changeSettingDraft, canonicalThreadSettings, classifyStatus,
-    indexAuthoritativeItems, negativePendingResponse, permissionProfileLabel, positivePendingResponse, projectConversation, stableKey,
+    indexAuthoritativeItems, pendingDecisionOptions, pendingRequestDetails, pendingResponse, permissionProfileLabel,
+    projectConversation, stableKey,
     settingDraftFor, settingPromptOptions,
 } from "../index.js";
 import type {PendingRequestPresentation, SettingDraft, SettingField, SettingPromptOptions} from "../index.js";
@@ -512,48 +513,71 @@ function Inspector({session, revision, drawer = false, paneRef, onClose}: {sessi
 }
 function Info({label, value}: {label: string; value: string}) { return <div className="info-row"><span>{label}</span><strong>{value || "—"}</strong></div>; }
 
-function requestSupportsDirectAccept(request: PendingRequestPresentation): boolean {
-    return ["command-approval", "file-change-approval", "permissions-approval", "legacy-patch-approval", "legacy-command-approval"].includes(request.kind);
-}
-
-function requestAcceptLabel(request: PendingRequestPresentation): string {
-    return request.kind === "permissions-approval" ? "Allow this turn" : "Accept";
-}
-
-function requestSummary(request: PendingRequestPresentation, raw: Record<string, unknown>, questions: readonly unknown[]): string {
-    const parts: string[] = [];
-    for (const [label, value] of [["Command", raw.command], ["Reason", raw.reason], ["Message", raw.message], ["Directory", raw.cwd], ["Grant root", raw.grantRoot]] as const)
-        if (typeof value === "string" && value.trim() !== "") parts.push(label === "Message" ? value : `${label}: ${value}`);
-    if (raw.permissions !== undefined) parts.push(`Permissions: ${JSON.stringify(raw.permissions)}`);
-    if (questions.length > 0) parts.push(`${questions.length} questions`);
-    return parts.length > 0 ? parts.join("  |  ") : `Request ${request.id} needs a decision.`;
-}
-
 function RequestCard({request, session}: {request: PendingRequestPresentation; session: BrowserFrontendSession}) {
     const raw = request.raw && typeof request.raw === "object" ? request.raw as Record<string, unknown> : {};
     const questions = Array.isArray(raw.questions) ? raw.questions as Record<string, unknown>[] : [];
-    const [answers, setAnswers] = useState<Record<string, string>>({});
+    const [answers, setAnswers] = useState<Record<string, string[]>>({});
+    const [otherAnswers, setOtherAnswers] = useState<Record<string, string>>({});
     const [structured, setStructured] = useState("{}");
-    const approve = () => {
+    const details = pendingRequestDetails(request);
+    const decisions = pendingDecisionOptions(request);
+    const resolving = session.isPendingResolving(request);
+    const actionable = session.canResolvePending(request);
+    const userInputValid = questions.length > 0 && questions.every(question => {
+        const id = typeof question.id === "string" ? question.id : "";
+        return id !== "" && ((answers[id]?.length ?? 0) > 0 || (otherAnswers[id]?.trim() ?? "") !== "");
+    });
+    let structuredInput: unknown = raw.requestedSchema === undefined ? null : {};
+    let structuredValid = true;
+    if (request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined) {
+        try { structuredInput = JSON.parse(structured); structuredValid = structuredInput !== null && typeof structuredInput === "object" && !Array.isArray(structuredInput); }
+        catch { structuredValid = false; }
+    }
+    const respond = (decision: string) => {
         let input: unknown = {};
         if (request.kind === "user-input") input = Object.fromEntries(questions.map(question => {
-            const id = String(question.id ?? ""); return [id, {answers: [answers[id] ?? ""]}];
+            const id = typeof question.id === "string" ? question.id : "";
+            const values = [...(answers[id] ?? [])];
+            const other = otherAnswers[id]?.trim() ?? "";
+            if (other !== "") values.push(other);
+            return [id, {answers: values}];
         }));
-        else if (request.kind === "mcp-elicitation") { try { input = JSON.parse(structured); } catch { return; } }
-        session.resolvePending(JSON.parse(request.id), positivePendingResponse(request, input));
+        else if (request.kind === "mcp-elicitation") input = structuredInput;
+        const response = pendingResponse(request, decision, input);
+        if (response) session.resolvePending(request, response);
     };
-    const reject = () => session.resolvePending(JSON.parse(request.id), negativePendingResponse(request));
-    const directAccept = requestSupportsDirectAccept(request);
-    return <div className="request-card">
+    const toggleAnswer = (id: string, value: string, checked: boolean) => setAnswers(current => ({...current,
+        [id]: checked ? [...(current[id] ?? []), value] : (current[id] ?? []).filter(answer => answer !== value),
+    }));
+    return <div className="request-card" aria-busy={resolving || undefined}>
         <strong>{humanize(request.kind)}</strong>
-        <p>{requestSummary(request, raw, questions)}</p>
         {typeof raw.command === "string" && raw.command.trim() !== "" && <code>{raw.command}</code>}
-        {request.kind === "user-input" && questions.map(question => { const id = String(question.id ?? ""); const options = Array.isArray(question.options) ? question.options as Record<string, unknown>[] : []; return <label className="request-question" key={id}><span>{String(question.question ?? question.header ?? id)}</span>{options.length > 0
-            ? <select value={answers[id] ?? ""} onChange={event => setAnswers(current => ({...current, [id]: event.target.value}))}><option value="">Choose…</option>{options.map(option => <option key={String(option.label)}>{String(option.label)}</option>)}</select>
-            : <input type={question.isSecret ? "password" : "text"} value={answers[id] ?? ""} onChange={event => setAnswers(current => ({...current, [id]: event.target.value}))} />}</label>; })}
+        {details.entries.length > 0 && <dl className="request-details">{details.entries.map((detail, index) => <div key={`${detail.path}-${index}`}>
+            <dt>{detail.path.split(" / ").map(humanize).join(" / ")}</dt><dd>{detail.value}</dd></div>)}
+            {details.truncated && <div><dt>Additional detail</dt><dd>Too large to display safely</dd></div>}</dl>}
+        {request.kind === "user-input" && questions.map((question, questionIndex) => {
+            const id = typeof question.id === "string" ? question.id : "";
+            const options = Array.isArray(question.options) ? question.options as Record<string, unknown>[] : [];
+            const showOther = options.length === 0 || question.isOther === true;
+            return <fieldset className="request-question" key={id || questionIndex}><legend>{String((question.header ?? question.question ?? id) || `Question ${questionIndex + 1}`)}</legend>
+                {question.header !== undefined && question.question !== undefined && <span>{String(question.question)}</span>}
+                {options.map((choice, optionIndex) => { const label = String(choice.label ?? ""); return label === "" ? null : <label key={`${label}-${optionIndex}`}>
+                    <input type="checkbox" checked={(answers[id] ?? []).includes(label)} onChange={event => toggleAnswer(id, label, event.target.checked)} />
+                    <span>{label}{typeof choice.description === "string" && choice.description !== "" && <small>{choice.description}</small>}</span></label>; })}
+                {showOther && <input type={question.isSecret ? "password" : "text"} value={otherAnswers[id] ?? ""}
+                    placeholder={options.length > 0 ? "Other answer" : "Type your answer"}
+                    onChange={event => setOtherAnswers(current => ({...current, [id]: event.target.value}))} />}
+            </fieldset>;
+        })}
         {request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined && <textarea value={structured} onChange={event => setStructured(event.target.value)} rows={5} aria-label="Structured MCP response" />}
-        <details><summary>Request data</summary><pre>{JSON.stringify(request.raw, null, 2)}</pre></details>
-        <div className="request-actions"><button className="request-button danger" onClick={reject}>Reject</button><button className="request-button approve" onClick={approve}>{directAccept ? requestAcceptLabel(request) : "Submit"}</button></div>
+        {request.kind === "mcp-elicitation" && raw.requestedSchema !== undefined && !structuredValid && <p className="request-validation">Enter a valid JSON object.</p>}
+        <div className="request-actions">{resolving ? <span>Resolving…</span> : decisions.map(decision => {
+            const inputValid = request.kind === "user-input" ? userInputValid : request.kind === "mcp-elicitation" ? structuredValid : true;
+            const safeWithoutFullDisclosure = ["decline", "cancel", "denied", "abort", "unavailable", "unsupported"].includes(decision.value);
+            return <button type="button" key={decision.value} className={`request-button ${decision.tone === "neutral" ? "" : decision.tone}`}
+                disabled={!actionable || (details.truncated && !safeWithoutFullDisclosure) || (decision.requiresInput === true && !inputValid)}
+                onClick={() => respond(decision.value)}>{decision.label}</button>;
+        })}</div>
     </div>;
 }
 

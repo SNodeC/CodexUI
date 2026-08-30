@@ -241,6 +241,45 @@ test("prompt admission requires provider readiness and controller authority", as
     session.dispose();
 });
 
+test("pending request responses require current controller authority and resolve once", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open();
+    await readyProvider(socket, "request-controller");
+
+    socket.receive(appserver({jsonrpc: "2.0", id: 77, method: "item/commandExecution/requestApproval", params: {
+        threadId: "thread-request", turnId: "turn-request", itemId: "item-request", command: "echo safe",
+        availableDecisions: ["accept", "decline"],
+    }}));
+    const request = [...session.model.pendingRequestPresentations().values()][0];
+    assert.ok(request);
+    assert.equal(session.canResolvePending(request), true);
+    assert.equal(session.resolvePending(request, {result: {decision: "accept"}}), true);
+    assert.equal(session.resolvePending(request, {result: {decision: "accept"}}), false);
+    const responses = socket.sent.filter(message => message.kind === "appserver" && message.payload.id === 77
+        && !Object.hasOwn(message.payload, "method"));
+    assert.equal(responses.length, 1, "a repeated action cannot emit a duplicate JSON-RPC response");
+    assert.equal(session.isPendingResolving(request), true);
+
+    socket.receive(appserver({jsonrpc: "2.0", method: "serverRequest/resolved", params: {
+        requestId: 77, threadId: "thread-request",
+    }}));
+    assert.equal(session.model.pendingRequestCount(), 0);
+    assert.equal(session.isPendingResolving(request), false);
+
+    socket.receive(appserver({jsonrpc: "2.0", id: 78, method: "item/commandExecution/requestApproval", params: {
+        threadId: "thread-request", turnId: "turn-request", itemId: "item-request-2", command: "echo guarded",
+    }}));
+    const guarded = [...session.model.pendingRequestPresentations().values()][0];
+    assert.ok(guarded);
+    socket.receive({kind: "bridge.controller", controllerConnectionId: "another-client"});
+    assert.equal(session.canResolvePending(guarded), false);
+    assert.equal(session.resolvePending(guarded, {result: {decision: "accept"}}), false);
+    socket.receive({kind: "bridge.controller", controllerConnectionId: "request-controller"});
+    assert.equal(session.canResolvePending(guarded), true);
+    session.dispose();
+});
+
 test("a prompt admitted during thread hydration waits for the authoritative read", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);

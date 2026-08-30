@@ -9,6 +9,7 @@ import type {WebSocketFactory} from "@snodec/codex-frontend";
 import type {JsonObject} from "../presentation/PresentationProtocol.js";
 import {isObject, member, stringMember} from "../presentation/PresentationProtocol.js";
 import {PresentationModel} from "../presentation/PresentationModel.js";
+import type {PendingRequestPresentation} from "../presentation/PresentationModel.js";
 import {ProtocolNormalizer} from "../presentation/ProtocolNormalizer.js";
 import {PromptCoordinator, indexAuthoritativeItems, promptWithFileLinks} from "../conversation/PromptCoordinator.js";
 import type {AttachmentDraft, PromptDispatch} from "../conversation/PromptCoordinator.js";
@@ -78,6 +79,7 @@ export class BrowserFrontendSession {
     private readonly listeners = new Set<() => void>();
     private readonly protocolFrames: unknown[] = [];
     private readonly runtimeByThread = new Map<string, ThreadRuntimeState>();
+    private readonly resolvingRequests = new Set<string>();
     private readonly acceptedTransitionTimers = new Map<number, ReturnType<typeof setTimeout>>();
     private transport: WebSocketTransport | undefined;
     private selectedThreadId = "";
@@ -284,9 +286,30 @@ export class BrowserFrontendSession {
         this.request(archived ? "thread.unarchive" : "thread.archive", {threadId});
     }
     deleteThread(threadId: string): void { this.request("thread.delete", {threadId}); }
-    resolvePending(requestId: unknown, response: {result?: unknown; error?: unknown}): boolean {
-        return this.sdk.sendRawJson({jsonrpc: "2.0", id: requestId,
+    isPendingResolving(request: PendingRequestPresentation): boolean {
+        return this.resolvingRequests.has(request.id);
+    }
+    canResolvePending(request: PendingRequestPresentation): boolean {
+        const connection = this.model.connection();
+        return this.canSubmit() && request.generation === connection.generation
+            && this.model.pendingRequestPresentations().get(request.id) === request
+            && !this.resolvingRequests.has(request.id);
+    }
+    resolvePending(request: PendingRequestPresentation, response: {result?: unknown; error?: unknown}): boolean {
+        if (!this.canResolvePending(request)) return false;
+        let requestId: unknown;
+        try { requestId = JSON.parse(request.id); }
+        catch { this.setNotice("The pending request has an invalid identity."); return false; }
+        this.resolvingRequests.add(request.id);
+        const sent = this.sdk.sendRawJson({jsonrpc: "2.0", id: requestId,
             ...(Object.hasOwn(response, "error") ? {error: response.error} : {result: response.result ?? {}})});
+        if (!sent) {
+            this.resolvingRequests.delete(request.id);
+            this.setNotice("The pending response could not be sent.");
+            return false;
+        }
+        this.publish();
+        return true;
     }
 
     private providerReady(): boolean {
@@ -305,6 +328,7 @@ export class BrowserFrontendSession {
     private invalidateProviderWork(): void {
         ++this.lifecycleEpoch;
         this.catalogHydrationKey = "";
+        this.resolvingRequests.clear();
         for (const [threadId, runtime] of this.runtimeByThread) {
             ++runtime.readRevision;
             runtime.hydration = "notHydrated";
@@ -528,6 +552,9 @@ export class BrowserFrontendSession {
             this.prompts.clearThread(threadId);
             this.runtimeByThread.delete(threadId);
             if (this.selectedThreadId === threadId) this.selectedThreadId = "";
+        } else if (type === "pending-request.removed") {
+            const scope = isObject(frame.scope) ? frame.scope : {};
+            if (Object.hasOwn(scope, "requestId")) this.resolvingRequests.delete(JSON.stringify(scope.requestId));
         } else if (type === "notice.added") {
             const notice = isObject(data.notice) ? data.notice : {};
             const message = stringMember(notice, "message") || stringMember(notice, "reason") || stringMember(notice, "detail");
