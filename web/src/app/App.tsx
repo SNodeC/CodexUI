@@ -441,14 +441,15 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     let title = humanize(card.kind);
     let body: ReactNode;
     let phaseClass = "";
+    let phaseLabel = "";
     if (card.kind === "userMessage") {
-        const data = card.payload as UserMessageData; title = nestedCard ? "You · steering" : "You";
+        const data = card.payload as UserMessageData; title = "You"; phaseLabel = nestedCard ? "steering" : "";
         body = <><SafeMarkdown text={data.text} /><ImageRibbon paths={data.imagePaths} /></>;
     } else if (card.kind === "localPrompt") {
-        const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : nestedCard ? "You · steering" : "You";
+        const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You"; phaseLabel = nestedCard && data.state !== "failed" ? "steering" : "";
         body = <><div className="card-text">{data.prompt}</div><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}</>;
     } else if (card.kind === "agentMessage") {
-        const data = card.payload as AgentMessageData; title = "Codex"; phaseClass = data.finalAnswer ? "final" : "update";
+        const data = card.payload as AgentMessageData; title = "Codex"; phaseClass = data.finalAnswer ? "final" : "update"; phaseLabel = data.finalAnswer ? "final answer" : "update";
         body = <SafeMarkdown text={data.text} />;
     } else if (card.kind === "reasoning") {
         const data = card.payload as ReasoningData; title = "Reasoning";
@@ -484,7 +485,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     const activeWork = (card.kind === "commandExecution" || card.kind === "imageGeneration")
         && ["active", "inProgress", "running", "started"].includes((card.payload as CommandExecutionData | ImageGenerationData).status);
     return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${nestedCard ? "steering" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""}`} data-card-key={stableKey(card.key)}>
-        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{copyContent.text && <span className="card-copy-control"><button className={`card-copy-button${copyFeedback ? " feedback-active" : ""}`} onClick={() => void copy(copyContent)} aria-label="Copy card content"><CopyIcon key={copyFeedback?.sequence ?? 0} /></button>{copyFeedback && <span className={`card-copy-overlay${copyFeedback.failed ? " failed" : ""}`} role="status" aria-live="polite">{copyFeedback.text}</span>}</span>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
+        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{phaseLabel && <span className={`card-phase ${phaseClass || "steering"}`}>{phaseLabel}</span>}{copyContent.text && <span className="card-copy-control"><button className={`card-copy-button${copyFeedback ? " feedback-active" : ""}`} onClick={() => void copy(copyContent)} aria-label="Copy card content"><CopyIcon key={copyFeedback?.sequence ?? 0} /></button>{copyFeedback && <span className={`card-copy-overlay${copyFeedback.failed ? " failed" : ""}`} role="status" aria-live="polite">{copyFeedback.text}</span>}</span>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
 

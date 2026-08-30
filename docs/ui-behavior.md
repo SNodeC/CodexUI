@@ -134,8 +134,9 @@ explicit error state.
 
 A prompt that starts a turn is the outer soft-blue turn card. A prompt admitted
 through `turn.steer` appears immediately inside the active turn as an animated
-teal `You · steering` card. After acknowledgment, the same widget becomes a
-soft-teal inset steering card with the canonical teal border and title treatment.
+teal `You` card with a right-aligned `steering` specialization. After
+acknowledgment, the same widget becomes a soft-teal inset steering card with
+the canonical teal border and title treatment.
 No optimistic card is exchanged for a second widget, and the turn grows around
 it without changing existing nested card identity.
 
@@ -230,6 +231,10 @@ lighter peak and back, and a rounded, non-layout-shifting `Copied` overlay
 appears at the action. Web clipboard failure uses the same
 local overlay with canonical error styling; reduced-motion mode suppresses the
 breath without suppressing the result.
+
+Message specializations (`steering`, `update`, and `final answer`) use normal
+font weight and sit at the right of the header immediately before Copy. The
+title remains at the left; no separator glyph is rendered.
 
 Pending-request dialogs validate required answers and structured MCP content
 before accepting the modal. Invalid input keeps the dialog and all entered

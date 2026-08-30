@@ -86,7 +86,26 @@ test("nested user messages expose the steering identity", () => {
         onToggle() {},
     }));
     assert.match(markup, /conversation-card userMessage[^"]*steering/u);
-    assert.match(markup, /You · steering/u);
+    assert.match(markup, />You<\/span>[\s\S]*card-phase steering">steering</u);
+    assert.ok(markup.indexOf("card-phase steering") < markup.indexOf("card-copy-button"));
+    assert.doesNotMatch(markup, /[·•]\s*steering/u);
+});
+
+test("Codex phases are plain right-side metadata before Copy", () => {
+    const update = itemCard("agentMessage", "update", {text: "Working", finalAnswer: false});
+    const updateMarkup = renderToStaticMarkup(createElement(Card, {
+        card: update, active: true, collapsed: false, onToggle() {},
+    }));
+    assert.match(updateMarkup, /card-phase update">update</u);
+    assert.ok(updateMarkup.indexOf("card-phase update") < updateMarkup.indexOf("card-copy-button"));
+    assert.doesNotMatch(updateMarkup, /[·•]\s*update/u);
+
+    const final = itemCard("agentMessage", "final", {text: "Done", finalAnswer: true});
+    const finalMarkup = renderToStaticMarkup(createElement(Card, {
+        card: final, active: false, collapsed: false, onToggle() {},
+    }));
+    assert.match(finalMarkup, /card-phase final">final answer</u);
+    assert.ok(finalMarkup.indexOf("card-phase final") < finalMarkup.indexOf("card-copy-button"));
 });
 
 test("message attachments retain one horizontal ribbon in source order", () => {

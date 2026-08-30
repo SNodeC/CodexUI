@@ -1119,8 +1119,6 @@ bool testMutableCardsAndCommandOutput() {
       CardKey{AuthoritativeItemKey{thread, "turn", "user"}})];
   auto *agentCardWidget = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "agent"}})];
-  auto *agentPhaseSeparator = agentCardWidget->findChild<QLabel *>(
-      QStringLiteral("agentMessagePhaseSeparator"));
   auto *agentPhase =
       agentCardWidget->findChild<QLabel *>(QStringLiteral("agentMessagePhase"));
   const auto userLabels = userCard->findChildren<QLabel *>();
@@ -1140,15 +1138,15 @@ bool testMutableCardsAndCommandOutput() {
                  }),
              "authoritative user messages render GitHub Markdown tables");
   result &= expect(
-      titleText(agentCardWidget) == QStringLiteral("Codex") &&
-          agentPhaseSeparator &&
-          agentPhaseSeparator->text() == QStringLiteral("•") && agentPhase &&
+      titleText(agentCardWidget) == QStringLiteral("Codex") && agentPhase &&
           agentPhase->text() == QStringLiteral("update") &&
           agentPhase->property("tone").toString() == QStringLiteral("active") &&
-          agentPhaseSeparator->property("tone").toString() ==
-              QStringLiteral("active") &&
-          agentPhase->font().weight() == QFont::Normal,
-      "interim agent messages show a normal-weight active update phase");
+          agentPhase->font().weight() == QFont::Normal &&
+          agentPhase->parentWidget()->layout()->indexOf(agentPhase) <
+              agentPhase->parentWidget()->layout()->indexOf(
+                  copyButton(agentCardWidget)),
+      "interim agent messages show a right-aligned normal-weight update "
+      "phase before Copy");
   auto *filesCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "files"}})];
   auto *planCard = identities[stableKey(
@@ -1216,13 +1214,10 @@ bool testMutableCardsAndCommandOutput() {
     result &= expect(card(view, stableKey(value.key)) ==
                          identities[stableKey(value.key)],
                      "same-key same-kind card updates in place");
-  result &=
-      expect(titleText(agentCardWidget) == QStringLiteral("Codex") &&
-          agentPhaseSeparator && agentPhase &&
+  result &= expect(
+      titleText(agentCardWidget) == QStringLiteral("Codex") && agentPhase &&
           agentPhase->text() == QStringLiteral("final answer") &&
           agentPhase->property("tone").toString() ==
-              QStringLiteral("success") &&
-          agentPhaseSeparator->property("tone").toString() ==
               QStringLiteral("success") &&
           agentPhase->font().weight() == QFont::Normal,
       "final agent messages show a normal-weight success answer phase");
@@ -1461,16 +1456,24 @@ bool testCardFoldingGeometryAndRetention() {
                    "a steering prompt joins the active turn");
   spin(40);
   ConversationCard *steeringCard = card(view, stableKey(steeringKey));
+  auto *steeringPhase = steeringCard
+                            ? steeringCard->findChild<QLabel *>(
+                                  QStringLiteral("steeringMessagePhase"))
+                            : nullptr;
   auto *steeringAnimation = steeringCard
                                 ? steeringCard->findChild<QTimer *>(
                                       QString{}, Qt::FindDirectChildrenOnly)
                                 : nullptr;
-  result &=
-      expect(steeringCard && userCard->isAncestorOf(steeringCard) &&
+  result &= expect(
+      steeringCard && userCard->isAncestorOf(steeringCard) &&
           steeringCard->property("nestedConversationCard").toBool() &&
-          cardTitle(steeringCard) == QStringLiteral("You · steering") &&
-          cardTitleColor(steeringCard) ==
-              QColor(QStringLiteral("#146f73")) &&
+          cardTitle(steeringCard) == QStringLiteral("You") && steeringPhase &&
+          steeringPhase->text() == QStringLiteral("steering") &&
+          steeringPhase->font().weight() == QFont::Normal &&
+          steeringPhase->parentWidget()->layout()->indexOf(steeringPhase) <
+              steeringPhase->parentWidget()->layout()->indexOf(
+                  copyButton(steeringCard)) &&
+          cardTitleColor(steeringCard) == QColor(QStringLiteral("#146f73")) &&
           steeringAnimation && steeringAnimation->isActive(),
       "a pending steering You card is nested and keeps its animation");
 
@@ -1484,14 +1487,14 @@ bool testCardFoldingGeometryAndRetention() {
   ConversationCard *authoritativeSteering = card(view, stableKey(steeringKey));
   result &=
       expect(authoritativeSteering == steeringCard &&
-                       userCard->isAncestorOf(authoritativeSteering) &&
+                 userCard->isAncestorOf(authoritativeSteering) &&
                  authoritativeSteering->cardKind() == CardKind::UserMessage &&
-                       cardTitle(authoritativeSteering) ==
-                           QStringLiteral("You · steering") &&
-                       authoritativeSteering->palette().color(
-                           QPalette::Window) == QColor(QStringLiteral("#eefafa")) &&
-                       steeringAnimation && !steeringAnimation->isActive(),
-                   "steering acknowledgement morphs the same nested card");
+                 cardTitle(authoritativeSteering) == QStringLiteral("You") &&
+                 steeringPhase->text() == QStringLiteral("steering") &&
+                 authoritativeSteering->palette().color(QPalette::Window) ==
+                     QColor(QStringLiteral("#eefafa")) &&
+                 steeringAnimation && !steeringAnimation->isActive(),
+             "steering acknowledgement morphs the same nested card");
 
   auto retainedEmptyReasoning = std::ranges::find_if(
       snapshot.sections.front().cards, [&emptyReasoning](const auto &value) {
