@@ -96,6 +96,7 @@ struct UiConversationView {
   std::string title;
   std::string workspace;
   std::string status;
+  std::string statusTone;
   std::optional<std::int64_t> lastActivityAt;
   std::string emptyMessage;
   middle::ConversationSnapshot snapshot;

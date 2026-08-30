@@ -1077,7 +1077,9 @@ public:
       conversation.mode = UiConversationMode::Thread;
       conversation.title = thread->title;
       conversation.workspace = thread->cwd;
-      conversation.status = std::string(classifyStatus(thread->status).text);
+      const PresentationStatus status = classifyStatus(thread->status);
+      conversation.status = std::string(status.text);
+      conversation.statusTone = std::string(status.tone);
       conversation.lastActivityAt = thread->lastActivityAt;
       conversation.emptyMessage = "No materialized activity.";
     } else if (newThreadIntent) {

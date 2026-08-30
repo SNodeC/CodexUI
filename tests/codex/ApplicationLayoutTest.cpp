@@ -298,8 +298,10 @@ bool testOverlayGeometryAndRegionRouting() {
   region.resize(1500, 820);
   region.show();
   region.setThreadHeading(QStringLiteral("Thread title"),
-                          QStringLiteral("/workspace  |  Completed"),
-                          QStringLiteral("Last activity: 14:15:51"));
+                          QStringLiteral("/workspace"),
+                          QStringLiteral("Last activity: 14:15:51"),
+                          QStringLiteral("Completed"),
+                          QStringLiteral("success"));
   spin(20);
 
   QSplitter *splitter = region.splitterWidget();
@@ -323,6 +325,8 @@ bool testOverlayGeometryAndRegionRouting() {
   auto *conversationTrailingMetadata =
       splitter->widget(1)->findChild<QLabel *>(
           QStringLiteral("conversationTrailingMetadata"));
+  auto *conversationState = splitter->widget(1)->findChild<QLabel *>(
+      QStringLiteral("conversationState"));
   auto *reasoningToggle = splitter->widget(1)->findChild<QToolButton *>(
           QStringLiteral("conversationReasoningToggle"));
   auto *updatesToggle = splitter->widget(1)->findChild<QToolButton *>(
@@ -350,16 +354,20 @@ bool testOverlayGeometryAndRegionRouting() {
       "Threads and Conversation header dividers share the 10 px inset");
   result &=
       expect(conversationTitle && conversationMetadata &&
-                 conversationTrailingMetadata &&
+                 conversationTrailingMetadata && conversationState &&
                  conversationMetadata->geometry().left() >
                      conversationTitle->geometry().right() &&
-                 conversationTrailingMetadata->geometry().right() >=
-                     conversationTrailingMetadata->parentWidget()->width() -
-                         16 &&
+                 conversationTrailingMetadata->geometry().right() <
+                     conversationState->geometry().left() &&
+                 conversationState->geometry().right() >=
+                     conversationState->parentWidget()->width() - 16 &&
                  conversationTrailingMetadata->text() ==
                      QStringLiteral("Last activity: 14:15:51") &&
                  conversationTrailingMetadata->property("tone").toString() ==
                      QStringLiteral("strong") &&
+                 conversationState->text() == QStringLiteral("Completed") &&
+                 conversationState->property("tone").toString() ==
+                     QStringLiteral("success") &&
                  conversationTrailingMetadata->width() >=
                      conversationTrailingMetadata->fontMetrics()
                          .horizontalAdvance(

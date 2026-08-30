@@ -72,6 +72,7 @@ test("thread hierarchy exposes selected tree-item semantics", () => {
     assert.match(markup, /role="treeitem" aria-level="1" aria-selected="true"/u);
     assert.match(markup, /aria-current="true" aria-label="Open Accessible thread, \/workspace"/u);
     assert.match(markup, /class="conversation-lockup"[\s\S]*Last activity:/u);
+    assert.match(markup, /Last activity:[\s\S]*<strong class="success">Completed<\/strong>/u);
     session.dispose();
 });
 

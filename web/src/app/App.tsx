@@ -642,9 +642,9 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
     return <main ref={pane} className="conversation-pane" tabIndex={-1}>
         <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">Conversation</span>
             <div className="conversation-lockup"><h1>{thread?.title ?? (snapshot.newThreadIntent ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
-                <p className="conversation-meta">{thread ? [thread.cwd, classifyStatus(thread.status).text].filter(Boolean).join(" | ")
+                <p className="conversation-meta">{thread ? thread.cwd
                     : snapshot.newThreadIntent ? `${snapshot.newThreadDraft?.workspace ?? ""} | Send a message to create this thread.` : "Choose a thread from the left."}</p>
-                {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)}</p>}</div></div>
+                {thread?.lastActivityAt !== undefined && <p className="conversation-activity">{lastActivityText(thread.lastActivityAt)} <span aria-hidden="true">|</span> <strong className={classifyStatus(thread.status).tone}>{classifyStatus(thread.status).text}</strong></p>}</div></div>
             <div className={`conversation-heading-actions${paneControls ? " responsive" : ""}`}>
                 {paneControls && <div className="responsive-pane-controls">{paneControls}</div>}
                 <div className="conversation-view-controls" aria-label="Conversation presentation">

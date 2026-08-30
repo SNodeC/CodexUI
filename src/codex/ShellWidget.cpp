@@ -557,18 +557,14 @@ void ShellWidget::Impl::render() {
       text(view.conversation.emptyMessage));
   middleRegion->conversation().reconcile(view.conversation.snapshot);
   if (view.conversation.mode == UiConversationMode::Thread) {
-    QStringList metadata;
-    if (!view.conversation.workspace.empty())
-      metadata << text(view.conversation.workspace);
-    if (!view.conversation.status.empty())
-      metadata << text(view.conversation.status);
     const QString activity = view.conversation.lastActivityAt
                                  ? lastActivityText(
                                        *view.conversation.lastActivityAt)
                                  : QString{};
     middleRegion->setThreadHeading(
         text(view.conversation.title),
-        metadata.join(QStringLiteral("  |  ")), activity);
+        text(view.conversation.workspace), activity,
+        text(view.conversation.status), text(view.conversation.statusTone));
   } else if (view.conversation.mode == UiConversationMode::NewThread) {
     middleRegion->setThreadHeading(text(view.conversation.title),
                                    text(view.conversation.workspace));
