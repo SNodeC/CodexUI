@@ -368,6 +368,9 @@ bool testOverlayGeometryAndRegionRouting() {
                  conversationState->text() == QStringLiteral("Completed") &&
                  conversationState->property("tone").toString() ==
                      QStringLiteral("success") &&
+                 conversationState->width() >=
+                     conversationState->fontMetrics().horizontalAdvance(
+                         conversationState->text()) &&
                  conversationTrailingMetadata->width() >=
                      conversationTrailingMetadata->fontMetrics()
                          .horizontalAdvance(

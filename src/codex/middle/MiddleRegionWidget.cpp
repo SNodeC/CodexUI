@@ -248,8 +248,12 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
                                               QSizePolicy::Preferred);
   conversationStateSeparator = makeLabel(QStringLiteral("|"), "meta");
   conversationStateSeparator->setProperty("tone", "strong");
+  conversationStateSeparator->setSizePolicy(QSizePolicy::Minimum,
+                                            QSizePolicy::Preferred);
   conversationState = makeLabel({}, "meta");
   conversationState->setObjectName(QStringLiteral("conversationState"));
+  conversationState->setSizePolicy(QSizePolicy::Minimum,
+                                   QSizePolicy::Preferred);
   conversationTitle->setAlignment(Qt::AlignLeft | Qt::AlignTop);
   conversationMetadata->setAlignment(Qt::AlignLeft | Qt::AlignTop);
   conversationTrailingMetadata->setAlignment(Qt::AlignRight | Qt::AlignTop);
