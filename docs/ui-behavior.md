@@ -191,7 +191,8 @@ overflow appears only when required, while its vertical size remains bounded by
 the tallest thumbnail. A standard 1 px neutral border, 6 px radius, 4 px inner
 padding, and soft-neutral surface enclose both thumbnails and scrollbar. The
 ribbon remains subordinate content of its existing card, never a nested card.
-Available thumbnails are named keyboard targets and open with Enter or Space;
+Available thumbnails are named keyboard targets and open on mouse release
+inside the thumbnail or with Enter or Space;
 unavailable placeholders remain announced but are not focusable. Markdown
 links in Conversation and Inspector content are reachable by keyboard.
 
@@ -223,9 +224,12 @@ accessible text provide the action label. Copy remains available while that
 card is collapsed; contentless cards omit it. Markdown cards copy their exact
 retained source as both plain clipboard text and `text/markdown`, never
 reconstructed rendered text. Structured cards copy a deterministic plain-text
-representation of their primary content.
-The web copy action reports success, unsupported clipboard access, and write
-failure through the canonical notice surface instead of failing silently.
+representation of their primary content. After a successful write, only the
+copy glyph performs one short breath from its darker hover color to a clearly
+lighter peak and back, and a rounded, non-layout-shifting `Copied` overlay
+appears at the action. Web clipboard failure uses the same
+local overlay with canonical error styling; reduced-motion mode suppresses the
+breath without suppressing the result.
 
 Pending-request dialogs validate required answers and structured MCP content
 before accepting the modal. Invalid input keeps the dialog and all entered

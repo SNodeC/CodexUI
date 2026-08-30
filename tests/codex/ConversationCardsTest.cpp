@@ -27,6 +27,8 @@
 #include <QThread>
 #include <QTimer>
 #include <QToolButton>
+#include <QToolTip>
+#include <QVariantAnimation>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -960,6 +962,24 @@ bool testCardCopyControls() {
              mime->data("text/markdown") == cases[index].expected.toUtf8()),
         "each content card copies its canonical source while collapsed or "
         "expanded");
+    if (index == 0) {
+      auto *pulse = button->findChild<QVariantAnimation *>();
+      result &= expect(
+          pulse && button->property("copyFeedbackActive").toBool() &&
+              pulse->startValue().value<QColor>() == QColor("#1d2633") &&
+              pulse->keyValueAt(0.5).value<QColor>() == QColor("#b9c4d2") &&
+              pulse->endValue().value<QColor>() == QColor("#1d2633") &&
+              QToolTip::isVisible() &&
+              QToolTip::text() == QStringLiteral("Copied"),
+          "Copy breathes from the hover color to a noticeably lighter peak "
+          "and back while showing the canonical transient Copied overlay");
+      const QSize cardSize = card.size();
+      spin(500);
+      result &= expect(!button->property("copyFeedbackActive").toBool() &&
+                           card.size() == cardSize,
+                       "Copy feedback completes once without changing card "
+                       "geometry");
+    }
     if (index == 0)
       result &= expect(
           button->parentWidget()->layout()->indexOf(button) <
@@ -2262,20 +2282,35 @@ bool testMessageImagePresentation() {
       card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
   if (thumbnail) {
     const QPointF local(thumbnail->rect().center());
-    QMouseEvent click(QEvent::MouseButtonPress, local, local,
+    QMouseEvent press(QEvent::MouseButtonPress, local, local,
                       thumbnail->mapToGlobal(local.toPoint()), Qt::LeftButton,
                       Qt::LeftButton, Qt::NoModifier);
-    QApplication::sendEvent(thumbnail, &click);
+    QApplication::sendEvent(thumbnail, &press);
     spin();
   }
   viewer = nullptr;
   for (QWidget *candidate : QApplication::topLevelWidgets())
-    if (candidate->objectName() == QStringLiteral("messageImageViewer"))
+    if (candidate->objectName() == QStringLiteral("messageImageViewer") &&
+        candidate->isVisible())
+      viewer = candidate;
+  result &= expect(!viewer, "mouse-down does not open the image viewer");
+  if (thumbnail) {
+    const QPointF local(thumbnail->rect().center());
+    QMouseEvent release(QEvent::MouseButtonRelease, local, local,
+                        thumbnail->mapToGlobal(local.toPoint()), Qt::LeftButton,
+                        Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(thumbnail, &release);
+    spin();
+  }
+  for (QWidget *candidate : QApplication::topLevelWidgets())
+    if (candidate->objectName() == QStringLiteral("messageImageViewer") &&
+        candidate->isVisible())
       viewer = candidate;
   delete card;
   spin();
   result &= expect(viewer && viewer->isVisible(),
-                   "an open viewer is independent of its originating card");
+                   "mouse-up opens a viewer that remains independent of its "
+                   "originating card");
   if (viewer)
     viewer->close();
   spin();
@@ -2306,10 +2341,14 @@ bool testGeneratedImagePresentationAndGenericBound() {
                    "generated-image card reuses the bounded thumbnail");
   if (thumbnail) {
     const QPointF local(thumbnail->rect().center());
-    QMouseEvent click(QEvent::MouseButtonPress, local, local,
+    QMouseEvent press(QEvent::MouseButtonPress, local, local,
                       thumbnail->mapToGlobal(local.toPoint()), Qt::LeftButton,
                       Qt::LeftButton, Qt::NoModifier);
-    QApplication::sendEvent(thumbnail, &click);
+    QApplication::sendEvent(thumbnail, &press);
+    QMouseEvent release(QEvent::MouseButtonRelease, local, local,
+                        thumbnail->mapToGlobal(local.toPoint()), Qt::LeftButton,
+                        Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(thumbnail, &release);
     spin();
   }
   QWidget *viewer = nullptr;
