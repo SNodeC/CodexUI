@@ -3,10 +3,16 @@ import test from "node:test";
 
 import {
     applySettingChange, canonicalSettingValues, canonicalThreadSettings, changeSettingDraft, collaborationMode, negativePendingResponse,
-    pendingDecisionOptions, pendingRequestDetails, pendingResponse, permissionProfileLabel, positivePendingResponse,
+    displayStatus, pendingDecisionOptions, pendingRequestDetails, pendingResponse, permissionProfileLabel, positivePendingResponse,
     sandboxPolicy, threadStartOptions, turnStartOptions,
     settingDraftFor, settingPromptOptions,
 } from "../dist/index.js";
+
+test("status presentation is lowercase and human-readable", () => {
+    assert.equal(displayStatus("inProgress"), "running");
+    assert.equal(displayStatus("notLoaded"), "not loaded");
+    assert.equal(displayStatus("futureProviderState"), "future provider state");
+});
 
 test("native turn-setting option shaping", () => {
     assert.deepEqual(canonicalThreadSettings(

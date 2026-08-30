@@ -112,6 +112,11 @@ test("browser session uses the C++ action routing and preserves prompt-response 
     assert.equal(start.payload.params.threadId, "thread-1");
     assert.equal(start.payload.params.input[0].text, "new prompt");
     assert.match(start.payload.params.clientUserMessageId, /^codexui-/u);
+    assert.equal(session.conversation().sections[0].cards[0].payload.showPendingAnimation, false,
+        "newly admitted prompts begin without motion");
+    await new Promise(resolve => setTimeout(resolve, 1050));
+    assert.equal(session.conversation().sections[0].cards[0].payload.showPendingAnimation, true,
+        "the session republishes delayed feedback after one second");
 
     socket.receive(appserver({jsonrpc: "2.0", method: "turn/started", params: {
         threadId: "thread-1", turn: {id: "turn-1", status: "inProgress", items: []},
@@ -134,9 +139,44 @@ test("browser session uses the C++ action routing and preserves prompt-response 
     assert.equal(visible[1], stableKey({kind: "item", threadId: "thread-1", turnId: "turn-1", itemId: "reasoning-1"}));
     assert.equal(session.model.connection().connected, true);
     assert.equal(session.model.connection().providerState, "ready");
-    await new Promise(resolve => setTimeout(resolve, 510));
     assert.equal(session.conversation().sections[0].cards[0].kind, "userMessage",
-        "the native 500ms acknowledgement timer materializes without another server event");
+        "correlated acknowledgement materializes without a post-ack timer");
+    session.dispose();
+});
+
+test("acknowledged turn roots stay active across a delayed lifecycle event", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "border-handoff");
+    respond(socket, requests(socket, "thread/list").at(-1),
+        {data: [{id: "handoff-thread", status: {type: "idle"}}]});
+    session.selectThread("handoff-thread");
+    respond(socket, requests(socket, "thread/read").at(-1),
+        {thread: {id: "handoff-thread", status: {type: "idle"}, turns: []}});
+    await session.submitPrompt("handoff prompt"); await Promise.resolve();
+    const start = requests(socket, "turn/start").at(-1);
+    socket.receive(appserver({jsonrpc: "2.0", method: "item/started", params: {
+        threadId: "handoff-thread", turnId: "handoff-turn", item: {
+            id: "handoff-user", type: "userMessage", clientId: start.payload.params.clientUserMessageId,
+            content: [{type: "text", text: "handoff prompt"}],
+        },
+    }}));
+    respond(socket, start, {turn: {id: "handoff-turn"}});
+    await waitForPublish();
+    const promoted = session.conversation();
+    assert.equal(promoted.activeTurnId, "handoff-turn");
+    assert.equal(promoted.sections[0]?.cards[0]?.kind, "userMessage");
+
+    socket.receive(appserver({jsonrpc: "2.0", method: "turn/started", params: {
+        threadId: "handoff-thread", turn: {id: "handoff-turn", status: "inProgress", items: []},
+    }}));
+    await waitForPublish();
+    assert.equal(session.conversation().activeTurnId, "handoff-turn");
+    socket.receive(appserver({jsonrpc: "2.0", method: "turn/completed", params: {
+        threadId: "handoff-thread", turn: {id: "handoff-turn", status: "completed", items: []},
+    }}));
+    await waitForPublish();
+    assert.equal(session.conversation().activeTurnId, undefined);
     session.dispose();
 });
 

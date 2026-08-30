@@ -394,8 +394,7 @@ ConversationSnapshot ConversationProjection::project(
       continue;
     const AuthoritativeItem &item = authoritativeItems.ordered[index];
     const auto binding = bindings.find(item.key);
-    if (binding != bindings.end() &&
-        binding->second->localCardVisible(nowMilliseconds))
+    if (binding != bindings.end() && binding->second->localCardVisible())
       continue;
     CardKey visualKey =
         item.promptAlias ? CardKey{item.promptAlias->key} : CardKey{item.key};
@@ -482,7 +481,7 @@ ConversationSnapshot ConversationProjection::project(
   }
 
   for (const PromptSubmission &submission : localSubmissions) {
-    if (!submission.localCardVisible(nowMilliseconds))
+    if (!submission.localCardVisible())
       continue;
     std::optional<std::size_t> materializedIndex;
     if (submission.materializedItem)
@@ -512,7 +511,11 @@ ConversationSnapshot ConversationProjection::project(
                                          submission.state == PromptState::Queued
                                              ? PromptState::InFlight
                                              : submission.state,
-                                         submission.acceptedAtMilliseconds,
+                                         (submission.state == PromptState::Queued ||
+                                          submission.state == PromptState::InFlight) &&
+                                             nowMilliseconds -
+                                                     submission.admittedAtMilliseconds >=
+                                                 PendingAnimationDelayMilliseconds,
                                          submission.error,
                                          localImagePaths(submission)}};
     const bool authoritativeRootExists =

@@ -69,7 +69,7 @@ bottom or is owned by the user.
   unaffected.
 - The Plan inspector preserves app-server step states while the owning turn is
   active. If a stale step still reports `inProgress` after its owning turn or
-  thread becomes terminal, the display reconciles that step to Completed,
+  thread becomes terminal, the display reconciles that step to `completed`,
   Failed, or Interrupted. Pending steps remain Pending, and retained protocol
   data is not rewritten.
 - Each visible thread is presented as a compact card. Its status indicator is
@@ -110,9 +110,10 @@ events and Enter used to confirm an active input-method composition never
 submit a prompt.
 
 Submitting a prompt creates a client-local pending prompt card at the bottom of
-the destination thread immediately. The card uses a muted version of the normal
-blue user-card treatment, with a brighter blue highlight sweeping left and
-right across it until the app-server acknowledges the operation.
+the destination thread immediately. The card begins with the calm blue
+user-card treatment and an emphasized border. If the correlated app-server
+result has not arrived after one second, a brighter blue highlight begins
+sweeping left and right.
 Ordinary attached files appear as local Markdown links at the bottom of that
 card from its first frame. The same composed Markdown is sent to app-server and
 retained by the authoritative user message, so acknowledgment does not reflow
@@ -121,11 +122,12 @@ encoded as path content rather than being misread as a fragment or query.
 
 Each pending prompt has a process-wide client-local submission ID and remains
 associated with its destination thread. It therefore remains visible when the
-user switches threads and returns. On
-successful acknowledgment, the card shows a short accepted sweep before it
-becomes a normal user message. If the authoritative app-server item arrives
-during that transition, it inherits the pending card's stable visual anchor and
-replaces it after the 500-millisecond transition completes. Only the correlated
+user switches threads and returns. Successful acknowledgment or definitive
+failure stops delayed feedback immediately. The one-second timer controls only
+whether pending feedback is visible; it never acknowledges or promotes the
+prompt. If the authoritative app-server item arrives before or after the
+result, it inherits the pending card's stable visual anchor and replaces it as
+soon as both correlation and acknowledgment are complete. Only the correlated
 `turn.start` or `turn.steer` completion callback acknowledges a prompt;
 conversation events never infer acknowledgment. Each operation carries a
 unique `clientUserMessageId`, which binds the authoritative user item without
@@ -133,15 +135,21 @@ confusing identical prompt text. A failed submission remains visible with an
 explicit error state.
 
 A prompt that starts a turn is the outer soft-blue turn card. A prompt admitted
-through `turn.steer` appears immediately inside the active turn as an animated
-teal `You · steering` card. After acknowledgment, the same widget becomes a
-soft-teal inset steering card with the canonical teal border and title treatment.
+through `turn.steer` appears immediately inside the active turn as a calm teal
+`You` card with a right-aligned `steering` specialization. It uses the same
+one-second delayed-feedback rule as the outer card. After
+acknowledgment, the same widget becomes a soft-teal inset steering card with
+the canonical teal border and title treatment.
 No optimistic card is exchanged for a second widget, and the turn grows around
 it without changing existing nested card identity.
 
-After acknowledgment, the authoritative outer You card uses a stronger static
-blue border while its turn remains active. It has no animation, glow, shading,
-or geometry change. Completion restores the canonical border in place.
+At acknowledgment, the retained outer You card immediately uses the stronger
+static blue running border. That border belongs to the card across its local-
+prompt-to-authoritative-message morph while pending feedback stops; it
+has no animation, glow, shading, or geometry change. A successful `turn.start`
+result retains active ownership until the separate authoritative lifecycle
+catches up, so the optimistic-to-running handoff has no neutral-border frame.
+Completion restores the canonical border in place.
 
 The composer is cleared immediately after local admission and remains enabled.
 Users may enter additional prompts while earlier prompts await acknowledgment.
@@ -200,7 +208,13 @@ User messages use the canonical soft-blue identity surface. Final Codex
 messages use the canonical soft-violet identity surface, while interim Codex
 updates remain neutral and identify their phase in the header. Process cards
 also remain neutral so they support rather than dominate the primary exchange.
-Status text alone uses canonical semantic state colors.
+Their lifecycle status is a normal-weight lowercase value at the right of the
+header, immediately before Copy, and uses canonical semantic state colors.
+Thread rows, conversation metadata, Inspector entries, and process cards share
+the same vocabulary: `running`, `completed`, `failed`, `interrupted`, `pending`,
+and `not loaded`. Command exit
+code, cwd, and duration; file totals; and agent execution context remain below
+the primary content. Generated-image cards have no duplicate body-status row.
 
 Every conversation card with visible detail uses the same keyboard-focusable
 disclosure chevron: down when expanded and left when collapsed. Title-only
@@ -230,6 +244,10 @@ lighter peak and back, and a rounded, non-layout-shifting `Copied` overlay
 appears at the action. Web clipboard failure uses the same
 local overlay with canonical error styling; reduced-motion mode suppresses the
 breath without suppressing the result.
+
+Message specializations (`steering`, `update`, and `final answer`) use normal
+font weight and sit at the right of the header immediately before Copy. The
+title remains at the left; no separator glyph is rendered.
 
 Pending-request dialogs validate required answers and structured MCP content
 before accepting the modal. Invalid input keeps the dialog and all entered
@@ -411,8 +429,8 @@ correct launcher and taskbar icon.
 
 Long-running operations need scoped progress presentation rather than a global
 busy state. Candidate scopes include prompt acknowledgment, thread creation,
-and loading a long thread. Pending prompt acknowledgment already has its own
-animated highlight sweep. Any additional progress indicator must preserve input
+and loading a long thread. Overdue prompt acknowledgment already has its own
+delayed highlight sweep. Any additional progress indicator must preserve input
 and navigation that can safely remain interactive, identify the operation it
 represents, and avoid suggesting that unrelated threads are blocked. No general
 spinner contract is defined yet.

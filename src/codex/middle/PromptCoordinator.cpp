@@ -141,19 +141,9 @@ std::string promptWithFileLinks(std::string prompt,
   return prompt;
 }
 
-bool PromptSubmission::acceptedTransitionActive(
-    std::int64_t nowMilliseconds) const noexcept {
-  return state == PromptState::Accepted && acceptedAtMilliseconds > 0 &&
-         nowMilliseconds >= acceptedAtMilliseconds &&
-         nowMilliseconds - acceptedAtMilliseconds <
-             AcknowledgementTransitionMilliseconds;
-}
-
-bool PromptSubmission::localCardVisible(
-    std::int64_t nowMilliseconds) const noexcept {
+bool PromptSubmission::localCardVisible() const noexcept {
   return state == PromptState::Queued || state == PromptState::InFlight ||
-         state == PromptState::Failed || !materializedItem ||
-         acceptedTransitionActive(nowMilliseconds);
+         state == PromptState::Failed || !materializedItem;
 }
 
 std::uint64_t PromptCoordinator::admit(
@@ -171,6 +161,7 @@ std::uint64_t PromptCoordinator::admit(
   submission.prompt = std::move(prompt);
   submission.attachments = std::move(attachments);
   submission.turnOptions = std::move(turnOptions);
+  submission.admittedAtMilliseconds = nowMilliseconds;
   submission.expectedTurnId = std::move(activeTurnId);
 
   if (authoritativeThread) {
@@ -219,13 +210,11 @@ PromptCoordinator::beginNext(const std::string &threadId,
 
 bool PromptCoordinator::acknowledge(
     const std::string &threadId, std::uint64_t submissionId,
-    std::optional<std::string> authoritativeTurnId,
-    std::int64_t nowMilliseconds) {
+    std::optional<std::string> authoritativeTurnId) {
   PromptSubmission *pending = find(threadId, submissionId);
   if (!pending || pending->state != PromptState::InFlight)
     return false;
   pending->state = PromptState::Accepted;
-  pending->acceptedAtMilliseconds = nowMilliseconds;
   pending->error.clear();
   if (authoritativeTurnId)
     pending->expectedTurnId = std::move(authoritativeTurnId);
@@ -326,16 +315,14 @@ bool PromptCoordinator::reassignThread(const std::string &fromThreadId,
 }
 
 void PromptCoordinator::reconcile(const std::string &threadId,
-                                  const ThreadPresentation &authoritativeThread,
-                                  std::int64_t nowMilliseconds) {
+                                  const ThreadPresentation &authoritativeThread) {
   auto authoritativeItems =
       indexAuthoritativeItems(threadId, &authoritativeThread);
-  reconcile(threadId, authoritativeItems, nowMilliseconds);
+  reconcile(threadId, authoritativeItems);
 }
 
 void PromptCoordinator::reconcile(const std::string &threadId,
-                                  AuthoritativeItemIndex &authoritativeItems,
-                                  std::int64_t nowMilliseconds) {
+                                  AuthoritativeItemIndex &authoritativeItems) {
   applyVisualAliases(threadId, authoritativeItems);
   auto found = byThread.find(threadId);
   if (found == byThread.end())
@@ -415,8 +402,7 @@ void PromptCoordinator::reconcile(const std::string &threadId,
   }
   for (const PromptSubmission &submission : found->second) {
     if (submission.state != PromptState::Accepted ||
-        !submission.materializedItem ||
-        submission.acceptedTransitionActive(nowMilliseconds))
+        !submission.materializedItem)
       continue;
     visualAliasesByThread[threadId].insert_or_assign(
         *submission.materializedItem,
@@ -424,10 +410,9 @@ void PromptCoordinator::reconcile(const std::string &threadId,
                           submission.admissionAnchor,
                           submission.admissionOrdinal});
   }
-  std::erase_if(found->second, [nowMilliseconds](const auto &submission) {
+  std::erase_if(found->second, [](const auto &submission) {
     return submission.state == PromptState::Accepted &&
-           submission.materializedItem &&
-           !submission.acceptedTransitionActive(nowMilliseconds);
+           submission.materializedItem;
   });
   applyVisualAliases(threadId, authoritativeItems);
 }

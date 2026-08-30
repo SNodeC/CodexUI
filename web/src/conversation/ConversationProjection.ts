@@ -1,6 +1,6 @@
 import type {ItemPresentation, ThreadPresentation} from "../presentation/PresentationModel.js";
 import {isObject, member, stringMember} from "../presentation/PresentationProtocol.js";
-import {AuthoritativeHistoryPageSize, terminalOutputHasVisibleText} from "./MiddleTypes.js";
+import {AuthoritativeHistoryPageSize, PendingAnimationDelayMilliseconds, terminalOutputHasVisibleText} from "./MiddleTypes.js";
 import type {
     AgentActivityData, AgentMessageData, AuthoritativeItemKey, CardKey, CardKind, CardPayload,
     CommandExecutionData, ConversationSnapshot, FileChangeData, FileChangesData, GenericActivityData,
@@ -151,7 +151,8 @@ export function projectConversation(
     for (let index = suffixStart; index < authoritativeItems.ordered.length; ++index) retainedPositions.push(index);
     const hidden = suffixStart - pinnedRoots.size;
     const result: ConversationSnapshot = {
-        threadId: authoritativeItems.threadId, sections: [], hiddenAuthoritativeItemCount: hidden, hasMore: hidden > 0,
+        threadId: authoritativeItems.threadId, sections: [], hiddenAuthoritativeItemCount: hidden,
+        hasMore: hidden > 0, activeTurnId: undefined,
     };
     const bindings = new Map<string, PromptSubmission>();
     for (const submission of localSubmissions) if (submission.materializedItem)
@@ -161,7 +162,7 @@ export function projectConversation(
         const item = authoritativeItems.ordered[index]!;
         const identity = `${item.key.threadId}\0${item.key.turnId}\0${item.key.itemId}`;
         const binding = bindings.get(identity);
-        if (binding && localCardVisible(binding, nowMilliseconds)) continue;
+        if (binding && localCardVisible(binding)) continue;
         let visualKey: CardKey = item.promptAlias?.key ?? item.key;
         if (binding) visualKey = {kind: "prompt", submissionId: binding.id};
         let position = index * 2 + 1;
@@ -177,7 +178,7 @@ export function projectConversation(
             card: authoritativeCard(item.key, item.presentation, visualKey)});
     }
     for (const submission of localSubmissions) {
-        if (!localCardVisible(submission, nowMilliseconds)) continue;
+        if (!localCardVisible(submission)) continue;
         const materialized = submission.materializedItem
             ? authoritativePosition(authoritativeItems, submission.materializedItem) : undefined;
         const position = submissionPosition(submission, authoritativeItems, materialized);
@@ -188,7 +189,9 @@ export function projectConversation(
         const payload: LocalPromptData = {
             submissionId: submission.id, prompt: submission.prompt,
             state: submission.state === "queued" ? "inFlight" : submission.state,
-            acceptedAtMilliseconds: submission.acceptedAtMilliseconds, error: submission.error,
+            showPendingAnimation: (submission.state === "queued" || submission.state === "inFlight")
+                && nowMilliseconds - submission.admittedAtMilliseconds >= PendingAnimationDelayMilliseconds,
+            error: submission.error,
             imagePaths: localImagePaths(submission),
         };
         const turnRootPosition = authoritativeItems.turnRoots.get(turnId);

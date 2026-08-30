@@ -80,6 +80,7 @@ test("protocol labels are humanized only at the render boundary", () => {
     assert.equal(humanizeProtocolLabel("contextCompaction"), "Context compaction");
     assert.equal(humanizeProtocolLabel("thread.settings.changed"), "Thread settings changed");
     assert.equal(humanizeProtocolLabel("commandExecution"), "Command execution");
+    assert.equal(humanizeProtocolLabel("xhigh"), "Extra high");
     assert.equal("contextCompaction", "contextCompaction", "the protocol value remains unchanged");
 });
 
@@ -176,7 +177,7 @@ test("conversation presentation preferences retain filtered cards and initialize
     session.dispose();
 });
 
-test("Plan reconciles stale Running against terminal lifecycle without changing Pending", () => {
+test("Plan reconciles stale running against terminal lifecycle without changing pending", () => {
     const session = new BrowserFrontendSession("ws://bridge.test/codex", () => { throw new Error("not connected"); });
     session.model.applyEvent(event(1, 1, "thread.upsert", {thread: {id: "plan-thread", status: "active"}}, "merge", {threadId: "plan-thread"}));
     session.model.applyEvent(event(2, 1, "turn.upsert", {turn: {id: "plan-turn", status: "inProgress"}}, "merge", {threadId: "plan-thread", turnId: "plan-turn"}));
@@ -186,13 +187,13 @@ test("Plan reconciles stale Running against terminal lifecycle without changing 
     }, "replace", {threadId: "plan-thread", turnId: "plan-turn"}));
     session.selectThread("plan-thread");
     const render = () => renderToStaticMarkup(createElement(App, {session}));
-    assert.match(render(), /<small>Running<\/small>[\s\S]*<small>Pending<\/small>/u);
+    assert.match(render(), /<small>running<\/small>[\s\S]*<small>pending<\/small>/u);
 
-    for (const [sequence, source, display] of [[4, "completed", "Completed"], [5, "failed", "Failed"], [6, "interrupted", "Interrupted"]]) {
+    for (const [sequence, source, display] of [[4, "completed", "completed"], [5, "failed", "failed"], [6, "interrupted", "interrupted"]]) {
         session.model.applyEvent(event(sequence, 1, "thread.upsert", {thread: {id: "plan-thread", status: source}}, "merge", {threadId: "plan-thread"}));
         const markup = render();
-        assert.doesNotMatch(markup, /<small>Running<\/small>/u);
-        assert.match(markup, new RegExp(`<small>${display}</small>[\\s\\S]*<small>Pending</small>`, "u"));
+        assert.doesNotMatch(markup, /<small>running<\/small>/u);
+        assert.match(markup, new RegExp(`<small>${display}</small>[\\s\\S]*<small>pending</small>`, "u"));
     }
     session.dispose();
 });

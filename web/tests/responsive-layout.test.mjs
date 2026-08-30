@@ -72,7 +72,7 @@ test("thread hierarchy exposes selected tree-item semantics", () => {
     assert.match(markup, /role="treeitem" aria-level="1" aria-selected="true"/u);
     assert.match(markup, /aria-current="true" aria-label="Open Accessible thread, \/workspace"/u);
     assert.match(markup, /class="conversation-lockup"[\s\S]*Last activity:/u);
-    assert.match(markup, /Last activity:[\s\S]*<strong class="success">Completed<\/strong>/u);
+    assert.match(markup, /Last activity:[\s\S]*<strong class="success">completed<\/strong>/u);
     session.dispose();
 });
 
@@ -86,7 +86,9 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /@media \(max-width:\s*760px\)[\s\S]*\.top-bar\s*\{[^}]*flex-wrap:\s*wrap/u);
     assert.match(css, /\.conversation-heading \.conversation-activity\s*\{[^}]*color:\s*#1d2633/u);
     assert.match(css, /\.conversation-card\.userMessage\.steering\s*\{[^}]*background:\s*#eefafa;[^}]*border-color:\s*#9fd7d8/u);
-    assert.match(css, /\.conversation-card\.localPrompt\.steering\s*\{[^}]*#eefafa[^}]*#d9efef[^}]*border-color:\s*#78bdc0/u);
+    assert.match(css, /\.conversation-card\.localPrompt\.steering\s*\{[^}]*background:\s*#eefafa;[^}]*border-color:\s*#5caeb1/u);
+    assert.doesNotMatch(css, /acknowledgment-fade/u);
+    assert.match(css, /conversation-card\.turn-container\.active-turn[^}]*#6f98e8/u);
     assert.match(css, /\.send-button\.steer\s*\{[^}]*background:\s*#167b80[^}]*color:\s*#fff/u);
     assert.match(css, /\.send-button\.steer:hover\s*\{[^}]*background:\s*#126b70/u);
     assert.match(css, /\.send-button\.steer:active\s*\{[^}]*background:\s*#0f595d/u);
@@ -97,6 +99,9 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /\.composer-actions span\s*\{[^}]*color:\s*#667085/u);
     assert.match(css, /\.conversation-lockup\s*\{[^}]*align-items:\s*baseline/u);
     assert.match(css, /\.conversation-heading \.conversation-activity\s*\{[^}]*margin-left:\s*auto[^}]*text-align:\s*right/u);
+    assert.doesNotMatch(css, /font-variant-caps/u);
+    assert.match(css, /\.card-phase\.status\.active\s*\{[^}]*color:\s*#285fca/u);
+    assert.match(css, /\.card-phase\.status\.success\s*\{[^}]*color:\s*#176b45/u);
     assert.match(css, /\.card-copy-button\.feedback-active svg\s*\{[^}]*animation:\s*copy-breathe 440ms/u);
     assert.match(css, /@keyframes copy-breathe\s*\{[^}]*0%, 100%\s*\{[^}]*color:\s*#1d2633[^}]*\}[^}]*50%\s*\{[^}]*color:\s*#b9c4d2/u);
     assert.match(css, /\.card-copy-overlay\s*\{[^}]*border-radius:\s*6px[^}]*background:\s*#1d2633/u);

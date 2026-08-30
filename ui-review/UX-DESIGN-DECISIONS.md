@@ -103,15 +103,21 @@ interim Codex updates, and the initial Command execution and Image folds. Filter
 removes retained content, final answers remain visible, and changing the Command
 default does not override an existing card's user-owned state.
 
-Cards with content use one header action order: title/phase, flexible space,
-backgroundless copy icon, then disclosure. The two icons share a vertical
-center and the canonical compact 4 px action gap. Copy remains reachable on a
+Cards with content use one header action order: title, flexible space,
+normal-weight specialization, backgroundless copy icon, then disclosure. The
+specialization has no separator glyph. The two icons share a vertical center
+and the canonical compact 4 px action gap. Copy remains reachable on a
 collapsed card, while a contentless card omits it. Authored Markdown copies
 from the retained source with `text/markdown` and identical plain text;
 non-Markdown cards copy their deterministic primary-content text rather than
 rendered widget text. Copy feedback remains local to the action: the glyph
 breathes once from its darker hover color to a noticeably lighter peak and
 back, while a rounded `Copied` overlay appears without changing card geometry.
+Process lifecycle states use the same right-side slot before Copy, rendered as
+normal-weight lowercase values with canonical semantic colors. The same
+lowercase vocabulary is used in thread rows, conversation metadata, and the
+Inspector; raw camelCase protocol values are humanized. Non-status execution
+metadata remains in the card body.
 Folding is immediate rather than animated and anchors the selected title row,
 so content only contracts upward or grows downward below the interaction point.
 Multiple message images form one source-ordered horizontal ribbon. It keeps the
@@ -175,13 +181,16 @@ canonical geometry.
 
 ## Pending prompt presentation
 
-Local admission creates a muted-blue prompt card immediately. A brighter blue
-highlight sweeps left and right until app-server acknowledgment.
+Local admission creates a calm blue prompt card with an emphasized border
+immediately. A brighter blue highlight starts sweeping left and right only
+after one second without app-server acknowledgment.
 The card belongs to its destination thread and persists through navigation.
 Only the correlated `turn.start` or `turn.steer` completion callback
-acknowledges it. Each request carries a unique `clientUserMessageId`; after a
-successful callback the card keeps a 500-millisecond accepted transition before
-normal message presentation. Failure produces an explicit error state.
+acknowledges it. Each request carries a unique `clientUserMessageId`; the
+matching callback stops delayed feedback immediately and permits normal message
+presentation as soon as the authoritative item is correlated. Failure produces
+an explicit error state. Steering uses the same timing with the canonical teal
+hue.
 
 The authoritative outer You card uses a stronger static blue border while its
 turn is active. This state must not animate or alter card geometry; the moving
@@ -240,6 +249,6 @@ desktop identity.
 ## Long-operation feedback
 
 Progress feedback is scoped to the operation it represents. Prompt
-acknowledgment uses the pending card's animated highlight sweep. Thread creation
+acknowledgment uses a delayed highlight sweep only while overdue. Thread creation
 and long thread loading may receive dedicated scoped indicators, but no global
 spinner or application-wide input lock is defined.

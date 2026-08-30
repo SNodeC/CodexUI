@@ -146,15 +146,15 @@ public:
     pulse_->setKeyValueAt(0.5, QColor(QStringLiteral("#b9c4d2")));
     pulse_->setEndValue(QColor(QStringLiteral("#1d2633")));
     pulse_->setEasingCurve(QEasingCurve::InOutSine);
-    QObject::connect(pulse_, &QVariantAnimation::valueChanged, this,
-                     [this](const QVariant &value) {
-                       pulseColor_ = value.value<QColor>();
-                       const qreal phase = static_cast<qreal>(pulse_->currentTime()) /
-                                           pulse_->duration();
-                       pulseScale_ =
-                           1.0 + 0.12 * (1.0 - std::abs(2.0 * phase - 1.0));
-                       update();
-                     });
+    QObject::connect(
+        pulse_, &QVariantAnimation::valueChanged, this,
+        [this](const QVariant &value) {
+          pulseColor_ = value.value<QColor>();
+          const qreal phase =
+              static_cast<qreal>(pulse_->currentTime()) / pulse_->duration();
+          pulseScale_ = 1.0 + 0.12 * (1.0 - std::abs(2.0 * phase - 1.0));
+          update();
+        });
     QObject::connect(pulse_, &QVariantAnimation::finished, this, [this] {
       pulseScale_ = 1.0;
       pulseColor_ = QColor(QStringLiteral("#1d2633"));
@@ -312,8 +312,8 @@ public:
     setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     setStyleSheet(
         QStringLiteral("QScrollArea#messageImages{background:#fbfcfe;"
-        "border:1px solid #d7dee8;border-radius:6px;}"
-        "QWidget#messageImageStrip{background:transparent;}"));
+                       "border:1px solid #d7dee8;border-radius:6px;}"
+                       "QWidget#messageImageStrip{background:transparent;}"));
 
     strip_ = new QWidget;
     strip_->setObjectName(QStringLiteral("messageImageStrip"));
@@ -503,13 +503,8 @@ bool setVisibleMarkdown(QLabel *label, const QString &markdown) {
 
 QString displayStatus(const QString &status) {
   const QByteArray encoded = status.toUtf8();
-  const PresentationStatus classified = classifyStatus(std::string_view(
-      encoded.constData(), static_cast<std::size_t>(encoded.size())));
-  const QString display = QString::fromUtf8(
-      classified.text.data(), static_cast<qsizetype>(classified.text.size()));
-  return classified.kind == StatusKind::Unknown
-             ? UiStyle::humanizeLabel(display)
-             : display;
+  return text(codexui::codex::displayStatus(std::string_view(
+      encoded.constData(), static_cast<std::size_t>(encoded.size()))));
 }
 
 QString statusTone(const QString &status) {
@@ -532,7 +527,7 @@ void setStatusTone(QLabel *label, const QString &status) {
 }
 
 QString commandMetadata(const CommandExecutionData &command) {
-  QStringList metadata{displayStatus(text(command.status))};
+  QStringList metadata;
   if (command.exitCode)
     metadata << QStringLiteral("exit %1").arg(*command.exitCode);
   if (!command.cwd.empty())
@@ -549,8 +544,8 @@ QString agentMetadata(const AgentActivityData &activity) {
   QStringList metadata;
   if (!activity.tool.empty())
     metadata << text(activity.tool);
-  metadata << displayStatus(
-      text(activity.status.empty() ? activity.kind : activity.status));
+  if (activity.status.empty() && !activity.kind.empty())
+    metadata << displayStatus(text(activity.kind));
   if (!activity.receivers.empty())
     metadata << textList(activity.receivers).join(QStringLiteral(", "));
   if (!activity.model.empty())
@@ -627,7 +622,7 @@ QString planMarkdown(const PlanData &plan) {
   for (const PlanStepData &step : plan.steps) {
     const QString marker = step.status == "completed"    ? QStringLiteral("✓")
                            : step.status == "inProgress" ? QStringLiteral("◉")
-                                                      : QStringLiteral("○");
+                                                         : QStringLiteral("○");
     rows << QStringLiteral("%1 %2  ").arg(marker, text(step.text));
   }
   return rows.join(QLatin1Char('\n'));
@@ -657,7 +652,7 @@ CardCopyContent cardCopyContent(const VisibleCardData &card) {
           return {
               joinedCopyText({text(trimTrailingEmptyLines(payload.command)),
                               text(trimTrailingEmptyLines(payload.output))}),
-                  false};
+              false};
         } else if constexpr (std::is_same_v<Payload, AgentActivityData>) {
           return {
               joinedCopyText({text(payload.prompt), text(payload.resultText)}),
@@ -685,10 +680,6 @@ CardCopyContent cardCopyContent(const VisibleCardData &card) {
       card.payload);
 }
 
-bool acceptedTransitionActive(const LocalPromptData &prompt, qint64 now) {
-  return prompt.acceptedTransitionActive(now);
-}
-
 bool presentationEquals(const VisibleCardData &left,
                         const VisibleCardData &right) {
   if (left.kind != right.kind)
@@ -699,7 +690,7 @@ bool presentationEquals(const VisibleCardData &left,
     return first->prompt == second->prompt &&
            first->imagePaths == second->imagePaths &&
            first->state == second->state &&
-           first->acceptedAtMilliseconds == second->acceptedAtMilliseconds &&
+           first->showPendingAnimation == second->showPendingAnimation &&
            first->error == second->error;
   }
   return left.payload == right.payload;
@@ -1050,7 +1041,8 @@ public:
   }
 
   bool setAuthoritativeTurnActive(bool active) {
-    const bool next = active && current.kind == CardKind::UserMessage;
+    const bool next = active && (current.kind == CardKind::LocalPrompt ||
+                                 current.kind == CardKind::UserMessage);
     if (authoritativeTurnActive == next)
       return false;
     authoritativeTurnActive = next;
@@ -1062,9 +1054,16 @@ public:
   void setNestedConversationCard(bool nested) {
     owner->setProperty("nestedConversationCard", nested);
     if (current.kind == CardKind::UserMessage ||
-        current.kind == CardKind::LocalPrompt)
-      title->setText(nested ? QStringLiteral("You · steering")
-                            : QStringLiteral("You"));
+        current.kind == CardKind::LocalPrompt) {
+      title->setText(QStringLiteral("You"));
+      if (nested) {
+        showPhase(QStringLiteral("steering"),
+                  QStringLiteral("steeringMessagePhase"));
+        setPhaseTone(QStringLiteral("steering"));
+      } else if (phase) {
+        phase->hide();
+      }
+    }
     if (current.kind == CardKind::LocalPrompt)
       refreshPendingPresentation();
     owner->style()->unpolish(owner);
@@ -1074,7 +1073,7 @@ public:
 
   void setNestedCards(const std::vector<ConversationCard *> &cards) {
     const std::unordered_set<ConversationCard *> retained(cards.begin(),
-                                                           cards.end());
+                                                          cards.end());
     for (int index = nestedLayout->count() - 1; index >= 0; --index) {
       auto *card = dynamic_cast<ConversationCard *>(
           nestedLayout->itemAt(index)->widget());
@@ -1125,6 +1124,38 @@ public:
     copy->setVisible(!cardCopyContent(current).text.isEmpty());
   }
 
+  void showPhase(const QString &value, const QString &objectName) {
+    if (!phase) {
+      phase = makeLabel({}, "messagePhase", header);
+      phase->setWordWrap(false);
+      phase->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+      headerLayout->insertWidget(headerLayout->indexOf(copy), phase, 0,
+                                 Qt::AlignVCenter);
+    }
+    phase->setObjectName(objectName);
+    phase->setText(value);
+    phase->show();
+  }
+
+  void showStatus(const QString &status, const QString &objectName) {
+    if (status.isEmpty()) {
+      if (phase)
+        phase->hide();
+      return;
+    }
+    showPhase(displayStatus(status), objectName);
+    setStatusTone(phase, status);
+  }
+
+  void setPhaseTone(const QString &tone) {
+    if (!phase || phase->property("tone").toString() == tone)
+      return;
+    phase->setProperty("tone", tone);
+    phase->style()->unpolish(phase);
+    phase->style()->polish(phase);
+    phase->update();
+  }
+
   void setActiveWork(bool active) {
     if (owner->property("activeWork").toBool() == active)
       return;
@@ -1158,19 +1189,7 @@ public:
   void createComposition(const AgentMessageData &message) {
     owner->setProperty("messageRole", "agent");
     title->setText(QStringLiteral("Codex"));
-    title->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-    phaseSeparator = makeLabel(QStringLiteral("•"), "messagePhase", header);
-    phaseSeparator->setObjectName(QStringLiteral("agentMessagePhaseSeparator"));
-    phaseSeparator->setWordWrap(false);
-    phaseSeparator->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
-    phase = makeLabel({}, "messagePhase", header);
-    phase->setObjectName(QStringLiteral("agentMessagePhase"));
-    phase->setWordWrap(false);
-    phase->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-    headerLayout->setStretch(0, 0);
-    headerLayout->insertWidget(1, phaseSeparator, 0, Qt::AlignVCenter);
-    headerLayout->insertWidget(2, phase, 0, Qt::AlignVCenter);
-    headerLayout->insertStretch(3, 1);
+    showPhase({}, QStringLiteral("agentMessagePhase"));
     body = makeMarkdownLabel({}, content);
     contentLayout->addWidget(body);
     updateComposition(message);
@@ -1184,12 +1203,12 @@ public:
       owner->style()->unpolish(owner);
       owner->style()->polish(owner);
     }
-    phase->setText(message.finalAnswer ? QStringLiteral("final answer")
-                                       : QStringLiteral("update"));
+    showPhase(message.finalAnswer ? QStringLiteral("final answer")
+                                  : QStringLiteral("update"),
+              QStringLiteral("agentMessagePhase"));
     const QString phaseStatus = message.finalAnswer
                                     ? QStringLiteral("completed")
                                     : QStringLiteral("inProgress");
-    setStatusTone(phaseSeparator, phaseStatus);
     setStatusTone(phase, phaseStatus);
     layout->setContentsMargins(12, message.finalAnswer ? 10 : 8, 12,
                                message.finalAnswer ? 10 : 8);
@@ -1216,6 +1235,7 @@ public:
 
   void updateComposition(const CommandExecutionData &execution) {
     setActiveWork(isActiveStatus(execution.status));
+    showStatus(text(execution.status), QStringLiteral("commandStatus"));
     const std::string trimmedCommand =
         trimTrailingEmptyLines(execution.command);
     const QString displayCommand = text(trimmedCommand);
@@ -1235,9 +1255,7 @@ public:
       // the documented follow-latest state.
       output->restoreScrollState({true, 0});
     }
-    metadata->setText(commandMetadata(execution));
-    setStatusTone(metadata, text(execution.status));
-    metadata->show();
+    setVisibleText(metadata, commandMetadata(execution));
   }
 
   void createComposition(const AgentActivityData &activity) {
@@ -1252,10 +1270,8 @@ public:
   }
 
   void updateComposition(const AgentActivityData &activity) {
-    metadata->setText(agentMetadata(activity));
-    setStatusTone(metadata, text(activity.status.empty() ? activity.kind
-                                                         : activity.status));
-    metadata->show();
+    showStatus(text(activity.status), QStringLiteral("agentActivityStatus"));
+    setVisibleText(metadata, agentMetadata(activity));
     setVisibleText(body, text(activity.prompt));
     setVisibleMarkdown(detail, text(activity.resultText));
   }
@@ -1282,14 +1298,13 @@ public:
 
   void updateComposition(const FileChangesData &changes) {
     setVisibleText(body, fileChangesText(changes));
-    QStringList values{displayStatus(text(changes.status))};
-    values << QStringLiteral("%1 paths").arg(changes.changes.size());
+    showStatus(text(changes.status), QStringLiteral("fileChangesStatus"));
+    QStringList values{QStringLiteral("%1 paths").arg(changes.changes.size())};
     if (const auto counts = totalDiffCounts(changes))
       values << QStringLiteral("+%1 −%2")
                     .arg(counts->additions)
                     .arg(counts->deletions);
     metadata->setText(values.join(QStringLiteral("  |  ")));
-    setStatusTone(metadata, text(changes.status));
     metadata->show();
   }
 
@@ -1306,9 +1321,7 @@ public:
 
   void createComposition(const ImageGenerationData &image) {
     title->setText(QStringLiteral("Generated image"));
-    metadata = makeLabel({}, "meta", content);
     body = makeLabel({}, "body", content);
-    contentLayout->addWidget(metadata);
     contentLayout->addWidget(body);
     createImageContainer();
     updateComposition(image);
@@ -1316,12 +1329,11 @@ public:
 
   void updateComposition(const ImageGenerationData &image) {
     setActiveWork(isActiveStatus(image.status));
+    showStatus(text(image.status), QStringLiteral("imageGenerationStatus"));
     const bool generated =
         !image.status.empty() || !image.revisedPrompt.empty();
     title->setText(generated ? QStringLiteral("Generated image")
                              : QStringLiteral("Image"));
-    setVisibleText(metadata, displayStatus(text(image.status)));
-    setStatusTone(metadata, text(image.status));
     setVisibleText(body, text(image.revisedPrompt));
     // A generated image can become readable at the same path as its status
     // advances, so its update remains the authoritative reload boundary.
@@ -1376,17 +1388,15 @@ public:
     const auto *prompt = std::get_if<LocalPromptData>(&current.payload);
     if (!prompt)
       return false;
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    const bool transitioning = acceptedTransitionActive(*prompt, now);
     const bool waiting = prompt->state == PromptState::Queued ||
                          prompt->state == PromptState::InFlight;
     const bool failed = prompt->state == PromptState::Failed;
     const bool steering = owner->property("nestedConversationCard").toBool();
-    const QString foreground = waiting || transitioning
-                                   ? steering ? QStringLiteral("#146f73")
-                                              : QStringLiteral("#536b8f")
-                               : failed ? QStringLiteral("#982f3d")
-                                        : QStringLiteral("#1d2633");
+    const QString foreground =
+        waiting
+            ? steering ? QStringLiteral("#146f73") : QStringLiteral("#536b8f")
+        : failed ? QStringLiteral("#982f3d")
+                 : QStringLiteral("#1d2633");
     const QString style =
         QStringLiteral("background:transparent;color:%1;").arg(foreground);
     bool changed = false;
@@ -1405,7 +1415,7 @@ public:
 
     changed = setVisibleText(metadata, status) || changed;
 
-    if (waiting || transitioning) {
+    if (waiting && prompt->showPendingAnimation) {
       if (!animationTimer->isActive())
         animationTimer->start();
     } else {
@@ -1421,7 +1431,6 @@ public:
   QWidget *header = nullptr;
   QHBoxLayout *headerLayout = nullptr;
   QLabel *title = nullptr;
-  QLabel *phaseSeparator = nullptr;
   QLabel *phase = nullptr;
   CardCopyButton *copy = nullptr;
   CardDisclosureButton *disclosure = nullptr;
@@ -1504,14 +1513,17 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
                             9.0);
     return;
   }
-  if (impl_->current.kind == CardKind::UserMessage &&
-      impl_->authoritativeTurnActive) {
+  const auto paintActiveTurnBorder = [this] {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setBrush(Qt::NoBrush);
     painter.setPen(QPen(QColor(QStringLiteral("#6f98e8")), 1.5));
     painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0), 8.0,
                             8.0);
+  };
+  if (impl_->current.kind == CardKind::UserMessage) {
+    if (impl_->authoritativeTurnActive)
+      paintActiveTurnBorder();
     return;
   }
   if (impl_->current.kind != CardKind::LocalPrompt)
@@ -1523,42 +1535,38 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
   QPainter painter(this);
   painter.setRenderHint(QPainter::Antialiasing);
   const QRectF bounds = QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5);
-  const qint64 now = QDateTime::currentMSecsSinceEpoch();
   const bool waiting = prompt->state == PromptState::Queued ||
                        prompt->state == PromptState::InFlight;
-  const bool transitioning = acceptedTransitionActive(*prompt, now);
   const bool failed = prompt->state == PromptState::Failed;
   const bool steering = property("nestedConversationCard").toBool();
-  const QColor background = waiting || transitioning
-                                ? QColor(steering ? QStringLiteral("#d9efef")
-                                                  : QStringLiteral("#dbe7f8"))
-                            : failed ? QColor(QStringLiteral("#fff0f2"))
-                                     : QColor(steering
-                                                  ? QStringLiteral("#eefafa")
+  const bool animated = waiting && prompt->showPendingAnimation;
+  const QColor background = failed
+                                ? QColor(QStringLiteral("#fff0f2"))
+                                : QColor(steering ? QStringLiteral("#eefafa")
                                                   : QStringLiteral("#eaf2ff"));
-  const QColor border = waiting || transitioning
-                            ? QColor(steering ? QStringLiteral("#78bdc0")
-                                              : QStringLiteral("#9eb9df"))
-                        : failed ? QColor(QStringLiteral("#efb8c0"))
-                                 : QColor(steering
-                                              ? QStringLiteral("#9fd7d8")
+  const QColor border = failed
+                            ? QColor(QStringLiteral("#efb8c0"))
+                        : waiting
+                            ? QColor(steering ? QStringLiteral("#5caeb1")
+                                              : QStringLiteral("#79a0d7"))
+                            : QColor(steering ? QStringLiteral("#9fd7d8")
                                               : QStringLiteral("#bfd3f9"));
   painter.setBrush(background);
-  painter.setPen(QPen(border, 1.0));
+  painter.setPen(QPen(border, waiting ? 1.5 : 1.0));
   painter.drawRoundedRect(bounds, 8.0, 8.0);
 
-  if (!waiting && !transitioning)
+  if (!animated) {
+    if (impl_->authoritativeTurnActive)
+      paintActiveTurnBorder();
     return;
+  }
 
+  const qint64 now = QDateTime::currentMSecsSinceEpoch();
   const qint64 phase = now % (2 * PendingHalfCycleMilliseconds);
-  const qreal position =
-      waiting ? phase <= PendingHalfCycleMilliseconds
-                    ? qreal(phase) / PendingHalfCycleMilliseconds
-                    : qreal(2 * PendingHalfCycleMilliseconds - phase) /
-                          PendingHalfCycleMilliseconds
-              : std::clamp(qreal(now - prompt->acceptedAtMilliseconds) /
-                               AcknowledgementTransitionMilliseconds,
-                           0.0, 1.0);
+  const qreal position = phase <= PendingHalfCycleMilliseconds
+                             ? qreal(phase) / PendingHalfCycleMilliseconds
+                             : qreal(2 * PendingHalfCycleMilliseconds - phase) /
+                                   PendingHalfCycleMilliseconds;
   const qreal center = bounds.left() + position * bounds.width();
   const qreal radius = std::max(28.0, bounds.width() * 0.24);
   QLinearGradient sweep(center - radius, 0.0, center + radius, 0.0);
@@ -1576,10 +1584,10 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
   painter.restore();
 
   painter.setBrush(Qt::NoBrush);
-  painter.setPen(QPen(QColor(steering ? QStringLiteral("#5caeb1")
-                                      : QStringLiteral("#79a0d7")),
-                      1.5));
+  painter.setPen(QPen(border, 1.5));
   painter.drawRoundedRect(bounds, 8.0, 8.0);
+  if (impl_->authoritativeTurnActive)
+    paintActiveTurnBorder();
 }
 
 ConversationCard *createConversationCard(const VisibleCardData &data,

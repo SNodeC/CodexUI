@@ -116,6 +116,7 @@ QString applicationStyleSheet() {
         QLabel[kind="brand"] { font-size: %3pt; font-weight: 600; }
         QLabel[kind="title"] { font-size: %2pt; font-weight: 600; }
         QLabel[kind="messagePhase"] { font-size: %2pt; font-weight: 400; }
+        QLabel[kind="messagePhase"][tone="steering"] { color: #146f73; }
         QLabel[kind="body"] { font-size: %2pt; }
         QLabel[kind="code"] { font-family: monospace; font-size: %2pt; font-weight: 400; }
         QLabel[kind="meta"] { color: #667085; font-size: %1pt; }
@@ -506,6 +507,8 @@ QString applicationStyleSheet() {
 
 QString humanizeLabel(QString value) {
   value = value.trimmed();
+  if (value.compare(QStringLiteral("xhigh"), Qt::CaseInsensitive) == 0)
+    return QStringLiteral("Extra high");
   QString result;
   result.reserve(value.size() + 4);
   bool space = false;

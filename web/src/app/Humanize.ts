@@ -1,5 +1,6 @@
 export function humanizeProtocolLabel(value: string): string {
     if (value === "contextCompaction") return "Context compaction";
+    if (value.toLocaleLowerCase() === "xhigh") return "Extra high";
     const result: string[] = [];
     let pendingSpace = false;
     const characters = [...value.trim()];

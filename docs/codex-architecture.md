@@ -112,8 +112,8 @@ deliberately small and protocol-complete:
   or focusing the composer and preserving its local-admission scroll behavior;
 - an optional read-only frame observer feeds the bounded Protocol diagnostic
   without giving that renderer state or replay authority;
-- absolute wakeups let the existing Qt timer drive deferred dispatch and visual
-  acknowledgment transitions without introducing another scheduler.
+- absolute wakeups let the existing Qt timer drive deferred dispatch and the
+  pending-feedback threshold without introducing another scheduler.
 
 Downward communication uses the value-type `PresentationClient`: generic
 correlated `execute(action, data, completion)`, fire-and-forget
@@ -661,19 +661,20 @@ are updated in place, absent keys are removed, new keys are inserted at their
 projected positions, and an identical typed projection is a true visual no-op.
 
 Prompt admission and app-server acknowledgment are separate states. On Send or
-Steer, CodexUI immediately appends a client-local pending user card to the
-destination thread. The card uses a muted blue user-prompt treatment and a
-Qt-painted highlight sweeping left and right until the correlated app-server
-result callback arrives. Only the matching `turn.start` or `turn.steer`
+Steer, CodexUI immediately appends a calm client-local user card with an
+emphasized blue or teal border to the destination thread. If the correlated
+app-server result has not arrived after one second, a Qt-painted highlight
+begins sweeping left and right. Only the matching `turn.start` or `turn.steer`
 completion callback acknowledges the prompt; conversation events cannot infer
 acknowledgment. Each request carries a unique `clientUserMessageId`, allowing
 the resulting user item to bind exactly even when prompts have identical text.
-A fast successful result retains a 500-millisecond accepted transition so the
-state change remains visible. Pending cards survive thread switching and
+The matching success or definitive failure stops the sweep immediately; the
+one-second wakeup changes presentation only and cannot acknowledge a request.
+Pending cards survive thread switching and
 become normal authoritative user messages when the corresponding app-server
-item materializes. The pending and authoritative forms share one visual key
-and anchor during the accepted transition. Once materialization and that
-transition are complete, the local submission is removed and the retained item
+item materializes. The pending and authoritative forms share one visual key,
+anchor, and active-turn border during that transition. Once materialization and
+acknowledgment are complete, the local submission is removed and the retained item
 uses its authoritative identity. Failure produces a retained error card.
 
 The composer remains enabled while acknowledgments are outstanding. Multiple
@@ -1595,8 +1596,8 @@ The remaining presentation-level choices are implemented as follows:
 - the Info/Protocol view retains at most 2,000 text blocks and the presentation
   model retains at most 256 authority-free telemetry records; the protocol
   statistics summary is below the expanding log;
-- pending prompt acknowledgment uses a per-thread animated card rather than an
-  application-wide busy state or composer lock;
+- overdue prompt acknowledgment uses delayed per-thread card feedback rather
+  than an application-wide busy state or composer lock;
 - reaching the conversation bottom re-enables automatic following, including
   after scrolling through composer-added trailing space or a contraction clamp;
 - paused conversation updates preserve the first visible stable card and its
