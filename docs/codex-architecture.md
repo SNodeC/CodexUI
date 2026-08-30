@@ -766,7 +766,9 @@ The Requests view presents each pending request independently. Command and
 file-change approvals use native decision enums, user-input answers preserve
 question IDs and support options/free text/secret input, MCP form responses
 return structured JSON, and permission approvals preserve the requested
-permission object and selected turn/session scope. Dynamic tools unavailable
+permission object and selected turn/session scope. Every requested permission
+field, including unknown future fields, is disclosed as literal structured
+detail before approval. Dynamic tools unavailable
 in CodexUI return a typed failed-tool response. Authentication, attestation,
 and unknown capabilities receive an explicit JSON-RPC error rather than
 remaining pending indefinitely. Canceling the dialog itself does not resolve

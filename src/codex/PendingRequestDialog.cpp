@@ -15,6 +15,7 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 
+#include <string_view>
 #include <vector>
 
 namespace codexui::codex {
@@ -75,6 +76,70 @@ void addDetail(QVBoxLayout *layout, const QString &label,
   if (!value.empty())
     layout->addWidget(
         wrapped(QStringLiteral("%1: %2").arg(label, text(value)), "meta"));
+}
+
+QString permissionKey(std::string_view key) {
+  if (key == "fileSystem")
+    return QStringLiteral("File system");
+  if (key == "network")
+    return QStringLiteral("Network");
+  if (key == "globScanMaxDepth")
+    return QStringLiteral("glob scan maximum depth");
+  return text(std::string(key));
+}
+
+QString permissionValue(const nlohmann::json &value) {
+  if (value.is_boolean())
+    return value.get<bool>() ? QStringLiteral("Yes") : QStringLiteral("No");
+  if (value.is_string())
+    return text(value.get<std::string>());
+  if (value.is_null())
+    return QStringLiteral("None");
+  return text(value.dump());
+}
+
+void addPermissionValue(QVBoxLayout *layout, const nlohmann::json &value,
+                        const QString &path) {
+  if (value.is_object()) {
+    if (value.empty()) {
+      layout->addWidget(wrapped(path.isEmpty()
+                                    ? QStringLiteral("None specified")
+                                    : QStringLiteral("%1: None").arg(path),
+                                "meta"));
+      return;
+    }
+    for (auto iterator = value.begin(); iterator != value.end(); ++iterator) {
+      const QString key = permissionKey(iterator.key());
+      addPermissionValue(layout, iterator.value(),
+                         path.isEmpty()
+                             ? key
+                             : QStringLiteral("%1 / %2").arg(path, key));
+    }
+    return;
+  }
+  if (value.is_array()) {
+    if (value.empty()) {
+      layout->addWidget(wrapped(path.isEmpty()
+                                    ? QStringLiteral("None specified")
+                                    : QStringLiteral("%1: None").arg(path),
+                                "meta"));
+      return;
+    }
+    for (qsizetype index = 0; index < static_cast<qsizetype>(value.size());
+         ++index) {
+      addPermissionValue(
+          layout, value[static_cast<std::size_t>(index)],
+          path.isEmpty()
+              ? QStringLiteral("Permission %1").arg(index + 1)
+              : QStringLiteral("%1 / %2").arg(path).arg(index + 1));
+    }
+    return;
+  }
+  layout->addWidget(
+      wrapped(QStringLiteral("%1: %2")
+                  .arg(path.isEmpty() ? QStringLiteral("Value") : path,
+                       permissionValue(value)),
+              "meta"));
 }
 
 void addChoice(QComboBox *combo, const QString &label, const char *value) {
@@ -244,9 +309,11 @@ PendingRequestDialog::present(const PendingRequestPresentation &request,
               stringValue(raw, "reason"));
     addDetail(contentLayout, QStringLiteral("Working directory"),
               stringValue(raw, "cwd"));
-    contentLayout->addWidget(wrapped(
-        QStringLiteral("Codex requests additional filesystem or network "
-                       "permissions. Review the reason before approving.")));
+    contentLayout->addWidget(wrapped(QStringLiteral("Requested permissions"),
+                                     "title"));
+    addPermissionValue(
+        contentLayout,
+        raw.value("permissions", nlohmann::json::object()), QString{});
     decision = new QComboBox;
     addChoice(decision, QStringLiteral("Approve for this turn"), "turn");
     addChoice(decision, QStringLiteral("Approve for this session"), "session");

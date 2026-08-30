@@ -986,6 +986,48 @@ bool verifyPendingRequestTextBoundaries() {
          expect(escapedLink, "the explicit MCP link escapes untrusted markup");
 }
 
+bool verifyPermissionRequestDisclosure() {
+  const nlohmann::json permissions =
+      {{"fileSystem",
+        {{"write", nlohmann::json::array({"/tmp/<untrusted>"})},
+         {"entries",
+          nlohmann::json::array(
+              {{{"access", "read"},
+                {"path", {{"type", "glob_pattern"}, {"pattern", "*.md"}}}}})}}},
+       {"network", {{"enabled", true}}},
+       {"futureCapability", {{"mode", "bounded"}}}};
+  bool completeDisclosure = false;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    QStringList displayed;
+    for (QLabel *label : dialog->findChildren<QLabel *>()) {
+      if (label)
+        displayed.push_back(label->text());
+    }
+    const QString all = displayed.join(QLatin1Char('\n'));
+    completeDisclosure =
+        all.contains(QStringLiteral("File system / write / 1: "
+                                    "/tmp/<untrusted>")) &&
+        all.contains(QStringLiteral("Network / enabled: Yes")) &&
+        all.contains(
+            QStringLiteral("futureCapability / mode: bounded"));
+    dialog->accept();
+  });
+  const PendingRequestPresentation request{
+      "permissions", "permissions-approval", "thread-a", 1,
+      {{"permissions", permissions}, {"reason", "test disclosure"}}};
+  const auto response = PendingRequestDialog::present(request, nullptr);
+  return expect(completeDisclosure,
+                "permission approval discloses known and future fields") &&
+         expect(response && response->error.is_null() &&
+                    response->result.value("permissions", nlohmann::json{}) ==
+                        permissions &&
+                    response->result.value("scope", std::string{}) == "turn",
+                "permission approval returns the exact disclosed object");
+}
+
 } // namespace
 } // namespace codexui::codex
 
@@ -999,6 +1041,7 @@ int main(int argc, char **argv) {
   codexui::codex::PresentationPeer peer(
       codexui::codex::FrontendSessionTestPeer::takeClientDescriptor(session));
   const bool result = codexui::codex::verifyPendingRequestTextBoundaries() &&
+                      codexui::codex::verifyPermissionRequestDisclosure() &&
                       codexui::codex::runShellFlow(session, peer);
   if (result)
     std::cout << "Shell integration test passed\n";
