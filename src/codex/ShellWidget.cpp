@@ -500,7 +500,7 @@ void ShellWidget::Impl::buildUi() {
   statusLayout->setSpacing(10);
   auto *attribution = new QLabel(QStringLiteral(
       "<span style=\"color:#344054;font-weight:600\">"
-      "© Volker Christian @ Codex</span>  |  "
+      "© Volker Christian &amp; Codex</span>  |  "
       "<a style=\"color:#344054;text-decoration:none;font-weight:600\" "
       "href=\"https://github.com/SNodeC/CodexUI\">CodexUI</a>  •  "
       "<a style=\"color:#344054;text-decoration:none;font-weight:600\" "

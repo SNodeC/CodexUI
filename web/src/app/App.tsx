@@ -630,7 +630,7 @@ export function App({session}: {session: BrowserFrontendSession}) {
             <Conversation session={session} revision={snapshot.revision} paneControls={responsiveMode === "desktop" ? undefined : paneControls} />
             {!inspectorOverlay && <Inspector session={session} revision={snapshot.revision} />}
         </div>
-        <footer className="status-bar" aria-hidden={activeDrawer ? true : undefined}><div><strong>© Volker Christian @ Codex</strong><span> | </span>
+        <footer className="status-bar" aria-hidden={activeDrawer ? true : undefined}><div><strong>© Volker Christian &amp; Codex</strong><span> | </span>
             <a href="https://github.com/SNodeC/CodexUI">CodexUI</a><span> • </span><a href="https://github.com/SNodeC/AISuite">AISuite</a><span> • </span>
             <small>Powered by</small> <a href="https://github.com/SNodeC/snode.c">SNode.C</a></div>
             <div className="global-status"><span>Status:</span><StatusDot tone={connectionTone} /><strong>{globalStatus}</strong></div></footer>
