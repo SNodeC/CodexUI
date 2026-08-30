@@ -346,8 +346,42 @@ PendingRequestDialog::present(const PendingRequestPresentation &request,
   auto *buttons =
       new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
   buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Submit"));
-  QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog,
-                   &QDialog::accept);
+  nlohmann::json acceptedAnswers = nlohmann::json::object();
+  nlohmann::json acceptedStructuredContent = nullptr;
+  QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+    if (request.kind == "user-input") {
+      nlohmann::json answers = nlohmann::json::object();
+      for (const QuestionEditor &question : questions) {
+        nlohmann::json values = nlohmann::json::array();
+        for (const auto &[label, choice] : question.choices) {
+          if (choice->isChecked())
+            values.push_back(label);
+        }
+        if (question.other && !question.other->text().trimmed().isEmpty())
+          values.push_back(question.other->text().toStdString());
+        if (values.empty()) {
+          QMessageBox::warning(&dialog, QStringLiteral("Incomplete response"),
+                               QStringLiteral("Answer every question before "
+                                              "submitting."));
+          return;
+        }
+        answers[question.id] = {{"answers", std::move(values)}};
+      }
+      acceptedAnswers = std::move(answers);
+    } else if (request.kind == "mcp-elicitation" && structuredContent &&
+               decision->currentData().toString() == QStringLiteral("accept")) {
+      nlohmann::json content = nlohmann::json::parse(
+          structuredContent->toPlainText().toStdString(), nullptr, false);
+      if (content.is_discarded() || !content.is_object()) {
+        QMessageBox::warning(&dialog, QStringLiteral("Invalid response"),
+                             QStringLiteral("The MCP response must be a valid "
+                                            "JSON object."));
+        return;
+      }
+      acceptedStructuredContent = std::move(content);
+    }
+    dialog.accept();
+  });
   QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog,
                    &QDialog::reject);
   root->addWidget(buttons);
@@ -360,39 +394,11 @@ PendingRequestDialog::present(const PendingRequestPresentation &request,
     response.result = {
         {"decision", decision->currentData().toString().toStdString()}};
   } else if (request.kind == "user-input") {
-    nlohmann::json answers = nlohmann::json::object();
-    for (const QuestionEditor &question : questions) {
-      nlohmann::json values = nlohmann::json::array();
-      for (const auto &[label, choice] : question.choices) {
-        if (choice->isChecked())
-          values.push_back(label);
-      }
-      if (question.other && !question.other->text().trimmed().isEmpty())
-        values.push_back(question.other->text().toStdString());
-      if (values.empty()) {
-        QMessageBox::warning(parent, QStringLiteral("Incomplete response"),
-                             QStringLiteral("Answer every question before "
-                                            "submitting."));
-        return std::nullopt;
-      }
-      answers[question.id] = {{"answers", std::move(values)}};
-    }
-    response.result = {{"answers", std::move(answers)}};
+    response.result = {{"answers", std::move(acceptedAnswers)}};
   } else if (request.kind == "mcp-elicitation") {
     const std::string action = decision->currentData().toString().toStdString();
-    nlohmann::json content = nullptr;
-    if (action == "accept" && structuredContent) {
-      content = nlohmann::json::parse(
-          structuredContent->toPlainText().toStdString(), nullptr, false);
-      if (content.is_discarded() || !content.is_object()) {
-        QMessageBox::warning(parent, QStringLiteral("Invalid response"),
-                             QStringLiteral("The MCP response must be a valid "
-                                            "JSON object."));
-        return std::nullopt;
-      }
-    }
     response.result = {{"action", action},
-                       {"content", std::move(content)},
+                       {"content", std::move(acceptedStructuredContent)},
                        {"_meta", nullptr}};
   } else if (request.kind == "permissions-approval") {
     const std::string scope = decision->currentData().toString().toStdString();

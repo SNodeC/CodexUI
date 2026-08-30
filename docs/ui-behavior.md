@@ -212,6 +212,10 @@ retained source as both plain clipboard text and `text/markdown`, never
 reconstructed rendered text. Structured cards copy a deterministic plain-text
 representation of their primary content.
 
+Pending-request dialogs validate required answers and structured MCP content
+before accepting the modal. Invalid input keeps the dialog and all entered
+content open for correction.
+
 The native and web Conversation headers expose persistent, matching icon-only
 controls for Reasoning visibility, interim Codex-update visibility, and the
 initial folding state of newly appearing Command execution and Image cards. Final Codex

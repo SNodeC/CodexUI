@@ -14,10 +14,14 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QElapsedTimer>
 #include <QFrame>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
+#include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QTabWidget>
 #include <QThread>
@@ -1060,6 +1064,98 @@ bool verifyPendingRequestTextBoundaries() {
          expect(escapedLink, "the explicit MCP link escapes untrusted markup");
 }
 
+bool verifyPendingRequestValidationRetainsInput() {
+  bool incompleteWarning = false;
+  bool questionDialogRetained = false;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    const auto edits = dialog->findChildren<QLineEdit *>();
+    auto *buttons = dialog->findChild<QDialogButtonBox *>();
+    auto *submit = buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
+    if (edits.size() != 2 || !submit)
+      return;
+    edits.front()->setText(QStringLiteral("Retained first answer"));
+    QTimer::singleShot(0, [&] {
+      auto *warning =
+          qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+      incompleteWarning = warning &&
+                          warning->windowTitle() ==
+                              QStringLiteral("Incomplete response");
+      if (warning)
+        warning->done(QMessageBox::Ok);
+    });
+    submit->click();
+    questionDialogRetained =
+        dialog->isVisible() &&
+        edits.front()->text() == QStringLiteral("Retained first answer");
+    edits.back()->setText(QStringLiteral("Second answer"));
+    submit->click();
+  });
+  const PendingRequestPresentation questions{
+      "questions", "user-input", "thread-a", 1,
+      {{"questions",
+        nlohmann::json::array(
+            {{{"id", "first"},
+              {"question", "First?"},
+              {"options", nlohmann::json::array()}},
+             {{"id", "second"},
+              {"question", "Second?"},
+              {"options", nlohmann::json::array()}}})}}};
+  const auto questionResponse =
+      PendingRequestDialog::present(questions, nullptr);
+  const bool answersPreserved =
+      questionResponse &&
+      questionResponse->result["answers"]["first"]["answers"] ==
+          nlohmann::json::array({"Retained first answer"}) &&
+      questionResponse->result["answers"]["second"]["answers"] ==
+          nlohmann::json::array({"Second answer"});
+
+  bool invalidJsonWarning = false;
+  bool mcpDialogRetained = false;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    auto *editor = dialog->findChild<QPlainTextEdit *>();
+    auto *buttons = dialog->findChild<QDialogButtonBox *>();
+    auto *submit = buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
+    if (!editor || !submit)
+      return;
+    editor->setPlainText(QStringLiteral("["));
+    QTimer::singleShot(0, [&] {
+      auto *warning =
+          qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+      invalidJsonWarning = warning &&
+                           warning->windowTitle() ==
+                               QStringLiteral("Invalid response");
+      if (warning)
+        warning->done(QMessageBox::Ok);
+    });
+    submit->click();
+    mcpDialogRetained = dialog->isVisible() &&
+                        editor->toPlainText() == QStringLiteral("[");
+    editor->setPlainText(QStringLiteral("{\"accepted\":true}"));
+    submit->click();
+  });
+  const PendingRequestPresentation elicitation{
+      "elicitation", "mcp-elicitation", "thread-a", 1,
+      {{"message", "Structured response"},
+       {"requestedSchema", {{"type", "object"}}}}};
+  const auto mcpResponse = PendingRequestDialog::present(elicitation, nullptr);
+  const bool validJsonReturned =
+      mcpResponse && mcpResponse->result.value("action", std::string{}) ==
+                         "accept" &&
+      mcpResponse->result["content"] == nlohmann::json({{"accepted", true}});
+
+  return expect(incompleteWarning && questionDialogRetained && answersPreserved,
+                "incomplete questions keep the modal and prior answers open") &&
+         expect(invalidJsonWarning && mcpDialogRetained && validJsonReturned,
+                "invalid MCP JSON remains editable until a valid object is "
+                "submitted");
+}
+
 bool verifyPermissionRequestDisclosure() {
   const nlohmann::json permissions =
       {{"fileSystem",
@@ -1114,7 +1210,10 @@ int main(int argc, char **argv) {
   codexui::codex::FrontendSession session(*configuration);
   codexui::codex::PresentationPeer peer(
       codexui::codex::FrontendSessionTestPeer::takeClientDescriptor(session));
+  const bool validationRetainsInput =
+      codexui::codex::verifyPendingRequestValidationRetainsInput();
   const bool result = codexui::codex::verifyPendingRequestTextBoundaries() &&
+                      validationRetainsInput &&
                       codexui::codex::verifyPermissionRequestDisclosure() &&
                       codexui::codex::runShellFlow(session, peer);
   if (result)
