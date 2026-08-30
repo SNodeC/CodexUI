@@ -59,6 +59,33 @@ test("browser session defaults to the bridge's canonical WebSocket endpoint", ()
     }
 });
 
+test("user thread operations are single-flight and report failures", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "operation-feedback");
+
+    session.renameThread("thread-1", "Renamed");
+    session.renameThread("thread-1", "Duplicate");
+    const rename = requests(socket, "thread/name/set");
+    assert.equal(rename.length, 1);
+    assert.equal(session.operationPending("thread.rename", "thread-1"), true);
+    reject(socket, rename[0], "rename denied");
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.operationPending("thread.rename", "thread-1"), false);
+    assert.match(session.getSnapshot().notice, /Rename thread failed: rename denied/u);
+
+    const listsBefore = requests(socket, "thread/list").length;
+    session.requestThreads(); session.requestThreads();
+    assert.equal(requests(socket, "thread/list").length, listsBefore + 1);
+    assert.equal(session.operationPending("threads.refresh"), true);
+    const refresh = requests(socket, "thread/list").at(-1);
+    reject(socket, refresh, "refresh denied");
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.operationPending("threads.refresh"), false);
+    assert.match(session.getSnapshot().notice, /Refresh threads failed: refresh denied/u);
+    session.dispose();
+});
+
 test("browser session uses the C++ action routing and preserves prompt-response order", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);

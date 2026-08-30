@@ -81,6 +81,7 @@ export class BrowserFrontendSession {
     private readonly protocolFrames: unknown[] = [];
     private readonly runtimeByThread = new Map<string, ThreadRuntimeState>();
     private readonly resolvingRequests = new Set<string>();
+    private readonly pendingUserOperations = new Set<string>();
     private readonly acceptedTransitionTimers = new Map<number, ReturnType<typeof setTimeout>>();
     private transport: WebSocketTransport | undefined;
     private selectedThreadId = "";
@@ -211,6 +212,7 @@ export class BrowserFrontendSession {
         if (this.noticeTimer) clearTimeout(this.noticeTimer);
         this.noticeTimer = undefined; this.notice = ""; this.publish();
     }
+    notify(message: string, error = false): void { this.setNotice(message, error); }
     claimController(): boolean { return this.sdk.claimController(); }
     releaseController(): boolean { return this.sdk.releaseController(); }
     canSubmit(): boolean {
@@ -312,21 +314,31 @@ export class BrowserFrontendSession {
         const turnId = this.model.activeTurnId(this.selectedThreadId);
         if (turnId) this.request("turn.interrupt", {threadId: this.selectedThreadId, turnId});
     }
-    requestThreads(): void { this.request("threads.list", {}); }
-    renameThread(threadId: string, name: string): void { this.request("thread.rename", {threadId, name}); }
+    operationPending(action: string, threadId = ""): boolean {
+        return this.pendingUserOperations.has(`${action}:${threadId}`);
+    }
+    requestThreads(): void {
+        void this.performUserOperation("threads.refresh", "threads.list", {}, "Refresh threads", false);
+    }
+    renameThread(threadId: string, name: string): void {
+        void this.performUserOperation("thread.rename", "thread.rename", {threadId, name}, "Rename thread");
+    }
     reloadThread(threadId: string): void { this.readThread(threadId, true); }
     forkThread(threadId: string): void {
-        this.requestPromise("thread.fork", {threadId}).then(response => {
+        this.performUserOperation("thread.fork", "thread.fork", {threadId}, "Fork thread")?.then(response => {
             const thread = isObject(response.data) ? member(response.data, "thread", {}) : {};
             const id = stringMember(thread, "id");
             if (response.ok && id !== "") this.selectThread(id);
-            else this.setNotice(this.errorMessage(response));
+            else if (response.ok) this.setNotice("Fork thread failed: no thread was returned.");
         });
     }
     archiveThread(threadId: string, archived: boolean): void {
-        this.request(archived ? "thread.unarchive" : "thread.archive", {threadId});
+        void this.performUserOperation("thread.archive", archived ? "thread.unarchive" : "thread.archive",
+            {threadId}, archived ? "Unarchive thread" : "Archive thread");
     }
-    deleteThread(threadId: string): void { this.request("thread.delete", {threadId}); }
+    deleteThread(threadId: string): void {
+        void this.performUserOperation("thread.delete", "thread.delete", {threadId}, "Delete thread");
+    }
     isPendingResolving(request: PendingRequestPresentation): boolean {
         return this.resolvingRequests.has(request.id);
     }
@@ -482,6 +494,26 @@ export class BrowserFrontendSession {
         return new Promise(resolve => this.request(action, parameters, (response, stale) => resolve(stale
             ? {ok: false, stale: true}
             : Object.hasOwn(response, "result") ? {ok: true, data: response.result} : {ok: false, error: response.error}), acceptResult));
+    }
+    private performUserOperation(keyAction: string, action: string, parameters: JsonObject,
+        failureContext: string, requiresControl = true): Promise<OperationResponse> | undefined {
+        const threadId = stringMember(parameters, "threadId");
+        const key = `${keyAction}:${threadId}`;
+        if (this.pendingUserOperations.has(key)) return undefined;
+        if (requiresControl ? !this.canSubmit() : !this.providerReady()) {
+            this.setNotice(`${failureContext} is unavailable until Codex is ready${requiresControl ? " and controlled" : ""}.`);
+            return undefined;
+        }
+        this.pendingUserOperations.add(key);
+        this.publish();
+        const operation = this.requestPromise(action, parameters);
+        void operation.then(response => {
+            this.pendingUserOperations.delete(key);
+            if (!response.ok && !response.stale)
+                this.setNotice(`${failureContext} failed: ${this.errorMessage(response)}`);
+            else this.publish();
+        });
+        return operation;
     }
     private dispatchNextPrompt(threadId: string): void {
         if (!this.canSubmit() || this.prompts.hasInFlight(threadId)) return;

@@ -155,12 +155,12 @@ function ThreadPane({session, revision, drawer = false, paneRef, onClose}: {sess
                 </button>
                 {thread && selected === id && <div className="thread-actions">
                     <button title="Reload" onClick={() => session.reloadThread(id)}>↻</button>
-                    <button title="Fork" onClick={() => session.forkThread(id)}>⑂</button>
-                    <button title={thread.archived ? "Unarchive" : "Archive"} onClick={() => session.archiveThread(id, thread.archived)}>□</button>
+                    <button title="Fork" disabled={!session.canSubmit() || session.operationPending("thread.fork", id)} onClick={() => session.forkThread(id)}>⑂</button>
+                    <button title={thread.archived ? "Unarchive" : "Archive"} disabled={!session.canSubmit() || session.operationPending("thread.archive", id)} onClick={() => session.archiveThread(id, thread.archived)}>□</button>
                     <button title="More actions" onClick={() => setActionOpen(current => current === id ? "" : id)}>•••</button>
                     {actionOpen === id && <div className="action-popover">
-                        <button onClick={() => { const name = window.prompt("Thread name", thread.title); if (name?.trim()) session.renameThread(id, name.trim()); }}>Rename</button>
-                        <button className="danger" onClick={() => { if (window.confirm("Delete the selected thread?")) session.deleteThread(id); }}>Delete</button>
+                        <button disabled={!session.canSubmit() || session.operationPending("thread.rename", id)} onClick={() => { const name = window.prompt("Thread name", thread.title); if (name?.trim()) session.renameThread(id, name.trim()); }}>Rename</button>
+                        <button className="danger" disabled={!session.canSubmit() || session.operationPending("thread.delete", id)} onClick={() => { if (window.confirm("Delete the selected thread?")) session.deleteThread(id); }}>Delete</button>
                     </div>}
                 </div>}
             </div>
@@ -176,7 +176,7 @@ function ThreadPane({session, revision, drawer = false, paneRef, onClose}: {sess
             {snapshot.optimisticThreads.map(thread => renderThread(thread.id, 0))}
             {session.threadOrder().filter(id => !snapshot.optimisticThreads.some(thread => thread.id === id)).map(id => renderThread(id, 0))}
         </div>
-        <button className="refresh-button" onClick={() => session.requestThreads()}>↻ Refresh threads</button>
+        <button className="refresh-button" disabled={session.operationPending("threads.refresh")} onClick={() => session.requestThreads()}>↻ Refresh threads</button>
     </aside>;
 }
 
@@ -263,21 +263,23 @@ export function cardCopyContent(card: VisibleCardData): CardCopyContent {
     return {text: JSON.stringify(data.raw, null, 2), markdown: false};
 }
 
-async function writeCardClipboard(content: CardCopyContent): Promise<void> {
-    if (!content.text || !navigator.clipboard) return;
+export async function writeCardClipboard(content: CardCopyContent): Promise<"copied" | "unsupported" | "failed"> {
+    if (!content.text || typeof navigator === "undefined" || !navigator.clipboard) return "unsupported";
     if (content.markdown && typeof ClipboardItem !== "undefined" && navigator.clipboard.write) {
         try {
             await navigator.clipboard.write([new ClipboardItem({
                 "text/plain": new Blob([content.text], {type: "text/plain"}),
                 "text/markdown": new Blob([content.text], {type: "text/markdown"}),
             })]);
-            return;
+            return "copied";
         } catch { /* Fall back to portable plain-text clipboard transport. */ }
     }
-    await navigator.clipboard.writeText(content.text);
+    if (typeof navigator.clipboard.writeText !== "function") return "unsupported";
+    try { await navigator.clipboard.writeText(content.text); return "copied"; }
+    catch { return "failed"; }
 }
 
-export function Card({card, active, collapsed, onToggle, nested, turnContainer = false}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; nested?: ReactNode; turnContainer?: boolean}) {
+export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy: (content: CardCopyContent) => void; nested?: ReactNode; turnContainer?: boolean}) {
     let title = humanize(card.kind);
     let body: ReactNode;
     let phaseClass = "";
@@ -321,7 +323,7 @@ export function Card({card, active, collapsed, onToggle, nested, turnContainer =
     const activeWork = (card.kind === "commandExecution" || card.kind === "imageGeneration")
         && ["active", "inProgress", "running", "started"].includes((card.payload as CommandExecutionData | ImageGenerationData).status);
     return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""}`} data-card-key={stableKey(card.key)}>
-        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{copyContent.text && <button className="card-copy-button" onClick={() => void writeCardClipboard(copyContent)} aria-label="Copy card content"><CopyIcon /></button>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}>{collapsed ? "＋" : "−"}</button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
+        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{copyContent.text && <button className="card-copy-button" onClick={() => onCopy(copyContent)} aria-label="Copy card content"><CopyIcon /></button>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}>{collapsed ? "＋" : "−"}</button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
 
@@ -381,12 +383,17 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
     const toggleCard = (key: string, collapsed: boolean) => {
         folding.current.set(key, !collapsed); forceCardState(value => value + 1);
     };
+    const copyCard = (content: CardCopyContent) => void writeCardClipboard(content).then(outcome => {
+        if (outcome === "copied") session.notify("Card content copied.");
+        else if (outcome === "unsupported") session.notify("Clipboard access is not available in this browser.", true);
+        else session.notify("Card content could not be copied.", true);
+    });
     const visibleSections = conversation.sections
         .map(section => ({...section, cards: section.cards.filter(cardVisible)}))
         .filter(section => section.cards.length > 0);
     const renderCard = (card: VisibleCardData, nested?: ReactNode, turnContainer = false) => {
         const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
-        return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} nested={nested} turnContainer={turnContainer} />;
+        return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} nested={nested} turnContainer={turnContainer} />;
     };
     return <main className="conversation-pane">
         <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">Conversation</span>

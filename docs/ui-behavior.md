@@ -212,6 +212,8 @@ card is collapsed; contentless cards omit it. Markdown cards copy their exact
 retained source as both plain clipboard text and `text/markdown`, never
 reconstructed rendered text. Structured cards copy a deterministic plain-text
 representation of their primary content.
+The web copy action reports success, unsupported clipboard access, and write
+failure through the canonical notice surface instead of failing silently.
 
 Pending-request dialogs validate required answers and structured MCP content
 before accepting the modal. Invalid input keeps the dialog and all entered
@@ -227,6 +229,10 @@ preference never refolds an existing card.
 Browser persistence is an optional convenience: unavailable or denied local
 storage falls back to canonical defaults and never prevents the UI from
 starting or accepting preference changes.
+Web thread refresh, rename, fork, archive, and delete actions are single-flight.
+Mutation controls require current controller readiness, remain disabled while
+their operation is pending, and report operation failures through the canonical
+notice surface.
 
 Folding is an explicit geometry transaction. Collapsing keeps the selected
 title row fixed while the natural scroll range permits and shifts following

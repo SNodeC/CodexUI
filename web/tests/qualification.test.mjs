@@ -3,7 +3,7 @@ import test from "node:test";
 import {renderToStaticMarkup} from "react-dom/server";
 import {createElement} from "react";
 
-import {App, inspectorPlainState} from "../dist/app/App.js";
+import {App, inspectorPlainState, writeCardClipboard} from "../dist/app/App.js";
 import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
 import {readBrowserStorage, writeBrowserStorage} from "../dist/app/BrowserStorage.js";
 import {event, humanizeProtocolLabel, result} from "../dist/index.js";
@@ -18,6 +18,27 @@ test("browser storage denial falls back without breaking startup or persistence"
         assert.doesNotThrow(() => writeBrowserStorage("preference", "true"));
         assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://codex.example/codex");
     } finally { delete globalThis.window; }
+});
+
+test("clipboard writes report success, unsupported access, and failure honestly", async () => {
+    const retainedNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    let copied = "";
+    try {
+        Object.defineProperty(globalThis, "navigator", {configurable: true, value: {
+            clipboard: {writeText: async value => { copied = value; }},
+        }});
+        assert.equal(await writeCardClipboard({text: "copy me", markdown: false}), "copied");
+        assert.equal(copied, "copy me");
+        Object.defineProperty(globalThis, "navigator", {configurable: true, value: {}});
+        assert.equal(await writeCardClipboard({text: "copy me", markdown: false}), "unsupported");
+        Object.defineProperty(globalThis, "navigator", {configurable: true, value: {
+            clipboard: {writeText: async () => { throw new Error("denied"); }},
+        }});
+        assert.equal(await writeCardClipboard({text: "copy me", markdown: false}), "failed");
+    } finally {
+        if (retainedNavigator) Object.defineProperty(globalThis, "navigator", retainedNavigator);
+        else delete globalThis.navigator;
+    }
 });
 
 test("server-rendered shell exposes keyboard and landmark semantics", () => {
