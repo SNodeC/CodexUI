@@ -35,7 +35,8 @@ public:
   [[nodiscard]] QSplitter *splitterWidget() const noexcept;
 
   void setThreadHeading(QString title, QString metadata,
-                        QString trailingMetadata = {});
+                        QString trailingMetadata = {},
+                        QString state = {}, QString stateTone = {});
   void showNotice(QString message, bool error = true);
   void showSidebar(bool visible);
   void showInspector(bool visible);
@@ -58,6 +59,8 @@ private:
   QLabel *conversationTitle = nullptr;
   QLabel *conversationMetadata = nullptr;
   QLabel *conversationTrailingMetadata = nullptr;
+  QLabel *conversationStateSeparator = nullptr;
+  QLabel *conversationState = nullptr;
   QToolButton *reasoningVisibility = nullptr;
   QToolButton *updateVisibility = nullptr;
   QToolButton *commandInitialFolding = nullptr;

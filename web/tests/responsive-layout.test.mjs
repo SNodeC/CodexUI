@@ -72,6 +72,7 @@ test("thread hierarchy exposes selected tree-item semantics", () => {
     assert.match(markup, /role="treeitem" aria-level="1" aria-selected="true"/u);
     assert.match(markup, /aria-current="true" aria-label="Open Accessible thread, \/workspace"/u);
     assert.match(markup, /class="conversation-lockup"[\s\S]*Last activity:/u);
+    assert.match(markup, /Last activity:[\s\S]*<strong class="success">Completed<\/strong>/u);
     session.dispose();
 });
 
@@ -83,6 +84,7 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /@media \(max-width:\s*1160px\)[\s\S]*grid-template-columns:\s*220px minmax\(0, 1fr\)/u);
     assert.match(css, /@media \(max-width:\s*760px\)[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/u);
     assert.match(css, /@media \(max-width:\s*760px\)[\s\S]*\.top-bar\s*\{[^}]*flex-wrap:\s*wrap/u);
+    assert.match(css, /\.conversation-heading \.conversation-activity\s*\{[^}]*color:\s*#1d2633/u);
     assert.match(css, /\.responsive-drawer\s*\{[^}]*position:\s*fixed/u);
     assert.match(css, /\.drawer-backdrop\s*\{[^}]*position:\s*fixed/u);
     assert.match(css, /button:focus-visible[\s\S]*outline:\s*2px solid #6f98e8/u);

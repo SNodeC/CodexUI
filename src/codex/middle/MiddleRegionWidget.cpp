@@ -242,16 +242,31 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   conversationTrailingMetadata = makeLabel({}, "meta");
   conversationTrailingMetadata->setObjectName(
       QStringLiteral("conversationTrailingMetadata"));
+  conversationTrailingMetadata->setProperty("tone", "strong");
   conversationTrailingMetadata->setWordWrap(false);
   conversationTrailingMetadata->setSizePolicy(QSizePolicy::Minimum,
                                               QSizePolicy::Preferred);
+  conversationStateSeparator = makeLabel(QStringLiteral("|"), "meta");
+  conversationStateSeparator->setProperty("tone", "strong");
+  conversationStateSeparator->setSizePolicy(QSizePolicy::Minimum,
+                                            QSizePolicy::Preferred);
+  conversationState = makeLabel({}, "meta");
+  conversationState->setObjectName(QStringLiteral("conversationState"));
+  conversationState->setSizePolicy(QSizePolicy::Minimum,
+                                   QSizePolicy::Preferred);
   conversationTitle->setAlignment(Qt::AlignLeft | Qt::AlignTop);
   conversationMetadata->setAlignment(Qt::AlignLeft | Qt::AlignTop);
   conversationTrailingMetadata->setAlignment(Qt::AlignRight | Qt::AlignTop);
+  conversationState->setAlignment(Qt::AlignLeft | Qt::AlignTop);
   alignThreadHeadingBaselines();
+  auto *trailingHeading = new QHBoxLayout;
+  trailingHeading->setSpacing(4);
+  trailingHeading->addWidget(conversationTrailingMetadata, 0, Qt::AlignTop);
+  trailingHeading->addWidget(conversationStateSeparator, 0, Qt::AlignTop);
+  trailingHeading->addWidget(conversationState, 0, Qt::AlignTop);
   threadHeading->addWidget(conversationTitle, 0, Qt::AlignTop);
   threadHeading->addWidget(conversationMetadata, 1, Qt::AlignTop);
-  threadHeading->addWidget(conversationTrailingMetadata, 0, Qt::AlignTop);
+  threadHeading->addLayout(trailingHeading);
   contentLayout->addLayout(threadHeading);
   contentLayout->addSpacing(7);
   contentLayout->addWidget(divider());
@@ -347,13 +362,22 @@ QSplitter *MiddleRegionWidget::splitterWidget() const noexcept {
 }
 
 void MiddleRegionWidget::setThreadHeading(QString title, QString metadata,
-                                          QString trailingMetadata) {
+                                          QString trailingMetadata,
+                                          QString state, QString stateTone) {
   if (conversationTitle->text() != title)
     conversationTitle->setText(std::move(title));
   if (conversationMetadata->text() != metadata)
     conversationMetadata->setText(std::move(metadata));
   if (conversationTrailingMetadata->text() != trailingMetadata)
     conversationTrailingMetadata->setText(std::move(trailingMetadata));
+  if (conversationState->text() != state)
+    conversationState->setText(std::move(state));
+  conversationStateSeparator->setVisible(!conversationState->text().isEmpty());
+  if (conversationState->property("tone").toString() != stateTone) {
+    conversationState->setProperty("tone", std::move(stateTone));
+    conversationState->style()->unpolish(conversationState);
+    conversationState->style()->polish(conversationState);
+  }
   alignThreadHeadingBaselines();
 }
 
@@ -361,6 +385,8 @@ void MiddleRegionWidget::alignThreadHeadingBaselines() {
   conversationTitle->ensurePolished();
   conversationMetadata->ensurePolished();
   conversationTrailingMetadata->ensurePolished();
+  conversationStateSeparator->ensurePolished();
+  conversationState->ensurePolished();
   const int offset = std::max(
       0, conversationTitle->fontMetrics().ascent() -
              conversationMetadata->fontMetrics().ascent());
@@ -369,6 +395,8 @@ void MiddleRegionWidget::alignThreadHeadingBaselines() {
       0, conversationTitle->fontMetrics().ascent() -
              conversationTrailingMetadata->fontMetrics().ascent());
   conversationTrailingMetadata->setContentsMargins(0, trailingOffset, 0, 0);
+  conversationStateSeparator->setContentsMargins(0, trailingOffset, 0, 0);
+  conversationState->setContentsMargins(0, trailingOffset, 0, 0);
 }
 
 void MiddleRegionWidget::showNotice(QString message, bool error) {
