@@ -151,7 +151,6 @@ QPlainTextEdit *diffView(const QString &objectName) {
   view->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
   auto *scrollBar = new DiffScrollBar(view);
   view->setVerticalScrollBar(scrollBar);
-  view->verticalScrollBar()->setProperty("kind", "infoViewer");
   new DiffHighlighter(view->document());
   QObject::connect(view, &QPlainTextEdit::textChanged, view,
                    [view, scrollBar] {

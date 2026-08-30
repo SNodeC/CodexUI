@@ -22,6 +22,7 @@
 #include <QFile>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QLabel>
@@ -1507,10 +1508,14 @@ bool testInfoViewerLayout() {
             return scroll && scroll->property("kind") == "inspectorScroll" &&
                    scroll->verticalScrollBarPolicy() ==
                        Qt::ScrollBarAsNeeded &&
-                   scroll->verticalScrollBar()->property("kind") ==
-                       "infoViewer";
+                   scroll->verticalScrollBar()
+                       ->property("kind")
+                       .toString()
+                       .isEmpty() &&
+                   scroll->verticalScrollBar()->styleSheet().isEmpty();
           }),
-      "Plan, Agents, and Requests use the canonical Inspector scrollbar");
+      "Plan, Agents, and Requests inherit the canonical application "
+      "scrollbar");
   protocolChoice->click();
   inspector.appendProtocolFrame(
       {{"kind", "event"},
@@ -1545,9 +1550,17 @@ bool testInfoViewerLayout() {
                  state->verticalScrollBarPolicy() == Qt::ScrollBarAsNeeded,
              "both Info viewers use the common as-needed scrollbar policy");
   result &=
-      expect(protocol->verticalScrollBar()->property("kind") == "infoViewer" &&
-                 state->verticalScrollBar()->property("kind") == "infoViewer",
-             "both Info viewer scrollbars use the shared visual style");
+      expect(protocol->verticalScrollBar()
+                     ->property("kind")
+                     .toString()
+                     .isEmpty() &&
+                 state->verticalScrollBar()
+                     ->property("kind")
+                     .toString()
+                     .isEmpty() &&
+                 protocol->verticalScrollBar()->styleSheet().isEmpty() &&
+                 state->verticalScrollBar()->styleSheet().isEmpty(),
+             "both Info viewer scrollbars inherit the shared visual style");
   result &= expect(protocol->toPlainText().contains(
                        QStringLiteral("thread hydration failed")),
                    "failed protocol results retain their error detail");
@@ -1740,6 +1753,52 @@ bool testInspectorDetailParity() {
           agentResult->height() >= resultHeightForWidth - 1 &&
           agentResult->height() <= resultHeightForWidth + 1,
       "long agent Markdown follows visible metadata without surplus height");
+  const auto hasNativeBlackFrame = [](QScrollBar *scrollBar) {
+    if (!scrollBar)
+      return true;
+    const QImage rendered = scrollBar->grab().toImage();
+    for (int y = 0; y < rendered.height(); ++y) {
+      for (int x = 0; x < rendered.width(); ++x) {
+        const QColor pixel = rendered.pixelColor(x, y);
+        if (pixel.red() < 16 && pixel.green() < 16 && pixel.blue() < 16)
+          return true;
+      }
+    }
+    return false;
+  };
+  auto *agentsScroll = qobject_cast<QScrollArea *>(inspector.tabs()->widget(1));
+  QScrollBar *agentsScrollBar =
+      agentsScroll ? agentsScroll->verticalScrollBar() : nullptr;
+  result &= expect(
+      agentsScrollBar && agentsScrollBar->isVisible() &&
+          agentsScrollBar->width() == 8 &&
+          !hasNativeBlackFrame(agentsScrollBar),
+      "an overflowing Inspector tab renders the canonical frameless scrollbar");
+  auto *compactDiff = inspector.findChild<QPlainTextEdit *>(
+      QStringLiteral("codexDiffText"));
+  QStringList diffLines;
+  for (int line = 0; line < 80; ++line)
+    diffLines
+        << QStringLiteral(
+               "+%1 a deliberately long changed line for scrollbar verification")
+               .arg(line);
+  inspector.tabs()->setCurrentIndex(2);
+  spin(20);
+  if (compactDiff)
+    compactDiff->setPlainText(diffLines.join(QLatin1Char('\n')));
+  spin(20);
+  QScrollBar *diffVertical =
+      compactDiff ? compactDiff->verticalScrollBar() : nullptr;
+  QScrollBar *diffHorizontal =
+      compactDiff ? compactDiff->horizontalScrollBar() : nullptr;
+  result &= expect(
+      diffVertical && diffHorizontal && diffVertical->isVisible() &&
+          diffHorizontal->isVisible() && diffVertical->width() == 8 &&
+          diffHorizontal->height() == 8 &&
+          !hasNativeBlackFrame(diffVertical) &&
+          !hasNativeBlackFrame(diffHorizontal),
+      "Changes preview scrollbars retain overview rendering without native "
+      "frames");
   inspector.tabs()->setCurrentIndex(3);
   spin(20);
   result &=

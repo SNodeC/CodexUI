@@ -332,7 +332,6 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    scroll->verticalScrollBar()->setProperty("kind", "infoViewer");
     scroll->setWidget(content);
     return scroll;
   };
@@ -344,7 +343,6 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   stateView->setLineWrapMode(QPlainTextEdit::WidgetWidth);
   stateView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   stateView->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-  stateView->verticalScrollBar()->setProperty("kind", "infoViewer");
   auto *protocolContent = new QWidget;
   auto *protocolLayout = new QVBoxLayout(protocolContent);
   protocolLayout->setContentsMargins(0, 0, 0, 0);
@@ -356,7 +354,6 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   protocolLog->setLineWrapMode(QPlainTextEdit::WidgetWidth);
   protocolLog->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   protocolLog->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-  protocolLog->verticalScrollBar()->setProperty("kind", "infoViewer");
   protocolLog->document()->setMaximumBlockCount(MaximumProtocolLines);
   connect(protocolLog->verticalScrollBar(), &QScrollBar::valueChanged, this,
           [this](int value) {

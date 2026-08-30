@@ -82,6 +82,18 @@ QString applicationStyleSheet() {
         QMainWindow, QWidget#applicationShell { background: #f6f8fb; }
         QWidget#codexTurnSettings { background: #ffffff; border-top: 1px solid #d7dee8; }
         QFrame#inspector { background: #fbfcfe; }
+        QFrame#inspector QScrollBar:vertical {
+            background: #fbfcfe;
+            border: 2px solid #fbfcfe;
+            width: 8px;
+            margin: 0;
+        }
+        QFrame#inspector QScrollBar:horizontal {
+            background: #fbfcfe;
+            border: 2px solid #fbfcfe;
+            height: 8px;
+            margin: 0;
+        }
         QLabel { background: transparent; font-weight: 400; }
         QLabel[kind="muted"] { color: #667085; font-size: %1pt; }
         QLabel[kind="section"] {
@@ -402,36 +414,6 @@ QString applicationStyleSheet() {
             height: 0;
         }
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-            background: none;
-            border: 0;
-        }
-        QScrollBar[kind="infoViewer"]:vertical {
-            background: transparent;
-            border: 0;
-            width: 8px;
-            margin: 2px;
-        }
-        QScrollBar[kind="infoViewer"]::handle:vertical {
-            background: #b9c4d2;
-            min-height: 28px;
-            border-radius: 3px;
-        }
-        QScrollBar[kind="infoViewer"]::handle:vertical:hover { background: #98a2b3; }
-        QScrollBar[kind="infoViewer"]::add-line:vertical,
-        QScrollBar[kind="infoViewer"]::sub-line:vertical {
-            background: transparent;
-            border: 0;
-            height: 0;
-        }
-        QScrollBar[kind="infoViewer"]::up-arrow:vertical,
-        QScrollBar[kind="infoViewer"]::down-arrow:vertical {
-            background: none;
-            border: 0;
-            width: 0;
-            height: 0;
-        }
-        QScrollBar[kind="infoViewer"]::add-page:vertical,
-        QScrollBar[kind="infoViewer"]::sub-page:vertical {
             background: none;
             border: 0;
         }
