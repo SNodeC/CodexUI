@@ -32,8 +32,10 @@
 #include <QTextDocument>
 #include <QTimer>
 #include <QToolButton>
+#include <QToolTip>
 #include <QVBoxLayout>
 #include <QVariant>
+#include <QVariantAnimation>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -137,6 +139,43 @@ public:
     setFocusPolicy(Qt::StrongFocus);
     setAccessibleName(QStringLiteral("Copy card content"));
     setToolTip(accessibleName());
+
+    pulse_ = new QVariantAnimation(this);
+    pulse_->setDuration(440);
+    pulse_->setStartValue(QColor(QStringLiteral("#1d2633")));
+    pulse_->setKeyValueAt(0.5, QColor(QStringLiteral("#b9c4d2")));
+    pulse_->setEndValue(QColor(QStringLiteral("#1d2633")));
+    pulse_->setEasingCurve(QEasingCurve::InOutSine);
+    QObject::connect(pulse_, &QVariantAnimation::valueChanged, this,
+                     [this](const QVariant &value) {
+                       pulseColor_ = value.value<QColor>();
+                       const qreal phase = static_cast<qreal>(pulse_->currentTime()) /
+                                           pulse_->duration();
+                       pulseScale_ =
+                           1.0 + 0.12 * (1.0 - std::abs(2.0 * phase - 1.0));
+                       update();
+                     });
+    QObject::connect(pulse_, &QVariantAnimation::finished, this, [this] {
+      pulseScale_ = 1.0;
+      pulseColor_ = QColor(QStringLiteral("#1d2633"));
+      setProperty("copyFeedbackActive", false);
+      update();
+    });
+  }
+
+  void showCopiedFeedback() {
+    pulse_->stop();
+    pulseScale_ = 1.0;
+    pulseColor_ = QColor(QStringLiteral("#1d2633"));
+    setProperty("copyFeedbackActive", true);
+    if (style()->styleHint(QStyle::SH_Widget_Animation_Duration, nullptr,
+                           this) > 0)
+      pulse_->start();
+    else
+      setProperty("copyFeedbackActive", false);
+    QToolTip::showText(mapToGlobal(QPoint(width() / 2, height())),
+                       QStringLiteral("Copied"), this, rect(), 1000);
+    update();
   }
 
 protected:
@@ -147,15 +186,26 @@ protected:
       color = QColor(QStringLiteral("#98a2b3"));
     else if (underMouse() || hasFocus())
       color = QColor(QStringLiteral("#1d2633"));
+    if (property("copyFeedbackActive").toBool())
+      color = pulseColor_;
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
+    const QPointF center(10.0, 11.5);
+    painter.translate(center);
+    painter.scale(pulseScale_, pulseScale_);
+    painter.translate(-center);
     painter.setBrush(Qt::NoBrush);
     painter.setPen(
         QPen(color, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     painter.drawRoundedRect(QRectF(4.5, 5.5, 8.0, 9.0), 1.2, 1.2);
     painter.drawRoundedRect(QRectF(7.5, 8.5, 8.0, 9.0), 1.2, 1.2);
   }
+
+private:
+  QVariantAnimation *pulse_ = nullptr;
+  qreal pulseScale_ = 1.0;
+  QColor pulseColor_ = QColor(QStringLiteral("#1d2633"));
 };
 
 void openImageViewer(const QString &path);
@@ -206,11 +256,26 @@ public:
 
 protected:
   void mousePressEvent(QMouseEvent *event) override {
-    if (event->button() == Qt::LeftButton && activate()) {
+    if (event->button() == Qt::LeftButton &&
+        property("imageAvailable").toBool()) {
+      leftPressArmed_ = true;
+      setFocus(Qt::MouseFocusReason);
       event->accept();
       return;
     }
+    leftPressArmed_ = false;
     QLabel::mousePressEvent(event);
+  }
+
+  void mouseReleaseEvent(QMouseEvent *event) override {
+    if (event->button() == Qt::LeftButton && leftPressArmed_) {
+      leftPressArmed_ = false;
+      if (rect().contains(event->position().toPoint()))
+        activate();
+      event->accept();
+      return;
+    }
+    QLabel::mouseReleaseEvent(event);
   }
 
   void keyPressEvent(QKeyEvent *event) override {
@@ -232,6 +297,7 @@ private:
   }
 
   QString path_;
+  bool leftPressArmed_ = false;
 };
 
 class ImageRibbon final : public QScrollArea {
@@ -917,6 +983,7 @@ public:
       if (content.markdown)
         mime->setData("text/markdown", content.text.toUtf8());
       QApplication::clipboard()->setMimeData(mime);
+      copy->showCopiedFeedback();
     });
     owner->setProperty("kind", "raised");
     std::visit([this](const auto &payload) { createComposition(payload); },

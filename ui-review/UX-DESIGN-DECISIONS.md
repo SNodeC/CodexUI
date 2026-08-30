@@ -109,7 +109,9 @@ center and the canonical compact 4 px action gap. Copy remains reachable on a
 collapsed card, while a contentless card omits it. Authored Markdown copies
 from the retained source with `text/markdown` and identical plain text;
 non-Markdown cards copy their deterministic primary-content text rather than
-rendered widget text.
+rendered widget text. Copy feedback remains local to the action: the glyph
+breathes once from its darker hover color to a noticeably lighter peak and
+back, while a rounded `Copied` overlay appears without changing card geometry.
 Folding is immediate rather than animated and anchors the selected title row,
 so content only contracts upward or grows downward below the interaction point.
 Multiple message images form one source-ordered horizontal ribbon. It keeps the

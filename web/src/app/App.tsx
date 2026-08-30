@@ -423,7 +423,21 @@ function ScrollableCode({text, className, label}: {text: string; className: stri
         }}><code>{text}</code></pre>;
 }
 
-export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false, nestedCard = false}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy: (content: CardCopyContent) => void; nested?: ReactNode; turnContainer?: boolean; nestedCard?: boolean}) {
+type ClipboardOutcome = "copied" | "unsupported" | "failed";
+
+export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false, nestedCard = false}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy?: (content: CardCopyContent) => ClipboardOutcome | Promise<ClipboardOutcome> | void; nested?: ReactNode; turnContainer?: boolean; nestedCard?: boolean}) {
+    const [copyFeedback, setCopyFeedback] = useState<{text: string; failed: boolean; sequence: number}>();
+    const copyFeedbackSequence = useRef(0);
+    const copyFeedbackTimer = useRef<ReturnType<typeof setTimeout>>();
+    useEffect(() => () => { if (copyFeedbackTimer.current) clearTimeout(copyFeedbackTimer.current); }, []);
+    const copy = async (content: CardCopyContent) => {
+        const outcome = await (onCopy ? onCopy(content) : writeCardClipboard(content));
+        if (!outcome) return;
+        if (copyFeedbackTimer.current) clearTimeout(copyFeedbackTimer.current);
+        const failed = outcome !== "copied";
+        setCopyFeedback({text: failed ? "Copy failed" : "Copied", failed, sequence: ++copyFeedbackSequence.current});
+        copyFeedbackTimer.current = setTimeout(() => setCopyFeedback(undefined), 1000);
+    };
     let title = humanize(card.kind);
     let body: ReactNode;
     let phaseClass = "";
@@ -470,7 +484,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     const activeWork = (card.kind === "commandExecution" || card.kind === "imageGeneration")
         && ["active", "inProgress", "running", "started"].includes((card.payload as CommandExecutionData | ImageGenerationData).status);
     return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${nestedCard ? "steering" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""}`} data-card-key={stableKey(card.key)}>
-        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{copyContent.text && <button className="card-copy-button" onClick={() => onCopy(copyContent)} aria-label="Copy card content"><CopyIcon /></button>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
+        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{copyContent.text && <span className="card-copy-control"><button className={`card-copy-button${copyFeedback ? " feedback-active" : ""}`} onClick={() => void copy(copyContent)} aria-label="Copy card content"><CopyIcon key={copyFeedback?.sequence ?? 0} /></button>{copyFeedback && <span className={`card-copy-overlay${copyFeedback.failed ? " failed" : ""}`} role="status" aria-live="polite">{copyFeedback.text}</span>}</span>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
 
@@ -627,11 +641,7 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
         }
         folding.current.set(key, !collapsed); forceCardState(value => value + 1);
     };
-    const copyCard = (content: CardCopyContent) => void writeCardClipboard(content).then(outcome => {
-        if (outcome === "copied") session.notify("Card content copied.");
-        else if (outcome === "unsupported") session.notify("Clipboard access is not available in this browser.", true);
-        else session.notify("Card content could not be copied.", true);
-    });
+    const copyCard = (content: CardCopyContent) => writeCardClipboard(content);
     const visibleSections = conversation.sections
         .map(section => ({...section, cards: section.cards.filter(cardVisible)}))
         .filter(section => section.cards.length > 0);

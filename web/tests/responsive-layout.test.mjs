@@ -97,6 +97,10 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /\.composer-actions span\s*\{[^}]*color:\s*#667085/u);
     assert.match(css, /\.conversation-lockup\s*\{[^}]*align-items:\s*baseline/u);
     assert.match(css, /\.conversation-heading \.conversation-activity\s*\{[^}]*margin-left:\s*auto[^}]*text-align:\s*right/u);
+    assert.match(css, /\.card-copy-button\.feedback-active svg\s*\{[^}]*animation:\s*copy-breathe 440ms/u);
+    assert.match(css, /@keyframes copy-breathe\s*\{[^}]*0%, 100%\s*\{[^}]*color:\s*#1d2633[^}]*\}[^}]*50%\s*\{[^}]*color:\s*#b9c4d2/u);
+    assert.match(css, /\.card-copy-overlay\s*\{[^}]*border-radius:\s*6px[^}]*background:\s*#1d2633/u);
+    assert.match(css, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*animation-duration:\s*\.001ms/u);
     assert.match(css, /@media \(max-width:\s*520px\)[\s\S]*\.conversation-lockup \.conversation-activity\s*\{[^}]*flex-basis:\s*100%/u);
     assert.match(css, /\.composer-dock\s*\{[^}]*bottom:\s*0[^}]*padding:\s*8px 0 16px[^}]*background:\s*#f2f5f9/u);
     assert.match(css, /\.composer-dock::before\s*\{[^}]*bottom:\s*100%[^}]*height:\s*8px[^}]*background:\s*#f2f5f9/u);
