@@ -159,6 +159,9 @@ Prompt admission, stable first-response placement, per-thread scroll ownership,
 card folding, safe Markdown, bounded command output, controller eligibility,
 and reconnect hydration follow the native behavior documents. Visual geometry
 may be browser-native; the behavioral invariant may not silently change.
+Conversation paging pins each represented turn's complete-history root prompt
+as structural context outside the activity budget; steering prompts never
+become turn roots.
 
 The responsive shell keeps Threads, Conversation, and Inspector visible above
 1160 px. At tablet widths it keeps Threads and Conversation in-flow and exposes

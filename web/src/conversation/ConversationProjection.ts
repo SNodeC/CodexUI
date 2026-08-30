@@ -117,7 +117,7 @@ function submissionPosition(submission: PromptSubmission, index: AuthoritativeIt
     return index.ordered.length * 2 + 2;
 }
 interface ProjectedNode {
-    position: number; tieBreaker: number; sectionKey: string; turnId: string; card: VisibleCardData;
+    position: number; tieBreaker: number; sectionKey: string; turnId: string; turnRoot: boolean; card: VisibleCardData;
 }
 
 export function projectConversation(
@@ -129,7 +129,15 @@ export function projectConversation(
 ): ConversationSnapshot {
     const authoritativeItems = "ordered" in source ? source : indexAuthoritativeItems(source.id, source);
     const authoritativeThread = "ordered" in source ? thread : source;
-    const hidden = Math.max(0, authoritativeItems.ordered.length - authoritativeItemLimit);
+    const suffixStart = Math.max(0, authoritativeItems.ordered.length - authoritativeItemLimit);
+    const pinnedRoots = new Set<number>();
+    for (let index = suffixStart; index < authoritativeItems.ordered.length; ++index) {
+        const root = authoritativeItems.turnRoots.get(authoritativeItems.ordered[index]!.key.turnId);
+        if (root !== undefined && root < suffixStart) pinnedRoots.add(root);
+    }
+    const retainedPositions = [...pinnedRoots].sort((left, right) => left - right);
+    for (let index = suffixStart; index < authoritativeItems.ordered.length; ++index) retainedPositions.push(index);
+    const hidden = suffixStart - pinnedRoots.size;
     const result: ConversationSnapshot = {
         threadId: authoritativeItems.threadId, sections: [], hiddenAuthoritativeItemCount: hidden, hasMore: hidden > 0,
     };
@@ -137,7 +145,7 @@ export function projectConversation(
     for (const submission of localSubmissions) if (submission.materializedItem)
         bindings.set(`${submission.materializedItem.threadId}\0${submission.materializedItem.turnId}\0${submission.materializedItem.itemId}`, submission);
     const nodes: ProjectedNode[] = [];
-    for (let index = hidden; index < authoritativeItems.ordered.length; ++index) {
+    for (const index of retainedPositions) {
         const item = authoritativeItems.ordered[index]!;
         const identity = `${item.key.threadId}\0${item.key.turnId}\0${item.key.itemId}`;
         const binding = bindings.get(identity);
@@ -153,7 +161,8 @@ export function projectConversation(
             tieBreaker = item.promptAlias.admissionOrdinal;
         }
         nodes.push({position, tieBreaker, sectionKey: sectionComponent("turn:", authoritativeItems.threadId, item.key.turnId),
-            turnId: item.key.turnId, card: authoritativeCard(item.key, item.presentation, visualKey)});
+            turnId: item.key.turnId, turnRoot: authoritativeItems.turnRoots.get(item.key.turnId) === index,
+            card: authoritativeCard(item.key, item.presentation, visualKey)});
     }
     for (const submission of localSubmissions) {
         if (!localCardVisible(submission, nowMilliseconds)) continue;
@@ -170,7 +179,10 @@ export function projectConversation(
             acceptedAtMilliseconds: submission.acceptedAtMilliseconds, error: submission.error,
             imagePaths: localImagePaths(submission),
         };
-        nodes.push({position, tieBreaker: submission.admissionOrdinal, sectionKey, turnId, card: {
+        const turnRootPosition = authoritativeItems.turnRoots.get(turnId);
+        const turnRoot = turnRootPosition !== undefined
+            ? materialized === turnRootPosition : submission.startsTurn;
+        nodes.push({position, tieBreaker: submission.admissionOrdinal, sectionKey, turnId, turnRoot, card: {
             key: {kind: "prompt", submissionId: submission.id}, kind: "localPrompt", threadId: authoritativeItems.threadId,
             turnId, itemId: "", payload,
         }});
@@ -183,7 +195,9 @@ export function projectConversation(
             sectionIndex = result.sections.length; sectionIndexes.set(node.sectionKey, sectionIndex);
             result.sections.push({key: node.sectionKey, turnId: node.turnId, cards: []});
         }
-        result.sections[sectionIndex]!.cards.push(node.card);
+        const section = result.sections[sectionIndex]!;
+        section.cards.push(node.card);
+        if (node.turnRoot) section.rootCardKey = node.card.key;
     }
     return result;
 }

@@ -398,7 +398,8 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
             {conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId); forceCardState(value => value + 1); }}>Load earlier activity</button>}
             {visibleSections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
             {visibleSections.map(section => {
-                const prompt = section.cards.find(card => card.kind === "userMessage" || card.kind === "localPrompt");
+                const rootKey = section.rootCardKey ? stableKey(section.rootCardKey) : "";
+                const prompt = rootKey === "" ? undefined : section.cards.find(card => stableKey(card.key) === rootKey);
                 const nestedCards = prompt ? section.cards.filter(card => card !== prompt) : [];
                 const nested = nestedCards.length > 0 ? nestedCards.map(card => renderCard(card)) : undefined;
                 return <section key={section.key} className="turn-section">

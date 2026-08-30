@@ -36,7 +36,7 @@ export type CardPayload = UserMessageData | AgentMessageData | CommandExecutionD
 export interface VisibleCardData {
     key: CardKey; kind: CardKind; threadId: string; turnId: string; itemId: string; payload: CardPayload;
 }
-export interface TurnSection {key: string; turnId: string; cards: VisibleCardData[]}
+export interface TurnSection {key: string; turnId: string; cards: VisibleCardData[]; rootCardKey?: CardKey}
 export interface ConversationSnapshot {
     threadId: string; sections: TurnSection[]; hiddenAuthoritativeItemCount: number; hasMore: boolean;
 }
