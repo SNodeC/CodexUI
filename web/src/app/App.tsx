@@ -417,7 +417,7 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
                 changeSettingDraft(settingsDrafts, projectionId, canonicalSettings, settingsRevision, field, value);
                 forceSettingsState(revision => revision + 1);
             }} />
-            <Composer key={projectionId} session={session} active={Boolean(thread || snapshot.newThreadIntent)} draftKey={projectionId} drafts={drafts.current} options={settingsOptions} />
+            <Composer key={projectionId} session={session} active={Boolean(thread || snapshot.newThreadIntent) && session.canSubmit()} draftKey={projectionId} drafts={drafts.current} options={settingsOptions} />
         </div>
     </main>;
 }

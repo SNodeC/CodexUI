@@ -28,6 +28,14 @@ function requests(socket, method) {
 function respond(socket, request, result) {
     socket.receive(appserver({jsonrpc: "2.0", id: request.payload.id, result}));
 }
+function reject(socket, request, message) {
+    socket.receive(appserver({jsonrpc: "2.0", id: request.payload.id, error: {code: -32000, message}}));
+}
+async function readyProvider(socket, connectionId, role = "controller", providerGeneration = 1) {
+    socket.receive({kind: "bridge.connection", event: "opened", connectionId, role});
+    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration});
+    await Promise.resolve();
+}
 const waitForPublish = () => new Promise(resolve => setTimeout(resolve, 25));
 
 test("browser session defaults to the bridge's canonical WebSocket endpoint", () => {
@@ -50,8 +58,7 @@ test("browser session uses the C++ action routing and preserves prompt-response 
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect();
     socket.open();
-    socket.receive({kind: "bridge.connection", event: "opened", connectionId: "web-test", role: "observer"});
-    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+    await readyProvider(socket, "web-test");
 
     const threadList = requests(socket, "thread/list").at(-1);
     const modelList = requests(socket, "model/list").at(-1);
@@ -104,8 +111,7 @@ test("new threads retain one optimistic row through first-turn acknowledgment", 
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open();
-    socket.receive({kind: "bridge.connection", event: "opened", connectionId: "new-thread", role: "controller"});
-    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+    await readyProvider(socket, "new-thread");
 
     session.beginNewThread();
     const draft = session.getSnapshot().optimisticThreads[0];
@@ -144,6 +150,7 @@ test("prompt admission immediately promotes the effective recent thread", async 
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open();
+    await readyProvider(socket, "promotion");
     session.model.applyEvent(result(100, 1, "threads.list", "list", true, {threads: [
         {id: "older", recencyAt: 10}, {id: "recent", recencyAt: 30},
     ]}, "merge"));
@@ -168,8 +175,7 @@ test("browser transport reconnects cleanly across provider generations", async (
         const socket = new FakeSocket(); sockets.push(socket); return socket;
     });
     session.connect(); sockets[0].open();
-    sockets[0].receive({kind: "bridge.connection", event: "opened", connectionId: "first", role: "observer"});
-    sockets[0].receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+    await readyProvider(sockets[0], "first", "observer");
     respond(sockets[0], requests(sockets[0], "thread/list").at(-1), {data: [{id: "old-thread"}]});
     assert.ok(session.model.thread("old-thread"));
     sockets[0].receive({kind: "bridge.provider", state: "disconnected", providerGeneration: 1, reason: "restart"});
@@ -178,8 +184,7 @@ test("browser transport reconnects cleanly across provider generations", async (
     session.reconnect(); await Promise.resolve();
     assert.equal(sockets.length, 2);
     sockets[1].open();
-    sockets[1].receive({kind: "bridge.connection", event: "opened", connectionId: "second", role: "controller"});
-    sockets[1].receive({kind: "bridge.provider", state: "ready", providerGeneration: 2});
+    await readyProvider(sockets[1], "second", "controller", 2);
     assert.ok(requests(sockets[1], "thread/list").length > 0);
     assert.equal(session.model.connection().providerGeneration, 2);
     assert.equal(session.model.connection().role, "controller");
@@ -199,8 +204,7 @@ test("browser session resumes a not-loaded thread before starting its queued tur
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open();
-    socket.receive({kind: "bridge.connection", event: "opened", connectionId: "resume-test", role: "controller"});
-    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+    await readyProvider(socket, "resume-test");
     respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "sleeping", status: {type: "notLoaded"}}]});
     session.selectThread("sleeping");
     respond(socket, requests(socket, "thread/read").at(-1), {thread: {id: "sleeping", status: {type: "notLoaded"}, turns: []}});
@@ -212,5 +216,138 @@ test("browser session resumes a not-loaded thread before starting its queued tur
     respond(socket, resume, {thread: {id: "sleeping", status: {type: "idle"}}});
     await Promise.resolve(); await Promise.resolve();
     assert.equal(requests(socket, "turn/start").at(-1).payload.params.input[0].text, "wake and work");
+    session.dispose();
+});
+
+test("prompt admission requires provider readiness and controller authority", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open();
+    socket.receive({kind: "bridge.connection", event: "opened", connectionId: "admission", role: "controller"});
+    assert.equal(session.canSubmit(), false);
+    session.beginNewThread();
+    assert.equal(await session.submitPrompt("too early"), false);
+    assert.equal(requests(socket, "thread/start").length, 0);
+
+    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 1});
+    await Promise.resolve();
+    socket.receive({kind: "bridge.controller", controllerConnectionId: "another-client"});
+    assert.equal(session.canSubmit(), false);
+    assert.equal(await session.submitPrompt("observer attempt"), false);
+    assert.equal(requests(socket, "thread/start").length, 0);
+
+    socket.receive({kind: "bridge.controller", controllerConnectionId: "admission"});
+    assert.equal(session.canSubmit(), true);
+    session.dispose();
+});
+
+test("a prompt admitted during thread hydration waits for the authoritative read", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "hydrate-before-send");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "thread-h", status: {type: "idle"}}]});
+    session.selectThread("thread-h");
+    const read = requests(socket, "thread/read").at(-1);
+    assert.ok(read);
+    assert.equal(await session.submitPrompt("wait for read"), true);
+    await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").length, 0);
+
+    respond(socket, read, {thread: {id: "thread-h", status: {type: "idle"}, turns: []}});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").at(-1).payload.params.input[0].text, "wait for read");
+    session.dispose();
+});
+
+test("a queued prompt waits through controller loss and resumes after control returns", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "role-transition");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "role-thread", status: {type: "idle"}}]});
+    session.selectThread("role-thread");
+    const read = requests(socket, "thread/read").at(-1);
+    assert.equal(await session.submitPrompt("wait for control"), true);
+    socket.receive({kind: "bridge.controller", controllerConnectionId: "other-client"});
+    respond(socket, read, {thread: {id: "role-thread", status: {type: "idle"}, turns: []}});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").length, 0);
+
+    socket.receive({kind: "bridge.controller", controllerConnectionId: "role-transition"});
+    await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").at(-1).payload.params.input[0].text, "wait for control");
+    session.dispose();
+});
+
+test("provider loss preserves a queued hydration-gated prompt for the next generation", async () => {
+    const sockets = [];
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => {
+        const socket = new FakeSocket(); sockets.push(socket); return socket;
+    });
+    session.connect(); sockets[0].open(); await readyProvider(sockets[0], "generation-a");
+    respond(sockets[0], requests(sockets[0], "thread/list").at(-1), {data: [{id: "retained", status: {type: "idle"}}]});
+    session.selectThread("retained");
+    const staleRead = requests(sockets[0], "thread/read").at(-1);
+    assert.equal(await session.submitPrompt("survive restart"), true);
+    sockets[0].receive({kind: "bridge.provider", state: "disconnected", providerGeneration: 1, reason: "restart"});
+    sockets[0].close(1000, "restart");
+    respond(sockets[0], staleRead, {thread: {id: "retained", status: {type: "idle"}, turns: []}});
+
+    session.reconnect(); await Promise.resolve();
+    sockets[1].open(); await readyProvider(sockets[1], "generation-b", "controller", 2);
+    respond(sockets[1], requests(sockets[1], "thread/list").at(-1), {data: [{id: "retained", status: {type: "idle"}}]});
+    const currentRead = requests(sockets[1], "thread/read").at(-1);
+    respond(sockets[1], currentRead, {thread: {id: "retained", status: {type: "idle"}, turns: []}});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(sockets[0], "turn/start").length, 0);
+    assert.equal(requests(sockets[1], "turn/start").at(-1).payload.params.input[0].text, "survive restart");
+    session.dispose();
+});
+
+test("a provider-generation transition invalidates prior thread hydration", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "generation-transition");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "same-thread", status: {type: "idle"}}]});
+    session.selectThread("same-thread");
+    respond(socket, requests(socket, "thread/read").at(-1), {thread: {id: "same-thread", status: {type: "idle"}, turns: []}});
+    await Promise.resolve();
+    const readsBefore = requests(socket, "thread/read").length;
+
+    socket.receive({kind: "bridge.provider", state: "ready", providerGeneration: 2});
+    await Promise.resolve();
+    assert.equal(requests(socket, "thread/list").length, 2);
+    const currentRead = requests(socket, "thread/read").at(-1);
+    assert.equal(requests(socket, "thread/read").length, readsBefore + 1);
+    assert.equal(await session.submitPrompt("new generation"), true);
+    await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").length, 0);
+    respond(socket, currentRead, {thread: {id: "same-thread", status: {type: "idle"}, turns: []}});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").length, 1);
+    session.dispose();
+});
+
+test("thread-not-found turn submission performs exactly one resume recovery", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "recover");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "recover-thread", status: {type: "idle"}}]});
+    session.selectThread("recover-thread");
+    respond(socket, requests(socket, "thread/read").at(-1), {thread: {id: "recover-thread", status: {type: "idle"}, turns: []}});
+    await Promise.resolve();
+    await session.submitPrompt("recover once"); await Promise.resolve();
+    const first = requests(socket, "turn/start").at(-1);
+    reject(socket, first, "thread not found");
+    await Promise.resolve();
+    const resume = requests(socket, "thread/resume").at(-1);
+    assert.ok(resume);
+    respond(socket, resume, {thread: {id: "recover-thread", status: {type: "idle"}}});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(requests(socket, "turn/start").length, 2);
+    const second = requests(socket, "turn/start").at(-1);
+    reject(socket, second, "thread not found");
+    await Promise.resolve();
+    assert.equal(requests(socket, "thread/resume").length, 1);
+    assert.equal(session.prompts.submissions("recover-thread").at(-1).state, "failed");
     session.dispose();
 });

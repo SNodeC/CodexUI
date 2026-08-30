@@ -55,6 +55,16 @@ interface PromptPromotion {
     readonly recencyAt: number | undefined;
 }
 
+type HydrationState = "notHydrated" | "inFlight" | "hydrated" | "failed";
+interface ThreadRuntimeState {
+    hydration: HydrationState;
+    operationReady: boolean;
+    resumeInFlight: boolean;
+    readRevision: number;
+    readonly recoveryAttemptedSubmissions: Set<number>;
+}
+interface OperationResponse {ok: boolean; data?: unknown; error?: unknown; stale?: boolean}
+
 type RawRequest = (method: string, params: unknown, handler: (response: unknown) => void) => string;
 type RegisterNotification = (method: string, handler: (notification: JsonObject) => void) => void;
 type RegisterRequest = (method: string, handler: (request: JsonObject) => void) => void;
@@ -67,7 +77,7 @@ export class BrowserFrontendSession {
     private readonly normalizer: ProtocolNormalizer;
     private readonly listeners = new Set<() => void>();
     private readonly protocolFrames: unknown[] = [];
-    private readonly resumeInFlight = new Set<string>();
+    private readonly runtimeByThread = new Map<string, ThreadRuntimeState>();
     private readonly acceptedTransitionTimers = new Map<number, ReturnType<typeof setTimeout>>();
     private transport: WebSocketTransport | undefined;
     private selectedThreadId = "";
@@ -83,6 +93,8 @@ export class BrowserFrontendSession {
     private noticeTimer: ReturnType<typeof setTimeout> | undefined;
     private publishScheduled = false;
     private disposed = false;
+    private lifecycleEpoch = 0;
+    private catalogHydrationKey = "";
     private bridgeUrl: string;
     private readonly createWebSocket: WebSocketFactory | undefined;
     private snapshot: BrowserSessionSnapshot;
@@ -112,9 +124,6 @@ export class BrowserFrontendSession {
         });
         this.sdk.onBridgeEvent(message => {
             this.normalizer.bridgeEvent(message);
-            if (isObject(message) && ((message.kind === "bridge.connection" && message.event === "opened")
-                || (message.kind === "bridge.provider" && message.state === "ready")))
-                this.hydrateCatalogs();
         });
         const registerNotification = this.sdk.onServerNotification.bind(this.sdk) as RegisterNotification;
         for (const method of Object.keys(serverNotificationOperations)) registerNotification(method, notification => {
@@ -172,13 +181,17 @@ export class BrowserFrontendSession {
     }
     claimController(): boolean { return this.sdk.claimController(); }
     releaseController(): boolean { return this.sdk.releaseController(); }
+    canSubmit(): boolean {
+        const connection = this.model.connection();
+        return connection.connected && connection.providerState === "ready" && connection.role === "controller";
+    }
 
     selectThread(threadId: string): void {
         if (threadId === DraftThreadId && this.newThreadIntent) { this.publish(); return; }
         if (this.prompts.submissions(DraftThreadId).length === 0)
             this.optimisticThreads = this.optimisticThreads.filter(thread => thread.id !== DraftThreadId);
         this.selectedThreadId = threadId; this.newThreadIntent = false; this.publish();
-        if (threadId !== "") this.request("thread.read", {threadId, includeTurns: true});
+        if (threadId !== "") this.ensureThreadHydrated(threadId);
     }
     beginNewThread(): void {
         if (this.newThreadCreationInFlight) { this.setNotice("The current new thread is still being created.", false); return; }
@@ -204,6 +217,10 @@ export class BrowserFrontendSession {
     async submitPrompt(prompt: string, attachments: AttachmentDraft[] = [], turnOptions: JsonObject = {}, threadOptions: JsonObject = {}): Promise<boolean> {
         const canonicalPrompt = promptWithFileLinks(prompt.trim(), attachments);
         if (canonicalPrompt === "") return false;
+        if (!this.canSubmit()) {
+            this.setNotice("Codex is not ready for a controlled turn. Your message was not sent.");
+            return false;
+        }
         let destination = this.selectedThreadId;
         let thread = this.model.thread(destination);
         if (destination === "") {
@@ -212,7 +229,10 @@ export class BrowserFrontendSession {
         }
         this.prompts.admit(destination, canonicalPrompt, attachments, turnOptions, thread,
             destination === DraftThreadId ? undefined : this.model.activeTurnId(destination), Date.now());
-        if (destination !== DraftThreadId) this.promotePromptedThread(destination);
+        if (destination !== DraftThreadId) {
+            this.threadRuntime(destination);
+            this.promotePromptedThread(destination);
+        }
         this.publish();
         if (destination === DraftThreadId) {
             if (this.newThreadCreationInFlight) return true;
@@ -237,6 +257,8 @@ export class BrowserFrontendSession {
                     cwd: stringMember(createdThread, "cwd") || thread.cwd,
                 } : thread);
             this.selectedThreadId = id; this.newThreadIntent = false; destination = id;
+            const runtime = this.threadRuntime(id);
+            runtime.hydration = "hydrated"; runtime.operationReady = true;
             this.publish();
         }
         queueMicrotask(() => this.dispatchNextPrompt(destination));
@@ -249,7 +271,7 @@ export class BrowserFrontendSession {
     }
     requestThreads(): void { this.request("threads.list", {}); }
     renameThread(threadId: string, name: string): void { this.request("thread.rename", {threadId, name}); }
-    reloadThread(threadId: string): void { this.request("thread.read", {threadId, includeTurns: true}); }
+    reloadThread(threadId: string): void { this.readThread(threadId, true); }
     forkThread(threadId: string): void {
         this.requestPromise("thread.fork", {threadId}).then(response => {
             const thread = isObject(response.data) ? member(response.data, "thread", {}) : {};
@@ -267,40 +289,151 @@ export class BrowserFrontendSession {
             ...(Object.hasOwn(response, "error") ? {error: response.error} : {result: response.result ?? {}})});
     }
 
+    private providerReady(): boolean {
+        const connection = this.model.connection();
+        return connection.connected && connection.providerState === "ready";
+    }
+    private threadRuntime(threadId: string): ThreadRuntimeState {
+        let runtime = this.runtimeByThread.get(threadId);
+        if (!runtime) {
+            runtime = {hydration: "notHydrated", operationReady: false, resumeInFlight: false,
+                readRevision: 0, recoveryAttemptedSubmissions: new Set()};
+            this.runtimeByThread.set(threadId, runtime);
+        }
+        return runtime;
+    }
+    private invalidateProviderWork(): void {
+        ++this.lifecycleEpoch;
+        this.catalogHydrationKey = "";
+        for (const [threadId, runtime] of this.runtimeByThread) {
+            ++runtime.readRevision;
+            runtime.hydration = "notHydrated";
+            runtime.operationReady = false;
+            runtime.resumeInFlight = false;
+            runtime.recoveryAttemptedSubmissions.clear();
+            for (const submission of this.prompts.submissions(threadId))
+                if (submission.state === "inFlight") this.prompts.requeue(threadId, submission.id);
+        }
+    }
+    private ensureThreadHydrated(threadId: string): void {
+        if (!this.providerReady() || threadId === "") return;
+        const runtime = this.threadRuntime(threadId);
+        if (["inFlight", "hydrated", "failed"].includes(runtime.hydration)) return;
+        this.readThread(threadId);
+    }
+    private readThread(threadId: string, forced = false): void {
+        if (!this.providerReady() || threadId === "") return;
+        const runtime = this.threadRuntime(threadId);
+        if (runtime.resumeInFlight) return;
+        if (!forced && runtime.hydration !== "notHydrated") return;
+        runtime.hydration = "inFlight";
+        runtime.operationReady = false;
+        const revision = ++runtime.readRevision;
+        const epoch = this.lifecycleEpoch;
+        this.requestPromise("thread.read", {threadId, includeTurns: true}, () => epoch === this.lifecycleEpoch
+            && this.runtimeByThread.get(threadId)?.readRevision === revision).then(response => {
+            if (response.stale) return;
+            const current = this.runtimeByThread.get(threadId);
+            if (!current || current.readRevision !== revision) return;
+            if (response.ok && this.model.thread(threadId)) {
+                current.hydration = "hydrated";
+                current.operationReady = this.model.thread(threadId)?.status !== "notLoaded";
+                queueMicrotask(() => this.dispatchNextPrompt(threadId));
+                return;
+            }
+            current.hydration = "failed";
+            const message = response.ok ? "Thread loading returned no thread" : this.errorMessage(response);
+            this.prompts.failQueued(threadId, message);
+            this.setNotice(message);
+        });
+    }
+    private dispatchQueuedPrompts(): void {
+        if (!this.canSubmit()) return;
+        for (const threadId of this.prompts.queuedThreadIds()) this.dispatchNextPrompt(threadId);
+    }
+    private resumePromptQueue(threadId: string): void {
+        const runtime = this.threadRuntime(threadId);
+        if (runtime.resumeInFlight || !this.canSubmit()) return;
+        runtime.resumeInFlight = true;
+        const epoch = this.lifecycleEpoch;
+        this.requestPromise("thread.resume", {threadId}, () => epoch === this.lifecycleEpoch
+            && this.runtimeByThread.get(threadId)?.resumeInFlight === true).then(response => {
+            if (response.stale) return;
+            const current = this.runtimeByThread.get(threadId);
+            if (!current) return;
+            current.resumeInFlight = false;
+            if (response.ok) {
+                current.hydration = "hydrated"; current.operationReady = true;
+                queueMicrotask(() => this.dispatchNextPrompt(threadId));
+                return;
+            }
+            current.hydration = "failed";
+            const message = this.errorMessage(response);
+            this.prompts.failQueued(threadId, message); this.setNotice(message);
+        });
+    }
+    private attemptThreadRecovery(dispatch: PromptDispatch, response: OperationResponse): boolean {
+        const message = this.errorMessage(response).toLowerCase();
+        if (response.ok || !message.includes("thread") || !message.includes("not found")) return false;
+        const runtime = this.threadRuntime(dispatch.threadId);
+        if (runtime.recoveryAttemptedSubmissions.has(dispatch.id)) return false;
+        runtime.recoveryAttemptedSubmissions.add(dispatch.id);
+        if (!this.prompts.requeue(dispatch.threadId, dispatch.id)) return false;
+        runtime.hydration = "hydrated";
+        runtime.operationReady = false;
+        this.resumePromptQueue(dispatch.threadId);
+        return true;
+    }
     private hydrateCatalogs(): void {
-        this.request("threads.list", {}); this.request("models.list", {}); this.request("permission-profiles.list", {});
+        if (!this.providerReady()) return;
+        const connection = this.model.connection();
+        const key = `${connection.generation}:${connection.providerGeneration}`;
+        if (this.catalogHydrationKey !== key) {
+            this.catalogHydrationKey = key;
+            this.request("threads.list", {}); this.request("models.list", {}); this.request("permission-profiles.list", {});
+        }
         const queued = new Set(this.prompts.queuedThreadIds());
         if (this.selectedThreadId !== "") queued.add(this.selectedThreadId);
-        for (const threadId of queued) this.request("thread.read", {threadId, includeTurns: true}, () => this.dispatchNextPrompt(threadId));
+        for (const threadId of queued) this.ensureThreadHydrated(threadId);
+        this.dispatchQueuedPrompts();
     }
-    private request(action: string, parameters: JsonObject, callback?: (frame: JsonObject) => void): string {
+    private request(action: string, parameters: JsonObject, callback?: (frame: JsonObject, stale: boolean) => void,
+        acceptResult: () => boolean = () => true): string {
         const method = actionMethods[action];
         const correlation = `web-request-${this.nextCorrelation++}`;
         if (!method) { this.normalizer.operationRejected(action, correlation, -32601, "unsupported CodexUI presentation action"); return correlation; }
         const startedAtSequence = this.normalizer.sequence;
         const request = this.sdk.request.bind(this.sdk) as unknown as RawRequest;
         request(method, parameters, response => {
+            if (!acceptResult()) { callback?.({}, true); return; }
             const envelope = isObject(response) ? response : {};
             this.normalizer.operationResult(action, correlation, parameters, envelope, startedAtSequence);
-            callback?.(envelope);
+            callback?.(envelope, false);
         });
         return correlation;
     }
-    private requestPromise(action: string, parameters: JsonObject): Promise<{ok: boolean; data?: unknown; error?: unknown}> {
-        return new Promise(resolve => this.request(action, parameters, response => resolve(Object.hasOwn(response, "result")
-            ? {ok: true, data: response.result} : {ok: false, error: response.error})));
+    private requestPromise(action: string, parameters: JsonObject,
+        acceptResult: () => boolean = () => true): Promise<OperationResponse> {
+        return new Promise(resolve => this.request(action, parameters, (response, stale) => resolve(stale
+            ? {ok: false, stale: true}
+            : Object.hasOwn(response, "result") ? {ok: true, data: response.result} : {ok: false, error: response.error}), acceptResult));
     }
     private dispatchNextPrompt(threadId: string): void {
-        if (!this.model.connection().connected || this.prompts.hasInFlight(threadId)) return;
+        if (!this.canSubmit() || this.prompts.hasInFlight(threadId)) return;
+        if (!this.prompts.submissions(threadId).some(submission => submission.state === "queued")) return;
+        const runtime = this.threadRuntime(threadId);
+        if (runtime.hydration !== "hydrated") {
+            this.ensureThreadHydrated(threadId);
+            return;
+        }
         const thread = this.model.thread(threadId);
-        if (thread?.status === "notLoaded") {
-            if (this.resumeInFlight.has(threadId)) return;
-            this.resumeInFlight.add(threadId);
-            this.requestPromise("thread.resume", {threadId}).then(response => {
-                this.resumeInFlight.delete(threadId);
-                if (response.ok) this.dispatchNextPrompt(threadId);
-                else { this.prompts.failQueued(threadId, this.errorMessage(response)); this.setNotice(this.errorMessage(response)); }
-            });
+        if (!runtime.operationReady && thread?.status === "notLoaded") {
+            this.resumePromptQueue(threadId);
+            return;
+        }
+        if (!thread) {
+            runtime.hydration = "notHydrated"; runtime.operationReady = false;
+            this.ensureThreadHydrated(threadId);
             return;
         }
         const dispatch = this.prompts.beginNext(threadId, this.model.activeTurnId(threadId));
@@ -317,8 +450,15 @@ export class BrowserFrontendSession {
         const params: JsonObject = dispatch.expectedTurnId
             ? {threadId: dispatch.threadId, expectedTurnId: dispatch.expectedTurnId, clientUserMessageId: dispatch.clientUserMessageId, input}
             : {...dispatch.turnOptions, threadId: dispatch.threadId, clientUserMessageId: dispatch.clientUserMessageId, input};
-        this.requestPromise(action, params).then(response => {
+        const epoch = this.lifecycleEpoch;
+        this.requestPromise(action, params, () => epoch === this.lifecycleEpoch
+            && this.prompts.submission(dispatch.threadId, dispatch.id)?.state === "inFlight").then(response => {
+            if (response.stale) return;
+            if (this.attemptThreadRecovery(dispatch, response)) return;
+            const runtime = this.runtimeByThread.get(dispatch.threadId);
+            runtime?.recoveryAttemptedSubmissions.delete(dispatch.id);
             if (response.ok) {
+                if (runtime) runtime.operationReady = true;
                 const turn = isObject(response.data) ? member(response.data, "turn", {}) : {};
                 this.prompts.acknowledge(dispatch.threadId, dispatch.id, stringMember(turn, "id") || undefined, Date.now());
                 this.scheduleAcceptedTransition(dispatch.threadId, dispatch.id);
@@ -365,10 +505,28 @@ export class BrowserFrontendSession {
         if (frame.kind !== "event") return;
         const type = stringMember(frame, "type");
         const data = isObject(frame.data) ? frame.data : {};
-        if (type === "thread.removed") {
+        if (type === "connection.lifecycle") {
+            const state = stringMember(data, "state");
+            if (["connecting", "retrying", "disconnected", "failure"].includes(state)) this.invalidateProviderWork();
+        } else if (type === "connection.provider") {
+            const state = stringMember(data, "state");
+            if (state === "ready") {
+                const connection = this.model.connection();
+                const providerKey = `${connection.generation}:${connection.providerGeneration}`;
+                if (this.catalogHydrationKey !== "" && this.catalogHydrationKey !== providerKey) this.invalidateProviderWork();
+                queueMicrotask(() => this.hydrateCatalogs());
+            }
+            else this.invalidateProviderWork();
+        } else if (type === "connection.bridge" || type === "connection.controller") {
+            if (this.providerReady()) queueMicrotask(() => {
+                if (this.selectedThreadId !== "") this.ensureThreadHydrated(this.selectedThreadId);
+                this.dispatchQueuedPrompts();
+            });
+        } else if (type === "thread.removed") {
             const scope = isObject(frame.scope) ? frame.scope : {};
             const threadId = stringMember(scope, "threadId");
             this.prompts.clearThread(threadId);
+            this.runtimeByThread.delete(threadId);
             if (this.selectedThreadId === threadId) this.selectedThreadId = "";
         } else if (type === "notice.added") {
             const notice = isObject(data.notice) ? data.notice : {};
