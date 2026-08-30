@@ -106,7 +106,8 @@ class DevTools {
 }
 
 async function pageTarget(port) {
-    for (let attempt = 0; attempt < 200; ++attempt) {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
         try {
             const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
             const page = targets.find(target => target.type === "page");
@@ -236,7 +237,10 @@ try {
     chrome?.kill("SIGTERM");
     if (chrome && chrome.exitCode === null)
         await Promise.race([new Promise(complete => chrome.once("exit", complete)), wait(1000)]);
-    if (chrome?.exitCode === null) chrome.kill("SIGKILL");
+    if (chrome?.exitCode === null) {
+        chrome.kill("SIGKILL");
+        await Promise.race([new Promise(complete => chrome.once("exit", complete)), wait(1000)]);
+    }
     await new Promise(complete => server.close(complete));
-    await rm(profile, {recursive: true, force: true});
+    await rm(profile, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
 }

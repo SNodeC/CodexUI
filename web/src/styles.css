@@ -120,10 +120,12 @@ h1, h2, h3, p { margin: 0; }
 .brand-orb { width: 46px; height: 46px; border-radius: 15px; }
 .empty-state h3 { font-size: 14px; font-weight: 550; }
 .load-more { display: block; margin: 0 auto 16px; }
-.composer-dock { position: absolute; z-index: 4; right: max(20px, calc((100% - 800px) / 2)); bottom: 16px; left: max(20px, calc((100% - 800px) / 2)); padding-top: 8px; border-top: 1px solid #d7dee8; background: #f2f5f9; }
+.composer-dock { position: absolute; z-index: 4; right: max(20px, calc((100% - 800px) / 2)); bottom: 0; left: max(20px, calc((100% - 800px) / 2)); padding: 8px 0 16px; border-top: 1px solid #d7dee8; background: #f2f5f9; }
+.composer-dock::before { content: ""; position: absolute; right: 0; bottom: 100%; left: 0; height: 8px; background: #f2f5f9; }
+.composer-dock::after { content: ""; position: absolute; z-index: 1; top: -1px; right: 0; left: 0; height: 1px; background: #d7dee8; }
 .composer { border: 1px solid #cfd7e4; background: #fff; border-radius: 13px; box-shadow: 0 7px 22px #26334f16; overflow: hidden; }
 .composer:focus-within { border-color: #6f98e8; box-shadow: 0 0 0 2px #6f98e82b, 0 7px 22px #26334f16; }
-.composer textarea { display: block; width: 100%; min-height: 42px; max-height: 180px; resize: none; border: 0; outline: 0; padding: 12px 15px 6px; color: #1d2739; }
+.composer textarea { display: block; width: 100%; min-height: 42px; max-height: 180px; resize: none; border: 0; outline: 0; padding: 12px 15px 6px; background: #fff; color: #1d2739; }
 .composer textarea:disabled { background: #f4f6f9; }
 .composer-actions { display: flex; align-items: center; justify-content: space-between; padding: 7px 9px 9px 14px; }
 .composer-actions span { color: #667085; font-size: 9px; }
@@ -203,7 +205,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     .conversation-view-controls { flex-wrap: wrap; }
     .conversation-scroll { padding: 12px 8px calc(var(--composer-overlay-height) + 16px); }
     .conversation-card { padding: 11px 12px; }
-    .composer-dock { right: 8px; bottom: 8px; left: 8px; }
+    .composer-dock { right: 8px; bottom: 0; left: 8px; padding-bottom: 8px; }
     .composer textarea { padding: 11px 12px 7px; }
     .composer-actions { flex-wrap: wrap; gap: 7px; padding-inline: 10px; }
     .composer-actions span { flex: 1 1 190px; }

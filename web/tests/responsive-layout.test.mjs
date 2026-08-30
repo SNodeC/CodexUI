@@ -87,4 +87,9 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /button:focus-visible[\s\S]*outline:\s*2px solid #6f98e8/u);
     assert.match(css, /@media \(pointer:\s*coarse\)[\s\S]*min-height:\s*44px/u);
     assert.match(css, /\.composer-actions span\s*\{[^}]*color:\s*#667085/u);
+    assert.match(css, /\.composer-dock\s*\{[^}]*bottom:\s*0[^}]*padding:\s*8px 0 16px[^}]*background:\s*#f2f5f9/u);
+    assert.match(css, /\.composer-dock::before\s*\{[^}]*bottom:\s*100%[^}]*height:\s*8px[^}]*background:\s*#f2f5f9/u);
+    assert.match(css, /\.composer-dock::after\s*\{[^}]*top:\s*-1px[^}]*height:\s*1px[^}]*background:\s*#d7dee8/u);
+    assert.match(css, /\.composer textarea\s*\{[^}]*background:\s*#fff/u);
+    assert.match(css, /@media \(max-width:\s*520px\)[\s\S]*\.composer-dock\s*\{[^}]*bottom:\s*0[^}]*padding-bottom:\s*8px/u);
 });
