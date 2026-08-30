@@ -1,9 +1,11 @@
 import {useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
 import type {FormEvent, ReactNode, RefObject} from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
     ConversationViewportState, DefaultSetting, changeSettingDraft, canonicalThreadSettings, classifyStatus,
     pendingDecisionOptions, pendingRequestDetails, pendingResponse, permissionProfileLabel, stableKey,
-    settingDraftFor, settingPromptOptions,
+    settingDraftFor, settingPromptOptions, trimTrailingEmptyLines,
 } from "../index.js";
 import type {PendingRequestPresentation, SettingDraft, SettingField, SettingPromptOptions, ThreadPresentation} from "../index.js";
 import type {
@@ -83,6 +85,10 @@ function PresentationIcon({kind}: {kind: "reasoning" | "updates" | "command" | "
 
 function CopyIcon() {
     return <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="2.5" width="8" height="9" rx="1.5"/><rect x="6" y="5.5" width="8" height="9" rx="1.5"/></svg>;
+}
+
+function FoldIcon({collapsed}: {collapsed: boolean}) {
+    return <svg viewBox="0 0 16 16" aria-hidden="true"><path d={collapsed ? "m10 3-5 5 5 5" : "m3 6 5 5 5-5"} /></svg>;
 }
 
 function ImageRibbon({paths}: {paths: string[]}) {
@@ -274,30 +280,15 @@ function safeHref(value: string): string | undefined {
     try { const url = new URL(value); return url.protocol === "https:" || url.protocol === "http:" ? url.href : undefined; }
     catch { return undefined; }
 }
-function InlineMarkdown({text}: {text: string}) {
-    const expression = /(`[^`]+`|\[[^\]]+\]\([^)]+\)|\*\*[^*]+\*\*)/gu;
-    return <>{text.split(expression).filter(Boolean).map((part, index) => {
-        if (part.startsWith("`") && part.endsWith("`")) return <code key={index} className="inline-code">{part.slice(1, -1)}</code>;
-        if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
-        const link = /^\[([^\]]+)\]\(([^)]+)\)$/u.exec(part);
-        if (link) { const href = safeHref(link[2]!); return href ? <a key={index} href={href} target="_blank" rel="noreferrer">{link[1]}</a> : <span key={index}>{link[1]} ({link[2]})</span>; }
-        return part;
-    })}</>;
-}
 function SafeMarkdown({text}: {text: string}) {
-    const blocks: ReactNode[] = [];
-    let code: string[] | undefined;
-    let paragraph: string[] = [];
-    const flush = () => { if (paragraph.length) { blocks.push(<p key={`p-${blocks.length}`}><InlineMarkdown text={paragraph.join("\n")} /></p>); paragraph = []; } };
-    for (const line of text.split("\n")) {
-        if (line.startsWith("```")) { if (code) { blocks.push(<pre key={`c-${blocks.length}`}>{code.join("\n")}</pre>); code = undefined; } else { flush(); code = []; } continue; }
-        if (code) { code.push(line); continue; }
-        if (/^#{1,4} /u.test(line)) { flush(); blocks.push(<h3 key={`h-${blocks.length}`}><InlineMarkdown text={line.replace(/^#{1,4} /u, "")} /></h3>); }
-        else if (/^[-*] /u.test(line)) { flush(); blocks.push(<div className="markdown-list" key={`l-${blocks.length}`}>• <InlineMarkdown text={line.slice(2)} /></div>); }
-        else if (line.trim() === "") flush(); else paragraph.push(line);
-    }
-    flush(); if (code) blocks.push(<pre key={`c-${blocks.length}`}>{code.join("\n")}</pre>);
-    return <div className="safe-markdown">{blocks}</div>;
+    return <div className="safe-markdown"><Markdown remarkPlugins={[remarkGfm]} skipHtml components={{
+        a({href, children}) {
+            const safe = safeHref(href ?? "");
+            return safe ? <a href={safe} target="_blank" rel="noreferrer">{children}</a>
+                : <span>{children}{href ? ` (${href})` : ""}</span>;
+        },
+        img({src, alt}) { return <span className="markdown-image-reference">{alt || "Image"}{src ? ` (${src})` : ""}</span>; },
+    }}>{text}</Markdown></div>;
 }
 
 export interface CardCopyContent {text: string; markdown: boolean}
@@ -315,6 +306,42 @@ function planMarkdown(plan: PlanData): string {
         rows.push(`${marker} ${step.text}  `);
     }
     return rows.join("\n");
+}
+
+const MaximumGenericActivityCharacters = 4096;
+
+function boundedGenericActivity(raw: unknown): string {
+    const rendered = JSON.stringify(raw, null, 2) ?? "";
+    return rendered.length <= MaximumGenericActivityCharacters ? rendered
+        : `${rendered.slice(0, MaximumGenericActivityCharacters)}\n\n[Activity details truncated]`;
+}
+
+function commandMetadata(command: CommandExecutionData): string {
+    const values = [displayStatus(command.status)];
+    if (command.exitCode !== undefined) values.push(`exit ${command.exitCode}`);
+    if (command.cwd) values.push(command.cwd);
+    if (command.durationMilliseconds !== undefined) {
+        const seconds = command.durationMilliseconds / 1000;
+        values.push(`${seconds.toFixed(seconds < 10 ? 1 : 0)} s`);
+    }
+    return values.filter(Boolean).join("  |  ");
+}
+
+function agentMetadata(activity: AgentActivityData): string {
+    const status = activity.status || activity.kind;
+    return [activity.tool, displayStatus(status), activity.receivers.join(", "), activity.model,
+        activity.reasoningEffort, activity.childThreadId ? `thread ${activity.childThreadId}` : "",
+        activity.agentPath, activity.senderThreadId ? `sender ${activity.senderThreadId}` : ""]
+        .filter(Boolean).join("  |  ");
+}
+
+function fileChangeMetadata(changes: FileChangesData): string {
+    let additions = 0; let deletions = 0; let countsAvailable = false;
+    for (const change of changes.changes) if (change.additions !== undefined && change.deletions !== undefined) {
+        additions += change.additions; deletions += change.deletions; countsAvailable = true;
+    }
+    return [displayStatus(changes.status), `${changes.changes.length} paths`, countsAvailable ? `+${additions} −${deletions}` : ""]
+        .filter(Boolean).join("  |  ");
 }
 
 export function cardCopyContent(card: VisibleCardData): CardCopyContent {
@@ -350,7 +377,7 @@ export function cardCopyContent(card: VisibleCardData): CardCopyContent {
         return {text: joinCopyText([data.revisedPrompt, data.path]), markdown: false};
     }
     const data = card.payload as GenericActivityData;
-    return {text: JSON.stringify(data.raw, null, 2), markdown: false};
+    return {text: boundedGenericActivity(data.raw), markdown: false};
 }
 
 export async function writeCardClipboard(content: CardCopyContent): Promise<"copied" | "unsupported" | "failed"> {
@@ -375,7 +402,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     let phaseClass = "";
     if (card.kind === "userMessage") {
         const data = card.payload as UserMessageData; title = "You";
-        body = <><div className="card-text">{data.text}</div><ImageRibbon paths={data.imagePaths} /></>;
+        body = <><SafeMarkdown text={data.text} /><ImageRibbon paths={data.imagePaths} /></>;
     } else if (card.kind === "localPrompt") {
         const data = card.payload as LocalPromptData; title = data.state === "failed" ? "Not sent" : "You";
         body = <><div className="card-text">{data.prompt}</div><ImageRibbon paths={data.imagePaths} />{data.error && <div className="error-text">{data.error}</div>}</>;
@@ -384,36 +411,38 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         body = <SafeMarkdown text={data.text} />;
     } else if (card.kind === "reasoning") {
         const data = card.payload as ReasoningData; title = "Reasoning";
-        body = data.summary ? <div className="card-text">{data.summary}</div> : active ? <div className="activity-line"><i />Working…</div> : null;
+        body = data.summary ? <SafeMarkdown text={data.summary} /> : active ? <div className="activity-line"><i />Working…</div> : null;
     } else if (card.kind === "commandExecution") {
-        const data = card.payload as CommandExecutionData; title = "Command";
-        body = <><code className="command-line">{data.command}</code>{data.output && <pre>{data.output}</pre>}
-            <small>{humanize(data.status)}{data.exitCode !== undefined ? ` · exit ${data.exitCode}` : ""}</small></>;
+        const data = card.payload as CommandExecutionData; title = "Command execution";
+        body = <><code className="command-line">{trimTrailingEmptyLines(data.command)}</code>{data.output && <pre>{trimTrailingEmptyLines(data.output)}</pre>}
+            <small className={`card-status ${classifyStatus(data.status).tone}`}>{commandMetadata(data)}</small></>;
     } else if (card.kind === "fileChanges") {
         const data = card.payload as FileChangesData; title = "File changes";
-        body = <div className="file-list">{data.changes.map(change => <div key={`${change.path}:${change.kind}`}>
+        body = <><div className="file-list">{data.changes.map(change => <div key={`${change.path}:${change.kind}`}>
             <span>{change.path}</span><small>{humanize(change.kind)} {change.additions !== undefined && <b className="plus">+{change.additions}</b>} {change.deletions !== undefined && <b className="minus">−{change.deletions}</b>}</small>
-        </div>)}</div>;
+        </div>)}</div><small className={`card-status ${classifyStatus(data.status).tone}`}>{fileChangeMetadata(data)}</small></>;
     } else if (card.kind === "agentActivity") {
-        const data = card.payload as AgentActivityData; title = humanize(data.tool || data.kind || "Agent activity");
-        body = <><div className="card-text">{data.prompt || data.resultText || data.childThreadId}</div><small>{humanize(data.status)}</small></>;
+        const data = card.payload as AgentActivityData; title = "Agent activity";
+        body = <><small className={`card-status ${classifyStatus(data.status || data.kind).tone}`}>{agentMetadata(data)}</small>
+            {data.prompt && <div className="card-text">{data.prompt}</div>}{data.resultText && <SafeMarkdown text={data.resultText} />}</>;
     } else if (card.kind === "imageGeneration") {
-        const data = card.payload as {path: string; status: string; revisedPrompt: string}; title = "Generated image";
-        body = <><div className="card-text">{data.revisedPrompt}</div><ImageRibbon paths={data.path ? [data.path] : []} /></>;
+        const data = card.payload as ImageGenerationData; title = data.status || data.revisedPrompt ? "Generated image" : "Image";
+        body = <>{data.status && <small className={`card-status ${classifyStatus(data.status).tone}`}>{displayStatus(data.status)}</small>}
+            {data.revisedPrompt && <div className="card-text">{data.revisedPrompt}</div>}<ImageRibbon paths={data.path ? [data.path] : []} /></>;
     } else if (card.kind === "plan") {
-        const data = card.payload as {legacyText: string}; title = "Plan"; body = <div className="card-text">{data.legacyText}</div>;
+        const data = card.payload as PlanData; title = "Plan"; body = <SafeMarkdown text={planMarkdown(data)} />;
     } else {
-        const data = card.payload as {type: string; raw: unknown}; title = humanize(data.type);
-        body = <details><summary>Protocol data</summary><pre>{JSON.stringify(data.raw, null, 2)}</pre></details>;
+        const data = card.payload as GenericActivityData; title = data.type ? humanize(data.type) : "Activity";
+        body = <pre className="generic-activity-data">{boundedGenericActivity(data.raw)}</pre>;
     }
     const copyContent = cardCopyContent(card);
-    const foldable = ["userMessage", "localPrompt", "agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "imageGeneration", "genericActivity"].includes(card.kind)
+    const foldable = ["userMessage", "localPrompt", "agentMessage", "commandExecution", "agentActivity", "reasoning", "fileChanges", "imageGeneration", "plan", "genericActivity"].includes(card.kind)
         && !(card.kind === "reasoning" && !(card.payload as ReasoningData).summary);
     const activeTurn = active && turnContainer && card.kind === "userMessage";
     const activeWork = (card.kind === "commandExecution" || card.kind === "imageGeneration")
         && ["active", "inProgress", "running", "started"].includes((card.payload as CommandExecutionData | ImageGenerationData).status);
     return <article className={`conversation-card ${card.kind} ${phaseClass} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""}`} data-card-key={stableKey(card.key)}>
-        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{copyContent.text && <button className="card-copy-button" onClick={() => onCopy(copyContent)} aria-label="Copy card content"><CopyIcon /></button>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}>{collapsed ? "＋" : "−"}</button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
+        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{copyContent.text && <button className="card-copy-button" onClick={() => onCopy(copyContent)} aria-label="Copy card content"><CopyIcon /></button>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
 
@@ -468,7 +497,9 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
         if (!folding.current.has(key))
             folding.current.set(key,
                 (card.kind === "commandExecution" && !presentation.commandsInitiallyExpanded)
-                || (card.kind === "imageGeneration" && !presentation.imagesInitiallyExpanded));
+                || (card.kind === "imageGeneration" && !presentation.imagesInitiallyExpanded)
+                || (card.kind === "reasoning" && Boolean((card.payload as ReasoningData).summary))
+                || ["fileChanges", "agentActivity", "plan", "genericActivity"].includes(card.kind));
         return folding.current.get(key) ?? false;
     };
     const toggleCard = (key: string, collapsed: boolean) => {

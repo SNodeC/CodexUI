@@ -88,3 +88,59 @@ test("message attachments retain one horizontal ribbon in source order", () => {
     assert.ok(markup.indexOf("one.png") < markup.indexOf("two.png"));
     assert.ok(markup.indexOf("two.png") < markup.indexOf("three.png"));
 });
+
+test("authoritative messages render safe GitHub Markdown without fetching embedded images", () => {
+    const user = itemCard("userMessage", "markdown", {
+        text: "# Heading\n\n> quoted\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n- [x] done\n\n[local](file:///tmp/file)\n\n![remote](https://example.test/image.png)\n\n<script>unsafe()</script>",
+        imagePaths: [],
+    });
+    const markup = renderToStaticMarkup(createElement(Card, {
+        card: user, active: false, collapsed: false, onToggle() {}, onCopy() {},
+    }));
+    assert.match(markup, /<h1>Heading<\/h1>/u);
+    assert.match(markup, /<blockquote>/u);
+    assert.match(markup, /<table>/u);
+    assert.match(markup, /type="checkbox"/u);
+    assert.match(markup, /checked=""/u);
+    assert.match(markup, /disabled=""/u);
+    assert.doesNotMatch(markup, /<script|<img/u);
+    assert.doesNotMatch(markup, /href="file:/u);
+    assert.match(markup, /markdown-image-reference/u);
+});
+
+test("typed activity cards retain complete metadata and bounded diagnostics", () => {
+    const command = itemCard("commandExecution", "command", {
+        command: "printf test\n\n", output: "done\n\n", status: "completed", cwd: "/workspace", exitCode: 0,
+        durationMilliseconds: 1500,
+    });
+    const commandMarkup = renderToStaticMarkup(createElement(Card, {
+        card: command, active: false, collapsed: false, onToggle() {}, onCopy() {},
+    }));
+    assert.match(commandMarkup, /Command execution/u);
+    assert.match(commandMarkup, /Completed  \|  exit 0  \|  \/workspace  \|  1\.5 s/u);
+    assert.doesNotMatch(commandMarkup, /done\n\n/u);
+
+    const agent = itemCard("agentActivity", "agent", {
+        tool: "spawn_agent", status: "completed", kind: "", prompt: "Inspect this", resultText: "**Done**",
+        receivers: ["worker"], model: "gpt-test", reasoningEffort: "medium", childThreadId: "child",
+        agentPath: "root/worker", senderThreadId: "root",
+    });
+    const agentMarkup = renderToStaticMarkup(createElement(Card, {
+        card: agent, active: false, collapsed: false, onToggle() {}, onCopy() {},
+    }));
+    for (const value of ["spawn_agent", "worker", "gpt-test", "medium", "thread child", "root/worker", "sender root", "Inspect this"])
+        assert.match(agentMarkup, new RegExp(value, "u"));
+    assert.match(agentMarkup, /<strong>Done<\/strong>/u);
+
+    const files = itemCard("fileChanges", "files", {status: "completed", changes: [
+        {path: "one.cpp", kind: "update", additions: 2, deletions: 1},
+        {path: "two.cpp", kind: "create", additions: 3, deletions: 0},
+    ]});
+    const filesMarkup = renderToStaticMarkup(createElement(Card, {
+        card: files, active: false, collapsed: false, onToggle() {}, onCopy() {},
+    }));
+    assert.match(filesMarkup, /Completed  \|  2 paths  \|  \+5 −1/u);
+
+    const generic = itemCard("genericActivity", "generic", {type: "futureThing", raw: {text: "x".repeat(5000)}});
+    assert.match(cardCopyContent(generic).text, /\[Activity details truncated\]$/u);
+});

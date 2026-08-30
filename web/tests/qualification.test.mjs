@@ -160,7 +160,9 @@ test("conversation presentation preferences retain filtered cards and initialize
     }};
     const filtered = renderToStaticMarkup(createElement(App, {session}));
     delete globalThis.window;
-    assert.match(filtered, /Retained reasoning detail/u);
+    assert.match(filtered, /conversation-card reasoning\s+collapsed/u);
+    assert.doesNotMatch(filtered, /Retained reasoning detail/u);
+    assert.match(filtered, /aria-label="Expand card"/u);
     assert.doesNotMatch(filtered, /Retained Codex update/u);
     assert.match(filtered, /Final answer always visible/u);
     assert.match(filtered, /conversation-card commandExecution\s+collapsed/u);

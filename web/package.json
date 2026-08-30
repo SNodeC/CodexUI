@@ -14,7 +14,9 @@
   "dependencies": {
     "@snodec/codex-frontend": "file:../../../AISuite-extraction/AISuite-final/packages/codex-frontend",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
   },
   "devDependencies": {
     "@types/react": "18.3.27",
