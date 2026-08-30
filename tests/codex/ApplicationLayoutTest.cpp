@@ -12,11 +12,12 @@
 #include "codex/middle/ThreadPane.h"
 #include "codex/ui/ExpandingPromptEditor.h"
 #include "codex/ui/UiStyle.h"
+#include "codex/ui/UiViewProjection.h"
 
 #include <QApplication>
-#include <QCoreApplication>
-#include <QContextMenuEvent>
 #include <QComboBox>
+#include <QContextMenuEvent>
+#include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QFile>
@@ -39,9 +40,8 @@
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTextCursor>
-#include <QTimer>
-#include <QToolButton>
 #include <QThread>
+#include <QTimer>
 #include <QToolButton>
 #include <QWheelEvent>
 
@@ -75,6 +75,20 @@ bool expect(bool condition, const char *message) {
   return false;
 }
 
+std::string utf8(const QString &value) { return value.toUtf8().toStdString(); }
+
+void refresh(ThreadPane &pane, const PresentationModel &model,
+             std::string selectedThreadId) {
+  pane.refresh(
+      ui::projectThreadListSnapshot(model, std::move(selectedThreadId)));
+}
+
+void refresh(InspectorPane &pane, const PresentationModel &model,
+             std::string selectedThreadId) {
+  pane.refresh(
+      ui::projectInspectorSnapshot(model, std::move(selectedThreadId)));
+}
+
 void sendPromptKey(codexui::ExpandingPromptEditor &editor, int key,
                    Qt::KeyboardModifiers modifiers = Qt::NoModifier,
                    bool autoRepeat = false) {
@@ -90,8 +104,7 @@ bool testPromptKeyboardSubmission() {
   QCoreApplication::processEvents();
 
   int submissions = 0;
-  QObject::connect(&editor,
-                   &codexui::ExpandingPromptEditor::submitRequested,
+  QObject::connect(&editor, &codexui::ExpandingPromptEditor::submitRequested,
                    [&submissions] { ++submissions; });
   const auto resetDraft = [&editor] {
     editor.setPlainText(QStringLiteral("draft"));
@@ -106,8 +119,8 @@ bool testPromptKeyboardSubmission() {
 
   resetDraft();
   sendPromptKey(editor, Qt::Key_Return);
-  result &= expect(submissions == 1,
-                   "Return submits the focused prompt editor");
+  result &=
+      expect(submissions == 1, "Return submits the focused prompt editor");
   resetDraft();
   sendPromptKey(editor, Qt::Key_Enter, Qt::KeypadModifier);
   result &= expect(submissions == 2,
@@ -118,8 +131,7 @@ bool testPromptKeyboardSubmission() {
                    "Control+Enter remains a prompt submission alias");
   resetDraft();
   sendPromptKey(editor, Qt::Key_Return, Qt::MetaModifier);
-  result &= expect(submissions == 4,
-                   "Meta+Enter is a prompt submission alias");
+  result &= expect(submissions == 4, "Meta+Enter is a prompt submission alias");
 
   resetDraft();
   sendPromptKey(editor, Qt::Key_Return, Qt::ShiftModifier);
@@ -161,8 +173,8 @@ bool commitPath(git_repository *repository, const char *path) {
   git_index *index = nullptr;
   if (git_repository_index(&index, repository) < 0)
     return false;
-  const bool indexed = git_index_add_bypath(index, path) == 0 &&
-                       git_index_write(index) == 0;
+  const bool indexed =
+      git_index_add_bypath(index, path) == 0 && git_index_write(index) == 0;
   git_oid treeId{};
   const bool wroteTree = indexed && git_index_write_tree(&treeId, index) == 0;
   git_index_free(index);
@@ -229,9 +241,9 @@ VisibleCardData textCard(const std::string &thread, int index) {
           turn,
           item,
           AgentMessageData{
-              QStringLiteral("A materialized response line %1 with enough "
+              utf8(QStringLiteral("A materialized response line %1 with enough "
                              "content to occupy normal card height.")
-                  .arg(index),
+                       .arg(index)),
               false}};
 }
 
@@ -249,8 +261,8 @@ QWheelEvent wheelFor(QWidget *target, int pixelDelta,
                      Qt::ScrollPhase phase = Qt::ScrollUpdate) {
   const QPointF local(target->rect().center());
   return QWheelEvent(local, target->mapToGlobal(local.toPoint()), QPoint(),
-                     QPoint(0, pixelDelta), Qt::NoButton, Qt::NoModifier,
-                     phase, false);
+                     QPoint(0, pixelDelta), Qt::NoButton, Qt::NoModifier, phase,
+                     false);
 }
 
 std::vector<std::string> threadOrder(const ThreadPane &pane) {
@@ -285,6 +297,9 @@ bool testOverlayGeometryAndRegionRouting() {
              "composer construction reports no pre-canonical trailing space");
   region.resize(1500, 820);
   region.show();
+  region.setThreadHeading(QStringLiteral("Thread title"),
+                          QStringLiteral("/workspace  |  Completed"),
+                          QStringLiteral("Last activity: 14:15:51"));
   spin(20);
 
   QSplitter *splitter = region.splitterWidget();
@@ -297,36 +312,30 @@ bool testOverlayGeometryAndRegionRouting() {
                        splitter->widget(2)->maximumWidth() == 520,
                    "pane width constraints match the visual contract");
 
-  auto *threadHeaderDivider =
-      splitter->widget(0)->findChild<QFrame *>(
+  auto *threadHeaderDivider = splitter->widget(0)->findChild<QFrame *>(
           QStringLiteral("threadHeaderDivider"));
-  auto *conversationHeaderDivider =
-      splitter->widget(1)->findChild<QFrame *>(
+  auto *conversationHeaderDivider = splitter->widget(1)->findChild<QFrame *>(
           QStringLiteral("conversationHeaderDivider"));
-  auto *conversationTitle =
-      splitter->widget(1)->findChild<QLabel *>(
+  auto *conversationTitle = splitter->widget(1)->findChild<QLabel *>(
           QStringLiteral("conversationTitle"));
-  auto *conversationMetadata =
-      splitter->widget(1)->findChild<QLabel *>(
+  auto *conversationMetadata = splitter->widget(1)->findChild<QLabel *>(
           QStringLiteral("conversationMetadata"));
-  auto *reasoningToggle =
-      splitter->widget(1)->findChild<QToolButton *>(
+  auto *conversationTrailingMetadata =
+      splitter->widget(1)->findChild<QLabel *>(
+          QStringLiteral("conversationTrailingMetadata"));
+  auto *reasoningToggle = splitter->widget(1)->findChild<QToolButton *>(
           QStringLiteral("conversationReasoningToggle"));
-  auto *updatesToggle =
-      splitter->widget(1)->findChild<QToolButton *>(
+  auto *updatesToggle = splitter->widget(1)->findChild<QToolButton *>(
           QStringLiteral("conversationUpdatesToggle"));
-  auto *commandFoldingToggle =
-      splitter->widget(1)->findChild<QToolButton *>(
+  auto *commandFoldingToggle = splitter->widget(1)->findChild<QToolButton *>(
           QStringLiteral("conversationCommandFoldingToggle"));
-  auto *imageFoldingToggle =
-      splitter->widget(1)->findChild<QToolButton *>(
+  auto *imageFoldingToggle = splitter->widget(1)->findChild<QToolButton *>(
           QStringLiteral("conversationImageFoldingToggle"));
   const auto paneRect = [](QWidget *widget, QWidget *pane) {
     return QRect(widget->mapTo(pane, QPoint()), widget->size());
   };
   const QRect threadDividerRect =
-      threadHeaderDivider
-          ? paneRect(threadHeaderDivider, splitter->widget(0))
+      threadHeaderDivider ? paneRect(threadHeaderDivider, splitter->widget(0))
           : QRect{};
   const QRect conversationDividerRect =
       conversationHeaderDivider
@@ -337,21 +346,33 @@ bool testOverlayGeometryAndRegionRouting() {
           threadDividerRect.left() == 10 &&
           threadDividerRect.right() == splitter->widget(0)->width() - 11 &&
           conversationDividerRect.left() == 10 &&
-          conversationDividerRect.right() ==
-              splitter->widget(1)->width() - 11,
+          conversationDividerRect.right() == splitter->widget(1)->width() - 11,
       "Threads and Conversation header dividers share the 10 px inset");
-  result &= expect(
-      conversationTitle && conversationMetadata &&
-          conversationMetadata->geometry().left() >
-              conversationTitle->geometry().right() &&
-          std::abs(conversationMetadata->geometry().bottom() -
-                   conversationTitle->geometry().bottom()) <= 1,
-      "thread title and metadata form one baseline-aligned lockup");
+  result &=
+      expect(conversationTitle && conversationMetadata &&
+                 conversationTrailingMetadata &&
+                 conversationMetadata->geometry().left() >
+                     conversationTitle->geometry().right() &&
+                 conversationTrailingMetadata->geometry().right() >=
+                     conversationTrailingMetadata->parentWidget()->width() -
+                         16 &&
+                 conversationTrailingMetadata->text() ==
+                     QStringLiteral("Last activity: 14:15:51") &&
+                 conversationTrailingMetadata->width() >=
+                     conversationTrailingMetadata->fontMetrics()
+                         .horizontalAdvance(
+                             conversationTrailingMetadata->text()) &&
+                 std::abs((conversationMetadata->geometry().top() +
+                           conversationMetadata->contentsMargins().top() +
+                           conversationMetadata->fontMetrics().ascent()) -
+                          (conversationTitle->geometry().top() +
+                           conversationTitle->contentsMargins().top() +
+                           conversationTitle->fontMetrics().ascent())) <= 1,
+      "thread title metadata align by baseline and activity aligns right");
   result &= expect(
           reasoningToggle && updatesToggle && commandFoldingToggle &&
-          imageFoldingToggle &&
-          !reasoningToggle->isChecked() && updatesToggle->isChecked() &&
-          commandFoldingToggle->isChecked() &&
+          imageFoldingToggle && !reasoningToggle->isChecked() &&
+          updatesToggle->isChecked() && commandFoldingToggle->isChecked() &&
           imageFoldingToggle->isChecked() &&
           reasoningToggle->text().isEmpty() &&
           updatesToggle->text().isEmpty() &&
@@ -377,12 +398,11 @@ bool testOverlayGeometryAndRegionRouting() {
                 QStringLiteral("Hide reasoning cards") &&
             commandFoldingToggle->accessibleName() ==
                 QStringLiteral("New command cards start collapsed") &&
-            persisted
-                 .value(QStringLiteral("conversation/showReasoning"), false)
+            persisted.value(QStringLiteral("conversation/showReasoning"), false)
                  .toBool() &&
             !persisted
-                .value(QStringLiteral(
-                           "conversation/commandsInitiallyExpanded"),
+                 .value(
+                     QStringLiteral("conversation/commandsInitiallyExpanded"),
                        true)
                 .toBool(),
         "Conversation presentation controls update the view and persistent "
@@ -421,7 +441,9 @@ bool testOverlayGeometryAndRegionRouting() {
                            : -1;
   };
   const auto settingsToEditorGap = [&] {
-    return region.composer().promptEditor()->mapTo(&region.composer(), QPoint())
+    return region.composer()
+               .promptEditor()
+               ->mapTo(&region.composer(), QPoint())
                .y() -
            overlayRect(settings).bottom() - 1;
   };
@@ -495,25 +517,23 @@ bool testOverlayGeometryAndRegionRouting() {
   view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
   spin(10);
   result &= expect(
-      stableComposerGeometry() &&
-          settingsToEditorGap() == compactEditorGap &&
+      stableComposerGeometry() && settingsToEditorGap() == compactEditorGap &&
           view.viewport()->height() - finalCardBottom() == extra &&
           view.geometry() == viewGeometry &&
           view.viewport()->geometry() == viewportGeometry &&
           region.composer().canonicalReserve()->height() == canonical,
       "prompt growth keeps gaps fixed without shifting the message viewport");
   region.composer().setAttachments(
-      {{QStringLiteral("/tmp/layout-diagnostic.png"),
-        QStringLiteral("layout-diagnostic.png"), QStringLiteral("image/png")}});
+      {{"/tmp/layout-diagnostic.png", "layout-diagnostic.png", "image/png"}});
   spin(30);
   view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
   spin(10);
-  result &= expect(
-      stableComposerGeometry() &&
+  result &= expect(stableComposerGeometry() &&
           region.composer().extraOverlayHeight() > extra &&
           view.viewport()->height() - finalCardBottom() ==
               region.composer().extraOverlayHeight() &&
-          view.trailingSpaceHeight() == region.composer().extraOverlayHeight(),
+                       view.trailingSpaceHeight() ==
+                           region.composer().extraOverlayHeight(),
       "attachments retain the canonical settings-to-composer gap");
   region.composer().clearDraft();
   spin(30);
@@ -524,8 +544,7 @@ bool testOverlayGeometryAndRegionRouting() {
           view.trailingSpaceHeight() == 0 && view.geometry() == viewGeometry &&
           view.viewport()->geometry() == viewportGeometry &&
           finalCardBottom() == view.viewport()->height() &&
-          stableComposerGeometry() &&
-          settingsToEditorGap() == compactEditorGap,
+          stableComposerGeometry() && settingsToEditorGap() == compactEditorGap,
       "prompt contraction restores canonical layout, gaps, and trailing space");
   region.composer().setActiveTurn(false);
   spin(20);
@@ -593,8 +612,8 @@ bool testStableComposerLayoutRequests() {
     LayoutRequestCounter composerLayoutRequests;
     region.composer().installEventFilter(&composerLayoutRequests);
     spin(80);
-    result = expect(
-        composerLayoutRequests.count <= 1,
+    result =
+        expect(composerLayoutRequests.count <= 1,
         "stable composer geometry does not perpetually request layout");
   }
   qApp->setStyleSheet(QString{});
@@ -608,16 +627,15 @@ bool testThreadSelectionProjection() {
       presentation::Authority::Merge, {{"threadId", "thread-a"}}));
   model.applyEvent(presentation::event(
       2, 1, "thread.upsert",
-      {{"thread", {{"id", "thread-b"},
-                    {"name", "B"},
-                    {"status", {{"type", "active"}}}}}},
+      {{"thread",
+        {{"id", "thread-b"}, {"name", "B"}, {"status", {{"type", "active"}}}}}},
       presentation::Authority::Merge, {{"threadId", "thread-b"}}));
 
   ThreadPane pane;
-  pane.refresh(model, "thread-a");
+  refresh(pane, model, "thread-a");
   bool result = expect(pane.visiblySelectedThreadId() == "thread-a",
                        "thread selection is projected from Shell state");
-  pane.refresh(model, "draft:new-thread");
+  refresh(pane, model, "draft:new-thread");
   result &= expect(pane.visiblySelectedThreadId().empty(),
                    "a New Thread draft cannot retain an old visible row");
 
@@ -631,11 +649,11 @@ bool testThreadSelectionProjection() {
                                        {{"threadId", "thread-a"},
                                         {"turnId", "turn-a"},
                                         {"itemId", "thread-b"}}));
-  pane.refresh(model, "thread-b");
+  refresh(pane, model, "thread-b");
   auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
   QListWidgetItem *selected = list ? list->currentItem() : nullptr;
-  result &= expect(
-      selected &&
+  result &=
+      expect(selected &&
           selected->data(Qt::UserRole).toString() ==
               QStringLiteral("thread-b") &&
           pane.visiblySelectedThreadId() == "thread-b",
@@ -646,8 +664,7 @@ bool testThreadSelectionProjection() {
       row ? row->findChild<QLabel *>(QStringLiteral("threadTitle")) : nullptr;
   auto *status =
       row ? row->findChild<QLabel *>(QStringLiteral("threadStatus")) : nullptr;
-  auto *dot =
-      row ? row->findChild<QFrame *>(QStringLiteral("threadStatusDot"))
+  auto *dot = row ? row->findChild<QFrame *>(QStringLiteral("threadStatusDot"))
           : nullptr;
   auto *rowLayout = row ? qobject_cast<QHBoxLayout *>(row->layout()) : nullptr;
   auto *sortButton =
@@ -655,19 +672,18 @@ bool testThreadSelectionProjection() {
   QListWidgetItem *parentItem = threadItem(list, "thread-a");
   QWidget *parentRow =
       list && parentItem ? list->itemWidget(parentItem) : nullptr;
-  QWidget *disclosure =
-      parentRow ? parentRow->findChild<QWidget *>(
+  QWidget *disclosure = parentRow
+                            ? parentRow->findChild<QWidget *>(
                       QStringLiteral("threadExpansionIndicator"))
                 : nullptr;
   auto *parentDot =
-      parentRow ? parentRow->findChild<QFrame *>(
-                      QStringLiteral("threadStatusDot"))
+      parentRow
+          ? parentRow->findChild<QFrame *>(QStringLiteral("threadStatusDot"))
                 : nullptr;
   const QString selectedAccessible =
       selected ? selected->data(Qt::AccessibleTextRole).toString() : QString{};
-  const QString parentAccessible = parentItem
-                                       ? parentItem->data(Qt::AccessibleTextRole)
-                                             .toString()
+  const QString parentAccessible =
+      parentItem ? parentItem->data(Qt::AccessibleTextRole).toString()
                                        : QString{};
   result &= expect(
       selected && selected->sizeHint().height() == 54 && rowLayout &&
@@ -695,7 +711,7 @@ bool testThreadSelectionProjection() {
           status->textInteractionFlags().testFlag(Qt::TextSelectableByMouse),
       "thread cards keep their status dot and canonical disclosure styling "
       "inside the UI contract");
-  pane.refresh(model, "thread-a");
+  refresh(pane, model, "thread-a");
   bool childPresent = false;
   if (list) {
     for (int index = 0; index < list->count(); ++index) {
@@ -709,7 +725,7 @@ bool testThreadSelectionProjection() {
   model.applyEvent(presentation::event(
       4, 1, "thread.removed", nlohmann::json::object(),
       presentation::Authority::Remove, {{"threadId", "thread-b"}}));
-  pane.refresh(model, "thread-a");
+  refresh(pane, model, "thread-a");
   bool retainedAfterRemoval = false;
   if (list) {
     for (int index = 0; index < list->count(); ++index) {
@@ -729,8 +745,8 @@ bool testIncrementalThreadSettings() {
       nlohmann::json::array({{{"model", "gpt-a"}, {"displayName", "A"}},
                              {{"model", "gpt-b"}, {"displayName", "B"}}});
   settings.setContext("thread-a",
-                      {{"model", "gpt-a"}, {"approvalPolicy", "never"}},
-                      models, nlohmann::json::array());
+                      {{"model", "gpt-a"}, {"approvalPolicy", "never"}}, models,
+                      nlohmann::json::array());
   auto *model = settings.findChild<QComboBox *>(QStringLiteral("codexModel"));
   auto *approval =
       settings.findChild<QComboBox *>(QStringLiteral("codexApproval"));
@@ -740,8 +756,8 @@ bool testIncrementalThreadSettings() {
       settings.findChild<QComboBox *>(QStringLiteral("codexSandbox"));
   auto *network =
       settings.findChild<QComboBox *>(QStringLiteral("codexNetwork"));
-  auto *permissionProfile = settings.findChild<QComboBox *>(
-      QStringLiteral("codexPermissionProfile"));
+  auto *permissionProfile =
+      settings.findChild<QComboBox *>(QStringLiteral("codexPermissionProfile"));
   if (!model || !approval || !personality || !access || !network ||
       !permissionProfile)
     return expect(false, "thread settings controls are discoverable");
@@ -755,9 +771,8 @@ bool testIncrementalThreadSettings() {
 
   model->setCurrentIndex(model->findData(QStringLiteral("gpt-b")));
   settings.setContext(
-      "thread-a",
-      {{"model", "gpt-a"}, {"approvalPolicy", "on-request"}}, models,
-      nlohmann::json::array(), 1, {{"approvalPolicy", "on-request"}});
+      "thread-a", {{"model", "gpt-a"}, {"approvalPolicy", "on-request"}},
+      models, nlohmann::json::array(), 1, {{"approvalPolicy", "on-request"}});
   bool result = expect(canonicalSettingsStyle,
                        "thread settings use canonical application styling");
   result &= expect(
@@ -765,17 +780,15 @@ bool testIncrementalThreadSettings() {
           approval->currentData().toString() == QStringLiteral("on-request"),
       "a partial authoritative update preserves unrelated pending settings");
 
-  settings.setContext(
-      "thread-a",
-      {{"model", "gpt-b"}, {"approvalPolicy", "on-request"}}, models,
-      nlohmann::json::array(), 2,
+  settings.setContext("thread-a",
+                      {{"model", "gpt-b"}, {"approvalPolicy", "on-request"}},
+                      models, nlohmann::json::array(), 2,
       {{"model", "gpt-b"}, {"approvalPolicy", "on-request"}});
   result &= expect(!settings.turnStartOptions().contains("model") &&
                        !settings.turnStartOptions().contains("approvalPolicy"),
                    "authoritative settings clear their pending overrides");
 
-  settings.setContext(
-      "thread-b",
+  settings.setContext("thread-b",
       {{"model", "gpt-a"},
        {"reasoningEffort", "medium"},
        {"personality", "friendly"},
@@ -791,10 +804,9 @@ bool testIncrementalThreadSettings() {
       models, nlohmann::json::array());
   result &= expect(model->currentData().toString() == QStringLiteral("gpt-a"),
                    "thread selection restores that thread's retained value");
-  result &= expect(
-      settings.turnStartOptions() ==
-              nlohmann::json{
-                  {"collaborationMode",
+  result &=
+      expect(settings.turnStartOptions() ==
+                     nlohmann::json{{"collaborationMode",
                    {{"mode", "default"},
                     {"settings",
                      {{"model", "gpt-a"},
@@ -806,16 +818,15 @@ bool testIncrementalThreadSettings() {
                    "a permission preset does not lock its effective access "
                    "controls");
 
-  settings.setContext(
-      "full-access-thread",
+  settings.setContext("full-access-thread",
       {{"sandboxPolicy", {{"type", "dangerFullAccess"}}},
        {"activePermissionProfile", {{"id", ":full-access"}}}},
       nlohmann::json::array(),
-      {{"data", nlohmann::json::array(
-                    {{{"id", ":full-access"}, {"allowed", true}}})}});
-  result &= expect(access->isEnabled() && !network->isEnabled() &&
-                       network->currentData().toString() ==
-                           QStringLiteral("enabled"),
+                      {{"data", nlohmann::json::array({{{"id", ":full-access"},
+                                                        {"allowed", true}}})}});
+  result &=
+      expect(access->isEnabled() && !network->isEnabled() &&
+                 network->currentData().toString() == QStringLiteral("enabled"),
                    "only logically redundant network selection is disabled");
 
   settings.setContext(
@@ -829,12 +840,10 @@ bool testIncrementalThreadSettings() {
                      {{"id", ":read-only"}, {"allowed", true}},
                      {{"id", ":danger-full-access"}, {"allowed", true}}})}});
   result &= expect(
-      permissionProfile->itemText(
-          permissionProfile->findData(QStringLiteral(":workspace"))) ==
-              QStringLiteral("Workspace") &&
-          permissionProfile->itemText(
-              permissionProfile->findData(QStringLiteral(":read-only"))) ==
-              QStringLiteral("Read only") &&
+      permissionProfile->itemText(permissionProfile->findData(
+          QStringLiteral(":workspace"))) == QStringLiteral("Workspace") &&
+          permissionProfile->itemText(permissionProfile->findData(
+              QStringLiteral(":read-only"))) == QStringLiteral("Read only") &&
           permissionProfile->itemText(permissionProfile->findData(
               QStringLiteral(":danger-full-access"))) ==
               QStringLiteral("Full access"),
@@ -855,8 +864,7 @@ bool testIncrementalThreadSettings() {
               nlohmann::json("danger-full-access"),
       "an explicit access choice replaces the active permission profile");
 
-  settings.setContext(
-      "individual-overrides-thread",
+  settings.setContext("individual-overrides-thread",
       {{"model", "gpt-a"},
        {"approvalPolicy", "never"},
        {"personality", "friendly"},
@@ -864,11 +872,10 @@ bool testIncrementalThreadSettings() {
         {{"type", "workspaceWrite"}, {"networkAccess", false}}},
        {"activePermissionProfile", {{"id", ":workspace"}}}},
       models,
-      {{"data", nlohmann::json::array(
-                    {{{"id", ":workspace"}, {"allowed", true}}})}});
+                      {{"data", nlohmann::json::array({{{"id", ":workspace"},
+                                                        {"allowed", true}}})}});
   model->setCurrentIndex(model->findData(QStringLiteral("gpt-b")));
-  approval->setCurrentIndex(
-      approval->findData(QStringLiteral("on-request")));
+  approval->setCurrentIndex(approval->findData(QStringLiteral("on-request")));
   personality->setCurrentIndex(
       personality->findData(QStringLiteral("pragmatic")));
   const nlohmann::json individualOverrides = settings.turnStartOptions();
@@ -894,16 +901,15 @@ bool testThreadHierarchyExpansionAndNavigation() {
         nlohmann::json::array({{{"id", "root-z"}, {"name", "Z root"}},
                                {{"id", "root-a"}, {"name", "A root"}}})}},
       presentation::Authority::Merge));
-  const auto addChild = [&model](std::uint64_t sequence,
-                                 const std::string &parent,
-                                 const std::string &child,
-                                 const std::string &title) {
+  const auto addChild =
+      [&model](std::uint64_t sequence, const std::string &parent,
+               const std::string &child, const std::string &title) {
     model.applyEvent(presentation::event(
         sequence, 1, "thread.upsert",
         {{"thread", {{"id", child}, {"name", title}}}},
         presentation::Authority::Merge, {{"threadId", child}}));
-    model.applyEvent(presentation::event(
-        sequence + 1, 1, "agents.activity.upsert",
+        model.applyEvent(presentation::event(sequence + 1, 1,
+                                             "agents.activity.upsert",
         {{"activity",
           {{"id", "spawn-" + child},
            {"type", "subAgentActivity"},
@@ -933,12 +939,12 @@ bool testThreadHierarchyExpansionAndNavigation() {
   actions.select = [&](const std::string &id) {
     selectedThread = id;
     ++selections;
-    pane.refresh(model, selectedThread);
+    refresh(pane, model, selectedThread);
   };
   pane.setActions(std::move(actions));
   pane.resize(340, 620);
   pane.show();
-  pane.refresh(model, selectedThread);
+  refresh(pane, model, selectedThread);
   spin(20);
 
   auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
@@ -949,8 +955,8 @@ bool testThreadHierarchyExpansionAndNavigation() {
                     QStringLiteral("threadExpansionIndicator"))
               : nullptr;
   bool result = expect(
-      list && threadOrder(pane) ==
-                  std::vector<std::string>{"root-a", "root-z"} &&
+      list &&
+          threadOrder(pane) == std::vector<std::string>{"root-a", "root-z"} &&
           rootA && rootA->data(Qt::UserRole + 2).toInt() == 0 &&
           rootDisclosure && rootDisclosure->size() == QSize(16, 24) &&
           rootDisclosure->property("chevronDirection").toString() ==
@@ -963,8 +969,7 @@ bool testThreadHierarchyExpansionAndNavigation() {
 
   const auto clickExpansion = [list](QListWidgetItem *item) {
     QWidget *row = item ? list->itemWidget(item) : nullptr;
-    QWidget *indicator =
-        row ? row->findChild<QWidget *>(
+    QWidget *indicator = row ? row->findChild<QWidget *>(
                   QStringLiteral("threadExpansionIndicator"))
             : nullptr;
     const QPoint position =
@@ -983,14 +988,12 @@ bool testThreadHierarchyExpansionAndNavigation() {
   QListWidgetItem *childA = threadItem(list, "child-a");
   rootA = threadItem(list, "root-a");
   rootRow = rootA ? list->itemWidget(rootA) : nullptr;
-  rootDisclosure =
-      rootRow ? rootRow->findChild<QWidget *>(
+  rootDisclosure = rootRow ? rootRow->findChild<QWidget *>(
                     QStringLiteral("threadExpansionIndicator"))
               : nullptr;
   result &= expect(
-      threadOrder(pane) ==
-              std::vector<std::string>{"root-a", "child-z", "child-a",
-                                       "root-z"} &&
+      threadOrder(pane) == std::vector<std::string>{"root-a", "child-z",
+                                                    "child-a", "root-z"} &&
           childZ && childZ->data(Qt::UserRole + 2).toInt() == 1 && childA &&
           rootDisclosure &&
           rootDisclosure->property("chevronDirection").toString() ==
@@ -1002,19 +1005,19 @@ bool testThreadHierarchyExpansionAndNavigation() {
     return false;
 
   selectedThread = "grandchild";
-  pane.refresh(model, selectedThread);
+  refresh(pane, model, selectedThread);
   spin();
   QListWidgetItem *grandchild = threadItem(list, "grandchild");
   QWidget *grandchildRow =
       list && grandchild ? list->itemWidget(grandchild) : nullptr;
-  QLabel *grandchildTitle = grandchildRow
-                                ? grandchildRow->findChild<QLabel *>(
-                                      QStringLiteral("threadTitle"))
+  QLabel *grandchildTitle =
+      grandchildRow
+          ? grandchildRow->findChild<QLabel *>(QStringLiteral("threadTitle"))
                                 : nullptr;
   result &= expect(
-      threadOrder(pane) ==
-              std::vector<std::string>{"root-a", "child-z", "grandchild",
-                                       "child-a", "root-z"} &&
+      threadOrder(pane) == std::vector<std::string>{"root-a", "child-z",
+                                                    "grandchild", "child-a",
+                                                    "root-z"} &&
           grandchild && grandchild->data(Qt::UserRole + 2).toInt() == 2 &&
           grandchildTitle && grandchildTitle->text().startsWith("! ") &&
           pane.visiblySelectedThreadId() == "grandchild" && selections == 0,
@@ -1026,17 +1029,16 @@ bool testThreadHierarchyExpansionAndNavigation() {
   childZ = threadItem(list, "child-z");
   clickExpansion(childZ);
   result &= expect(
-      threadOrder(pane) ==
-              std::vector<std::string>{"root-a", "child-z", "child-a",
-                                       "root-z"} &&
+      threadOrder(pane) == std::vector<std::string>{"root-a", "child-z",
+                                                    "child-a", "root-z"} &&
           pane.visiblySelectedThreadId().empty() && selections == 0,
       "collapsing a nested parent hides descendants without selecting it");
   childZ = threadItem(list, "child-z");
   clickExpansion(childZ);
   result &= expect(
-      threadOrder(pane) ==
-              std::vector<std::string>{"root-a", "child-z", "grandchild",
-                                       "child-a", "root-z"} &&
+      threadOrder(pane) == std::vector<std::string>{"root-a", "child-z",
+                                                    "grandchild", "child-a",
+                                                    "root-z"} &&
           pane.visiblySelectedThreadId() == "grandchild" && selections == 0,
       "expanding restores arbitrary nesting and projected child selection");
 
@@ -1056,7 +1058,8 @@ bool testThreadHierarchyExpansionAndNavigation() {
   QKeyEvent rightToChild(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
   QApplication::sendEvent(list, &rightToChild);
   spin();
-  result &= expect(selectedThread == "grandchild" &&
+  result &=
+      expect(selectedThread == "grandchild" &&
                        pane.visiblySelectedThreadId() == "grandchild" &&
                        selections == beforeKeyboard + 1,
                    "Right navigates from an expanded parent to its first child");
@@ -1071,17 +1074,16 @@ bool testThreadHierarchyExpansionAndNavigation() {
   QApplication::sendEvent(list, &leftCollapse);
   spin();
   result &= expect(
-      threadOrder(pane) ==
-              std::vector<std::string>{"root-a", "child-z", "child-a",
-                                       "root-z"} &&
+      threadOrder(pane) == std::vector<std::string>{"root-a", "child-z",
+                                                    "child-a", "root-z"} &&
           pane.visiblySelectedThreadId() == "child-z" &&
           selections == beforeKeyboard + 2,
       "Left collapses an expanded parent without changing selection");
   QKeyEvent rightExpand(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
   QApplication::sendEvent(list, &rightExpand);
   spin();
-  result &= expect(
-      threadOrder(pane) ==
+  result &=
+      expect(threadOrder(pane) ==
               std::vector<std::string>{"root-a", "child-z", "grandchild",
                                        "child-a", "root-z"} &&
           pane.visiblySelectedThreadId() == "child-z" &&
@@ -1103,7 +1105,7 @@ bool testThreadAlphanumericSort() {
       presentation::Authority::Merge));
   ThreadPane pane;
   pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
-  pane.refresh(model, "two");
+  refresh(pane, model, "two");
   const std::vector<std::string> order = threadOrder(pane);
   const bool correct = order == std::vector<std::string>(
                                     {"one", "two", "ten", "alpha", "beta"}) &&
@@ -1130,7 +1132,7 @@ bool testThreadCreatedSort() {
       presentation::Authority::Merge));
   ThreadPane pane;
   pane.setSortCriterion(ThreadPane::SortCriterion::Created);
-  pane.refresh(model, {});
+  refresh(pane, model, {});
   return expect(threadOrder(pane) == std::vector<std::string>(
                                          {"new", "middle", "old", "missing"}),
                 "Created sorting is newest first with missing values last");
@@ -1151,7 +1153,7 @@ bool testThreadLastChangedSort() {
       presentation::Authority::Merge, {{"threadId", "first"}}));
   ThreadPane pane;
   pane.setSortCriterion(ThreadPane::SortCriterion::LastChanged);
-  pane.refresh(model, {});
+  refresh(pane, model, {});
   return expect(threadOrder(pane) ==
                     std::vector<std::string>({"third", "first", "second"}),
                 "Last changed sorting uses retained updated timestamps");
@@ -1167,7 +1169,7 @@ bool testThreadRecencySort() {
                                {{"id", "middle"}, {"recencyAt", 20}}})}},
       presentation::Authority::Merge));
   ThreadPane pane;
-  pane.refresh(model, "older");
+  refresh(pane, model, "older");
   return expect(
       pane.currentSortCriterion() == ThreadPane::SortCriterion::Recency &&
           threadOrder(pane) ==
@@ -1176,13 +1178,43 @@ bool testThreadRecencySort() {
       "Recent is the default and preserves selection");
 }
 
+bool testThreadLastActivityRetention() {
+  PresentationModel model;
+  model.applyEvent(presentation::result(
+      1, 1, "threads.list", "activity-threads", true,
+      {{"threads",
+        nlohmann::json::array(
+            {{{"id", "tracked"}, {"updatedAt", 20}, {"recencyAt", 30}},
+             {{"id", "updated-only"}, {"updatedAt", 25}}})}},
+      presentation::Authority::Merge));
+  const ThreadPresentation *thread = model.thread("tracked");
+  bool result =
+      expect(thread && thread->lastActivityAt == 30,
+             "provider recency and update timestamps seed activity by maximum");
+  const ThreadPresentation *updatedOnly = model.thread("updated-only");
+  result &= expect(updatedOnly && updatedOnly->lastActivityAt == 25,
+                   "provider update timestamp seeds activity without recency");
+  model.noteThreadActivity("tracked", 25);
+  thread = model.thread("tracked");
+  result &= expect(thread && thread->lastActivityAt == 30,
+                   "older local traffic cannot move activity backwards");
+  model.noteThreadActivity("tracked", 40);
+  model.applyEvent(presentation::event(
+      2, 1, "thread.upsert",
+      {{"thread", {{"id", "tracked"}, {"recencyAt", 35}}}},
+      presentation::Authority::Merge, {{"threadId", "tracked"}}));
+  thread = model.thread("tracked");
+  result &=
+      expect(thread && thread->lastActivityAt == 40,
+             "stale provider hydration cannot replace newer live activity");
+  return result;
+}
+
 bool testPromptAdmissionPromotesThread() {
   PresentationModel model;
   model.applyEvent(presentation::result(
       1, 1, "threads.list", "prompt-promotion", true,
-      {{"threads",
-        nlohmann::json::array(
-            {{{"id", "older"},
+      {{"threads", nlohmann::json::array({{{"id", "older"},
               {"name", "Older"},
               {"createdAt", 10},
               {"updatedAt", 10},
@@ -1194,32 +1226,31 @@ bool testPromptAdmissionPromotesThread() {
               {"recencyAt", 30}}})}},
       presentation::Authority::Merge));
   ThreadPane pane;
-  pane.refresh(model, "older");
-  bool result = expect(
-      threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
+  refresh(pane, model, "older");
+  bool result =
+      expect(threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
       "provider recency initially determines thread order");
 
   pane.promotePromptedThread("older");
-  result &= expect(
-      threadOrder(pane) == std::vector<std::string>({"older", "recent"}),
+  result &=
+      expect(threadOrder(pane) == std::vector<std::string>({"older", "recent"}),
       "prompt admission immediately promotes the thread under Recent");
   pane.setSortCriterion(ThreadPane::SortCriterion::LastChanged);
-  result &= expect(
-      threadOrder(pane) == std::vector<std::string>({"older", "recent"}),
+  result &=
+      expect(threadOrder(pane) == std::vector<std::string>({"older", "recent"}),
       "the same admission promotes the thread under Last changed");
   pane.setSortCriterion(ThreadPane::SortCriterion::Created);
-  result &= expect(
-      threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
+  result &=
+      expect(threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
       "prompt admission does not affect Created ordering");
 
   pane.setSortCriterion(ThreadPane::SortCriterion::Recency);
   model.applyEvent(presentation::event(
-      2, 1, "thread.upsert",
-      {{"thread", {{"id", "older"}, {"recencyAt", 20}}}},
+      2, 1, "thread.upsert", {{"thread", {{"id", "older"}, {"recencyAt", 20}}}},
       presentation::Authority::Merge, {{"threadId", "older"}}));
-  pane.refresh(model, "older");
-  result &= expect(
-      threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
+  refresh(pane, model, "older");
+  result &=
+      expect(threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
       "authoritative recency changes retire the local promotion");
   return result;
 }
@@ -1231,7 +1262,7 @@ bool testOptimisticThreadRowLifecycle() {
   pane.show();
   pane.beginOptimisticThread("draft:new-thread", "Draft title",
                              "/workspace/draft");
-  pane.refresh(model, "draft:new-thread");
+  refresh(pane, model, "draft:new-thread");
   spin();
 
   auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
@@ -1247,46 +1278,48 @@ bool testOptimisticThreadRowLifecycle() {
   if (!draft)
     return false;
 
-  model.applyEvent(presentation::event(
-      1, 1, "thread.upsert",
-      {{"thread", {{"id", "thread-created"},
+  model.applyEvent(presentation::event(1, 1, "thread.upsert",
+                                       {{"thread",
+                                         {{"id", "thread-created"},
                     {"name", "Created title"},
                     {"cwd", "/workspace/created"},
                     {"status", "idle"}}}},
-      presentation::Authority::Merge, {{"threadId", "thread-created"}}));
+                                       presentation::Authority::Merge,
+                                       {{"threadId", "thread-created"}}));
   pane.promoteOptimisticThread("draft:new-thread", "thread-created");
-  pane.refresh(model, "thread-created");
+  refresh(pane, model, "thread-created");
   spin();
   QListWidgetItem *promoted = threadItem(list, "thread-created");
-  result &= expect(
-      promoted == draft && promoted->data(Qt::UserRole + 6).toBool() &&
+  result &=
+      expect(promoted == draft && promoted->data(Qt::UserRole + 6).toBool() &&
           pane.visiblySelectedThreadId() == "thread-created" &&
           animation->isActive(),
-      "thread/start rekeys the existing row without replacing its item or animation");
+             "thread/start rekeys the existing row without replacing its item "
+             "or animation");
 
   pane.beginOptimisticThread("draft:second", "Second draft",
                              "/workspace/second");
-  pane.refresh(model, "draft:second");
+  refresh(pane, model, "draft:second");
   spin();
   QListWidgetItem *second = threadItem(list, "draft:second");
-  result &= expect(
-      second && threadItem(list, "thread-created") == draft &&
+  result &= expect(second && threadItem(list, "thread-created") == draft &&
           animation->isActive(),
-      "a second draft can animate while the first created thread still awaits acknowledgment");
+                   "a second draft can animate while the first created thread "
+                   "still awaits acknowledgment");
 
   pane.confirmOptimisticThread("thread-created");
-  pane.refresh(model, "draft:second");
+  refresh(pane, model, "draft:second");
   spin();
-  result &= expect(
-      threadItem(list, "thread-created") == draft &&
+  result &= expect(threadItem(list, "thread-created") == draft &&
           !draft->data(Qt::UserRole + 6).toBool() &&
           !pane.isOptimisticThread("thread-created") &&
           threadItem(list, "draft:second") == second &&
-          second->data(Qt::UserRole + 6).toBool() && animation->isActive(),
+                       second->data(Qt::UserRole + 6).toBool() &&
+                       animation->isActive(),
       "acknowledging one new thread canonicalizes only that row");
 
   pane.failOptimisticThread("draft:second");
-  pane.refresh(model, "draft:second");
+  refresh(pane, model, "draft:second");
   spin();
   result &= expect(
       threadItem(list, "draft:second") == second &&
@@ -1312,7 +1345,7 @@ bool testThreadRowReorderOwnership() {
   pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
   pane.resize(320, 500);
   pane.show();
-  pane.refresh(model, "thread-a");
+  refresh(pane, model, "thread-a");
   spin(20);
   auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
   QListWidgetItem *threadA = nullptr;
@@ -1357,7 +1390,7 @@ bool testThreadRowReorderOwnership() {
   model.applyEvent(presentation::event(
       3, 1, "thread.status.changed", {{"status", "completed"}},
       presentation::Authority::Merge, {{"threadId", "thread-b"}}));
-  pane.refresh(model, "thread-a");
+  refresh(pane, model, "thread-a");
   result &= expect(stableThreadARow == list->itemWidget(threadA) &&
                        originalRow == list->itemWidget(threadB),
                    "content-only refreshes preserve thread row widgets");
@@ -1368,7 +1401,7 @@ bool testThreadRowReorderOwnership() {
         nlohmann::json::array({{{"id", "thread-a"}, {"name", "Z"}},
                                {{"id", "thread-b"}, {"name", "B"}}})}},
       presentation::Authority::Replace));
-  pane.refresh(model, "thread-a");
+  refresh(pane, model, "thread-a");
   QPointer<QWidget> movedRow = list->itemWidget(threadB);
   result &= expect(originalRow && movedRow && originalRow != movedRow,
                    "moving an item never reattaches its deferred-delete row");
@@ -1402,11 +1435,8 @@ bool testNestedCommandScrollOwnership() {
   snapshot.sections.back().cards.push_back(
       {AuthoritativeItemKey{"command-thread", "turn-2", "command"},
        CardKind::CommandExecution, "command-thread", "turn-2", "command",
-       CommandExecutionData{command,
-                            output,
-                            QStringLiteral("inProgress"),
-                            {},
-                            std::nullopt}});
+       CommandExecutionData{
+           utf8(command), utf8(output), "inProgress", {}, std::nullopt}});
   region.conversation().reconcile(snapshot);
   spin(30);
 
@@ -1416,8 +1446,8 @@ bool testNestedCommandScrollOwnership() {
     if (auto *candidate = dynamic_cast<CommandOutputView *>(widget)) {
       commandOutput = candidate;
     } else if (auto *candidate = dynamic_cast<ContentSizedTextView *>(widget);
-               candidate && candidate->objectName() ==
-                                QStringLiteral("commandTextView")) {
+               candidate &&
+               candidate->objectName() == QStringLiteral("commandTextView")) {
       commandText = candidate;
     }
   bool result = expect(
@@ -1444,14 +1474,16 @@ bool testNestedCommandScrollOwnership() {
     inner->setValue(inner->minimum());
     const int outerBeforeOverscroll = outer->value();
     QWheelEvent sameGesture = wheelFor(view, 120, Qt::ScrollUpdate);
-    passed &= expect(!region.routeScrollEvent(view, &sameGesture) &&
+    passed &=
+        expect(!region.routeScrollEvent(view, &sameGesture) &&
                          outer->value() == outerBeforeOverscroll,
                      "a gesture reaching the top cannot leak to the conversation");
     QWheelEvent end = wheelFor(view, 0, Qt::ScrollEnd);
     region.routeScrollEvent(view, &end);
 
     QWheelEvent freshAtTop = wheelFor(view, 120, Qt::ScrollBegin);
-    passed &= expect(region.routeScrollEvent(view, &freshAtTop) &&
+    passed &=
+        expect(region.routeScrollEvent(view, &freshAtTop) &&
                          outer->value() < outerBeforeOverscroll,
                      "a fresh outward gesture at the top scrolls the conversation");
     QWheelEvent topEnd = wheelFor(view, 0, Qt::ScrollEnd);
@@ -1464,14 +1496,16 @@ bool testNestedCommandScrollOwnership() {
     inner->setValue(inner->maximum());
     const int outerBeforeBottomOverscroll = outer->value();
     QWheelEvent sameDownGesture = wheelFor(view, -120, Qt::ScrollUpdate);
-    passed &= expect(!region.routeScrollEvent(view, &sameDownGesture) &&
+    passed &=
+        expect(!region.routeScrollEvent(view, &sameDownGesture) &&
                          outer->value() == outerBeforeBottomOverscroll,
                      "a gesture reaching the bottom cannot leak to the conversation");
     QWheelEvent downEnd = wheelFor(view, 0, Qt::ScrollEnd);
     region.routeScrollEvent(view, &downEnd);
 
     QWheelEvent freshAtBottom = wheelFor(view, -120, Qt::ScrollBegin);
-    passed &= expect(region.routeScrollEvent(view, &freshAtBottom) &&
+    passed &= expect(
+        region.routeScrollEvent(view, &freshAtBottom) &&
                          outer->value() > outerBeforeBottomOverscroll,
                      "a fresh outward gesture at the bottom scrolls the conversation");
     QWheelEvent bottomEnd = wheelFor(view, 0, Qt::ScrollEnd);
@@ -1486,7 +1520,8 @@ bool testNestedCommandScrollOwnership() {
                      "a mouse-wheel notch scrolls a movable nested view");
     inner->setValue(inner->minimum());
     QWheelEvent boundaryNotch = wheelFor(view, 120, Qt::NoScrollPhase);
-    passed &= expect(region.routeScrollEvent(view, &boundaryNotch) &&
+    passed &=
+        expect(region.routeScrollEvent(view, &boundaryNotch) &&
                          outer->value() < outerBeforeMouseWheel,
                      "a mouse-wheel notch at the boundary scrolls the conversation");
     return passed;
@@ -1504,27 +1539,31 @@ bool testInfoViewerLayout() {
   inspector.resize(420, 700);
   inspector.show();
   PresentationModel model;
-  inspector.refresh(model, {});
+  refresh(inspector, model, {});
   inspector.tabs()->setCurrentIndex(4);
   auto *infoStack =
       inspector.findChild<QStackedWidget *>(QStringLiteral("infoStack"));
-  auto *protocolChoice = inspector.findChild<QPushButton *>(
-      QStringLiteral("protocolInfoChoice"));
+  auto *protocolChoice =
+      inspector.findChild<QPushButton *>(QStringLiteral("protocolInfoChoice"));
   auto *protocol =
       inspector.findChild<QPlainTextEdit *>(QStringLiteral("protocolInfoLog"));
   auto *state =
       inspector.findChild<QPlainTextEdit *>(QStringLiteral("stateInfoView"));
   auto *statistics =
       inspector.findChild<QLabel *>(QStringLiteral("protocolInfoStats"));
-  bool result = expect(infoStack && protocolChoice && protocol && state && statistics,
+  bool result =
+      expect(infoStack && protocolChoice && protocol && state && statistics,
                        "Info exposes State and Protocol through choice navigation");
   if (!infoStack || !protocolChoice || !protocol || !state || !statistics)
     return false;
   const auto inspectorScrolls = inspector.findChildren<QScrollArea *>();
   result &= expect(
       inspectorScrolls.size() == 3 &&
-          std::ranges::all_of(inspectorScrolls, [](QScrollArea *scroll) {
-            return scroll && scroll->property("kind") == "inspectorScroll" &&
+          std::ranges::all_of(
+              inspectorScrolls,
+              [](QScrollArea *scroll) {
+                return scroll &&
+                       scroll->property("kind") == "inspectorScroll" &&
                    scroll->verticalScrollBarPolicy() ==
                        Qt::ScrollBarAsNeeded &&
                    scroll->verticalScrollBar()
@@ -1562,21 +1601,15 @@ bool testInfoViewerLayout() {
          {"authority", "app-server"},
          {"scope", {{"threadId", "thread"}}}});
   }
-  inspector.refresh(model, {});
+  refresh(inspector, model, {});
   spin(20);
   result &=
       expect(protocol->verticalScrollBarPolicy() == Qt::ScrollBarAsNeeded &&
                  state->verticalScrollBarPolicy() == Qt::ScrollBarAsNeeded,
              "both Info viewers use the common as-needed scrollbar policy");
-  result &=
-      expect(protocol->verticalScrollBar()
-                     ->property("kind")
-                     .toString()
-                     .isEmpty() &&
-                 state->verticalScrollBar()
-                     ->property("kind")
-                     .toString()
-                     .isEmpty() &&
+  result &= expect(
+      protocol->verticalScrollBar()->property("kind").toString().isEmpty() &&
+          state->verticalScrollBar()->property("kind").toString().isEmpty() &&
                  protocol->verticalScrollBar()->styleSheet().isEmpty() &&
                  state->verticalScrollBar()->styleSheet().isEmpty(),
              "both Info viewer scrollbars inherit the shared visual style");
@@ -1595,7 +1628,7 @@ bool testInfoViewerLayout() {
                                  {"sequence", 91},
                                  {"generation", 1},
                                  {"authority", "app-server"}});
-  inspector.refresh(model, {});
+  refresh(inspector, model, {});
   spin(20);
   result &=
       expect(protocolScroll->value() == pausedValue,
@@ -1698,7 +1731,7 @@ bool testInspectorDetailParity() {
   InspectorPane inspector;
   inspector.resize(420, 700);
   inspector.show();
-  inspector.refresh(model, "owner-thread");
+  refresh(inspector, model, "owner-thread");
   inspector.tabs()->setCurrentIndex(1);
   spin(20);
   bool result = expect(
@@ -1718,28 +1751,25 @@ bool testInspectorDetailParity() {
                    "running agent status uses the canonical active tone");
   auto *agentResult =
       inspector.findChild<QLabel *>(QStringLiteral("agentResult"));
-  auto *agentFrame =
-      agentResult ? qobject_cast<QFrame *>(agentResult->parentWidget()) : nullptr;
-  auto *agentTitle = agentFrame
-                         ? agentFrame->findChild<QLabel *>(
-                               QStringLiteral("agentTitle"))
+  auto *agentFrame = agentResult
+                         ? qobject_cast<QFrame *>(agentResult->parentWidget())
                          : nullptr;
-  auto *agentName = agentFrame
-                        ? agentFrame->findChild<QLabel *>(
-                              QStringLiteral("agentName"))
+  auto *agentTitle =
+      agentFrame ? agentFrame->findChild<QLabel *>(QStringLiteral("agentTitle"))
+                 : nullptr;
+  auto *agentName =
+      agentFrame ? agentFrame->findChild<QLabel *>(QStringLiteral("agentName"))
                         : nullptr;
   const int statusBottom =
       agentStatus && agentFrame
           ? agentStatus->mapTo(agentFrame, QPoint()).y() + agentStatus->height()
           : 0;
-  const int headingBottom =
-      std::max({agentTitle && agentFrame
-                    ? agentTitle->mapTo(agentFrame, QPoint()).y() +
-                          agentTitle->height()
+  const int headingBottom = std::max(
+      {agentTitle && agentFrame
+           ? agentTitle->mapTo(agentFrame, QPoint()).y() + agentTitle->height()
                     : 0,
                 agentName && agentFrame
-                    ? agentName->mapTo(agentFrame, QPoint()).y() +
-                          agentName->height()
+           ? agentName->mapTo(agentFrame, QPoint()).y() + agentName->height()
                     : 0,
                 statusBottom});
   const int resultTop = agentResult && agentFrame
@@ -1791,18 +1821,17 @@ bool testInspectorDetailParity() {
   if (agentsScroll)
     agentsScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
   spin(20);
-  result &= expect(
-      agentsScrollBar && agentsScrollBar->isVisible() &&
+  result &= expect(agentsScrollBar && agentsScrollBar->isVisible() &&
           agentsScrollBar->width() == 8 &&
           !hasNativeBlackFrame(agentsScrollBar),
-      "a visible Inspector scrollbar renders with the canonical frameless style");
-  auto *compactDiff = inspector.findChild<QPlainTextEdit *>(
-      QStringLiteral("codexDiffText"));
+                   "a visible Inspector scrollbar renders with the canonical "
+                   "frameless style");
+  auto *compactDiff =
+      inspector.findChild<QPlainTextEdit *>(QStringLiteral("codexDiffText"));
   QStringList diffLines;
   for (int line = 0; line < 80; ++line)
-    diffLines
-        << QStringLiteral(
-               "+%1 a deliberately long changed line for scrollbar verification")
+    diffLines << QStringLiteral("+%1 a deliberately long changed line for "
+                                "scrollbar verification")
                .arg(line);
   inspector.tabs()->setCurrentIndex(2);
   spin(20);
@@ -1816,8 +1845,7 @@ bool testInspectorDetailParity() {
   result &= expect(
       diffVertical && diffHorizontal && diffVertical->isVisible() &&
           diffHorizontal->isVisible() && diffVertical->width() == 8 &&
-          diffHorizontal->height() == 8 &&
-          !hasNativeBlackFrame(diffVertical) &&
+          diffHorizontal->height() == 8 && !hasNativeBlackFrame(diffVertical) &&
           !hasNativeBlackFrame(diffHorizontal),
       "Changes preview scrollbars retain overview rendering without native "
       "frames");
@@ -1832,7 +1860,7 @@ bool testInspectorDetailParity() {
   model.applyEvent(presentation::event(
       5, 1, "thread.name.changed", {{"name", "Renamed title"}},
       presentation::Authority::Replace, {{"threadId", "owner-thread"}}));
-  inspector.refresh(model, "owner-thread");
+  refresh(inspector, model, "owner-thread");
   spin(20);
   result &= expect(
       hasLabelContaining(inspector, QStringLiteral("thread Renamed title")) &&
@@ -1869,7 +1897,7 @@ bool testInspectorDetailParity() {
          {"cwd", "/home/voc/projects/drafts"}}}},
       presentation::Authority::Merge,
       {{"threadId", "owner-thread"}, {"requestId", "request-two"}}));
-  inspector.refresh(model, "owner-thread");
+  refresh(inspector, model, "owner-thread");
   spin(20);
   QPushButton *acceptButton = nullptr;
   for (QPushButton *button : inspector.findChildren<QPushButton *>()) {
@@ -1880,9 +1908,12 @@ bool testInspectorDetailParity() {
   }
   result &= expect(
       acceptButton &&
-          acceptButton->property("kind").toString() == QStringLiteral("request") &&
-          hasLabelContaining(inspector, QStringLiteral("Command: gh auth status")) &&
+          acceptButton->property("kind").toString() ==
+              QStringLiteral("request") &&
           hasLabelContaining(inspector,
+                             QStringLiteral("Command: gh auth status")) &&
+          hasLabelContaining(
+              inspector,
                              QStringLiteral("Reason: Verify GitHub authentication")),
       "simple approval requests show decision details and direct accept");
   qApp->setStyleSheet(previousStyleSheet);
@@ -1910,19 +1941,20 @@ bool testTerminalPlanStatusReconciliation() {
       {{"threadId", "plan-thread"}, {"turnId", "plan-turn"}}));
 
   InspectorPane inspector;
-  inspector.refresh(model, "plan-thread");
+  refresh(inspector, model, "plan-thread");
   const auto hasExactLabel = [&inspector](const QString &value) {
     return std::ranges::any_of(
-        inspector.findChildren<QLabel *>(), [&value](const QLabel *label) {
-          return label->text() == value;
-        });
+        inspector.findChildren<QLabel *>(),
+        [&value](const QLabel *label) { return label->text() == value; });
   };
   bool result = expect(hasExactLabel(QStringLiteral("Running")) &&
                            hasExactLabel(QStringLiteral("pending")),
                        "active plans preserve Running and Pending statuses");
   const auto markdownLabels = inspector.findChildren<QLabel *>();
-  result &= expect(
-      std::ranges::any_of(markdownLabels, [](const QLabel *label) {
+  result &=
+      expect(std::ranges::any_of(
+                 markdownLabels,
+                 [](const QLabel *label) {
         return label->textFormat() == Qt::RichText &&
                label->text().contains(QStringLiteral("href=")) &&
                label->textInteractionFlags().testFlag(
@@ -1930,25 +1962,26 @@ bool testTerminalPlanStatusReconciliation() {
       }),
       "Inspector Markdown links are keyboard accessible");
 
-  const auto setThreadStatus = [&](std::uint64_t sequence,
-                                   const char *status) {
+  const auto setThreadStatus = [&](std::uint64_t sequence, const char *status) {
     model.applyEvent(presentation::event(
         sequence, 1, "thread.upsert",
         {{"thread", {{"id", "plan-thread"}, {"status", status}}}},
         presentation::Authority::Merge, {{"threadId", "plan-thread"}}));
-    inspector.refresh(model, "plan-thread");
+    refresh(inspector, model, "plan-thread");
   };
   setThreadStatus(4, "completed");
   result &= expect(!hasExactLabel(QStringLiteral("Running")) &&
                        hasExactLabel(QStringLiteral("Completed")) &&
                        hasExactLabel(QStringLiteral("pending")),
-                   "a terminal thread reconciles stale Running to Completed without changing Pending");
+                   "a terminal thread reconciles stale Running to Completed "
+                   "without changing Pending");
   setThreadStatus(5, "failed");
   result &= expect(hasExactLabel(QStringLiteral("Failed")) &&
                        hasExactLabel(QStringLiteral("pending")),
                    "a failed thread reconciles stale Running to Failed");
   setThreadStatus(6, "interrupted");
-  result &= expect(hasExactLabel(QStringLiteral("Interrupted")) &&
+  result &=
+      expect(hasExactLabel(QStringLiteral("Interrupted")) &&
                        hasExactLabel(QStringLiteral("pending")),
                    "an interrupted thread reconciles stale Running to Interrupted");
   return result;
@@ -1961,8 +1994,8 @@ bool testGitDiffScopes() {
     return false;
   GitDiffProvider provider;
   git_repository *repository = nullptr;
-  if (!expect(git_repository_init(&repository,
-                                  repositoryDirectory.path().toUtf8().constData(),
+  if (!expect(git_repository_init(
+                  &repository, repositoryDirectory.path().toUtf8().constData(),
                                   0) == 0,
               "Git diff test initializes an in-process repository"))
     return false;
@@ -1982,15 +2015,14 @@ bool testGitDiffScopes() {
                      received = snapshot;
                      ready = true;
                    });
-  const auto request = [&](const QString &workspace,
-                           const QStringList &directories,
-                           const QStringList &paths,
-                           const QString &selectedRepository,
-                           GitDiffScope scope,
-                           bool includeHiddenRepositories = false) {
+  const auto request =
+      [&](const QString &workspace, const QStringList &directories,
+          const QStringList &paths, const QString &selectedRepository,
+          GitDiffScope scope, bool includeHiddenRepositories = false) {
     ready = false;
     provider.request(workspace, directories, paths, selectedRepository,
-                     includeHiddenRepositories, scope, GitDiffContext::Compact);
+                         includeHiddenRepositories, scope,
+                         GitDiffContext::Compact);
     QElapsedTimer timeout;
     timeout.start();
     while (!ready && timeout.elapsed() < 3000)
@@ -1998,14 +2030,12 @@ bool testGitDiffScopes() {
     return ready;
   };
 
-  bool result = expect(request(repositoryDirectory.path(), {}, {}, {},
-                              GitDiffScope::Unstaged) &&
+  bool result = expect(
+      request(repositoryDirectory.path(), {}, {}, {}, GitDiffScope::Unstaged) &&
                            received.repository && received.error.isEmpty() &&
                            received.files.size() == 1 &&
-                           received.files.front().status ==
-                               QStringLiteral("Untracked") &&
-                           received.files.front().patch.contains(
-                               QStringLiteral("+first line")),
+          received.files.front().status == QStringLiteral("Untracked") &&
+          received.files.front().patch.contains(QStringLiteral("+first line")),
                        "Unstaged scope includes untracked file content");
 
   git_index *index = nullptr;
@@ -2014,21 +2044,21 @@ bool testGitDiffScopes() {
     git_index_write(index);
     git_index_free(index);
   }
-  result &= expect(request(repositoryDirectory.path(), {}, {}, {},
-                           GitDiffScope::Staged) &&
+  result &= expect(
+      request(repositoryDirectory.path(), {}, {}, {}, GitDiffScope::Staged) &&
                        received.files.size() == 1 &&
-                       received.files.front().status ==
-                           QStringLiteral("Added"),
+          received.files.front().status == QStringLiteral("Added"),
                    "Staged scope compares the index with HEAD");
-  result &= expect(request(repositoryDirectory.path(), {}, {}, {},
+  result &= expect(
+      request(repositoryDirectory.path(), {}, {}, {},
                            GitDiffScope::Uncommitted) &&
                        received.files.size() == 1 &&
-                       received.files.front().patch.contains(
-                           QStringLiteral("+second line")),
+          received.files.front().patch.contains(QStringLiteral("+second line")),
                    "Since-HEAD scope combines index and worktree state");
 
   QTemporaryDir ordinaryDirectory;
-  result &= expect(ordinaryDirectory.isValid() &&
+  result &=
+      expect(ordinaryDirectory.isValid() &&
                        request(ordinaryDirectory.path(), {}, {}, {},
                                GitDiffScope::Unstaged) &&
                        !received.repository &&
@@ -2062,7 +2092,8 @@ bool testGitDiffScopes() {
               {QStringLiteral("shared.txt")}, {}, GitDiffScope::Unstaged) &&
           received.repositoryRoots.size() == 2 && received.files.size() == 3 &&
           !received.repositoryRoots.contains(QDir::cleanPath(hiddenRoot)),
-      "duplicate directories are deduplicated, hidden roots are excluded, and ambiguous paths retain visible matches");
+      "duplicate directories are deduplicated, hidden roots are excluded, and "
+      "ambiguous paths retain visible matches");
   result &= expect(
       request(multiWorkspace.path(), {firstRoot, secondRoot, hiddenRoot},
               {QStringLiteral("shared.txt")}, {}, GitDiffScope::Unstaged,
@@ -2079,15 +2110,15 @@ bool testGitDiffScopes() {
       "repository selection filters files without losing the candidate set");
   result &= expect(
       request(multiWorkspace.path(), {firstRoot, secondRoot},
-              {QStringLiteral("first-only.txt")}, {},
-              GitDiffScope::Unstaged) &&
+              {QStringLiteral("first-only.txt")}, {}, GitDiffScope::Unstaged) &&
           received.repositoryRoots == QStringList{QDir::cleanPath(firstRoot)} &&
           received.files.size() == 2,
-      "a unique relative path resolves one repository and includes all of its changes");
-  result &= expect(
-      request(multiWorkspace.path(), {firstRoot, secondRoot},
-              {QDir(secondRoot).filePath(QStringLiteral("shared.txt"))}, {},
-              GitDiffScope::Unstaged) &&
+      "a unique relative path resolves one repository and includes all of its "
+      "changes");
+  result &=
+      expect(request(multiWorkspace.path(), {firstRoot, secondRoot},
+                     {QDir(secondRoot).filePath(QStringLiteral("shared.txt"))},
+                     {}, GitDiffScope::Unstaged) &&
           received.repositoryRoots ==
               QStringList{QDir::cleanPath(secondRoot)} &&
           received.files.size() == 1,
@@ -2097,7 +2128,8 @@ bool testGitDiffScopes() {
               {QStringLiteral("not-applied-yet.txt")},
               QStringLiteral("/stale/repository"), GitDiffScope::Unstaged) &&
           received.repositoryRoots.size() == 2 && received.files.size() == 3,
-      "an unmatched early path and stale selection safely fall back to all candidate repositories");
+      "an unmatched early path and stale selection safely fall back to all "
+      "candidate repositories");
   const QString priorityPath = QStringLiteral("priority.txt");
   QFile firstPriority(QDir(firstRoot).filePath(priorityPath));
   QFile secondPriority(QDir(secondRoot).filePath(priorityPath));
@@ -2109,8 +2141,7 @@ bool testGitDiffScopes() {
       secondPriority.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
       secondPriority.write("baseline\n") > 0;
   secondPriority.close();
-  const bool priorityCommitted =
-      priorityFiles && secondPriorityFile &&
+  const bool priorityCommitted = priorityFiles && secondPriorityFile &&
       commitPath(firstRepository, "priority.txt") &&
       commitPath(secondRepository, "priority.txt");
   if (firstPriority.open(QIODevice::WriteOnly | QIODevice::Truncate))
@@ -2151,7 +2182,8 @@ bool testGitDiffScopes() {
                         return file.path == priorityPath &&
                                file.status == QStringLiteral("Deleted");
                       }),
-      "a deleted path is resolved from Git state and preferred over a clean tracked match");
+      "a deleted path is resolved from Git state and preferred over a clean "
+      "tracked match");
   git_repository_free(firstRepository);
   git_repository_free(secondRepository);
   git_repository_free(hiddenRepository);
@@ -2177,6 +2209,7 @@ int main(int argc, char **argv) {
   result &= testThreadCreatedSort();
   result &= testThreadLastChangedSort();
   result &= testThreadRecencySort();
+  result &= testThreadLastActivityRetention();
   result &= testPromptAdmissionPromotesThread();
   result &= testOptimisticThreadRowLifecycle();
   result &= testThreadRowReorderOwnership();

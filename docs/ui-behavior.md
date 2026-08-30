@@ -11,10 +11,12 @@ blue-tinted checked actions, muted disabled actions, and inset separators.
 
 ## Conversation source and structure
 
-`PresentationModel` is the sole retained authoritative store for normalized UI
-state. The message view is a projection of its selected thread plus
-client-local prompt admissions; cards and inspectors do not maintain a second
-domain store.
+`UiSession` owns the sole retained `PresentationModel` for normalized UI state
+and projects toolkit-neutral snapshots. The concrete message view consumes its
+selected-thread snapshot plus client-local prompt admissions; cards and
+inspectors do not access the model or maintain a second domain store. Qt keeps
+only renderer mechanics such as scroll anchors, folding, expansion, focus,
+geometry, and the editable composer form.
 
 The conversation has one semantic grouping level: an app-server turn contains
 its items in server order. When a turn has a prompt, its first You card is the
@@ -41,6 +43,13 @@ bottom or is owned by the user.
 ## Thread identity and prompt routing
 
 - The selected thread is identified by its stable app-server thread ID.
+- The Conversation heading reports `Last activity` from one monotonic
+  presentation timestamp. After hydration it starts at the greater of the
+  app-server's `updatedAt` and optional `recencyAt`. During the live session,
+  thread-scoped protocol traffic in either direction advances it immediately;
+  global connection and catalog traffic does not. This local value never
+  replaces the authoritative timestamps used for thread sorting and is not
+  persisted by CodexUI.
 - Once selected, a hydrated thread remains visible in the sidebar for the
   session even when it is outside the ordinary top-level thread ordering; an
   authoritative removal still removes it.

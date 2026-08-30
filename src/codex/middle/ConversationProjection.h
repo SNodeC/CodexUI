@@ -7,9 +7,8 @@
 #include "codex/middle/MiddleTypes.h"
 #include "codex/middle/PromptCoordinator.h"
 
-#include <QtGlobal>
-
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string>
 
@@ -26,12 +25,12 @@ public:
   project(const AuthoritativeItemIndex &authoritativeItems,
           const ThreadPresentation *authoritativeThread,
           std::span<const PromptSubmission> localSubmissions,
-          std::size_t authoritativeItemLimit, qint64 nowMilliseconds);
+          std::size_t authoritativeItemLimit, std::int64_t nowMilliseconds);
 
   [[nodiscard]] static ConversationSnapshot
   project(const ThreadPresentation &authoritativeThread,
           std::span<const PromptSubmission> localSubmissions,
-          std::size_t authoritativeItemLimit, qint64 nowMilliseconds) {
+          std::size_t authoritativeItemLimit, std::int64_t nowMilliseconds) {
     const auto items =
         indexAuthoritativeItems(authoritativeThread.id, &authoritativeThread);
     return project(items, &authoritativeThread, localSubmissions,

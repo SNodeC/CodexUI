@@ -20,6 +20,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <string_view>
 #include <utility>
 
 namespace codexui::codex::middle {
@@ -31,6 +32,10 @@ constexpr int DividerOutset = 10;
 constexpr int BottomInset = 12;
 constexpr int AttachmentRowHeight = 28;
 constexpr int MaximumVisibleAttachments = 4;
+
+QString text(std::string_view value) {
+  return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
+}
 
 QLabel *makeLabel(QString value, const char *kind) {
   auto *label = new QLabel(std::move(value));
@@ -95,15 +100,18 @@ ComposerPane::ComposerPane(QWidget *anchor)
   attentionTextLayout->setSpacing(2);
   attentionTitle_ = makeLabel(QStringLiteral("A Codex request needs attention"),
                               "attentionSection");
-  attentionDetail_ = makeLabel(QStringLiteral("Review the pending request."),
-                               "meta");
+  attentionDetail_ =
+      makeLabel(QStringLiteral("Review the pending request."), "meta");
   attentionTextLayout->addWidget(attentionTitle_);
   attentionTextLayout->addWidget(attentionDetail_);
   attentionLayout->addWidget(attentionText, 1);
   attentionLayout->addStretch();
-  attentionRejectButton_ = new QPushButton(QStringLiteral("Reject"), attention_);
-  attentionAcceptButton_ = new QPushButton(QStringLiteral("Accept"), attention_);
-  attentionReviewButton_ = new QPushButton(QStringLiteral("Review"), attention_);
+  attentionRejectButton_ =
+      new QPushButton(QStringLiteral("Reject"), attention_);
+  attentionAcceptButton_ =
+      new QPushButton(QStringLiteral("Accept"), attention_);
+  attentionReviewButton_ =
+      new QPushButton(QStringLiteral("Review"), attention_);
   attentionRejectButton_->setObjectName(
       QStringLiteral("pendingRequestRejectButton"));
   attentionAcceptButton_->setObjectName(
@@ -254,16 +262,15 @@ void ComposerPane::setAttentionVisible(bool visible) {
 }
 
 void ComposerPane::setAttentionRequest(QString title, QString detail,
-                                       bool directAccept,
-                                       QString acceptLabel) {
+                                       bool directAccept, QString acceptLabel) {
   if (title.isEmpty())
     title = QStringLiteral("A Codex request needs attention");
   if (detail.isEmpty())
     detail = QStringLiteral("Review the pending request.");
   if (acceptLabel.isEmpty())
     acceptLabel = QStringLiteral("Accept");
-  const bool unchanged =
-      attentionTitle_->text() == title && attentionDetail_->text() == detail &&
+  const bool unchanged = attentionTitle_->text() == title &&
+                         attentionDetail_->text() == detail &&
       attentionAcceptButton_->isVisible() == directAccept &&
       attentionReviewButton_->isVisible() != directAccept &&
       attentionAcceptButton_->text() == acceptLabel;
@@ -414,7 +421,8 @@ void ComposerPane::refreshAttachments() {
     rowLayout->setSpacing(5);
 
     auto *remove = new QPushButton(QStringLiteral("X"), row);
-    remove->setAccessibleName(QStringLiteral("Remove %1").arg(attachment.name));
+    remove->setAccessibleName(
+        QStringLiteral("Remove %1").arg(text(attachment.name)));
     remove->setToolTip(QStringLiteral("Remove attachment"));
     remove->setFixedSize(18, 18);
     remove->setProperty("kind", "destructiveCompact");
@@ -434,8 +442,8 @@ void ComposerPane::refreshAttachments() {
                        "border:1px solid #d7dee8;border-radius:6px;}"));
     auto *fileLayout = new QHBoxLayout(fileBox);
     fileLayout->setContentsMargins(8, 1, 8, 1);
-    auto *name = makeLabel(attachment.name, "meta");
-    name->setToolTip(QDir::toNativeSeparators(attachment.path));
+    auto *name = makeLabel(text(attachment.name), "meta");
+    name->setToolTip(QDir::toNativeSeparators(text(attachment.path)));
     fileLayout->addWidget(name);
     rowLayout->addWidget(fileBox, 1);
     rowLayout->addWidget(remove, 0, Qt::AlignVCenter);

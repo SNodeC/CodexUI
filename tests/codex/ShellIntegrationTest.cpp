@@ -48,6 +48,15 @@ public:
   static int takeClientDescriptor(FrontendSession &session) {
     return std::exchange(session.clientDescriptor, -1);
   }
+
+  static void receive(FrontendSession &session, nlohmann::json frame) {
+    session.receiveMessage(std::move(frame));
+  }
+
+  static void failOutstanding(FrontendSession &session, int code,
+                              std::string message) {
+    session.failAllPending(code, std::move(message));
+  }
 };
 
 namespace {
@@ -59,6 +68,53 @@ bool expect(bool condition, const char *message) {
     return true;
   std::cerr << "FAILED: " << message << '\n';
   return false;
+}
+
+bool verifyFrontendBoundaryOrdering(Configuration &configuration) {
+  FrontendSession session(configuration);
+  std::vector<std::string> order;
+  std::vector<std::string> activity;
+  nlohmann::json completed;
+  session.setEventHandler(
+      [&order](const nlohmann::json &) { order.emplace_back("event"); });
+  session.setActivityHandler([&activity](const std::string &threadId) {
+    activity.push_back(threadId);
+  });
+  const std::string correlation = session.request(
+      "thread.read", {{"threadId", "ordering"}},
+      [&order, &completed](const nlohmann::json &result) {
+        order.emplace_back("completion");
+        completed = result;
+      });
+  FrontendSessionTestPeer::receive(
+      session, presentation::result(1, 1, "thread.read", correlation, true,
+                                    {{"thread", {{"id", "ordering"}}}},
+                                    Authority::Replace,
+                                    {{"threadId", "ordering"}}));
+  bool result = expect(
+      order == std::vector<std::string>{"completion", "event"},
+      "a correlated completion remains ordered before global frame delivery");
+  result &= expect(presentation::isPresentationFrame(completed) &&
+                       completed.value("action", std::string{}) ==
+                           "thread.read",
+                   "a successful completion receives a complete presentation result");
+  result &= expect(
+      activity == std::vector<std::string>{"ordering", "ordering"},
+      "thread-scoped outbound requests and inbound results both report activity");
+
+  nlohmann::json failed;
+  const std::string failedCorrelation = session.request(
+      "thread.resume", {{"threadId", "ordering"}},
+      [&failed](const nlohmann::json &response) { failed = response; });
+  FrontendSessionTestPeer::failOutstanding(session, -32020,
+                                           "test connection loss");
+  result &= expect(
+      presentation::isPresentationFrame(failed) &&
+          failed.value("action", std::string{}) == "thread.resume" &&
+          failed.value("correlationId", std::string{}) == failedCorrelation &&
+          !failed.value("ok", true),
+      "locally failed operations preserve the complete result contract");
+  return result;
 }
 
 void spin(int milliseconds = 0) {
@@ -1036,7 +1092,7 @@ bool verifyPendingRequestTextBoundaries() {
                 (*command)->textFormat() == Qt::PlainText;
     dialog->reject();
   });
-  const PendingRequestPresentation request{
+  const PendingRequestDescriptor request{
       "unsafe-command", "command-approval", "thread-a", 1,
       {{"command", "<b>untrusted command</b>"}}};
   static_cast<void>(PendingRequestDialog::present(request, nullptr));
@@ -1054,7 +1110,7 @@ bool verifyPendingRequestTextBoundaries() {
     });
     dialog->reject();
   });
-  const PendingRequestPresentation elicitation{
+  const PendingRequestDescriptor elicitation{
       "unsafe-link", "mcp-elicitation", "thread-a", 1,
       {{"url", "https://example.invalid/\"><img src=x>"}}};
   static_cast<void>(PendingRequestDialog::present(elicitation, nullptr));
@@ -1093,7 +1149,7 @@ bool verifyPendingRequestValidationRetainsInput() {
     edits.back()->setText(QStringLiteral("Second answer"));
     submit->click();
   });
-  const PendingRequestPresentation questions{
+  const PendingRequestDescriptor questions{
       "questions", "user-input", "thread-a", 1,
       {{"questions",
         nlohmann::json::array(
@@ -1139,7 +1195,7 @@ bool verifyPendingRequestValidationRetainsInput() {
     editor->setPlainText(QStringLiteral("{\"accepted\":true}"));
     submit->click();
   });
-  const PendingRequestPresentation elicitation{
+  const PendingRequestDescriptor elicitation{
       "elicitation", "mcp-elicitation", "thread-a", 1,
       {{"message", "Structured response"},
        {"requestedSchema", {{"type", "object"}}}}};
@@ -1185,7 +1241,7 @@ bool verifyPermissionRequestDisclosure() {
             QStringLiteral("futureCapability / mode: bounded"));
     dialog->accept();
   });
-  const PendingRequestPresentation request{
+  const PendingRequestDescriptor request{
       "permissions", "permissions-approval", "thread-a", 1,
       {{"permissions", permissions}, {"reason", "test disclosure"}}};
   const auto response = PendingRequestDialog::present(request, nullptr);
@@ -1207,12 +1263,15 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   core::SNodeC::init(argc, argv);
 
+  const bool frontendBoundary =
+      codexui::codex::verifyFrontendBoundaryOrdering(*configuration);
   codexui::codex::FrontendSession session(*configuration);
   codexui::codex::PresentationPeer peer(
       codexui::codex::FrontendSessionTestPeer::takeClientDescriptor(session));
   const bool validationRetainsInput =
       codexui::codex::verifyPendingRequestValidationRetainsInput();
-  const bool result = codexui::codex::verifyPendingRequestTextBoundaries() &&
+  const bool result = frontendBoundary &&
+                      codexui::codex::verifyPendingRequestTextBoundaries() &&
                       validationRetainsInput &&
                       codexui::codex::verifyPermissionRequestDisclosure() &&
                       codexui::codex::runShellFlow(session, peer);

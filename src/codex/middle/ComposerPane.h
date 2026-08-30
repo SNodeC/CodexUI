@@ -3,7 +3,7 @@
 #ifndef CODEXUI_CODEX_MIDDLE_COMPOSERPANE_H
 #define CODEXUI_CODEX_MIDDLE_COMPOSERPANE_H
 
-#include "codex/FileSelectionDialog.h"
+#include "codex/AttachmentDraft.h"
 
 #include <QWidget>
 

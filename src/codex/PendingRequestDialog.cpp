@@ -47,30 +47,6 @@ QLabel *wrapped(QString value, const char *kind = "body") {
   return label;
 }
 
-QString titleFor(const std::string &kind) {
-  if (kind == "command-approval")
-    return QStringLiteral("Command approval");
-  if (kind == "file-change-approval")
-    return QStringLiteral("File-change approval");
-  if (kind == "user-input")
-    return QStringLiteral("Codex needs input");
-  if (kind == "mcp-elicitation")
-    return QStringLiteral("MCP server request");
-  if (kind == "permissions-approval")
-    return QStringLiteral("Permission request");
-  if (kind == "dynamic-tool-call")
-    return QStringLiteral("Dynamic tool request");
-  if (kind == "authentication-refresh")
-    return QStringLiteral("Authentication refresh");
-  if (kind == "attestation")
-    return QStringLiteral("Attestation request");
-  if (kind == "legacy-patch-approval")
-    return QStringLiteral("Legacy patch approval");
-  if (kind == "legacy-command-approval")
-    return QStringLiteral("Legacy command approval");
-  return QStringLiteral("Unsupported Codex request");
-}
-
 void addDetail(QVBoxLayout *layout, const QString &label,
                const std::string &value) {
   if (!value.empty())
@@ -147,10 +123,6 @@ void addChoice(QComboBox *combo, const QString &label, const char *value) {
     combo->addItem(label, QString::fromLatin1(value));
 }
 
-nlohmann::json jsonRpcError(std::string message) {
-  return {{"code", -32601}, {"message", std::move(message)}};
-}
-
 struct QuestionEditor {
   std::string id;
   std::vector<std::pair<std::string, QCheckBox *>> choices;
@@ -160,16 +132,18 @@ struct QuestionEditor {
 } // namespace
 
 std::optional<PendingRequestResponse>
-PendingRequestDialog::present(const PendingRequestPresentation &request,
+PendingRequestDialog::present(const PendingRequestDescriptor &request,
                               QWidget *parent) {
   QDialog dialog(parent);
-  dialog.setWindowTitle(titleFor(request.kind));
+  const QString dialogTitle =
+      text(PendingRequestPolicy::dialogTitle(request.kind));
+  dialog.setWindowTitle(dialogTitle);
   dialog.setModal(true);
   dialog.resize(620, 560);
   auto *root = new QVBoxLayout(&dialog);
   root->setContentsMargins(18, 16, 18, 16);
   root->setSpacing(10);
-  root->addWidget(wrapped(titleFor(request.kind), "heading"));
+  root->addWidget(wrapped(dialogTitle, "heading"));
   root->addWidget(wrapped(QStringLiteral("Thread %1  |  request %2")
                               .arg(text(request.threadId), text(request.id)),
                           "meta"));
@@ -388,96 +362,26 @@ PendingRequestDialog::present(const PendingRequestPresentation &request,
   if (dialog.exec() != QDialog::Accepted)
     return std::nullopt;
 
-  PendingRequestResponse response;
+  std::string selectedDecision;
   if (request.kind == "command-approval" ||
       request.kind == "file-change-approval") {
-    response.result = {
-        {"decision", decision->currentData().toString().toStdString()}};
+    selectedDecision = decision->currentData().toString().toStdString();
   } else if (request.kind == "user-input") {
-    response.result = {{"answers", std::move(acceptedAnswers)}};
+    return PendingRequestPolicy::responseForSubmission(
+        request.kind, raw, {}, std::move(acceptedAnswers));
   } else if (request.kind == "mcp-elicitation") {
-    const std::string action = decision->currentData().toString().toStdString();
-    response.result = {{"action", action},
-                       {"content", std::move(acceptedStructuredContent)},
-                       {"_meta", nullptr}};
+    selectedDecision = decision->currentData().toString().toStdString();
+    return PendingRequestPolicy::responseForSubmission(
+        request.kind, raw, std::move(selectedDecision),
+        std::move(acceptedStructuredContent));
   } else if (request.kind == "permissions-approval") {
-    const std::string scope = decision->currentData().toString().toStdString();
-    if (scope == "decline") {
-      response.error = jsonRpcError("Permission request declined by user");
-    } else {
-      response.result = {
-          {"permissions", raw.value("permissions", nlohmann::json::object())},
-          {"scope", scope}};
-    }
+    selectedDecision = decision->currentData().toString().toStdString();
   } else if (request.kind == "legacy-patch-approval" ||
              request.kind == "legacy-command-approval") {
-    const std::string selected =
-        decision->currentData().toString().toStdString();
-    if (selected == "approved" || selected == "approved_for_session")
-      response.result = {{"decision", selected}};
-    else if (selected == "denied")
-      response.result = {
-          {"decision", {{"denied", {{"rejection", "Denied by user"}}}}}};
-    else
-      response.result = {{"decision", "abort"}};
-  } else if (request.kind == "dynamic-tool-call") {
-    response.result = {
-        {"contentItems",
-         nlohmann::json::array(
-             {{{"type", "inputText"},
-               {"text", "CodexUI does not provide this dynamic tool"}}})},
-        {"success", false}};
-  } else {
-    response.error =
-        jsonRpcError("CodexUI does not support this server request");
+    selectedDecision = decision->currentData().toString().toStdString();
   }
-  return response;
-}
-
-PendingRequestResponse PendingRequestDialog::negativeResponse(
-    const PendingRequestPresentation &request) {
-  PendingRequestResponse response;
-  if (request.kind == "command-approval" ||
-      request.kind == "file-change-approval") {
-    response.result = {{"decision", "decline"}};
-  } else if (request.kind == "mcp-elicitation") {
-    response.result = {
-        {"action", "decline"}, {"content", nullptr}, {"_meta", nullptr}};
-  } else if (request.kind == "legacy-patch-approval" ||
-             request.kind == "legacy-command-approval") {
-    response.result = {
-        {"decision", {{"denied", {{"rejection", "Denied by user"}}}}}};
-  } else if (request.kind == "dynamic-tool-call") {
-    response.result = {
-        {"contentItems",
-         nlohmann::json::array(
-             {{{"type", "inputText"}, {"text", "Request declined by user"}}})},
-        {"success", false}};
-  } else {
-    response.error = jsonRpcError("Request declined by user");
-  }
-  return response;
-}
-
-PendingRequestResponse PendingRequestDialog::positiveResponse(
-    const PendingRequestPresentation &request) {
-  PendingRequestResponse response;
-  if (request.kind == "command-approval" ||
-      request.kind == "file-change-approval") {
-    response.result = {{"decision", "accept"}};
-  } else if (request.kind == "permissions-approval") {
-    response.result = {
-        {"permissions",
-         request.raw.value("permissions", nlohmann::json::object())},
-        {"scope", "turn"}};
-  } else if (request.kind == "legacy-patch-approval" ||
-             request.kind == "legacy-command-approval") {
-    response.result = {{"decision", "approved"}};
-  } else {
-    response.error =
-        jsonRpcError("CodexUI cannot directly approve this server request");
-  }
-  return response;
+  return PendingRequestPolicy::responseForSubmission(
+      request.kind, raw, std::move(selectedDecision));
 }
 
 } // namespace codexui::codex

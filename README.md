@@ -15,16 +15,20 @@ SNode.C client thread
     <-> Codex app-server
 ```
 
-The Qt thread owns widgets and `PresentationModel`. The SNode.C thread owns the
-event loop, selected transport, `AISuite::OpenAICodex` frontend proxy SDK,
-native protocol normalization, and connection/controller telemetry. They
-exchange only bounded `codexui.presentation` JSONL commands and events.
+The Qt thread owns widgets plus a toolkit-neutral `UiSession`, which owns the
+`PresentationModel` and UI/UX state machine. Widgets exchange only semantic
+intents and value snapshots with that boundary. `FrontendSession` adapts its
+generic presentation client to the unchanged socketpair. The SNode.C thread
+owns the event loop, selected transport, `AISuite::OpenAICodex` frontend proxy
+SDK, native protocol normalization, and connection/controller telemetry. The
+threads exchange only bounded `codexui.presentation` JSONL commands and events.
 
 ## Applications
 
-`codex-ui` is the canonical visual application. Its production shell consumes
-the normalized presentation protocol and model directly; there is no parallel
-legacy UI or alternate application target.
+`codex-ui` is the canonical visual application. Its production shell renders
+the neutral `UiSessionView` API and sends semantic intents; it does not consume
+`PresentationModel` directly. There is no parallel legacy UI or alternate
+application target.
 
 `CodexWebUI` is the browser presentation. It uses the framework-neutral
 `@snodec/codex-frontend` SDK from AISuite, connects directly to the bridge over

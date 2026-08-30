@@ -3,7 +3,6 @@
 #include "codex/middle/InspectorPane.h"
 
 #include "codex/DiffViewer.h"
-#include "codex/PresentationModel.h"
 #include "codex/PresentationStatus.h"
 #include "codex/ui/UiStyle.h"
 
@@ -82,24 +81,6 @@ QLabel *statusLabel(const std::string &status) {
   if (!classified.tone.empty())
     label->setProperty("tone", classified.tone.data());
   return label;
-}
-
-std::string effectivePlanStepStatus(const std::string &stepStatus,
-                                    const std::string &turnStatus,
-                                    const std::string &threadStatus) {
-  if (!isActiveStatus(stepStatus))
-    return stepStatus;
-  StatusKind outcome = classifyStatus(turnStatus).kind;
-  if (outcome != StatusKind::Completed && outcome != StatusKind::Failed &&
-      outcome != StatusKind::Interrupted)
-    outcome = classifyStatus(threadStatus).kind;
-  if (outcome == StatusKind::Completed)
-    return "completed";
-  if (outcome == StatusKind::Failed)
-    return "failed";
-  if (outcome == StatusKind::Interrupted)
-    return "interrupted";
-  return stepStatus;
 }
 
 QLabel *makeMarkdownLabel(const QString &value) {
@@ -209,7 +190,7 @@ void restoreScrollPosition(QPlainTextEdit *view,
 
 } // namespace
 
-QFrame *InspectorPane::agentFrame(const AgentSnapshot &agent) {
+QFrame *InspectorPane::agentFrame(const ui::InspectorAgentRow &agent) {
   auto *frame = new QFrame;
   frame->setProperty("kind", "raised");
   auto *layout = new QVBoxLayout(frame);
@@ -426,23 +407,19 @@ void InspectorPane::setHideAction(std::function<void()> hide) {
 
 void InspectorPane::setRequestActions(RequestAction review,
                                       RequestAction accept,
-                                      RequestAction reject,
-                                      RequestEligibility eligible) {
+                                      RequestAction reject) {
   reviewRequest = std::move(review);
   acceptRequest = std::move(accept);
   rejectRequest = std::move(reject);
-  requestEligible = std::move(eligible);
 }
 
-void InspectorPane::refresh(const PresentationModel &model,
-                            const std::string &selectedThreadId) {
-  currentModel = &model;
-  currentThreadId = selectedThreadId;
+void InspectorPane::refresh(const ui::InspectorSnapshot &snapshot) {
+  currentSnapshot = snapshot;
   refreshCurrentTab();
 }
 
 void InspectorPane::refreshCurrentTab() {
-  if (!currentModel)
+  if (!currentSnapshot)
     return;
   switch (inspectorTabs->currentIndex()) {
   case 0:
@@ -471,48 +448,11 @@ void InspectorPane::refreshCurrentTab() {
 }
 
 void InspectorPane::refreshPlan() {
-  const ThreadPresentation *thread = currentModel->thread(currentThreadId);
-  PlanSnapshot next;
-  next.threadId = currentThreadId;
-  next.threadPresent = thread != nullptr;
-  if (thread) {
-    for (auto id = thread->turnOrder.rbegin(); id != thread->turnOrder.rend();
-         ++id) {
-      const auto turn = thread->turns.find(*id);
-      if (turn == thread->turns.end())
-        continue;
-      if (turn->second.plan.is_object() &&
-          turn->second.plan.contains("steps")) {
-        PlanContentSnapshot plan;
-        plan.explanation = stringValue(turn->second.plan, "explanation");
-        for (const auto &step :
-             turn->second.plan.value("steps", nlohmann::json::array())) {
-          const std::string status = stringValue(step, "status");
-          plan.steps.push_back({
-              stringValue(step, "step"),
-              effectivePlanStepStatus(status, turn->second.status,
-                                      thread->status)});
-        }
-        next.plan = std::move(plan);
-        break;
-      }
-      for (auto itemId = turn->second.itemOrder.rbegin();
-           itemId != turn->second.itemOrder.rend(); ++itemId) {
-        const auto item = turn->second.items.find(*itemId);
-        if (item != turn->second.items.end() &&
-            stringValue(item->second.raw, "type") == "plan") {
-          next.planItem = stringValue(item->second.raw, "text");
-          break;
-        }
-      }
-      if (next.planItem)
-        break;
-    }
-  }
+  const ui::InspectorPlanSnapshot &next = currentSnapshot->plan;
   if (planSnapshot && *planSnapshot == next)
     return;
-  planSnapshot = std::move(next);
-  const PlanSnapshot &snapshot = *planSnapshot;
+  planSnapshot = next;
+  const ui::InspectorPlanSnapshot &snapshot = *planSnapshot;
   setUpdatesEnabled(false);
   clearLayout(planLayout);
   if (!snapshot.threadPresent) {
@@ -522,7 +462,7 @@ void InspectorPane::refreshPlan() {
     const QString explanation = text(snapshot.plan->explanation);
     if (!explanation.isEmpty())
       planLayout->addWidget(makeMarkdownLabel(explanation));
-    for (const PlanStepSnapshot &step : snapshot.plan->steps) {
+    for (const ui::InspectorPlanStep &step : snapshot.plan->steps) {
       auto *row = new QFrame;
       row->setProperty("kind", "raised");
       auto *layout = new QVBoxLayout(row);
@@ -547,44 +487,11 @@ void InspectorPane::refreshPlan() {
 }
 
 void InspectorPane::refreshAgents() {
-  const ThreadPresentation *thread = currentModel->thread(currentThreadId);
-  AgentsSnapshot next;
-  next.threadId = currentThreadId;
-  next.threadPresent = thread != nullptr;
-  if (thread) {
-    next.agents.reserve(thread->agentOrder.size());
-    for (const std::string &id : thread->agentOrder) {
-      const auto agent = thread->agents.find(id);
-      if (agent == thread->agents.end())
-        continue;
-      AgentSnapshot snapshot;
-      snapshot.id = id;
-      snapshot.status = agent->second.status;
-      snapshot.childThreadId = agent->second.childThreadId;
-      snapshot.agentPath = stringValue(agent->second.raw, "agentPath");
-      snapshot.tool = stringValue(agent->second.raw, "tool");
-      snapshot.model = stringValue(agent->second.raw, "model");
-      snapshot.reasoningEffort =
-          stringValue(agent->second.raw, "reasoningEffort");
-      snapshot.prompt = stringValue(agent->second.raw, "prompt");
-      snapshot.resultText = stringValue(agent->second.raw, "resultText");
-      snapshot.senderThreadId =
-          stringValue(agent->second.raw, "senderThreadId");
-      const auto receivers = agent->second.raw.find("receiverThreadIds");
-      if (receivers != agent->second.raw.end() && receivers->is_array()) {
-        for (const auto &receiver : *receivers) {
-          if (receiver.is_string())
-            snapshot.receiverThreadIds.push_back(
-                receiver.get<std::string>());
-        }
-      }
-      next.agents.push_back(std::move(snapshot));
-    }
-  }
+  const ui::InspectorAgentsSnapshot &next = currentSnapshot->agents;
   if (agentsSnapshot && *agentsSnapshot == next)
     return;
-  agentsSnapshot = std::move(next);
-  const AgentsSnapshot &snapshot = *agentsSnapshot;
+  agentsSnapshot = next;
+  const ui::InspectorAgentsSnapshot &snapshot = *agentsSnapshot;
   setUpdatesEnabled(false);
   clearLayout(agentsLayout);
   if (!snapshot.threadPresent)
@@ -594,51 +501,30 @@ void InspectorPane::refreshAgents() {
     agentsLayout->addWidget(makeLabel(
         QStringLiteral("No agent activity for this thread."), "muted"));
   else
-    for (const AgentSnapshot &agent : snapshot.agents)
+    for (const ui::InspectorAgentRow &agent : snapshot.agents)
       agentsLayout->addWidget(agentFrame(agent));
   agentsLayout->addStretch();
   setUpdatesEnabled(true);
 }
 
 void InspectorPane::refreshChanges() {
-  const ThreadPresentation *thread = currentModel->thread(currentThreadId);
+  const ui::InspectorChangesSnapshot &snapshot = currentSnapshot->changes;
   diffViewer->setRepositoryContext(
-      text(currentThreadId), thread ? text(thread->cwd) : QString{},
-      thread ? texts(thread->commandCwds) : QStringList{},
-      thread ? texts(thread->changedPaths) : QStringList{});
+      text(snapshot.threadId), text(snapshot.cwd), texts(snapshot.commandCwds),
+      texts(snapshot.changedPaths));
   diffViewer->refreshRepository();
 }
 
 void InspectorPane::refreshRequests() {
-  std::vector<RequestSnapshot> next;
-  next.reserve(currentModel->pendingRequestCount());
-  for (const auto &[id, request] :
-       currentModel->pendingRequestPresentations()) {
-    RequestSnapshot snapshot;
-    snapshot.id = id;
-    snapshot.kind = request.kind;
-    snapshot.threadContext = request.threadId;
-    if (const ThreadPresentation *thread =
-            currentModel->thread(request.threadId);
-        thread && !thread->title.empty())
-      snapshot.threadContext = thread->title;
-    snapshot.generation = request.generation;
-    snapshot.command = stringValue(request.raw, "command");
-    snapshot.reason = stringValue(request.raw, "reason");
-    snapshot.message = stringValue(request.raw, "message");
-    const auto questions = request.raw.find("questions");
-    if (questions != request.raw.end() && questions->is_array())
-      snapshot.questionCount = questions->size();
-    snapshot.actionable = requestEligible && requestEligible(id);
-    next.push_back(std::move(snapshot));
-  }
+  const ui::InspectorRequestsSnapshot &next = currentSnapshot->requests;
   if (requestsSnapshot && *requestsSnapshot == next)
     return;
-  requestsSnapshot = std::move(next);
-  const std::vector<RequestSnapshot> &snapshot = *requestsSnapshot;
+  requestsSnapshot = next;
+  const std::vector<ui::InspectorRequestRow> &snapshot =
+      requestsSnapshot->requests;
   setUpdatesEnabled(false);
   clearLayout(requestsLayout);
-  for (const RequestSnapshot &request : snapshot) {
+  for (const ui::InspectorRequestRow &request : snapshot) {
     auto *frame = new QFrame;
     frame->setProperty("kind", "raised");
     frame->setProperty("tone", "warning");
@@ -718,18 +604,7 @@ void InspectorPane::refreshRequests() {
 }
 
 void InspectorPane::refreshState() {
-  nlohmann::json domains = nlohmann::json::object();
-  for (const auto &[name, value] : currentModel->globalDomains())
-    domains[name] = value;
-  nlohmann::json pending = nlohmann::json::object();
-  for (const auto &[id, request] : currentModel->pendingRequestPresentations())
-    pending[id] = {{"category", request.kind},
-                   {"threadId", request.threadId},
-                   {"generation", request.generation}};
-  nlohmann::json state{{"models", currentModel->modelCatalog()},
-                       {"pendingRequests", std::move(pending)},
-                       {"domains", std::move(domains)}};
-  std::string rendered = state.dump(2);
+  std::string rendered = currentSnapshot->state.state.dump(2);
   constexpr std::size_t MaximumBytes = 32U * 1024U;
   if (rendered.size() > MaximumBytes) {
     const std::size_t total = rendered.size();
@@ -746,26 +621,17 @@ void InspectorPane::refreshState() {
 }
 
 void InspectorPane::refreshProtocolStats() {
-  std::size_t turns = 0;
-  std::size_t items = 0;
-  if (const ThreadPresentation *thread =
-          currentModel->thread(currentThreadId)) {
-    turns = thread->turnOrder.size();
-    for (const auto &[id, turn] : thread->turns) {
-      static_cast<void>(id);
-      items += turn.itemOrder.size();
-    }
-  }
+  const ui::InspectorStateSnapshot &snapshot = currentSnapshot->state;
   const QString value =
       QStringLiteral("seq %1  |  threads %2  |  models %3  |  turns %4  |  "
                      "items %5  |  pending %6  |  telemetry %7")
           .arg(static_cast<qulonglong>(observedSequence))
-          .arg(static_cast<qulonglong>(currentModel->threadOrder().size()))
-          .arg(static_cast<qulonglong>(currentModel->modelCatalog().size()))
-          .arg(static_cast<qulonglong>(turns))
-          .arg(static_cast<qulonglong>(items))
-          .arg(static_cast<qulonglong>(currentModel->pendingRequestCount()))
-          .arg(static_cast<qulonglong>(currentModel->telemetry().size()));
+          .arg(static_cast<qulonglong>(snapshot.threadCount))
+          .arg(static_cast<qulonglong>(snapshot.modelCount))
+          .arg(static_cast<qulonglong>(snapshot.selectedThreadTurnCount))
+          .arg(static_cast<qulonglong>(snapshot.selectedThreadItemCount))
+          .arg(static_cast<qulonglong>(snapshot.pendingRequestCount))
+          .arg(static_cast<qulonglong>(snapshot.telemetryCount));
   if (value.toUtf8() == protocolStatsSnapshot)
     return;
   protocolStatsSnapshot = value.toUtf8();

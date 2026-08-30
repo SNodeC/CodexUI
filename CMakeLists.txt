@@ -29,6 +29,7 @@ find_package(Threads REQUIRED)
 
 set(
     CODEXUI_CODEX_COMMON_SOURCES
+    src/codex/AttachmentDraft.h
     src/codex/ClientRuntime.cpp
     src/codex/ClientRuntime.h
     src/codex/Configuration.cpp
@@ -47,13 +48,18 @@ set(
     src/codex/MainWindow.h
     src/codex/NewThreadDialog.cpp
     src/codex/NewThreadDialog.h
+    src/codex/PendingRequestPolicy.cpp
+    src/codex/PendingRequestPolicy.h
     src/codex/PresentationModel.cpp
     src/codex/PresentationModel.h
+    src/codex/PresentationClient.h
     src/codex/PresentationStatus.h
     src/codex/PresentationProtocol.cpp
     src/codex/PresentationProtocol.h
     src/codex/ProtocolNormalizer.cpp
     src/codex/ProtocolNormalizer.h
+    src/codex/UiSession.cpp
+    src/codex/UiSession.h
     src/codex/ipc/QtSocketPairEndpoint.cpp
     src/codex/ipc/QtSocketPairEndpoint.h
     src/codex/ipc/SNodeSocketPairEndpoint.cpp
@@ -67,6 +73,9 @@ set(
     src/codex/ui/BrandMark.h
     src/codex/ui/UiStyle.cpp
     src/codex/ui/UiStyle.h
+    src/codex/ui/UiViewProjection.cpp
+    src/codex/ui/UiViewProjection.h
+    src/codex/ui/UiViewState.h
 )
 
 set(
@@ -204,6 +213,55 @@ if(BUILD_TESTING)
     )
 
     add_executable(
+        codexui-pending-request-policy-test
+        tests/codex/PendingRequestPolicyTest.cpp
+        src/codex/PendingRequestPolicy.cpp
+        src/codex/PendingRequestPolicy.h
+    )
+    target_compile_features(
+        codexui-pending-request-policy-test PRIVATE cxx_std_20
+    )
+    target_include_directories(
+        codexui-pending-request-policy-test PRIVATE src
+    )
+    add_test(
+        NAME codexui-pending-request-policy
+        COMMAND codexui-pending-request-policy-test
+    )
+    set_tests_properties(
+        codexui-pending-request-policy PROPERTIES TIMEOUT 10
+    )
+
+    add_executable(
+        codexui-ui-session-test
+        tests/codex/UiSessionTest.cpp
+        src/codex/UiSession.cpp
+        src/codex/UiSession.h
+        src/codex/PendingRequestPolicy.cpp
+        src/codex/PendingRequestPolicy.h
+        src/codex/PresentationClient.h
+        src/codex/PresentationModel.cpp
+        src/codex/PresentationModel.h
+        src/codex/PresentationProtocol.cpp
+        src/codex/PresentationProtocol.h
+        src/codex/PresentationStatus.h
+        src/codex/AttachmentDraft.h
+        src/codex/ui/UiViewProjection.cpp
+        src/codex/ui/UiViewProjection.h
+        src/codex/ui/UiViewState.h
+        src/codex/middle/ConversationProjection.cpp
+        src/codex/middle/ConversationProjection.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+        src/codex/middle/PromptCoordinator.cpp
+        src/codex/middle/PromptCoordinator.h
+    )
+    target_compile_features(codexui-ui-session-test PRIVATE cxx_std_20)
+    target_include_directories(codexui-ui-session-test PRIVATE src)
+    add_test(NAME codexui-ui-session COMMAND codexui-ui-session-test)
+    set_tests_properties(codexui-ui-session PROPERTIES TIMEOUT 10)
+
+    add_executable(
         codexui-conversation-projection-test
         tests/codex/ConversationProjectionTest.cpp
         src/codex/middle/ConversationProjection.cpp
@@ -212,14 +270,12 @@ if(BUILD_TESTING)
         src/codex/middle/MiddleTypes.h
         src/codex/middle/PromptCoordinator.cpp
         src/codex/middle/PromptCoordinator.h
+        src/codex/AttachmentDraft.h
     )
     target_compile_features(
         codexui-conversation-projection-test PRIVATE cxx_std_20
     )
     target_include_directories(codexui-conversation-projection-test PRIVATE src)
-    target_link_libraries(
-        codexui-conversation-projection-test PRIVATE Qt6::Widgets
-    )
     add_test(
         NAME codexui-conversation-projection
         COMMAND codexui-conversation-projection-test
@@ -275,6 +331,9 @@ if(BUILD_TESTING)
         src/codex/ui/ExpandingPromptEditor.h
         src/codex/ui/UiStyle.cpp
         src/codex/ui/UiStyle.h
+        src/codex/ui/UiViewProjection.cpp
+        src/codex/ui/UiViewProjection.h
+        src/codex/ui/UiViewState.h
         src/codex/middle/ComposerPane.cpp
         src/codex/middle/ComposerPane.h
         src/codex/middle/ConversationCards.cpp

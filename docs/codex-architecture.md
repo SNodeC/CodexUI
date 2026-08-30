@@ -7,10 +7,15 @@ CodexUI is a remote frontend for `codex-bridge`. It uses the AISuite
 without introducing another backend, protocol authority, or retained semantic
 store.
 
-The architecture has three explicit boundaries:
+The architecture keeps the existing transport boundaries and adds an explicit
+in-process renderer boundary:
 
 ```text
-Qt presentation
+Qt widgets and dialogs
+    <-> semantic intents, neutral snapshots, notices, and narrow effects
+UiSession (toolkit-neutral C++ UI/UX logic; on the Qt thread today)
+    <-> PresentationClient actions/results and normalized presentation frames
+FrontendSession Qt/socketpair adapter
     <-> normalized UI command/event protocol
 SNode.C client runtime + codex frontend proxy SDK
     <-> slim codex-bridge envelope over a selected SNode.C transport
@@ -35,10 +40,10 @@ a protocol object and is unrelated to these execution threads.
         Qt GUI thread                         SNode.C client thread
    +------------------------+             +---------------------------+
    | Qt application loop    |             | SNode.C event loop        |
-   | widgets                |             | selected client transport |
-   | presentation model     |             | ClientConnection          |
-   | normalized UI events   |             | frontend proxy SDK        |
-   | user interaction       |             | protocol normalizer       |
+   | concrete widgets       |             | selected client transport |
+   | UiSession              |             | ClientConnection          |
+   | PresentationModel      |             | frontend proxy SDK        |
+   | FrontendSession        |             | protocol normalizer       |
    +-----------+------------+             +-------------+-------------+
                |                                            |
                | bounded full-duplex Unix socketpair        |
@@ -74,17 +79,57 @@ required.
 The Qt thread exclusively owns:
 
 - `QApplication`, the Qt event loop, and all GUI objects;
-- selected thread, selected tab, scroll, expansion, draft, and focus state;
-- the `PresentationModel`, which is the sole retained authoritative store for
-  normalized presentation state;
-- rendering and user-action translation;
-- correlation of normalized UI operation results with UI intents.
+- `UiSession`, including selected-thread intent, new-thread intent, prompt
+  admission and queues, hydration/recovery state, pending-request eligibility,
+  and the `PresentationModel`;
+- concrete-only selected tab, scroll, expansion, composer-form draft, dialog,
+  focus, geometry, and paint state;
+- `FrontendSession`, the Qt endpoint adapter and normalized operation-result
+  correlation;
+- projection of neutral snapshots into widgets and translation of gestures
+  into semantic `UiSession` calls.
 
-Only the Qt thread may mutate Qt objects or presentation state. It performs no
-bridge transport, app-server framing, JSON-RPC correlation, or typed app-server
-decoding.
+Only the Qt thread may mutate Qt objects or `UiSession` today. `UiSession` has
+no Qt types and does not require the Qt event loop; keeping it on this thread is
+the current threading model, not a toolkit dependency. The Qt side performs no
+bridge transport, app-server framing, native JSON-RPC correlation, or typed
+app-server decoding.
 
-### 3.2 SNode.C Client Thread
+### 3.2 Renderer/Logic API
+
+`UiSession` is the authoritative UI/UX state owner. Its public surface is
+deliberately small and protocol-complete:
+
+- renderer input consists of semantic calls such as select, submit, reload,
+  interrupt, resolve request, or configure connection;
+- normalized `codexui.presentation` frames enter through
+  `onPresentationFrame`, and transport activity enters through the stable
+  thread identity only;
+- rendering reads one aggregate `UiSessionView` containing toolkit-neutral
+  thread, conversation, inspector, settings, connection, request, and
+  optimistic-thread snapshots;
+- one-shot notices and narrow effects cover only concrete work such as clearing
+  or focusing the composer and preserving its local-admission scroll behavior;
+- an optional read-only frame observer feeds the bounded Protocol diagnostic
+  without giving that renderer state or replay authority;
+- absolute wakeups let the existing Qt timer drive deferred dispatch and visual
+  acknowledgment transitions without introducing another scheduler.
+
+Downward communication uses the value-type `PresentationClient`: generic
+correlated `execute(action, data, completion)`, fire-and-forget
+`send(action, data)`, and `respond(requestId, result, error)`. It contains no Qt,
+socket, thread, or inheritance contract. `FrontendSession` supplies those three
+functions over the unchanged Qt socketpair endpoint. Consequently another UI
+toolkit can consume the same C++ UI/UX logic by rendering the snapshots and
+supplying an equivalent presentation-protocol adapter; it does not need to
+inherit from or instantiate a Qt widget.
+
+This separation is not a new live protocol or execution architecture. The
+class still runs on the GUI thread, the bounded socketpair remains the sole
+cross-thread queue, and protocol version 1 is unchanged. It makes a later move
+of the neutral logic possible without making that move part of this refactor.
+
+### 3.3 SNode.C Client Thread
 
 The SNode.C thread exclusively owns:
 
@@ -278,10 +323,10 @@ The implemented typed action catalog additionally covers:
   feedback upload, and Windows sandbox setup/readiness.
 
 Every action is dispatched through its generated AISuite codex operation type.
-Qt sends semantic presentation action names and typed `data`; native app-server
-method names do not cross the regular socketpair contract. `initialize` and
-`initialized` are deliberately absent because the bridge owns the one shared
-provider handshake.
+`UiSession` sends semantic presentation action names and typed `data` through
+`PresentationClient` and `FrontendSession`; native app-server method names do
+not cross the regular socketpair contract. `initialize` and `initialized` are
+deliberately absent because the bridge owns the one shared provider handshake.
 
 Commands are asynchronous. No Qt call blocks waiting for SNode.C. Unsupported
 correlated actions receive one `result` with `ok:false` and a structured error.
@@ -388,12 +433,14 @@ identity requires a new major version.
 
 ## 6. Presentation Authority and Reduction
 
-Qt owns `PresentationModel`, the sole retained authoritative store for
-normalized presentation state. Widgets and projections read from it; they do
-not retain competing copies of thread, turn, item, plan, agent, request, or
-global-domain state. The app-server remains the semantic and persistence
-authority, so the model is not a persistence layer or substitute for
-app-server history.
+`UiSession` owns `PresentationModel`, the sole retained authoritative store for
+normalized presentation state. Only neutral projection code inside the logic
+boundary reads it. Qt widgets consume value snapshots and do not retain
+competing copies of thread, turn, item, plan, agent, request, or global-domain
+state. Widget-local scroll, expansion, sorting, focus, and paint caches are
+presentation mechanics, not another semantic store. The app-server remains the
+semantic and persistence authority, so the model is not a persistence layer or
+substitute for app-server history.
 
 Presentation reduction follows these rules:
 
@@ -445,8 +492,8 @@ explicit forced fresh-read operation.
 
 ### 7.1 Upcoming-Turn Settings
 
-The real shell has a codex-native upcoming-turn settings surface backed by the
-normalized `PresentationModel`. Its primary controls are:
+The real shell has a codex-native upcoming-turn settings surface populated from
+the neutral `UiSession` settings snapshot. Its primary controls are:
 
 - model and model-constrained reasoning effort;
 - sandbox access and the sandbox-native network choice;
@@ -599,11 +646,12 @@ that they are clean again.
 
 ### 7.5 Conversation Projection and Prompt Admission
 
-The selected conversation is a pure projection of `PresentationModel` plus
-client-local prompt admissions. Its one structural grouping level is the
-app-server turn: each retained turn contributes one transparent section, and
-its items remain in exact server order. A turn is identified only by its stable
-turn ID; CodexUI does not infer a turn boundary from a user-message card.
+The selected conversation snapshot is a pure projection inside `UiSession` of
+`PresentationModel` plus client-local prompt admissions. Its one structural
+grouping level is the app-server turn: each retained turn contributes one
+transparent section, and its items remain in exact server order. A turn is
+identified only by its stable turn ID; CodexUI does not infer a turn boundary
+from a user-message card.
 
 Authoritative cards use the stable `(threadId, turnId, itemId)` identity.
 Locally admitted cards use a process-wide submission identity that remains
@@ -981,13 +1029,13 @@ depends on the member's presence.
 
 ## 16. Application Presentation
 
-The production `ShellWidget` is the sole Qt consumer of the
-`codexui.presentation` contract and `PresentationModel`. Conversation, Plan,
-Agents, Changes, Requests, retained State, and bounded Protocol diagnostics are
-integrated into that shell. Diagnostic presentation is telemetry only: it
-cannot replay frames, hydrate state, supply deletion authority, or conceal a
-missing app-server result. The shell has no semantic snapshot or parallel state
-authority.
+The production `ShellWidget` is a concrete renderer of `UiSessionView`; it does
+not consume `PresentationModel` or branch on protocol operations. Conversation,
+Plan, Agents, Changes, Requests, retained State, and bounded Protocol
+diagnostics are integrated into that shell. The raw Protocol log is a bounded
+renderer-local diagnostic view of frames also delivered to `UiSession`; it has
+no reduction, replay, hydration, or deletion authority. The shell retains no
+parallel semantic state authority.
 
 ## 17. Implemented Components and APIs
 
@@ -1003,12 +1051,15 @@ The implementation is divided into the following concrete components:
 | `SocketPair` | Movable RAII owner for the unnamed nonblocking `AF_UNIX` socketpair |
 | `QtSocketPairEndpoint` | Qt-thread descriptor adapter using `QSocketNotifier`, bounded reads, and bounded writes |
 | `SNodeSocketPairEndpoint` | SNode.C-thread descriptor adapter using `ReadEventReceiver` and `WriteEventReceiver`, bounded reads, and bounded writes |
-| `FrontendSession` | Qt-side asynchronous command facade, correlation registry, lifecycle owner, and socketpair JSONL endpoint |
+| `PresentationClient` | Toolkit-neutral value API for generic execute, send, and server-request response operations |
+| `FrontendSession` | Qt-side `PresentationClient` adapter, correlation registry, lifecycle owner, and socketpair JSONL endpoint |
 | `ClientRuntime` | SNode.C-thread application graph, selected transport, frontend proxy SDK dispatch, reconnect, and shutdown |
 | `ProtocolNormalizer` | Native app-server/bridge input to `codexui.presentation` result/event conversion |
 | `PresentationProtocol` | Frame construction, validation, authority, sequence, generation, and scope utilities |
-| `PresentationModel` | Qt-owned stable-ID reducer for threads, turns, items, plans, agents, requests, global domains, and telemetry |
-| `ShellWidget` | Product shell and protocol/application coordinator; owns stable selection, hydration, recovery, and command dispatch |
+| `PresentationModel` | Toolkit-neutral stable-ID reducer for threads, turns, items, plans, agents, requests, global domains, and telemetry; owned by `UiSession` |
+| `UiSession` | Toolkit-neutral UI/UX owner for semantic intents, selection, hydration, recovery, prompt queues, pending eligibility, projections, notices, and effects |
+| `UiViewState` / `UiViewProjection` | Renderer-facing neutral snapshot DTOs and pure model projection |
+| `ShellWidget` | Thin Qt product-shell adapter for dialogs, gestures, snapshot rendering, focus, and pane composition |
 | `MiddleRegionWidget` | Three-pane visual composition and center-region wheel routing |
 | `ThreadPane` | Stable-ID thread-list projection and thread actions |
 | `ConversationProjection` | Pure thread-to-turn-to-card projection over `PresentationModel` and local prompts |
@@ -1027,16 +1078,14 @@ The implementation is divided into the following concrete components:
 | `MainWindow` | Top-level Qt window ownership only |
 | `BrandMark` and desktop resources | Shared visual mark and the consistent `codex-ui` executable/application/window/icon identity |
 
-### 17.1 FrontendSession API
+### 17.1 Presentation Client and FrontendSession APIs
 
-`FrontendSession` is the normal Qt-side entry point. It provides asynchronous
-methods for thread discovery/read/create/resume/fork/rename/archive/delete,
-model and environment discovery, turn start/steer/interrupt, controller
-claim/release, transport connect/disconnect/reconnect/configure, raw diagnostic
-send, and typed server-request
-resolution. Every correlated method returns a presentation correlation ID and
-optionally invokes a Qt-thread response callback. It never blocks the GUI
-thread or exposes a transport socket.
+`PresentationClient` is the normal UI-logic entry point. Its three generic
+functions cover correlated operations, uncorrelated commands, and typed
+server-request responses. `FrontendSession::presentationClient()` binds them to
+the existing Qt endpoint. Every correlated operation returns a presentation
+correlation ID and optionally invokes a GUI-thread response callback. Neither
+API blocks the GUI thread or exposes a transport socket.
 
 The generic operation method:
 
@@ -1046,17 +1095,30 @@ request(std::string operation,
         ResponseHandler handler = {})
 ```
 
-supports the complete generated AISuite operation catalog without adding one
-Qt facade method per rarely used operation. Frequently used UI actions have
-narrow named methods such as `listThreads()`, `readThread()`, `startTurn()`,
-`steerTurn()`, `configureConnection()`, and `respondToServerRequest()`.
+supports the complete generated AISuite operation catalog. Existing narrow
+`FrontendSession` convenience methods remain adapters, but `UiSession` depends
+only on `PresentationClient` and therefore does not mirror the catalog as a Qt
+facade.
 
 Lifecycle is explicit: `start()` creates the endpoint/runtime graph,
 `shutdown()` requests orderly asynchronous termination, and `wait()` joins the
 SNode.C thread. `setEventHandler()` receives normalized frames and
 `setRuntimeStoppedHandler()` reports terminal worker shutdown.
 
-### 17.2 Normalizer and reducer APIs
+### 17.2 UiSession API
+
+`UiSession` accepts normalized frames and semantic renderer intents. It owns
+the presentation reducer and prompt coordinator and publishes one aggregate
+`UiSessionView`. Thread and Inspector panes accept their neutral snapshot DTOs;
+conversation cards accept neutral middle-layer values. The concrete shell has
+no `PresentationModel` include.
+
+The change callback requests a coalesced render on the current GUI loop. The
+absolute wakeup callback maps deferred prompt dispatch and acknowledgment
+deadlines onto `QTimer` without giving `UiSession` a Qt dependency. This is an
+adapter seam, not another queue or event loop.
+
+### 17.3 Normalizer and reducer APIs
 
 `ProtocolNormalizer` accepts transport lifecycle, bridge telemetry, typed
 server notifications, server requests, raw inbound observation, operation
@@ -1071,7 +1133,7 @@ telemetry, and pending-request presentation records. Internal upsert helpers
 preserve complete fields across partial events, correlate child-agent threads,
 and apply explicit merge/replace/remove authority.
 
-### 17.3 Transport availability
+### 17.4 Transport availability
 
 The executable always builds Unix, IPv4, and IPv6 JSONL clients. TLS, RFCOMM,
 WebSocket, and WSS clients are compiled when their SNode.C targets are
@@ -1095,7 +1157,7 @@ The AISuite dependency build is limited to two compiler jobs because its
 generated protocol translation units can otherwise exceed the hosted runner's
 aggregate memory.
 
-### 17.4 Shell settings and pending-request APIs
+### 17.5 Shell settings and pending-request APIs
 
 `TurnSettingsWidget` owns only an upcoming-turn draft. The shell supplies fresh
 provider context and catalogs through:
@@ -1127,26 +1189,29 @@ encoder resolves the catalog entry marked `isDefault` and sends its concrete
 model ID. Until that fresh catalog is available, CodexUI omits the otherwise
 explicit collaboration object rather than constructing an invalid one.
 
-`PendingRequestDialog::present()` accepts one generation-preserving
-`PendingRequestPresentation` and returns either no value when the user closes
-the dialog or a `PendingRequestResponse` containing exactly one native result
-or JSON-RPC error. `negativeResponse()` constructs the family-specific explicit
-decline used by the Requests surface. The caller resolves through
-`FrontendSession::respondToServerRequest()` with the stable connection
-generation and request ID; the dialog never mutates presentation state itself.
+`PendingRequestDialog::present()` accepts one neutral, generation-preserving
+`PendingRequestDescriptor` and returns either no value when the user closes the
+dialog or a `PendingRequestResponse` containing exactly one native result or
+JSON-RPC error. `PendingRequestPolicy` owns family-specific positive, negative,
+and form-submission response shaping. `UiSession::resolvePending()` revalidates
+the descriptor against current generation, identity, kind, thread, and raw
+request before responding through `PresentationClient`; the dialog never
+mutates presentation state itself.
 
-`ShellWidget` is the sole visual command adapter. It translates selection,
-composer, settings, controller, thread-management, and request-review actions
-into `FrontendSession` calls. Agent messages, plan text, reasoning summaries,
-and agent results pass through `QTextDocument::setMarkdown()` with
+`ShellWidget` is the sole native visual adapter. It translates selection,
+composer, settings, controller, thread-management, and request-review gestures
+into semantic `UiSession` calls and renders snapshots/effects. Agent messages,
+plan text, reasoning summaries, and agent results pass through
+`QTextDocument::setMarkdown()` with
 `MarkdownNoHTML`; user prompts, commands, and command output remain literal.
 Its custom dialogs return transient value objects and never mutate the
-presentation model directly. The composer owns attachment drafts; the
-connection dialog edits only the SNode.C runtime selection; and `DiffViewer`
+presentation model directly. The composer owns its editable attachment draft;
+the neutral logic owns admitted attachment values. The connection dialog edits
+only the SNode.C runtime selection, and `DiffViewer`
 is a read-only consumer of normalized model domains and retained provider
 items.
 
-### 17.5 Essential Automated Architecture Tests
+### 17.6 Essential Automated Architecture Tests
 
 The permanent automated-test policy protects architectural boundaries rather
 than individual fixes, widget details, or lines of implementation. A defect
@@ -1155,7 +1220,7 @@ codex suite only when it validates a boundary whose failure would undermine
 the application architecture independently of the particular symptom that
 revealed it.
 
-Seven focused CTest executables form the essential suite. They use production
+Nine focused CTest executables form the essential suite. They use production
 classes directly and are built when standard CMake `BUILD_TESTING` is enabled.
 CTest enables that option by default; disabling it remains the conventional
 packaging choice and does not select a different runtime implementation.
@@ -1199,7 +1264,7 @@ representative native app-server and bridge records
     -> ProtocolNormalizer
     -> codexui.presentation v1 frames
     -> PresentationModel::applyEvent()
-    -> coherent Qt-owned presentation state
+    -> coherent toolkit-neutral presentation state
 ```
 
 The representative lifecycle includes connection and controller publication,
@@ -1218,6 +1283,16 @@ The normalizer sink is connected directly to the reducer because the
 socketpair itself is independently covered by the first test. This keeps a
 failure attributable to either inter-thread transport or semantic reduction
 instead of repeating both mechanisms in every case.
+
+#### UI Session Boundary
+
+`codexui-ui-session-test` supplies a fake value-type `PresentationClient` to
+the production, Qt-free `UiSession`. It verifies provider hydration, selection
+hydration, settings resume, aggregate snapshots, deferred exact prompt
+dispatch, pending-request eligibility and stale-response rejection, new-thread
+effects, and change/wakeup callbacks. `codexui-pending-request-policy-test`
+separately verifies every typed native response shape. Neither executable links
+Qt.
 
 #### Conversation Projection
 
@@ -1436,7 +1511,9 @@ separate explicit authority and retention decision.
 ## 20. Visual Shell Integration Boundary
 
 The CodexUI shell is implemented in codex-owned Qt widgets. Those widgets
-consume only `PresentationModel` and call only `FrontendSession`.
+consume only neutral view values and call only semantic `UiSession` intents.
+`UiSession` alone consumes normalized frames, owns `PresentationModel`, and
+talks downward through `PresentationClient`.
 
 The implemented shell contains the 64-pixel top bar, hideable work sidebar,
 thread list, conversation timeline and composer, hideable inspector, Plan,
@@ -1474,7 +1551,8 @@ contract requires a separately reviewed change.
 2. `codex-bridge` is a thin multi-client router with telemetry, not a cache.
 3. The codex frontend SDK is a typed proxy, not a frontend state store.
 4. SNode.C owns transport, SDK execution, protocol decoding, and normalization.
-5. Qt owns widgets, interaction, selection, and transient presentation state.
+5. Qt owns concrete widgets and renderer mechanics; toolkit-neutral
+   `UiSession` owns semantic UI/UX state on the Qt thread today.
 6. Only normalized commands/events form the regular inter-thread contract.
 7. Cross-thread work is asynchronous and bounded.
 8. Partial omission is not deletion authority.
@@ -1503,9 +1581,9 @@ contract requires a separately reviewed change.
     one hidden layout transaction and one scroll settlement.
 22. Conversation hierarchy has exactly one semantic grouping level: stable
     app-server turns containing stable server-ordered items.
-23. `PresentationModel` is the only retained normalized presentation store;
-    conversation and inspector views are keyed projections, not parallel state
-    authorities.
+23. `UiSession` exclusively owns `PresentationModel`, the only retained
+    normalized presentation store; conversation and inspector views are value
+    projections, not parallel state authorities.
 
 ## 22. Resolved Presentation Decisions
 

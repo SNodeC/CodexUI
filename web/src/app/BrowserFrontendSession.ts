@@ -137,6 +137,9 @@ export class BrowserFrontendSession {
         this.createWebSocket = createWebSocket;
         this.normalizer = new ProtocolNormalizer(frame => {
             this.model.applyEvent(frame);
+            const scope = isObject(frame.scope) ? frame.scope : {};
+            const threadId = stringMember(scope, "threadId");
+            if (threadId !== "") this.model.noteThreadActivity(threadId, Math.floor(Date.now() / 1000));
             this.protocolFrames.push(retainedProtocolFrame(frame));
             if (this.protocolFrames.length > MaximumProtocolFrames) this.protocolFrames.shift();
             this.reconcilePromptsForFrame(frame);
@@ -431,6 +434,8 @@ export class BrowserFrontendSession {
             this.setNotice("The pending response could not be sent.");
             return false;
         }
+        if (request.threadId !== "")
+            this.model.noteThreadActivity(request.threadId, Math.floor(Date.now() / 1000));
         this.publish();
         return true;
     }
@@ -551,8 +556,17 @@ export class BrowserFrontendSession {
         if (!method) { this.normalizer.operationRejected(action, correlation, -32601, "unsupported CodexUI presentation action"); return correlation; }
         const startedAtSequence = this.normalizer.sequence;
         const request = this.sdk.request.bind(this.sdk) as unknown as RawRequest;
+        const threadId = stringMember(parameters, "threadId");
+        if (threadId !== "") {
+            this.model.noteThreadActivity(threadId, Math.floor(Date.now() / 1000));
+            this.schedulePublish();
+        }
         request(method, parameters, response => {
             if (!acceptResult()) { callback?.({}, true); return; }
+            if (threadId !== "") {
+                this.model.noteThreadActivity(threadId, Math.floor(Date.now() / 1000));
+                this.schedulePublish();
+            }
             const envelope = isObject(response) ? response : {};
             this.normalizer.operationResult(action, correlation, parameters, envelope, startedAtSequence);
             callback?.(envelope, false);

@@ -3,10 +3,11 @@
 #ifndef CODEXUI_CODEX_FILESELECTIONDIALOG_H
 #define CODEXUI_CODEX_FILESELECTIONDIALOG_H
 
+#include "codex/AttachmentDraft.h"
+
 #include <QDialog>
 #include <QString>
 
-#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -18,13 +19,6 @@ class QPushButton;
 class QTreeView;
 
 namespace codexui::codex {
-
-struct AttachmentDraft {
-  QString path;
-  QString name;
-  QString mimeType;
-  std::int64_t size = 0;
-};
 
 class FileSelectionDialog final : public QDialog {
 public:

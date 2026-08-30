@@ -379,6 +379,16 @@ void PresentationModel::applyEvent(const nlohmann::json &event) noexcept {
   }
 }
 
+void PresentationModel::noteThreadActivity(const std::string &threadId,
+                                           std::int64_t timestamp) noexcept {
+  const auto iterator = threads.find(threadId);
+  if (iterator == threads.end())
+    return;
+  std::optional<std::int64_t> &activity = iterator->second.lastActivityAt;
+  if (!activity || timestamp > *activity)
+    activity = timestamp;
+}
+
 void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
   if (!presentation::isPresentationFrame(event))
     return;
@@ -852,6 +862,10 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
   updateTimestamp(raw, "createdAt", result.createdAt);
   updateTimestamp(raw, "updatedAt", result.updatedAt);
   updateTimestamp(raw, "recencyAt", result.recencyAt);
+  if (result.updatedAt)
+    noteThreadActivity(id, *result.updatedAt);
+  if (result.recencyAt)
+    noteThreadActivity(id, *result.recencyAt);
   result.archived = boolValue(raw, "archived", result.archived);
 
   const auto turns = raw.find("turns");
