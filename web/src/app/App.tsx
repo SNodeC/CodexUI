@@ -3,11 +3,12 @@ import type {FormEvent, ReactNode, RefObject} from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-    ConversationViewportState, DefaultSetting, changeSettingDraft, canonicalThreadSettings, classifyStatus,
+    ConversationViewportState, DefaultSetting, anchoredScrollTop, changeSettingDraft, canonicalThreadSettings, classifyStatus,
+    foldedCardScrollTop, nestedScrollConsumes,
     pendingDecisionOptions, pendingRequestDetails, pendingResponse, permissionProfileLabel, stableKey,
     settingDraftFor, settingPromptOptions, trimTrailingEmptyLines,
 } from "../index.js";
-import type {PendingRequestPresentation, SettingDraft, SettingField, SettingPromptOptions, ThreadPresentation} from "../index.js";
+import type {ConversationViewportAnchor, PendingRequestPresentation, SettingDraft, SettingField, SettingPromptOptions, ThreadPresentation} from "../index.js";
 import type {
     AgentActivityData, CommandExecutionData, FileChangesData, LocalPromptData,
     ReasoningData, UserMessageData, AgentMessageData, GenericActivityData,
@@ -396,6 +397,20 @@ export async function writeCardClipboard(content: CardCopyContent): Promise<"cop
     catch { return "failed"; }
 }
 
+function ScrollableCode({text, className, label}: {text: string; className: string; label: string}) {
+    const surface = useRef<HTMLPreElement>(null);
+    const following = useRef(true);
+    useBrowserLayoutEffect(() => {
+        if (following.current && surface.current) surface.current.scrollTop = surface.current.scrollHeight;
+    }, [text]);
+    return <pre ref={surface} className={className} tabIndex={0} aria-label={label}
+        onScroll={event => { const element = event.currentTarget; following.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 2; }}
+        onWheel={event => {
+            const element = event.currentTarget;
+            if (nestedScrollConsumes(event.deltaY, element.scrollTop, element.clientHeight, element.scrollHeight)) event.stopPropagation();
+        }}><code>{text}</code></pre>;
+}
+
 export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy: (content: CardCopyContent) => void; nested?: ReactNode; turnContainer?: boolean}) {
     let title = humanize(card.kind);
     let body: ReactNode;
@@ -414,7 +429,8 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         body = data.summary ? <SafeMarkdown text={data.summary} /> : active ? <div className="activity-line"><i />Working…</div> : null;
     } else if (card.kind === "commandExecution") {
         const data = card.payload as CommandExecutionData; title = "Command execution";
-        body = <><code className="command-line">{trimTrailingEmptyLines(data.command)}</code>{data.output && <pre>{trimTrailingEmptyLines(data.output)}</pre>}
+        body = <><ScrollableCode className="command-line" label="Command" text={trimTrailingEmptyLines(data.command)} />
+            {data.output && <ScrollableCode className="command-output" label="Command output" text={trimTrailingEmptyLines(data.output)} />}
             <small className={`card-status ${classifyStatus(data.status).tone}`}>{commandMetadata(data)}</small></>;
     } else if (card.kind === "fileChanges") {
         const data = card.payload as FileChangesData; title = "File changes";
@@ -446,8 +462,39 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
     </article>;
 }
 
+interface PendingConversationGeometry {
+    threadId: string;
+    following: boolean;
+    anchor: ConversationViewportAnchor | undefined;
+    fold?: {cardKey: string; collapsed: boolean; previousTitleTop: number};
+}
+
+function conversationAnchor(container: HTMLElement): ConversationViewportAnchor | undefined {
+    const viewportTop = container.getBoundingClientRect().top;
+    for (const card of container.querySelectorAll<HTMLElement>(".conversation-card[data-card-key]")) {
+        const header = card.querySelector<HTMLElement>(":scope > header");
+        if (!header || header.getBoundingClientRect().bottom < viewportTop) continue;
+        return {cardKey: card.dataset.cardKey ?? "", pixelOffset: header.getBoundingClientRect().top - viewportTop};
+    }
+    return undefined;
+}
+
+function cardForKey(container: HTMLElement, key: string): HTMLElement | undefined {
+    return [...container.querySelectorAll<HTMLElement>(".conversation-card[data-card-key]")]
+        .find(card => card.dataset.cardKey === key);
+}
+
+function restoreConversationAnchor(container: HTMLElement, anchor: ConversationViewportAnchor | undefined,
+    fallbackScrollTop: number): void {
+    if (!anchor) { container.scrollTop = fallbackScrollTop; return; }
+    const card = cardForKey(container, anchor.cardKey);
+    const header = card?.querySelector<HTMLElement>(":scope > header");
+    if (!header) { container.scrollTop = fallbackScrollTop; return; }
+    const cardContentTop = header.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
+    container.scrollTop = anchoredScrollTop(cardContentTop, anchor.pixelOffset, container.scrollHeight - container.clientHeight);
+}
+
 function Conversation({session, revision, paneControls}: {session: BrowserFrontendSession; revision: number; paneControls?: ReactNode}) {
-    void revision;
     const snapshot = session.getSnapshot();
     const thread = session.model.thread(snapshot.selectedThreadId);
     const projectionId = snapshot.selectedThreadId || (snapshot.newThreadIntent ? "__codexui_new_thread__" : "");
@@ -456,10 +503,14 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
         count + (thread.turns.get(id)?.itemOrder.length ?? 0), 0) ?? 0;
     const limit = viewport.effectiveLimit(projectionId, authoritativeCount);
     const conversation = session.conversation(limit);
+    const pane = useRef<HTMLElement>(null);
     const scroll = useRef<HTMLDivElement>(null);
+    const composerDock = useRef<HTMLDivElement>(null);
     const previousThread = useRef(projectionId);
+    const renderedRevision = useRef(revision);
+    const pendingGeometry = useRef<PendingConversationGeometry>();
     const folding = useRef(new Map<string, boolean>());
-    const [, forceCardState] = useState(0);
+    const [cardStateRevision, forceCardState] = useState(0);
     const [presentation, setPresentation] = useState(storedConversationPresentation);
     const drafts = useRef(new Map<string, string>());
     const draftRevision = useRef(snapshot.newThreadDraftRevision);
@@ -474,18 +525,68 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
     const settingsRevision = thread?.settingsRevision ?? 0;
     const settingsDraft = settingDraftFor(settingsDrafts, projectionId, canonicalSettings, settingsRevision);
     const settingsOptions = settingPromptOptions(settingsDraft, session.model.modelCatalog());
-    useEffect(() => {
-        if (previousThread.current !== projectionId) {
-            previousThread.current = projectionId;
-            const saved = viewport.scroll(projectionId);
-            requestAnimationFrame(() => { if (scroll.current) scroll.current.scrollTop = saved.following ? scroll.current.scrollHeight : saved.scrollTop; });
-        }
-    }, [projectionId, viewport]);
     useBrowserLayoutEffect(() => {
+        const element = scroll.current;
+        if (!element) return;
         const saved = viewport.scroll(projectionId);
-        if (saved.following && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
-    }, [revision, projectionId, viewport]);
+        const revisionChanged = renderedRevision.current !== revision;
+        renderedRevision.current = revision;
+        const switchedThread = previousThread.current !== projectionId;
+        const transaction = pendingGeometry.current?.threadId === projectionId ? pendingGeometry.current : undefined;
+        if (switchedThread) {
+            previousThread.current = projectionId;
+            pendingGeometry.current = undefined;
+            if (saved.following) element.scrollTop = element.scrollHeight;
+            else restoreConversationAnchor(element, saved.anchor, saved.scrollTop);
+        } else if (transaction?.fold) {
+            const card = cardForKey(element, transaction.fold.cardKey);
+            const header = card?.querySelector<HTMLElement>(":scope > header");
+            if (card && header) {
+                const viewportTop = element.getBoundingClientRect().top;
+                const visibleBottom = Math.min(element.getBoundingClientRect().bottom,
+                    (composerDock.current?.getBoundingClientRect().top ?? element.getBoundingClientRect().bottom) - 8);
+                const cardContentTop = header.getBoundingClientRect().top - viewportTop + element.scrollTop;
+                element.scrollTop = foldedCardScrollTop(cardContentTop, transaction.fold.previousTitleTop,
+                    card.getBoundingClientRect().height, Math.max(0, visibleBottom - viewportTop),
+                    transaction.fold.collapsed, element.scrollHeight - element.clientHeight);
+            }
+        } else if (transaction?.following || (!transaction && saved.following)) {
+            element.scrollTop = element.scrollHeight;
+        } else if (transaction || revisionChanged) {
+            restoreConversationAnchor(element, transaction?.anchor ?? saved.anchor, saved.scrollTop);
+        }
+        const following = transaction?.fold ? false : transaction?.following ?? saved.following;
+        viewport.updateScroll(projectionId, element.scrollTop, following, conversationAnchor(element));
+        if (transaction) pendingGeometry.current = undefined;
+    }, [revision, projectionId, cardStateRevision, presentation, viewport]);
+    useBrowserLayoutEffect(() => {
+        const dock = composerDock.current; const owner = pane.current;
+        if (!dock || !owner || typeof ResizeObserver === "undefined") return;
+        let previousHeight = 0;
+        const observer = new ResizeObserver(() => {
+            const element = scroll.current; const height = Math.ceil(dock.getBoundingClientRect().height);
+            if (height === previousHeight) return;
+            const saved = viewport.scroll(projectionId);
+            const anchor = element ? conversationAnchor(element) ?? saved.anchor : saved.anchor;
+            owner.style.setProperty("--composer-overlay-height", `${height}px`);
+            if (element && previousHeight !== 0) {
+                if (height > previousHeight && saved.following) element.scrollTop = element.scrollHeight;
+                else restoreConversationAnchor(element, anchor, saved.scrollTop);
+                viewport.updateScroll(projectionId, element.scrollTop, saved.following, conversationAnchor(element));
+            }
+            previousHeight = height;
+        });
+        observer.observe(dock);
+        return () => observer.disconnect();
+    }, [projectionId, viewport]);
+    const pauseForRelayout = () => {
+        if (!scroll.current) return;
+        const anchor = conversationAnchor(scroll.current);
+        pendingGeometry.current = {threadId: projectionId, following: false, anchor};
+        viewport.updateScroll(projectionId, scroll.current.scrollTop, false, anchor);
+    };
     const updatePresentation = (change: Partial<ConversationPresentationOptions>) => setPresentation(current => {
+        if (change.showReasoning !== undefined || change.showCodexUpdates !== undefined) pauseForRelayout();
         const next = {...current, ...change}; persistConversationPresentation(next); return next;
     });
     const cardVisible = (card: VisibleCardData) => {
@@ -503,6 +604,15 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
         return folding.current.get(key) ?? false;
     };
     const toggleCard = (key: string, collapsed: boolean) => {
+        const element = scroll.current; const card = element ? cardForKey(element, key) : undefined;
+        const header = card?.querySelector<HTMLElement>(":scope > header");
+        if (element && header) {
+            const previousTitleTop = header.getBoundingClientRect().top - element.getBoundingClientRect().top;
+            const anchor = conversationAnchor(element);
+            pendingGeometry.current = {threadId: projectionId, following: false, anchor,
+                fold: {cardKey: key, collapsed: !collapsed, previousTitleTop}};
+            viewport.updateScroll(projectionId, element.scrollTop, false, anchor);
+        }
         folding.current.set(key, !collapsed); forceCardState(value => value + 1);
     };
     const copyCard = (content: CardCopyContent) => void writeCardClipboard(content).then(outcome => {
@@ -517,7 +627,7 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
         const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
         return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} nested={nested} turnContainer={turnContainer} />;
     };
-    return <main className="conversation-pane">
+    return <main ref={pane} className="conversation-pane">
         <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">Conversation</span>
             <h1>{thread?.title ?? (snapshot.newThreadIntent ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
             <p>{thread ? `${thread.cwd} · ${classifyStatus(thread.status).text}` : snapshot.newThreadIntent ? `${snapshot.newThreadDraft?.workspace ?? ""} · Send a message to create this thread.` : "Choose a thread from the left."}</p></div>
@@ -533,7 +643,7 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
         </div>
         <div className="conversation-scroll" ref={scroll} onScroll={event => {
             const element = event.currentTarget; const following = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
-            viewport.updateScroll(projectionId, element.scrollTop, following);
+            viewport.updateScroll(projectionId, element.scrollTop, following, conversationAnchor(element));
         }}>
             {conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId); forceCardState(value => value + 1); }}>Load earlier activity</button>}
             {visibleSections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
@@ -547,7 +657,7 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
                 </section>;
             })}
         </div>
-        <div className="composer-dock">
+        <div ref={composerDock} className="composer-dock">
             <SettingsPanel key={`settings:${projectionId}`} session={session} draft={settingsDraft} onChange={(field, value) => {
                 changeSettingDraft(settingsDrafts, projectionId, canonicalSettings, settingsRevision, field, value);
                 forceSettingsState(revision => revision + 1);
@@ -587,7 +697,16 @@ function SettingsPanel({session, draft, onChange}: {session: BrowserFrontendSess
 
 function Composer({session, active, draftKey, drafts, options}: {session: BrowserFrontendSession; active: boolean; draftKey: string; drafts: Map<string, string>; options: SettingPromptOptions}) {
     const [prompt, setPrompt] = useState(drafts.get(draftKey) ?? "");
+    const editor = useRef<HTMLTextAreaElement>(null);
     const running = session.model.activeTurnId(session.getSnapshot().selectedThreadId) !== undefined;
+    useBrowserLayoutEffect(() => {
+        const element = editor.current;
+        if (!element) return;
+        element.style.height = "auto";
+        const maximum = 180;
+        element.style.height = `${Math.min(element.scrollHeight, maximum)}px`;
+        element.style.overflowY = element.scrollHeight > maximum ? "auto" : "hidden";
+    }, [prompt]);
     const submit = (event: FormEvent) => {
         event.preventDefault();
         if (!active || prompt.trim() === "") return;
@@ -595,14 +714,14 @@ function Composer({session, active, draftKey, drafts, options}: {session: Browse
         void session.submitPrompt(value, [], options.turn, options.thread);
     };
     return <form className="composer" onSubmit={submit}>
-        <textarea value={prompt} disabled={!active} onChange={event => { setPrompt(event.target.value); drafts.set(draftKey, event.target.value); }}
+        <textarea ref={editor} value={prompt} disabled={!active} onChange={event => { setPrompt(event.target.value); drafts.set(draftKey, event.target.value); }}
             aria-label="Message Codex" aria-describedby="composer-keyboard-hint" aria-keyshortcuts="Enter Control+Enter Meta+Enter"
             onKeyDown={event => { if (shouldSubmitPromptFromKey({
                 key: event.key, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey,
                 shiftKey: event.shiftKey, repeat: event.repeat,
                 isComposing: event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229,
             })) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}
-            placeholder={active ? "Message Codex…" : "Select or create a thread"} rows={3} />
+            placeholder={active ? "Message Codex…" : "Select or create a thread"} rows={1} />
         <div className="composer-actions"><span id="composer-keyboard-hint">Enter to send · Shift+Enter for a new line</span>
             {running ? <button type="button" className="stop-button" onClick={() => session.interrupt()}>■ Stop</button>
                 : <button type="submit" className="send-button" disabled={!active || prompt.trim() === ""}>Send ↑</button>}</div>
