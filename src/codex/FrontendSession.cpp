@@ -177,7 +177,8 @@ std::string FrontendSession::request(std::string operation,
       requestId, OutstandingRequest{action, threadId, std::move(handler)});
   const bool sent = sendMessage(presentation::command(
       std::move(operation), std::move(parameters), requestId));
-  if (sent && !threadId.empty() && activityHandler)
+  if (sent && !threadId.empty() &&
+      !presentation::isThreadHydrationAction(action) && activityHandler)
     activityHandler(threadId);
   if (!sent) {
     const auto iterator = outstanding.find(requestId);
@@ -456,7 +457,9 @@ void FrontendSession::receiveMessage(nlohmann::json message) {
       terminalFailure("presentation result action does not match its request");
       return;
     }
-    if (!iterator->second.threadId.empty() && activityHandler)
+    if (!iterator->second.threadId.empty() &&
+        !presentation::isThreadHydrationAction(iterator->second.action) &&
+        activityHandler)
       activityHandler(iterator->second.threadId);
     ResponseHandler handler = std::move(iterator->second.completion);
     outstanding.erase(iterator);

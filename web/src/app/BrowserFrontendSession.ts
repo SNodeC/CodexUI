@@ -20,6 +20,10 @@ import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
 const DraftThreadId = "__codexui_new_thread__";
 const MaximumProtocolFrames = 500;
 
+function isThreadHydrationAction(action: string): boolean {
+    return action === "thread.read" || action === "thread.resume";
+}
+
 function retainedProtocolFrame(frame: JsonObject): unknown {
     if (stringMember(frame, "type") !== "pending-request.upsert") return structuredClone(frame);
     const data = isObject(frame.data) ? frame.data : {};
@@ -139,7 +143,10 @@ export class BrowserFrontendSession {
             this.model.applyEvent(frame);
             const scope = isObject(frame.scope) ? frame.scope : {};
             const threadId = stringMember(scope, "threadId");
-            if (threadId !== "") this.model.noteThreadActivity(threadId, Math.floor(Date.now() / 1000));
+            const hydrationResult = stringMember(frame, "kind") === "result"
+                && isThreadHydrationAction(stringMember(frame, "action"));
+            if (threadId !== "" && !hydrationResult)
+                this.model.noteThreadActivity(threadId, Math.floor(Date.now() / 1000));
             this.protocolFrames.push(retainedProtocolFrame(frame));
             if (this.protocolFrames.length > MaximumProtocolFrames) this.protocolFrames.shift();
             this.reconcilePromptsForFrame(frame);
@@ -557,13 +564,14 @@ export class BrowserFrontendSession {
         const startedAtSequence = this.normalizer.sequence;
         const request = this.sdk.request.bind(this.sdk) as unknown as RawRequest;
         const threadId = stringMember(parameters, "threadId");
-        if (threadId !== "") {
+        const recordsActivity = threadId !== "" && !isThreadHydrationAction(action);
+        if (recordsActivity) {
             this.model.noteThreadActivity(threadId, Math.floor(Date.now() / 1000));
             this.schedulePublish();
         }
         request(method, parameters, response => {
             if (!acceptResult()) { callback?.({}, true); return; }
-            if (threadId !== "") {
+            if (recordsActivity) {
                 this.model.noteThreadActivity(threadId, Math.floor(Date.now() / 1000));
                 this.schedulePublish();
             }

@@ -46,10 +46,11 @@ bottom or is owned by the user.
 - The Conversation heading reports `Last activity` from one monotonic
   presentation timestamp. After hydration it starts at the greater of the
   app-server's `updatedAt` and optional `recencyAt`. During the live session,
-  thread-scoped protocol traffic in either direction advances it immediately;
-  global connection and catalog traffic does not. This local value never
-  replaces the authoritative timestamps used for thread sorting and is not
-  persisted by CodexUI.
+  meaningful thread-scoped protocol traffic in either direction advances it
+  immediately. Selection-driven `thread/read` and `thread/resume` hydration,
+  global connection traffic, and catalog traffic do not count as activity.
+  This local value never replaces the authoritative timestamps used for thread
+  sorting and is not persisted by CodexUI.
 - Once selected, a hydrated thread remains visible in the sidebar for the
   session even when it is outside the ordinary top-level thread ordering; an
   authoritative removal still removes it.

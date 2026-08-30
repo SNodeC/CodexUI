@@ -138,10 +138,12 @@ int main() {
                        boundary.count("permission-profiles.list") == 1,
                    "provider readiness hydrates through the generic boundary");
 
-  session.onPresentationFrame(codexui::codex::presentation::event(
-      sequence++, 1, "thread.upsert",
-      {{"thread", thread("thread-a", "Boundary thread")}}, Authority::Merge,
-      {{"threadId", "thread-a"}}));
+  nlohmann::json listedThread = thread("thread-a", "Boundary thread");
+  listedThread["updatedAt"] = 20;
+  listedThread["recencyAt"] = 30;
+  session.onPresentationFrame(codexui::codex::presentation::result(
+      sequence++, 1, "threads.list", "catalog", true,
+      {{"threads", nlohmann::json::array({listedThread})}}, Authority::Merge));
   session.selectThread("thread-a");
   Request *read = boundary.latest("thread.read");
   passed &= expect(read && read->data.value("threadId", std::string{}) ==
@@ -170,6 +172,8 @@ int main() {
                        selected.status.canSubmit &&
                        selected.threads.canControl,
                    "one neutral snapshot projects the selected UI state");
+  passed &= expect(selected.conversation.lastActivityAt == 30,
+                   "selection hydration preserves authoritative thread activity");
 
   UiPromptDraft prompt;
   prompt.text = "  inspect the boundary  ";

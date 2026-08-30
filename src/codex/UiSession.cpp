@@ -3,6 +3,7 @@
 #include "codex/UiSession.h"
 
 #include "codex/PresentationModel.h"
+#include "codex/PresentationProtocol.h"
 #include "codex/PresentationStatus.h"
 #include "codex/middle/ConversationProjection.h"
 #include "codex/middle/PromptCoordinator.h"
@@ -232,7 +233,9 @@ public:
     const nlohmann::json scope =
         event.value("scope", nlohmann::json::object());
     const std::string eventThreadId = stringValue(scope, "threadId");
-    if (!eventThreadId.empty())
+    const bool hydrationResult =
+        kind == "result" && presentation::isThreadHydrationAction(action);
+    if (!eventThreadId.empty() && !hydrationResult)
       model.noteThreadActivity(eventThreadId, nowSeconds());
     if (kind == "event" && type == "pending-request.removed") {
       const auto requestId = scope.find("requestId");

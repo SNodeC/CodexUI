@@ -99,8 +99,19 @@ bool verifyFrontendBoundaryOrdering(Configuration &configuration) {
                            "thread.read",
                    "a successful completion receives a complete presentation result");
   result &= expect(
+      activity.empty(),
+      "selection hydration requests and results do not report activity");
+
+  const std::string renameCorrelation = session.request(
+      "thread.rename", {{"threadId", "ordering"}, {"name", "Renamed"}});
+  FrontendSessionTestPeer::receive(
+      session, presentation::result(2, 1, "thread.rename", renameCorrelation,
+                                    true, nlohmann::json::object(),
+                                    Authority::Merge,
+                                    {{"threadId", "ordering"}}));
+  result &= expect(
       activity == std::vector<std::string>{"ordering", "ordering"},
-      "thread-scoped outbound requests and inbound results both report activity");
+      "meaningful thread requests and results both report activity");
 
   nlohmann::json failed;
   const std::string failedCorrelation = session.request(

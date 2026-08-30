@@ -303,7 +303,7 @@ test("thread ordering uses newest recency and retires prompt promotion on author
     session.dispose();
 });
 
-test("thread activity uses provider maximum and advances for outbound and inbound traffic", async () => {
+test("thread activity preserves provider time during hydration and advances for meaningful traffic", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "activity");
@@ -315,17 +315,25 @@ test("thread activity uses provider maximum and advances for outbound and inboun
     assert.equal(session.model.thread("tracked").lastActivityAt, 30);
     assert.equal(session.model.thread("updated-only").lastActivityAt, 25);
 
-    const beforeOutbound = Math.floor(Date.now() / 1000);
     session.selectThread("tracked");
-    assert.ok(session.model.thread("tracked").lastActivityAt >= beforeOutbound,
-        "thread-scoped requests advance local activity immediately");
+    assert.equal(session.model.thread("tracked").lastActivityAt, 30,
+        "selection-driven read does not replace authoritative activity");
 
     const read = requests(socket, "thread/read").at(-1);
+    respond(socket, read, {thread: {id: "tracked", updatedAt: 20, recencyAt: 30, turns: []}});
+    assert.equal(session.model.thread("tracked").lastActivityAt, 30,
+        "authoritative read response remains the activity source during hydration");
+
+    const beforeOutbound = Math.floor(Date.now() / 1000);
+    session.renameThread("tracked", "Renamed tracked thread");
+    assert.ok(session.model.thread("tracked").lastActivityAt >= beforeOutbound,
+        "meaningful thread requests advance local activity immediately");
+    const rename = requests(socket, "thread/name/set").at(-1);
     session.model.thread("tracked").lastActivityAt = 1;
     const beforeResponse = Math.floor(Date.now() / 1000);
-    respond(socket, read, {thread: {id: "tracked", updatedAt: 20, recencyAt: 30, turns: []}});
+    respond(socket, rename, {});
     assert.ok(session.model.thread("tracked").lastActivityAt >= beforeResponse,
-        "thread-scoped responses advance local activity");
+        "meaningful thread responses advance local activity");
 
     session.model.thread("tracked").lastActivityAt = 1;
     const beforeInbound = Math.floor(Date.now() / 1000);
