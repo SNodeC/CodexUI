@@ -106,7 +106,8 @@ class DevTools {
 }
 
 async function pageTarget(port) {
-    for (let attempt = 0; attempt < 200; ++attempt) {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
         try {
             const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
             const page = targets.find(target => target.type === "page");
