@@ -50,6 +50,18 @@ async function staticServer() {
     return {server, url: `http://127.0.0.1:${address.port}/`};
 }
 
+async function availableLoopbackPort() {
+    const probe = createServer();
+    await new Promise((complete, reject) => {
+        probe.once("error", reject);
+        probe.listen(0, "127.0.0.1", complete);
+    });
+    const address = probe.address();
+    assert(address && typeof address === "object");
+    await new Promise((complete, reject) => probe.close(error => error ? reject(error) : complete()));
+    return address.port;
+}
+
 class DevTools {
     #id = 0;
     #pending = new Map();
@@ -91,15 +103,6 @@ class DevTools {
     }
 
     close() { this.#socket.close(); }
-}
-
-async function devToolsPort(profile) {
-    const path = join(profile, "DevToolsActivePort");
-    for (let attempt = 0; attempt < 200; ++attempt) {
-        try { return Number((await readFile(path, "utf8")).split("\n", 1)[0]); }
-        catch { await wait(25); }
-    }
-    throw new Error("Chrome did not publish its DevTools port");
 }
 
 async function pageTarget(port) {
@@ -160,15 +163,16 @@ let chromeErrors = "";
 let devTools;
 
 try {
+    const port = await availableLoopbackPort();
     const constrainedRunnerArguments = process.env.CI
         ? ["--no-sandbox", "--disable-dev-shm-usage"]
         : [];
     chrome = spawn(executable, ["--headless=new", "--disable-gpu", "--no-first-run",
         ...constrainedRunnerArguments,
-        "--no-default-browser-check", "--remote-debugging-port=0", `--user-data-dir=${profile}`,
+        "--no-default-browser-check", "--remote-debugging-address=127.0.0.1",
+        `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
         "--window-size=760,900", "--noerrdialogs", url], {stdio: ["ignore", "ignore", "pipe"]});
     chrome.stderr.on("data", chunk => { chromeErrors = `${chromeErrors}${chunk}`.slice(-8000); });
-    const port = await devToolsPort(profile);
     devTools = await DevTools.connect(await pageTarget(port));
     await devTools.call("Runtime.enable");
     await waitUntil(devTools, `document.querySelector(".top-actions")`, "CodexUI application shell");
