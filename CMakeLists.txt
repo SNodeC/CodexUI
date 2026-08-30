@@ -120,10 +120,12 @@ endfunction()
 
 configure_codexui_target(codex-ui)
 
-set(CODEXUI_WEB_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/web/app-dist" CACHE PATH
-    "Directory containing the built CodexWebUI static artifact")
-install(DIRECTORY "${CODEXUI_WEB_DIST_DIR}/"
-        DESTINATION "${CMAKE_INSTALL_DATADIR}/codexui/web" OPTIONAL)
+option(CODEXUI_INSTALL_WEB "Require and install the CodexWebUI production artifact" ON)
+if(CODEXUI_INSTALL_WEB)
+    add_subdirectory(web)
+else()
+    message(STATUS "CodexWebUI packaging disabled by CODEXUI_INSTALL_WEB=OFF")
+endif()
 
 if(TARGET snodec::net-in-stream-tls AND TARGET snodec::net-in6-stream-tls)
     target_compile_definitions(codex-ui PRIVATE CODEXUI_CODEX_FRONTEND_TLS=1)

@@ -114,7 +114,8 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/aisuite;$GITHUB_WORKSPACE/_stage/snodec"
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/_stage/aisuite;$GITHUB_WORKSPACE/_stage/snodec" \
+            -DCODEXUI_INSTALL_WEB=OFF
 
       - name: Build CodexUI
         run: cmake --build build --target all
@@ -186,9 +187,19 @@ jobs:
           npm ci --prefix web
           npm run release --prefix web
 
+      - name: Stage and verify the CodexWebUI install
+        working-directory: CodexUI/codexui
+        run: |
+          cmake -S web -B _build/web-package \
+            -DCMAKE_INSTALL_PREFIX="$PWD/_stage/web"
+          cmake --build _build/web-package --target codexui-web-artifact
+          cmake --install _build/web-package --component CodexWebUI
+          test -s _stage/web/share/codexui/web/index.html
+          test -n "$(find _stage/web/share/codexui/web/assets -type f -print -quit)"
+
       - name: Upload CodexWebUI production artifact
         uses: actions/upload-artifact@v4
         with:
           name: codexui-web
-          path: CodexUI/codexui/web/app-dist
+          path: CodexUI/codexui/_stage/web/share/codexui/web
           if-no-files-found: error
