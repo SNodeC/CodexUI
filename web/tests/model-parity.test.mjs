@@ -243,3 +243,36 @@ test("provider generations are scoped to one frontend connection generation", ()
     assert.equal(model.connection().providerGeneration, 1);
     assert.equal(model.connection().providerState, "ready");
 });
+
+test("stream text retains bounded tails and explicit discarded-byte metadata", () => {
+    const model = new PresentationModel();
+    const oversized = "A".repeat(300 * 1024);
+    model.applyEvent(event(1, 1, "conversation.item.upsert", {item: {
+        id: "bounded-command", type: "commandExecution", aggregatedOutput: oversized,
+    }}, "merge", {threadId: "bounded-thread", turnId: "bounded-turn", itemId: "bounded-command"}));
+    let item = model.thread("bounded-thread").turns.get("bounded-turn").items.get("bounded-command");
+    assert.ok(new TextEncoder().encode(item.raw.aggregatedOutput).length <= 256 * 1024);
+    assert.ok(item.textRetention.get("aggregatedOutput").discardedBytes > 0);
+
+    model.applyEvent(event(2, 1, "conversation.item.append", {
+        field: "aggregatedOutput", text: "B".repeat(300 * 1024),
+    }, "merge", {threadId: "bounded-thread", turnId: "bounded-turn", itemId: "bounded-command"}));
+    item = model.thread("bounded-thread").turns.get("bounded-turn").items.get("bounded-command");
+    assert.ok(new TextEncoder().encode(item.raw.aggregatedOutput).length <= 256 * 1024);
+    assert.equal(item.raw.aggregatedOutput.startsWith("B"), true);
+    assert.ok(item.textRetention.get("aggregatedOutput").discardedBytes >= 300 * 1024);
+
+    model.applyEvent(event(3, 1, "conversation.item.upsert", {item: {
+        id: "bounded-reasoning", type: "reasoning", summary: ["C".repeat(160 * 1024), "D".repeat(160 * 1024)],
+    }}, "merge", {threadId: "bounded-thread", turnId: "bounded-turn", itemId: "bounded-reasoning"}));
+    const reasoning = model.thread("bounded-thread").turns.get("bounded-turn").items.get("bounded-reasoning");
+    assert.ok(reasoning.textRetention.get("summary").retainedBytes <= 256 * 1024);
+    assert.ok(reasoning.textRetention.get("summary").discardedBytes > 0);
+
+    model.applyEvent(event(4, 1, "conversation.item.upsert", {item: {
+        id: "large-prompt", type: "userMessage", text: oversized,
+    }}, "merge", {threadId: "bounded-thread", turnId: "bounded-turn", itemId: "large-prompt"}));
+    const prompt = model.thread("bounded-thread").turns.get("bounded-turn").items.get("large-prompt");
+    assert.equal(prompt.raw.text, oversized);
+    assert.equal(prompt.textRetention, undefined);
+});

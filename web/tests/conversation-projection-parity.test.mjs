@@ -258,3 +258,18 @@ test("C++ terminal text and canonical attachment links", () => {
         {path: "/tmp/image.png", name: "image.png", mimeType: "image/png", size: 10},
     ]), "Review this\n\nAttached files:\n- [review notes \\[final\\] (2).pdf](file:///tmp/review%20notes%20%5Bfinal%5D%20%282%29.pdf)");
 });
+
+test("bounded stream projection visibly discloses omitted output", () => {
+    const thread = cleanThread("bounded-projection");
+    addTurn(thread, "turn-one", "completed");
+    append(thread, "turn-one", "command", {
+        type: "commandExecution", command: "generate output", status: "completed", aggregatedOutput: "retained tail",
+    });
+    thread.turns.get("turn-one").items.get("command").textRetention = new Map([
+        ["aggregatedOutput", {retainedBytes: 13, discardedBytes: 4096}],
+    ]);
+    const projected = findCard(projectConversation(thread, [], 80, 100), {
+        kind: "item", threadId: thread.id, turnId: "turn-one", itemId: "command",
+    }).payload;
+    assert.match(projected.output, /^\[Earlier command output was truncated \(4096 bytes omitted\)\.\]\nretained tail$/u);
+});

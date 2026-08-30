@@ -9,11 +9,31 @@ import {classifyStatus, isActiveStatus, isTerminalTurnStatus} from "./Presentati
 
 const MaximumRetainedTelemetry = 256;
 const MaximumIndexedTextParts = 4096;
+const MaximumRetainedStreamBytes = 256 * 1024;
+const RetainedStreamTailBytes = 192 * 1024;
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+function utf8ByteLength(value: string): number {
+    if (value.length > 64) return textEncoder.encode(value).length;
+    let bytes = 0;
+    for (let index = 0; index < value.length; ++index) {
+        const code = value.charCodeAt(index);
+        if (code <= 0x7f) ++bytes;
+        else if (code <= 0x7ff) bytes += 2;
+        else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length
+            && value.charCodeAt(index + 1) >= 0xdc00 && value.charCodeAt(index + 1) <= 0xdfff) {
+            bytes += 4; ++index;
+        } else bytes += 3;
+    }
+    return bytes;
+}
 
 export interface ItemPresentation {
     id: string;
     raw: JsonObject;
     domains: Map<string, unknown>;
+    textRetention?: Map<string, {retainedBytes: number; discardedBytes: number}>;
 }
 
 export interface TurnPresentation {
@@ -189,21 +209,134 @@ function mergeExplicitMembers(target: unknown, update: unknown): unknown {
     return target;
 }
 
-function appendText(item: JsonObject, field: string, params: unknown): void {
-    const delta = stringMember(params, "delta");
-    if (delta === "") return;
-    item[field] = (typeof item[field] === "string" ? item[field] : "") + delta;
+function utf8Tail(value: string, retainedBytes: number): {text: string; retained: number; discarded: number} {
+    const encoded = textEncoder.encode(value);
+    if (encoded.length <= retainedBytes) return {text: value, retained: encoded.length, discarded: 0};
+    let start = encoded.length - retainedBytes;
+    while (start < encoded.length && (encoded[start]! & 0xc0) === 0x80) ++start;
+    return {text: textDecoder.decode(encoded.subarray(start)), retained: encoded.length - start, discarded: start};
 }
 
-function appendIndexedText(item: JsonObject, field: string, params: unknown, indexField: string): void {
+function retention(item: ItemPresentation, field: string): {retainedBytes: number; discardedBytes: number} {
+    item.textRetention ??= new Map();
+    let value = item.textRetention.get(field);
+    if (!value) { value = {retainedBytes: 0, discardedBytes: 0}; item.textRetention.set(field, value); }
+    return value;
+}
+
+function recordDiscardedText(item: ItemPresentation, field: string, bytes: number): void {
+    if (bytes > 0) retention(item, field).discardedBytes += bytes;
+}
+
+function setRetainedTextBytes(item: ItemPresentation, field: string, bytes: number): void {
+    retention(item, field).retainedBytes = bytes;
+}
+
+function boundScalarText(item: ItemPresentation, field: string, value: string): string {
+    if (!item.textRetention?.has(field) && value.length <= Math.floor(MaximumRetainedStreamBytes / 3))
+        return value;
+    const encodedBytes = textEncoder.encode(value).length;
+    if (encodedBytes <= MaximumRetainedStreamBytes) {
+        if (item.textRetention?.has(field)) setRetainedTextBytes(item, field, encodedBytes);
+        return value;
+    }
+    const tail = utf8Tail(value, RetainedStreamTailBytes);
+    recordDiscardedText(item, field, tail.discarded);
+    setRetainedTextBytes(item, field, tail.retained);
+    return tail.text;
+}
+
+function boundIndexedText(item: ItemPresentation, field: string, parts: unknown[]): void {
+    if (!item.textRetention?.has(field)) {
+        const codeUnits = parts.reduce<number>((sum, part) => sum + (typeof part === "string" ? part.length : 0), 0);
+        if (codeUnits <= Math.floor(MaximumRetainedStreamBytes / 3)) return;
+    }
+    const encoded = parts.map(part => typeof part === "string" ? textEncoder.encode(part).length : 0);
+    let retained = encoded.reduce((sum, bytes) => sum + bytes, 0);
+    if (retained > MaximumRetainedStreamBytes) {
+        let toDiscard = retained - RetainedStreamTailBytes;
+        for (let index = 0; index < parts.length && toDiscard > 0; ++index) {
+            if (typeof parts[index] !== "string") continue;
+            const value = parts[index] as string;
+            const bytes = encoded[index]!;
+            if (bytes <= toDiscard) {
+                parts[index] = ""; toDiscard -= bytes; retained -= bytes; recordDiscardedText(item, field, bytes);
+            } else {
+                const tail = utf8Tail(value, bytes - toDiscard);
+                parts[index] = tail.text; retained -= tail.discarded; toDiscard = 0;
+                recordDiscardedText(item, field, tail.discarded);
+            }
+        }
+    }
+    if (retained > MaximumRetainedStreamBytes || item.textRetention?.has(field))
+        setRetainedTextBytes(item, field, retained);
+}
+
+function resetIncomingTextBounds(item: ItemPresentation, incoming: JsonObject): void {
+    for (const field of ["text", "output", "aggregatedOutput", "summary", "content"])
+        if (Object.hasOwn(incoming, field)) {
+            item.textRetention?.delete(field);
+            if (item.textRetention?.size === 0) delete item.textRetention;
+        }
+}
+
+function boundRetainedItemText(item: ItemPresentation): void {
+    const boundScalar = (field: string): void => {
+        if (typeof item.raw[field] === "string") item.raw[field] = boundScalarText(item, field, item.raw[field]);
+    };
+    const boundIndexed = (field: string): void => {
+        if (Array.isArray(item.raw[field])) boundIndexedText(item, field, item.raw[field]);
+    };
+    const type = stringMember(item.raw, "type");
+    if (type === "commandExecution") {
+        boundScalar("aggregatedOutput"); boundScalar("output");
+    } else if (type === "agentMessage" || type === "plan") {
+        boundScalar("text");
+    } else if (type === "reasoning") {
+        boundIndexed("summary"); boundIndexed("content");
+    } else if (type === "fileChange") {
+        boundScalar("output");
+    } else if (type === "userMessage") {
+        return;
+    } else {
+        for (const field of ["text", "output", "aggregatedOutput"]) boundScalar(field);
+        for (const field of ["summary", "content"]) boundIndexed(field);
+    }
+}
+
+function appendText(item: ItemPresentation, field: string, params: unknown): void {
+    const delta = stringMember(params, "delta");
+    if (delta === "") return;
+    const existing = typeof item.raw[field] === "string" ? item.raw[field] : "";
+    const existingBytes = item.textRetention?.get(field)?.retainedBytes ?? textEncoder.encode(existing).length;
+    const deltaBytes = utf8ByteLength(delta);
+    if (deltaBytes > MaximumRetainedStreamBytes) {
+        const tail = utf8Tail(delta, RetainedStreamTailBytes);
+        item.raw[field] = tail.text;
+        setRetainedTextBytes(item, field, tail.retained);
+        recordDiscardedText(item, field, existingBytes + tail.discarded);
+        return;
+    }
+    const combined = existing + delta;
+    const combinedBytes = existingBytes + deltaBytes;
+    if (combinedBytes > MaximumRetainedStreamBytes) item.raw[field] = boundScalarText(item, field, combined);
+    else { item.raw[field] = combined; setRetainedTextBytes(item, field, combinedBytes); }
+}
+
+function appendIndexedText(item: ItemPresentation, field: string, params: unknown, indexField: string): void {
     const rawIndex = isObject(params) ? params[indexField] : undefined;
     const position = typeof rawIndex === "number" && Number.isInteger(rawIndex) && rawIndex >= 0 ? rawIndex : 0;
     if (position >= MaximumIndexedTextParts) return;
-    const parts: unknown[] = Array.isArray(item[field]) ? item[field] : [];
-    item[field] = parts;
+    const parts: unknown[] = Array.isArray(item.raw[field]) ? item.raw[field] : [];
+    item.raw[field] = parts;
     while (parts.length <= position) parts.push("");
+    const retainedBefore = item.textRetention?.get(field)?.retainedBytes
+        ?? parts.reduce<number>((sum, part) => sum + (typeof part === "string" ? textEncoder.encode(part).length : 0), 0);
     const delta = stringMember(params, "delta") || stringMember(params, "text");
     parts[position] = (typeof parts[position] === "string" ? parts[position] : "") + delta;
+    const retained = retainedBefore + utf8ByteLength(delta);
+    setRetainedTextBytes(item, field, retained);
+    if (retained > MaximumRetainedStreamBytes) boundIndexedText(item, field, parts);
 }
 
 function applyDomainAuthority(
@@ -497,7 +630,7 @@ export class PresentationModel {
         }
         if (type === "conversation.file-change.output-appended") {
             const item = this.findItem(scope);
-            if (item) appendText(item.raw, "output", {delta: stringMember(data, "delta")});
+            if (item) appendText(item, "output", {delta: stringMember(data, "delta")});
             return;
         }
         if (type === "conversation.file-change.patch-replaced") {
@@ -522,9 +655,9 @@ export class PresentationModel {
         const item = this.findItem(identity);
         if (!item) return;
         const field = stringMember(data, "field");
-        if (field === "summary") appendIndexedText(item.raw, "summary", data, "summaryIndex");
-        else if (field === "content") appendIndexedText(item.raw, "content", data, "contentIndex");
-        else if (field !== "") appendText(item.raw, field, identity);
+        if (field === "summary") appendIndexedText(item, "summary", data, "summaryIndex");
+        else if (field === "content") appendIndexedText(item, "content", data, "contentIndex");
+        else if (field !== "") appendText(item, field, identity);
         if (stringMember(item.raw, "type") === "agentMessage")
             this.updateOwningAgentResult(threadId, stringMember(item.raw, "text"));
     }
@@ -663,7 +796,11 @@ export class PresentationModel {
             result = {id, raw: clone(raw), domains: new Map()};
             turn.items.set(id, result);
             turn.itemOrder.push(id);
-        } else mergePreservingCompleteness(result.raw, raw);
+        } else {
+            resetIncomingTextBounds(result, raw);
+            mergePreservingCompleteness(result.raw, raw);
+        }
+        boundRetainedItemText(result);
         const type = stringMember(result.raw, "type");
         retainRepositoryHints(thread, result.raw);
         if (["subAgentActivity", "collabAgentToolCall"].includes(type))

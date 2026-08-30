@@ -116,6 +116,31 @@ bool testCanonicalGroupingAndProjection() {
   return result;
 }
 
+bool testStreamTruncationIsVisible() {
+  ThreadPresentation thread;
+  thread.id = "bounded-projection";
+  addTurn(thread, "turn-1", "completed");
+  ItemPresentation command =
+      item("command", {{"type", "commandExecution"},
+                       {"command", "generate output"},
+                       {"status", "completed"},
+                       {"aggregatedOutput", "retained tail"}});
+  command.textRetention.push_back(
+      {"aggregatedOutput", std::string("retained tail").size(), 4096});
+  appendItem(thread, "turn-1", std::move(command));
+  const ConversationSnapshot snapshot = ConversationProjection::project(
+      thread, {}, ConversationProjection::DefaultAuthoritativeItemLimit, 10);
+  const auto *projected = std::get_if<CommandExecutionData>(
+      &snapshot.sections.front().cards.front().payload);
+  return expect(
+      projected &&
+          projected->output.startsWith(
+              QStringLiteral("[Earlier command output was truncated ")) &&
+          projected->output.contains(QStringLiteral("4096 bytes omitted")) &&
+          projected->output.endsWith(QStringLiteral("retained tail")),
+      "bounded stream projection visibly discloses omitted output before its retained tail");
+}
+
 bool testTurnRootSurvivesHistoryPaging() {
   ThreadPresentation thread;
   thread.id = "thread-long-turn";
@@ -904,6 +929,7 @@ bool testFileLinksArePartOfTheCanonicalPrompt() {
 int main() {
   using namespace codexui::codex::middle;
   bool result = testCanonicalGroupingAndProjection();
+  result &= testStreamTruncationIsVisible();
   result &= testTurnRootSurvivesHistoryPaging();
   result &= testQueueIsolationAndRealAcknowledgement();
   result &= testDispatchChoiceAndPreHydrationTail();

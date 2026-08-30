@@ -51,6 +51,27 @@ std::optional<QString> optionalText(const nlohmann::json &object,
   return text(value->get<std::string>());
 }
 
+std::uint64_t omittedTextBytes(const ItemPresentation &item,
+                               const char *field) {
+  const auto value = std::find_if(
+      item.textRetention.begin(), item.textRetention.end(),
+      [field](const TextRetentionPresentation &entry) {
+        return entry.field == field;
+      });
+  return value == item.textRetention.end() ? 0 : value->discardedBytes;
+}
+
+QString withTruncationNotice(QString value, std::uint64_t omitted,
+                             const QString &subject, bool markdown) {
+  if (omitted == 0)
+    return value;
+  const QString notice =
+      QStringLiteral("Earlier %1 was truncated (%2 bytes omitted).")
+          .arg(subject, QString::number(omitted));
+  return markdown ? QStringLiteral("> %1\n\n%2").arg(notice, value)
+                  : QStringLiteral("[%1]\n%2").arg(notice, value);
+}
+
 std::pair<int, int> unifiedDiffCounts(QStringView diff) {
   int additions = 0;
   int deletions = 0;
@@ -185,12 +206,21 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
   } else if (type == "agentMessage") {
     result.kind = CardKind::AgentMessage;
     result.payload = AgentMessageData{
-        messageText(item), stringValue(item, "phase") == "final_answer"};
+        withTruncationNotice(messageText(item),
+                             omittedTextBytes(presentation, "text"),
+                             QStringLiteral("Codex response"), true),
+        stringValue(item, "phase") == "final_answer"};
   } else if (type == "commandExecution") {
     result.kind = CardKind::CommandExecution;
+    const char *outputField = "aggregatedOutput";
     QString output = text(stringValue(item, "aggregatedOutput"));
-    if (output.isEmpty())
+    if (output.isEmpty()) {
+      outputField = "output";
       output = text(stringValue(item, "output"));
+    }
+    output = withTruncationNotice(
+        output, omittedTextBytes(presentation, outputField),
+        QStringLiteral("command output"), false);
     if (!terminalOutputHasVisibleText(output))
       output.clear();
     std::optional<int> exitCode;
@@ -223,7 +253,10 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
   } else if (type == "reasoning") {
     result.kind = CardKind::Reasoning;
     result.payload = ReasoningData{
-        joinedStrings(item.value("summary", nlohmann::json::array()))};
+        withTruncationNotice(
+            joinedStrings(item.value("summary", nlohmann::json::array())),
+            omittedTextBytes(presentation, "summary"),
+            QStringLiteral("reasoning"), true)};
   } else if (type == "fileChange") {
     result.kind = CardKind::FileChanges;
     const nlohmann::json changes =
@@ -257,7 +290,9 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
     result.payload = ImageGenerationData{
         text(path), text(stringValue(item, "status")), text(revisedPrompt)};
   } else if (type == "plan") {
-    const QString plan = messageText(item);
+    const QString plan = withTruncationNotice(
+        messageText(item), omittedTextBytes(presentation, "text"),
+        QStringLiteral("plan text"), true);
     if (!plan.isEmpty()) {
       result.kind = CardKind::Plan;
       result.payload = PlanData{{}, {}, plan};

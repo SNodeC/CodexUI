@@ -330,6 +330,10 @@ Command execution card in place; they do not replace it. Output follows its
 bottom while already at the bottom. A manual upward scroll pauses following
 until the user returns to the bottom. Each output card retains its own
 follow/pause position across in-place output updates.
+When retained stream text exceeds its canonical byte budget, the card shows an
+explicit omitted-byte notice followed by the newest retained tail. The same
+notice is included when copying the card, so bounded history is never presented
+as the complete command output, response, reasoning, or plan text.
 
 ## Inspector and Info presentation
 

@@ -48,6 +48,14 @@ function unifiedDiffCounts(diff: string): [number, number] {
     }
     return [additions, deletions];
 }
+function omittedTextBytes(item: ItemPresentation, field: string): number {
+    return item.textRetention?.get(field)?.discardedBytes ?? 0;
+}
+function withTruncationNotice(value: string, omitted: number, subject: string, markdown: boolean): string {
+    if (omitted === 0) return value;
+    const notice = `Earlier ${subject} was truncated (${omitted} bytes omitted).`;
+    return markdown ? `> ${notice}\n\n${value}` : `[${notice}]\n${value}`;
+}
 function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPresentation, visualKey: CardKey): VisibleCardData {
     const item = presentation.raw;
     const type = stringMember(item, "type");
@@ -57,10 +65,12 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
         kind = "userMessage"; payload = {text: messageText(item), imagePaths: messageImagePaths(item)} satisfies UserMessageData;
     } else if (type === "agentMessage") {
         kind = "agentMessage";
-        payload = {text: messageText(item), finalAnswer: stringMember(item, "phase") === "final_answer"} satisfies AgentMessageData;
+        payload = {text: withTruncationNotice(messageText(item), omittedTextBytes(presentation, "text"), "Codex response", true),
+            finalAnswer: stringMember(item, "phase") === "final_answer"} satisfies AgentMessageData;
     } else if (type === "commandExecution") {
         kind = "commandExecution";
-        let output = stringMember(item, "aggregatedOutput") || stringMember(item, "output");
+        const outputField = stringMember(item, "aggregatedOutput") !== "" ? "aggregatedOutput" : "output";
+        let output = withTruncationNotice(stringMember(item, outputField), omittedTextBytes(presentation, outputField), "command output", false);
         if (!terminalOutputHasVisibleText(output)) output = "";
         const exitCode = integerValue(item, "exitCode");
         const durationMilliseconds = integerValue(item, "durationMs") ?? integerValue(item, "duration_ms");
@@ -79,7 +89,8 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
             agentPath: stringMember(item, "agentPath"), senderThreadId: stringMember(item, "senderThreadId"),
         } satisfies AgentActivityData;
     } else if (type === "reasoning") {
-        kind = "reasoning"; payload = {summary: stringList(member(item, "summary", [])).join(", ")} satisfies ReasoningData;
+        kind = "reasoning"; payload = {summary: withTruncationNotice(
+            stringList(member(item, "summary", [])).join(", "), omittedTextBytes(presentation, "summary"), "reasoning", true)} satisfies ReasoningData;
     } else if (type === "fileChange") {
         kind = "fileChanges";
         const rawChanges = member(item, "changes", []);
@@ -98,7 +109,8 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
             revisedPrompt: stringMember(item, "revisedPrompt") || stringMember(item, "revised_prompt"),
         } satisfies ImageGenerationData;
     } else if (type === "plan" && messageText(item) !== "") {
-        kind = "plan"; payload = {explanation: "", steps: [], legacyText: messageText(item)};
+        kind = "plan"; payload = {explanation: "", steps: [], legacyText: withTruncationNotice(
+            messageText(item), omittedTextBytes(presentation, "text"), "plan text", true)};
     }
     return {key: visualKey, kind, threadId: identity.threadId, turnId: identity.turnId, itemId: identity.itemId, payload};
 }

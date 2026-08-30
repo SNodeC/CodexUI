@@ -669,6 +669,14 @@ following is paused, the effective history window expands with appends so its
 stable visual anchor cannot be evicted; the requested bound is restored when
 following resumes.
 
+Streamed scalar text and indexed reasoning/content parts share a 256 KiB
+retained budget per item field in both reducers. Crossing that threshold drops
+the oldest complete UTF-8 prefix and retains a 192 KiB tail, leaving amortized
+space for further deltas. Full item hydration and completion payloads pass
+through the same bound. The item retains the discarded-byte count separately,
+and projection visibly places that count before the retained tail; truncation
+is therefore bounded, explicit, and never mistaken for complete output.
+
 The bottom composer overlay has a canonical in-layout reservation. As multiline
 input, attachments, settings, or attention controls grow beyond that height,
 the conversation viewport keeps its geometry and the composer overlays its
