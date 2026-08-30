@@ -451,6 +451,7 @@ public:
                  QStringList nextPaths, QString nextRepository,
                  bool nextIncludeHiddenRepositories,
                  GitDiffScope nextScope, QString preferredPath) {
+    provider->cancel();
     workspace = std::move(nextWorkspace);
     commandDirectories = std::move(nextDirectories);
     changedPaths = std::move(nextPaths);
@@ -716,6 +717,8 @@ void DiffViewer::setRepositoryContext(QString nextThreadId,
       commandDirectories == nextCommandDirectories &&
       changedPaths == nextChangedPaths)
     return;
+  refreshTimer->stop();
+  provider->cancel();
   const bool changedThread = threadId != nextThreadId;
   threadId = std::move(nextThreadId);
   workspace = std::move(nextWorkspace);

@@ -177,6 +177,58 @@ bool testSnapshotMetadataRefresh() {
                 "diff presentation updates when only line totals change");
 }
 
+bool testContextSwitchCancelsOldSnapshot() {
+  QTemporaryDir firstDirectory;
+  QTemporaryDir secondDirectory;
+  if (!expect(firstDirectory.isValid() && secondDirectory.isValid(),
+              "creates repositories for context cancellation"))
+    return false;
+  git_repository *firstRepository = nullptr;
+  git_repository *secondRepository = nullptr;
+  const bool initialized =
+      git_repository_init(&firstRepository,
+                          firstDirectory.path().toUtf8().constData(), 0) == 0 &&
+      git_repository_init(&secondRepository,
+                          secondDirectory.path().toUtf8().constData(), 0) == 0 &&
+      createInitialCommit(firstRepository, firstDirectory.path()) &&
+      createInitialCommit(secondRepository, secondDirectory.path());
+  if (!expect(initialized, "initializes context cancellation repositories")) {
+    git_repository_free(firstRepository);
+    git_repository_free(secondRepository);
+    return false;
+  }
+
+  DiffViewer viewer;
+  viewer.resize(700, 500);
+  viewer.show();
+  auto *provider = viewer.findChild<GitDiffProvider *>();
+  QStringList deliveredWorkspaces;
+  QObject::connect(provider, &GitDiffProvider::snapshotReady, &viewer,
+                   [&deliveredWorkspaces](const GitDiffSnapshot &snapshot) {
+                     deliveredWorkspaces.push_back(snapshot.workspace);
+                   });
+  provider->request(firstDirectory.path(), {firstDirectory.path()}, {}, {},
+                    false, codexui::codex::GitDiffScope::Unstaged,
+                    codexui::codex::GitDiffContext::Compact);
+  viewer.setRepositoryContext(QStringLiteral("second-context"),
+                              secondDirectory.path(),
+                              {secondDirectory.path()}, {});
+  const bool secondApplied = waitFor(
+      [&] {
+        return viewer.currentSnapshot().workspace == secondDirectory.path() &&
+               viewer.currentSnapshot().repository;
+      },
+      1500);
+  for (QTimer *timer : viewer.findChildren<QTimer *>())
+    timer->stop();
+  const bool oldSuppressed =
+      !deliveredWorkspaces.contains(firstDirectory.path());
+  git_repository_free(firstRepository);
+  git_repository_free(secondRepository);
+  return expect(secondApplied && oldSuppressed,
+                "a context switch synchronously suppresses the old Git result");
+}
+
 bool testLiveWorkingTreeChanges() {
   QTemporaryDir directory;
   if (!expect(directory.isValid(), "creates a temporary repository"))
@@ -349,6 +401,7 @@ int main(int argc, char **argv) {
   git_libgit2_init();
   bool result = testEmptySnapshotLoadingState();
   result &= testSnapshotMetadataRefresh();
+  result &= testContextSwitchCancelsOldSnapshot();
   result &= testLiveWorkingTreeChanges();
   git_libgit2_shutdown();
   return result ? 0 : 1;

@@ -575,8 +575,11 @@ addition/deletion counts, Copy, Open review, and file-double-click review. The
 modeless Change Review window remains usable beside the conversation and offers
 Unified or Side by side layout plus Compact or Expanded context. Preferences
 persist across threads. Repository collection runs outside the UI thread,
-superseded results are discarded, and rendered diff content is bounded to 16
-MiB with an explicit truncation state. Every returned file carries its resolved
+superseded results are discarded, and a thread/workspace context change
+synchronously cancels the prior generation before adopting the new identity.
+An old result therefore cannot be rendered or persisted under the newly
+selected thread. Rendered diff content is bounded to 16 MiB with an explicit
+truncation state. Every returned file carries its resolved
 absolute pathname. CodexUI watches existing changed files and their parent
 directories, then debounces filesystem events into a fresh libgit2 snapshot.
 Parent-directory watches keep deletion, recreation, rename, and atomic file
@@ -1240,7 +1243,8 @@ retention, bounded child-thread reads, and one-shot thread-not-found recovery.
 repository. It performs filesystem writes rather than UI interaction. The test
 verifies polling discovery of a manually created nested untracked file and
 native watcher refresh after removal, content reversion, deletion restoration,
-and atomic replacement. `codexui-application-layout-test` complements it with
+atomic replacement, and suppression of an in-flight result across a context
+switch. `codexui-application-layout-test` complements it with
 in-process repository-resolution coverage for all scopes, duplicate candidates,
 ambiguous and absolute paths, All and individual repository selection, hidden
 repository exclusion/inclusion, stale hints/selections, and preference for an
