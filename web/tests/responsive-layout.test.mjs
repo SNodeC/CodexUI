@@ -83,6 +83,7 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /@media \(max-width:\s*1160px\)[\s\S]*grid-template-columns:\s*220px minmax\(0, 1fr\)/u);
     assert.match(css, /@media \(max-width:\s*760px\)[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/u);
     assert.match(css, /@media \(max-width:\s*760px\)[\s\S]*\.top-bar\s*\{[^}]*flex-wrap:\s*wrap/u);
+    assert.match(css, /\.conversation-heading \.conversation-activity\s*\{[^}]*color:\s*#1d2633/u);
     assert.match(css, /\.responsive-drawer\s*\{[^}]*position:\s*fixed/u);
     assert.match(css, /\.drawer-backdrop\s*\{[^}]*position:\s*fixed/u);
     assert.match(css, /button:focus-visible[\s\S]*outline:\s*2px solid #6f98e8/u);

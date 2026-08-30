@@ -119,6 +119,7 @@ QString applicationStyleSheet() {
         QLabel[kind="body"] { font-size: %2pt; }
         QLabel[kind="code"] { font-family: monospace; font-size: %2pt; font-weight: 400; }
         QLabel[kind="meta"] { color: #667085; font-size: %1pt; }
+        QLabel[kind="meta"][tone="strong"] { color: #1d2633; }
         QLabel[kind="small"] { color: #667085; font-size: %1pt; }
         QLabel[kind="settingLabel"] { color: #667085; font-weight: 600; }
         QLabel[tone="active"] { color: #285fca; }

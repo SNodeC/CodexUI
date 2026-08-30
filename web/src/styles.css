@@ -68,7 +68,7 @@ h1, h2, h3, p { margin: 0; }
 .conversation-lockup { display: flex; min-width: 0; align-items: baseline; gap: 10px; }
 .conversation-heading h1 { flex: 0 1 auto; min-width: 0; margin: 2px 0 3px; font-size: 20px; letter-spacing: -.02em; }
 .conversation-heading p { flex: 1 1 auto; min-width: 0; margin: 0; color: #667085; font-size: 11px; overflow-wrap: anywhere; }
-.conversation-heading .conversation-activity { flex: 0 0 auto; margin-left: auto; white-space: nowrap; text-align: right; }
+.conversation-heading .conversation-activity { flex: 0 0 auto; margin-left: auto; color: #1d2633; white-space: nowrap; text-align: right; }
 .conversation-heading-actions { display: contents; }
 .conversation-heading-actions.responsive { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 8px; }
 .responsive-pane-controls { display: flex; align-items: center; gap: 5px; }

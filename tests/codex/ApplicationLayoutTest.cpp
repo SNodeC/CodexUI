@@ -358,6 +358,8 @@ bool testOverlayGeometryAndRegionRouting() {
                          16 &&
                  conversationTrailingMetadata->text() ==
                      QStringLiteral("Last activity: 14:15:51") &&
+                 conversationTrailingMetadata->property("tone").toString() ==
+                     QStringLiteral("strong") &&
                  conversationTrailingMetadata->width() >=
                      conversationTrailingMetadata->fontMetrics()
                          .horizontalAdvance(

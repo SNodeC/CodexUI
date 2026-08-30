@@ -242,6 +242,7 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   conversationTrailingMetadata = makeLabel({}, "meta");
   conversationTrailingMetadata->setObjectName(
       QStringLiteral("conversationTrailingMetadata"));
+  conversationTrailingMetadata->setProperty("tone", "strong");
   conversationTrailingMetadata->setWordWrap(false);
   conversationTrailingMetadata->setSizePolicy(QSizePolicy::Minimum,
                                               QSizePolicy::Preferred);
