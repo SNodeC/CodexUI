@@ -626,9 +626,12 @@ provider-marked `notLoaded` thread is resumed first, and a transient
 thread-not-found submission result permits exactly one resume-and-retry before
 becoming a terminal error. Failed hydration rejects local admission without
 clearing the composer draft; an explicit reload is required before sending.
-Transport eligibility is rechecked at the queued dispatch boundary: a
-disconnect leaves the prompt queued until bridge-open re-drives dispatch, and
-an in-flight resume gates both hydration reads and turn operations.
+Transport eligibility is rechecked at the queued dispatch boundary. Internal
+session cancellations caused by provider or bridge generation loss are marked
+as transient: an in-flight prompt returns to its queue, fresh hydration runs,
+and bridge-open then re-drives dispatch. Ordinary app-server error results are
+not marked and remain terminal. An in-flight resume gates both hydration reads
+and turn operations.
 
 The conversation smoothly follows new content only while its vertical scrollbar
 is at the bottom. Geometry bursts retarget a short monotonic animation to the
@@ -1218,7 +1221,8 @@ transient card rasters only to prove that motion exists.
 `FrontendSession` across their real socketpair presentation boundary. It
 verifies exact visible-thread routing, independent prompt queues, real result
 acknowledgment, background completion, retained Plan/Agents state, monotonic
-hydration across reconnect, terminal callbacks, failed-hydration draft
+hydration across reconnect, queued and in-flight prompt retention across a
+provider restart, terminal current-provider callbacks, failed-hydration draft
 retention, bounded child-thread reads, and one-shot thread-not-found recovery.
 
 #### Git Changes Integration

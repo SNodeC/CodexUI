@@ -158,6 +158,12 @@ bool isThreadNotFoundResult(const nlohmann::json &result) {
          message.contains(QStringLiteral("not found"));
 }
 
+bool isTransientCancellation(const nlohmann::json &result) {
+  return !result.value("ok", false) &&
+         result.value("error", nlohmann::json::object())
+             .value("transient", false);
+}
+
 std::optional<std::string> resultTurnId(const nlohmann::json &result) {
   const nlohmann::json scope = result.value("scope", nlohmann::json::object());
   std::string id = stringValue(scope, "turnId");
@@ -257,6 +263,7 @@ struct ShellWidget::Impl final {
       settingsHydration = SettingsHydration::Unknown;
       readRevision = 0;
       operationReady = false;
+      resumeInFlight = false;
       dispatchScheduled = false;
     }
   };
@@ -1116,6 +1123,12 @@ void ShellWidget::Impl::readThread(const std::string &threadId, bool forced) {
                          [this, threadId] { dispatchNextPrompt(threadId); });
       return;
     }
+    if (isTransientCancellation(result)) {
+      runtime.hydration = Hydration::NotHydrated;
+      if (runtime.settingsHydration == SettingsHydration::WaitingForRead)
+        runtime.settingsHydration = SettingsHydration::Unknown;
+      return;
+    }
     // A non-forced hydration is attempted once per connection generation.
     // Explicit Reload bypasses this terminal state, while a new generation
     // clears it together with the other hydration bookkeeping.
@@ -1166,6 +1179,10 @@ void ShellWidget::Impl::resumeThreadForSettings(
           return;
         ThreadRuntimeState &runtime = found->second;
         if (!result.value("ok", false)) {
+          if (isTransientCancellation(result)) {
+            runtime.settingsHydration = SettingsHydration::Unknown;
+            return;
+          }
           runtime.settingsHydration = SettingsHydration::Failed;
           if (selectedThreadId == threadId) {
             const std::string message =
@@ -1364,6 +1381,10 @@ void ShellWidget::Impl::startThreadForDraft() {
       return;
     newThreadCreationInFlight = false;
     if (!result.value("ok", false)) {
+      if (isTransientCancellation(result)) {
+        render();
+        return;
+      }
       const std::string message =
           safeMessage(result.value("error", nlohmann::json::object()));
       const QString error = text(
@@ -1539,6 +1560,12 @@ void ShellWidget::Impl::resumePromptQueue(const std::string &threadId) {
         ThreadRuntimeState &runtime = found->second;
         runtime.resumeInFlight = false;
         if (!result.value("ok", false)) {
+          if (isTransientCancellation(result)) {
+            runtime.hydration = Hydration::NotHydrated;
+            runtime.settingsHydration = SettingsHydration::Unknown;
+            runtime.operationReady = false;
+            return;
+          }
           runtime.settingsHydration = SettingsHydration::Failed;
           const std::string message =
               safeMessage(result.value("error", nlohmann::json::object()));
@@ -1560,6 +1587,17 @@ void ShellWidget::Impl::resumePromptQueue(const std::string &threadId) {
 void ShellWidget::Impl::completePrompt(const std::string &threadId,
                                        std::uint64_t submissionId,
                                        const nlohmann::json &result) {
+  if (isTransientCancellation(result)) {
+    if (prompts.requeue(threadId, submissionId)) {
+      if (auto runtime = runtimeByThread.find(threadId);
+          runtime != runtimeByThread.end()) {
+        runtime->second.hydration = Hydration::NotHydrated;
+        runtime->second.operationReady = false;
+      }
+      render();
+    }
+    return;
+  }
   if (attemptThreadRecovery(threadId, submissionId, result))
     return;
   const auto runtime = runtimeByThread.find(threadId);
@@ -1617,6 +1655,12 @@ bool ShellWidget::Impl::attemptThreadRecovery(const std::string &threadId,
         ThreadRuntimeState &runtime = found->second;
         runtime.resumeInFlight = false;
         if (!resumeResult.value("ok", false)) {
+          if (isTransientCancellation(resumeResult)) {
+            runtime.hydration = Hydration::NotHydrated;
+            runtime.settingsHydration = SettingsHydration::Unknown;
+            runtime.operationReady = false;
+            return;
+          }
           runtime.settingsHydration = SettingsHydration::Failed;
           const std::string message = safeMessage(
               resumeResult.value("error", nlohmann::json::object()));

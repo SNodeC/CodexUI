@@ -152,10 +152,11 @@ the turn operation. If a submission still receives a transient thread-not-found
 result, CodexUI performs one bounded resume-and-retry; a repeated failure is
 shown on the pending card rather than retried indefinitely. If hydration has
 failed, submission is rejected without clearing the composer draft; Reload
-must succeed before that prompt can be admitted. A disconnect between admission
-and dispatch leaves the pending card in place and unsent until bridge-open
-re-drives it. An active resume prevents a concurrent hydration read or turn
-operation for the same thread.
+must succeed before that prompt can be admitted. A disconnect after admission
+leaves the pending card in place; a dispatched prompt is returned to its queue,
+and bridge-open re-drives queued work only after fresh thread hydration. Real
+app-server operation failures remain terminal. An active resume prevents a
+concurrent hydration read or turn operation for the same thread.
 
 For an explicit new-thread draft, prompts entered while `thread.create` is in
 flight remain attached to that draft. When creation succeeds, all pending

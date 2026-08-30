@@ -507,6 +507,10 @@ bool ShellFlow::verifyReconnectHydration() {
   result &= expect(readC1.has_value(), "C issues its first hydration read");
   if (!readC1)
     return false;
+  result &= expect(submit(editor, QStringLiteral("prompt C queued across restart")),
+                   "a prompt can queue behind C's in-flight hydration");
+  result &= expect(!peer.waitFor("turn.start", "thread-c", 100).has_value(),
+                   "the queued prompt waits for authoritative hydration");
 
   result &= peer.send(presentation::event(
       sequence++, 1, "connection.provider",
@@ -560,6 +564,23 @@ bool ShellFlow::verifyReconnectHydration() {
                    "the new connection owns a fresh hydration read");
   if (!readC2)
     return false;
+  const auto readB2 = peer.waitFor("thread.read", "thread-b");
+  result &= expect(readB2.has_value(),
+                   "the restart also rehydrates B's interrupted prompt queue");
+  if (!readB2)
+    return false;
+  result &= peer.send(presentation::result(
+      sequence++, 2, "thread.read",
+      readB2->value("correlationId", std::string{}), true,
+      {{"thread", thread("thread-b", "B")}}, Authority::Replace,
+      {{"threadId", "thread-b"}}));
+  const auto resumedStartB = peer.waitFor("turn.start", "thread-b");
+  result &= expect(resumedStartB.has_value(),
+                   "B's interrupted in-flight prompt is reissued after hydration");
+  if (!resumedStartB)
+    return false;
+  startBCorrelation =
+      resumedStartB->value("correlationId", std::string{});
   result &= peer.send(presentation::result(
       sequence++, 2, "thread.read",
       readC2->value("correlationId", std::string{}), true,
@@ -571,7 +592,23 @@ bool ShellFlow::verifyReconnectHydration() {
                            {{"thread", thread("thread-c", "stale C")}},
                            Authority::Replace, {{"threadId", "thread-c"}}));
   result &= completeSettingsRefresh("thread-c");
+  const auto resumedStartC = peer.waitFor("turn.start", "thread-c");
+  result &= expect(
+      resumedStartC.has_value(),
+      "a transient provider restart preserves and dispatches C's queued prompt");
+  if (!resumedStartC)
+    return false;
+  result &= peer.send(presentation::result(
+      sequence++, 2, "turn.start",
+      resumedStartC->value("correlationId", std::string{}), true,
+      {{"turn", {{"id", "turn-c-reconnected"}, {"status", "completed"}}}},
+      Authority::Replace,
+      {{"threadId", "thread-c"}, {"turnId", "turn-c-reconnected"}}));
   spin(10);
+  const middle::LocalPromptData *preserved =
+      localPrompt(shell, QStringLiteral("prompt C queued across restart"));
+  result &= expect(preserved && preserved->state == middle::PromptState::Accepted,
+                   "the reconnected turn result acknowledges the preserved prompt");
   result &= expect(hasAgentMessage(shell, QStringLiteral("current C marker")),
                    "a late successful stale read cannot replace newer cards");
   peer.discard();
@@ -596,7 +633,7 @@ bool ShellFlow::verifyTerminalCallback() {
   const middle::LocalPromptData *cancelled =
       localPrompt(shell, QStringLiteral("prompt B1"));
   result &= expect(cancelled && cancelled->state == middle::PromptState::Failed,
-                   "an exact terminal callback after reconnect is never lost");
+                   "a real failure of the reissued request remains terminal");
   return result;
 }
 
