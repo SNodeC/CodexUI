@@ -78,7 +78,10 @@ bottom or is owned by the user.
 - A new thread is created only from an explicit New Thread intent. Its dialog
   captures the workspace, optional name, instructions, and ephemeral state.
 - Background thread activity, list refreshes, reconnects, and creation by
-  another frontend never change the user's selected thread.
+  another frontend never change the user's selected thread. Completion of a
+  locally started creation likewise selects the returned thread only while
+  its optimistic draft remains visibly selected; later navigation is
+  preserved while the draft's queued prompts continue independently.
 - Selecting a thread hydrates it once per bridge connection even when the
   discovery result already contains an active turn. The full read is merged
   into the retained per-thread presentation, so live Plan and Agents state

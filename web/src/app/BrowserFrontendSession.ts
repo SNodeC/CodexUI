@@ -36,6 +36,7 @@ export interface BrowserSessionSnapshot {
     readonly revision: number;
     readonly selectedThreadId: string;
     readonly newThreadIntent: boolean;
+    readonly newThreadDraftRevision: number;
     readonly optimisticThreads: readonly OptimisticThreadSnapshot[];
     readonly conversation: ConversationSnapshot;
     readonly protocolFrames: readonly unknown[];
@@ -84,6 +85,7 @@ export class BrowserFrontendSession {
     private transport: WebSocketTransport | undefined;
     private selectedThreadId = "";
     private newThreadIntent = false;
+    private newThreadDraftRevision = 0;
     private optimisticThreads: OptimisticThreadSnapshot[] = [];
     private readonly threadVisualKeys = new Map<string, string>();
     private promptPromotion: PromptPromotion | undefined;
@@ -228,7 +230,9 @@ export class BrowserFrontendSession {
     }
     beginNewThread(): void {
         if (this.newThreadCreationInFlight) { this.setNotice("The current new thread is still being created.", false); return; }
+        this.prompts.clearThread(DraftThreadId);
         this.selectedThreadId = ""; this.newThreadIntent = true;
+        ++this.newThreadDraftRevision;
         this.optimisticThreads = [{
             id: DraftThreadId, visualKey: `optimistic-thread-${this.nextOptimisticThread++}`,
             title: "New thread", cwd: "", state: "awaiting",
@@ -289,7 +293,9 @@ export class BrowserFrontendSession {
                     title: stringMember(createdThread, "name") || thread.title,
                     cwd: stringMember(createdThread, "cwd") || thread.cwd,
                 } : thread);
-            this.selectedThreadId = id; this.newThreadIntent = false; destination = id;
+            const draftStillSelected = this.selectedThreadId === "" && this.newThreadIntent;
+            if (draftStillSelected) { this.selectedThreadId = id; this.newThreadIntent = false; }
+            destination = id;
             const runtime = this.threadRuntime(id);
             runtime.hydration = "hydrated"; runtime.operationReady = true;
             this.publish();
@@ -624,6 +630,7 @@ export class BrowserFrontendSession {
         if (thread) this.prompts.reconcile(this.selectedThreadId, index, Date.now());
         return {
             revision: this.revision, selectedThreadId: this.selectedThreadId, newThreadIntent: this.newThreadIntent,
+            newThreadDraftRevision: this.newThreadDraftRevision,
             optimisticThreads: this.optimisticThreads,
             conversation: projectConversation(index, this.prompts.submissions(projectionId), DefaultAuthoritativeItemLimit, Date.now(), thread),
             protocolFrames: this.protocolFrames, notice: this.notice, bridgeUrl: this.bridgeUrl,

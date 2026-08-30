@@ -152,6 +152,32 @@ test("new threads retain one optimistic row through first-turn acknowledgment", 
     session.dispose();
 });
 
+test("new-thread completion preserves later navigation and explicit drafts start clean", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open();
+    await readyProvider(socket, "new-thread-navigation");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "other-thread"}]});
+
+    session.beginNewThread();
+    const firstDraftRevision = session.getSnapshot().newThreadDraftRevision;
+    const submitted = session.submitPrompt("background creation");
+    const create = requests(socket, "thread/start").at(-1);
+    session.selectThread("other-thread");
+    respond(socket, create, {thread: {id: "background-thread", status: {type: "idle"}}});
+    assert.equal(await submitted, true);
+    await Promise.resolve();
+    assert.equal(session.getSnapshot().selectedThreadId, "other-thread",
+        "creation by a background draft cannot replace the user's later selection");
+    assert.equal(requests(socket, "turn/start").at(-1).payload.params.threadId, "background-thread");
+
+    session.beginNewThread();
+    assert.equal(session.prompts.submissions("__codexui_new_thread__").length, 0);
+    assert.equal(session.getSnapshot().newThreadDraftRevision, firstDraftRevision + 1,
+        "explicit New thread establishes a clean shared composer generation");
+    session.dispose();
+});
+
 test("prompt admission immediately promotes the effective recent thread", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);

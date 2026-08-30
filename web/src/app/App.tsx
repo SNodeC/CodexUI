@@ -341,6 +341,11 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
     const [, forceCardState] = useState(0);
     const [presentation, setPresentation] = useState(storedConversationPresentation);
     const drafts = useRef(new Map<string, string>());
+    const draftRevision = useRef(snapshot.newThreadDraftRevision);
+    if (draftRevision.current !== snapshot.newThreadDraftRevision) {
+        drafts.current.clear();
+        draftRevision.current = snapshot.newThreadDraftRevision;
+    }
     const settingsDrafts = useRef(new Map<string, SettingDraft>()).current;
     const [, forceSettingsState] = useState(0);
     const canonicalSettings = canonicalThreadSettings(thread?.raw ?? {}, thread?.domains.get("thread.settings.changed"));
@@ -418,7 +423,7 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
                 changeSettingDraft(settingsDrafts, projectionId, canonicalSettings, settingsRevision, field, value);
                 forceSettingsState(revision => revision + 1);
             }} />
-            <Composer key={projectionId} session={session} active={Boolean(thread || snapshot.newThreadIntent) && session.canSubmit()} draftKey={projectionId} drafts={drafts.current} options={settingsOptions} />
+            <Composer key={`shared-composer:${snapshot.newThreadDraftRevision}`} session={session} active={Boolean(thread || snapshot.newThreadIntent) && session.canSubmit()} draftKey="shared" drafts={drafts.current} options={settingsOptions} />
         </div>
     </main>;
 }
