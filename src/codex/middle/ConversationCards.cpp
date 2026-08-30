@@ -14,6 +14,7 @@
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QImageReader>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLinearGradient>
 #include <QMimeData>
@@ -148,6 +149,7 @@ public:
     setProperty("kind", "imageThumbnail");
     setCursor(Qt::PointingHandCursor);
     setToolTip(QDir::toNativeSeparators(path_));
+    setAccessibleDescription(QDir::toNativeSeparators(path_));
     setAlignment(Qt::AlignCenter);
     setMinimumSize(72, 48);
     setMaximumSize(ThumbnailMaximumWidth, ThumbnailMaximumHeight);
@@ -161,12 +163,18 @@ public:
                                          Qt::KeepAspectRatio));
     const QImage image = reader.read();
     if (image.isNull()) {
+      setAccessibleName(QStringLiteral("Image unavailable: %1")
+                            .arg(QFileInfo(path_).fileName()));
       setText(QStringLiteral("Image unavailable\n%1")
                   .arg(QFileInfo(path_).fileName()));
       setProperty("imageAvailable", false);
+      setFocusPolicy(Qt::NoFocus);
       unsetCursor();
       return;
     }
+    setAccessibleName(
+        QStringLiteral("Open image: %1").arg(QFileInfo(path_).fileName()));
+    setFocusPolicy(Qt::StrongFocus);
     setProperty("imageAvailable", true);
     setPixmap(QPixmap::fromImage(image));
     setFixedSize(image.size() + QSize(8, 8));
@@ -179,16 +187,31 @@ public:
 
 protected:
   void mousePressEvent(QMouseEvent *event) override {
-    if (event->button() == Qt::LeftButton &&
-        property("imageAvailable").toBool()) {
-      openImageViewer(path_);
+    if (event->button() == Qt::LeftButton && activate()) {
       event->accept();
       return;
     }
     QLabel::mousePressEvent(event);
   }
 
+  void keyPressEvent(QKeyEvent *event) override {
+    if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
+         event->key() == Qt::Key_Space) &&
+        activate()) {
+      event->accept();
+      return;
+    }
+    QLabel::keyPressEvent(event);
+  }
+
 private:
+  bool activate() {
+    if (!property("imageAvailable").toBool())
+      return false;
+    openImageViewer(path_);
+    return true;
+  }
+
   QString path_;
 };
 
@@ -360,7 +383,8 @@ QLabel *makeMarkdownLabel(const QString &value, QWidget *parent = nullptr) {
   label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   label->setOpenExternalLinks(true);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse |
-                                 Qt::LinksAccessibleByMouse);
+                                 Qt::LinksAccessibleByMouse |
+                                 Qt::LinksAccessibleByKeyboard);
   label->setProperty("markdownSource", value);
   label->setText(markdownHtml(value));
   return label;

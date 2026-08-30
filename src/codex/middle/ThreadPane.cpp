@@ -808,6 +808,15 @@ void ThreadPane::refresh(const PresentationModel &model,
       list->setItemWidget(found->second, createRow());
     }
     QListWidgetItem *item = found->second;
+    const QString title = text(row.title);
+    const QString status = text(classifyStatus(row.status).text);
+    QStringList accessibleParts{title, status,
+                                QStringLiteral("level %1").arg(row.depth + 1)};
+    if (row.hasChildren)
+      accessibleParts.push_back(row.expanded ? QStringLiteral("expanded")
+                                             : QStringLiteral("collapsed"));
+    item->setData(Qt::DisplayRole, title);
+    item->setData(Qt::AccessibleTextRole, accessibleParts.join(", "));
     item->setToolTip(text(row.cwd));
     item->setData(DepthRole, static_cast<qulonglong>(row.depth));
     item->setData(HasChildrenRole, row.hasChildren);

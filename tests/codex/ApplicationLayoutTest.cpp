@@ -663,6 +663,12 @@ bool testThreadSelectionProjection() {
       parentRow ? parentRow->findChild<QFrame *>(
                       QStringLiteral("threadStatusDot"))
                 : nullptr;
+  const QString selectedAccessible =
+      selected ? selected->data(Qt::AccessibleTextRole).toString() : QString{};
+  const QString parentAccessible = parentItem
+                                       ? parentItem->data(Qt::AccessibleTextRole)
+                                             .toString()
+                                       : QString{};
   result &= expect(
       selected && selected->sizeHint().height() == 54 && rowLayout &&
           rowLayout->contentsMargins() == QMargins(0, 2, 0, 2) &&
@@ -678,6 +684,11 @@ bool testThreadSelectionProjection() {
           dynamic_cast<UiStyle::ChevronToolButton *>(sortButton) &&
           sortButton->property("codexChevron").toBool() &&
           title->property("kind").toString() == QStringLiteral("title") &&
+          selected->data(Qt::DisplayRole).toString() == QStringLiteral("B") &&
+          selectedAccessible.contains(QStringLiteral("B, Running")) &&
+          selectedAccessible.contains(QStringLiteral("level 2")) &&
+          parentAccessible.contains(QStringLiteral("A")) &&
+          parentAccessible.contains(QStringLiteral("expanded")) &&
           status->property("kind").toString() == QStringLiteral("meta") &&
           status->property("tone").toString() == QStringLiteral("active") &&
           title->textInteractionFlags().testFlag(Qt::TextSelectableByMouse) &&
@@ -1888,7 +1899,7 @@ bool testTerminalPlanStatusReconciliation() {
       {{"threadId", "plan-thread"}, {"turnId", "plan-turn"}}));
   model.applyEvent(presentation::event(
       3, 1, "plan.replaced",
-      {{"explanation", "Lifecycle plan"},
+      {{"explanation", "Lifecycle [plan](https://example.com)"},
        {"steps", nlohmann::json::array(
                      {{{"step", "Active step"}, {"status", "inProgress"}},
                       {{"step", "Pending step"}, {"status", "pending"}}})}},
@@ -1906,6 +1917,15 @@ bool testTerminalPlanStatusReconciliation() {
   bool result = expect(hasExactLabel(QStringLiteral("Running")) &&
                            hasExactLabel(QStringLiteral("pending")),
                        "active plans preserve Running and Pending statuses");
+  const auto markdownLabels = inspector.findChildren<QLabel *>();
+  result &= expect(
+      std::ranges::any_of(markdownLabels, [](const QLabel *label) {
+        return label->textFormat() == Qt::RichText &&
+               label->text().contains(QStringLiteral("href=")) &&
+               label->textInteractionFlags().testFlag(
+                   Qt::LinksAccessibleByKeyboard);
+      }),
+      "Inspector Markdown links are keyboard accessible");
 
   const auto setThreadStatus = [&](std::uint64_t sequence,
                                    const char *status) {

@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QFont>
 #include <QImage>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLayout>
 #include <QMimeData>
@@ -1036,7 +1037,8 @@ bool testMutableCardsAndCommandOutput() {
       {AuthoritativeItemKey{thread, "turn", "user"}, CardKind::UserMessage,
        thread, "turn", "user",
        UserMessageData{QStringLiteral("hello **Markdown**\n\n| Value | Rating "
-                                      "|\n|---|---|\n| State | 10 |")}},
+                                      "|\n|---|---|\n| State | 10 |\n\n"
+                                      "[Docs](https://example.com)")}},
       {AuthoritativeItemKey{thread, "turn", "agent"}, CardKind::AgentMessage,
        thread, "turn", "agent",
        AgentMessageData{QStringLiteral("answer"), false}},
@@ -1134,9 +1136,12 @@ bool testMutableCardsAndCommandOutput() {
                    return label->property("markdownSource").toString() ==
                               QStringLiteral(
                                   "hello **Markdown**\n\n| Value | Rating |\n"
-                                  "|---|---|\n| State | 10 |") &&
+                                  "|---|---|\n| State | 10 |\n\n"
+                                  "[Docs](https://example.com)") &&
                           label->textFormat() == Qt::RichText &&
-                          label->text().contains(QStringLiteral("<table"));
+                          label->text().contains(QStringLiteral("<table")) &&
+                          label->textInteractionFlags().testFlag(
+                              Qt::LinksAccessibleByKeyboard);
                  }),
              "authoritative user messages render GitHub Markdown tables");
   result &= expect(
@@ -2267,12 +2272,12 @@ bool testMessageImagePresentation() {
   result &= expect(retainedThumbnail == thumbnail,
                    "an unchanged attachment retains its decoded thumbnail");
   thumbnail = retainedThumbnail;
+  result &= expect(thumbnail && thumbnail->focusPolicy() == Qt::StrongFocus &&
+                       !thumbnail->accessibleName().isEmpty(),
+                   "available image thumbnails expose a named keyboard target");
   if (thumbnail) {
-    const QPointF local(thumbnail->rect().center());
-    QMouseEvent click(QEvent::MouseButtonPress, local, local,
-                      thumbnail->mapToGlobal(local.toPoint()), Qt::LeftButton,
-                      Qt::LeftButton, Qt::NoModifier);
-    QApplication::sendEvent(thumbnail, &click);
+    QKeyEvent activate(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QApplication::sendEvent(thumbnail, &activate);
     spin();
   }
   QWidget *viewer = nullptr;
@@ -2280,7 +2285,7 @@ bool testMessageImagePresentation() {
     if (candidate->objectName() == QStringLiteral("messageImageViewer"))
       viewer = candidate;
   result &= expect(viewer && viewer->isVisible(),
-                   "clicking a thumbnail opens the non-modal image viewer");
+                   "keyboard activation opens the non-modal image viewer");
   const auto *viewerImage = viewer ? viewer->findChild<QLabel *>(QStringLiteral(
                                          "messageImageViewerImage"))
                                    : nullptr;
@@ -2300,7 +2305,9 @@ bool testMessageImagePresentation() {
   result &= expect(
       retainedGuard.isNull() && missingThumbnail &&
           !missingThumbnail->property("imageAvailable").toBool() &&
-          missingThumbnail->text().contains(QStringLiteral("unavailable")),
+          missingThumbnail->text().contains(QStringLiteral("unavailable")) &&
+          missingThumbnail->focusPolicy() == Qt::NoFocus &&
+          !missingThumbnail->accessibleName().isEmpty(),
       "an unreadable image has a stable restrained placeholder");
 
   result &= expect(source.save(missingPath),

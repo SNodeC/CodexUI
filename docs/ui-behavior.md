@@ -178,6 +178,9 @@ overflow appears only when required, while its vertical size remains bounded by
 the tallest thumbnail. A standard 1 px neutral border, 6 px radius, 4 px inner
 padding, and soft-neutral surface enclose both thumbnails and scrollbar. The
 ribbon remains subordinate content of its existing card, never a nested card.
+Available thumbnails are named keyboard targets and open with Enter or Space;
+unavailable placeholders remain announced but are not focusable. Markdown
+links in Conversation and Inspector content are reachable by keyboard.
 
 User messages use the canonical soft-blue identity surface. Final Codex
 messages use the canonical soft-violet identity surface, while interim Codex

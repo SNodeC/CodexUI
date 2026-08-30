@@ -116,7 +116,8 @@ QLabel *makeMarkdownLabel(const QString &value) {
   label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   label->setOpenExternalLinks(true);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse |
-                                 Qt::LinksAccessibleByMouse);
+                                 Qt::LinksAccessibleByMouse |
+                                 Qt::LinksAccessibleByKeyboard);
   return label;
 }
 
