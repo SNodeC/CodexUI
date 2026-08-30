@@ -134,10 +134,10 @@ explicit error state.
 
 A prompt that starts a turn is the outer soft-blue turn card. A prompt admitted
 through `turn.steer` appears immediately inside the active turn as an animated
-blue You card; after acknowledgment the same widget becomes a softer blue
-authoritative steering card. No optimistic card is exchanged for a second
-widget, and the turn grows around it without changing existing nested card
-identity.
+teal `You · steering` card. After acknowledgment, the same widget becomes a
+soft-teal inset steering card with the canonical teal border and title treatment.
+No optimistic card is exchanged for a second widget, and the turn grows around
+it without changing existing nested card identity.
 
 After acknowledgment, the authoritative outer You card uses a stronger static
 blue border while its turn remains active. It has no animation, glow, shading,

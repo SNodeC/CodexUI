@@ -153,8 +153,9 @@ QString applicationStyleSheet() {
         QPushButton[kind="history"]:hover { background: #d8e7ff; border-color: #9ebcf3; }
         QPushButton[kind="request"] { background: #fff6df; border-color: #e5c77d; color: #8a5208; }
         QPushButton[kind="request"]:hover { background: #ffefc4; border-color: #d5ad50; }
-        QPushButton[kind="steer"] { background: #ffffff; border-color: #2f6feb; color: #2f6feb; }
-        QPushButton[kind="steer"]:hover { background: #e5eeff; border-color: #285fca; color: #285fca; }
+        QPushButton[kind="steer"] { background: #167b80; border-color: #167b80; color: white; }
+        QPushButton[kind="steer"]:hover { background: #126b70; border-color: #126b70; color: white; }
+        QPushButton[kind="steer"]:pressed { background: #0f595d; border-color: #0f595d; color: white; }
         QPushButton[kind="cancel"] { background: #eef1f5; border-color: #c8d0dc; color: #475467; }
         QPushButton[kind="cancel"]:hover { background: #e3e8ef; border-color: #aeb8c6; }
         QPushButton[kind="subtle"], QToolButton[kind="subtle"] {
@@ -240,7 +241,8 @@ QString applicationStyleSheet() {
         QFrame[kind="raised"][tone="warning"] { background: #fff6df; border-color: #e5c77d; }
         QFrame[messageRole="user"] { background: #eaf2ff; border: 1px solid #bfd3f9; border-radius: 8px; }
         QFrame[messageRole="user"] QLabel[kind="title"] { color: #285fca; }
-        QFrame[messageRole="user"][nestedConversationCard="true"] { background: #f3f7ff; border-color: #cfddf4; }
+        QFrame[messageRole="user"][nestedConversationCard="true"] { background: #eefafa; border-color: #9fd7d8; }
+        QFrame[messageRole="user"][nestedConversationCard="true"] QLabel[kind="title"] { color: #146f73; }
         QFrame[messageRole="agent"][messagePhase="final"] { background: #f4f0ff; border: 1px solid #d4c5f2; border-radius: 8px; }
         QFrame[messageRole="agent"][messagePhase="final"] QLabel[kind="title"] { color: #53389e; }
         QFrame[messageRole="agent"][messagePhase="update"] { background: #ffffff; border: 1px solid #d7dee8; border-radius: 8px; }

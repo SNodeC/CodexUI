@@ -77,6 +77,18 @@ test("only an authoritative running-turn You container is emphasized", () => {
     assert.doesNotMatch(finished, /active-turn/u);
 });
 
+test("nested user messages expose the steering identity", () => {
+    const user = itemCard("userMessage", "steering", {
+        text: "Additional direction", imagePaths: [],
+    });
+    const markup = renderToStaticMarkup(createElement(Card, {
+        card: user, active: true, collapsed: false, nestedCard: true,
+        onToggle() {},
+    }));
+    assert.match(markup, /conversation-card userMessage[^"]*steering/u);
+    assert.match(markup, /You · steering/u);
+});
+
 test("message attachments retain one horizontal ribbon in source order", () => {
     const user = itemCard("userMessage", "prompt", {
         text: "Prompt", imagePaths: ["/tmp/one.png", "/tmp/two.png", "/tmp/three.png"],

@@ -48,6 +48,13 @@ are not mapped to the canonical application scale.
 | Orange | `#a85d0c` | `#8e4d09` | `#743e07` | `#fff6df` | `#e5c77d` | `#8a5208` |
 | Red | `#c43d4d` | `#aa3342` | `#8f2b38` | `#fff0f2` | `#efb8c0` | `#982f3d` |
 | Violet | `#6941c6` | `#5b37ad` | `#4b2e90` | `#f4f0ff` | `#d4c5f2` | `#53389e` |
+| Teal | `#167b80` | `#126b70` | `#0f595d` | `#eefafa` | `#9fd7d8` | `#146f73` |
+
+Teal is a secondary interaction and identity family, not a status color. It
+connects the Steer action with the resulting steering user message and
+distinguishes that message from its blue owning turn without implying success,
+warning, or failure. Existing state families remain authoritative everywhere
+else.
 
 Neutral separators and borders use three canonical intensity steps:
 
