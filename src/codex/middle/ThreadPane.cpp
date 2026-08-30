@@ -815,7 +815,7 @@ void ThreadPane::refresh(const PresentationModel &model,
     if (row.hasChildren)
       accessibleParts.push_back(row.expanded ? QStringLiteral("expanded")
                                              : QStringLiteral("collapsed"));
-    item->setData(Qt::DisplayRole, title);
+    item->setData(Qt::DisplayRole, {});
     item->setData(Qt::AccessibleTextRole, accessibleParts.join(", "));
     item->setToolTip(text(row.cwd));
     item->setData(DepthRole, static_cast<qulonglong>(row.depth));

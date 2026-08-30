@@ -684,7 +684,7 @@ bool testThreadSelectionProjection() {
           dynamic_cast<UiStyle::ChevronToolButton *>(sortButton) &&
           sortButton->property("codexChevron").toBool() &&
           title->property("kind").toString() == QStringLiteral("title") &&
-          selected->data(Qt::DisplayRole).toString() == QStringLiteral("B") &&
+          selected->data(Qt::DisplayRole).toString().isEmpty() &&
           selectedAccessible.contains(QStringLiteral("B, Running")) &&
           selectedAccessible.contains(QStringLiteral("level 2")) &&
           parentAccessible.contains(QStringLiteral("A")) &&
