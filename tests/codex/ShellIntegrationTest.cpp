@@ -338,6 +338,10 @@ bool ShellFlow::verifyHydrationAndNavigation() {
                                            {"role", "controller"}},
                                           Authority::Merge));
   result &= peer.send(presentation::event(
+      sequence++, 1, "connection.provider",
+      {{"generation", std::uint64_t{1}}, {"state", "ready"}},
+      Authority::Replace));
+  result &= peer.send(presentation::event(
       sequence++, 1, "thread.upsert", {{"thread", thread("thread-a", "A")}},
       Authority::Merge, {{"threadId", "thread-a"}}));
   result &= peer.send(presentation::event(
@@ -504,6 +508,23 @@ bool ShellFlow::verifyReconnectHydration() {
   if (!readC1)
     return false;
 
+  result &= peer.send(presentation::event(
+      sequence++, 1, "connection.provider",
+      {{"generation", std::uint64_t{1}}, {"state", "disconnected"}},
+      Authority::Replace));
+  spin(10);
+  const auto *status =
+      shell.findChild<QLabel *>(QStringLiteral("globalStatusLabel"));
+  result &= expect(status && status->text() == QStringLiteral("Provider unavailable"),
+                   "provider loss cannot leave the shell visibly Ready");
+  peer.discard();
+  result &= expect(submit(editor, QStringLiteral("provider unavailable")),
+                   "the editable composer reaches the guarded admission boundary");
+  spin(5);
+  result &= expect(editor->toPlainText() == QStringLiteral("provider unavailable") &&
+                       !peer.has("turn.start") && !peer.has("turn.steer"),
+                   "provider loss rejects a stale hidden-thread destination without clearing the draft");
+
   generation = 2;
   result &= peer.send(presentation::event(sequence++, 2, "connection.lifecycle",
                                           {{"state", "disconnected"}},
@@ -517,6 +538,23 @@ bool ShellFlow::verifyReconnectHydration() {
                                      {"connectionId", "test-controller-2"},
                                      {"role", "controller"}},
                                     Authority::Merge));
+  result &= peer.send(presentation::event(
+      sequence++, 2, "connection.provider",
+      {{"generation", std::uint64_t{2}}, {"state", "ready"}},
+      Authority::Replace));
+  const auto reconnectedList = peer.waitFor("threads.list");
+  result &= expect(reconnectedList.has_value(),
+                   "the ready provider requests a fresh authoritative list");
+  if (!reconnectedList)
+    return false;
+  result &= peer.send(presentation::result(
+      sequence++, 2, "threads.list",
+      reconnectedList->value("correlationId", std::string{}), true,
+      {{"threads",
+        nlohmann::json::array({thread("thread-a", "A"),
+                               thread("thread-b", "B"),
+                               thread("thread-c", "C")})}},
+      Authority::Merge));
   const auto readC2 = peer.waitFor("thread.read", "thread-c");
   result &= expect(readC2.has_value(),
                    "the new connection owns a fresh hydration read");

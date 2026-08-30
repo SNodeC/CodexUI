@@ -332,7 +332,9 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
       connectionState.role.clear();
       connectionState.controllerConnectionId.clear();
       connectionState.detail = stringValue(data, "detail");
-      pendingRequests.clear();
+      connectionState.providerState.clear();
+      connectionState.providerDetail.clear();
+      clearProviderState();
     } else if (lifecycle == "disconnected" || lifecycle == "failure") {
       connectionState.connected = false;
       connectionState.retrying = false;
@@ -340,7 +342,9 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
       connectionState.role.clear();
       connectionState.controllerConnectionId.clear();
       connectionState.detail = stringValue(data, "detail");
-      pendingRequests.clear();
+      connectionState.providerState.clear();
+      connectionState.providerDetail.clear();
+      clearProviderState();
     }
     return;
   }

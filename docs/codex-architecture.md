@@ -494,7 +494,10 @@ local path. The accepted workspace is encoded as the native `thread/start`
 The visual shell's thread sidebar has no global More menu. A right-click
 context menu is created for the stable thread ID under the pointer and exposes
 Reload, Rename, Fork, Archive/Unarchive, and Delete. Read-only Reload remains
-available to an observer; mutations require the connected controller role.
+available to an observer while the app-server provider is ready; mutations
+require a provider-ready connected controller. Provider loss keeps the selected
+stable ID only as a rehydration hint, disables admission, and cannot route a
+prompt to a thread that is no longer present in provider authority.
 Opening or invoking the menu does not select the row or disturb the thread
 currently being reviewed.
 

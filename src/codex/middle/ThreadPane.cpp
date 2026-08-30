@@ -857,11 +857,13 @@ void ThreadPane::showContextMenu(const QPoint &position) {
     }
     menu->deleteLater();
   });
-  menu->addAction(QStringLiteral("Reload"), this, [this, id] {
+  QAction *reload = menu->addAction(QStringLiteral("Reload"), this, [this, id] {
     if (actions.reload)
       actions.reload(id);
   });
-  const bool canControl = currentModel->connection().connected &&
+  const bool providerReady = currentModel->connection().connected &&
+                             currentModel->connection().providerState == "ready";
+  const bool canControl = providerReady &&
                           currentModel->connection().role == "controller";
   QAction *rename = menu->addAction(QStringLiteral("Rename"), this, [this, id] {
     if (actions.rename)
@@ -883,6 +885,7 @@ void ThreadPane::showContextMenu(const QPoint &position) {
     if (actions.remove)
       actions.remove(id);
   });
+  reload->setEnabled(providerReady);
   rename->setEnabled(canControl);
   fork->setEnabled(canControl);
   archive->setEnabled(canControl);

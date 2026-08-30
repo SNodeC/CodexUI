@@ -614,6 +614,26 @@ int main() {
                        ownershipModel.childOwnership("child-two") == nullptr,
                    "provider loss clears threads and ownership atomically");
 
+  PresentationModel transportLossModel;
+  transportLossModel.applyEvent(codexui::codex::presentation::event(
+      1, 1, "connection.lifecycle", {{"state", "connected"}},
+      codexui::codex::presentation::Authority::Replace));
+  transportLossModel.applyEvent(codexui::codex::presentation::event(
+      2, 1, "connection.provider",
+      {{"generation", std::uint64_t{1}}, {"state", "ready"}},
+      codexui::codex::presentation::Authority::Replace));
+  transportLossModel.applyEvent(codexui::codex::presentation::result(
+      3, 1, "threads.list", "transport-threads", true,
+      {{"threads", nlohmann::json::array({{{"id", "transport-thread"}}})}},
+      codexui::codex::presentation::Authority::Merge));
+  transportLossModel.applyEvent(codexui::codex::presentation::event(
+      4, 1, "connection.lifecycle", {{"state", "disconnected"}},
+      codexui::codex::presentation::Authority::Replace));
+  passed &= expect(
+      transportLossModel.threadOrder().empty() &&
+          transportLossModel.connection().providerState.empty(),
+      "transport loss invalidates stale provider readiness and authority");
+
   PresentationModel reconnectOwnershipModel;
   reconnectOwnershipModel.applyEvent(codexui::codex::presentation::result(
       1, 1, "thread.read", "hydrate-owner", true,

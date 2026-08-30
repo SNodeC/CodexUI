@@ -274,6 +274,7 @@ struct ShellWidget::Impl final {
     bool connected = false;
     bool retrying = false;
     std::string role;
+    std::string providerState;
     QString selectedTransport;
     QString workspace;
     bool active = false;
@@ -320,6 +321,9 @@ struct ShellWidget::Impl final {
                                   bool retryFailed = false);
   void showNotice(QString message, bool error = true);
   void resetRuntimeForConnection();
+  [[nodiscard]] bool providerReady() const;
+  [[nodiscard]] bool canControlProvider() const;
+  void hydrateProvider();
 
   void selectThread(std::string threadId);
   void beginNewThread();
@@ -533,7 +537,10 @@ void ShellWidget::Impl::buildUi() {
 void ShellWidget::Impl::connectUi() {
   middle::ThreadPane::Actions threadActions;
   threadActions.newThread = [this] { beginNewThread(); };
-  threadActions.refresh = [this] { session.listThreads(); };
+  threadActions.refresh = [this] {
+    if (providerReady())
+      session.listThreads();
+  };
   threadActions.hide = [this] { middleRegion->showSidebar(false); };
   threadActions.select = [this](const std::string &id) {
     if (id == DraftThreadId && newThreadIntent) {
@@ -617,6 +624,34 @@ void ShellWidget::Impl::resetRuntimeForConnection() {
   }
 }
 
+bool ShellWidget::Impl::providerReady() const {
+  const ConnectionPresentation &connection = model.connection();
+  return connection.connected && connection.providerState == "ready";
+}
+
+bool ShellWidget::Impl::canControlProvider() const {
+  return providerReady() && model.connection().role == "controller";
+}
+
+void ShellWidget::Impl::hydrateProvider() {
+  if (!providerReady())
+    return;
+  session.listThreads();
+  session.listModels();
+  ensureThreadHydrated(selectedThreadId);
+  ensureThreadSettingsHydrated(selectedThreadId);
+  for (const std::string &threadId : prompts.queuedThreadIds()) {
+    if (threadId == DraftThreadId) {
+      if (newThreadIntent)
+        startThreadForDraft();
+    } else {
+      dispatchNextPrompt(threadId);
+    }
+  }
+  session.listPermissionProfiles(
+      {{"cwd", QDir::currentPath().toStdString()}});
+}
+
 void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
   middleRegion->inspector().appendProtocolFrame(event);
 
@@ -674,22 +709,17 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
                                 : text(detail));
   }
 
-  if (kind == "event" && type == "connection.bridge" &&
-      stringValue(data, "state") == "opened") {
-    session.listThreads();
-    session.listModels();
-    ensureThreadHydrated(selectedThreadId);
+  if (kind == "event" &&
+      ((type == "connection.provider" &&
+        stringValue(data, "state") == "ready") ||
+       (type == "connection.bridge" &&
+        stringValue(data, "state") == "opened" && providerReady())))
+    hydrateProvider();
+  if (kind == "event" && type == "connection.controller" &&
+      providerReady() && model.connection().role == "controller") {
     ensureThreadSettingsHydrated(selectedThreadId);
-    for (const std::string &threadId : prompts.queuedThreadIds()) {
-      if (threadId == DraftThreadId) {
-        if (newThreadIntent)
-          startThreadForDraft();
-      } else {
-        dispatchNextPrompt(threadId);
-      }
-    }
-    session.listPermissionProfiles(
-        {{"cwd", QDir::currentPath().toStdString()}});
+    for (const std::string &threadId : prompts.queuedThreadIds())
+      dispatchNextPrompt(threadId);
   }
 
   if (type == "thread.removed" && !eventThreadId.empty()) {
@@ -705,12 +735,6 @@ void ShellWidget::Impl::handleEvent(const nlohmann::json &event) {
       prompts.reconcile(eventThreadId, *thread,
                         QDateTime::currentMSecsSinceEpoch());
     }
-  } else if (kind == "event" && type == "connection.provider" &&
-             stringValue(data, "state") == "ready") {
-    session.listThreads();
-    session.listModels();
-    readThread(selectedThreadId, true);
-    ensureThreadSettingsHydrated(selectedThreadId);
   }
 
   if (!staleReadResult && kind == "result" && action == "thread.read" &&
@@ -883,10 +907,15 @@ void ShellWidget::Impl::refreshStatus() {
     workspace = text(middleRegion->composer().turnSettings()->workspace(
         QDir::currentPath().toStdString()));
   }
-  StatusUiSnapshot next{connection.connected, connection.retrying,
-                        connection.role,      std::move(selectedTransport),
-                        std::move(workspace), active,
-                        selectedPending,      totalPending};
+  StatusUiSnapshot next{connection.connected,
+                        connection.retrying,
+                        connection.role,
+                        connection.providerState,
+                        std::move(selectedTransport),
+                        std::move(workspace),
+                        active,
+                        selectedPending,
+                        totalPending};
   if (statusSnapshot && *statusSnapshot == next)
     return;
   statusSnapshot = std::move(next);
@@ -944,6 +973,12 @@ void ShellWidget::Impl::refreshStatus() {
   } else if (!snapshot.connected) {
     globalStatus = QStringLiteral("Offline");
     globalTone = QStringLiteral("danger");
+  } else if (snapshot.providerState != "ready") {
+    globalStatus = snapshot.providerState.empty()
+                       ? QStringLiteral("Waiting for provider")
+                       : QStringLiteral("Provider unavailable");
+    globalTone = snapshot.providerState.empty() ? QStringLiteral("warning")
+                                                : QStringLiteral("danger");
   } else if (snapshot.totalPending != 0) {
     globalStatus = QStringLiteral("Attention required");
     globalTone = QStringLiteral("warning");
@@ -955,7 +990,8 @@ void ShellWidget::Impl::refreshStatus() {
       snapshot.workspace, Qt::ElideMiddle,
       workspaceBreadcrumb->maximumWidth()));
 
-  const bool canSubmit = snapshot.connected && snapshot.role == "controller";
+  const bool canSubmit = snapshot.connected && snapshot.providerState == "ready" &&
+                         snapshot.role == "controller";
   middleRegion->composer().setActiveTurn(snapshot.active);
   middleRegion->composer().setCanSubmit(canSubmit);
   middleRegion->composer().setSettingsEnabled(canSubmit && !snapshot.active);
@@ -1044,7 +1080,7 @@ void ShellWidget::Impl::beginNewThread() {
 }
 
 void ShellWidget::Impl::readThread(const std::string &threadId, bool forced) {
-  if (threadId.empty())
+  if (threadId.empty() || !providerReady())
     return;
   ThreadRuntimeState &runtime = runtimeByThread[threadId];
   if (runtime.resumeInFlight)
@@ -1098,8 +1134,7 @@ void ShellWidget::Impl::readThread(const std::string &threadId, bool forced) {
 
 void ShellWidget::Impl::ensureThreadSettingsHydrated(
     const std::string &threadId) {
-  if (threadId.empty() || !model.connection().connected ||
-      model.connection().role != "controller")
+  if (threadId.empty() || !canControlProvider())
     return;
   ThreadRuntimeState &runtime = runtimeByThread[threadId];
   if (runtime.settingsHydration == SettingsHydration::WaitingForRead ||
@@ -1173,6 +1208,8 @@ void ShellWidget::Impl::hydrateThreadForSelection(
 }
 
 void ShellWidget::Impl::renameThread(const std::string &threadId) {
+  if (!canControlProvider())
+    return;
   const ThreadPresentation *thread = model.thread(threadId);
   if (!thread)
     return;
@@ -1187,7 +1224,7 @@ void ShellWidget::Impl::renameThread(const std::string &threadId) {
 }
 
 void ShellWidget::Impl::forkThread(const std::string &threadId) {
-  if (threadId.empty())
+  if (threadId.empty() || !canControlProvider())
     return;
   const auto token = alive;
   session.forkThread(threadId, nlohmann::json::object(),
@@ -1204,6 +1241,8 @@ void ShellWidget::Impl::forkThread(const std::string &threadId) {
 }
 
 void ShellWidget::Impl::toggleThreadArchive(const std::string &threadId) {
+  if (!canControlProvider())
+    return;
   const ThreadPresentation *thread = model.thread(threadId);
   if (!thread)
     return;
@@ -1214,7 +1253,7 @@ void ShellWidget::Impl::toggleThreadArchive(const std::string &threadId) {
 }
 
 void ShellWidget::Impl::deleteThread(const std::string &threadId) {
-  if (threadId.empty())
+  if (threadId.empty() || !canControlProvider())
     return;
   if (QMessageBox::question(owner, QStringLiteral("Delete thread"),
                             QStringLiteral("Delete the selected thread?"),
@@ -1228,6 +1267,11 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
   prompt = prompt.trimmed();
   if (prompt.isEmpty())
     return false;
+  if (!canControlProvider()) {
+    showNotice(QStringLiteral(
+        "Codex is not ready for a controlled turn. Your message was not sent."));
+    return false;
+  }
   prompt = middle::promptWithFileLinks(std::move(prompt), attachments);
   const std::string visiblySelected =
       middleRegion->threads().visiblySelectedThreadId();
@@ -1255,6 +1299,10 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
     }
     destination = DraftThreadId;
     thread = nullptr;
+  } else if (!thread) {
+    showNotice(QStringLiteral("The selected thread is no longer available. "
+                              "Your message was not sent."));
+    return false;
   }
 
   if (destination != DraftThreadId) {
@@ -1299,7 +1347,8 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
 }
 
 void ShellWidget::Impl::startThreadForDraft() {
-  if (newThreadCreationInFlight || prompts.submissions(DraftThreadId).empty())
+  if (!canControlProvider() || newThreadCreationInFlight ||
+      prompts.submissions(DraftThreadId).empty())
     return;
   newThreadCreationInFlight = true;
   nlohmann::json options =
@@ -1379,7 +1428,7 @@ void ShellWidget::Impl::startThreadForDraft() {
 }
 
 void ShellWidget::Impl::dispatchNextPrompt(const std::string &threadId) {
-  if (threadId.empty() || !model.connection().connected)
+  if (threadId.empty() || !canControlProvider())
     return;
   auto runtime = runtimeByThread.find(threadId);
   if (runtime != runtimeByThread.end() &&
@@ -1421,7 +1470,7 @@ void ShellWidget::Impl::dispatchNextPrompt(const std::string &threadId) {
     runtime->second.dispatchScheduled = false;
     if (observedConnectionGeneration != generation)
       return;
-    if (!model.connection().connected || runtime->second.resumeInFlight)
+    if (!canControlProvider() || runtime->second.resumeInFlight)
       return;
     const ThreadPresentation *thread = model.thread(threadId);
     if (runtime->second.hydration != Hydration::Hydrated ||
@@ -1475,7 +1524,7 @@ void ShellWidget::Impl::dispatchPrompt(middle::PromptDispatch dispatch) {
 
 void ShellWidget::Impl::resumePromptQueue(const std::string &threadId) {
   ThreadRuntimeState &runtime = runtimeByThread[threadId];
-  if (runtime.resumeInFlight)
+  if (runtime.resumeInFlight || !canControlProvider())
     return;
   runtime.resumeInFlight = true;
   const auto token = alive;
