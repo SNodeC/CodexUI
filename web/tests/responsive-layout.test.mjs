@@ -6,6 +6,7 @@ import {renderToStaticMarkup} from "react-dom/server";
 
 import {App, responsiveModeForWidth, runThreadPaneNavigation} from "../dist/app/App.js";
 import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
+import {result} from "../dist/index.js";
 
 function renderShellAt(width) {
     const previousWindow = globalThis.window;
@@ -60,6 +61,19 @@ test("responsive shell exposes only the panes that fit and accessible drawer tri
     assert.match(mobile, /aria-haspopup="dialog" aria-controls="inspector-pane" aria-expanded="false"/u);
 });
 
+test("thread hierarchy exposes selected tree-item semantics", () => {
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("not connected"); });
+    session.model.applyEvent(result(1, 1, "threads.list", "list", true, {threads: [{
+        id: "thread-1", preview: "Accessible thread", cwd: "/workspace", status: {type: "idle"},
+    }]}, "replace"));
+    session.selectThread("thread-1");
+    const markup = renderToStaticMarkup(createElement(App, {session}));
+    assert.match(markup, /class="thread-list" role="tree" aria-label="Threads"/u);
+    assert.match(markup, /role="treeitem" aria-level="1" aria-selected="true"/u);
+    assert.match(markup, /aria-current="true" aria-label="Open Accessible thread, \/workspace"/u);
+    session.dispose();
+});
+
 test("responsive CSS keeps the desktop grid and removes the old document-width floor", async () => {
     const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
     assert.match(css, /grid-template-columns:\s*260px minmax\(420px, 1fr\) 300px/u);
@@ -67,7 +81,10 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.doesNotMatch(css, /\.app-shell\s*\{[^}]*min-width:\s*980px/u);
     assert.match(css, /@media \(max-width:\s*1160px\)[\s\S]*grid-template-columns:\s*220px minmax\(0, 1fr\)/u);
     assert.match(css, /@media \(max-width:\s*760px\)[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/u);
-    assert.match(css, /@media \(max-width:\s*520px\)[\s\S]*\.top-bar\s*\{[^}]*flex-wrap:\s*wrap/u);
+    assert.match(css, /@media \(max-width:\s*760px\)[\s\S]*\.top-bar\s*\{[^}]*flex-wrap:\s*wrap/u);
     assert.match(css, /\.responsive-drawer\s*\{[^}]*position:\s*fixed/u);
     assert.match(css, /\.drawer-backdrop\s*\{[^}]*position:\s*fixed/u);
+    assert.match(css, /button:focus-visible[\s\S]*outline:\s*2px solid #6f98e8/u);
+    assert.match(css, /@media \(pointer:\s*coarse\)[\s\S]*min-height:\s*44px/u);
+    assert.match(css, /\.composer-actions span\s*\{[^}]*color:\s*#667085/u);
 });

@@ -44,11 +44,11 @@ test("clipboard writes report success, unsupported access, and failure honestly"
 test("server-rendered shell exposes keyboard and landmark semantics", () => {
     const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("not connected"); });
     const markup = renderToStaticMarkup(createElement(App, {session}));
-    assert.match(markup, /<header class="top-bar">/u);
-    assert.match(markup, /<main class="conversation-pane">/u);
+    assert.match(markup, /<header class="top-bar" data-modal-background="true">/u);
+    assert.match(markup, /<main class="conversation-pane" tabindex="-1">/u);
     assert.match(markup, /<aside class="thread-pane">/u);
     assert.match(markup, /<aside class="inspector-pane">/u);
-    assert.match(markup, /<footer class="status-bar">/u);
+    assert.match(markup, /<footer class="status-bar" data-modal-background="true">/u);
     assert.match(markup, /aria-label="Bridge WebSocket URL"/u);
     assert.match(markup, /aria-label="Conversation presentation"/u);
     assert.match(markup, /aria-label="Show reasoning cards"/u);

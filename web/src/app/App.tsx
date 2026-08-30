@@ -195,18 +195,22 @@ function ThreadPane({session, revision, onRequestNewThread, drawer = false, pane
         const status = classifyStatus(thread?.status ?? "");
         const hasChildren = (thread?.childThreadOrder.length ?? 0) > 0;
         const optimisticClass = optimistic ? ` optimistic-${optimistic.state}` : "";
-        return <div key={session.threadVisualKey(id)}>
+        const title = thread?.title || optimistic?.title || id;
+        const detail = optimistic ? optimistic.state === "failed" ? "Not created" : optimistic.state === "confirmed" ? "Created" : "Creating" : thread?.cwd || thread?.preview || id;
+        return <div key={session.threadVisualKey(id)} role="treeitem" aria-level={depth + 1} aria-selected={selected === id}
+            aria-expanded={hasChildren ? expanded.has(id) : undefined} aria-label={`${title}, ${detail}`}>
             <div className={`thread-row-wrap ${selected === id ? "selected" : ""}${contextMenu?.threadId === id ? " context-open" : ""}${optimisticClass}`} style={{paddingLeft: `${8 + depth * 14}px`}}
                 onContextMenu={event => { if (!thread) return; event.preventDefault(); event.stopPropagation(); openContextMenu(id, event.clientX, event.clientY, event.currentTarget); }}>
                 <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id)} aria-label={expanded.has(id) ? "Collapse child threads" : "Expand child threads"}>{hasChildren ? (expanded.has(id) ? "⌄" : "›") : ""}</button>
-                <button className="thread-row" onClick={() => runThreadPaneNavigation(() => session.selectThread(id), onClose)}>
-                    <StatusDot tone={optimistic?.state === "failed" ? "danger" : optimistic ? "warning" : status.tone || "muted"} /><span><strong>{thread?.title || optimistic?.title || id}</strong><small>{optimistic ? optimistic.state === "failed" ? "Not created" : optimistic.state === "confirmed" ? "Created" : "Creating" : thread?.cwd || thread?.preview || id}</small></span>
+                <button className="thread-row" aria-current={selected === id ? "true" : undefined}
+                    aria-label={`Open ${title}, ${detail}`} onClick={() => runThreadPaneNavigation(() => session.selectThread(id), onClose)}>
+                    <StatusDot tone={optimistic?.state === "failed" ? "danger" : optimistic ? "warning" : status.tone || "muted"} /><span><strong>{title}</strong><small>{detail}</small></span>
                 </button>
                 {thread && <button className="thread-menu-trigger" title="Thread actions" aria-label={`Actions for ${thread.title || id}`}
                     aria-haspopup="menu" aria-expanded={contextMenu?.threadId === id}
                     onClick={event => { event.stopPropagation(); const bounds = event.currentTarget.getBoundingClientRect(); openContextMenu(id, bounds.right, bounds.bottom, event.currentTarget); }}>•••</button>}
             </div>
-            {thread && hasChildren && expanded.has(id) && thread.childThreadOrder.map(child => renderThread(child, depth + 1))}
+            {thread && hasChildren && expanded.has(id) && <div role="group">{thread.childThreadOrder.map(child => renderThread(child, depth + 1))}</div>}
         </div>;
     };
     return <aside ref={paneRef} className={`thread-pane${drawer ? " responsive-drawer drawer-left" : ""}`} id={drawer ? "thread-pane" : undefined}
@@ -219,7 +223,7 @@ function ThreadPane({session, revision, onRequestNewThread, drawer = false, pane
             <option value="recent">Recent</option><option value="created">Created</option>
             <option value="updated">Last changed</option><option value="alphanumeric">Alphanumeric</option>
         </select></label>
-        <div className="thread-list">
+        <div className="thread-list" role="tree" aria-label="Threads">
             {snapshot.optimisticThreads.map(thread => renderThread(thread.id, 0))}
             {session.threadOrder(sortCriterion).filter(id => !snapshot.optimisticThreads.some(thread => thread.id === id)).map(id => renderThread(id, 0))}
         </div>
@@ -243,7 +247,7 @@ export function NewThreadDialog({initialWorkspace, onCancel, onContinue}: {initi
     const [developerInstructions, setDeveloperInstructions] = useState("");
     const [ephemeral, setEphemeral] = useState(false);
     const [error, setError] = useState("");
-    useEffect(() => {
+    useBrowserLayoutEffect(() => {
         const previous = typeof document === "undefined" ? null : document.activeElement as HTMLElement | null;
         workspaceInput.current?.focus();
         return () => { if (previous?.isConnected) previous.focus(); };
@@ -627,7 +631,7 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
         const key = stableKey(card.key); const collapsed = cardCollapsed(card, key);
         return <Card key={key} card={card} active={session.model.activeTurnId(projectionId) === card.turnId} collapsed={collapsed} onToggle={() => toggleCard(key, collapsed)} onCopy={copyCard} nested={nested} turnContainer={turnContainer} />;
     };
-    return <main ref={pane} className="conversation-pane">
+    return <main ref={pane} className="conversation-pane" tabIndex={-1}>
         <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">Conversation</span>
             <h1>{thread?.title ?? (snapshot.newThreadIntent ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
             <p>{thread ? `${thread.cwd} · ${classifyStatus(thread.status).text}` : snapshot.newThreadIntent ? `${snapshot.newThreadDraft?.workspace ?? ""} · Send a message to create this thread.` : "Choose a thread from the left."}</p></div>
@@ -853,27 +857,40 @@ export function App({session}: {session: BrowserFrontendSession}) {
     const responsiveMode = useResponsiveMode();
     const [drawer, setDrawer] = useState<"threads" | "inspector" | null>(null);
     const [newThreadDialog, setNewThreadDialog] = useState(false);
+    const shell = useRef<HTMLDivElement>(null);
     const threadTrigger = useRef<HTMLButtonElement>(null);
     const inspectorTrigger = useRef<HTMLButtonElement>(null);
     const threadDrawer = useRef<HTMLElement>(null);
     const inspectorDrawer = useRef<HTMLElement>(null);
+    const pendingFocusReturn = useRef<HTMLElement | null>(null);
     const threadsOverlay = responsiveMode === "mobile";
     const inspectorOverlay = responsiveMode !== "desktop";
     const activeDrawer = drawer === "threads" && threadsOverlay || drawer === "inspector" && inspectorOverlay ? drawer : null;
+    const modalOpen = Boolean(activeDrawer || newThreadDialog);
     const closeDrawer = () => setDrawer(null);
     const requestNewThread = () => { closeDrawer(); setNewThreadDialog(true); };
     const createNewThreadDraft = (draft: NewThreadDraft) => {
         session.beginNewThread(draft); setNewThreadDialog(false); closeDrawer();
     };
     useEffect(() => setDrawer(null), [responsiveMode]);
-    useEffect(() => {
+    useBrowserLayoutEffect(() => {
+        for (const region of shell.current?.querySelectorAll<HTMLElement>("[data-modal-background]") ?? [])
+            region.toggleAttribute("inert", modalOpen);
+        if (!modalOpen && pendingFocusReturn.current) {
+            const target = pendingFocusReturn.current;
+            pendingFocusReturn.current = null;
+            if (target.isConnected) target.focus();
+            else document.querySelector<HTMLElement>(".conversation-pane")?.focus();
+        }
+    }, [modalOpen]);
+    useBrowserLayoutEffect(() => {
         if (!activeDrawer || typeof document === "undefined") return;
         const pane = activeDrawer === "threads" ? threadDrawer.current : inspectorDrawer.current;
         const trigger = activeDrawer === "threads" ? threadTrigger.current : inspectorTrigger.current;
         if (!pane) return;
         const focusableSelector = "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex=\"-1\"])";
         const focusables = () => [...pane.querySelectorAll<HTMLElement>(focusableSelector)].filter(element => element.offsetParent !== null);
-        const frame = window.requestAnimationFrame(() => (pane.querySelector<HTMLElement>("[data-drawer-close]") ?? pane).focus());
+        (pane.querySelector<HTMLElement>("[data-drawer-close]") ?? pane).focus();
         const onKeyDown = (event: KeyboardEvent) => {
             if (event.key === "Escape") { event.preventDefault(); closeDrawer(); return; }
             if (event.key !== "Tab") return;
@@ -885,17 +902,16 @@ export function App({session}: {session: BrowserFrontendSession}) {
         };
         document.addEventListener("keydown", onKeyDown);
         return () => {
-            window.cancelAnimationFrame(frame);
             document.removeEventListener("keydown", onKeyDown);
-            if (trigger?.isConnected) trigger.focus();
+            pendingFocusReturn.current = trigger;
         };
     }, [activeDrawer]);
     const paneControls = <>
         {threadsOverlay && <button ref={threadTrigger} type="button" className="responsive-pane-button" aria-haspopup="dialog" aria-controls="thread-pane" aria-expanded={activeDrawer === "threads"} onClick={() => setDrawer("threads")}><span aria-hidden="true">☰</span> Threads</button>}
         {inspectorOverlay && <button ref={inspectorTrigger} type="button" className="responsive-pane-button" aria-haspopup="dialog" aria-controls="inspector-pane" aria-expanded={activeDrawer === "inspector"} onClick={() => setDrawer("inspector")}><span aria-hidden="true">ⓘ</span> Inspector</button>}
     </>;
-    return <div className={`app-shell${activeDrawer ? " drawer-visible" : ""}`}>
-        <header className="top-bar" aria-hidden={activeDrawer || newThreadDialog ? true : undefined}><div className="brand"><span className="brand-mark">C</span><span><b>CodexUI</b><small>Codex, clearly.</small></span></div>
+    return <div ref={shell} className={`app-shell${activeDrawer ? " drawer-visible" : ""}`}>
+        <header className="top-bar" data-modal-background aria-hidden={modalOpen || undefined}><div className="brand"><span className="brand-mark">C</span><span><b>CodexUI</b><small>Codex, clearly.</small></span></div>
             <div className="workspace-breadcrumb">{session.model.thread(snapshot.selectedThreadId)?.cwd || snapshot.newThreadDraft?.workspace || "No workspace"}</div>
             <div className="top-actions">
                 {connection.connected && <button className="subtle-button" onClick={() => canControl ? session.releaseController() : session.claimController()}>{canControl ? "Release control" : "Claim control"}</button>}
@@ -903,13 +919,13 @@ export function App({session}: {session: BrowserFrontendSession}) {
                     <button onClick={() => connection.connected || connection.retrying ? session.disconnect() : session.connect(url)}>{connection.connected ? "Disconnect" : "Connect"}</button><StatusDot tone={connectionTone} /></label>
             </div>
         </header>
-        {snapshot.notice && <div className="notice-banner" role="alert" aria-hidden={activeDrawer || newThreadDialog ? true : undefined}><span>{snapshot.notice}</span><button onClick={() => session.dismissNotice()} aria-label="Dismiss notice">×</button></div>}
-        <div className="workspace-grid" aria-hidden={activeDrawer || newThreadDialog ? true : undefined}>
+        {snapshot.notice && <div className="notice-banner" data-modal-background role="alert" aria-hidden={modalOpen || undefined}><span>{snapshot.notice}</span><button onClick={() => session.dismissNotice()} aria-label="Dismiss notice">×</button></div>}
+        <div className="workspace-grid" data-modal-background aria-hidden={modalOpen || undefined}>
             {!threadsOverlay && <ThreadPane session={session} revision={snapshot.revision} onRequestNewThread={requestNewThread} />}
             <Conversation session={session} revision={snapshot.revision} paneControls={responsiveMode === "desktop" ? undefined : paneControls} />
             {!inspectorOverlay && <Inspector session={session} revision={snapshot.revision} />}
         </div>
-        <footer className="status-bar" aria-hidden={activeDrawer || newThreadDialog ? true : undefined}><div><strong>© Volker Christian &amp; Codex</strong><span> | </span>
+        <footer className="status-bar" data-modal-background aria-hidden={modalOpen || undefined}><div><strong>© Volker Christian &amp; Codex</strong><span> | </span>
             <a href="https://github.com/SNodeC/CodexUI">CodexUI</a><span> • </span><a href="https://github.com/SNodeC/AISuite">AISuite</a><span> • </span>
             <small>Powered by</small> <a href="https://github.com/SNodeC/snode.c">SNode.C</a></div>
             <div className="global-status"><span>Status:</span><StatusDot tone={connectionTone} /><strong>{globalStatus}</strong></div></footer>
