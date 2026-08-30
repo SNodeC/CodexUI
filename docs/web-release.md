@@ -19,19 +19,23 @@ following:
 
 - the pinned SDK installs from its lockfile and passes protocol generation,
   routing/lifecycle, and WebSocket transport equality tests;
-- the browser application installs from its lockfile and passes all seven web
-  test files;
-- the production Vite artifact builds and is uploaded without source-tree or
-  development-only files;
+- the browser application installs from its lockfile and passes the complete
+  75-test suite across ten web test files;
+- the production Vite artifact builds, passes its relocatability check, and is
+  installed through the standalone CMake packaging project;
+- CI asserts the staged `share/codexui/web/index.html` and generated assets
+  before uploading that installed tree, without source or development files;
 - the complete seven-test native CTest suite passes against the same AISuite
   revision;
 - `git diff --check` passes and the recorded performance profile shows no
   material regression from `web-qualification.md`.
 
-The CI artifact is named `codexui-web`. Installation copies that static
-directory into the CodexUI data directory, and the existing `codex-bridge`
-listener serves it alongside `/codex`. No Node process, web-specific backend,
-or protocol extension is part of the release.
+The CI artifact is named `codexui-web`. Combined CMake builds require the web
+artifact by default; a native-only build must explicitly set
+`CODEXUI_INSTALL_WEB=OFF`. Installation copies the static tree into the
+CodexUI data directory, and the existing `codex-bridge` listener serves it
+alongside `/codex`. No Node process, web-specific backend, or protocol
+extension is part of the release.
 
 ## Operator checks
 

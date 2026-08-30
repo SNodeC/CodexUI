@@ -23,6 +23,13 @@ claim pixel identity with Qt.
 - Settings and pending-request tests assert the exact native request payloads.
 - Server rendering verifies the shell landmarks and accessible connection and
   disclosure controls without requiring a second UI state implementation.
+- Viewport tests cover stable card/pixel anchors, native folding geometry, and
+  nested-scroll boundary ownership; responsive tests cover the 1160/760 mode
+  boundaries, semantic thread-tree selection, focus styling, contrast tokens,
+  and coarse-pointer targets.
+- The packaging gate rejects a missing production artifact, performs both
+  standalone and combined CMake installs, and verifies the staged entry point
+  and assets.
 
 ## Measured presentation cost
 
@@ -37,14 +44,15 @@ Representative input: one authoritative thread containing 100 turns and
 item. Five fresh Node processes were run on 2026-08-28 with Node 24.19.0 on an
 Intel Core i7-14700HX (x86-64).
 
-The five-process run was repeated after the lifecycle and release increments
-with the same runtime, machine, and input. Negative change is faster.
+The five-process run was repeated on 2026-08-30 after the integrated review
+increments with the same runtime, machine, and input. Negative change is
+faster.
 
-| Operation | Initial median | 1.0 median | Change | 1.0 range |
+| Operation | Initial median | Reviewed median | Change | Reviewed range |
 | --- | ---: | ---: | ---: | ---: |
-| Authoritative hydration, 10,000 items | 44.09 ms | 43.85 ms | −0.5% | 43.16–44.33 ms |
-| Full projection, 10,000 visible cards | 33.11 ms | 32.28 ms | −2.5% | 31.19–36.25 ms |
-| Apply 2,000 streaming deltas | 9.85 ms | 8.21 ms | −16.6% | 4.98–9.14 ms |
+| Authoritative hydration, 10,000 items | 44.09 ms | 46.34 ms | +5.1% | 44.23–47.59 ms |
+| Full projection, 10,000 visible cards | 33.11 ms | 34.93 ms | +5.5% | 33.66–38.65 ms |
+| Apply 2,000 streaming deltas | 9.85 ms | 9.89 ms | +0.4% | 9.55–11.17 ms |
 
 The production view starts with the native 80-item history window, schedules
 at most one React publication per animation frame, retains keyed cards, and
@@ -67,5 +75,13 @@ normal 80-item window, so the native authority/index structure was retained.
 - Notices are bounded to one visible message and follow the native 10-second
   error and 6-second informational auto-dismiss policy.
 - Reduced-motion preference disables shimmer, spinner, and smooth scrolling.
-- The center pane owns per-thread follow/paused scroll state; a paused anchor
-  is not evicted when streamed items arrive.
+- The center pane owns per-thread follow/paused scroll state with stable
+  card/pixel anchors; a paused anchor is not evicted when streamed items
+  arrive. The composer grows upward over an opaque reserved surface while
+  command surfaces retain their own follow/pause and wheel-boundary ownership.
+- A real Chromium review at 760, 521, and 360 px confirmed zero document-width
+  overflow with the full connection-control shape. Drawer focus entered
+  synchronously, background regions became inert, Tab wrapped, Escape restored
+  the trigger, and breakpoint removal restored focus to Conversation. This is
+  retained review evidence; the deterministic CI assertions remain the test
+  authority.
