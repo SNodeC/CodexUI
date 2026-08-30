@@ -224,6 +224,9 @@ answers are never filtered. Visibility is a presentation choice only: filtered
 cards remain in the retained projection, continue accepting updates, and reappear
 with their latest content and user-owned folding state. Changing the Command
 preference never refolds an existing card.
+Browser persistence is an optional convenience: unavailable or denied local
+storage falls back to canonical defaults and never prevents the UI from
+starting or accepting preference changes.
 
 Folding is an explicit geometry transaction. Collapsing keeps the selected
 title row fixed while the natural scroll range permits and shifts following

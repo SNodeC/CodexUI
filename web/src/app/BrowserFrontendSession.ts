@@ -15,6 +15,7 @@ import {PromptCoordinator, indexAuthoritativeItems, promptWithFileLinks} from ".
 import type {AttachmentDraft, PromptDispatch} from "../conversation/PromptCoordinator.js";
 import {DefaultAuthoritativeItemLimit, projectConversation} from "../conversation/ConversationProjection.js";
 import type {ConversationSnapshot} from "../conversation/MiddleTypes.js";
+import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
 
 const DraftThreadId = "__codexui_new_thread__";
 const MaximumProtocolFrames = 500;
@@ -151,7 +152,7 @@ export class BrowserFrontendSession {
 
     static defaultBridgeUrl(): string {
         if (typeof window === "undefined") return "ws://127.0.0.1:8080/codex";
-        const configured = window.localStorage.getItem("codexui.bridgeUrl");
+        const configured = readBrowserStorage("codexui.bridgeUrl");
         if (configured) return configured;
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         return `${protocol}//${window.location.host || "127.0.0.1:8080"}/codex`;
@@ -173,7 +174,7 @@ export class BrowserFrontendSession {
             return;
         }
         this.bridgeUrl = url.trim();
-        if (typeof window !== "undefined") window.localStorage.setItem("codexui.bridgeUrl", this.bridgeUrl);
+        writeBrowserStorage("codexui.bridgeUrl", this.bridgeUrl);
         this.normalizer.transportEvent("connecting");
         try { this.transport = new WebSocketTransport(this.connection, this.bridgeUrl,
             this.createWebSocket ? {createWebSocket: this.createWebSocket} : {}); }

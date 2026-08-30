@@ -5,7 +5,20 @@ import {createElement} from "react";
 
 import {App, inspectorPlainState} from "../dist/app/App.js";
 import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
+import {readBrowserStorage, writeBrowserStorage} from "../dist/app/BrowserStorage.js";
 import {event, humanizeProtocolLabel, result} from "../dist/index.js";
+
+test("browser storage denial falls back without breaking startup or persistence", () => {
+    globalThis.window = {
+        location: {protocol: "https:", host: "codex.example"},
+        get localStorage() { throw new Error("storage denied"); },
+    };
+    try {
+        assert.equal(readBrowserStorage("missing"), undefined);
+        assert.doesNotThrow(() => writeBrowserStorage("preference", "true"));
+        assert.equal(BrowserFrontendSession.defaultBridgeUrl(), "wss://codex.example/codex");
+    } finally { delete globalThis.window; }
+});
 
 test("server-rendered shell exposes keyboard and landmark semantics", () => {
     const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("not connected"); });

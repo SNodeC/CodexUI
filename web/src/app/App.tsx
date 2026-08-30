@@ -14,6 +14,7 @@ import type {
 import type {BrowserFrontendSession} from "./BrowserFrontendSession.js";
 import {shouldSubmitPromptFromKey} from "./ComposerKeyboard.js";
 import {humanizeProtocolLabel as humanize} from "./Humanize.js";
+import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
 
 const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -98,8 +99,8 @@ const defaultConversationPresentation: ConversationPresentationOptions = {
 function storedConversationPresentation(): ConversationPresentationOptions {
     if (typeof window === "undefined") return defaultConversationPresentation;
     const boolean = (key: string, fallback: boolean) => {
-        const stored = window.localStorage.getItem(key);
-        return stored === null ? fallback : stored === "true";
+        const stored = readBrowserStorage(key);
+        return stored === undefined ? fallback : stored === "true";
     };
     return {
         showReasoning: boolean("codexui.conversation.showReasoning", false),
@@ -110,11 +111,10 @@ function storedConversationPresentation(): ConversationPresentationOptions {
 }
 
 function persistConversationPresentation(options: ConversationPresentationOptions): void {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem("codexui.conversation.showReasoning", String(options.showReasoning));
-    window.localStorage.setItem("codexui.conversation.showCodexUpdates", String(options.showCodexUpdates));
-    window.localStorage.setItem("codexui.conversation.commandsInitiallyExpanded", String(options.commandsInitiallyExpanded));
-    window.localStorage.setItem("codexui.conversation.imagesInitiallyExpanded", String(options.imagesInitiallyExpanded));
+    writeBrowserStorage("codexui.conversation.showReasoning", String(options.showReasoning));
+    writeBrowserStorage("codexui.conversation.showCodexUpdates", String(options.showCodexUpdates));
+    writeBrowserStorage("codexui.conversation.commandsInitiallyExpanded", String(options.commandsInitiallyExpanded));
+    writeBrowserStorage("codexui.conversation.imagesInitiallyExpanded", String(options.imagesInitiallyExpanded));
 }
 
 function StatusDot({tone}: {tone: string}) { return <span className={`status-dot ${tone}`} aria-hidden="true" />; }
