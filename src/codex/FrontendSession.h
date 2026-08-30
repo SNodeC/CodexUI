@@ -3,6 +3,8 @@
 #ifndef CODEXUI_CODEX_FRONTENDSESSION_H
 #define CODEXUI_CODEX_FRONTENDSESSION_H
 
+#include "codex/PresentationClient.h"
+
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
@@ -11,7 +13,6 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace ai::openai::codex::protocol {
 class JsonLineFramer;
@@ -29,6 +30,7 @@ class FrontendSessionTestPeer;
 class FrontendSession final {
 public:
   using EventHandler = std::function<void(const nlohmann::json &)>;
+  using ActivityHandler = std::function<void(const std::string &)>;
   using ResponseHandler = std::function<void(const nlohmann::json &)>;
   using RuntimeStoppedHandler = std::function<void()>;
 
@@ -42,7 +44,13 @@ public:
   void wait();
   void shutdown();
   void setEventHandler(EventHandler handler);
+  void setActivityHandler(ActivityHandler handler);
   void setRuntimeStoppedHandler(RuntimeStoppedHandler handler);
+
+  // Returns the slim, toolkit-neutral command API consumed by UI logic.
+  // FrontendSession continues to own the current Qt endpoint, socketpair, and
+  // SNode.C thread exactly as before.
+  [[nodiscard]] PresentationClient presentationClient();
 
   std::string request(std::string operation, nlohmann::json parameters,
                       ResponseHandler handler = {});
@@ -111,6 +119,12 @@ public:
 private:
   friend class FrontendSessionTestPeer;
 
+  struct OutstandingRequest {
+    std::string action;
+    std::string threadId;
+    ResponseHandler completion;
+  };
+
   bool sendMessage(const nlohmann::json &message);
   void receiveMessage(nlohmann::json message);
   void reportLocalError(std::string message);
@@ -124,9 +138,9 @@ private:
   std::thread clientThread;
   int clientDescriptor = -1;
   std::uint64_t nextOperation = 1;
-  std::unordered_map<std::string, ResponseHandler> pending;
-  std::unordered_set<std::string> outstanding;
+  std::unordered_map<std::string, OutstandingRequest> outstanding;
   EventHandler eventHandler;
+  ActivityHandler activityHandler;
   RuntimeStoppedHandler runtimeStoppedHandler;
   bool started = false;
   bool stopping = false;

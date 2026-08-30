@@ -3,14 +3,11 @@
 #ifndef CODEXUI_CODEX_MIDDLE_PROMPTCOORDINATOR_H
 #define CODEXUI_CODEX_MIDDLE_PROMPTCOORDINATOR_H
 
-#include "codex/FileSelectionDialog.h"
+#include "codex/AttachmentDraft.h"
 #include "codex/PresentationModel.h"
 #include "codex/middle/MiddleTypes.h"
 
 #include <nlohmann/json.hpp>
-
-#include <QString>
-#include <QtGlobal>
 
 #include <cstdint>
 #include <map>
@@ -24,8 +21,8 @@
 
 namespace codexui::codex::middle {
 
-[[nodiscard]] QString
-promptWithFileLinks(QString prompt,
+[[nodiscard]] std::string
+promptWithFileLinks(std::string prompt,
                     std::span<const AttachmentDraft> attachments);
 
 struct PromptSubmission {
@@ -33,12 +30,12 @@ struct PromptSubmission {
   std::uint64_t admissionOrdinal = 0;
   std::string threadId;
   std::string clientUserMessageId;
-  QString prompt;
+  std::string prompt;
   std::vector<AttachmentDraft> attachments;
   nlohmann::json turnOptions = nlohmann::json::object();
   PromptState state = PromptState::Queued;
-  qint64 acceptedAtMilliseconds = 0;
-  QString error;
+  std::int64_t acceptedAtMilliseconds = 0;
+  std::string error;
   std::optional<AuthoritativeItemKey> admissionAnchor;
   bool admissionAtStart = false;
   bool startsTurn = false;
@@ -46,15 +43,16 @@ struct PromptSubmission {
   std::optional<AuthoritativeItemKey> materializedItem;
 
   [[nodiscard]] bool
-  acceptedTransitionActive(qint64 nowMilliseconds) const noexcept;
-  [[nodiscard]] bool localCardVisible(qint64 nowMilliseconds) const noexcept;
+  acceptedTransitionActive(std::int64_t nowMilliseconds) const noexcept;
+  [[nodiscard]] bool
+  localCardVisible(std::int64_t nowMilliseconds) const noexcept;
 };
 
 struct PromptDispatch {
   std::uint64_t id = 0;
   std::string threadId;
   std::string clientUserMessageId;
-  QString prompt;
+  std::string prompt;
   std::vector<AttachmentDraft> attachments;
   nlohmann::json turnOptions = nlohmann::json::object();
   std::optional<std::string> expectedTurnId;
@@ -77,7 +75,8 @@ struct AuthoritativeItemIndex {
   std::vector<AuthoritativeItem> ordered;
   std::map<AuthoritativeItemKey, std::size_t> positions;
   std::unordered_map<std::string, std::size_t> userMessagesByClientId;
-  std::set<std::tuple<std::string, QString, std::size_t>> userMessagesByText;
+  std::set<std::tuple<std::string, std::string, std::size_t>>
+      userMessagesByText;
   std::unordered_map<std::string, std::size_t> turnRootUserMessagePositions;
 
   [[nodiscard]] std::optional<std::size_t>
@@ -94,10 +93,10 @@ indexAuthoritativeItems(const std::string &threadId,
 class PromptCoordinator final {
 public:
   [[nodiscard]] std::uint64_t
-  admit(std::string threadId, QString prompt,
+  admit(std::string threadId, std::string prompt,
         std::vector<AttachmentDraft> attachments, nlohmann::json turnOptions,
         const ThreadPresentation *authoritativeThread,
-        std::optional<std::string> activeTurnId, qint64 nowMilliseconds);
+        std::optional<std::string> activeTurnId, std::int64_t nowMilliseconds);
 
   // Starts at most one queued submission for a thread. The active turn is
   // sampled at dispatch time because earlier queued submissions may have
@@ -109,12 +108,12 @@ public:
   [[nodiscard]] bool acknowledge(const std::string &threadId,
                                  std::uint64_t submissionId,
                                  std::optional<std::string> authoritativeTurnId,
-                                 qint64 nowMilliseconds);
+                                 std::int64_t nowMilliseconds);
   [[nodiscard]] bool fail(const std::string &threadId,
-                          std::uint64_t submissionId, QString error);
+                          std::uint64_t submissionId, std::string error);
   [[nodiscard]] bool requeue(const std::string &threadId,
                              std::uint64_t submissionId);
-  std::size_t failQueued(const std::string &threadId, const QString &error);
+  std::size_t failQueued(const std::string &threadId, const std::string &error);
 
   // Used when the app-server assigns an id to an explicit New Thread draft.
   // LocalPromptKey is unaffected by this move.
@@ -128,10 +127,10 @@ public:
   // compact visual alias retains the admitted card identity and boundary.
   void reconcile(const std::string &threadId,
                  const ThreadPresentation &authoritativeThread,
-                 qint64 nowMilliseconds);
+                 std::int64_t nowMilliseconds);
   void reconcile(const std::string &threadId,
                  AuthoritativeItemIndex &authoritativeItems,
-                 qint64 nowMilliseconds);
+                 std::int64_t nowMilliseconds);
 
   [[nodiscard]] std::span<const PromptSubmission>
   submissions(const std::string &threadId) const noexcept;

@@ -26,6 +26,7 @@ namespace {
 
 constexpr std::size_t MaximumFrameBytes = 64U * 1024U * 1024U;
 constexpr std::size_t MaximumWriteQueueBytes = 128U * 1024U * 1024U;
+constexpr std::size_t MaximumOutstandingRequests = 4096;
 
 } // namespace
 
@@ -108,7 +109,6 @@ void FrontendSession::shutdown() {
     QTimer::singleShot(750, &acknowledgementLoop, &QEventLoop::quit);
     acknowledgementLoop.exec();
     // A timeout must not leave a callback capturing the completed nested loop.
-    pending.erase(requestId);
     outstanding.erase(requestId);
   } else if (started) {
     static_cast<void>(sendMessage(presentation::command("runtime.shutdown")));
@@ -128,36 +128,74 @@ void FrontendSession::setEventHandler(EventHandler handler) {
   eventHandler = std::move(handler);
 }
 
+void FrontendSession::setActivityHandler(ActivityHandler handler) {
+  activityHandler = std::move(handler);
+}
+
 void FrontendSession::setRuntimeStoppedHandler(RuntimeStoppedHandler handler) {
   runtimeStoppedHandler = std::move(handler);
+}
+
+PresentationClient FrontendSession::presentationClient() {
+  return PresentationClient{
+      [this](std::string action, nlohmann::json data,
+             PresentationClient::Completion completion) {
+        return request(std::move(action), std::move(data),
+                       std::move(completion));
+      },
+      [this](std::string action, nlohmann::json data) {
+        return sendMessage(
+            presentation::command(std::move(action), std::move(data)));
+      },
+      [this](nlohmann::json requestId, nlohmann::json result,
+             nlohmann::json error) {
+        return respondToServerRequest(std::move(requestId), std::move(result),
+                                      std::move(error));
+      }};
 }
 
 std::string FrontendSession::request(std::string operation,
                                      nlohmann::json parameters,
                                      ResponseHandler handler) {
   const std::string requestId = "ui-request-" + std::to_string(nextOperation++);
-  outstanding.insert(requestId);
-  if (handler)
-    pending.emplace(requestId, std::move(handler));
-  if (!sendMessage(presentation::command(std::move(operation),
-                                         std::move(parameters), requestId))) {
-    const auto iterator = pending.find(requestId);
-    if (iterator != pending.end()) {
-      ResponseHandler failed = std::move(iterator->second);
-      pending.erase(iterator);
+  const std::string threadId =
+      presentation::stringMember(parameters, "threadId");
+  const std::string action = operation;
+  if (outstanding.size() >= MaximumOutstandingRequests) {
+    if (handler) {
       try {
-        failed({{"protocol", presentation::ProtocolName},
-                {"version", presentation::ProtocolVersion},
-                {"kind", "result"},
-                {"correlationId", requestId},
-                {"ok", false},
-                {"error",
-                 {{"code", -32020},
-                  {"message", "CodexUI IPC rejected operation"}}}});
+        handler(presentation::result(
+            0, activeGeneration, action, requestId, false,
+            {{"code", -32021},
+             {"message", "CodexUI has too many outstanding operations"}}));
       } catch (...) {
       }
     }
-    outstanding.erase(requestId);
+    return requestId;
+  }
+  outstanding.emplace(
+      requestId, OutstandingRequest{action, threadId, std::move(handler)});
+  const bool sent = sendMessage(presentation::command(
+      std::move(operation), std::move(parameters), requestId));
+  if (sent && !threadId.empty() &&
+      !presentation::isThreadHydrationAction(action) && activityHandler)
+    activityHandler(threadId);
+  if (!sent) {
+    const auto iterator = outstanding.find(requestId);
+    if (iterator != outstanding.end()) {
+      ResponseHandler failed = std::move(iterator->second.completion);
+      const std::string failedAction = std::move(iterator->second.action);
+      outstanding.erase(iterator);
+      if (!failed)
+        return requestId;
+      try {
+        failed(presentation::result(
+            0, activeGeneration, failedAction, requestId, false,
+            {{"code", -32020},
+             {"message", "CodexUI IPC rejected operation"}}));
+      } catch (...) {
+      }
+    }
   }
   return requestId;
 }
@@ -411,17 +449,24 @@ void FrontendSession::receiveMessage(nlohmann::json message) {
   if (presentation::stringMember(message, "kind") == "result") {
     const std::string requestId =
         presentation::stringMember(message, "correlationId");
-    if (outstanding.erase(requestId) == 0)
+    const auto iterator = outstanding.find(requestId);
+    if (iterator == outstanding.end())
       return;
-    const auto iterator = pending.find(requestId);
-    if (iterator != pending.end()) {
-      ResponseHandler handler = std::move(iterator->second);
-      pending.erase(iterator);
-      if (handler) {
-        try {
-          handler(message);
-        } catch (...) {
-        }
+    if (presentation::stringMember(message, "action") !=
+        iterator->second.action) {
+      terminalFailure("presentation result action does not match its request");
+      return;
+    }
+    if (!iterator->second.threadId.empty() &&
+        !presentation::isThreadHydrationAction(iterator->second.action) &&
+        activityHandler)
+      activityHandler(iterator->second.threadId);
+    ResponseHandler handler = std::move(iterator->second.completion);
+    outstanding.erase(iterator);
+    if (handler) {
+      try {
+        handler(message);
+      } catch (...) {
       }
     }
   }
@@ -483,22 +528,18 @@ void FrontendSession::terminalFailure(std::string message) {
 
 void FrontendSession::failAllPending(int code, std::string message,
                                      bool transient) noexcept {
+  auto failed = std::move(outstanding);
   outstanding.clear();
-  auto failed = std::move(pending);
-  pending.clear();
-  for (auto &[correlationId, handler] : failed) {
+  for (auto &[correlationId, request] : failed) {
+    ResponseHandler &handler = request.completion;
     if (!handler)
       continue;
     try {
       nlohmann::json error{{"code", code}, {"message", message}};
       if (transient)
         error["transient"] = true;
-      handler({{"protocol", presentation::ProtocolName},
-               {"version", presentation::ProtocolVersion},
-               {"kind", "result"},
-               {"correlationId", correlationId},
-               {"ok", false},
-               {"error", std::move(error)}});
+      handler(presentation::result(0, activeGeneration, request.action,
+                                   correlationId, false, std::move(error)));
     } catch (...) {
     }
   }

@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -55,6 +56,24 @@ constexpr int ThumbnailMaximumHeight = 180;
 constexpr int ViewerMaximumImageExtent = 4096;
 constexpr qsizetype MaximumGenericActivityCharacters = 4096;
 constexpr int CardHeaderActionSpacing = 4;
+
+QString text(std::string_view value) {
+  return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
+}
+
+QStringList textList(const std::vector<std::string> &values) {
+  QStringList result;
+  result.reserve(static_cast<qsizetype>(values.size()));
+  for (const std::string &value : values)
+    result.push_back(text(value));
+  return result;
+}
+
+std::string utf8(const QString &value) { return value.toUtf8().toStdString(); }
+
+QString trimmedTrailingLines(const QString &value) {
+  return text(trimTrailingEmptyLines(utf8(value)));
+}
 
 bool initiallyCollapsed(CardKind kind, bool commandInitiallyCollapsed,
                         bool imageInitiallyCollapsed) {
@@ -225,8 +244,8 @@ public:
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
     setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-    setStyleSheet(QStringLiteral(
-        "QScrollArea#messageImages{background:#fbfcfe;"
+    setStyleSheet(
+        QStringLiteral("QScrollArea#messageImages{background:#fbfcfe;"
         "border:1px solid #d7dee8;border-radius:6px;}"
         "QWidget#messageImageStrip{background:transparent;}"));
 
@@ -279,8 +298,8 @@ private:
     const bool overflows = naturalSize_.width() > availableWidth;
     const int scrollBarHeight =
         overflows ? style()->pixelMetric(QStyle::PM_ScrollBarExtent) : 0;
-    const int target = std::max(
-        0, naturalSize_.height() + scrollBarHeight + 2 * frameWidth());
+    const int target =
+        std::max(0, naturalSize_.height() + scrollBarHeight + 2 * frameWidth());
     if (height() != target)
       setFixedHeight(target);
   }
@@ -447,11 +466,11 @@ void setStatusTone(QLabel *label, const QString &status) {
 }
 
 QString commandMetadata(const CommandExecutionData &command) {
-  QStringList metadata{displayStatus(command.status)};
+  QStringList metadata{displayStatus(text(command.status))};
   if (command.exitCode)
     metadata << QStringLiteral("exit %1").arg(*command.exitCode);
-  if (!command.cwd.isEmpty())
-    metadata << command.cwd;
+  if (!command.cwd.empty())
+    metadata << text(command.cwd);
   if (command.durationMilliseconds) {
     const qreal seconds = qreal(*command.durationMilliseconds) / 1000.0;
     metadata << QStringLiteral("%1 s").arg(seconds, 0, 'f',
@@ -462,29 +481,29 @@ QString commandMetadata(const CommandExecutionData &command) {
 
 QString agentMetadata(const AgentActivityData &activity) {
   QStringList metadata;
-  if (!activity.tool.isEmpty())
-    metadata << activity.tool;
-  metadata << displayStatus(activity.status.isEmpty() ? activity.kind
-                                                      : activity.status);
-  if (!activity.receivers.isEmpty())
-    metadata << activity.receivers.join(QStringLiteral(", "));
-  if (!activity.model.isEmpty())
-    metadata << activity.model;
-  if (!activity.reasoningEffort.isEmpty())
-    metadata << activity.reasoningEffort;
-  if (!activity.childThreadId.isEmpty())
-    metadata << QStringLiteral("thread %1").arg(activity.childThreadId);
-  if (!activity.agentPath.isEmpty())
-    metadata << activity.agentPath;
-  if (!activity.senderThreadId.isEmpty())
-    metadata << QStringLiteral("sender %1").arg(activity.senderThreadId);
+  if (!activity.tool.empty())
+    metadata << text(activity.tool);
+  metadata << displayStatus(
+      text(activity.status.empty() ? activity.kind : activity.status));
+  if (!activity.receivers.empty())
+    metadata << textList(activity.receivers).join(QStringLiteral(", "));
+  if (!activity.model.empty())
+    metadata << text(activity.model);
+  if (!activity.reasoningEffort.empty())
+    metadata << text(activity.reasoningEffort);
+  if (!activity.childThreadId.empty())
+    metadata << QStringLiteral("thread %1").arg(text(activity.childThreadId));
+  if (!activity.agentPath.empty())
+    metadata << text(activity.agentPath);
+  if (!activity.senderThreadId.empty())
+    metadata << QStringLiteral("sender %1").arg(text(activity.senderThreadId));
   return metadata.join(QStringLiteral("  |  "));
 }
 
-QString displayChangeKind(const QString &kind) {
-  if (kind.isEmpty())
+QString displayChangeKind(std::string_view kind) {
+  if (kind.empty())
     return QStringLiteral("Changed");
-  return UiStyle::humanizeLabel(kind);
+  return UiStyle::humanizeLabel(text(kind));
 }
 
 struct DiffCounts {
@@ -505,10 +524,10 @@ QString joinedCopyText(QStringList parts) {
 QString fileChangesText(const FileChangesData &data) {
   QStringList rows;
   for (const FileChangeData &change : data.changes) {
-    if (change.path.isEmpty())
+    if (change.path.empty())
       continue;
     QString row = QStringLiteral("%1  ·  %2")
-                      .arg(change.path, displayChangeKind(change.kind));
+                      .arg(text(change.path), displayChangeKind(change.kind));
     if (change.additions && change.deletions)
       row += QStringLiteral("  +%1 −%2")
                  .arg(*change.additions)
@@ -532,19 +551,18 @@ std::optional<DiffCounts> totalDiffCounts(const FileChangesData &data) {
 }
 
 QString planMarkdown(const PlanData &plan) {
-  if (!plan.legacyText.isEmpty())
-    return plan.legacyText;
+  if (!plan.legacyText.empty())
+    return text(plan.legacyText);
   QStringList rows;
-  if (!plan.explanation.isEmpty())
-    rows << plan.explanation;
+  if (!plan.explanation.empty())
+    rows << text(plan.explanation);
   if (!plan.steps.empty() && !rows.empty())
     rows << QString{};
   for (const PlanStepData &step : plan.steps) {
-    const QString marker =
-        step.status == QStringLiteral("completed")    ? QStringLiteral("✓")
-        : step.status == QStringLiteral("inProgress") ? QStringLiteral("◉")
+    const QString marker = step.status == "completed"    ? QStringLiteral("✓")
+                           : step.status == "inProgress" ? QStringLiteral("◉")
                                                       : QStringLiteral("○");
-    rows << QStringLiteral("%1 %2  ").arg(marker, step.text);
+    rows << QStringLiteral("%1 %2  ").arg(marker, text(step.text));
   }
   return rows.join(QLatin1Char('\n'));
 }
@@ -562,33 +580,40 @@ CardCopyContent cardCopyContent(const VisibleCardData &card) {
       [](const auto &payload) -> CardCopyContent {
         using Payload = std::decay_t<decltype(payload)>;
         if constexpr (std::is_same_v<Payload, UserMessageData>) {
-          return payload.text.isEmpty()
-                     ? CardCopyContent{
-                           payload.imagePaths.join(QLatin1Char('\n')), false}
-                     : CardCopyContent{payload.text, true};
+          return payload.text.empty()
+                     ? CardCopyContent{textList(payload.imagePaths)
+                                           .join(QLatin1Char('\n')),
+                                       false}
+                     : CardCopyContent{text(payload.text), true};
         } else if constexpr (std::is_same_v<Payload, AgentMessageData>) {
-          return {payload.text, true};
+          return {text(payload.text), true};
         } else if constexpr (std::is_same_v<Payload, CommandExecutionData>) {
-          return {joinedCopyText({trimTrailingEmptyLines(payload.command),
-                                  trimTrailingEmptyLines(payload.output)}),
+          return {
+              joinedCopyText({text(trimTrailingEmptyLines(payload.command)),
+                              text(trimTrailingEmptyLines(payload.output))}),
                   false};
         } else if constexpr (std::is_same_v<Payload, AgentActivityData>) {
-          return {joinedCopyText({payload.prompt, payload.resultText}), true};
+          return {
+              joinedCopyText({text(payload.prompt), text(payload.resultText)}),
+              true};
         } else if constexpr (std::is_same_v<Payload, ReasoningData>) {
-          return {payload.summary, true};
+          return {text(payload.summary), true};
         } else if constexpr (std::is_same_v<Payload, FileChangesData>) {
           return {fileChangesText(payload), false};
         } else if constexpr (std::is_same_v<Payload, PlanData>) {
           return {planMarkdown(payload), true};
         } else if constexpr (std::is_same_v<Payload, ImageGenerationData>) {
-          return {joinedCopyText({payload.revisedPrompt, payload.path}), false};
+          return {
+              joinedCopyText({text(payload.revisedPrompt), text(payload.path)}),
+              false};
         } else if constexpr (std::is_same_v<Payload, GenericActivityData>) {
           return {boundedGenericActivity(payload.raw), false};
         } else {
-          return payload.prompt.isEmpty()
-                     ? CardCopyContent{
-                           payload.imagePaths.join(QLatin1Char('\n')), false}
-                     : CardCopyContent{payload.prompt, true};
+          return payload.prompt.empty()
+                     ? CardCopyContent{textList(payload.imagePaths)
+                                           .join(QLatin1Char('\n')),
+                                       false}
+                     : CardCopyContent{text(payload.prompt), true};
         }
       },
       card.payload);
@@ -764,7 +789,7 @@ bool CommandOutputView::followsLatest() const noexcept {
 }
 
 bool CommandOutputView::setOutput(const QString &output) {
-  const QString displayOutput = trimTrailingEmptyLines(output);
+  const QString displayOutput = trimmedTrailingLines(output);
   if (currentOutput_ == displayOutput)
     return false;
 
@@ -1046,8 +1071,8 @@ public:
   }
 
   void updateComposition(const UserMessageData &message) {
-    setVisibleMarkdown(body, message.text);
-    setImages(message.imagePaths);
+    setVisibleMarkdown(body, text(message.text));
+    setImages(textList(message.imagePaths));
   }
 
   void createComposition(const AgentMessageData &message) {
@@ -1072,8 +1097,8 @@ public:
   }
 
   void updateComposition(const AgentMessageData &message) {
-    const QString messagePhase =
-        message.finalAnswer ? QStringLiteral("final") : QStringLiteral("update");
+    const QString messagePhase = message.finalAnswer ? QStringLiteral("final")
+                                                     : QStringLiteral("update");
     if (owner->property("messagePhase").toString() != messagePhase) {
       owner->setProperty("messagePhase", messagePhase);
       owner->style()->unpolish(owner);
@@ -1088,7 +1113,7 @@ public:
     setStatusTone(phase, phaseStatus);
     layout->setContentsMargins(12, message.finalAnswer ? 10 : 8, 12,
                                message.finalAnswer ? 10 : 8);
-    setVisibleMarkdown(body, message.text);
+    setVisibleMarkdown(body, text(message.text));
   }
 
   void createComposition(const CommandExecutionData &execution) {
@@ -1110,14 +1135,15 @@ public:
   }
 
   void updateComposition(const CommandExecutionData &execution) {
-    const QByteArray status = execution.status.toUtf8();
-    setActiveWork(isActiveStatus(std::string_view(
-        status.constData(), static_cast<std::size_t>(status.size()))));
-    const QString displayCommand = trimTrailingEmptyLines(execution.command);
+    setActiveWork(isActiveStatus(execution.status));
+    const std::string trimmedCommand =
+        trimTrailingEmptyLines(execution.command);
+    const QString displayCommand = text(trimmedCommand);
     command->setContent(displayCommand);
     command->setVisible(!displayCommand.isEmpty());
-    const QString displayOutput = trimTrailingEmptyLines(execution.output);
-    const bool visibleOutput = terminalOutputHasVisibleText(displayOutput);
+    const std::string trimmedOutput = trimTrailingEmptyLines(execution.output);
+    const QString displayOutput = text(trimmedOutput);
+    const bool visibleOutput = terminalOutputHasVisibleText(trimmedOutput);
     if (visibleOutput) {
       output->setOutput(displayOutput);
       output->show();
@@ -1130,7 +1156,7 @@ public:
       output->restoreScrollState({true, 0});
     }
     metadata->setText(commandMetadata(execution));
-    setStatusTone(metadata, execution.status);
+    setStatusTone(metadata, text(execution.status));
     metadata->show();
   }
 
@@ -1147,11 +1173,11 @@ public:
 
   void updateComposition(const AgentActivityData &activity) {
     metadata->setText(agentMetadata(activity));
-    setStatusTone(metadata,
-                  activity.status.isEmpty() ? activity.kind : activity.status);
+    setStatusTone(metadata, text(activity.status.empty() ? activity.kind
+                                                         : activity.status));
     metadata->show();
-    setVisibleText(body, activity.prompt);
-    setVisibleMarkdown(detail, activity.resultText);
+    setVisibleText(body, text(activity.prompt));
+    setVisibleMarkdown(detail, text(activity.resultText));
   }
 
   void createComposition(const ReasoningData &reasoning) {
@@ -1162,7 +1188,7 @@ public:
   }
 
   void updateComposition(const ReasoningData &reasoning) {
-    setVisibleMarkdown(body, reasoning.summary);
+    setVisibleMarkdown(body, text(reasoning.summary));
   }
 
   void createComposition(const FileChangesData &changes) {
@@ -1176,14 +1202,14 @@ public:
 
   void updateComposition(const FileChangesData &changes) {
     setVisibleText(body, fileChangesText(changes));
-    QStringList values{displayStatus(changes.status)};
+    QStringList values{displayStatus(text(changes.status))};
     values << QStringLiteral("%1 paths").arg(changes.changes.size());
     if (const auto counts = totalDiffCounts(changes))
       values << QStringLiteral("+%1 −%2")
                     .arg(counts->additions)
                     .arg(counts->deletions);
     metadata->setText(values.join(QStringLiteral("  |  ")));
-    setStatusTone(metadata, changes.status);
+    setStatusTone(metadata, text(changes.status));
     metadata->show();
   }
 
@@ -1209,19 +1235,18 @@ public:
   }
 
   void updateComposition(const ImageGenerationData &image) {
-    const QByteArray status = image.status.toUtf8();
-    setActiveWork(isActiveStatus(std::string_view(
-        status.constData(), static_cast<std::size_t>(status.size()))));
+    setActiveWork(isActiveStatus(image.status));
     const bool generated =
-        !image.status.isEmpty() || !image.revisedPrompt.isEmpty();
+        !image.status.empty() || !image.revisedPrompt.empty();
     title->setText(generated ? QStringLiteral("Generated image")
                              : QStringLiteral("Image"));
-    setVisibleText(metadata, displayStatus(image.status));
-    setStatusTone(metadata, image.status);
-    setVisibleText(body, image.revisedPrompt);
+    setVisibleText(metadata, displayStatus(text(image.status)));
+    setStatusTone(metadata, text(image.status));
+    setVisibleText(body, text(image.revisedPrompt));
     // A generated image can become readable at the same path as its status
     // advances, so its update remains the authoritative reload boundary.
-    setImages(image.path.isEmpty() ? QStringList{} : QStringList{image.path},
+    setImages(image.path.empty() ? QStringList{}
+                                 : QStringList{text(image.path)},
               true);
   }
 
@@ -1232,9 +1257,9 @@ public:
   }
 
   void updateComposition(const GenericActivityData &activity) {
-    title->setText(activity.type.isEmpty()
+    title->setText(activity.type.empty()
                        ? QStringLiteral("Activity")
-                       : UiStyle::humanizeLabel(activity.type));
+                       : UiStyle::humanizeLabel(text(activity.type)));
     metadata->setText(boundedGenericActivity(activity.raw));
     metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
     metadata->show();
@@ -1262,8 +1287,8 @@ public:
   }
 
   void updateComposition(const LocalPromptData &prompt) {
-    setVisibleMarkdown(body, prompt.prompt);
-    setImages(prompt.imagePaths);
+    setVisibleMarkdown(body, text(prompt.prompt));
+    setImages(textList(prompt.imagePaths));
     refreshPendingPresentation();
   }
 
@@ -1292,9 +1317,9 @@ public:
 
     QString status;
     if (failed)
-      status = prompt->error.isEmpty()
+      status = prompt->error.empty()
                    ? QStringLiteral("Not sent")
-                   : QStringLiteral("Not sent: %1").arg(prompt->error);
+                   : QStringLiteral("Not sent: %1").arg(text(prompt->error));
 
     changed = setVisibleText(metadata, status) || changed;
 
@@ -1393,8 +1418,8 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setBrush(Qt::NoBrush);
     painter.setPen(QPen(QColor(QStringLiteral("#98a2b3")), 1.5));
-    painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0),
-                            9.0, 9.0);
+    painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0), 9.0,
+                            9.0);
     return;
   }
   if (impl_->current.kind == CardKind::UserMessage &&
@@ -1403,8 +1428,8 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setBrush(Qt::NoBrush);
     painter.setPen(QPen(QColor(QStringLiteral("#6f98e8")), 1.5));
-    painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0),
-                            8.0, 8.0);
+    painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0), 8.0,
+                            8.0);
     return;
   }
   if (impl_->current.kind != CardKind::LocalPrompt)

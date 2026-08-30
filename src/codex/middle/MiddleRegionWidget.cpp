@@ -26,6 +26,7 @@
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
+#include <algorithm>
 #include <array>
 #include <utility>
 
@@ -238,8 +239,19 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   conversationMetadata->setObjectName(
       QStringLiteral("conversationMetadata"));
   conversationMetadata->setWordWrap(false);
-  threadHeading->addWidget(conversationTitle, 0, Qt::AlignBaseline);
-  threadHeading->addWidget(conversationMetadata, 1, Qt::AlignBaseline);
+  conversationTrailingMetadata = makeLabel({}, "meta");
+  conversationTrailingMetadata->setObjectName(
+      QStringLiteral("conversationTrailingMetadata"));
+  conversationTrailingMetadata->setWordWrap(false);
+  conversationTrailingMetadata->setSizePolicy(QSizePolicy::Minimum,
+                                              QSizePolicy::Preferred);
+  conversationTitle->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+  conversationMetadata->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+  conversationTrailingMetadata->setAlignment(Qt::AlignRight | Qt::AlignTop);
+  alignThreadHeadingBaselines();
+  threadHeading->addWidget(conversationTitle, 0, Qt::AlignTop);
+  threadHeading->addWidget(conversationMetadata, 1, Qt::AlignTop);
+  threadHeading->addWidget(conversationTrailingMetadata, 0, Qt::AlignTop);
   contentLayout->addLayout(threadHeading);
   contentLayout->addSpacing(7);
   contentLayout->addWidget(divider());
@@ -334,11 +346,29 @@ QSplitter *MiddleRegionWidget::splitterWidget() const noexcept {
   return splitter;
 }
 
-void MiddleRegionWidget::setThreadHeading(QString title, QString metadata) {
+void MiddleRegionWidget::setThreadHeading(QString title, QString metadata,
+                                          QString trailingMetadata) {
   if (conversationTitle->text() != title)
     conversationTitle->setText(std::move(title));
   if (conversationMetadata->text() != metadata)
     conversationMetadata->setText(std::move(metadata));
+  if (conversationTrailingMetadata->text() != trailingMetadata)
+    conversationTrailingMetadata->setText(std::move(trailingMetadata));
+  alignThreadHeadingBaselines();
+}
+
+void MiddleRegionWidget::alignThreadHeadingBaselines() {
+  conversationTitle->ensurePolished();
+  conversationMetadata->ensurePolished();
+  conversationTrailingMetadata->ensurePolished();
+  const int offset = std::max(
+      0, conversationTitle->fontMetrics().ascent() -
+             conversationMetadata->fontMetrics().ascent());
+  conversationMetadata->setContentsMargins(0, offset, 0, 0);
+  const int trailingOffset = std::max(
+      0, conversationTitle->fontMetrics().ascent() -
+             conversationTrailingMetadata->fontMetrics().ascent());
+  conversationTrailingMetadata->setContentsMargins(0, trailingOffset, 0, 0);
 }
 
 void MiddleRegionWidget::showNotice(QString message, bool error) {

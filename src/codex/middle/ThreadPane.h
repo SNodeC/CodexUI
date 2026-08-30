@@ -3,6 +3,8 @@
 #ifndef CODEXUI_CODEX_MIDDLE_THREADPANE_H
 #define CODEXUI_CODEX_MIDDLE_THREADPANE_H
 
+#include "codex/ui/UiViewState.h"
+
 #include <QFrame>
 
 #include <cstddef>
@@ -20,8 +22,6 @@ class QToolButton;
 class QTimer;
 
 namespace codexui::codex {
-class PresentationModel;
-
 namespace middle {
 
 class ThreadPane final : public QFrame {
@@ -43,8 +43,7 @@ public:
   explicit ThreadPane(QWidget *parent = nullptr);
 
   void setActions(Actions actions);
-  void refresh(const PresentationModel &model,
-               const std::string &selectedThreadId);
+  void refresh(const ui::ThreadListSnapshot &snapshot);
   void beginOptimisticThread(std::string id, std::string title,
                              std::string cwd);
   void promoteOptimisticThread(const std::string &draftId,
@@ -58,7 +57,7 @@ public:
   [[nodiscard]] std::string visiblySelectedThreadId() const;
 
 private:
-  struct ThreadRowSnapshot {
+  struct RenderedThreadRow {
     std::string id;
     std::string title;
     std::string cwd;
@@ -71,14 +70,14 @@ private:
     bool optimistic = false;
     bool optimisticFailed = false;
 
-    bool operator==(const ThreadRowSnapshot &) const = default;
+    bool operator==(const RenderedThreadRow &) const = default;
   };
-  struct ThreadPaneSnapshot {
+  struct RenderedThreadList {
     std::string selectedThreadId;
     SortCriterion sortCriterion = SortCriterion::Recency;
-    std::vector<ThreadRowSnapshot> rows;
+    std::vector<RenderedThreadRow> rows;
 
-    bool operator==(const ThreadPaneSnapshot &) const = default;
+    bool operator==(const RenderedThreadList &) const = default;
   };
   struct OptimisticThread {
     std::string id;
@@ -93,19 +92,17 @@ private:
   };
 
   void updateSortButton();
-  void sortRootThreads(std::vector<std::string> &ids,
-                       const PresentationModel &model) const;
-  void appendVisibleThread(
-      ThreadPaneSnapshot &snapshot, const PresentationModel &model,
-      const std::unordered_map<std::string, std::size_t> &pendingByThread,
-      const std::string &threadId, const std::string &parentId,
-      std::size_t depth, std::unordered_set<std::string> &visited) const;
+  void sortRootThreads(std::vector<ui::ThreadListRow> &rows) const;
+  void appendVisibleThread(RenderedThreadList &snapshot,
+                           const ui::ThreadListRow &thread,
+                           const std::string &parentId, std::size_t depth,
+                           std::unordered_set<std::string> &visited) const;
   void toggleExpanded(const std::string &threadId);
   void navigateHierarchy(int key);
   void setContextHighlight(const std::string &threadId, bool highlighted);
   void showContextMenu(const QPoint &position);
 
-  const PresentationModel *currentModel = nullptr;
+  std::optional<ui::ThreadListSnapshot> currentSnapshot;
   Actions actions;
   SortCriterion sortCriterion = SortCriterion::Recency;
   QToolButton *sortButton = nullptr;
@@ -118,7 +115,7 @@ private:
   QTimer *optimisticAnimation = nullptr;
   std::vector<OptimisticThread> optimisticThreads;
   std::optional<PromptPromotion> promptPromotion;
-  std::optional<ThreadPaneSnapshot> visibleSnapshot;
+  std::optional<RenderedThreadList> visibleSnapshot;
 };
 
 } // namespace middle

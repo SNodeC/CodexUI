@@ -3,6 +3,8 @@
 #ifndef CODEXUI_CODEX_MIDDLE_INSPECTORPANE_H
 #define CODEXUI_CODEX_MIDDLE_INSPECTORPANE_H
 
+#include "codex/ui/UiViewState.h"
+
 #include <QByteArray>
 #include <QFrame>
 #include <QString>
@@ -26,7 +28,6 @@ class QVBoxLayout;
 namespace codexui::codex {
 
 class DiffViewer;
-class PresentationModel;
 
 namespace middle {
 
@@ -36,77 +37,19 @@ namespace middle {
 class InspectorPane final : public QFrame {
 public:
   using RequestAction = std::function<void(const std::string &)>;
-  using RequestEligibility = std::function<bool(const std::string &)>;
 
   explicit InspectorPane(QWidget *parent = nullptr);
 
   void setHideAction(std::function<void()> hide);
   void setRequestActions(RequestAction review, RequestAction accept,
-                         RequestAction reject, RequestEligibility eligible);
-  void refresh(const PresentationModel &model,
-               const std::string &selectedThreadId);
+                         RequestAction reject);
+  void refresh(const ui::InspectorSnapshot &snapshot);
   void appendProtocolFrame(const nlohmann::json &frame);
 
   [[nodiscard]] QTabWidget *tabs() const noexcept { return inspectorTabs; }
 
 private:
-  struct PlanStepSnapshot {
-    std::string step;
-    std::string status;
-
-    bool operator==(const PlanStepSnapshot &) const = default;
-  };
-  struct PlanContentSnapshot {
-    std::string explanation;
-    std::vector<PlanStepSnapshot> steps;
-
-    bool operator==(const PlanContentSnapshot &) const = default;
-  };
-  struct PlanSnapshot {
-    std::string threadId;
-    bool threadPresent = false;
-    std::optional<PlanContentSnapshot> plan;
-    std::optional<std::string> planItem;
-
-    bool operator==(const PlanSnapshot &) const = default;
-  };
-  struct AgentSnapshot {
-    std::string id;
-    std::string status;
-    std::string childThreadId;
-    std::string agentPath;
-    std::string tool;
-    std::string model;
-    std::string reasoningEffort;
-    std::string prompt;
-    std::string resultText;
-    std::string senderThreadId;
-    std::vector<std::string> receiverThreadIds;
-
-    bool operator==(const AgentSnapshot &) const = default;
-  };
-  struct AgentsSnapshot {
-    std::string threadId;
-    bool threadPresent = false;
-    std::vector<AgentSnapshot> agents;
-
-    bool operator==(const AgentsSnapshot &) const = default;
-  };
-  struct RequestSnapshot {
-    std::string id;
-    std::string kind;
-    std::string threadContext;
-    std::uint64_t generation = 0;
-    std::string command;
-    std::string reason;
-    std::string message;
-    std::optional<std::size_t> questionCount;
-    bool actionable = false;
-
-    bool operator==(const RequestSnapshot &) const = default;
-  };
-
-  static QFrame *agentFrame(const AgentSnapshot &agent);
+  static QFrame *agentFrame(const ui::InspectorAgentRow &agent);
   void refreshCurrentTab();
   void refreshPlan();
   void refreshAgents();
@@ -117,12 +60,10 @@ private:
   void showProtocolTail();
   void restoreProtocolScroll(bool followsTail, int pausedValue);
 
-  const PresentationModel *currentModel = nullptr;
-  std::string currentThreadId;
+  std::optional<ui::InspectorSnapshot> currentSnapshot;
   RequestAction reviewRequest;
   RequestAction acceptRequest;
   RequestAction rejectRequest;
-  RequestEligibility requestEligible;
   std::function<void()> hideAction;
 
   QTabWidget *inspectorTabs = nullptr;
@@ -138,9 +79,9 @@ private:
   QPlainTextEdit *protocolLog = nullptr;
   QLabel *protocolStats = nullptr;
 
-  std::optional<PlanSnapshot> planSnapshot;
-  std::optional<AgentsSnapshot> agentsSnapshot;
-  std::optional<std::vector<RequestSnapshot>> requestsSnapshot;
+  std::optional<ui::InspectorPlanSnapshot> planSnapshot;
+  std::optional<ui::InspectorAgentsSnapshot> agentsSnapshot;
+  std::optional<ui::InspectorRequestsSnapshot> requestsSnapshot;
   QByteArray stateSnapshot;
   QByteArray protocolStatsSnapshot;
   std::deque<QString> protocolLines;

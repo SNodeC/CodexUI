@@ -19,10 +19,6 @@ namespace {
 // complete Conversation projection available for a one-line policy reversal.
 constexpr bool projectStructuredPlansInConversation = false;
 
-QString text(const std::string &value) {
-  return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
-}
-
 std::string stringValue(const nlohmann::json &object, const char *key) {
   if (!object.is_object())
     return {};
@@ -31,88 +27,101 @@ std::string stringValue(const nlohmann::json &object, const char *key) {
                                                      : std::string{};
 }
 
-std::optional<qint64> integerValue(const nlohmann::json &object,
+std::optional<std::int64_t> integerValue(const nlohmann::json &object,
                                    const char *key) {
   if (!object.is_object())
     return std::nullopt;
   const auto value = object.find(key);
   if (value == object.end() || !value->is_number_integer())
     return std::nullopt;
-  return value->get<qint64>();
+  return value->get<std::int64_t>();
 }
 
-std::optional<QString> optionalText(const nlohmann::json &object,
+std::optional<std::string> optionalText(const nlohmann::json &object,
                                     const char *key) {
   if (!object.is_object())
     return std::nullopt;
   const auto value = object.find(key);
   if (value == object.end() || !value->is_string())
     return std::nullopt;
-  return text(value->get<std::string>());
+  return value->get<std::string>();
 }
 
 std::uint64_t omittedTextBytes(const ItemPresentation &item,
                                const char *field) {
-  const auto value = std::find_if(
-      item.textRetention.begin(), item.textRetention.end(),
+  const auto value =
+      std::find_if(item.textRetention.begin(), item.textRetention.end(),
       [field](const TextRetentionPresentation &entry) {
         return entry.field == field;
       });
   return value == item.textRetention.end() ? 0 : value->discardedBytes;
 }
 
-QString withTruncationNotice(QString value, std::uint64_t omitted,
-                             const QString &subject, bool markdown) {
+std::string withTruncationNotice(std::string value, std::uint64_t omitted,
+                                 std::string_view subject, bool markdown) {
   if (omitted == 0)
     return value;
-  const QString notice =
-      QStringLiteral("Earlier %1 was truncated (%2 bytes omitted).")
-          .arg(subject, QString::number(omitted));
-  return markdown ? QStringLiteral("> %1\n\n%2").arg(notice, value)
-                  : QStringLiteral("[%1]\n%2").arg(notice, value);
+  const std::string notice = "Earlier " + std::string(subject) +
+                             " was truncated (" + std::to_string(omitted) +
+                             " bytes omitted).";
+  return markdown ? "> " + notice + "\n\n" + value
+                  : '[' + notice + "]\n" + value;
 }
 
-std::pair<int, int> unifiedDiffCounts(QStringView diff) {
+std::pair<int, int> unifiedDiffCounts(std::string_view diff) {
   int additions = 0;
   int deletions = 0;
-  for (const QStringView line : diff.split(QLatin1Char('\n'))) {
-    if (line.startsWith(QStringLiteral("+++ ")) ||
-        line.startsWith(QStringLiteral("--- ")))
+  for (std::size_t offset = 0; offset <= diff.size();) {
+    const std::size_t end = diff.find('\n', offset);
+    const std::string_view line =
+        diff.substr(offset, end == std::string_view::npos ? diff.size() - offset
+                                                          : end - offset);
+    if (line.starts_with("+++ ") || line.starts_with("--- ")) {
+      if (end == std::string_view::npos)
+        break;
+      offset = end + 1;
       continue;
-    if (line.startsWith(QLatin1Char('+')))
+    }
+    if (line.starts_with('+'))
       ++additions;
-    else if (line.startsWith(QLatin1Char('-')))
+    else if (line.starts_with('-'))
       ++deletions;
+    if (end == std::string_view::npos)
+      break;
+    offset = end + 1;
   }
   return {additions, deletions};
 }
 
-QString messageText(const nlohmann::json &item) {
+std::string messageText(const nlohmann::json &item) {
   const std::string type = stringValue(item, "type");
   if (type == "agentMessage" || type == "plan")
-    return text(stringValue(item, "text"));
+    return stringValue(item, "text");
   if (type != "userMessage")
     return {};
 
-  QStringList parts;
+  std::string result;
   const auto content = item.find("content");
   if (content != item.end() && content->is_array()) {
     for (const nlohmann::json &entry : *content) {
       const std::string value = stringValue(entry, "text");
-      if (!value.empty())
-        parts.push_back(text(value));
+      if (value.empty())
+        continue;
+      if (!result.empty())
+        result.push_back('\n');
+      result += value;
     }
   }
-  if (parts.empty()) {
+  if (result.empty()) {
     const std::string fallback = stringValue(item, "text");
     if (!fallback.empty())
-      parts.push_back(text(fallback));
+      result = fallback;
   }
-  return parts.join(QStringLiteral("\n"));
+  return result;
 }
 
-QStringList messageImagePaths(const nlohmann::json &item) {
-  QStringList result;
+std::vector<std::string> messageImagePaths(const nlohmann::json &item) {
+  std::vector<std::string> result;
   const auto content = item.find("content");
   if (content == item.end() || !content->is_array())
     return result;
@@ -121,36 +130,40 @@ QStringList messageImagePaths(const nlohmann::json &item) {
       continue;
     const std::string path = stringValue(entry, "path");
     if (!path.empty())
-      result.push_back(text(path));
+      result.push_back(path);
   }
   return result;
 }
 
-QStringList localImagePaths(const PromptSubmission &submission) {
-  QStringList result;
+std::vector<std::string> localImagePaths(const PromptSubmission &submission) {
+  std::vector<std::string> result;
   for (const AttachmentDraft &attachment : submission.attachments)
-    if (attachment.mimeType.startsWith(QStringLiteral("image/")))
+    if (attachment.mimeType.starts_with("image/"))
       result.push_back(attachment.path);
   return result;
 }
 
-QString joinedStrings(const nlohmann::json &value) {
+std::string joinedStrings(const nlohmann::json &value) {
   if (!value.is_array())
     return {};
-  QStringList result;
-  for (const nlohmann::json &entry : value)
-    if (entry.is_string())
-      result.push_back(text(entry.get<std::string>()));
-  return result.join(QStringLiteral(", "));
+  std::string result;
+  for (const nlohmann::json &entry : value) {
+    if (!entry.is_string())
+      continue;
+    if (!result.empty())
+      result += ", ";
+    result += entry.get<std::string>();
+  }
+  return result;
 }
 
-QStringList stringList(const nlohmann::json &value) {
-  QStringList result;
+std::vector<std::string> stringList(const nlohmann::json &value) {
+  std::vector<std::string> result;
   if (!value.is_array())
     return result;
   for (const nlohmann::json &entry : value)
     if (entry.is_string())
-      result.push_back(text(entry.get<std::string>()));
+      result.push_back(entry.get<std::string>());
   return result;
 }
 
@@ -164,15 +177,15 @@ bool hasStructuredPlan(const TurnPresentation &turn) {
 
 PlanData structuredPlan(const TurnPresentation &turn) {
   PlanData result;
-  result.explanation = text(stringValue(turn.plan, "explanation"));
+  result.explanation = stringValue(turn.plan, "explanation");
   const auto steps = turn.plan.find("steps");
   if (steps == turn.plan.end() || !steps->is_array())
     return result;
   result.steps.reserve(steps->size());
   for (const nlohmann::json &step : *steps) {
-    const QString value = text(stringValue(step, "step"));
-    if (!value.isEmpty())
-      result.steps.push_back({value, text(stringValue(step, "status"))});
+    const std::string value = stringValue(step, "step");
+    if (!value.empty())
+      result.steps.push_back({value, stringValue(step, "status")});
   }
   return result;
 }
@@ -194,10 +207,9 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
                                   CardKey visualKey) {
   const nlohmann::json &item = presentation.raw;
   const std::string type = stringValue(item, "type");
-  VisibleCardData result{
-      std::move(visualKey), CardKind::GenericActivity,
+  VisibleCardData result{std::move(visualKey), CardKind::GenericActivity,
       identity.threadId,    identity.turnId,
-      identity.itemId,      GenericActivityData{text(type), item}};
+                         identity.itemId,      GenericActivityData{type, item}};
 
   if (type == "userMessage") {
     result.kind = CardKind::UserMessage;
@@ -208,65 +220,60 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
     result.payload = AgentMessageData{
         withTruncationNotice(messageText(item),
                              omittedTextBytes(presentation, "text"),
-                             QStringLiteral("Codex response"), true),
+                             "Codex response", true),
         stringValue(item, "phase") == "final_answer"};
   } else if (type == "commandExecution") {
     result.kind = CardKind::CommandExecution;
     const char *outputField = "aggregatedOutput";
-    QString output = text(stringValue(item, "aggregatedOutput"));
-    if (output.isEmpty()) {
+    std::string output = stringValue(item, "aggregatedOutput");
+    if (output.empty()) {
       outputField = "output";
-      output = text(stringValue(item, "output"));
+      output = stringValue(item, "output");
     }
-    output = withTruncationNotice(
-        output, omittedTextBytes(presentation, outputField),
-        QStringLiteral("command output"), false);
+    output = withTruncationNotice(output,
+                                  omittedTextBytes(presentation, outputField),
+                                  "command output", false);
     if (!terminalOutputHasVisibleText(output))
       output.clear();
     std::optional<int> exitCode;
     const auto rawExitCode = item.find("exitCode");
     if (rawExitCode != item.end() && rawExitCode->is_number_integer())
       exitCode = rawExitCode->get<int>();
-    std::optional<qint64> duration = integerValue(item, "durationMs");
+    std::optional<std::int64_t> duration = integerValue(item, "durationMs");
     if (!duration)
       duration = integerValue(item, "duration_ms");
-    result.payload = CommandExecutionData{text(stringValue(item, "command")),
-                                          output,
-                                          text(stringValue(item, "status")),
-                                          text(stringValue(item, "cwd")),
-                                          exitCode,
-                                          duration};
+    result.payload = CommandExecutionData{
+        stringValue(item, "command"), output,   stringValue(item, "status"),
+        stringValue(item, "cwd"),     exitCode, duration};
   } else if (type == "collabAgentToolCall" || type == "subAgentActivity") {
     result.kind = CardKind::AgentActivity;
     result.payload = AgentActivityData{
-        text(stringValue(item, "tool")),
-        text(stringValue(item, "status")),
-        text(stringValue(item, "kind")),
-        text(stringValue(item, "prompt")),
-        text(stringValue(item, "resultText")),
+        stringValue(item, "tool"),
+        stringValue(item, "status"),
+        stringValue(item, "kind"),
+        stringValue(item, "prompt"),
+        stringValue(item, "resultText"),
         stringList(item.value("receiverThreadIds", nlohmann::json::array())),
-        text(stringValue(item, "model")),
-        text(stringValue(item, "reasoningEffort")),
-        text(stringValue(item, "agentThreadId")),
-        text(stringValue(item, "agentPath")),
-        text(stringValue(item, "senderThreadId"))};
+        stringValue(item, "model"),
+        stringValue(item, "reasoningEffort"),
+        stringValue(item, "agentThreadId"),
+        stringValue(item, "agentPath"),
+        stringValue(item, "senderThreadId")};
   } else if (type == "reasoning") {
     result.kind = CardKind::Reasoning;
-    result.payload = ReasoningData{
-        withTruncationNotice(
+    result.payload = ReasoningData{withTruncationNotice(
             joinedStrings(item.value("summary", nlohmann::json::array())),
-            omittedTextBytes(presentation, "summary"),
-            QStringLiteral("reasoning"), true)};
+        omittedTextBytes(presentation, "summary"), "reasoning", true)};
   } else if (type == "fileChange") {
     result.kind = CardKind::FileChanges;
     const nlohmann::json changes =
         item.value("changes", nlohmann::json::array());
-    FileChangesData projected{text(stringValue(item, "status")), {}};
+    FileChangesData projected{stringValue(item, "status"), {}};
     if (changes.is_array()) {
       projected.changes.reserve(changes.size());
       for (const nlohmann::json &change : changes) {
-        FileChangeData entry{text(stringValue(change, "path")),
-                             text(stringValue(change, "kind")), std::nullopt,
+        FileChangeData entry{stringValue(change, "path"),
+                             stringValue(change, "kind"), std::nullopt,
                              std::nullopt};
         if (const auto diff = optionalText(change, "diff")) {
           const auto [additions, deletions] = unifiedDiffCounts(*diff);
@@ -287,13 +294,13 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
     if (revisedPrompt.empty())
       revisedPrompt = stringValue(item, "revised_prompt");
     result.kind = CardKind::ImageGeneration;
-    result.payload = ImageGenerationData{
-        text(path), text(stringValue(item, "status")), text(revisedPrompt)};
+    result.payload =
+        ImageGenerationData{path, stringValue(item, "status"), revisedPrompt};
   } else if (type == "plan") {
-    const QString plan = withTruncationNotice(
-        messageText(item), omittedTextBytes(presentation, "text"),
-        QStringLiteral("plan text"), true);
-    if (!plan.isEmpty()) {
+    const std::string plan = withTruncationNotice(
+        messageText(item), omittedTextBytes(presentation, "text"), "plan text",
+        true);
+    if (!plan.empty()) {
       result.kind = CardKind::Plan;
       result.payload = PlanData{{}, {}, plan};
     }
@@ -345,7 +352,7 @@ ConversationSnapshot ConversationProjection::project(
     const AuthoritativeItemIndex &authoritativeItems,
     const ThreadPresentation *authoritativeThread,
     std::span<const PromptSubmission> localSubmissions,
-    std::size_t authoritativeItemLimit, qint64 nowMilliseconds) {
+    std::size_t authoritativeItemLimit, std::int64_t nowMilliseconds) {
   ConversationSnapshot result;
   result.threadId = authoritativeItems.threadId;
 
@@ -370,8 +377,7 @@ ConversationSnapshot ConversationProjection::project(
         root->second < firstVisible)
       pinnedRootIndexes.insert(root->second);
   }
-  result.hiddenAuthoritativeItemCount =
-      firstVisible - pinnedRootIndexes.size();
+  result.hiddenAuthoritativeItemCount = firstVisible - pinnedRootIndexes.size();
   result.hasMore = result.hiddenAuthoritativeItemCount > 0;
 
   std::map<AuthoritativeItemKey, const PromptSubmission *> bindings;
@@ -381,8 +387,7 @@ ConversationSnapshot ConversationProjection::project(
 
   std::vector<ProjectedNode> nodes;
   nodes.reserve(authoritativeItems.ordered.size() - firstVisible +
-                pinnedRootIndexes.size() +
-                localSubmissions.size());
+                pinnedRootIndexes.size() + localSubmissions.size());
   for (std::size_t index = 0; index < authoritativeItems.ordered.size();
        ++index) {
     if (index < firstVisible && !pinnedRootIndexes.contains(index))
@@ -411,8 +416,8 @@ ConversationSnapshot ConversationProjection::project(
     }
     VisibleCardData card =
         authoritativeCard(item.key, *item.presentation, std::move(visualKey));
-    const auto root = authoritativeItems.turnRootUserMessagePositions.find(
-        item.key.turnId);
+    const auto root =
+        authoritativeItems.turnRootUserMessagePositions.find(item.key.turnId);
     const bool turnRoot =
         root != authoritativeItems.turnRootUserMessagePositions.end() &&
         root->second == index;
@@ -511,16 +516,17 @@ ConversationSnapshot ConversationProjection::project(
                                          submission.error,
                                          localImagePaths(submission)}};
     const bool authoritativeRootExists =
-        !turnId.empty() && authoritativeItems.turnRootUserMessagePositions
-                               .contains(turnId);
-    bool turnRoot = (!knownTurn || submission.startsTurn) &&
-                    !authoritativeRootExists;
+        !turnId.empty() &&
+        authoritativeItems.turnRootUserMessagePositions.contains(turnId);
+    bool turnRoot =
+        (!knownTurn || submission.startsTurn) && !authoritativeRootExists;
     if (submission.materializedItem) {
       const auto root = authoritativeItems.turnRootUserMessagePositions.find(
           submission.materializedItem->turnId);
       const auto materialized =
           authoritativeItems.position(*submission.materializedItem);
-      turnRoot = root != authoritativeItems.turnRootUserMessagePositions.end() &&
+      turnRoot =
+          root != authoritativeItems.turnRootUserMessagePositions.end() &&
                  materialized && root->second == *materialized;
     }
     nodes.push_back({position, submission.admissionOrdinal, sectionKey, turnId,
@@ -542,7 +548,8 @@ ConversationSnapshot ConversationProjection::project(
     if (section == sectionIndexes.end()) {
       const std::size_t index = result.sections.size();
       sectionIndexes.emplace(node.sectionKey, index);
-      result.sections.push_back({node.sectionKey, node.turnId, {}, std::nullopt});
+      result.sections.push_back(
+          {node.sectionKey, node.turnId, {}, std::nullopt});
       section = sectionIndexes.find(node.sectionKey);
     }
     TurnSection &projectedSection = result.sections[section->second];

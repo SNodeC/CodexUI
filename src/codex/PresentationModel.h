@@ -62,6 +62,7 @@ struct ThreadPresentation {
   std::optional<std::int64_t> createdAt;
   std::optional<std::int64_t> updatedAt;
   std::optional<std::int64_t> recencyAt;
+  std::optional<std::int64_t> lastActivityAt;
   std::vector<std::string> commandCwds;
   std::vector<std::string> changedPaths;
   std::vector<std::string> turnOrder;
@@ -109,6 +110,8 @@ struct TelemetryPresentation {
 class PresentationModel final {
 public:
   void applyEvent(const nlohmann::json &event) noexcept;
+  void noteThreadActivity(const std::string &threadId,
+                          std::int64_t timestamp) noexcept;
 
   [[nodiscard]] const std::vector<std::string> &threadOrder() const noexcept;
   [[nodiscard]] const ThreadPresentation *

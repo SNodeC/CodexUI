@@ -18,11 +18,19 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <string>
+#include <string_view>
 
 namespace codexui::codex {
 namespace {
 
 constexpr int MaximumAttachments = 16;
+
+QString text(std::string_view value) {
+  return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
+}
+
+std::string utf8(const QString &value) { return value.toUtf8().toStdString(); }
 
 QLabel *dialogLabel(QString text, const char *kind) {
   auto *label = new QLabel(std::move(text));
@@ -132,12 +140,12 @@ FileSelectionDialog::FileSelectionDialog(
     for (const AttachmentDraft &attachment : initialAttachments) {
       auto *item = new QListWidgetItem(
           QStringLiteral("%1  |  %2")
-              .arg(attachment.name, readableSize(attachment.size)));
-      item->setData(Qt::UserRole, attachment.path);
-      item->setData(Qt::UserRole + 1, attachment.mimeType);
+              .arg(text(attachment.name), readableSize(attachment.size)));
+      item->setData(Qt::UserRole, text(attachment.path));
+      item->setData(Qt::UserRole + 1, text(attachment.mimeType));
       item->setData(Qt::UserRole + 2,
                     QVariant::fromValue<qlonglong>(attachment.size));
-      item->setToolTip(attachment.path);
+      item->setToolTip(text(attachment.path));
       attachments->addItem(item);
     }
   }
@@ -214,10 +222,10 @@ std::vector<AttachmentDraft> FileSelectionDialog::selectedAttachments() const {
   result.reserve(static_cast<std::size_t>(attachments->count()));
   for (int index = 0; index < attachments->count(); ++index) {
     const QListWidgetItem *item = attachments->item(index);
-    result.push_back(AttachmentDraft{
-        item->data(Qt::UserRole).toString(),
-        QFileInfo(item->data(Qt::UserRole).toString()).fileName(),
-        item->data(Qt::UserRole + 1).toString(),
+    const QString path = item->data(Qt::UserRole).toString();
+    result.push_back(
+        AttachmentDraft{utf8(path), utf8(QFileInfo(path).fileName()),
+                        utf8(item->data(Qt::UserRole + 1).toString()),
         item->data(Qt::UserRole + 2).toLongLong()});
   }
   return result;

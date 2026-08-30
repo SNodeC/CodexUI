@@ -14,6 +14,11 @@ namespace codexui::codex::presentation {
 inline constexpr std::string_view ProtocolName = "codexui.presentation";
 inline constexpr std::uint32_t ProtocolVersion = 1;
 
+[[nodiscard]] inline constexpr bool
+isThreadHydrationAction(std::string_view action) noexcept {
+  return action == "thread.read" || action == "thread.resume";
+}
+
 enum class Authority {
   None,
   Merge,

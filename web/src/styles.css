@@ -64,9 +64,11 @@ h1, h2, h3, p { margin: 0; }
 .refresh-button { margin: 8px; color: #667085; background: transparent; }
 .conversation-pane { --composer-overlay-height: 112px; position: relative; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); background: #f2f5f9; }
 .conversation-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 26px 14px; background: #fff; border-bottom: 1px solid #e0e5ed; }
-.conversation-title { min-width: 0; }
-.conversation-heading h1 { margin: 2px 0 3px; font-size: 20px; letter-spacing: -.02em; }
-.conversation-heading p { color: #667085; font-size: 11px; }
+.conversation-title { flex: 1 1 auto; min-width: 0; }
+.conversation-lockup { display: flex; min-width: 0; align-items: baseline; gap: 10px; }
+.conversation-heading h1 { flex: 0 1 auto; min-width: 0; margin: 2px 0 3px; font-size: 20px; letter-spacing: -.02em; }
+.conversation-heading p { flex: 1 1 auto; min-width: 0; margin: 0; color: #667085; font-size: 11px; overflow-wrap: anywhere; }
+.conversation-heading .conversation-activity { flex: 0 0 auto; margin-left: auto; white-space: nowrap; text-align: right; }
 .conversation-heading-actions { display: contents; }
 .conversation-heading-actions.responsive { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 8px; }
 .responsive-pane-controls { display: flex; align-items: center; gap: 5px; }
@@ -199,6 +201,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     .brand small { display: none; }
     .conversation-heading { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
     .conversation-title { flex: 1 1 100%; }
+    .conversation-lockup { flex-wrap: wrap; gap: 2px 8px; }
+    .conversation-lockup .conversation-meta { flex-basis: 100%; }
+    .conversation-lockup .conversation-activity { flex-basis: 100%; }
     .conversation-heading h1 { font-size: 18px; overflow-wrap: anywhere; }
     .conversation-heading p { overflow-wrap: anywhere; }
     .conversation-heading-actions.responsive { flex: 1 1 100%; justify-content: space-between; flex-wrap: wrap; }

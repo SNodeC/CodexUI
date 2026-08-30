@@ -303,6 +303,48 @@ test("thread ordering uses newest recency and retires prompt promotion on author
     session.dispose();
 });
 
+test("thread activity preserves provider time during hydration and advances for meaningful traffic", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "activity");
+    const listed = requests(socket, "thread/list").at(-1);
+    respond(socket, listed, {data: [
+        {id: "tracked", updatedAt: 20, recencyAt: 30},
+        {id: "updated-only", updatedAt: 25},
+    ]});
+    assert.equal(session.model.thread("tracked").lastActivityAt, 30);
+    assert.equal(session.model.thread("updated-only").lastActivityAt, 25);
+
+    session.selectThread("tracked");
+    assert.equal(session.model.thread("tracked").lastActivityAt, 30,
+        "selection-driven read does not replace authoritative activity");
+
+    const read = requests(socket, "thread/read").at(-1);
+    respond(socket, read, {thread: {id: "tracked", updatedAt: 20, recencyAt: 30, turns: []}});
+    assert.equal(session.model.thread("tracked").lastActivityAt, 30,
+        "authoritative read response remains the activity source during hydration");
+
+    const beforeOutbound = Math.floor(Date.now() / 1000);
+    session.renameThread("tracked", "Renamed tracked thread");
+    assert.ok(session.model.thread("tracked").lastActivityAt >= beforeOutbound,
+        "meaningful thread requests advance local activity immediately");
+    const rename = requests(socket, "thread/name/set").at(-1);
+    session.model.thread("tracked").lastActivityAt = 1;
+    const beforeResponse = Math.floor(Date.now() / 1000);
+    respond(socket, rename, {});
+    assert.ok(session.model.thread("tracked").lastActivityAt >= beforeResponse,
+        "meaningful thread responses advance local activity");
+
+    session.model.thread("tracked").lastActivityAt = 1;
+    const beforeInbound = Math.floor(Date.now() / 1000);
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/status/changed", params: {
+        threadId: "tracked", status: {type: "idle"},
+    }}));
+    assert.ok(session.model.thread("tracked").lastActivityAt >= beforeInbound,
+        "thread-scoped app-server frames advance local activity");
+    session.dispose();
+});
+
 test("browser transport reconnects cleanly across provider generations", async () => {
     const sockets = [];
     const session = new BrowserFrontendSession("ws://bridge.test/", () => {

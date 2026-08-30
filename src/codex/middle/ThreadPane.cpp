@@ -2,7 +2,6 @@
 
 #include "codex/middle/ThreadPane.h"
 
-#include "codex/PresentationModel.h"
 #include "codex/PresentationStatus.h"
 #include "codex/ui/UiStyle.h"
 
@@ -283,13 +282,55 @@ QWidget *createRow() {
   return row;
 }
 
-std::optional<std::int64_t> timestampFor(const ThreadPresentation &thread,
+std::optional<std::int64_t> timestampFor(const ui::ThreadListRow &thread,
                                          ThreadPane::SortCriterion criterion) {
   if (criterion == ThreadPane::SortCriterion::Created)
     return thread.createdAt;
   if (criterion == ThreadPane::SortCriterion::LastChanged)
     return thread.updatedAt;
   return thread.recencyAt;
+}
+
+const ui::ThreadListRow *findThread(const ui::ThreadListRow &row,
+                                    std::string_view id) {
+  if (row.id == id)
+    return &row;
+  for (const ui::ThreadListRow &child : row.children) {
+    if (const ui::ThreadListRow *found = findThread(child, id))
+      return found;
+  }
+  return nullptr;
+}
+
+const ui::ThreadListRow *findThread(
+    const std::vector<ui::ThreadListRow> &roots, std::string_view id) {
+  for (const ui::ThreadListRow &root : roots) {
+    if (const ui::ThreadListRow *found = findThread(root, id))
+      return found;
+  }
+  return nullptr;
+}
+
+const ui::ThreadListRow *rootForThread(
+    const std::vector<ui::ThreadListRow> &roots, std::string_view id) {
+  for (const ui::ThreadListRow &root : roots) {
+    if (findThread(root, id))
+      return &root;
+  }
+  return nullptr;
+}
+
+bool expandAncestors(const ui::ThreadListRow &row, std::string_view id,
+                     std::unordered_set<std::string> &expanded) {
+  if (row.id == id)
+    return true;
+  for (const ui::ThreadListRow &child : row.children) {
+    if (expandAncestors(child, id, expanded)) {
+      expanded.insert(row.id);
+      return true;
+    }
+  }
+  return false;
 }
 
 } // namespace
@@ -490,22 +531,16 @@ bool ThreadPane::isOptimisticThread(const std::string &threadId) const {
 }
 
 void ThreadPane::promotePromptedThread(const std::string &threadId) {
-  if (!currentModel || threadId.empty())
+  if (!currentSnapshot || threadId.empty())
     return;
-  std::string rootId = threadId;
-  std::unordered_set<std::string> visited;
-  while (visited.insert(rootId).second) {
-    const ChildThreadOwnership *ownership = currentModel->childOwnership(rootId);
-    if (!ownership)
-      break;
-    rootId = ownership->parentThreadId;
-  }
-  const ThreadPresentation *root = currentModel->thread(rootId);
+  const ui::ThreadListRow *root =
+      rootForThread(currentSnapshot->roots, threadId);
   if (!root)
     return;
-  promptPromotion = PromptPromotion{rootId, root->updatedAt, root->recencyAt};
+  promptPromotion =
+      PromptPromotion{root->id, root->updatedAt, root->recencyAt};
   visibleSnapshot.reset();
-  refresh(*currentModel, projectedSelectedThreadId);
+  refresh(*currentSnapshot);
 }
 
 void ThreadPane::setSortCriterion(SortCriterion criterion) {
@@ -514,8 +549,8 @@ void ThreadPane::setSortCriterion(SortCriterion criterion) {
   sortCriterion = criterion;
   updateSortButton();
   visibleSnapshot.reset();
-  if (currentModel)
-    refresh(*currentModel, projectedSelectedThreadId);
+  if (currentSnapshot)
+    refresh(*currentSnapshot);
 }
 
 ThreadPane::SortCriterion ThreadPane::currentSortCriterion() const noexcept {
@@ -552,8 +587,7 @@ void ThreadPane::updateSortButton() {
                             : QStringLiteral("Recent")));
 }
 
-void ThreadPane::sortRootThreads(std::vector<std::string> &ids,
-                                 const PresentationModel &model) const {
+void ThreadPane::sortRootThreads(std::vector<ui::ThreadListRow> &rows) const {
   QCollator collator(QLocale::system().language() == QLocale::C
                          ? QLocale(QLocale::English)
                          : QLocale::system());
@@ -563,27 +597,25 @@ void ThreadPane::sortRootThreads(std::vector<std::string> &ids,
   std::string promotedRoot;
   if (promptPromotion && (sortCriterion == SortCriterion::LastChanged ||
                           sortCriterion == SortCriterion::Recency)) {
-    if (const ThreadPresentation *thread =
-            model.thread(promptPromotion->rootThreadId)) {
+    if (currentSnapshot) {
+      const ui::ThreadListRow *thread =
+          findThread(currentSnapshot->roots, promptPromotion->rootThreadId);
       const auto observed = sortCriterion == SortCriterion::LastChanged
                                 ? promptPromotion->updatedAt
                                 : promptPromotion->recencyAt;
-      if (timestampFor(*thread, sortCriterion) == observed)
+      if (thread && timestampFor(*thread, sortCriterion) == observed)
         promotedRoot = promptPromotion->rootThreadId;
     }
   }
-  std::sort(ids.begin(), ids.end(),
-            [&](const std::string &leftId, const std::string &rightId) {
-              if (leftId != rightId &&
-                  (leftId == promotedRoot || rightId == promotedRoot))
-                return leftId == promotedRoot;
-              const ThreadPresentation *left = model.thread(leftId);
-              const ThreadPresentation *right = model.thread(rightId);
-              if (!left || !right)
-                return leftId < rightId;
+  std::sort(rows.begin(), rows.end(),
+            [&](const ui::ThreadListRow &left,
+                const ui::ThreadListRow &right) {
+              if (left.id != right.id &&
+                  (left.id == promotedRoot || right.id == promotedRoot))
+                return left.id == promotedRoot;
               if (sortCriterion == SortCriterion::Alphanumeric) {
-                const QString leftTitle = text(left->title).trimmed();
-                const QString rightTitle = text(right->title).trimmed();
+                const QString leftTitle = text(left.title).trimmed();
+                const QString rightTitle = text(right.title).trimmed();
                 const bool leftStartsWithNumber =
                     !leftTitle.isEmpty() && leftTitle.front().isDigit();
                 const bool rightStartsWithNumber =
@@ -594,8 +626,8 @@ void ThreadPane::sortRootThreads(std::vector<std::string> &ids,
                 if (comparison != 0)
                   return comparison < 0;
               } else {
-                const auto leftTimestamp = timestampFor(*left, sortCriterion);
-                const auto rightTimestamp = timestampFor(*right, sortCriterion);
+                const auto leftTimestamp = timestampFor(left, sortCriterion);
+                const auto rightTimestamp = timestampFor(right, sortCriterion);
                 if (leftTimestamp != rightTimestamp) {
                   if (!leftTimestamp)
                     return false;
@@ -604,34 +636,25 @@ void ThreadPane::sortRootThreads(std::vector<std::string> &ids,
                   return *leftTimestamp > *rightTimestamp;
                 }
               }
-              return leftId < rightId;
+              return left.id < right.id;
             });
 }
 
 void ThreadPane::appendVisibleThread(
-    ThreadPaneSnapshot &snapshot, const PresentationModel &model,
-    const std::unordered_map<std::string, std::size_t> &pendingByThread,
-    const std::string &threadId, const std::string &parentId, std::size_t depth,
+    RenderedThreadList &snapshot, const ui::ThreadListRow &thread,
+    const std::string &parentId, std::size_t depth,
     std::unordered_set<std::string> &visited) const {
-  if (!visited.insert(threadId).second)
+  if (!visited.insert(thread.id).second)
     return;
-  const ThreadPresentation *thread = model.thread(threadId);
-  if (!thread)
-    return;
-  const bool hasChildren = std::ranges::any_of(
-      thread->childThreadOrder,
-      [&model](const std::string &id) { return model.thread(id) != nullptr; });
-  const bool expanded = hasChildren && expandedThreads.contains(threadId);
-  const auto pending = pendingByThread.find(threadId);
+  const bool hasChildren = !thread.children.empty();
+  const bool expanded = hasChildren && expandedThreads.contains(thread.id);
   snapshot.rows.push_back(
-      {threadId, thread->title, thread->cwd, thread->status, parentId,
-       pending == pendingByThread.end() ? std::size_t{} : pending->second,
-       depth, hasChildren, expanded});
+      {thread.id, thread.title, thread.cwd, thread.status, parentId,
+       thread.pending, depth, hasChildren, expanded});
   if (!expanded)
     return;
-  for (const std::string &childThreadId : thread->childThreadOrder)
-    appendVisibleThread(snapshot, model, pendingByThread, childThreadId,
-                        threadId, depth + 1, visited);
+  for (const ui::ThreadListRow &child : thread.children)
+    appendVisibleThread(snapshot, child, thread.id, depth + 1, visited);
 }
 
 void ThreadPane::toggleExpanded(const std::string &threadId) {
@@ -640,8 +663,8 @@ void ThreadPane::toggleExpanded(const std::string &threadId) {
   else
     expandedThreads.insert(threadId);
   visibleSnapshot.reset();
-  if (currentModel)
-    refresh(*currentModel, projectedSelectedThreadId);
+  if (currentSnapshot)
+    refresh(*currentSnapshot);
 }
 
 void ThreadPane::navigateHierarchy(int key) {
@@ -684,41 +707,30 @@ void ThreadPane::setContextHighlight(const std::string &threadId,
   found->second->setData(ContextMenuRole, highlighted);
 }
 
-void ThreadPane::refresh(const PresentationModel &model,
-                         const std::string &selectedThreadId) {
+void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
+  currentSnapshot = input;
+  const ui::ThreadListSnapshot &view = *currentSnapshot;
+  const std::string &selectedThreadId = view.selectedThreadId;
   const bool selectionChanged = selectedThreadId != projectedSelectedThreadId;
-  currentModel = &model;
   projectedSelectedThreadId = selectedThreadId;
   if (selectionChanged) {
-    std::unordered_set<std::string> visited;
-    std::string descendantId = selectedThreadId;
-    while (!descendantId.empty() && visited.insert(descendantId).second) {
-      const ChildThreadOwnership *ownership =
-          model.childOwnership(descendantId);
-      if (!ownership)
+    for (const ui::ThreadListRow &root : view.roots)
+      if (expandAncestors(root, selectedThreadId, expandedThreads))
         break;
-      expandedThreads.insert(ownership->parentThreadId);
-      descendantId = ownership->parentThreadId;
-    }
   }
-  std::erase_if(expandedThreads, [&model](const std::string &id) {
-    const ThreadPresentation *thread = model.thread(id);
-    return !thread || thread->childThreadOrder.empty();
+  std::erase_if(expandedThreads, [&view](const std::string &id) {
+    const ui::ThreadListRow *thread = findThread(view.roots, id);
+    return !thread || thread->children.empty();
   });
-  std::vector<std::string> rootOrder = model.threadOrder();
-  sortRootThreads(rootOrder, model);
+  std::vector<ui::ThreadListRow> rootRows = view.roots;
+  sortRootThreads(rootRows);
 
-  std::unordered_map<std::string, std::size_t> pendingByThread;
-  pendingByThread.reserve(model.pendingRequestCount());
-  for (const auto &[requestId, request] : model.pendingRequestPresentations()) {
-    static_cast<void>(requestId);
-    ++pendingByThread[request.threadId];
-  }
-  ThreadPaneSnapshot next{selectedThreadId, sortCriterion, {}};
+  RenderedThreadList next{selectedThreadId, sortCriterion, {}};
   std::unordered_set<std::string> visited;
-  visited.reserve(rootOrder.size());
+  visited.reserve(rootRows.size());
   for (const OptimisticThread &optimisticThread : optimisticThreads) {
-    if (const ThreadPresentation *thread = model.thread(optimisticThread.id)) {
+    if (const ui::ThreadListRow *thread =
+            findThread(view.roots, optimisticThread.id)) {
       next.rows.push_back({thread->id,
                            thread->title,
                            thread->cwd,
@@ -745,12 +757,12 @@ void ThreadPane::refresh(const PresentationModel &model,
     }
     visited.insert(optimisticThread.id);
   }
-  for (const std::string &id : rootOrder)
-    appendVisibleThread(next, model, pendingByThread, id, {}, 0, visited);
+  for (const ui::ThreadListRow &row : rootRows)
+    appendVisibleThread(next, row, {}, 0, visited);
   if (visibleSnapshot && *visibleSnapshot == next)
     return;
   visibleSnapshot = std::move(next);
-  const ThreadPaneSnapshot &snapshot = *visibleSnapshot;
+  const RenderedThreadList &snapshot = *visibleSnapshot;
   list->blockSignals(true);
   list->setUpdatesEnabled(false);
   // Selection is a projection of selectedThreadId, never retained widget
@@ -761,7 +773,7 @@ void ThreadPane::refresh(const PresentationModel &model,
 
   std::unordered_set<std::string> wanted;
   wanted.reserve(snapshot.rows.size());
-  for (const ThreadRowSnapshot &row : snapshot.rows)
+  for (const RenderedThreadRow &row : snapshot.rows)
     wanted.insert(row.id);
   for (int index = list->count() - 1; index >= 0; --index) {
     QListWidgetItem *item = list->item(index);
@@ -775,7 +787,7 @@ void ThreadPane::refresh(const PresentationModel &model,
   std::unordered_map<std::string, int> existingPositions;
   existingPositions.reserve(rows.size());
   int existingIndex = 0;
-  for (const ThreadRowSnapshot &row : snapshot.rows) {
+  for (const RenderedThreadRow &row : snapshot.rows) {
     if (rows.contains(row.id))
       existingPositions.emplace(row.id, existingIndex++);
   }
@@ -794,7 +806,7 @@ void ThreadPane::refresh(const PresentationModel &model,
     moved.insert(id);
   }
   int wantedIndex = 0;
-  for (const ThreadRowSnapshot &row : snapshot.rows) {
+  for (const RenderedThreadRow &row : snapshot.rows) {
     auto found = rows.find(row.id);
     if (found == rows.end()) {
       auto *item = new QListWidgetItem;
@@ -846,10 +858,10 @@ std::string ThreadPane::visiblySelectedThreadId() const {
 
 void ThreadPane::showContextMenu(const QPoint &position) {
   QListWidgetItem *item = list->itemAt(position);
-  if (!item || !currentModel)
+  if (!item || !currentSnapshot)
     return;
   const std::string id = item->data(Qt::UserRole).toString().toStdString();
-  const ThreadPresentation *thread = currentModel->thread(id);
+  const ui::ThreadListRow *thread = findThread(currentSnapshot->roots, id);
   if (!thread)
     return;
   if (contextMenu)
@@ -870,10 +882,8 @@ void ThreadPane::showContextMenu(const QPoint &position) {
     if (actions.reload)
       actions.reload(id);
   });
-  const bool providerReady = currentModel->connection().connected &&
-                             currentModel->connection().providerState == "ready";
-  const bool canControl = providerReady &&
-                          currentModel->connection().role == "controller";
+  const bool providerReady = currentSnapshot->providerReady;
+  const bool canControl = currentSnapshot->canControl;
   QAction *rename = menu->addAction(QStringLiteral("Rename"), this, [this, id] {
     if (actions.rename)
       actions.rename(id);

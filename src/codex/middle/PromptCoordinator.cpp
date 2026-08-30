@@ -2,17 +2,13 @@
 
 #include "codex/middle/PromptCoordinator.h"
 
-#include <QUrl>
 #include <algorithm>
 #include <set>
+#include <string_view>
 #include <utility>
 
 namespace codexui::codex::middle {
 namespace {
-
-QString text(const std::string &value) {
-  return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
-}
 
 std::string stringValue(const nlohmann::json &object, const char *key) {
   if (!object.is_object())
@@ -22,31 +18,63 @@ std::string stringValue(const nlohmann::json &object, const char *key) {
                                                      : std::string{};
 }
 
-QString userMessageText(const nlohmann::json &item) {
-  QStringList parts;
+std::string userMessageText(const nlohmann::json &item) {
+  std::string result;
   const auto content = item.find("content");
   if (content != item.end() && content->is_array()) {
     for (const nlohmann::json &entry : *content) {
       const std::string value = stringValue(entry, "text");
-      if (!value.empty())
-        parts.push_back(text(value));
+      if (value.empty())
+        continue;
+      if (!result.empty())
+        result.push_back('\n');
+      result += value;
     }
   }
-  if (parts.empty()) {
+  if (result.empty()) {
     const std::string value = stringValue(item, "text");
     if (!value.empty())
-      parts.push_back(text(value));
+      result = value;
   }
-  return parts.join(QStringLiteral("\n"));
+  return result;
 }
 
-QString markdownLinkLabel(QString label) {
-  label.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
-  label.replace(QLatin1Char('['), QStringLiteral("\\["));
-  label.replace(QLatin1Char(']'), QStringLiteral("\\]"));
-  label.replace(QLatin1Char('\r'), QLatin1Char(' '));
-  label.replace(QLatin1Char('\n'), QLatin1Char(' '));
-  return label;
+std::string markdownLinkLabel(std::string_view label) {
+  std::string result;
+  result.reserve(label.size());
+  for (const char character : label) {
+    if (character == '\\' || character == '[' || character == ']')
+      result.push_back('\\');
+    result.push_back(character == '\r' || character == '\n' ? ' ' : character);
+  }
+  return result;
+}
+
+bool urlPathByteAllowed(unsigned char byte) noexcept {
+  const bool alphanumeric = (byte >= 'a' && byte <= 'z') ||
+                            (byte >= 'A' && byte <= 'Z') ||
+                            (byte >= '0' && byte <= '9');
+  return alphanumeric || byte == '-' || byte == '.' || byte == '_' ||
+         byte == '~' || byte == '/' || byte == ':' || byte == '@' ||
+         byte == '!' || byte == '$' || byte == '&' || byte == '\'' ||
+         byte == '*' || byte == '+' || byte == ',' || byte == ';' ||
+         byte == '=';
+}
+
+std::string localFileUrl(std::string_view path) {
+  static constexpr char Hex[] = "0123456789ABCDEF";
+  std::string result = path.starts_with('/') ? "file://" : "file:";
+  result.reserve(result.size() + path.size());
+  for (const unsigned char byte : path) {
+    if (urlPathByteAllowed(byte)) {
+      result.push_back(static_cast<char>(byte));
+      continue;
+    }
+    result.push_back('%');
+    result.push_back(Hex[byte >> 4]);
+    result.push_back(Hex[byte & 0x0f]);
+  }
+  return result;
 }
 
 } // namespace
@@ -82,7 +110,8 @@ indexAuthoritativeItems(const std::string &threadId,
         const std::string clientId = stringValue(item->second.raw, "clientId");
         if (!clientId.empty())
           result.userMessagesByClientId.try_emplace(clientId, position);
-        const QString content = userMessageText(item->second.raw).trimmed();
+        const std::string content =
+            trimUnicodeWhitespace(userMessageText(item->second.raw));
         result.userMessagesByText.emplace(std::string{}, content, position);
         result.userMessagesByText.emplace(turnId, content, position);
       }
@@ -91,47 +120,47 @@ indexAuthoritativeItems(const std::string &threadId,
   return result;
 }
 
-QString promptWithFileLinks(QString prompt,
+std::string promptWithFileLinks(std::string prompt,
                             std::span<const AttachmentDraft> attachments) {
-  QStringList links;
+  std::vector<std::string> links;
   for (const AttachmentDraft &attachment : attachments) {
-    if (attachment.mimeType.startsWith(QStringLiteral("image/")) ||
-        attachment.mimeType.startsWith(QStringLiteral("audio/")))
+    if (attachment.mimeType.starts_with("image/") ||
+        attachment.mimeType.starts_with("audio/"))
       continue;
-    QString target =
-        QUrl::fromLocalFile(attachment.path).toString(QUrl::FullyEncoded);
-    target.replace(QLatin1Char('['), QStringLiteral("%5B"));
-    target.replace(QLatin1Char(']'), QStringLiteral("%5D"));
-    target.replace(QLatin1Char('('), QStringLiteral("%28"));
-    target.replace(QLatin1Char(')'), QStringLiteral("%29"));
-    links.push_back(QStringLiteral("- [%1](%2)")
-                        .arg(markdownLinkLabel(attachment.name), target));
+    links.push_back("- [" + markdownLinkLabel(attachment.name) + "](" +
+                    localFileUrl(attachment.path) + ')');
   }
   if (links.empty())
     return prompt;
-  return prompt + QStringLiteral("\n\nAttached files:\n") +
-         links.join(QLatin1Char('\n'));
+  prompt += "\n\nAttached files:\n";
+  for (std::size_t index = 0; index < links.size(); ++index) {
+    if (index != 0)
+      prompt.push_back('\n');
+    prompt += links[index];
+  }
+  return prompt;
 }
 
 bool PromptSubmission::acceptedTransitionActive(
-    qint64 nowMilliseconds) const noexcept {
+    std::int64_t nowMilliseconds) const noexcept {
   return state == PromptState::Accepted && acceptedAtMilliseconds > 0 &&
          nowMilliseconds >= acceptedAtMilliseconds &&
          nowMilliseconds - acceptedAtMilliseconds <
              AcknowledgementTransitionMilliseconds;
 }
 
-bool PromptSubmission::localCardVisible(qint64 nowMilliseconds) const noexcept {
+bool PromptSubmission::localCardVisible(
+    std::int64_t nowMilliseconds) const noexcept {
   return state == PromptState::Queued || state == PromptState::InFlight ||
          state == PromptState::Failed || !materializedItem ||
          acceptedTransitionActive(nowMilliseconds);
 }
 
 std::uint64_t PromptCoordinator::admit(
-    std::string threadId, QString prompt,
+    std::string threadId, std::string prompt,
     std::vector<AttachmentDraft> attachments, nlohmann::json turnOptions,
     const ThreadPresentation *authoritativeThread,
-    std::optional<std::string> activeTurnId, qint64 nowMilliseconds) {
+    std::optional<std::string> activeTurnId, std::int64_t nowMilliseconds) {
   PromptSubmission submission;
   submission.id = nextSubmissionId++;
   submission.admissionOrdinal = nextAdmissionOrdinal++;
@@ -190,7 +219,8 @@ PromptCoordinator::beginNext(const std::string &threadId,
 
 bool PromptCoordinator::acknowledge(
     const std::string &threadId, std::uint64_t submissionId,
-    std::optional<std::string> authoritativeTurnId, qint64 nowMilliseconds) {
+    std::optional<std::string> authoritativeTurnId,
+    std::int64_t nowMilliseconds) {
   PromptSubmission *pending = find(threadId, submissionId);
   if (!pending || pending->state != PromptState::InFlight)
     return false;
@@ -203,7 +233,7 @@ bool PromptCoordinator::acknowledge(
 }
 
 bool PromptCoordinator::fail(const std::string &threadId,
-                             std::uint64_t submissionId, QString error) {
+                             std::uint64_t submissionId, std::string error) {
   PromptSubmission *pending = find(threadId, submissionId);
   if (!pending || (pending->state != PromptState::InFlight &&
                    pending->state != PromptState::Queued))
@@ -224,7 +254,7 @@ bool PromptCoordinator::requeue(const std::string &threadId,
 }
 
 std::size_t PromptCoordinator::failQueued(const std::string &threadId,
-                                          const QString &error) {
+                                          const std::string &error) {
   auto found = byThread.find(threadId);
   if (found == byThread.end())
     return 0;
@@ -297,7 +327,7 @@ bool PromptCoordinator::reassignThread(const std::string &fromThreadId,
 
 void PromptCoordinator::reconcile(const std::string &threadId,
                                   const ThreadPresentation &authoritativeThread,
-                                  qint64 nowMilliseconds) {
+                                  std::int64_t nowMilliseconds) {
   auto authoritativeItems =
       indexAuthoritativeItems(threadId, &authoritativeThread);
   reconcile(threadId, authoritativeItems, nowMilliseconds);
@@ -305,7 +335,7 @@ void PromptCoordinator::reconcile(const std::string &threadId,
 
 void PromptCoordinator::reconcile(const std::string &threadId,
                                   AuthoritativeItemIndex &authoritativeItems,
-                                  qint64 nowMilliseconds) {
+                                  std::int64_t nowMilliseconds) {
   applyVisualAliases(threadId, authoritativeItems);
   auto found = byThread.find(threadId);
   if (found == byThread.end())
@@ -364,7 +394,7 @@ void PromptCoordinator::reconcile(const std::string &threadId,
 
     const std::string turnId =
         submission.expectedTurnId.value_or(std::string{});
-    const QString prompt = submission.prompt.trimmed();
+    const std::string prompt = trimUnicodeWhitespace(submission.prompt);
     auto candidate = authoritativeItems.userMessagesByText.lower_bound(
         {turnId, prompt, firstCandidate});
     while (candidate != authoritativeItems.userMessagesByText.end() &&

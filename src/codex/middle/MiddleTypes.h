@@ -5,21 +5,17 @@
 
 #include <nlohmann/json.hpp>
 
-#include <QString>
-#include <QStringList>
-#include <QStringView>
-#include <QtGlobal>
-
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
 namespace codexui::codex::middle {
 
-inline constexpr qint64 AcknowledgementTransitionMilliseconds = 500;
+inline constexpr std::int64_t AcknowledgementTransitionMilliseconds = 500;
 inline constexpr std::size_t AuthoritativeHistoryPageSize = 80;
 
 struct AuthoritativeItemKey {
@@ -49,8 +45,9 @@ struct TurnPlanKey {
 using CardKey = std::variant<AuthoritativeItemKey, TurnPlanKey, LocalPromptKey>;
 
 [[nodiscard]] std::string stableKey(const CardKey &key);
-[[nodiscard]] bool terminalOutputHasVisibleText(QStringView output);
-[[nodiscard]] QString trimTrailingEmptyLines(QStringView text);
+[[nodiscard]] bool terminalOutputHasVisibleText(std::string_view output);
+[[nodiscard]] std::string trimUnicodeWhitespace(std::string_view text);
+[[nodiscard]] std::string trimTrailingEmptyLines(std::string_view text);
 
 enum class PromptState { Queued, InFlight, Accepted, Failed };
 
@@ -68,55 +65,55 @@ enum class CardKind {
 };
 
 struct UserMessageData {
-  QString text;
-  QStringList imagePaths;
+  std::string text;
+  std::vector<std::string> imagePaths;
 
   bool operator==(const UserMessageData &) const = default;
 };
 
 struct AgentMessageData {
-  QString text;
+  std::string text;
   bool finalAnswer = false;
 
   bool operator==(const AgentMessageData &) const = default;
 };
 
 struct CommandExecutionData {
-  QString command;
-  QString output;
-  QString status;
-  QString cwd;
+  std::string command;
+  std::string output;
+  std::string status;
+  std::string cwd;
   std::optional<int> exitCode;
-  std::optional<qint64> durationMilliseconds;
+  std::optional<std::int64_t> durationMilliseconds;
 
   bool operator==(const CommandExecutionData &) const = default;
 };
 
 struct AgentActivityData {
-  QString tool;
-  QString status;
-  QString kind;
-  QString prompt;
-  QString resultText;
-  QStringList receivers;
-  QString model;
-  QString reasoningEffort;
-  QString childThreadId;
-  QString agentPath;
-  QString senderThreadId;
+  std::string tool;
+  std::string status;
+  std::string kind;
+  std::string prompt;
+  std::string resultText;
+  std::vector<std::string> receivers;
+  std::string model;
+  std::string reasoningEffort;
+  std::string childThreadId;
+  std::string agentPath;
+  std::string senderThreadId;
 
   bool operator==(const AgentActivityData &) const = default;
 };
 
 struct ReasoningData {
-  QString summary;
+  std::string summary;
 
   bool operator==(const ReasoningData &) const = default;
 };
 
 struct FileChangeData {
-  QString path;
-  QString kind;
+  std::string path;
+  std::string kind;
   std::optional<int> additions;
   std::optional<int> deletions;
 
@@ -124,37 +121,37 @@ struct FileChangeData {
 };
 
 struct FileChangesData {
-  QString status;
+  std::string status;
   std::vector<FileChangeData> changes;
 
   bool operator==(const FileChangesData &) const = default;
 };
 
 struct ImageGenerationData {
-  QString path;
-  QString status;
-  QString revisedPrompt;
+  std::string path;
+  std::string status;
+  std::string revisedPrompt;
 
   bool operator==(const ImageGenerationData &) const = default;
 };
 
 struct PlanStepData {
-  QString text;
-  QString status;
+  std::string text;
+  std::string status;
 
   bool operator==(const PlanStepData &) const = default;
 };
 
 struct PlanData {
-  QString explanation;
+  std::string explanation;
   std::vector<PlanStepData> steps;
-  QString legacyText;
+  std::string legacyText;
 
   bool operator==(const PlanData &) const = default;
 };
 
 struct GenericActivityData {
-  QString type;
+  std::string type;
   nlohmann::json raw = nlohmann::json::object();
 
   bool operator==(const GenericActivityData &) const = default;
@@ -162,14 +159,14 @@ struct GenericActivityData {
 
 struct LocalPromptData {
   std::uint64_t submissionId = 0;
-  QString prompt;
+  std::string prompt;
   PromptState state = PromptState::Queued;
-  qint64 acceptedAtMilliseconds = 0;
-  QString error;
-  QStringList imagePaths;
+  std::int64_t acceptedAtMilliseconds = 0;
+  std::string error;
+  std::vector<std::string> imagePaths;
 
   [[nodiscard]] bool
-  acceptedTransitionActive(qint64 nowMilliseconds) const noexcept {
+  acceptedTransitionActive(std::int64_t nowMilliseconds) const noexcept {
     return state == PromptState::Accepted && acceptedAtMilliseconds > 0 &&
            nowMilliseconds >= acceptedAtMilliseconds &&
            nowMilliseconds - acceptedAtMilliseconds <

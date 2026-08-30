@@ -64,13 +64,14 @@ test("responsive shell exposes only the panes that fit and accessible drawer tri
 test("thread hierarchy exposes selected tree-item semantics", () => {
     const session = new BrowserFrontendSession("ws://bridge.test/", () => { throw new Error("not connected"); });
     session.model.applyEvent(result(1, 1, "threads.list", "list", true, {threads: [{
-        id: "thread-1", preview: "Accessible thread", cwd: "/workspace", status: {type: "idle"},
+        id: "thread-1", preview: "Accessible thread", cwd: "/workspace", status: {type: "idle"}, updatedAt: 10,
     }]}, "replace"));
     session.selectThread("thread-1");
     const markup = renderToStaticMarkup(createElement(App, {session}));
     assert.match(markup, /class="thread-list" role="tree" aria-label="Threads"/u);
     assert.match(markup, /role="treeitem" aria-level="1" aria-selected="true"/u);
     assert.match(markup, /aria-current="true" aria-label="Open Accessible thread, \/workspace"/u);
+    assert.match(markup, /class="conversation-lockup"[\s\S]*Last activity:/u);
     session.dispose();
 });
 
@@ -87,6 +88,9 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /button:focus-visible[\s\S]*outline:\s*2px solid #6f98e8/u);
     assert.match(css, /@media \(pointer:\s*coarse\)[\s\S]*min-height:\s*44px/u);
     assert.match(css, /\.composer-actions span\s*\{[^}]*color:\s*#667085/u);
+    assert.match(css, /\.conversation-lockup\s*\{[^}]*align-items:\s*baseline/u);
+    assert.match(css, /\.conversation-heading \.conversation-activity\s*\{[^}]*margin-left:\s*auto[^}]*text-align:\s*right/u);
+    assert.match(css, /@media \(max-width:\s*520px\)[\s\S]*\.conversation-lockup \.conversation-activity\s*\{[^}]*flex-basis:\s*100%/u);
     assert.match(css, /\.composer-dock\s*\{[^}]*bottom:\s*0[^}]*padding:\s*8px 0 16px[^}]*background:\s*#f2f5f9/u);
     assert.match(css, /\.composer-dock::before\s*\{[^}]*bottom:\s*100%[^}]*height:\s*8px[^}]*background:\s*#f2f5f9/u);
     assert.match(css, /\.composer-dock::after\s*\{[^}]*top:\s*-1px[^}]*height:\s*1px[^}]*background:\s*#d7dee8/u);

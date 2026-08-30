@@ -69,6 +69,7 @@ export interface ThreadPresentation {
     createdAt?: number;
     updatedAt?: number;
     recencyAt?: number;
+    lastActivityAt?: number;
     commandCwds: string[];
     changedPaths: string[];
     turnOrder: string[];
@@ -398,6 +399,12 @@ export class PresentationModel {
 
     threadOrder(): readonly string[] { return this.orderedThreads; }
     thread(threadId: string): ThreadPresentation | undefined { return this.threads.get(threadId); }
+    noteThreadActivity(threadId: string, timestamp: number): void {
+        const thread = this.threads.get(threadId);
+        if (thread && Number.isSafeInteger(timestamp)
+            && (thread.lastActivityAt === undefined || timestamp > thread.lastActivityAt))
+            thread.lastActivityAt = timestamp;
+    }
     childOwnership(childThreadId: string): ChildThreadOwnership | undefined {
         return this.childOwnerships.get(childThreadId);
     }
@@ -715,6 +722,8 @@ export class PresentationModel {
         for (const key of ["createdAt", "updatedAt", "recencyAt"] as const) {
             if (typeof raw[key] === "number" && Number.isInteger(raw[key])) result[key] = raw[key];
         }
+        if (result.updatedAt !== undefined) this.noteThreadActivity(id, result.updatedAt);
+        if (result.recencyAt !== undefined) this.noteThreadActivity(id, result.recencyAt);
         result.archived = boolValue(raw, "archived", result.archived);
         if (Array.isArray(raw.turns)) {
             let previouslyOwnedChildren: string[] = [];
