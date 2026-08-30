@@ -5,6 +5,7 @@
 
 #include "codex/Configuration.h"
 #include "codex/FrontendSession.h"
+#include "codex/PendingRequestDialog.h"
 #include "codex/PresentationProtocol.h"
 #include "codex/ShellWidget.h"
 #include "codex/middle/ConversationCards.h"
@@ -940,6 +941,51 @@ bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
   return ShellFlow(session, peer).run();
 }
 
+bool verifyPendingRequestTextBoundaries() {
+  bool inspected = false;
+  bool plainText = false;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    inspected = true;
+    const auto labels = dialog->findChildren<QLabel *>();
+    const auto command = std::ranges::find_if(labels, [](QLabel *label) {
+      return label && label->text().contains(
+                          QStringLiteral("<b>untrusted command</b>"));
+    });
+    plainText = command != labels.end() &&
+                (*command)->textFormat() == Qt::PlainText;
+    dialog->reject();
+  });
+  const PendingRequestPresentation request{
+      "unsafe-command", "command-approval", "thread-a", 1,
+      {{"command", "<b>untrusted command</b>"}}};
+  static_cast<void>(PendingRequestDialog::present(request, nullptr));
+
+  bool escapedLink = false;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    const auto labels = dialog->findChildren<QLabel *>();
+    escapedLink = std::ranges::any_of(labels, [](QLabel *label) {
+      return label && label->textFormat() == Qt::RichText &&
+             label->text().contains(QStringLiteral("&lt;img")) &&
+             !label->text().contains(QStringLiteral("<img"));
+    });
+    dialog->reject();
+  });
+  const PendingRequestPresentation elicitation{
+      "unsafe-link", "mcp-elicitation", "thread-a", 1,
+      {{"url", "https://example.invalid/\"><img src=x>"}}};
+  static_cast<void>(PendingRequestDialog::present(elicitation, nullptr));
+
+  return expect(inspected && plainText,
+                "request text is always rendered literally") &&
+         expect(escapedLink, "the explicit MCP link escapes untrusted markup");
+}
+
 } // namespace
 } // namespace codexui::codex
 
@@ -952,7 +998,8 @@ int main(int argc, char **argv) {
   codexui::codex::FrontendSession session(*configuration);
   codexui::codex::PresentationPeer peer(
       codexui::codex::FrontendSessionTestPeer::takeClientDescriptor(session));
-  const bool result = codexui::codex::runShellFlow(session, peer);
+  const bool result = codexui::codex::verifyPendingRequestTextBoundaries() &&
+                      codexui::codex::runShellFlow(session, peer);
   if (result)
     std::cout << "Shell integration test passed\n";
   return result ? 0 : 1;

@@ -770,7 +770,8 @@ permission object and selected turn/session scope. Dynamic tools unavailable
 in CodexUI return a typed failed-tool response. Authentication, attestation,
 and unknown capabilities receive an explicit JSON-RPC error rather than
 remaining pending indefinitely. Canceling the dialog itself does not resolve
-the request.
+the request. Provider-supplied request text is always rendered literally; the
+explicit MCP URL link is the only rich-text label and its URL is HTML-escaped.
 
 The UI attention/brown state is derived only from currently unresolved pending
 requests associated with that thread. It is not inferred from historical item

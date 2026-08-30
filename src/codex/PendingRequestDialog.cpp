@@ -35,6 +35,7 @@ std::string stringValue(const nlohmann::json &object, const char *key) {
 
 QLabel *wrapped(QString value, const char *kind = "body") {
   auto *label = new QLabel(std::move(value));
+  label->setTextFormat(Qt::PlainText);
   label->setProperty("kind", kind);
   label->setWordWrap(true);
   label->setMinimumWidth(0);
@@ -216,8 +217,10 @@ PendingRequestDialog::present(const PendingRequestPresentation &request,
       contentLayout->addWidget(wrapped(text(message)));
     const std::string url = stringValue(raw, "url");
     if (!url.empty()) {
-      auto *link = wrapped(
-          QStringLiteral("<a href=\"%1\">%1</a>").arg(text(url)), "body");
+      const QString escapedUrl = text(url).toHtmlEscaped();
+      auto *link = wrapped(QStringLiteral("<a href=\"%1\">%1</a>")
+                               .arg(escapedUrl),
+                           "body");
       link->setTextFormat(Qt::RichText);
       contentLayout->addWidget(link);
     }
