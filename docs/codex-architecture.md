@@ -222,7 +222,9 @@ Authority has one meaning across all domains:
 An omitted field is unchanged. It is never an implicit deletion. Empty data is
 authoritative only when accompanied by `replace` or `remove` for an explicit
 scope. Unknown event types and diagnostics never mutate retained conversation
-state.
+state. Authority-free telemetry is retained only in its bounded diagnostic
+buffer and never materializes domain or thread state. Removal may delete
+existing scoped state, but never creates an absent scoped owner.
 
 ### 5.4 UI-to-SNode.C Commands
 

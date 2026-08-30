@@ -115,7 +115,17 @@ test("C++ ordering, domains, telemetry, generation, and repository hints", () =>
     assert.equal(model.telemetry().length, 1);
     assert.equal(model.globalDomains().has("catalog.models.changed"), false);
 
-    model.applyEvent(result(7, 1, "thread.read", "hints", true, {thread: {
+    model.applyEvent(event(7, 1, "notice.added", {message: "scoped telemetry"}, "none", {threadId: "phantom-none"}));
+    model.applyEvent(event(8, 1, "thread.goal.changed", {}, "remove", {threadId: "phantom-remove"}));
+    assert.equal(model.thread("phantom-none"), undefined);
+    assert.equal(model.thread("phantom-remove"), undefined);
+    assert.equal(model.telemetry().length, 2);
+    model.applyEvent(event(9, 1, "turn.upsert", {turn: {id: "real-turn", status: "inProgress"}}, "merge", {
+        threadId: "real-thread", turnId: "real-turn",
+    }));
+    assert.notEqual(model.thread("real-thread"), undefined);
+
+    model.applyEvent(result(10, 1, "thread.read", "hints", true, {thread: {
         id: "repository-thread", cwd: "/workspace", turns: [{id: "repository-turn", items: [
             {id: "command", type: "commandExecution", cwd: "/workspace/project/src"},
             {id: "change", type: "fileChange", changes: [{path: "lib/example.cpp"}, {path: "removed.txt"}]},
@@ -125,7 +135,7 @@ test("C++ ordering, domains, telemetry, generation, and repository hints", () =>
     assert.deepEqual(model.thread("repository-thread").changedPaths, ["lib/example.cpp", "removed.txt"]);
 
     model.applyEvent(event(1, 2, "connection.lifecycle", {state: "connected"}, "replace"));
-    model.applyEvent(event(8, 1, "thread.upsert", {thread: {id: "stale"}}, "merge", {threadId: "stale"}));
+    model.applyEvent(event(11, 1, "thread.upsert", {thread: {id: "stale"}}, "merge", {threadId: "stale"}));
     assert.equal(model.thread("stale"), undefined);
     model.applyEvent(event(2, 2, "pending-request.upsert", {requestId: 42, category: "approval", request: {}}, "merge", {threadId: "provider-a"}));
     assert.equal(model.pendingRequestCount(), 1);

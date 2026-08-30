@@ -311,7 +311,9 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
     return;
 
   const std::string type = presentation::stringMember(event, "type");
-  if (presentation::stringMember(event, "authority") == "none") {
+  const std::string authority =
+      presentation::stringMember(event, "authority");
+  if (authority == "none") {
     if (retainedTelemetry.size() == MaximumRetainedTelemetry)
       retainedTelemetry.erase(retainedTelemetry.begin());
     retainedTelemetry.push_back(TelemetryPresentation{
@@ -444,12 +446,13 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
 
   const std::string threadId = stringValue(scope, "threadId");
   if (threadId.empty()) {
-    retainDomainEvent(type, data, scope,
-                      presentation::stringMember(event, "authority"));
+    retainDomainEvent(type, data, scope, authority);
     return;
   }
   auto threadIterator = threads.find(threadId);
   if (threadIterator == threads.end()) {
+    if (authority == "none" || authority == "remove")
+      return;
     nlohmann::json minimal{{"id", threadId}};
     upsertThread(minimal, false);
     threadIterator = threads.find(threadId);
@@ -458,8 +461,9 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
   }
   ThreadPresentation &thread = threadIterator->second;
 
-  retainDomainEvent(type, data, scope,
-                    presentation::stringMember(event, "authority"));
+  retainDomainEvent(type, data, scope, authority);
+  if (authority == "none" || authority == "remove")
+    return;
 
   if (type == "thread.settings.changed" && data.is_object()) {
     thread.latestSettingsUpdate = data.value("threadSettings", data);

@@ -614,6 +614,31 @@ int main() {
                        ownershipModel.childOwnership("child-two") == nullptr,
                    "provider loss clears threads and ownership atomically");
 
+  PresentationModel authorityModel;
+  authorityModel.applyEvent(codexui::codex::presentation::event(
+      1, 1, "notice.added", {{"message", "scoped telemetry"}},
+      codexui::codex::presentation::Authority::None,
+      {{"threadId", "phantom-none"}}));
+  passed &= expect(
+      authorityModel.thread("phantom-none") == nullptr &&
+          authorityModel.telemetry().size() == 1,
+      "authority-none scoped telemetry cannot materialize a thread");
+  authorityModel.applyEvent(codexui::codex::presentation::event(
+      2, 1, "thread.goal.changed", nlohmann::json::object(),
+      codexui::codex::presentation::Authority::Remove,
+      {{"threadId", "phantom-remove"}}));
+  passed &= expect(
+      authorityModel.thread("phantom-remove") == nullptr,
+      "authority-remove cannot materialize an absent scoped thread");
+  authorityModel.applyEvent(codexui::codex::presentation::event(
+      3, 1, "turn.upsert",
+      {{"turn", {{"id", "real-turn"}, {"status", "inProgress"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "real-thread"}, {"turnId", "real-turn"}}));
+  passed &= expect(
+      authorityModel.thread("real-thread") != nullptr,
+      "authoritative merge still materializes represented thread state");
+
   PresentationModel transportLossModel;
   transportLossModel.applyEvent(codexui::codex::presentation::event(
       1, 1, "connection.lifecycle", {{"state", "connected"}},

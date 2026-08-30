@@ -439,11 +439,13 @@ export class PresentationModel {
         }
         let thread = this.threads.get(threadId);
         if (!thread) {
+            if (authority === "none" || authority === "remove") return;
             this.upsertThread({id: threadId}, false);
             thread = this.threads.get(threadId);
             if (!thread) return;
         }
         this.retainDomainEvent(type, data, scope, authority);
+        if (authority === "none" || authority === "remove") return;
         if (type === "thread.settings.changed" && isObject(data)) {
             thread.latestSettingsUpdate = clone(Object.hasOwn(data, "threadSettings") ? data.threadSettings : data);
             ++thread.settingsRevision;
