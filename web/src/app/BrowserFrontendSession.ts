@@ -20,6 +20,16 @@ import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
 const DraftThreadId = "__codexui_new_thread__";
 const MaximumProtocolFrames = 500;
 
+function retainedProtocolFrame(frame: JsonObject): unknown {
+    if (stringMember(frame, "type") !== "pending-request.upsert") return structuredClone(frame);
+    const data = isObject(frame.data) ? frame.data : {};
+    return structuredClone({...frame, data: {
+        requestId: member(data, "requestId"),
+        category: stringMember(data, "category"),
+        request: "[redacted; inspect the typed Requests view]",
+    }});
+}
+
 const actionMethods: Readonly<Record<string, string>> = {
     "threads.list": "thread/list", "thread.read": "thread/read", "thread.create": "thread/start",
     "thread.resume": "thread/resume", "thread.fork": "thread/fork", "thread.rename": "thread/name/set",
@@ -111,7 +121,7 @@ export class BrowserFrontendSession {
         this.createWebSocket = createWebSocket;
         this.normalizer = new ProtocolNormalizer(frame => {
             this.model.applyEvent(frame);
-            this.protocolFrames.push(structuredClone(frame));
+            this.protocolFrames.push(retainedProtocolFrame(frame));
             if (this.protocolFrames.length > MaximumProtocolFrames) this.protocolFrames.shift();
             this.reconcilePromptsForFrame(frame);
             this.handlePresentationFrame(frame);

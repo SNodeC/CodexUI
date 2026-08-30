@@ -365,7 +365,9 @@ presentation category, and typed request data. Categories are:
 
 Resolution uses `pending-request.resolve` in the other direction and
 `pending-request.removed` when authoritative resolution is observed. Secret
-request content is not copied into diagnostics.
+request content is not copied into diagnostics. The web Protocol history keeps
+only request identity, category, and a redaction marker; the transient typed
+request remains available exclusively through the Requests decision surface.
 
 ### 5.8 Raw JSON and Compatibility
 

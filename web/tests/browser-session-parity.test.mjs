@@ -360,6 +360,11 @@ test("pending request responses require current controller authority and resolve
     }}));
     const request = [...session.model.pendingRequestPresentations().values()][0];
     assert.ok(request);
+    assert.equal(request.raw.command, "echo safe", "the typed decision surface retains required content");
+    const retainedDiagnostic = JSON.stringify(session.getSnapshot().protocolFrames.at(-1));
+    assert.doesNotMatch(retainedDiagnostic, /echo safe/u);
+    assert.match(retainedDiagnostic, /redacted; inspect the typed Requests view/u,
+        "Protocol diagnostics do not retain raw server-request content");
     assert.equal(session.canResolvePending(request), true);
     assert.equal(session.resolvePending(request, {result: {decision: "accept"}}), true);
     assert.equal(session.resolvePending(request, {result: {decision: "accept"}}), false);
