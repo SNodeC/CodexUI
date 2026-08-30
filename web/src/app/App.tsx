@@ -1,11 +1,11 @@
 import {useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore} from "react";
 import type {FormEvent, ReactNode, RefObject} from "react";
 import {
-    ConversationViewportState, DefaultSetting, applySettingChange, canonicalSettingValues, canonicalThreadSettings, classifyStatus,
+    ConversationViewportState, DefaultSetting, changeSettingDraft, canonicalThreadSettings, classifyStatus,
     indexAuthoritativeItems, negativePendingResponse, permissionProfileLabel, positivePendingResponse, projectConversation, stableKey,
-    threadStartOptions, turnStartOptions,
+    settingDraftFor, settingPromptOptions,
 } from "../index.js";
-import type {PendingRequestPresentation, SettingField, SettingValues} from "../index.js";
+import type {PendingRequestPresentation, SettingDraft, SettingField, SettingPromptOptions} from "../index.js";
 import type {
     AgentActivityData, CommandExecutionData, FileChangesData, LocalPromptData,
     ReasoningData, UserMessageData, AgentMessageData, GenericActivityData,
@@ -340,7 +340,12 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
     const [, forceCardState] = useState(0);
     const [presentation, setPresentation] = useState(storedConversationPresentation);
     const drafts = useRef(new Map<string, string>());
-    const settingsOptions = useRef<PromptOptions>({turn: {}, thread: {}});
+    const settingsDrafts = useRef(new Map<string, SettingDraft>()).current;
+    const [, forceSettingsState] = useState(0);
+    const canonicalSettings = canonicalThreadSettings(thread?.raw ?? {}, thread?.domains.get("thread.settings.changed"));
+    const settingsRevision = thread?.settingsRevision ?? 0;
+    const settingsDraft = settingDraftFor(settingsDrafts, projectionId, canonicalSettings, settingsRevision);
+    const settingsOptions = settingPromptOptions(settingsDraft, session.model.modelCatalog());
     useEffect(() => {
         if (previousThread.current !== projectionId) {
             previousThread.current = projectionId;
@@ -408,40 +413,24 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
             })}
         </div>
         <div className="composer-dock">
-            <SettingsPanel key={`settings:${projectionId}`} session={session} canonical={canonicalThreadSettings(thread?.raw ?? {}, thread?.domains.get("thread.settings.changed"))} settingsRevision={thread?.settingsRevision ?? 0} optionsRef={settingsOptions} />
-            <Composer key={projectionId} session={session} active={Boolean(thread || snapshot.newThreadIntent)} draftKey={projectionId} drafts={drafts.current} optionsRef={settingsOptions} />
+            <SettingsPanel key={`settings:${projectionId}`} session={session} draft={settingsDraft} onChange={(field, value) => {
+                changeSettingDraft(settingsDrafts, projectionId, canonicalSettings, settingsRevision, field, value);
+                forceSettingsState(revision => revision + 1);
+            }} />
+            <Composer key={projectionId} session={session} active={Boolean(thread || snapshot.newThreadIntent)} draftKey={projectionId} drafts={drafts.current} options={settingsOptions} />
         </div>
     </main>;
 }
 
-interface PromptOptions {turn: Record<string, unknown>; thread: Record<string, unknown>}
-
-function SettingsPanel({session, canonical, settingsRevision, optionsRef}: {session: BrowserFrontendSession; canonical: unknown; settingsRevision: number; optionsRef: {current: PromptOptions}}) {
+function SettingsPanel({session, draft, onChange}: {session: BrowserFrontendSession; draft: SettingDraft; onChange: (field: SettingField, value: string) => void}) {
     const [open, setOpen] = useState(false);
-    const [values, setValues] = useState<SettingValues>(() => canonicalSettingValues(canonical));
-    const [touched, setTouched] = useState<Set<SettingField>>(() => new Set());
-    const canonicalSignature = JSON.stringify(canonical);
+    const {values, touched} = draft;
     const models = session.model.modelCatalog();
-    const updateOptions = (nextValues: SettingValues, nextTouched: Set<SettingField>) => {
-        optionsRef.current = {turn: turnStartOptions(nextValues, nextTouched, models), thread: threadStartOptions(nextValues, nextTouched)};
-    };
-    const change = (field: SettingField, value: string) => {
-        const {values: nextValues, touched: nextTouched} = applySettingChange(values, touched, field, value);
-        setValues(nextValues); setTouched(nextTouched); updateOptions(nextValues, nextTouched);
-    };
     const modelDefinitions = Array.isArray(models) ? models : [];
     const profilesDomain = session.model.globalDomains().get("operation.permission-profiles.list");
     const profiles = Array.isArray(profilesDomain) ? profilesDomain : (profilesDomain && typeof profilesDomain === "object" && Array.isArray((profilesDomain as {data?: unknown}).data) ? (profilesDomain as {data: unknown[]}).data : []);
-    const select = (label: string, field: SettingField, choices: readonly [string, string][]) => <label><span>{label}</span><select value={values[field]} onChange={event => change(field, event.target.value)}>{choices.map(([name, value]) => <option key={value} value={value}>{name}</option>)}</select></label>;
+    const select = (label: string, field: SettingField, choices: readonly [string, string][]) => <label><span>{label}</span><select value={values[field]} onChange={event => onChange(field, event.target.value)}>{choices.map(([name, value]) => <option key={value} value={value}>{name}</option>)}</select></label>;
     const defaults: [string, string] = ["Thread default", DefaultSetting];
-    useEffect(() => {
-        const fresh = canonicalSettingValues(canonical);
-        setValues(current => {
-            const next = {...current};
-            for (const field of Object.keys(fresh) as SettingField[]) if (!touched.has(field)) next[field] = fresh[field];
-            return next;
-        });
-    }, [settingsRevision, canonicalSignature]);
     return <div className={`settings-panel ${open ? "open" : ""}`}>
         <button className="settings-toggle" onClick={() => setOpen(value => !value)} aria-expanded={open}>Turn settings <span>{touched.size > 0 ? `${touched.size} changed` : "Thread defaults"} {open ? "⌃" : "⌄"}</span></button>
         {open && <div className="settings-grid">
@@ -449,26 +438,26 @@ function SettingsPanel({session, canonical, settingsRevision, optionsRef}: {sess
             {select("Reasoning", "effort", [defaults, ...["minimal", "low", "medium", "high", "xhigh", "ultra"].map(value => [humanize(value), value] as [string, string])])}
             {select("Access", "sandbox", [defaults, ["Workspace", "workspace-write"], ["Read only", "read-only"], ["Full access", "danger-full-access"], ["External", "external"]])}
             {select("Network", "network", [defaults, ["Restricted", "restricted"], ["Enabled", "enabled"]])}
-            <label><span>Workspace</span><input value={values.cwd} placeholder="Provider workspace path" onChange={event => change("cwd", event.target.value)} /></label>
+            <label><span>Workspace</span><input value={values.cwd} placeholder="Provider workspace path" onChange={event => onChange("cwd", event.target.value)} /></label>
             {select("Approval", "approval", [defaults, ["On request", "on-request"], ["Untrusted", "untrusted"], ["Never", "never"]])}
             {select("Style", "personality", [defaults, ["None", "none"], ["Friendly", "friendly"], ["Pragmatic", "pragmatic"]])}
             {select("Approval reviewer", "reviewer", [defaults, ["User", "user"], ["Auto review", "auto_review"], ["Guardian", "guardian_subagent"]])}
             {select("Permission profile", "permissionProfile", [defaults, ...profiles.filter(value => typeof value === "object" && value !== null && (value as {allowed?: boolean}).allowed !== false).map(value => { const id = String((value as {id?: string}).id); return [permissionProfileLabel(id), id] as [string, string]; })])}
-            <label><span>Service tier</span><input value={values.serviceTier === DefaultSetting ? "" : values.serviceTier} placeholder="Thread default" onChange={event => change("serviceTier", event.target.value || DefaultSetting)} /></label>
+            <label><span>Service tier</span><input value={values.serviceTier === DefaultSetting ? "" : values.serviceTier} placeholder="Thread default" onChange={event => onChange("serviceTier", event.target.value || DefaultSetting)} /></label>
             {select("Reasoning summary", "summary", [defaults, ["Auto", "auto"], ["Concise", "concise"], ["Detailed", "detailed"], ["None", "none"]])}
             {select("Collaboration mode", "collaboration", [["Code", "default"], ["Plan", "plan"]])}
         </div>}
     </div>;
 }
 
-function Composer({session, active, draftKey, drafts, optionsRef}: {session: BrowserFrontendSession; active: boolean; draftKey: string; drafts: Map<string, string>; optionsRef: {current: PromptOptions}}) {
+function Composer({session, active, draftKey, drafts, options}: {session: BrowserFrontendSession; active: boolean; draftKey: string; drafts: Map<string, string>; options: SettingPromptOptions}) {
     const [prompt, setPrompt] = useState(drafts.get(draftKey) ?? "");
     const running = session.model.activeTurnId(session.getSnapshot().selectedThreadId) !== undefined;
     const submit = (event: FormEvent) => {
         event.preventDefault();
         if (!active || prompt.trim() === "") return;
         const value = prompt; setPrompt(""); drafts.set(draftKey, "");
-        void session.submitPrompt(value, [], optionsRef.current.turn, optionsRef.current.thread);
+        void session.submitPrompt(value, [], options.turn, options.thread);
     };
     return <form className="composer" onSubmit={submit}>
         <textarea value={prompt} disabled={!active} onChange={event => { setPrompt(event.target.value); drafts.set(draftKey, event.target.value); }}
