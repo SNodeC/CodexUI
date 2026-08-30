@@ -2,8 +2,7 @@ import {useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalSt
 import type {FormEvent, ReactNode, RefObject} from "react";
 import {
     ConversationViewportState, DefaultSetting, changeSettingDraft, canonicalThreadSettings, classifyStatus,
-    indexAuthoritativeItems, pendingDecisionOptions, pendingRequestDetails, pendingResponse, permissionProfileLabel,
-    projectConversation, stableKey,
+    pendingDecisionOptions, pendingRequestDetails, pendingResponse, permissionProfileLabel, stableKey,
     settingDraftFor, settingPromptOptions,
 } from "../index.js";
 import type {PendingRequestPresentation, SettingDraft, SettingField, SettingPromptOptions} from "../index.js";
@@ -331,10 +330,11 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
     const snapshot = session.getSnapshot();
     const thread = session.model.thread(snapshot.selectedThreadId);
     const projectionId = snapshot.selectedThreadId || (snapshot.newThreadIntent ? "__codexui_new_thread__" : "");
-    const index = indexAuthoritativeItems(projectionId, thread);
     const viewport = useRef(new ConversationViewportState()).current;
-    const limit = viewport.effectiveLimit(projectionId, index.ordered.length);
-    const conversation = projectConversation(index, session.prompts.submissions(projectionId), limit, Date.now(), thread);
+    const authoritativeCount = thread?.turnOrder.reduce((count, id) =>
+        count + (thread.turns.get(id)?.itemOrder.length ?? 0), 0) ?? 0;
+    const limit = viewport.effectiveLimit(projectionId, authoritativeCount);
+    const conversation = session.conversation(limit);
     const scroll = useRef<HTMLDivElement>(null);
     const previousThread = useRef(projectionId);
     const folding = useRef(new Map<string, boolean>());

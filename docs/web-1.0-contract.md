@@ -100,6 +100,10 @@ The application uses:
 No general-purpose state framework is introduced. A typed presentation model
 is the sole retained normalized store. React subscribes to snapshots from that
 model; components retain only interaction state they own.
+The session snapshot does not retain a second conversation projection. The
+Conversation component requests one typed projection for its current history
+window, and prompt reconciliation scans authoritative history only when a
+thread read or user-message event can materialize a local prompt alias.
 
 ## Presentation boundary
 

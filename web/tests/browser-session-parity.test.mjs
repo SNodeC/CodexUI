@@ -101,15 +101,45 @@ test("browser session uses the C++ action routing and preserves prompt-response 
     respond(socket, start, {turn: {id: "turn-1", status: "inProgress"}});
     await waitForPublish();
 
-    const visible = cardKeys(session.getSnapshot().conversation).map(stableKey);
+    const visible = cardKeys(session.conversation()).map(stableKey);
     assert.equal(visible.length, 2);
     assert.match(visible[0], /^prompt:/u);
     assert.equal(visible[1], stableKey({kind: "item", threadId: "thread-1", turnId: "turn-1", itemId: "reasoning-1"}));
     assert.equal(session.model.connection().connected, true);
     assert.equal(session.model.connection().providerState, "ready");
     await new Promise(resolve => setTimeout(resolve, 510));
-    assert.equal(session.getSnapshot().conversation.sections[0].cards[0].kind, "userMessage",
+    assert.equal(session.conversation().sections[0].cards[0].kind, "userMessage",
         "the native 500ms acknowledgement timer materializes without another server event");
+    session.dispose();
+});
+
+test("stream deltas reconcile prompts only when a user message can materialize", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open();
+    await readyProvider(socket, "reconcile-scope");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [{id: "thread-1"}]});
+    session.selectThread("thread-1");
+    respond(socket, requests(socket, "thread/read").at(-1), {thread: {
+        id: "thread-1", turns: [{id: "turn-1", status: "inProgress", items: [{
+            id: "command-1", type: "commandExecution", status: "inProgress", command: "printf output",
+        }]}],
+    }});
+    let reconciliations = 0;
+    const reconcile = session.prompts.reconcile.bind(session.prompts);
+    session.prompts.reconcile = (...arguments_) => { ++reconciliations; return reconcile(...arguments_); };
+    session.prompts.admit("thread-1", "local prompt", [], {}, session.model.thread("thread-1"), "turn-1", Date.now());
+
+    socket.receive(appserver({jsonrpc: "2.0", method: "item/commandExecution/outputDelta", params: {
+        threadId: "thread-1", turnId: "turn-1", itemId: "command-1", delta: "output\n",
+    }}));
+    assert.equal(reconciliations, 0, "command streaming does not scan authoritative prompt history");
+    socket.receive(appserver({jsonrpc: "2.0", method: "item/started", params: {
+        threadId: "thread-1", turnId: "turn-1", item: {
+            id: "user-1", type: "userMessage", content: [{type: "text", text: "local prompt"}],
+        },
+    }}));
+    assert.equal(reconciliations, 1, "authoritative user materialization performs one reconciliation");
     session.dispose();
 });
 

@@ -236,6 +236,11 @@ export class PromptCoordinator {
         return index;
     }
 
+    decorate(threadId: string, index: AuthoritativeItemIndex): AuthoritativeItemIndex {
+        this.applyVisualAliases(threadId, index);
+        return index;
+    }
+
     submissions(threadId: string): readonly PromptSubmission[] { return this.byThread.get(threadId) ?? []; }
     submission(threadId: string, id: number): PromptSubmission | undefined { return this.find(threadId, id); }
     hasInFlight(threadId: string): boolean { return this.submissions(threadId).some(value => value.state === "inFlight"); }

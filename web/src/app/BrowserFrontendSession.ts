@@ -38,7 +38,6 @@ export interface BrowserSessionSnapshot {
     readonly newThreadIntent: boolean;
     readonly newThreadDraftRevision: number;
     readonly optimisticThreads: readonly OptimisticThreadSnapshot[];
-    readonly conversation: ConversationSnapshot;
     readonly protocolFrames: readonly unknown[];
     readonly notice: string;
     readonly bridgeUrl: string;
@@ -112,10 +111,7 @@ export class BrowserFrontendSession {
             this.model.applyEvent(frame);
             this.protocolFrames.push(structuredClone(frame));
             if (this.protocolFrames.length > MaximumProtocolFrames) this.protocolFrames.shift();
-            const scope = isObject(frame.scope) ? frame.scope : {};
-            const threadId = stringMember(scope, "threadId");
-            const thread = this.model.thread(threadId);
-            if (thread) this.prompts.reconcile(threadId, thread, Date.now());
+            this.reconcilePromptsForFrame(frame);
             this.handlePresentationFrame(frame);
             this.schedulePublish();
             return true;
@@ -248,6 +244,13 @@ export class BrowserFrontendSession {
         const index = order.indexOf(promotion.rootThreadId);
         if (index > 0) order.unshift(...order.splice(index, 1));
         return order;
+    }
+    conversation(limit = DefaultAuthoritativeItemLimit): ConversationSnapshot {
+        const projectionId = this.selectedThreadId === "" && this.newThreadIntent ? DraftThreadId : this.selectedThreadId;
+        const thread = this.model.thread(this.selectedThreadId);
+        const index = indexAuthoritativeItems(projectionId, thread);
+        if (thread) this.prompts.decorate(this.selectedThreadId, index);
+        return projectConversation(index, this.prompts.submissions(projectionId), limit, Date.now(), thread);
     }
     loadMore(): void { /* Default parity window is sufficient until viewport pausing is introduced. */ }
 
@@ -549,6 +552,22 @@ export class BrowserFrontendSession {
             recencyAt: this.model.thread(rootThreadId)?.recencyAt,
         };
     }
+    private reconcilePromptsForFrame(frame: JsonObject): void {
+        const scope = isObject(frame.scope) ? frame.scope : {};
+        const threadId = stringMember(scope, "threadId");
+        if (threadId === "" || this.prompts.submissions(threadId).length === 0) return;
+        const thread = this.model.thread(threadId);
+        if (!thread) return;
+        const resultRead = frame.kind === "result" && frame.ok === true && frame.action === "thread.read";
+        const type = stringMember(frame, "type");
+        if (!resultRead && type !== "conversation.item.upsert" && type !== "conversation.item.append") return;
+        if (!resultRead) {
+            const turnId = stringMember(scope, "turnId");
+            const itemId = stringMember(scope, "itemId");
+            if (stringMember(thread.turns.get(turnId)?.items.get(itemId)?.raw, "type") !== "userMessage") return;
+        }
+        this.prompts.reconcile(threadId, thread, Date.now());
+    }
     private errorMessage(response: {error?: unknown}): string {
         return stringMember(response.error, "message") || "Codex operation failed";
     }
@@ -624,15 +643,10 @@ export class BrowserFrontendSession {
     private makeSnapshot(): BrowserSessionSnapshot {
         this.optimisticThreads = this.optimisticThreads.filter(thread =>
             thread.state !== "confirmed" || !this.model.thread(thread.id));
-        const projectionId = this.selectedThreadId === "" && this.newThreadIntent ? DraftThreadId : this.selectedThreadId;
-        const thread = this.model.thread(this.selectedThreadId);
-        const index = indexAuthoritativeItems(projectionId, thread);
-        if (thread) this.prompts.reconcile(this.selectedThreadId, index, Date.now());
         return {
             revision: this.revision, selectedThreadId: this.selectedThreadId, newThreadIntent: this.newThreadIntent,
             newThreadDraftRevision: this.newThreadDraftRevision,
             optimisticThreads: this.optimisticThreads,
-            conversation: projectConversation(index, this.prompts.submissions(projectionId), DefaultAuthoritativeItemLimit, Date.now(), thread),
             protocolFrames: this.protocolFrames, notice: this.notice, bridgeUrl: this.bridgeUrl,
         };
     }
