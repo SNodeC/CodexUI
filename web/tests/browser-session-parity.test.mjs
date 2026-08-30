@@ -176,14 +176,23 @@ test("new threads retain one optimistic row through first-turn acknowledgment", 
     session.connect(); socket.open();
     await readyProvider(socket, "new-thread");
 
-    session.beginNewThread();
+    session.beginNewThread({
+        workspace: "/workspace", name: "Named draft", baseInstructions: "Base context",
+        developerInstructions: "Developer context", ephemeral: true,
+    });
     const draft = session.getSnapshot().optimisticThreads[0];
     assert.equal(draft?.id, "__codexui_new_thread__");
     assert.equal(draft?.state, "awaiting");
+    assert.equal(draft?.title, "Named draft");
+    assert.equal(draft?.cwd, "/workspace");
 
-    const submitted = session.submitPrompt("first prompt", [], {}, {cwd: "/workspace"});
+    const submitted = session.submitPrompt("first prompt", [], {}, {model: "gpt-current"});
     const create = requests(socket, "thread/start").at(-1);
     assert.ok(create);
+    assert.deepEqual(create.payload.params, {
+        model: "gpt-current", cwd: "/workspace", baseInstructions: "Base context",
+        developerInstructions: "Developer context", ephemeral: true,
+    });
     assert.equal(await session.submitPrompt("queued during creation"), true);
     session.beginNewThread();
     assert.equal(session.getSnapshot().optimisticThreads[0]?.visualKey, draft?.visualKey);
@@ -192,6 +201,9 @@ test("new threads retain one optimistic row through first-turn acknowledgment", 
     respond(socket, create, {thread: {id: "created-thread", name: "Created thread", cwd: "/workspace", status: {type: "idle"}}});
     assert.equal(await submitted, true);
     await Promise.resolve();
+    const rename = requests(socket, "thread/name/set").at(-1);
+    assert.equal(rename?.payload.params.name, "Named draft");
+    respond(socket, rename, {});
 
     const promoted = session.getSnapshot().optimisticThreads[0];
     assert.equal(promoted?.id, "created-thread");

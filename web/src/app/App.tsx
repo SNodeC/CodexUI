@@ -11,7 +11,7 @@ import type {
     ReasoningData, UserMessageData, AgentMessageData, GenericActivityData,
     ImageGenerationData, PlanData, VisibleCardData,
 } from "../index.js";
-import type {BrowserFrontendSession} from "./BrowserFrontendSession.js";
+import type {BrowserFrontendSession, NewThreadDraft} from "./BrowserFrontendSession.js";
 import {shouldSubmitPromptFromKey} from "./ComposerKeyboard.js";
 import {humanizeProtocolLabel as humanize} from "./Humanize.js";
 import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
@@ -131,7 +131,7 @@ function displayStatus(status: string): string {
     return classified.kind === "unknown" ? humanize(status) : classified.text;
 }
 
-function ThreadPane({session, revision, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; revision: number} & DrawerPaneProps) {
+function ThreadPane({session, revision, onRequestNewThread, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; revision: number; onRequestNewThread: () => void} & DrawerPaneProps) {
     void revision;
     const snapshot = session.getSnapshot();
     const selected = snapshot.selectedThreadId || (snapshot.newThreadIntent ? "__codexui_new_thread__" : "");
@@ -170,7 +170,7 @@ function ThreadPane({session, revision, drawer = false, paneRef, onClose}: {sess
     return <aside ref={paneRef} className={`thread-pane${drawer ? " responsive-drawer drawer-left" : ""}`} id={drawer ? "thread-pane" : undefined}
         role={drawer ? "dialog" : undefined} aria-modal={drawer || undefined} aria-labelledby={drawer ? "thread-pane-title" : undefined}>
         <div className="pane-heading"><div><span className="eyebrow">Workspace</span><h2 id={drawer ? "thread-pane-title" : undefined}>Threads</h2></div>
-            <div className="pane-heading-actions"><button className="icon-button" onClick={() => runThreadPaneNavigation(() => session.beginNewThread(), onClose)} title="New thread" aria-label="New thread">＋</button>
+            <div className="pane-heading-actions"><button className="icon-button" onClick={onRequestNewThread} title="New thread" aria-label="New thread">＋</button>
                 {drawer && <button type="button" className="drawer-close" data-drawer-close onClick={onClose} aria-label="Close Threads drawer">×</button>}</div></div>
         <div className="thread-list">
             {snapshot.optimisticThreads.map(thread => renderThread(thread.id, 0))}
@@ -178,6 +178,49 @@ function ThreadPane({session, revision, drawer = false, paneRef, onClose}: {sess
         </div>
         <button className="refresh-button" disabled={session.operationPending("threads.refresh")} onClick={() => session.requestThreads()}>↻ Refresh threads</button>
     </aside>;
+}
+
+export function NewThreadDialog({initialWorkspace, onCancel, onContinue}: {initialWorkspace: string; onCancel: () => void; onContinue: (draft: NewThreadDraft) => void}) {
+    const dialog = useRef<HTMLElement>(null);
+    const workspaceInput = useRef<HTMLInputElement>(null);
+    const [workspace, setWorkspace] = useState(initialWorkspace);
+    const [name, setName] = useState("");
+    const [baseInstructions, setBaseInstructions] = useState("");
+    const [developerInstructions, setDeveloperInstructions] = useState("");
+    const [ephemeral, setEphemeral] = useState(false);
+    const [error, setError] = useState("");
+    useEffect(() => {
+        const previous = typeof document === "undefined" ? null : document.activeElement as HTMLElement | null;
+        workspaceInput.current?.focus();
+        return () => { if (previous?.isConnected) previous.focus(); };
+    }, []);
+    const submit = (event: FormEvent) => {
+        event.preventDefault();
+        if (workspace.trim() === "") { setError("Enter the app-server workspace path."); workspaceInput.current?.focus(); return; }
+        onContinue({workspace: workspace.trim(), name: name.trim(), baseInstructions: baseInstructions.trim(),
+            developerInstructions: developerInstructions.trim(), ephemeral});
+    };
+    const keyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+        if (event.key === "Escape") { event.preventDefault(); onCancel(); return; }
+        if (event.key !== "Tab" || !dialog.current) return;
+        const focusable = [...dialog.current.querySelectorAll<HTMLElement>("button, input, textarea")]
+            .filter(element => !element.hasAttribute("disabled"));
+        const first = focusable[0]; const last = focusable.at(-1);
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    return <div className="modal-backdrop"><section ref={dialog} className="new-thread-dialog" role="dialog" aria-modal="true" aria-labelledby="new-thread-title" onKeyDown={keyDown}>
+        <header><h2 id="new-thread-title">New thread</h2><p>Set thread context. Upcoming-turn controls retain model, reasoning, access, and style.</p></header>
+        <form onSubmit={submit}>
+            <label><span>Workspace</span><input ref={workspaceInput} value={workspace} onChange={event => { setWorkspace(event.target.value); setError(""); }} placeholder="Absolute app-server workspace path" /></label>
+            <label><span>Name</span><input value={name} onChange={event => setName(event.target.value)} placeholder="Optional thread name" /></label>
+            <label><span>Base instructions</span><textarea value={baseInstructions} onChange={event => setBaseInstructions(event.target.value)} placeholder="Optional base instructions" /></label>
+            <label><span>Developer instructions</span><textarea value={developerInstructions} onChange={event => setDeveloperInstructions(event.target.value)} placeholder="Optional developer instructions" /></label>
+            <label className="ephemeral-choice"><input type="checkbox" checked={ephemeral} onChange={event => setEphemeral(event.target.checked)} /><span><strong>Temporary thread</strong><small>Temporary threads are not retained in normal Codex history.</small></span></label>
+            {error && <p className="dialog-error" role="alert">{error}</p>}
+            <footer><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary">Continue</button></footer>
+        </form>
+    </section></div>;
 }
 
 function safeHref(value: string): string | undefined {
@@ -350,7 +393,8 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
     }
     const settingsDrafts = useRef(new Map<string, SettingDraft>()).current;
     const [, forceSettingsState] = useState(0);
-    const canonicalSettings = canonicalThreadSettings(thread?.raw ?? {}, thread?.domains.get("thread.settings.changed"));
+    const canonicalSettings = canonicalThreadSettings(thread?.raw ?? (snapshot.newThreadDraft?.workspace
+        ? {cwd: snapshot.newThreadDraft.workspace} : {}), thread?.domains.get("thread.settings.changed"));
     const settingsRevision = thread?.settingsRevision ?? 0;
     const settingsDraft = settingDraftFor(settingsDrafts, projectionId, canonicalSettings, settingsRevision);
     const settingsOptions = settingPromptOptions(settingsDraft, session.model.modelCatalog());
@@ -397,8 +441,8 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
     };
     return <main className="conversation-pane">
         <div className="conversation-heading"><div className="conversation-title"><span className="eyebrow">Conversation</span>
-            <h1>{thread?.title ?? (snapshot.newThreadIntent ? "New thread" : "Select a thread")}</h1>
-            <p>{thread ? `${thread.cwd} · ${classifyStatus(thread.status).text}` : snapshot.newThreadIntent ? "Send a message to create this thread." : "Choose a thread from the left."}</p></div>
+            <h1>{thread?.title ?? (snapshot.newThreadIntent ? snapshot.newThreadDraft?.name || "New thread" : "Select a thread")}</h1>
+            <p>{thread ? `${thread.cwd} · ${classifyStatus(thread.status).text}` : snapshot.newThreadIntent ? `${snapshot.newThreadDraft?.workspace ?? ""} · Send a message to create this thread.` : "Choose a thread from the left."}</p></div>
             <div className={`conversation-heading-actions${paneControls ? " responsive" : ""}`}>
                 {paneControls && <div className="responsive-pane-controls">{paneControls}</div>}
                 <div className="conversation-view-controls" aria-label="Conversation presentation">
@@ -611,6 +655,7 @@ export function App({session}: {session: BrowserFrontendSession}) {
     const canControl = connection.role === "controller";
     const responsiveMode = useResponsiveMode();
     const [drawer, setDrawer] = useState<"threads" | "inspector" | null>(null);
+    const [newThreadDialog, setNewThreadDialog] = useState(false);
     const threadTrigger = useRef<HTMLButtonElement>(null);
     const inspectorTrigger = useRef<HTMLButtonElement>(null);
     const threadDrawer = useRef<HTMLElement>(null);
@@ -619,6 +664,10 @@ export function App({session}: {session: BrowserFrontendSession}) {
     const inspectorOverlay = responsiveMode !== "desktop";
     const activeDrawer = drawer === "threads" && threadsOverlay || drawer === "inspector" && inspectorOverlay ? drawer : null;
     const closeDrawer = () => setDrawer(null);
+    const requestNewThread = () => { closeDrawer(); setNewThreadDialog(true); };
+    const createNewThreadDraft = (draft: NewThreadDraft) => {
+        session.beginNewThread(draft); setNewThreadDialog(false); closeDrawer();
+    };
     useEffect(() => setDrawer(null), [responsiveMode]);
     useEffect(() => {
         if (!activeDrawer || typeof document === "undefined") return;
@@ -649,26 +698,27 @@ export function App({session}: {session: BrowserFrontendSession}) {
         {inspectorOverlay && <button ref={inspectorTrigger} type="button" className="responsive-pane-button" aria-haspopup="dialog" aria-controls="inspector-pane" aria-expanded={activeDrawer === "inspector"} onClick={() => setDrawer("inspector")}><span aria-hidden="true">ⓘ</span> Inspector</button>}
     </>;
     return <div className={`app-shell${activeDrawer ? " drawer-visible" : ""}`}>
-        <header className="top-bar" aria-hidden={activeDrawer ? true : undefined}><div className="brand"><span className="brand-mark">C</span><span><b>CodexUI</b><small>Codex, clearly.</small></span></div>
-            <div className="workspace-breadcrumb">{session.model.thread(snapshot.selectedThreadId)?.cwd || "No workspace"}</div>
+        <header className="top-bar" aria-hidden={activeDrawer || newThreadDialog ? true : undefined}><div className="brand"><span className="brand-mark">C</span><span><b>CodexUI</b><small>Codex, clearly.</small></span></div>
+            <div className="workspace-breadcrumb">{session.model.thread(snapshot.selectedThreadId)?.cwd || snapshot.newThreadDraft?.workspace || "No workspace"}</div>
             <div className="top-actions">
                 {connection.connected && <button className="subtle-button" onClick={() => canControl ? session.releaseController() : session.claimController()}>{canControl ? "Release control" : "Claim control"}</button>}
                 <label className="connection-control"><input value={url} onChange={event => setUrl(event.target.value)} aria-label="Bridge WebSocket URL" />
                     <button onClick={() => connection.connected || connection.retrying ? session.disconnect() : session.connect(url)}>{connection.connected ? "Disconnect" : "Connect"}</button><StatusDot tone={connectionTone} /></label>
             </div>
         </header>
-        {snapshot.notice && <div className="notice-banner" role="alert" aria-hidden={activeDrawer ? true : undefined}><span>{snapshot.notice}</span><button onClick={() => session.dismissNotice()} aria-label="Dismiss notice">×</button></div>}
-        <div className="workspace-grid" aria-hidden={activeDrawer ? true : undefined}>
-            {!threadsOverlay && <ThreadPane session={session} revision={snapshot.revision} />}
+        {snapshot.notice && <div className="notice-banner" role="alert" aria-hidden={activeDrawer || newThreadDialog ? true : undefined}><span>{snapshot.notice}</span><button onClick={() => session.dismissNotice()} aria-label="Dismiss notice">×</button></div>}
+        <div className="workspace-grid" aria-hidden={activeDrawer || newThreadDialog ? true : undefined}>
+            {!threadsOverlay && <ThreadPane session={session} revision={snapshot.revision} onRequestNewThread={requestNewThread} />}
             <Conversation session={session} revision={snapshot.revision} paneControls={responsiveMode === "desktop" ? undefined : paneControls} />
             {!inspectorOverlay && <Inspector session={session} revision={snapshot.revision} />}
         </div>
-        <footer className="status-bar" aria-hidden={activeDrawer ? true : undefined}><div><strong>© Volker Christian &amp; Codex</strong><span> | </span>
+        <footer className="status-bar" aria-hidden={activeDrawer || newThreadDialog ? true : undefined}><div><strong>© Volker Christian &amp; Codex</strong><span> | </span>
             <a href="https://github.com/SNodeC/CodexUI">CodexUI</a><span> • </span><a href="https://github.com/SNodeC/AISuite">AISuite</a><span> • </span>
             <small>Powered by</small> <a href="https://github.com/SNodeC/snode.c">SNode.C</a></div>
             <div className="global-status"><span>Status:</span><StatusDot tone={connectionTone} /><strong>{globalStatus}</strong></div></footer>
         {activeDrawer && <button type="button" className="drawer-backdrop" tabIndex={-1} onClick={closeDrawer} aria-label={`Close ${activeDrawer === "threads" ? "Threads" : "Inspector"} drawer`} />}
-        {activeDrawer === "threads" && <ThreadPane session={session} revision={snapshot.revision} drawer paneRef={threadDrawer} onClose={closeDrawer} />}
+        {activeDrawer === "threads" && <ThreadPane session={session} revision={snapshot.revision} onRequestNewThread={requestNewThread} drawer paneRef={threadDrawer} onClose={closeDrawer} />}
         {activeDrawer === "inspector" && <Inspector session={session} revision={snapshot.revision} drawer paneRef={inspectorDrawer} onClose={closeDrawer} />}
+        {newThreadDialog && <NewThreadDialog initialWorkspace={session.model.thread(snapshot.selectedThreadId)?.cwd ?? ""} onCancel={() => setNewThreadDialog(false)} onContinue={createNewThreadDraft} />}
     </div>;
 }

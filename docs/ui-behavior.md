@@ -77,6 +77,8 @@ bottom or is owned by the user.
   fallback for missing or inconsistent selection state.
 - A new thread is created only from an explicit New Thread intent. Its dialog
   captures the workspace, optional name, instructions, and ephemeral state.
+  In the browser, the workspace is an app-server-local path entered as text;
+  browser file pickers cannot truthfully select an arbitrary server directory.
 - Background thread activity, list refreshes, reconnects, and creation by
   another frontend never change the user's selected thread. Completion of a
   locally started creation likewise selects the returned thread only while

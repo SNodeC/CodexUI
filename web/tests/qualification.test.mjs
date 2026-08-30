@@ -3,7 +3,7 @@ import test from "node:test";
 import {renderToStaticMarkup} from "react-dom/server";
 import {createElement} from "react";
 
-import {App, inspectorPlainState, writeCardClipboard} from "../dist/app/App.js";
+import {App, NewThreadDialog, inspectorPlainState, writeCardClipboard} from "../dist/app/App.js";
 import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
 import {readBrowserStorage, writeBrowserStorage} from "../dist/app/BrowserStorage.js";
 import {event, humanizeProtocolLabel, result} from "../dist/index.js";
@@ -61,6 +61,19 @@ test("server-rendered shell exposes keyboard and landmark semantics", () => {
     assert.match(markup, /id="composer-keyboard-hint">Enter to send · Shift\+Enter for a new line/u);
     assert.match(markup, /aria-expanded="false"/u);
     session.dispose();
+});
+
+test("new-thread dialog exposes the complete native creation draft", () => {
+    const markup = renderToStaticMarkup(createElement(NewThreadDialog, {
+        initialWorkspace: "/workspace", onCancel: () => {}, onContinue: () => {},
+    }));
+    assert.match(markup, /role="dialog"/u);
+    assert.match(markup, />Workspace</u);
+    assert.match(markup, />Name</u);
+    assert.match(markup, />Base instructions</u);
+    assert.match(markup, />Developer instructions</u);
+    assert.match(markup, />Temporary thread</u);
+    assert.match(markup, /value="\/workspace"/u);
 });
 
 test("protocol labels are humanized only at the render boundary", () => {
