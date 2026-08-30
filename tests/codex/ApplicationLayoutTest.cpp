@@ -780,9 +780,17 @@ bool testIncrementalThreadSettings() {
       models, nlohmann::json::array());
   result &= expect(model->currentData().toString() == QStringLiteral("gpt-a"),
                    "thread selection restores that thread's retained value");
-  result &= expect(settings.turnStartOptions().empty() &&
-                       settings.threadStartOptions().empty(),
-                   "all untouched thread settings produce no overrides");
+  result &= expect(
+      settings.turnStartOptions() ==
+              nlohmann::json{
+                  {"collaborationMode",
+                   {{"mode", "default"},
+                    {"settings",
+                     {{"model", "gpt-a"},
+                      {"developer_instructions", nullptr},
+                      {"reasoning_effort", "medium"}}}}}} &&
+          settings.threadStartOptions().empty(),
+      "untouched settings emit only the displayed collaboration mode");
   result &= expect(access->isEnabled() && network->isEnabled(),
                    "a permission preset does not lock its effective access "
                    "controls");
