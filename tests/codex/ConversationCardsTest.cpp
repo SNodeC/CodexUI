@@ -2385,15 +2385,23 @@ bool testMessageImagePresentation() {
   });
   auto *thumbnail = thumbnails.empty() ? nullptr : thumbnails.front();
   const QPixmap thumbnailPixmap = thumbnail ? thumbnail->pixmap() : QPixmap{};
+  const auto hasEvenVerticalGap = [ribbon](QLabel *image) {
+    if (!ribbon || !image)
+      return false;
+    const int top = image->mapTo(ribbon->viewport(), QPoint{}).y();
+    const int bottom =
+        ribbon->viewport()->height() - top - image->height();
+    return std::abs(top - bottom) <= 1;
+  };
+  const QImage ribbonImage = ribbon ? ribbon->grab().toImage() : QImage{};
   result &= expect(
       ribbon && thumbnails.size() == 3 && thumbnail &&
           thumbnail->property("imageAvailable").toBool() &&
           !thumbnailPixmap.isNull() && thumbnailPixmap.width() <= 280 &&
           thumbnailPixmap.height() <= 180 &&
-          thumbnails[0]->mapTo(ribbon, QPoint{}).y() ==
-              thumbnails[1]->mapTo(ribbon, QPoint{}).y() &&
-          thumbnails[1]->mapTo(ribbon, QPoint{}).y() ==
-              thumbnails[2]->mapTo(ribbon, QPoint{}).y() &&
+          std::ranges::all_of(thumbnails, hasEvenVerticalGap) &&
+          !ribbonImage.isNull() &&
+          ribbonImage.pixelColor(2, 2) == QColor(QStringLiteral("#111827")) &&
           thumbnails[0]->mapTo(ribbon, QPoint{}).x() <
               thumbnails[1]->mapTo(ribbon, QPoint{}).x() &&
           thumbnails[1]->mapTo(ribbon, QPoint{}).x() <

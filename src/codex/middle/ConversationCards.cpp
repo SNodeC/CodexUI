@@ -311,16 +311,16 @@ public:
     setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
     setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     setStyleSheet(
-        QStringLiteral("QScrollArea#messageImages{background:#fbfcfe;"
+        QStringLiteral("QScrollArea#messageImages{background:#111827;"
                        "border:1px solid #d7dee8;border-radius:6px;}"
-                       "QWidget#messageImageStrip{background:transparent;}"));
+                       "QWidget#messageImageStrip{background:#111827;}"));
 
     strip_ = new QWidget;
     strip_->setObjectName(QStringLiteral("messageImageStrip"));
     layout_ = new QHBoxLayout(strip_);
     layout_->setContentsMargins(4, 4, 4, 4);
     layout_->setSpacing(8);
-    layout_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    layout_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     setWidget(strip_);
     hide();
   }
@@ -342,7 +342,7 @@ public:
       delete item;
     }
     for (const QString &path : paths)
-      layout_->addWidget(new ImageThumbnail(path, strip_), 0, Qt::AlignTop);
+      layout_->addWidget(new ImageThumbnail(path, strip_), 0, Qt::AlignVCenter);
 
     layout_->activate();
     naturalSize_ = layout_->sizeHint().expandedTo(QSize(0, 0));
