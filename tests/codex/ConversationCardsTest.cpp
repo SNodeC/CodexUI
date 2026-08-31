@@ -1301,16 +1301,17 @@ bool testMutableCardsAndCommandOutput() {
   // A scrollbar move immediately after an output update is user-owned.  It
   // must not be overwritten by a deferred follow-latest settlement.
   output->setOutput(longOutput + QStringLiteral("new output before gesture\n"));
-  const int immediateGestureValue = output->verticalScrollBar()->maximum() / 3;
-  output->verticalScrollBar()->setValue(immediateGestureValue);
+  output->verticalScrollBar()->triggerAction(
+      QAbstractSlider::SliderSingleStepSub);
   spin();
+  const int immediateGestureValue = output->verticalScrollBar()->value();
   result &=
       expect(!output->followsLatest() &&
                  output->verticalScrollBar()->value() == immediateGestureValue,
              "an immediate inner-scroll gesture supersedes following");
 
-  output->verticalScrollBar()->setValue(output->verticalScrollBar()->maximum() /
-                                        2);
+  output->verticalScrollBar()->triggerAction(
+      QAbstractSlider::SliderSingleStepSub);
   spin();
   const int preserved = output->verticalScrollBar()->value();
   output->setOutput(longOutput + QStringLiteral("one more line\n"));
@@ -1318,7 +1319,8 @@ bool testMutableCardsAndCommandOutput() {
   result &= expect(!output->followsLatest() &&
                        output->verticalScrollBar()->value() == preserved,
                    "paused command output preserves its inner scroll value");
-  output->verticalScrollBar()->setValue(output->verticalScrollBar()->maximum());
+  output->verticalScrollBar()->triggerAction(
+      QAbstractSlider::SliderToMaximum);
   spin();
   result &= expect(output->followsLatest(),
                    "inner output following resumes at its real bottom");
@@ -2144,9 +2146,27 @@ bool testCommandOutputStateAcrossNavigation() {
              "navigation test has independently scrollable output");
   if (!initialOutput)
     return false;
-  const int pausedValue = initialOutput->verticalScrollBar()->maximum() / 3;
-  initialOutput->verticalScrollBar()->setValue(pausedValue);
+  view.reconcile(conversation("other-thread", 8));
   spin();
+  view.reconcile(commandThread);
+  spin();
+  commandCard = card(view, stableKey(command.key));
+  initialOutput = commandCard
+                      ? dynamic_cast<CommandOutputView *>(
+                            commandCard->findChild<QTextEdit *>(
+                                QStringLiteral("commandOutputView")))
+                      : nullptr;
+  result &= expect(initialOutput && initialOutput->followsLatest() &&
+                       initialOutput->verticalScrollBar()->value() ==
+                           initialOutput->verticalScrollBar()->maximum(),
+                   "framework geometry during navigation does not pause a "
+                   "following command output");
+  if (!initialOutput)
+    return false;
+  initialOutput->verticalScrollBar()->triggerAction(
+      QAbstractSlider::SliderSingleStepSub);
+  spin();
+  const int pausedValue = initialOutput->verticalScrollBar()->value();
   result &= expect(!initialOutput->followsLatest(),
                    "command output is paused before thread navigation");
 

@@ -72,6 +72,7 @@ private:
   bool followsLatest_ = true;
   bool programmaticScroll_ = false;
   bool settlingScroll_ = false;
+  bool userScrollActive_ = false;
   int preservedScrollValue_ = 0;
   QString currentOutput_;
 };

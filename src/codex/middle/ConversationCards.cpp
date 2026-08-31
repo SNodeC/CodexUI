@@ -823,8 +823,23 @@ CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
           [this](int value) {
             if (programmaticScroll_)
               return;
-            preservedScrollValue_ = value;
-            followsLatest_ = isAtBottom();
+            if (userScrollActive_) {
+              preservedScrollValue_ = value;
+              followsLatest_ = isAtBottom();
+            }
+          });
+  connect(verticalScrollBar(), &QScrollBar::sliderPressed, this,
+          [this] { userScrollActive_ = true; });
+  connect(verticalScrollBar(), &QScrollBar::sliderReleased, this, [this] {
+    userScrollActive_ = false;
+    preservedScrollValue_ = verticalScrollBar()->value();
+    followsLatest_ = isAtBottom();
+  });
+  connect(verticalScrollBar(), &QScrollBar::actionTriggered, this,
+          [this](int) {
+            preservedScrollValue_ = verticalScrollBar()->sliderPosition();
+            followsLatest_ =
+                preservedScrollValue_ >= verticalScrollBar()->maximum() - 1;
           });
   connect(verticalScrollBar(), &QScrollBar::rangeChanged, this,
           [this](int, int) {
@@ -909,7 +924,8 @@ void CommandOutputView::settleScroll() {
           ? bar->maximum()
           : std::clamp(preservedScrollValue_, bar->minimum(), bar->maximum());
   bar->setValue(target);
-  preservedScrollValue_ = target;
+  if (followsLatest_)
+    preservedScrollValue_ = target;
   programmaticScroll_ = wasProgrammatic;
   settlingScroll_ = false;
 }
