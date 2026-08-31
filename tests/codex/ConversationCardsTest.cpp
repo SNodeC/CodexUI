@@ -2044,6 +2044,61 @@ bool testInitialCommandGeometrySettlement() {
   return result;
 }
 
+bool testRootlessFinalAnswerGeometrySettlement() {
+  const std::string thread = "rootless-child-thread";
+  const VisibleCardData activity{
+      AuthoritativeItemKey{thread, "turn", "activity"},
+      CardKind::AgentActivity,
+      thread,
+      "turn",
+      "activity",
+      AgentActivityData{"spawn_agent", "completed", "tool", "Child work",
+                        {}, {}, {}, {}, {}, {}, {}}};
+  VisibleCardData answer{
+      AuthoritativeItemKey{thread, "turn", "answer"},
+      CardKind::AgentMessage,
+      thread,
+      "turn",
+      "answer",
+      AgentMessageData{"Implemented the requested child-thread change.",
+                       true}};
+  ConversationSnapshot snapshot{
+      thread, {{"turn:rootless-child", "turn", {activity, answer}}}, 0,
+      false};
+
+  ConversationView view;
+  view.resize(700, 700);
+  view.show();
+  bool result = expect(view.reconcile(snapshot),
+                       "rootless child activity and final answer appear");
+  spin();
+  ConversationCard *answerCard = card(view, stableKey(answer.key));
+  if (!answerCard)
+    return false;
+  answerCard->setMinimumHeight(600);
+  answerCard->resize(answerCard->width(), 600);
+  std::get<AgentMessageData>(answer.payload).text +=
+      "\n\nValidation passed.";
+  snapshot.sections.front().cards.back() = answer;
+  result &= expect(view.reconcile(snapshot),
+                   "rootless final answer accepts an authoritative update");
+  spin();
+  QLabel *answerBody = nullptr;
+  for (QLabel *label : answerCard->findChildren<QLabel *>())
+    if (!label->property("markdownSource").toString().isEmpty()) {
+      answerBody = label;
+      break;
+    }
+  result &= expect(answerBody &&
+                       answerCard->height() == answerCard->minimumHeight() &&
+                       answerCard->height() < 200 &&
+                       answerBody->height() >=
+                           answerBody->heightForWidth(answerBody->width()),
+                   "rootless final answer settles to its natural final-width "
+                   "height instead of retaining stale viewport space");
+  return result;
+}
+
 bool testBottomAnchoredCommandOutputGrowth() {
   const std::string thread = "bottom-anchored-output";
   ConversationSnapshot snapshot = conversation(thread, 14);
@@ -2590,6 +2645,7 @@ int main(int argc, char **argv) {
   result &= testCardFoldingGeometryAndRetention();
   result &= testPresentationOptionsRetainCardsAndInitialFolding();
   result &= testInitialCommandGeometrySettlement();
+  result &= testRootlessFinalAnswerGeometrySettlement();
   result &= testBottomAnchoredCommandOutputGrowth();
   result &= testCommandOutputStateAcrossNavigation();
   result &= testPendingPromptAnimation();

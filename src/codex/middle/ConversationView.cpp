@@ -805,9 +805,40 @@ void ConversationView::recomputeGeometry() {
     if (card->layout())
       card->layout()->activate();
   };
+  const auto settleCardHeight = [&activateCard](ConversationCard *card,
+                                                int cardWidth) {
+    if (!card || !card->layout())
+      return;
+    card->setMinimumHeight(0);
+    card->layout()->invalidate();
+    activateCard(card);
+    card->updateGeometry();
+    cardWidth = std::max(0, cardWidth);
+    const int cardHeight =
+        card->layout()->hasHeightForWidth()
+            ? card->layout()->heightForWidth(cardWidth) +
+                  2 * card->frameWidth()
+            : card->sizeHint().height();
+    card->setMinimumHeight(cardHeight);
+    card->resize(cardWidth, cardHeight);
+    card->layout()->setGeometry(card->contentsRect());
+  };
   for (const auto &[key, card] : cards_) {
     static_cast<void>(key);
     activateCard(card);
+  }
+  // Child/subagent threads may have no visible You root. Their cards live
+  // directly in a turn section, so settle them at the final section width
+  // just as deliberately as cards nested inside a normal turn container.
+  for (const auto &[key, card] : cards_) {
+    static_cast<void>(key);
+    if (card->property("turnContainer").toBool() ||
+        card->property("nestedConversationCard").toBool())
+      continue;
+    const int cardWidth = card->parentWidget()
+                              ? card->parentWidget()->contentsRect().width()
+                              : card->width();
+    settleCardHeight(card, cardWidth);
   }
   // A You turn container adds one real layout depth. Settle that depth in
   // dependency order so newly nested cards reach their final height inside
@@ -830,21 +861,8 @@ void ConversationView::recomputeGeometry() {
           nested->layout()->itemAt(index)->widget());
       if (!nestedCard)
         continue;
-      nestedCard->setMinimumHeight(0);
-      if (nestedCard->layout())
-        nestedCard->layout()->invalidate();
-      activateCard(nestedCard);
-      nestedCard->updateGeometry();
       const int nestedWidth = nested->contentsRect().width();
-      const bool nestedHasHeightForWidth =
-          nestedCard->layout() && nestedCard->layout()->hasHeightForWidth();
-      const int childHeight = nestedHasHeightForWidth
-                                  ? nestedCard->layout()->heightForWidth(
-                                        nestedWidth) +
-                                        2 * nestedCard->frameWidth()
-                                  : nestedCard->sizeHint().height();
-      nestedCard->setMinimumHeight(childHeight);
-      nestedCard->resize(nestedWidth, childHeight);
+      settleCardHeight(nestedCard, nestedWidth);
     }
     nested->layout()->invalidate();
     const int nestedHeight =
@@ -854,21 +872,7 @@ void ConversationView::recomputeGeometry() {
     nested->updateGeometry();
     nested->layout()->invalidate();
     nested->layout()->activate();
-    if (card->layout()) {
-      card->layout()->invalidate();
-      card->layout()->activate();
-      card->updateGeometry();
-      const int cardWidth = card->width();
-      const int measuredCardHeight =
-          card->layout()->hasHeightForWidth()
-              ? card->layout()->heightForWidth(cardWidth) +
-                    2 * card->frameWidth()
-              : card->sizeHint().height();
-      const int cardHeight = measuredCardHeight;
-      card->setMinimumHeight(cardHeight);
-      card->resize(cardWidth, cardHeight);
-      card->layout()->setGeometry(card->contentsRect());
-    }
+    settleCardHeight(card, card->width());
   }
   for (const auto &[key, section] : sections_) {
     static_cast<void>(key);
