@@ -199,7 +199,8 @@ Multiple message attachments retain source order in one horizontal ribbon.
 The ribbon never wraps or grows the card beyond its available width; horizontal
 overflow appears only when required, while its vertical size remains bounded by
 the tallest thumbnail. A standard 1 px neutral border, 6 px radius, 4 px inner
-padding, and soft-neutral surface enclose both thumbnails and scrollbar. The
+padding, and canonical dark surface enclose both thumbnails and scrollbar.
+Thumbnails are vertically centered so each has equal top and bottom clearance. The
 ribbon remains subordinate content of its existing card, never a nested card.
 Available thumbnails are named keyboard targets and open on mouse release
 inside the thumbnail or with Enter or Space;
@@ -241,11 +242,12 @@ card is collapsed; contentless cards omit it. Markdown cards copy their exact
 retained source as both plain clipboard text and `text/markdown`, never
 reconstructed rendered text. Structured cards copy a deterministic plain-text
 representation of their primary content. After a successful write, only the
-copy glyph performs one short breath from its darker hover color to a clearly
-lighter peak and back, and a rounded, non-layout-shifting `Copied` overlay
-appears at the action. Web clipboard failure uses the same
-local overlay with canonical error styling; reduced-motion mode suppresses the
-breath without suppressing the result.
+copy glyph quickly morphs into the canonical green check, remains a check for
+1.5 seconds, and morphs back without moving the header. A rounded,
+non-layout-shifting `Copied` overlay appears at the action. Web clipboard
+failure keeps the copy glyph and uses the same local overlay with canonical
+error styling; reduced-motion mode makes the icon transitions immediate
+without suppressing the result.
 
 Message specializations (`steering`, `update`, and `final answer`) use normal
 font weight and sit at the right of the header immediately before Copy. The

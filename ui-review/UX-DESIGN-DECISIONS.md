@@ -111,7 +111,7 @@ collapsed card, while a contentless card omits it. Authored Markdown copies
 from the retained source with `text/markdown` and identical plain text;
 non-Markdown cards copy their deterministic primary-content text rather than
 rendered widget text. Copy feedback remains local to the action: the glyph
-breathes once from its darker hover color to a noticeably lighter peak and
+quickly morphs into a canonical green check, holds for 1.5 seconds, and morphs
 back, while a rounded `Copied` overlay appears without changing card geometry.
 Process lifecycle states use the same right-side slot before Copy, rendered as
 normal-weight lowercase values with canonical semantic colors. The same
@@ -123,8 +123,9 @@ so content only contracts upward or grows downward below the interaction point.
 Multiple message images form one source-ordered horizontal ribbon. It keeps the
 height of the tallest bounded thumbnail, never wraps, and exposes horizontal
 overflow only when the row exceeds the available card width. Its standard 1 px
-neutral border, 6 px radius, 4 px padding, and soft-neutral surface contain the
-scrollbar without turning the ribbon into a nested card.
+neutral border, 6 px radius, 4 px padding, and canonical dark surface contain
+the scrollbar without turning the ribbon into a nested card. Every thumbnail
+is vertically centered with equal top and bottom clearance.
 
 ## Application layout
 

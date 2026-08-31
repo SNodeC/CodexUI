@@ -576,7 +576,9 @@ bounded protocol and security design.
 Image paths are retained in pending and authoritative user-message
 presentation. The conversation shows bounded thumbnails below the Markdown
 prompt in one source-ordered horizontal ribbon; overflow scrolls horizontally
-without wrapping or widening the card. Selecting a thumbnail opens a non-modal,
+without wrapping or widening the card. The ribbon uses the canonical dark
+surface and vertically centers each preview with equal top and bottom clearance.
+Selecting a thumbnail opens a non-modal,
 fit-to-window viewer. CodexUI never fetches remote image URLs implicitly, and
 missing local images remain visible as unavailable placeholders.
 
