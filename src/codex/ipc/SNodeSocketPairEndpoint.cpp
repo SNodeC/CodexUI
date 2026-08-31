@@ -2,8 +2,8 @@
 
 #include "codex/ipc/SNodeSocketPairEndpoint.h"
 
+#include <Log.h>
 #include <core/system/socket.h>
-#include <log/SemanticLogger.h>
 
 #include <algorithm>
 #include <array>
@@ -18,13 +18,12 @@ namespace {
 constexpr std::size_t MaximumChunkBytes = 16U * 1024U;
 constexpr std::size_t MaximumWriteBytesPerEvent = 256U * 1024U;
 
-logger::LogScope makeLogScope() {
-  return {logger::LogOrigin::Application,
-          logger::LogBoundary::Connection,
-          "codexui.ipc",
-          "socketpair",
-          logger::LogRole::Client,
-          {}};
+snode::log::Scope makeLogScope() {
+  return {.origin = snode::log::Origin::Application,
+          .boundary = snode::log::Boundary::Connection,
+          .component = "codexui.ipc",
+          .identity = {.instance = "socketpair",
+                       .role = snode::log::Role::Client}};
 }
 
 } // namespace
