@@ -56,6 +56,7 @@ std::optional<ThreadListRow> projectThread(
   row.createdAt = thread->createdAt;
   row.updatedAt = thread->updatedAt;
   row.recencyAt = thread->recencyAt;
+  row.lastActivityAt = thread->lastActivityAt;
   if (const auto pending = pendingByThread.find(threadId);
       pending != pendingByThread.end())
     row.pending = pending->second;

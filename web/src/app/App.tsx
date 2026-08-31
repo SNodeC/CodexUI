@@ -200,14 +200,21 @@ function ThreadPane({session, revision, onRequestNewThread, drawer = false, pane
         const optimisticClass = optimistic ? ` optimistic-${optimistic.state}` : "";
         const title = thread?.title || optimistic?.title || id;
         const detail = optimistic ? optimistic.state === "failed" ? "not created" : optimistic.state === "confirmed" ? "created" : "creating" : thread?.cwd || thread?.preview || id;
+        const statusText = optimistic ? detail : displayStatus(thread?.status ?? "");
+        const parentId = session.model.childOwnership(id)?.parentThreadId;
+        const hoverDetails = [title, `Workspace: ${thread?.cwd || optimistic?.cwd || "Unknown"}`,
+            `Status: ${statusText}`,
+            `Last activity: ${thread?.lastActivityAt === undefined ? "Unknown" : lastActivityText(thread.lastActivityAt).replace(/^Last activity: /u, "")}`,
+            ...(parentId ? [`Parent: ${session.model.thread(parentId)?.title || parentId}`] : [])];
+        const accessibleDetails = hoverDetails.join(", ");
         return <div key={session.threadVisualKey(id)} role="treeitem" aria-level={depth + 1} aria-selected={selected === id}
-            aria-expanded={hasChildren ? expanded.has(id) : undefined} aria-label={`${title}, ${detail}`}>
+            aria-expanded={hasChildren ? expanded.has(id) : undefined} aria-label={accessibleDetails} title={hoverDetails.join("\n")}>
             <div className={`thread-row-wrap ${selected === id ? "selected" : ""}${contextMenu?.threadId === id ? " context-open" : ""}${optimisticClass}`} style={{paddingLeft: `${8 + depth * 14}px`}}
                 onContextMenu={event => { if (!thread) return; event.preventDefault(); event.stopPropagation(); openContextMenu(id, event.clientX, event.clientY, event.currentTarget); }}>
                 <button className="tree-toggle" disabled={!hasChildren} onClick={() => toggle(id)} aria-label={expanded.has(id) ? "Collapse child threads" : "Expand child threads"}>{hasChildren ? (expanded.has(id) ? "⌄" : "›") : ""}</button>
                 <button className="thread-row" aria-current={selected === id ? "true" : undefined}
-                    aria-label={`Open ${title}, ${detail}`} onClick={() => runThreadPaneNavigation(() => session.selectThread(id), onClose)}>
-                    <StatusDot tone={optimistic?.state === "failed" ? "danger" : optimistic ? "warning" : status.tone || "muted"} /><span><strong>{title}</strong><small>{detail}</small></span>
+                    aria-label={`Open ${accessibleDetails}`} onClick={() => runThreadPaneNavigation(() => session.selectThread(id), onClose)}>
+                    <StatusDot tone={optimistic?.state === "failed" ? "danger" : optimistic ? "warning" : status.tone || "muted"} /><strong>{title}</strong>
                 </button>
                 {thread && <button className="thread-menu-trigger" title="Thread actions" aria-label={`Actions for ${thread.title || id}`}
                     aria-haspopup="menu" aria-expanded={contextMenu?.threadId === id}

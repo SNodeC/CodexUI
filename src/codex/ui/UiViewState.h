@@ -23,6 +23,7 @@ struct ThreadListRow {
   std::optional<std::int64_t> createdAt;
   std::optional<std::int64_t> updatedAt;
   std::optional<std::int64_t> recencyAt;
+  std::optional<std::int64_t> lastActivityAt;
   std::size_t pending = 0;
   bool archived = false;
   std::vector<ThreadListRow> children;

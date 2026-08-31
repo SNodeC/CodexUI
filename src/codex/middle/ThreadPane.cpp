@@ -210,7 +210,6 @@ void updateRow(QWidget *row, const std::string &threadId,
                std::size_t requestCount, std::size_t depth, bool hasChildren,
                bool expanded, bool optimistic, bool optimisticFailed) {
   auto *title = row->findChild<QLabel *>(QStringLiteral("threadTitle"));
-  auto *status = row->findChild<QLabel *>(QStringLiteral("threadStatus"));
   auto *dot = row->findChild<QFrame *>(QStringLiteral("threadStatusDot"));
   auto *indent = row->findChild<QWidget *>(QStringLiteral("threadIndent"));
   auto *indicator = static_cast<ThreadDisclosureIndicator *>(
@@ -224,19 +223,6 @@ void updateRow(QWidget *row, const std::string &threadId,
     titleText.prepend(QStringLiteral("! "));
   title->setText(titleText);
   const PresentationStatus classified = classifyStatus(threadStatus);
-  status->setText(optimistic ? optimisticFailed ? QStringLiteral("not created")
-                                                : QStringLiteral("creating")
-                             : text(displayStatus(threadStatus)));
-  const QString tone = optimistic ? optimisticFailed ? QStringLiteral("danger")
-                                                     : QStringLiteral("warning")
-                       : requestCount != 0 ? QStringLiteral("warning")
-                                           : text(classified.tone);
-  if (status->property("tone").toString() != tone) {
-    status->setProperty("tone", tone);
-    status->style()->unpolish(status);
-    status->style()->polish(status);
-    status->update();
-  }
   QString color = QStringLiteral("#cacccf");
   if (optimistic)
     color = optimisticFailed ? QStringLiteral("#c43d4d")
@@ -268,18 +254,22 @@ QWidget *createRow() {
   layout->addSpacing(2);
   layout->addWidget(statusDot(), 0, Qt::AlignVCenter);
   layout->addSpacing(8);
-  auto *copy = new QVBoxLayout;
-  copy->setContentsMargins(0, 0, 0, 0);
-  copy->setSpacing(1);
   auto *title = makeLabel({}, "title");
   title->setObjectName(QStringLiteral("threadTitle"));
   title->setStyleSheet(QStringLiteral("font-weight:500;"));
-  auto *status = makeLabel({}, "meta");
-  status->setObjectName(QStringLiteral("threadStatus"));
-  copy->addWidget(title);
-  copy->addWidget(status);
-  layout->addLayout(copy, 1);
+  layout->addWidget(title, 1);
   return row;
+}
+
+QString activityText(const std::optional<std::int64_t> &timestamp) {
+  if (!timestamp)
+    return QStringLiteral("Unknown");
+  const QDateTime activity =
+      QDateTime::fromSecsSinceEpoch(*timestamp).toLocalTime();
+  const QDateTime now = QDateTime::currentDateTime();
+  return activity.date() == now.date()
+             ? activity.toString(QStringLiteral("HH:mm:ss"))
+             : activity.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
 }
 
 std::optional<std::int64_t> timestampFor(const ui::ThreadListRow &thread,
@@ -649,7 +639,8 @@ void ThreadPane::appendVisibleThread(
   const bool hasChildren = !thread.children.empty();
   const bool expanded = hasChildren && expandedThreads.contains(thread.id);
   snapshot.rows.push_back(
-      {thread.id, thread.title, thread.cwd, thread.status, parentId,
+      {thread.id, thread.title, thread.cwd, thread.status,
+       thread.lastActivityAt, parentId,
        thread.pending, depth, hasChildren, expanded});
   if (!expanded)
     return;
@@ -735,6 +726,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
                            thread->title,
                            thread->cwd,
                            thread->status,
+                           thread->lastActivityAt,
                            {},
                            0,
                            0,
@@ -746,6 +738,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
       next.rows.push_back({optimisticThread.id,
                            optimisticThread.title,
                            optimisticThread.cwd,
+                           {},
                            {},
                            {},
                            0,
@@ -810,7 +803,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
     auto found = rows.find(row.id);
     if (found == rows.end()) {
       auto *item = new QListWidgetItem;
-      item->setSizeHint(QSize(0, 54));
+      item->setSizeHint(QSize(0, 40));
       item->setData(Qt::UserRole, text(row.id));
       list->insertItem(wantedIndex, item);
       list->setItemWidget(item, createRow());
@@ -829,7 +822,21 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
                                              : QStringLiteral("collapsed"));
     item->setData(Qt::DisplayRole, {});
     item->setData(Qt::AccessibleTextRole, accessibleParts.join(", "));
-    item->setToolTip(text(row.cwd));
+    QStringList details{title,
+                        QStringLiteral("Workspace: %1").arg(
+                            row.cwd.empty() ? QStringLiteral("Unknown")
+                                            : text(row.cwd)),
+                        QStringLiteral("Status: %1").arg(status),
+                        QStringLiteral("Last activity: %1").arg(
+                            activityText(row.lastActivityAt))};
+    if (!row.parentId.empty()) {
+      const ui::ThreadListRow *parent =
+          findThread(currentSnapshot->roots, row.parentId);
+      details.push_back(QStringLiteral("Parent: %1").arg(
+          parent && !parent->title.empty() ? text(parent->title)
+                                           : text(row.parentId)));
+    }
+    item->setToolTip(details.join(QLatin1Char('\n')));
     item->setData(DepthRole, static_cast<qulonglong>(row.depth));
     item->setData(HasChildrenRole, row.hasChildren);
     item->setData(ExpandedRole, row.expanded);

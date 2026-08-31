@@ -49,9 +49,7 @@ h1, h2, h3, p { margin: 0; }
 .tree-toggle { width: 24px; height: 28px; padding: 0; border: 0; background: transparent; color: #65738a; font-size: 17px; cursor: pointer; }
 .tree-toggle:disabled { cursor: default; }
 .thread-row { display: grid; grid-template-columns: 10px minmax(0, 1fr); align-items: center; gap: 10px; min-width: 0; flex: 1; border: 0; background: transparent; border-radius: 9px; padding: 10px 6px; text-align: left; cursor: pointer; }
-.thread-row span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.thread-row strong { font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.thread-row small { color: #667085; font-size: 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.thread-row strong { min-width: 0; font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .thread-menu-trigger { visibility: hidden; flex: none; width: 28px; height: 28px; margin-right: 3px; border: 0; border-radius: 6px; background: transparent; color: #52627d; cursor: pointer; }
 .thread-row-wrap:hover .thread-menu-trigger, .thread-row-wrap:focus-within .thread-menu-trigger, .thread-menu-trigger[aria-expanded="true"] { visibility: visible; }
 .thread-menu-trigger:hover, .thread-menu-trigger:focus-visible { background: #dce6f8; }

@@ -673,8 +673,6 @@ bool testThreadSelectionProjection() {
   QWidget *row = selected && list ? list->itemWidget(selected) : nullptr;
   auto *title =
       row ? row->findChild<QLabel *>(QStringLiteral("threadTitle")) : nullptr;
-  auto *status =
-      row ? row->findChild<QLabel *>(QStringLiteral("threadStatus")) : nullptr;
   auto *dot = row ? row->findChild<QFrame *>(QStringLiteral("threadStatusDot"))
           : nullptr;
   auto *rowLayout = row ? qobject_cast<QHBoxLayout *>(row->layout()) : nullptr;
@@ -697,9 +695,9 @@ bool testThreadSelectionProjection() {
       parentItem ? parentItem->data(Qt::AccessibleTextRole).toString()
                                        : QString{};
   result &= expect(
-      selected && selected->sizeHint().height() == 54 && rowLayout &&
+      selected && selected->sizeHint().height() == 40 && rowLayout &&
           rowLayout->contentsMargins() == QMargins(0, 2, 0, 2) &&
-          rowLayout->spacing() == 0 && title && status && dot &&
+          rowLayout->spacing() == 0 && title && dot &&
           dot->size() == QSize(10, 10) && rowLayout->indexOf(dot) >= 0 &&
           disclosure && disclosure->size() == QSize(16, 24) &&
           disclosure->geometry().left() == 0 && parentDot &&
@@ -716,12 +714,13 @@ bool testThreadSelectionProjection() {
           selectedAccessible.contains(QStringLiteral("level 2")) &&
           parentAccessible.contains(QStringLiteral("A")) &&
           parentAccessible.contains(QStringLiteral("expanded")) &&
-          status->property("kind").toString() == QStringLiteral("meta") &&
-          status->property("tone").toString() == QStringLiteral("active") &&
           title->textInteractionFlags().testFlag(Qt::TextSelectableByMouse) &&
-          status->textInteractionFlags().testFlag(Qt::TextSelectableByMouse),
-      "thread cards keep their status dot and canonical disclosure styling "
-      "inside the UI contract");
+          selected->toolTip().contains(QStringLiteral("Workspace:")) &&
+          selected->toolTip().contains(QStringLiteral("Status: running")) &&
+          selected->toolTip().contains(QStringLiteral("Last activity:")) &&
+          selected->toolTip().contains(QStringLiteral("Parent: A")),
+      "compact thread cards retain their status dot and expose canonical "
+      "details through hover and accessibility");
   refresh(pane, model, "thread-a");
   bool childPresent = false;
   if (list) {

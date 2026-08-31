@@ -62,6 +62,7 @@ private:
     std::string title;
     std::string cwd;
     std::string status;
+    std::optional<std::int64_t> lastActivityAt;
     std::string parentId;
     std::size_t pending = 0;
     std::size_t depth = 0;
