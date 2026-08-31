@@ -22,6 +22,7 @@ inline constexpr auto dividerStrong = "#b9c4d2";
 inline constexpr auto primary = "#1d2633";
 inline constexpr auto secondary = "#667085";
 inline constexpr auto placeholder = "#98a2b3";
+inline constexpr auto threadInactive = "#cacccf";
 inline constexpr auto blue = "#2f6feb";
 inline constexpr auto blueHover = "#285fca";
 inline constexpr auto blueSelected = "#e5eeff";

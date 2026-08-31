@@ -26,7 +26,7 @@ export interface FileChangesData {status: string; changes: FileChangeData[]}
 export interface ImageGenerationData {path: string; status: string; revisedPrompt: string}
 export interface PlanStepData {text: string; status: string}
 export interface PlanData {explanation: string; steps: PlanStepData[]; legacyText: string}
-export interface GenericActivityData {type: string; raw: JsonObject}
+export interface GenericActivityData {type: string; status: string; raw: JsonObject}
 export interface LocalPromptData {
     submissionId: number; prompt: string; state: PromptState; showPendingAnimation: boolean;
     error: string; imagePaths: string[];

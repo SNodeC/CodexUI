@@ -463,6 +463,18 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
     return false;
 
   auto *wheel = static_cast<QWheelEvent *>(event);
+  if (inCenter &&
+      (target == composerPane || composerPane->isAncestorOf(target))) {
+    // Scrollable composer children receive their own native event. If they
+    // decline it at a boundary, the first non-scrollable composer ancestor
+    // consumes the propagated event instead of leaking it to Conversation.
+    for (QWidget *ancestor = target; ancestor && ancestor != composerPane;
+         ancestor = ancestor->parentWidget())
+      if (qobject_cast<QAbstractScrollArea *>(ancestor))
+        return false;
+    wheel->accept();
+    return true;
+  }
   if (inCenter) {
     if (target == conversationView || target == conversationView->viewport() ||
         conversationView->isAncestorOf(target)) {

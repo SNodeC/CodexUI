@@ -109,6 +109,27 @@ test("C++ ordering, domains, telemetry, generation, and repository hints", () =>
     }, "merge"));
     assert.deepEqual(model.threadOrder(), ["provider-a", "provider-b", "retained-b", "retained-a"]);
 
+    const structural = new PresentationModel();
+    structural.applyEvent(event(1, 1, "turn.upsert", {
+        turn: {id: "placeholder-turn", status: "inProgress"},
+    }, "merge", {threadId: "placeholder", turnId: "placeholder-turn"}));
+    assert.notEqual(structural.thread("placeholder"), undefined);
+    assert.deepEqual(structural.threadOrder(), []);
+    structural.applyEvent(result(2, 1, "thread.resume", "resume", true, {
+        thread: {id: "placeholder", parentThreadId: null},
+    }, "merge"));
+    assert.deepEqual(structural.threadOrder(), ["placeholder"]);
+    structural.applyEvent(result(3, 1, "threads.list", "structural", true, {
+        threads: [{id: "child", parentThreadId: "parent"}, {id: "parent", parentThreadId: null}],
+    }, "merge"));
+    assert.deepEqual(structural.childOwnership("child"), {parentThreadId: "parent", agentId: ""});
+    assert.deepEqual(structural.threadOrder(), ["parent", "placeholder"]);
+    structural.applyEvent(result(4, 1, "thread.read", "read-parent", true, {
+        thread: {id: "parent", parentThreadId: null, turns: []},
+    }, "replace", {threadId: "parent"}));
+    assert.deepEqual(structural.childOwnership("child"), {parentThreadId: "parent", agentId: ""});
+    assert.deepEqual(structural.threadOrder(), ["parent", "placeholder"]);
+
     model.applyEvent(event(4, 1, "catalog.skills.invalidated", {revision: 1}, "none"));
     model.applyEvent(event(5, 1, "catalog.models.changed", {models: ["a"]}, "replace"));
     model.applyEvent(event(6, 1, "catalog.models.changed", {}, "remove"));

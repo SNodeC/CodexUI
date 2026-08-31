@@ -393,6 +393,9 @@ test("thread activity preserves provider time during hydration and advances for 
     respond(socket, rename, {});
     assert.ok(session.model.thread("tracked").lastActivityAt >= beforeResponse,
         "meaningful thread responses advance local activity");
+    assert.equal(session.model.thread("tracked").updatedAt, 20);
+    assert.equal(session.model.thread("tracked").recencyAt, 30,
+        "non-prompt traffic does not reorder Recent or Last changed");
 
     session.model.thread("tracked").lastActivityAt = 1;
     const beforeInbound = Math.floor(Date.now() / 1000);

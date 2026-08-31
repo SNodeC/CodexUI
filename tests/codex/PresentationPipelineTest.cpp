@@ -363,6 +363,48 @@ int main() {
                                    "retained-a"},
       "thread discovery preserves provider order and one retained tail");
 
+  PresentationModel structuralModel;
+  structuralModel.applyEvent(codexui::codex::presentation::event(
+      1, 1, "turn.upsert",
+      {{"turn", {{"id", "placeholder-turn"}, {"status", "inProgress"}}}},
+      codexui::codex::presentation::Authority::Merge,
+      {{"threadId", "placeholder"}, {"turnId", "placeholder-turn"}}));
+  passed &= expect(structuralModel.thread("placeholder") != nullptr &&
+                       structuralModel.threadOrder().empty(),
+                   "thread-scoped events retain invisible placeholders");
+  structuralModel.applyEvent(codexui::codex::presentation::result(
+      2, 1, "thread.resume", "resume-placeholder", true,
+      {{"thread", {{"id", "placeholder"}, {"parentThreadId", nullptr}}}},
+      codexui::codex::presentation::Authority::Merge));
+  passed &= expect(
+      structuralModel.threadOrder() == std::vector<std::string>{"placeholder"},
+      "an explicit root resume admits an existing placeholder");
+  structuralModel.applyEvent(codexui::codex::presentation::result(
+      3, 1, "threads.list", "structural-threads", true,
+      {{"threads", nlohmann::json::array(
+                       {{{"id", "child"}, {"parentThreadId", "parent"}},
+                        {{"id", "parent"}, {"parentThreadId", nullptr}}})}},
+      codexui::codex::presentation::Authority::Merge));
+  const auto *structuralOwnership = structuralModel.childOwnership("child");
+  passed &= expect(
+      structuralOwnership && structuralOwnership->parentThreadId == "parent" &&
+          structuralOwnership->agentId.empty() &&
+          structuralModel.threadOrder() ==
+              std::vector<std::string>{"parent", "placeholder"},
+      "parentThreadId hides structural children before agent correlation");
+  structuralModel.applyEvent(codexui::codex::presentation::result(
+      4, 1, "thread.read", "read-structural-parent", true,
+      {{"thread", {{"id", "parent"},
+                   {"parentThreadId", nullptr},
+                   {"turns", nlohmann::json::array()}}}},
+      codexui::codex::presentation::Authority::Replace,
+      {{"threadId", "parent"}}));
+  passed &= expect(
+      structuralModel.childOwnership("child") &&
+          structuralModel.threadOrder() ==
+              std::vector<std::string>{"parent", "placeholder"},
+      "parent hydration preserves protocol-declared structural ownership");
+
   PresentationModel ownershipModel;
   ownershipModel.applyEvent(codexui::codex::presentation::result(
       1, 1, "threads.list", "ownership-roots", true,

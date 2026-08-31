@@ -186,6 +186,7 @@ ComposerPane::ComposerPane(QWidget *anchor)
 
   promptEditor_ = new codexui::ExpandingPromptEditor(composerBody_);
   sendButton_ = new QPushButton(QStringLiteral("Send"), composerBody_);
+  sendButton_->setObjectName(QStringLiteral("composerSendButton"));
   sendButton_->setProperty("kind", "primary");
   sendButton_->setToolTip(QStringLiteral("Send prompt (Enter)"));
   sendButton_->setFixedSize(62, ControlHeight);
@@ -204,9 +205,15 @@ ComposerPane::ComposerPane(QWidget *anchor)
   connect(promptEditor_, &codexui::ExpandingPromptEditor::submitRequested, this,
           [this] { submitDraft(); });
   connect(promptEditor_, &QPlainTextEdit::textChanged, this, [this] {
+    refreshSubmissionEnabled();
     refreshAdaptiveLayout();
     synchronizeGeometry();
   });
+  connect(promptEditor_, &codexui::ExpandingPromptEditor::focusStateChanged,
+          this, [this](bool focused) {
+            composer_->setProperty("focused", focused);
+            repolish(composer_);
+          });
   connect(promptEditor_, &codexui::ExpandingPromptEditor::editorHeightChanged,
           this, [this](int) {
             refreshAdaptiveLayout();
@@ -222,6 +229,7 @@ ComposerPane::ComposerPane(QWidget *anchor)
   });
 
   refreshAttachments();
+  refreshSubmissionEnabled();
   synchronizeGeometry();
   QTimer::singleShot(0, this, [this] {
     // The compact reserve is measured only after the splitter has assigned
@@ -306,7 +314,8 @@ void ComposerPane::setCanSubmit(bool canSubmit) {
   // Admission never locks or greys the editor; independent prompts may be
   // entered while earlier submissions await their real app-server callback.
   promptEditor_->setEnabled(true);
-  sendButton_->setEnabled(canSubmit);
+  canSubmit_ = canSubmit;
+  refreshSubmissionEnabled();
   attachmentButton_->setEnabled(canSubmit);
   for (QPushButton *button : attachmentPanel_->findChildren<QPushButton *>())
     button->setEnabled(true);
@@ -395,8 +404,9 @@ bool ComposerPane::eventFilter(QObject *watched, QEvent *event) {
 }
 
 void ComposerPane::submitDraft() {
-  const QString prompt = promptEditor_->toPlainText().trimmed();
-  if (prompt.isEmpty() || !sendButton_->isEnabled() || !actions_.submit)
+  const QString prompt = promptEditor_->toPlainText();
+  if (prompt.trimmed().isEmpty() || !sendButton_->isEnabled() ||
+      !actions_.submit)
     return;
   std::vector<AttachmentDraft> attachments = attachments_;
   if (actions_.submit(prompt, std::move(attachments)))
@@ -500,6 +510,11 @@ void ComposerPane::refreshActionStyle() {
     return;
   sendButton_->setProperty("kind", kind);
   repolish(sendButton_);
+}
+
+void ComposerPane::refreshSubmissionEnabled() {
+  sendButton_->setEnabled(
+      canSubmit_ && !promptEditor_->toPlainText().trimmed().isEmpty());
 }
 
 } // namespace codexui::codex::middle

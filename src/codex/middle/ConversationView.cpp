@@ -610,6 +610,13 @@ void ConversationView::setTrailingSpaceHeight(int height) {
     mode_ = Mode::Paused;
   }
   trailingSpaceHeight_ = height;
+  QScrollBar *conversationScrollBar = verticalScrollBar();
+  conversationScrollBar->setProperty("composerBottomInset", height);
+  conversationScrollBar->setStyleSheet(
+      height == 0
+          ? QString{}
+          : QStringLiteral("QScrollBar:vertical{margin:2px 2px %1px 2px;}")
+                .arg(height + 2));
   recomputeGeometry();
   if (mode_ == Mode::Following)
     setScrollValue(verticalScrollBar()->maximum());

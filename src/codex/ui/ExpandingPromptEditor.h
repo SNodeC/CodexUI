@@ -9,6 +9,7 @@ class QFocusEvent;
 class QInputMethodEvent;
 class QKeyEvent;
 class QResizeEvent;
+class QWheelEvent;
 
 namespace codexui {
 
@@ -36,6 +37,7 @@ protected:
     void inputMethodEvent(QInputMethodEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void wheelEvent(QWheelEvent* event) override;
 
 private:
     void scheduleRemeasure();
@@ -43,6 +45,7 @@ private:
 
     int maximumEditorHeight = compactHeight();
     int currentContentHeight = compactHeight();
+    bool contentScrollable = false;
     bool preeditActive = false;
     bool remeasureScheduled = false;
 };

@@ -478,6 +478,8 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         const data = card.payload as PlanData; title = "Plan"; body = <SafeMarkdown text={planMarkdown(data)} />;
     } else {
         const data = card.payload as GenericActivityData; title = data.type ? humanize(data.type) : "Activity";
+        phaseLabel = data.status ? displayStatus(data.status) : "";
+        phaseClass = data.status ? `status ${classifyStatus(data.status).tone}` : "";
         body = <pre className="generic-activity-data">{boundedGenericActivity(data.raw)}</pre>;
     }
     const copyContent = cardCopyContent(card);
@@ -704,7 +706,8 @@ function SettingsPanel({session, draft, onChange}: {session: BrowserFrontendSess
     const profiles = Array.isArray(profilesDomain) ? profilesDomain : (profilesDomain && typeof profilesDomain === "object" && Array.isArray((profilesDomain as {data?: unknown}).data) ? (profilesDomain as {data: unknown[]}).data : []);
     const select = (label: string, field: SettingField, choices: readonly [string, string][]) => <label><span>{label}</span><select value={values[field]} onChange={event => onChange(field, event.target.value)}>{choices.map(([name, value]) => <option key={value} value={value}>{name}</option>)}</select></label>;
     const defaults: [string, string] = ["Thread default", DefaultSetting];
-    return <div className={`settings-panel ${open ? "open" : ""}`}>
+    return <div className={`settings-panel ${open ? "open" : ""}`}
+        onWheel={event => event.preventDefault()}>
         <button className="settings-toggle" onClick={() => setOpen(value => !value)} aria-expanded={open}>Turn settings <span>{touched.size > 0 ? `${touched.size} changed` : "Thread defaults"} {open ? "⌃" : "⌄"}</span></button>
         {open && <div className="settings-grid">
             {select("Model", "model", [defaults, ...modelDefinitions.filter(value => typeof value === "object" && value !== null && !((value as {hidden?: boolean}).hidden)).map(value => [String((value as {displayName?: string}).displayName ?? (value as {model?: string; id?: string}).model ?? (value as {id?: string}).id), String((value as {model?: string; id?: string}).model ?? (value as {id?: string}).id)] as [string, string])])}
@@ -733,7 +736,9 @@ function Composer({session, active, draftKey, drafts, options}: {session: Browse
         element.style.height = "auto";
         const maximum = 180;
         element.style.height = `${Math.min(element.scrollHeight, maximum)}px`;
-        element.style.overflowY = element.scrollHeight > maximum ? "auto" : "hidden";
+        const scrollable = element.scrollHeight > maximum;
+        element.style.overflowY = scrollable ? "auto" : "hidden";
+        if (!scrollable) element.scrollTop = 0;
     }, [prompt]);
     const submit = (event: FormEvent) => {
         event.preventDefault();
@@ -744,11 +749,13 @@ function Composer({session, active, draftKey, drafts, options}: {session: Browse
     return <form className="composer" onSubmit={submit}>
         <textarea ref={editor} value={prompt} disabled={!active} onChange={event => { setPrompt(event.target.value); drafts.set(draftKey, event.target.value); }}
             aria-label="Message Codex" aria-describedby="composer-keyboard-hint" aria-keyshortcuts="Enter Control+Enter Meta+Enter"
-            onKeyDown={event => { if (shouldSubmitPromptFromKey({
+            onKeyDown={event => { const composing = event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229; if (shouldSubmitPromptFromKey({
                 key: event.key, altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey,
                 shiftKey: event.shiftKey, repeat: event.repeat,
-                isComposing: event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229,
-            })) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}
+                isComposing: composing,
+            })) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
+            else if (event.repeat && !event.shiftKey && !composing) event.preventDefault(); }}
+            onWheel={event => event.stopPropagation()}
             placeholder={active ? "Message Codex…" : "Select or create a thread"} rows={1} />
         <div className="composer-actions"><span id="composer-keyboard-hint">Enter to send · Shift+Enter for a new line</span>
             <span className="composer-submit-actions"><button type="submit" className={`send-button${running ? " steer" : ""}`} disabled={!active || prompt.trim() === ""}>{running ? "Steer ↑" : "Send ↑"}</button>

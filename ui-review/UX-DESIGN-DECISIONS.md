@@ -74,16 +74,19 @@ from 4.55:1 to 5.09:1. Blue denotes primary action or active work, green
 denotes success or connection, orange denotes warning or attention, and red
 denotes failure, stop, removal, or another destructive action. Activity dots
 use the same primary colors at 10 pixels so their state remains legible without
-creating a separate indicator palette. The existing gray palette is unchanged;
-only inactive thread dots use the lighter, less saturated `#cacccf` so active
-blue threads retain clear visual priority.
+creating a separate indicator palette. Thread dots project the app-server's
+current runtime status directly: `notLoaded` uses the lighter, less saturated
+`#cacccf`, `idle` uses canonical green, `active` uses canonical blue, and
+`systemError` uses canonical red.
 
 Semantic color is reserved for state-bearing UI: running status text uses blue,
 successful completion and connection use green, pending requests and warnings
 use orange, and failures, denials, stop, removal, and validation errors use red.
-Thread dots continue to describe activity rather than outcome, so completed or
-otherwise inactive threads retain the canonical light-gray dot. Reasoning prose
-and metadata without an authoritative status remain neutral because their
+Thread dots describe current app-server runtime state rather than reconstructing
+historical turn outcomes. Consequently, a provider-reported unloaded thread is
+gray even when its last persisted turn completed or failed; neither UI performs
+a background turn-history lookup merely to color the thread list. Reasoning
+prose and metadata without an authoritative status remain neutral because their
 content does not provide a reliable success, warning, or failure classification.
 An optimistic new-thread row is the deliberate pending-state exception: its
 soft-orange sweep distinguishes local intent from an authoritative active blue
@@ -169,16 +172,22 @@ follow mode and anchor are retained independently for each thread.
 
 The upcoming-turn settings and composer remain anchored to the bottom. The
 prompt editor starts at one line, grows upward to its maximum, and then scrolls
-internally. The message view reserves the canonical composer height. Additional
-growth overlays, but does not resize, the viewport. The trailing allowance is
-represented as a logical extent equal to the overlap so the user can scroll
-the final card to the composer boundary. The scroll content has no permanent
-bottom padding. Matching the Changes-tab separator, the moving composer uses
-8 px space, a standard divider extending 10 px beyond the adjacent content on
-each side, and another 8 px space. This provides the same boundary at the bottom
-and while reading higher in history. Extent growth does not move the existing
-reading position. Shrinking the composer removes the extent and restores the
-canonical geometry.
+internally. A draft that fits has no hidden trailing scroll offset. Send and
+Steer require non-whitespace input, prompt focus uses a geometry-neutral blue
+border, and submission preserves the exact authored text. The message view
+reserves the canonical composer height. Additional growth overlays, but does
+not resize, the viewport. The trailing allowance is represented as a logical
+extent equal to the overlap so the user can scroll the final card to the
+composer boundary. The visible scrollbar track ends at that same uncovered
+boundary without changing its range or retained anchor. The scroll content has
+no permanent bottom padding. Matching the Changes-tab separator, the moving
+composer uses 8 px space, a standard divider extending 10 px beyond the
+adjacent content on each side, and another 8 px space. This provides the same
+boundary at the bottom and while reading higher in history. Extent growth does
+not move the existing reading position. Shrinking the composer removes the
+extent and restores the canonical geometry. Wheel gestures originating in the
+prompt or settings remain owned by the composer and never scroll the message
+view behind it.
 
 ## Pending prompt presentation
 

@@ -1403,6 +1403,7 @@ public:
     title->setText(activity.type.empty()
                        ? QStringLiteral("Activity")
                        : UiStyle::humanizeLabel(text(activity.type)));
+    showStatus(text(activity.status), QStringLiteral("genericActivityStatus"));
     metadata->setText(boundedGenericActivity(activity.raw));
     metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
     metadata->show();

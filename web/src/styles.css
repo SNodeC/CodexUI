@@ -49,6 +49,10 @@ h1, h2, h3, p { margin: 0; }
 .tree-toggle { width: 24px; height: 28px; padding: 0; border: 0; background: transparent; color: #65738a; font-size: 17px; cursor: pointer; }
 .tree-toggle:disabled { cursor: default; }
 .thread-row { display: grid; grid-template-columns: 10px minmax(0, 1fr); align-items: center; gap: 10px; min-width: 0; flex: 1; border: 0; background: transparent; border-radius: 9px; padding: 10px 6px; text-align: left; cursor: pointer; }
+.thread-row .status-dot { background: #cacccf; box-shadow: 0 0 0 3px #cacccf18; }
+.thread-row .status-dot.success { background: #18865e; box-shadow: 0 0 0 3px #18865e1d; }
+.thread-row .status-dot.active { background: #2f6feb; box-shadow: 0 0 0 3px #2f6feb1d; }
+.thread-row .status-dot.danger { background: #c43d4d; box-shadow: 0 0 0 3px #c43d4d1d; }
 .thread-row strong { min-width: 0; font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .thread-menu-trigger { visibility: hidden; flex: none; width: 28px; height: 28px; margin-right: 3px; border: 0; border-radius: 6px; background: transparent; color: #52627d; cursor: pointer; }
 .thread-row-wrap:hover .thread-menu-trigger, .thread-row-wrap:focus-within .thread-menu-trigger, .thread-menu-trigger[aria-expanded="true"] { visibility: visible; }
@@ -82,6 +86,7 @@ h1, h2, h3, p { margin: 0; }
 .conversation-view-controls button:hover { background: #f1f5fb; border-color: #b9c4d2; }
 .conversation-view-controls button.active { background: #e5eeff; border-color: #bfd3f9; color: #1d2633; }
 .conversation-scroll { overflow: auto; padding: 22px max(24px, calc((100% - 780px) / 2)) calc(var(--composer-overlay-height) + 24px); }
+.conversation-scroll::-webkit-scrollbar-track { margin-block-end: calc(var(--composer-overlay-height) + 8px); }
 .turn-section { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
 .turn-section:last-child { margin-bottom: 0; }
 .turn-nested { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
@@ -133,7 +138,7 @@ h1, h2, h3, p { margin: 0; }
 .composer-dock::after { content: ""; position: absolute; z-index: 1; top: -1px; right: 0; left: 0; height: 1px; background: #d7dee8; }
 .composer { border: 1px solid #cfd7e4; background: #fff; border-radius: 13px; box-shadow: 0 7px 22px #26334f16; overflow: hidden; }
 .composer:focus-within { border-color: #6f98e8; box-shadow: 0 0 0 2px #6f98e82b, 0 7px 22px #26334f16; }
-.composer textarea { display: block; width: 100%; min-height: 42px; max-height: 180px; resize: none; border: 0; outline: 0; padding: 12px 15px 6px; background: #fff; color: #1d2739; }
+.composer textarea { display: block; width: 100%; min-height: 42px; max-height: 180px; resize: none; overscroll-behavior: contain; border: 0; outline: 0; padding: 12px 15px 6px; background: #fff; color: #1d2739; }
 .composer textarea:disabled { background: #f4f6f9; }
 .composer-actions { display: flex; align-items: center; justify-content: space-between; padding: 7px 9px 9px 14px; }
 .composer-actions span { color: #667085; font-size: 9px; }

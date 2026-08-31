@@ -17,6 +17,10 @@ function integerValue(object: unknown, key: string): number | undefined {
     const value = isObject(object) ? object[key] : undefined;
     return typeof value === "number" && Number.isInteger(value) ? value : undefined;
 }
+function statusValue(item: unknown): string {
+    const status = member(item, "status");
+    return typeof status === "string" ? status : stringMember(status, "type");
+}
 function messageText(item: unknown): string {
     const type = stringMember(item, "type");
     if (type === "agentMessage" || type === "plan") return stringMember(item, "text");
@@ -60,7 +64,7 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
     const item = presentation.raw;
     const type = stringMember(item, "type");
     let kind: CardKind = "genericActivity";
-    let payload: CardPayload = {type, raw: structuredClone(item)} satisfies GenericActivityData;
+    let payload: CardPayload = {type, status: statusValue(item), raw: structuredClone(item)} satisfies GenericActivityData;
     if (type === "userMessage") {
         kind = "userMessage"; payload = {text: messageText(item), imagePaths: messageImagePaths(item)} satisfies UserMessageData;
     } else if (type === "agentMessage") {
@@ -105,7 +109,7 @@ function authoritativeCard(identity: AuthoritativeItemKey, presentation: ItemPre
         kind = "imageGeneration";
         payload = {
             path: stringMember(item, "path") || stringMember(item, "savedPath") || stringMember(item, "saved_path"),
-            status: stringMember(item, "status"),
+            status: type === "imageView" ? "completed" : stringMember(item, "status"),
             revisedPrompt: stringMember(item, "revisedPrompt") || stringMember(item, "revised_prompt"),
         } satisfies ImageGenerationData;
     } else if (type === "plan" && messageText(item) !== "") {
