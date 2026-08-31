@@ -436,7 +436,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         if (copyFeedbackTimer.current) clearTimeout(copyFeedbackTimer.current);
         const failed = outcome !== "copied";
         setCopyFeedback({text: failed ? "Copy failed" : "Copied", failed});
-        copyFeedbackTimer.current = setTimeout(() => setCopyFeedback(undefined), 1500);
+        copyFeedbackTimer.current = setTimeout(() => setCopyFeedback(undefined), 1000);
     };
     let title = humanize(card.kind);
     let body: ReactNode;
