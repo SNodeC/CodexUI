@@ -745,13 +745,20 @@ ContentSizedTextView::ContentSizedTextView(int maximumContentHeight,
   setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
   setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   document()->setDocumentMargin(CommandTextPadding);
+  connect(verticalScrollBar(), &QScrollBar::sliderPressed, this,
+          [this] { latestContentSettlementPending_ = false; });
+  connect(verticalScrollBar(), &QScrollBar::actionTriggered, this,
+          [this](int) { latestContentSettlementPending_ = false; });
 }
 
 bool ContentSizedTextView::setContent(const QString &content) {
   if (toPlainText() == content)
     return false;
+  latestContentSettlementPending_ = true;
   setPlainText(content);
   measureAtCurrentWidth(true);
+  settleLatestContent();
+  scheduleLatestContentSettlement();
   return true;
 }
 
@@ -806,6 +813,7 @@ QSize ContentSizedTextView::minimumSizeHint() const {
 }
 
 void ContentSizedTextView::wheelEvent(QWheelEvent *event) {
+  latestContentSettlementPending_ = false;
   QScrollBar *bar = verticalScrollBar();
   const int delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
                                                   : event->angleDelta().y();
@@ -821,12 +829,39 @@ void ContentSizedTextView::wheelEvent(QWheelEvent *event) {
   QTextEdit::wheelEvent(event);
 }
 
+void ContentSizedTextView::settleLatestContent() {
+  QTextCursor cursor = textCursor();
+  cursor.movePosition(QTextCursor::End);
+  setTextCursor(cursor);
+  ensureCursorVisible();
+  verticalScrollBar()->setValue(verticalScrollBar()->maximum());
+}
+
+void ContentSizedTextView::scheduleLatestContentSettlement() {
+  QTimer::singleShot(0, this, [this] {
+    if (!latestContentSettlementPending_ || !isVisible())
+      return;
+    settleLatestContent();
+    latestContentSettlementPending_ = false;
+  });
+}
+
 void ContentSizedTextView::resizeEvent(QResizeEvent *event) {
   QTextEdit::resizeEvent(event);
   // Wrapping is authoritative only after QTextEdit has assigned its
   // viewport width. Propagate a changed hint immediately so a multiline view
   // cannot remain at an earlier one-line height with a premature scrollbar.
   measureAtCurrentWidth(true);
+  if (latestContentSettlementPending_)
+    settleLatestContent();
+}
+
+void ContentSizedTextView::showEvent(QShowEvent *event) {
+  QTextEdit::showEvent(event);
+  if (!latestContentSettlementPending_)
+    return;
+  settleLatestContent();
+  scheduleLatestContentSettlement();
 }
 
 void ContentSizedTextView::measureAtCurrentWidth(bool notifyParent) {
