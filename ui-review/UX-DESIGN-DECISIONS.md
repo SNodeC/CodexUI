@@ -114,7 +114,7 @@ collapsed card, while a contentless card omits it. Authored Markdown copies
 from the retained source with `text/markdown` and identical plain text;
 non-Markdown cards copy their deterministic primary-content text rather than
 rendered widget text. Copy feedback remains local to the action: the glyph
-quickly morphs into a canonical green check, holds for 1 second, and morphs
+quickly morphs into a canonical green check, holds for 0.5 seconds, and morphs
 back, while a rounded `Copied` overlay appears without changing card geometry.
 Process lifecycle states use the same right-side slot before Copy, rendered as
 normal-weight lowercase values with canonical semantic colors. The same

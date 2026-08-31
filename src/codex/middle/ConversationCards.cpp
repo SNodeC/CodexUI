@@ -59,7 +59,7 @@ constexpr int ViewerMaximumImageExtent = 4096;
 constexpr qsizetype MaximumGenericActivityCharacters = 4096;
 constexpr int CardHeaderActionSpacing = 4;
 constexpr int CopyMorphDurationMilliseconds = 160;
-constexpr int CopyCheckHoldMilliseconds = 1000;
+constexpr int CopyCheckHoldMilliseconds = 500;
 
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
