@@ -1232,12 +1232,18 @@ bool testMutableCardsAndCommandOutput() {
           }),
       "pending prompts render file links before authoritative replacement");
 
+  commandCard->setCollapsed(false);
+  spin();
   auto &cards = snapshot.sections.front().cards;
   std::get<UserMessageData>(cards[0].payload).text += " updated";
   auto &agent = std::get<AgentMessageData>(cards[1].payload);
   agent.text += " updated";
   agent.finalAnswer = true;
   auto &command = std::get<CommandExecutionData>(cards[2].payload);
+  QString longCommand;
+  for (int line = 0; line < 30; ++line)
+    longCommand += QStringLiteral("command argument line %1\n").arg(line);
+  command.command = utf8(longCommand);
   command.output =
       utf8(QString(120, QLatin1Char('x')) + QStringLiteral("\nvisible\n\n \t"));
   command.status = "completed";
@@ -1265,6 +1271,11 @@ bool testMutableCardsAndCommandOutput() {
                  commandCard->height() == immediateCommandHeight &&
                  output->sizeHint().height() == immediatePreferredOutputHeight,
              "command output has no delayed outer geometry settlement");
+  result &= expect(
+      commandText->verticalScrollBar()->maximum() > 0 &&
+          commandText->verticalScrollBar()->value() ==
+              commandText->verticalScrollBar()->minimum(),
+      "long executed-command text opens at its beginning");
   for (const auto &value : cards)
     result &= expect(card(view, stableKey(value.key)) ==
                          identities[stableKey(value.key)],
@@ -2172,57 +2183,6 @@ bool testBottomAnchoredCommandOutputGrowth() {
   return result;
 }
 
-bool testCommandTextSettlesAtLatestContent() {
-  QString command;
-  for (int line = 0; line < 30; ++line)
-    command += QStringLiteral("command argument line %1\n").arg(line);
-  VisibleCardData data{
-      AuthoritativeItemKey{"command-text-tail", "turn", "command"},
-      CardKind::CommandExecution,
-      "command-text-tail",
-      "turn",
-      "command",
-      CommandExecutionData{utf8(command), {}, "inProgress", {}, {}}};
-  ConversationCard card(data);
-  card.resize(560, card.sizeHint().height());
-  card.show();
-  spin();
-  bool result = expect(card.isCollapsed(),
-                       "long command begins in its configured folded state");
-  card.setCollapsed(false);
-  card.resize(560, card.sizeHint().height());
-  spin();
-
-  auto *commandText = dynamic_cast<ContentSizedTextView *>(
-      card.findChild<QTextEdit *>(QStringLiteral("commandTextView")));
-  result &= expect(
-      commandText && commandText->verticalScrollBar()->maximum() > 0 &&
-          commandText->verticalScrollBar()->value() ==
-              commandText->verticalScrollBar()->maximum(),
-      "long command text initially settles at its latest line");
-  if (!commandText)
-    return false;
-
-  commandText->verticalScrollBar()->triggerAction(
-      QAbstractSlider::SliderSingleStepSub);
-  spin();
-  const int pausedValue = commandText->verticalScrollBar()->value();
-  auto &execution = std::get<CommandExecutionData>(data.payload);
-  execution.status = "completed";
-  result &= expect(card.apply(data), "status-only command update is visible");
-  spin();
-  result &= expect(commandText->verticalScrollBar()->value() == pausedValue,
-                   "status-only updates retain manual command scrolling");
-
-  execution.command += "final command argument\n";
-  result &= expect(card.apply(data), "changed command text is visible");
-  spin();
-  result &= expect(commandText->verticalScrollBar()->value() ==
-                       commandText->verticalScrollBar()->maximum(),
-                   "changed command text settles at its latest line");
-  return result;
-}
-
 bool testCommandOutputStateAcrossNavigation() {
   const std::string thread = "command-navigation-thread";
   QString output;
@@ -2710,7 +2670,6 @@ int main(int argc, char **argv) {
   result &= testInitialCommandGeometrySettlement();
   result &= testRootlessFinalAnswerGeometrySettlement();
   result &= testBottomAnchoredCommandOutputGrowth();
-  result &= testCommandTextSettlesAtLatestContent();
   result &= testCommandOutputStateAcrossNavigation();
   result &= testPendingPromptAnimation();
   result &= testMessageImagePresentation();

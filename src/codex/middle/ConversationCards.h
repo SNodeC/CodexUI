@@ -15,7 +15,6 @@
 class QLabel;
 class QPaintEvent;
 class QResizeEvent;
-class QShowEvent;
 class QTimer;
 class QVBoxLayout;
 class QWheelEvent;
@@ -35,15 +34,10 @@ public:
 protected:
   void wheelEvent(QWheelEvent *event) override;
   void resizeEvent(QResizeEvent *event) override;
-  void showEvent(QShowEvent *event) override;
   void measureAtCurrentWidth(bool notifyParent);
 
 private:
-  void settleLatestContent();
-  void scheduleLatestContentSettlement();
-
   int preferredHeight_ = 0;
-  bool latestContentSettlementPending_ = false;
   bool wheelGestureActive_ = false;
   bool wheelGestureDecided_ = false;
   bool wheelGestureOwned_ = false;

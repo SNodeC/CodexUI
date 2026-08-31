@@ -401,9 +401,8 @@ has no non-content minimum height, grows from zero to a maximum of 220 pixels,
 and exposes a styled vertical scrollbar only when content exceeds that limit.
 The command surface uses the same content-height behavior with its existing
 90-pixel maximum. Trailing empty lines are omitted from both displayed texts.
-New or changed command text settles at its bottom after final layout; scrolling
-the command manually cancels a pending settlement, and status-only updates do
-not disturb that position.
+Executed command text opens at its beginning and never follows its bottom;
+tail-following belongs only to the streaming output surface.
 Their wrapped content height is measured at the final viewport width during the
 outer layout transaction. While the conversation follows its bottom, streaming
 output growth holds the card bottom and metadata in place and expands upward.
