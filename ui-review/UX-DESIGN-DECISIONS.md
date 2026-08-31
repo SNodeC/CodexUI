@@ -214,6 +214,8 @@ while earlier cards are pending. They are dispatched sequentially per thread.
 Output boxes grow from zero to 220 pixels. Longer output receives a styled
 vertical scrollbar. Each box independently follows output at its bottom and
 pauses when the user scrolls upward.
+Long command text initially presents its latest lines. Manual command scrolling
+is retained unless the command text itself changes.
 
 ## Inspector
 

@@ -281,6 +281,8 @@ Web thread refresh, rename, fork, archive, and delete actions are single-flight.
 Mutation controls require current controller readiness, remain disabled while
 their operation is pending, and report operation failures through the canonical
 notice surface.
+Transient notices overlay the conversation workspace in native and WebUI. Their
+appearance, timeout, and dismissal never resize or reposition message content.
 
 Folding is an explicit geometry transaction. Collapsing keeps the selected
 title row fixed while the natural scroll range permits and shifts following
@@ -399,6 +401,9 @@ has no non-content minimum height, grows from zero to a maximum of 220 pixels,
 and exposes a styled vertical scrollbar only when content exceeds that limit.
 The command surface uses the same content-height behavior with its existing
 90-pixel maximum. Trailing empty lines are omitted from both displayed texts.
+New or changed command text settles at its bottom after final layout; scrolling
+the command manually cancels a pending settlement, and status-only updates do
+not disturb that position.
 Their wrapped content height is measured at the final viewport width during the
 outer layout transaction. While the conversation follows its bottom, streaming
 output growth holds the card bottom and metadata in place and expands upward.

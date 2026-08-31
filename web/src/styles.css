@@ -8,7 +8,7 @@
 html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 button, input, textarea { font: inherit; }
 button { color: inherit; }
-.app-shell { display: grid; grid-template-areas: "top" "notice" "workspace" "status"; grid-template-rows: 64px auto minmax(0, 1fr) 40px; width: 100%; height: 100%; min-width: 0; overflow: hidden; }
+.app-shell { display: grid; grid-template-areas: "top" "workspace" "status"; grid-template-rows: 64px minmax(0, 1fr) 40px; width: 100%; height: 100%; min-width: 0; overflow: hidden; }
 .top-bar { grid-area: top; display: flex; align-items: center; min-width: 0; gap: 28px; padding: 0 18px; background: #fff; border-bottom: 1px solid #d7dee8; z-index: 3; }
 .brand { display: flex; align-items: center; gap: 10px; min-width: 180px; }
 .brand-mark, .brand-orb { display: grid; place-items: center; color: #fff; background: linear-gradient(145deg, #315ccf, #253d91); font-weight: 800; box-shadow: 0 5px 16px #315ccf35; }
@@ -26,7 +26,7 @@ button { color: inherit; }
 .status-dot.active { background: #315ccf; box-shadow: 0 0 0 3px #315ccf1d; }
 .status-dot.warning { background: #e79a31; box-shadow: 0 0 0 3px #e79a311d; }
 .status-dot.danger { background: #d84c5c; box-shadow: 0 0 0 3px #d84c5c1d; }
-.notice-banner { grid-area: notice; display: flex; justify-content: space-between; align-items: center; padding: 8px 20px; background: #fff4dc; color: #7e5415; border-bottom: 1px solid #f0d79e; font-size: 13px; }.notice-banner button { border: 0; background: transparent; color: inherit; font-size: 17px; cursor: pointer; }
+.notice-banner { grid-area: workspace; align-self: start; z-index: 8; display: flex; justify-content: space-between; align-items: center; margin: 8px clamp(8px, 2vw, 18px); padding: 8px 12px; background: #fff4dc; color: #7e5415; border: 1px solid #f0d79e; border-radius: 8px; box-shadow: 0 4px 12px #1720331f; font-size: 13px; }.notice-banner button { border: 0; background: transparent; color: inherit; font-size: 17px; cursor: pointer; }
 .workspace-grid { grid-area: workspace; display: grid; grid-template-columns: 260px minmax(420px, 1fr) 300px; width: 100%; min-width: 0; min-height: 0; overflow: hidden; }
 .thread-pane, .inspector-pane { min-width: 0; min-height: 0; background: #f8fafc; display: flex; flex-direction: column; }
 .thread-pane { border-right: 1px solid #d7dee8; }

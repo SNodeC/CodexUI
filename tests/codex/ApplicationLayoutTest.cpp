@@ -474,6 +474,28 @@ bool testOverlayGeometryAndRegionRouting() {
   spin(20);
   const QRect viewGeometry = view.geometry();
   const QRect viewportGeometry = view.viewport()->geometry();
+  auto *notice = region.findChild<QFrame *>(
+      QStringLiteral("conversationNoticeBar"));
+  auto *dismissNotice =
+      notice ? notice->findChild<QPushButton *>() : nullptr;
+  region.showNotice(QStringLiteral("Transient interaction notice"), false);
+  spin(10);
+  const auto regionRect = [&region](QWidget *widget) {
+    return QRect(widget->mapTo(&region, QPoint()), widget->size());
+  };
+  result &= expect(
+      notice && notice->isVisible() && dismissNotice &&
+          view.geometry() == viewGeometry &&
+          view.viewport()->geometry() == viewportGeometry &&
+          regionRect(notice).intersects(regionRect(&view)),
+      "transient interaction notice overlays without shifting messages");
+  if (dismissNotice)
+    dismissNotice->click();
+  spin(10);
+  result &= expect(notice && notice->isHidden() &&
+                       view.geometry() == viewGeometry &&
+                       view.viewport()->geometry() == viewportGeometry,
+                   "dismissing the notice preserves message geometry");
   const int canonical = region.composer().canonicalReserveHeight();
   result &=
       expect(canonical > 0 &&

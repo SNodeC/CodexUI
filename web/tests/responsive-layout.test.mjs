@@ -80,7 +80,8 @@ test("thread hierarchy exposes selected tree-item semantics", () => {
 test("responsive CSS keeps the desktop grid and removes the old document-width floor", async () => {
     const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
     assert.match(css, /grid-template-columns:\s*260px minmax\(420px, 1fr\) 300px/u);
-    assert.match(css, /grid-template-areas:\s*"top" "notice" "workspace" "status"/u);
+    assert.match(css, /grid-template-areas:\s*"top" "workspace" "status"/u);
+    assert.match(css, /\.notice-banner\s*\{[^}]*grid-area:\s*workspace[^}]*align-self:\s*start[^}]*z-index:\s*8[^}]*border-radius:\s*8px/u);
     assert.doesNotMatch(css, /\.app-shell\s*\{[^}]*min-width:\s*980px/u);
     assert.match(css, /@media \(max-width:\s*1160px\)[\s\S]*grid-template-columns:\s*220px minmax\(0, 1fr\)/u);
     assert.match(css, /@media \(max-width:\s*760px\)[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/u);
