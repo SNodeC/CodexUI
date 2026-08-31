@@ -51,6 +51,8 @@ test("Copy precedes folding and remains available on collapsed cards", () => {
     assert.ok(markup.includes("Copy card content"));
     assert.ok(markup.indexOf("Copy card content") < markup.indexOf("Expand card"));
     assert.match(markup, /card-copy-button[^>]*><svg/u);
+    assert.match(markup, /class="copy-glyph"/u);
+    assert.match(markup, /class="check-glyph"[^>]*data-visible="false"/u);
     assert.ok(!markup.includes(">Copy</button>"));
     assert.ok(!markup.includes("Source **Markdown**"));
 

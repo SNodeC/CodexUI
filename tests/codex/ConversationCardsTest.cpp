@@ -979,22 +979,26 @@ bool testCardCopyControls() {
         "each content card copies its canonical source while collapsed or "
         "expanded");
     if (index == 0) {
-      auto *pulse = button->findChild<QVariantAnimation *>();
+      auto *morph = button->findChild<QVariantAnimation *>();
+      const QImage copyIcon = button->grab().toImage();
+      spin(220);
+      const QImage checkIcon = button->grab().toImage();
       result &= expect(
-          pulse && button->property("copyFeedbackActive").toBool() &&
-              pulse->startValue().value<QColor>() == QColor("#1d2633") &&
-              pulse->keyValueAt(0.5).value<QColor>() == QColor("#b9c4d2") &&
-              pulse->endValue().value<QColor>() == QColor("#1d2633") &&
+          morph && button->property("copyFeedbackActive").toBool() &&
+              button->property("copyIconState") == QStringLiteral("check") &&
+              copyIcon != checkIcon &&
               QToolTip::isVisible() &&
               QToolTip::text() == QStringLiteral("Copied"),
-          "Copy breathes from the hover color to a noticeably lighter peak "
-          "and back while showing the canonical transient Copied overlay");
+          "Copy quickly morphs into a visible success check while showing "
+          "the canonical transient Copied overlay");
       const QSize cardSize = card.size();
-      spin(500);
+      spin(1700);
       result &= expect(!button->property("copyFeedbackActive").toBool() &&
+                           button->property("copyIconState") ==
+                               QStringLiteral("copy") &&
                            card.size() == cardSize,
-                       "Copy feedback completes once without changing card "
-                       "geometry");
+                       "the held check morphs back to Copy without changing "
+                       "card geometry");
     }
     if (index == 0)
       result &= expect(

@@ -58,6 +58,8 @@ constexpr int ThumbnailMaximumHeight = 180;
 constexpr int ViewerMaximumImageExtent = 4096;
 constexpr qsizetype MaximumGenericActivityCharacters = 4096;
 constexpr int CardHeaderActionSpacing = 4;
+constexpr int CopyMorphDurationMilliseconds = 160;
+constexpr int CopyCheckHoldMilliseconds = 1500;
 
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -140,41 +142,55 @@ public:
     setAccessibleName(QStringLiteral("Copy card content"));
     setToolTip(accessibleName());
 
-    pulse_ = new QVariantAnimation(this);
-    pulse_->setDuration(440);
-    pulse_->setStartValue(QColor(QStringLiteral("#1d2633")));
-    pulse_->setKeyValueAt(0.5, QColor(QStringLiteral("#b9c4d2")));
-    pulse_->setEndValue(QColor(QStringLiteral("#1d2633")));
-    pulse_->setEasingCurve(QEasingCurve::InOutSine);
+    morph_ = new QVariantAnimation(this);
+    morph_->setDuration(CopyMorphDurationMilliseconds);
+    morph_->setEasingCurve(QEasingCurve::InOutCubic);
     QObject::connect(
-        pulse_, &QVariantAnimation::valueChanged, this,
+        morph_, &QVariantAnimation::valueChanged, this,
         [this](const QVariant &value) {
-          pulseColor_ = value.value<QColor>();
-          const qreal phase =
-              static_cast<qreal>(pulse_->currentTime()) / pulse_->duration();
-          pulseScale_ = 1.0 + 0.12 * (1.0 - std::abs(2.0 * phase - 1.0));
+          morphProgress_ = value.toReal();
           update();
         });
-    QObject::connect(pulse_, &QVariantAnimation::finished, this, [this] {
-      pulseScale_ = 1.0;
-      pulseColor_ = QColor(QStringLiteral("#1d2633"));
-      setProperty("copyFeedbackActive", false);
-      update();
+    QObject::connect(morph_, &QVariantAnimation::finished, this, [this] {
+      if (returningToCopy_) {
+        finishFeedback();
+        return;
+      }
+      setProperty("copyIconState", QStringLiteral("check"));
+      hold_->start(CopyCheckHoldMilliseconds);
+    });
+    hold_ = new QTimer(this);
+    hold_->setSingleShot(true);
+    QObject::connect(hold_, &QTimer::timeout, this, [this] {
+      returningToCopy_ = true;
+      if (animationsEnabled()) {
+        morph_->setStartValue(morphProgress_);
+        morph_->setEndValue(0.0);
+        morph_->start();
+      } else {
+        finishFeedback();
+      }
     });
   }
 
   void showCopiedFeedback() {
-    pulse_->stop();
-    pulseScale_ = 1.0;
-    pulseColor_ = QColor(QStringLiteral("#1d2633"));
+    morph_->stop();
+    hold_->stop();
+    returningToCopy_ = false;
     setProperty("copyFeedbackActive", true);
-    if (style()->styleHint(QStyle::SH_Widget_Animation_Duration, nullptr,
-                           this) > 0)
-      pulse_->start();
-    else
-      setProperty("copyFeedbackActive", false);
+    setProperty("copyIconState", QStringLiteral("morphing"));
+    if (animationsEnabled()) {
+      morph_->setStartValue(morphProgress_);
+      morph_->setEndValue(1.0);
+      morph_->start();
+    } else {
+      morphProgress_ = 1.0;
+      setProperty("copyIconState", QStringLiteral("check"));
+      hold_->start(CopyCheckHoldMilliseconds);
+    }
     QToolTip::showText(mapToGlobal(QPoint(width() / 2, height())),
-                       QStringLiteral("Copied"), this, rect(), 1000);
+                       QStringLiteral("Copied"), this, rect(),
+                       CopyCheckHoldMilliseconds);
     update();
   }
 
@@ -187,25 +203,44 @@ protected:
     else if (underMouse() || hasFocus())
       color = QColor(QStringLiteral("#1d2633"));
     if (property("copyFeedbackActive").toBool())
-      color = pulseColor_;
+      color = QColor(QStringLiteral("#176b45"));
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    const QPointF center(10.0, 11.5);
-    painter.translate(center);
-    painter.scale(pulseScale_, pulseScale_);
-    painter.translate(-center);
     painter.setBrush(Qt::NoBrush);
     painter.setPen(
         QPen(color, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.save();
+    painter.setOpacity(1.0 - morphProgress_);
     painter.drawRoundedRect(QRectF(4.5, 5.5, 8.0, 9.0), 1.2, 1.2);
     painter.drawRoundedRect(QRectF(7.5, 8.5, 8.0, 9.0), 1.2, 1.2);
+    painter.restore();
+    painter.setOpacity(morphProgress_);
+    QPainterPath check;
+    check.moveTo(4.0, 12.0);
+    check.lineTo(7.5, 15.5);
+    check.lineTo(15.0, 7.5);
+    painter.drawPath(check);
   }
 
 private:
-  QVariantAnimation *pulse_ = nullptr;
-  qreal pulseScale_ = 1.0;
-  QColor pulseColor_ = QColor(QStringLiteral("#1d2633"));
+  [[nodiscard]] bool animationsEnabled() const {
+    return style()->styleHint(QStyle::SH_Widget_Animation_Duration, nullptr,
+                              this) > 0;
+  }
+
+  void finishFeedback() {
+    returningToCopy_ = false;
+    morphProgress_ = 0.0;
+    setProperty("copyFeedbackActive", false);
+    setProperty("copyIconState", QStringLiteral("copy"));
+    update();
+  }
+
+  QVariantAnimation *morph_ = nullptr;
+  QTimer *hold_ = nullptr;
+  qreal morphProgress_ = 0.0;
+  bool returningToCopy_ = false;
 };
 
 void openImageViewer(const QString &path);

@@ -103,11 +103,14 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.doesNotMatch(css, /font-variant-caps/u);
     assert.match(css, /\.card-phase\.status\.active\s*\{[^}]*color:\s*#285fca/u);
     assert.match(css, /\.card-phase\.status\.success\s*\{[^}]*color:\s*#176b45/u);
-    assert.match(css, /\.card-copy-button\.feedback-active svg\s*\{[^}]*animation:\s*copy-breathe 440ms/u);
-    assert.match(css, /@keyframes copy-breathe\s*\{[^}]*0%, 100%\s*\{[^}]*color:\s*#1d2633[^}]*\}[^}]*50%\s*\{[^}]*color:\s*#b9c4d2/u);
+    assert.match(css, /\.card-copy-button \.copy-glyph, \.card-copy-button \.check-glyph\s*\{[^}]*transition:\s*opacity 160ms ease, transform 160ms ease/u);
+    assert.match(css, /\.card-copy-button\.copied \.copy-glyph\s*\{[^}]*opacity:\s*0[^}]*transform:\s*scale\(\.72\)/u);
+    assert.match(css, /\.card-copy-button\.copied \.check-glyph\s*\{[^}]*opacity:\s*1[^}]*transform:\s*scale\(1\)/u);
+    assert.doesNotMatch(css, /copy-breathe/u);
     assert.match(css, /\.card-copy-overlay\s*\{[^}]*border-radius:\s*6px[^}]*background:\s*#1d2633/u);
     assert.match(css, /\.image-ribbon\s*\{[^}]*align-items:\s*center[^}]*padding:\s*4px[^}]*background:\s*#111827/u);
     assert.match(css, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*animation-duration:\s*\.001ms/u);
+    assert.match(css, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*transition-duration:\s*\.001ms/u);
     assert.match(css, /@media \(max-width:\s*520px\)[\s\S]*\.conversation-lockup \.conversation-activity\s*\{[^}]*flex-basis:\s*100%/u);
     assert.match(css, /\.composer-dock\s*\{[^}]*bottom:\s*0[^}]*padding:\s*8px 0 16px[^}]*background:\s*#f2f5f9/u);
     assert.match(css, /\.composer-dock::before\s*\{[^}]*bottom:\s*100%[^}]*height:\s*8px[^}]*background:\s*#f2f5f9/u);

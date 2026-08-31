@@ -84,8 +84,8 @@ function PresentationIcon({kind}: {kind: "reasoning" | "updates" | "command" | "
     return <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><circle cx="10.5" cy="5.5" r="1"/><path d="m3.5 11 3-3.5 2 2L10 8l2.5 3"/></svg>;
 }
 
-function CopyIcon() {
-    return <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="2.5" width="8" height="9" rx="1.5"/><rect x="6" y="5.5" width="8" height="9" rx="1.5"/></svg>;
+function CopyIcon({checked}: {checked: boolean}) {
+    return <svg viewBox="0 0 16 16" aria-hidden="true"><g className="copy-glyph"><rect x="3" y="2.5" width="8" height="9" rx="1.5"/><rect x="6" y="5.5" width="8" height="9" rx="1.5"/></g><path className="check-glyph" d="m2.5 8 3.25 3.25L13.5 3.5" data-visible={checked ? "true" : "false"}/></svg>;
 }
 
 function FoldIcon({collapsed}: {collapsed: boolean}) {
@@ -427,8 +427,7 @@ function ScrollableCode({text, className, label}: {text: string; className: stri
 type ClipboardOutcome = "copied" | "unsupported" | "failed";
 
 export function Card({card, active, collapsed, onToggle, onCopy, nested, turnContainer = false, nestedCard = false}: {card: VisibleCardData; active: boolean; collapsed: boolean; onToggle: () => void; onCopy?: (content: CardCopyContent) => ClipboardOutcome | Promise<ClipboardOutcome> | void; nested?: ReactNode; turnContainer?: boolean; nestedCard?: boolean}) {
-    const [copyFeedback, setCopyFeedback] = useState<{text: string; failed: boolean; sequence: number}>();
-    const copyFeedbackSequence = useRef(0);
+    const [copyFeedback, setCopyFeedback] = useState<{text: string; failed: boolean}>();
     const copyFeedbackTimer = useRef<ReturnType<typeof setTimeout>>();
     useEffect(() => () => { if (copyFeedbackTimer.current) clearTimeout(copyFeedbackTimer.current); }, []);
     const copy = async (content: CardCopyContent) => {
@@ -436,8 +435,8 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         if (!outcome) return;
         if (copyFeedbackTimer.current) clearTimeout(copyFeedbackTimer.current);
         const failed = outcome !== "copied";
-        setCopyFeedback({text: failed ? "Copy failed" : "Copied", failed, sequence: ++copyFeedbackSequence.current});
-        copyFeedbackTimer.current = setTimeout(() => setCopyFeedback(undefined), 1000);
+        setCopyFeedback({text: failed ? "Copy failed" : "Copied", failed});
+        copyFeedbackTimer.current = setTimeout(() => setCopyFeedback(undefined), 1500);
     };
     let title = humanize(card.kind);
     let body: ReactNode;
@@ -489,7 +488,7 @@ export function Card({card, active, collapsed, onToggle, onCopy, nested, turnCon
         && ["active", "inProgress", "running", "started"].includes((card.payload as CommandExecutionData | ImageGenerationData).status);
     const delayedPending = card.kind === "localPrompt" && (card.payload as LocalPromptData).showPendingAnimation;
     return <article className={`conversation-card ${card.kind} ${cardVariant} ${collapsed ? "collapsed" : ""} ${turnContainer ? "turn-container" : ""} ${nestedCard ? "steering" : ""} ${activeTurn ? "active-turn" : ""} ${activeWork ? "active-work" : ""} ${delayedPending ? "delayed-pending" : ""}`} data-card-key={stableKey(card.key)}>
-        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{phaseLabel && <span className={`card-phase ${phaseClass || "steering"}`}>{phaseLabel}</span>}{copyContent.text && <span className="card-copy-control"><button className={`card-copy-button${copyFeedback ? " feedback-active" : ""}`} onClick={() => void copy(copyContent)} aria-label="Copy card content"><CopyIcon key={copyFeedback?.sequence ?? 0} /></button>{copyFeedback && <span className={`card-copy-overlay${copyFeedback.failed ? " failed" : ""}`} role="status" aria-live="polite">{copyFeedback.text}</span>}</span>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
+        <header><span>{title}</span><span className="card-meta"><small>{card.itemId}</small>{phaseLabel && <span className={`card-phase ${phaseClass || "steering"}`}>{phaseLabel}</span>}{copyContent.text && <span className="card-copy-control"><button className={`card-copy-button${copyFeedback && !copyFeedback.failed ? " copied" : ""}`} onClick={() => void copy(copyContent)} aria-label="Copy card content"><CopyIcon checked={Boolean(copyFeedback && !copyFeedback.failed)} /></button>{copyFeedback && <span className={`card-copy-overlay${copyFeedback.failed ? " failed" : ""}`} role="status" aria-live="polite">{copyFeedback.text}</span>}</span>}{foldable && <button className="card-fold-button" onClick={onToggle} aria-label={collapsed ? "Expand card" : "Collapse card"}><FoldIcon collapsed={collapsed} /></button>}</span></header>{!collapsed && <>{body}{nested && <div className="turn-nested">{nested}</div>}</>}
     </article>;
 }
 
