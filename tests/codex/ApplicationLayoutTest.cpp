@@ -714,6 +714,7 @@ bool testThreadSelectionProjection() {
           selectedAccessible.contains(QStringLiteral("level 2")) &&
           parentAccessible.contains(QStringLiteral("A")) &&
           parentAccessible.contains(QStringLiteral("expanded")) &&
+          !title->wordWrap() &&
           title->textInteractionFlags().testFlag(Qt::TextSelectableByMouse) &&
           selected->toolTip().contains(QStringLiteral("Workspace:")) &&
           selected->toolTip().contains(QStringLiteral("Status: running")) &&

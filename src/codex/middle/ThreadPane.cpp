@@ -256,6 +256,7 @@ QWidget *createRow() {
   layout->addSpacing(8);
   auto *title = makeLabel({}, "title");
   title->setObjectName(QStringLiteral("threadTitle"));
+  title->setWordWrap(false);
   title->setStyleSheet(QStringLiteral("font-weight:500;"));
   layout->addWidget(title, 1);
   return row;
