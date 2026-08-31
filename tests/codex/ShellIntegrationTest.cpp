@@ -540,6 +540,7 @@ bool ShellFlow::verifyPromptLifecycle() {
                    "returning to hydrated B does not reread its history");
   result &= expect(submit(editor, QStringLiteral("prompt B1")),
                    "B1 is admitted while A1 is in flight");
+  spin(20);
   result &=
       expect(list && list->item(0) &&
                  list->item(0)->data(Qt::UserRole).toString().toStdString() ==

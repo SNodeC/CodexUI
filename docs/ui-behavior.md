@@ -49,8 +49,9 @@ bottom or is owned by the user.
   meaningful thread-scoped protocol traffic in either direction advances it
   immediately. Selection-driven `thread/read` and `thread/resume` hydration,
   global connection traffic, and catalog traffic do not count as activity.
-  This local value never replaces the authoritative timestamps used for thread
-  sorting and is not persisted by CodexUI.
+  The same live activity advances the presentation model's effective
+  `updatedAt` and `recencyAt` values, while the provider payload remains
+  retained as received. These local values are not persisted by CodexUI.
 - Once selected, a hydrated thread remains visible in the sidebar for the
   session even when it is outside the ordinary top-level thread ordering; an
   authoritative removal still removes it.
@@ -62,11 +63,12 @@ bottom or is owned by the user.
   beginning with numbers precede other titles. Timestamp values that are not
   available sort after timestamped threads. The directions are fixed; the UI
   does not provide a separate ascending/descending control.
-- Admitting a prompt immediately promotes its root thread group to the first
-  position under `Recent` and `Last changed`. This is a transient presentation
-  override, not a fabricated provider timestamp; it retires when updated
-  authoritative ordering data arrives. `Created` and `Alphanumeric` remain
-  unaffected.
+- Admitting a prompt immediately advances its root thread group's effective
+  `updatedAt` and `recencyAt`, so the ordinary timestamp comparator moves it to
+  the first position under `Recent` and `Last changed`. Rapid prompts receive
+  strictly increasing timestamp ticks. Stale provider timestamps cannot move
+  a locally newer thread backwards; newer provider timestamps reconcile
+  naturally. `Created` and `Alphanumeric` remain unaffected.
 - The Plan inspector preserves app-server step states while the owning turn is
   active. If a stale step still reports `inProgress` after its owning turn or
   thread becomes terminal, the display reconciles that step to `completed`,

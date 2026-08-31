@@ -51,7 +51,6 @@ public:
   void confirmOptimisticThread(const std::string &threadId);
   void failOptimisticThread(const std::string &threadId);
   [[nodiscard]] bool isOptimisticThread(const std::string &threadId) const;
-  void promotePromptedThread(const std::string &threadId);
   void setSortCriterion(SortCriterion criterion);
   [[nodiscard]] SortCriterion currentSortCriterion() const noexcept;
   [[nodiscard]] std::string visiblySelectedThreadId() const;
@@ -86,12 +85,6 @@ private:
     std::string cwd;
     bool failed = false;
   };
-  struct PromptPromotion {
-    std::string rootThreadId;
-    std::optional<std::int64_t> updatedAt;
-    std::optional<std::int64_t> recencyAt;
-  };
-
   void updateSortButton();
   void sortRootThreads(std::vector<ui::ThreadListRow> &rows) const;
   void appendVisibleThread(RenderedThreadList &snapshot,
@@ -115,7 +108,6 @@ private:
   QMenu *contextMenu = nullptr;
   QTimer *optimisticAnimation = nullptr;
   std::vector<OptimisticThread> optimisticThreads;
-  std::optional<PromptPromotion> promptPromotion;
   std::optional<RenderedThreadList> visibleSnapshot;
 };
 

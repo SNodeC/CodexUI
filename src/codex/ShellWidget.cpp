@@ -733,7 +733,7 @@ bool ShellWidget::Impl::submitPrompt(
   const bool admitted = uiSession.submitPrompt(std::move(draft));
   if (admitted && !visibleThreadId.empty() &&
       visibleThreadId != DraftThreadId)
-    middleRegion->threads().promotePromptedThread(visibleThreadId);
+    uiSession.notePromptActivity(visibleThreadId);
   return admitted;
 }
 

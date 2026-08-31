@@ -306,7 +306,7 @@ test("thread ordering uses newest creation time and leaves missing values last",
     session.dispose();
 });
 
-test("thread ordering uses newest update time and promotes a prompted root transiently", async () => {
+test("thread ordering uses prompt activity as natural newest update time", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open(); await readyProvider(socket, "updated-promotion");
@@ -314,13 +314,21 @@ test("thread ordering uses newest update time and promotes a prompted root trans
         {id: "old", updatedAt: 10}, {id: "new", updatedAt: 30},
     ]}, "merge"));
     assert.deepEqual(session.threadOrder("updated"), ["new", "old"]);
-    session.selectThread("old"); await session.submitPrompt("promote changed thread");
-    assert.deepEqual(session.threadOrder("updated"), ["old", "new"]);
-    assert.deepEqual(session.threadOrder("created"), ["new", "old"], "promotion does not affect Created");
+    const realNow = Date.now;
+    try {
+        Date.now = () => 40_000;
+        session.selectThread("old"); await session.submitPrompt("change old thread");
+        assert.deepEqual(session.threadOrder("updated"), ["old", "new"]);
+        Date.now = () => 40_000;
+        session.selectThread("new"); await session.submitPrompt("change new thread");
+        assert.deepEqual(session.threadOrder("updated"), ["new", "old"],
+            "the prior locally changed thread retains its timestamp behind the latest one");
+        assert.deepEqual(session.threadOrder("created"), ["new", "old"], "activity does not affect Created");
+    } finally { Date.now = realNow; }
     session.dispose();
 });
 
-test("thread ordering uses newest recency and retires prompt promotion on authoritative change", async () => {
+test("thread ordering retains every locally prompted thread by natural recency", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open();
@@ -331,15 +339,26 @@ test("thread ordering uses newest recency and retires prompt promotion on author
     assert.deepEqual(session.threadOrder(), ["recent", "older"],
         "Recent is explicit newest-first ordering");
 
-    session.selectThread("older");
-    await session.submitPrompt("promote older thread");
-    assert.deepEqual(session.threadOrder(), ["older", "recent"],
-        "the admitted prompt moves its thread to the first visible position");
+    const realNow = Date.now;
+    try {
+        Date.now = () => 40_000;
+        session.selectThread("older");
+        await session.submitPrompt("use older thread");
+        assert.deepEqual(session.threadOrder(), ["older", "recent"],
+            "the admitted prompt updates its thread recency immediately");
+
+        Date.now = () => 40_000;
+        session.selectThread("recent");
+        await session.submitPrompt("use recent thread");
+        assert.deepEqual(session.threadOrder(), ["recent", "older"],
+            "a later prompt does not erase the prior thread's local recency");
+    } finally { Date.now = realNow; }
 
     session.model.applyEvent(result(101, 1, "thread.read", "read", true,
         {thread: {id: "older", recencyAt: 11}}, "merge", {threadId: "older"}));
     assert.deepEqual(session.threadOrder(), ["recent", "older"],
-        "new authoritative recency data retires the transient promotion");
+        "stale authoritative recency cannot undo newer local activity");
+    assert.equal(session.model.thread("older").recencyAt, 40);
     session.dispose();
 });
 

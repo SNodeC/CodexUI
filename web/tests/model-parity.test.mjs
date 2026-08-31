@@ -161,6 +161,10 @@ test("C++ child ownership, correlation, replacement, and removal invariants", ()
     assert.deepEqual(model.thread("child-one").childThreadOrder, ["grandchild"]);
     assert.deepEqual(model.threadOrder(), ["parent", "second-root"]);
     assert.deepEqual(model.childOwnership("child-one"), {parentThreadId: "parent", agentId: "spawn-one"});
+    model.notePromptActivity("grandchild", 100);
+    assert.equal(model.thread("grandchild").recencyAt, 100);
+    assert.equal(model.thread("child-one").recencyAt, 100);
+    assert.equal(model.thread("parent").recencyAt, 100);
 
     model.applyEvent(event(5, 1, "agents.activity.upsert", {activity: {
         id: "peer", type: "subAgentActivity", kind: "interacted", agentPath: "/root/child-two", agentThreadId: "child-two",

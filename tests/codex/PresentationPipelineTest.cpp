@@ -435,6 +435,16 @@ int main() {
               std::vector<std::string>{"parent", "second-root"},
       "ownership is unique, ordered, nested, and excluded from root order");
 
+  ownershipModel.notePromptActivity("grandchild", 100);
+  parent = ownershipModel.thread("parent");
+  childOne = ownershipModel.thread("child-one");
+  const auto *grandchild = ownershipModel.thread("grandchild");
+  passed &= expect(
+      parent && parent->recencyAt == 100 && childOne &&
+          childOne->recencyAt == 100 && grandchild &&
+          grandchild->recencyAt == 100,
+      "nested prompt activity advances the child and every owning ancestor");
+
   ownershipModel.applyEvent(codexui::codex::presentation::event(
       6, 1, "agents.activity.upsert",
       {{"activity",

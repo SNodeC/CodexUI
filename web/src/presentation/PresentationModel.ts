@@ -400,10 +400,32 @@ export class PresentationModel {
     threadOrder(): readonly string[] { return this.orderedThreads; }
     thread(threadId: string): ThreadPresentation | undefined { return this.threads.get(threadId); }
     noteThreadActivity(threadId: string, timestamp: number): void {
-        const thread = this.threads.get(threadId);
-        if (thread && Number.isSafeInteger(timestamp)
-            && (thread.lastActivityAt === undefined || timestamp > thread.lastActivityAt))
-            thread.lastActivityAt = timestamp;
+        if (!Number.isSafeInteger(timestamp)) return;
+        let current = threadId;
+        const visited = new Set<string>();
+        while (current !== "" && !visited.has(current)) {
+            visited.add(current);
+            const thread = this.threads.get(current);
+            if (!thread) break;
+            if (thread.lastActivityAt === undefined || timestamp > thread.lastActivityAt)
+                thread.lastActivityAt = timestamp;
+            if (thread.updatedAt === undefined || timestamp > thread.updatedAt)
+                thread.updatedAt = timestamp;
+            if (thread.recencyAt === undefined || timestamp > thread.recencyAt)
+                thread.recencyAt = timestamp;
+            const ownership = this.childOwnerships.get(current);
+            if (!ownership) break;
+            current = ownership.parentThreadId;
+        }
+    }
+    notePromptActivity(threadId: string, timestamp: number): void {
+        for (const thread of this.threads.values()) {
+            if (thread.updatedAt !== undefined && thread.updatedAt >= timestamp)
+                timestamp = thread.updatedAt + 1;
+            if (thread.recencyAt !== undefined && thread.recencyAt >= timestamp)
+                timestamp = thread.recencyAt + 1;
+        }
+        this.noteThreadActivity(threadId, timestamp);
     }
     childOwnership(childThreadId: string): ChildThreadOwnership | undefined {
         return this.childOwnerships.get(childThreadId);
@@ -719,11 +741,20 @@ export class PresentationModel {
         const cwd = stringMember(raw, "cwd");
         if (cwd !== "") result.cwd = cwd;
         if (Object.hasOwn(raw, "status")) result.status = statusValue(raw.status);
-        for (const key of ["createdAt", "updatedAt", "recencyAt"] as const) {
-            if (typeof raw[key] === "number" && Number.isInteger(raw[key])) result[key] = raw[key];
+        if (typeof raw.createdAt === "number" && Number.isInteger(raw.createdAt))
+            result.createdAt = raw.createdAt;
+        for (const key of ["updatedAt", "recencyAt"] as const) {
+            const timestamp = raw[key];
+            if (typeof timestamp === "number" && Number.isInteger(timestamp)
+                && (result[key] === undefined || timestamp > result[key]!))
+                result[key] = timestamp;
         }
-        if (result.updatedAt !== undefined) this.noteThreadActivity(id, result.updatedAt);
-        if (result.recencyAt !== undefined) this.noteThreadActivity(id, result.recencyAt);
+        if (result.updatedAt !== undefined
+            && (result.lastActivityAt === undefined || result.updatedAt > result.lastActivityAt))
+            result.lastActivityAt = result.updatedAt;
+        if (result.recencyAt !== undefined
+            && (result.lastActivityAt === undefined || result.recencyAt > result.lastActivityAt))
+            result.lastActivityAt = result.recencyAt;
         result.archived = boolValue(raw, "archived", result.archived);
         if (Array.isArray(raw.turns)) {
             let previouslyOwnedChildren: string[] = [];

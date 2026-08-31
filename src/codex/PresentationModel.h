@@ -112,6 +112,8 @@ public:
   void applyEvent(const nlohmann::json &event) noexcept;
   void noteThreadActivity(const std::string &threadId,
                           std::int64_t timestamp) noexcept;
+  void notePromptActivity(const std::string &threadId,
+                          std::int64_t timestamp) noexcept;
 
   [[nodiscard]] const std::vector<std::string> &threadOrder() const noexcept;
   [[nodiscard]] const ThreadPresentation *

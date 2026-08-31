@@ -53,6 +53,23 @@ void updateTimestamp(const nlohmann::json &object, const char *key,
     target = iterator->get<std::int64_t>();
 }
 
+void retainTimestamp(const nlohmann::json &object, const char *key,
+                     std::optional<std::int64_t> &target) {
+  if (!object.is_object())
+    return;
+  const auto iterator = object.find(key);
+  if (iterator != object.end() && iterator->is_number_integer()) {
+    const std::int64_t timestamp = iterator->get<std::int64_t>();
+    if (!target || timestamp > *target)
+      target = timestamp;
+  }
+}
+
+void retainActivity(ThreadPresentation &thread, std::int64_t timestamp) {
+  if (!thread.lastActivityAt || timestamp > *thread.lastActivityAt)
+    thread.lastActivityAt = timestamp;
+}
+
 std::string statusValue(const nlohmann::json &value) {
   if (value.is_string())
     return value.get<std::string>();
@@ -381,12 +398,35 @@ void PresentationModel::applyEvent(const nlohmann::json &event) noexcept {
 
 void PresentationModel::noteThreadActivity(const std::string &threadId,
                                            std::int64_t timestamp) noexcept {
-  const auto iterator = threads.find(threadId);
-  if (iterator == threads.end())
-    return;
-  std::optional<std::int64_t> &activity = iterator->second.lastActivityAt;
-  if (!activity || timestamp > *activity)
-    activity = timestamp;
+  std::string current = threadId;
+  std::unordered_set<std::string> visited;
+  while (!current.empty() && visited.insert(current).second) {
+    const auto iterator = threads.find(current);
+    if (iterator == threads.end())
+      break;
+    ThreadPresentation &thread = iterator->second;
+    retainActivity(thread, timestamp);
+    if (!thread.updatedAt || timestamp > *thread.updatedAt)
+      thread.updatedAt = timestamp;
+    if (!thread.recencyAt || timestamp > *thread.recencyAt)
+      thread.recencyAt = timestamp;
+    const auto ownership = childOwnerships.find(current);
+    if (ownership == childOwnerships.end())
+      break;
+    current = ownership->second.parentThreadId;
+  }
+}
+
+void PresentationModel::notePromptActivity(const std::string &threadId,
+                                           std::int64_t timestamp) noexcept {
+  for (const auto &[id, thread] : threads) {
+    static_cast<void>(id);
+    if (thread.updatedAt && *thread.updatedAt >= timestamp)
+      timestamp = *thread.updatedAt + 1;
+    if (thread.recencyAt && *thread.recencyAt >= timestamp)
+      timestamp = *thread.recencyAt + 1;
+  }
+  noteThreadActivity(threadId, timestamp);
 }
 
 void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
@@ -860,12 +900,12 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
   if (status != raw.end())
     result.status = statusValue(*status);
   updateTimestamp(raw, "createdAt", result.createdAt);
-  updateTimestamp(raw, "updatedAt", result.updatedAt);
-  updateTimestamp(raw, "recencyAt", result.recencyAt);
+  retainTimestamp(raw, "updatedAt", result.updatedAt);
+  retainTimestamp(raw, "recencyAt", result.recencyAt);
   if (result.updatedAt)
-    noteThreadActivity(id, *result.updatedAt);
+    retainActivity(result, *result.updatedAt);
   if (result.recencyAt)
-    noteThreadActivity(id, *result.recencyAt);
+    retainActivity(result, *result.recencyAt);
   result.archived = boolValue(raw, "archived", result.archived);
 
   const auto turns = raw.find("turns");

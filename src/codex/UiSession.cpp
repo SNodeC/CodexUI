@@ -326,6 +326,11 @@ public:
     changed();
   }
 
+  void notePromptActivity(const std::string &threadId) {
+    model.notePromptActivity(threadId, nowSeconds());
+    changed();
+  }
+
   void hydrateHistoricalChildren(const std::string &parentThreadId,
                                  bool retryFailed = false) {
     const ThreadPresentation *thread = model.thread(parentThreadId);
@@ -1183,6 +1188,10 @@ void UiSession::onPresentationFrame(const nlohmann::json &frame) {
 
 void UiSession::noteThreadActivity(const std::string &threadId) {
   impl->noteThreadActivity(threadId);
+}
+
+void UiSession::notePromptActivity(const std::string &threadId) {
+  impl->notePromptActivity(threadId);
 }
 
 void UiSession::tick() { impl->tick(); }

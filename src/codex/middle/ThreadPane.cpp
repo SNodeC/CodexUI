@@ -301,15 +301,6 @@ const ui::ThreadListRow *findThread(
   return nullptr;
 }
 
-const ui::ThreadListRow *rootForThread(
-    const std::vector<ui::ThreadListRow> &roots, std::string_view id) {
-  for (const ui::ThreadListRow &root : roots) {
-    if (findThread(root, id))
-      return &root;
-  }
-  return nullptr;
-}
-
 bool expandAncestors(const ui::ThreadListRow &row, std::string_view id,
                      std::unordered_set<std::string> &expanded) {
   if (row.id == id)
@@ -520,19 +511,6 @@ bool ThreadPane::isOptimisticThread(const std::string &threadId) const {
                              });
 }
 
-void ThreadPane::promotePromptedThread(const std::string &threadId) {
-  if (!currentSnapshot || threadId.empty())
-    return;
-  const ui::ThreadListRow *root =
-      rootForThread(currentSnapshot->roots, threadId);
-  if (!root)
-    return;
-  promptPromotion =
-      PromptPromotion{root->id, root->updatedAt, root->recencyAt};
-  visibleSnapshot.reset();
-  refresh(*currentSnapshot);
-}
-
 void ThreadPane::setSortCriterion(SortCriterion criterion) {
   if (sortCriterion == criterion)
     return;
@@ -584,25 +562,9 @@ void ThreadPane::sortRootThreads(std::vector<ui::ThreadListRow> &rows) const {
   collator.setCaseSensitivity(Qt::CaseInsensitive);
   collator.setIgnorePunctuation(true);
   collator.setNumericMode(true);
-  std::string promotedRoot;
-  if (promptPromotion && (sortCriterion == SortCriterion::LastChanged ||
-                          sortCriterion == SortCriterion::Recency)) {
-    if (currentSnapshot) {
-      const ui::ThreadListRow *thread =
-          findThread(currentSnapshot->roots, promptPromotion->rootThreadId);
-      const auto observed = sortCriterion == SortCriterion::LastChanged
-                                ? promptPromotion->updatedAt
-                                : promptPromotion->recencyAt;
-      if (thread && timestampFor(*thread, sortCriterion) == observed)
-        promotedRoot = promptPromotion->rootThreadId;
-    }
-  }
   std::sort(rows.begin(), rows.end(),
             [&](const ui::ThreadListRow &left,
                 const ui::ThreadListRow &right) {
-              if (left.id != right.id &&
-                  (left.id == promotedRoot || right.id == promotedRoot))
-                return left.id == promotedRoot;
               if (sortCriterion == SortCriterion::Alphanumeric) {
                 const QString leftTitle = text(left.title).trimmed();
                 const QString rightTitle = text(right.title).trimmed();

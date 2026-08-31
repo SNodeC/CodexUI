@@ -161,6 +161,7 @@ public:
 
   void onPresentationFrame(const nlohmann::json &frame);
   void noteThreadActivity(const std::string &threadId);
+  void notePromptActivity(const std::string &threadId);
   void tick();
 
   [[nodiscard]] std::string conversationKey() const;

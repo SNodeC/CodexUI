@@ -1223,7 +1223,7 @@ bool testThreadLastActivityRetention() {
   return result;
 }
 
-bool testPromptAdmissionPromotesThread() {
+bool testPromptActivityNaturallyOrdersThreads() {
   PresentationModel model;
   model.applyEvent(presentation::result(
       1, 1, "threads.list", "prompt-promotion", true,
@@ -1244,27 +1244,36 @@ bool testPromptAdmissionPromotesThread() {
       expect(threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
       "provider recency initially determines thread order");
 
-  pane.promotePromptedThread("older");
+  model.notePromptActivity("older", 40);
+  refresh(pane, model, "older");
   result &=
       expect(threadOrder(pane) == std::vector<std::string>({"older", "recent"}),
-      "prompt admission immediately promotes the thread under Recent");
+      "prompt activity immediately updates natural Recent ordering");
   pane.setSortCriterion(ThreadPane::SortCriterion::LastChanged);
   result &=
       expect(threadOrder(pane) == std::vector<std::string>({"older", "recent"}),
-      "the same admission promotes the thread under Last changed");
+      "the same activity updates natural Last changed ordering");
   pane.setSortCriterion(ThreadPane::SortCriterion::Created);
   result &=
       expect(threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
-      "prompt admission does not affect Created ordering");
+      "prompt activity does not affect Created ordering");
 
   pane.setSortCriterion(ThreadPane::SortCriterion::Recency);
+  model.notePromptActivity("recent", 40);
+  refresh(pane, model, "recent");
+  result &=
+      expect(threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
+      "a later prompt moves its thread first without losing prior activity");
   model.applyEvent(presentation::event(
       2, 1, "thread.upsert", {{"thread", {{"id", "older"}, {"recencyAt", 20}}}},
       presentation::Authority::Merge, {{"threadId", "older"}}));
-  refresh(pane, model, "older");
+  refresh(pane, model, "recent");
+  const ThreadPresentation *older = model.thread("older");
   result &=
-      expect(threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
-      "authoritative recency changes retire the local promotion");
+      expect(older && older->recencyAt == 40 && older->updatedAt == 40 &&
+                 threadOrder(pane) ==
+                     std::vector<std::string>({"recent", "older"}),
+             "stale provider timestamps cannot undo newer local ordering");
   return result;
 }
 
@@ -2223,7 +2232,7 @@ int main(int argc, char **argv) {
   result &= testThreadLastChangedSort();
   result &= testThreadRecencySort();
   result &= testThreadLastActivityRetention();
-  result &= testPromptAdmissionPromotesThread();
+  result &= testPromptActivityNaturallyOrdersThreads();
   result &= testOptimisticThreadRowLifecycle();
   result &= testThreadRowReorderOwnership();
   result &= testNestedCommandScrollOwnership();
