@@ -153,6 +153,7 @@ struct PlanData {
 struct GenericActivityData {
   std::string type;
   nlohmann::json raw = nlohmann::json::object();
+  std::string status;
 
   bool operator==(const GenericActivityData &) const = default;
 };

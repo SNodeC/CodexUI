@@ -27,6 +27,15 @@ std::string stringValue(const nlohmann::json &object, const char *key) {
                                                      : std::string{};
 }
 
+std::string statusValue(const nlohmann::json &object) {
+  const auto status = object.find("status");
+  if (status == object.end())
+    return {};
+  if (status->is_string())
+    return status->get<std::string>();
+  return stringValue(*status, "type");
+}
+
 std::optional<std::int64_t> integerValue(const nlohmann::json &object,
                                    const char *key) {
   if (!object.is_object())
@@ -209,7 +218,8 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
   const std::string type = stringValue(item, "type");
   VisibleCardData result{std::move(visualKey), CardKind::GenericActivity,
       identity.threadId,    identity.turnId,
-                         identity.itemId,      GenericActivityData{type, item}};
+                         identity.itemId,
+                         GenericActivityData{type, item, statusValue(item)}};
 
   if (type == "userMessage") {
     result.kind = CardKind::UserMessage;
@@ -295,7 +305,10 @@ VisibleCardData authoritativeCard(const AuthoritativeItemKey &identity,
       revisedPrompt = stringValue(item, "revised_prompt");
     result.kind = CardKind::ImageGeneration;
     result.payload =
-        ImageGenerationData{path, stringValue(item, "status"), revisedPrompt};
+        ImageGenerationData{path,
+                            type == "imageView" ? "completed"
+                                                : stringValue(item, "status"),
+                            revisedPrompt};
   } else if (type == "plan") {
     const std::string plan = withTruncationNotice(
         messageText(item), omittedTextBytes(presentation, "text"), "plan text",

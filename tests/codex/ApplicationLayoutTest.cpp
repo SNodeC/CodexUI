@@ -15,6 +15,7 @@
 #include "codex/ui/UiViewProjection.h"
 
 #include <QApplication>
+#include <QAbstractTextDocumentLayout>
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QCoreApplication>
@@ -50,6 +51,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace codexui::codex::middle {
@@ -150,8 +152,9 @@ bool testPromptKeyboardSubmission() {
   result &= expect(submissions == 4, "Alt+Enter does not submit a prompt");
   resetDraft();
   sendPromptKey(editor, Qt::Key_Return, Qt::ControlModifier, true);
-  result &= expect(submissions == 4,
-                   "an auto-repeated Enter chord does not submit a prompt");
+  result &= expect(submissions == 4 &&
+                       editor.toPlainText() == QStringLiteral("draft"),
+                   "an auto-repeated Enter chord neither submits nor inserts");
 
   resetDraft();
   QInputMethodEvent preedit(QStringLiteral("candidate"), {});
@@ -166,6 +169,50 @@ bool testPromptKeyboardSubmission() {
   sendPromptKey(editor, Qt::Key_Return);
   result &= expect(submissions == 5,
                    "Enter submits again after IME composition completes");
+
+  editor.setPlainText(QStringLiteral("one\ntwo\nthree\nfour"));
+  QCoreApplication::processEvents();
+  editor.verticalScrollBar()->setValue(editor.verticalScrollBar()->maximum());
+  result &= expect(
+      editor.verticalScrollBarPolicy() == Qt::ScrollBarAlwaysOff &&
+          editor.verticalScrollBar()->value() ==
+              editor.verticalScrollBar()->minimum(),
+      "a fully visible multiline draft has no hidden empty-line scroll tail");
+
+  editor.clear();
+  editor.resize(280, codexui::ExpandingPromptEditor::compactHeight());
+  QCoreApplication::processEvents();
+  const int compactWidth = 170;
+  QString boundary;
+  while (boundary.size() < 100 &&
+         !editor.requiresExpandedLayout(compactWidth)) {
+    boundary += QLatin1Char('W');
+    editor.setPlainText(boundary);
+  }
+  const QString beforeBoundary = boundary.chopped(1);
+  editor.setPlainText(beforeBoundary);
+  const bool beforeExpands = editor.requiresExpandedLayout(compactWidth);
+  editor.setPlainText(boundary);
+  QCoreApplication::processEvents();
+  const qreal liveWidth = editor.document()->textWidth();
+  int liveLayoutChanges = 0;
+  const QMetaObject::Connection layoutConnection = QObject::connect(
+      editor.document()->documentLayout(),
+      &QAbstractTextDocumentLayout::documentSizeChanged, &editor,
+      [&liveLayoutChanges] { ++liveLayoutChanges; });
+  const bool boundaryExpands = editor.requiresExpandedLayout(compactWidth);
+  QObject::disconnect(layoutConnection);
+  result &= expect(!beforeBoundary.isEmpty(),
+                   "the compact probe discovers a nonempty wrap boundary");
+  result &= expect(!beforeExpands,
+                   "the character before the wrap boundary remains compact");
+  result &= expect(boundaryExpands,
+                   "the first wrapped character enters multiline mode");
+  result &= expect(editor.document()->textWidth() == liveWidth,
+                   "compact layout probing preserves the live document width");
+  result &= expect(
+      liveLayoutChanges == 0,
+      "compact layout probing does not relay out the visible document");
   return result;
 }
 
@@ -427,6 +474,28 @@ bool testOverlayGeometryAndRegionRouting() {
   spin(20);
   const QRect viewGeometry = view.geometry();
   const QRect viewportGeometry = view.viewport()->geometry();
+  auto *notice = region.findChild<QFrame *>(
+      QStringLiteral("conversationNoticeBar"));
+  auto *dismissNotice =
+      notice ? notice->findChild<QPushButton *>() : nullptr;
+  region.showNotice(QStringLiteral("Transient interaction notice"), false);
+  spin(10);
+  const auto regionRect = [&region](QWidget *widget) {
+    return QRect(widget->mapTo(&region, QPoint()), widget->size());
+  };
+  result &= expect(
+      notice && notice->isVisible() && dismissNotice &&
+          view.geometry() == viewGeometry &&
+          view.viewport()->geometry() == viewportGeometry &&
+          regionRect(notice).intersects(regionRect(&view)),
+      "transient interaction notice overlays without shifting messages");
+  if (dismissNotice)
+    dismissNotice->click();
+  spin(10);
+  result &= expect(notice && notice->isHidden() &&
+                       view.geometry() == viewGeometry &&
+                       view.viewport()->geometry() == viewportGeometry,
+                   "dismissing the notice preserves message geometry");
   const int canonical = region.composer().canonicalReserveHeight();
   result &=
       expect(canonical > 0 &&
@@ -443,6 +512,8 @@ bool testOverlayGeometryAndRegionRouting() {
       composerSurface = frame;
   }
   TurnSettingsWidget *settings = region.composer().turnSettings();
+  auto *sendButton = region.composer().findChild<QPushButton *>(
+      QStringLiteral("composerSendButton"));
   const auto overlayRect = [&](QWidget *widget) {
     return QRect(widget->mapTo(&region.composer(), QPoint()), widget->size());
   };
@@ -494,6 +565,33 @@ bool testOverlayGeometryAndRegionRouting() {
               QStringLiteral("QLabel[tone=\"success\"]")) &&
           stableComposerGeometry(),
       "compact composer has an opaque surface and canonical section gaps");
+  region.composer().setCanSubmit(true);
+  result &= expect(sendButton && !sendButton->isEnabled(),
+                   "an empty prompt cannot activate Send");
+  region.composer().promptEditor()->setPlainText(QStringLiteral("draft"));
+  spin(10);
+  result &= expect(sendButton && sendButton->isEnabled(),
+                   "non-blank input activates Send when admission is ready");
+  region.composer().promptEditor()->setFocus();
+  spin(10);
+  result &= expect(composerSurface->property("focused").toBool(),
+                   "prompt focus activates the canonical composer focus state");
+  QString submittedPrompt;
+  ComposerPane::Actions exactSubmission;
+  exactSubmission.submit = [&submittedPrompt](
+                                QString prompt,
+                                std::vector<AttachmentDraft>) {
+    submittedPrompt = std::move(prompt);
+    return false;
+  };
+  region.composer().setActions(std::move(exactSubmission));
+  const QString exactPrompt = QStringLiteral("  indented Markdown\n\n");
+  region.composer().promptEditor()->setPlainText(exactPrompt);
+  QMetaObject::invokeMethod(region.composer().promptEditor(),
+                            "submitRequested", Qt::DirectConnection);
+  result &= expect(submittedPrompt == exactPrompt,
+                   "submission validates whitespace without rewriting it");
+  region.composer().clearDraft();
   view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
   spin(10);
   result &= expect(finalCardBottom() == view.viewport()->height(),
@@ -525,6 +623,12 @@ bool testOverlayGeometryAndRegionRouting() {
   const int extra = region.composer().extraOverlayHeight();
   result &= expect(extra > 0 && view.trailingSpaceHeight() == extra,
                    "prompt growth is mirrored by exact trailing scroll space");
+  result &= expect(
+      view.verticalScrollBar()->property("composerBottomInset").toInt() ==
+              extra &&
+          view.verticalScrollBar()->styleSheet().contains(
+              QStringLiteral("margin:2px 2px %1px 2px").arg(extra + 2)),
+      "prompt growth shortens the visible message scrollbar track");
   view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
   spin(10);
   result &= expect(
@@ -553,6 +657,10 @@ bool testOverlayGeometryAndRegionRouting() {
   result &= expect(
       region.composer().extraOverlayHeight() == 0 &&
           view.trailingSpaceHeight() == 0 && view.geometry() == viewGeometry &&
+          view.verticalScrollBar()
+                  ->property("composerBottomInset")
+                  .toInt() == 0 &&
+          view.verticalScrollBar()->styleSheet().isEmpty() &&
           view.viewport()->geometry() == viewportGeometry &&
           finalCardBottom() == view.viewport()->height() &&
           stableComposerGeometry() && settingsToEditorGap() == compactEditorGap,
@@ -596,6 +704,35 @@ bool testOverlayGeometryAndRegionRouting() {
                             Qt::DirectConnection);
   result &= expect(region.composer().promptEditor()->toPlainText().isEmpty(),
                    "successful local admission clears the draft exactly once");
+
+  QString oversizedPrompt;
+  for (int line = 0; line < 30; ++line)
+    oversizedPrompt += QStringLiteral("scroll-owned prompt line %1\n").arg(line);
+  region.composer().promptEditor()->setPlainText(oversizedPrompt);
+  spin(20);
+  auto *promptScroll = region.composer().promptEditor()->verticalScrollBar();
+  promptScroll->setValue(promptScroll->minimum());
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum() / 2);
+  const int conversationBeforePromptWheel =
+      view.verticalScrollBar()->value();
+  QWheelEvent promptRoute =
+      wheelFor(region.composer().promptEditor(), 120, Qt::ScrollBegin);
+  result &= expect(
+      !region.routeScrollEvent(region.composer().promptEditor(), &promptRoute),
+      "the prompt editor retains its own wheel origin");
+  QWheelEvent promptNative =
+      wheelFor(region.composer().promptEditor(), 120, Qt::ScrollUpdate);
+  QCoreApplication::sendEvent(region.composer().promptEditor(), &promptNative);
+  result &= expect(
+      view.verticalScrollBar()->value() == conversationBeforePromptWheel,
+      "prompt overscroll cannot move the conversation");
+  QWheelEvent settingsWheel = wheelFor(settings, 120, Qt::ScrollBegin);
+  result &= expect(region.routeScrollEvent(settings, &settingsWheel) &&
+                       view.verticalScrollBar()->value() ==
+                           conversationBeforePromptWheel,
+                   "settings-originated scrolling is consumed locally");
+  region.composer().clearDraft();
+  spin(20);
 
   QWheelEvent overLeftHandle = wheelFor(splitter->handle(1), 180);
   result &=
@@ -747,6 +884,48 @@ bool testThreadSelectionProjection() {
   }
   result &= expect(!retainedAfterRemoval,
                    "an authoritative removal drops a retained thread");
+  return result;
+}
+
+bool testThreadRuntimeStatusColors() {
+  PresentationModel model;
+  const std::vector<std::pair<std::string, std::string>> statuses{
+      {"thread-not-loaded", "notLoaded"},
+      {"thread-completed", "idle"},
+      {"thread-running", "active"},
+      {"thread-failed", "systemError"},
+  };
+  std::uint64_t sequence = 1;
+  for (const auto &[id, status] : statuses) {
+    model.applyEvent(presentation::event(
+        sequence++, 1, "thread.upsert",
+        {{"thread", {{"id", id}, {"name", id},
+                     {"status", {{"type", status}}}}}},
+        presentation::Authority::Merge, {{"threadId", id}}));
+  }
+
+  ThreadPane pane;
+  refresh(pane, model, "thread-completed");
+  auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
+  const std::vector<std::pair<std::string, const char *>> expected{
+      {"thread-not-loaded", UiStyle::threadInactive},
+      {"thread-completed", UiStyle::green},
+      {"thread-running", UiStyle::blue},
+      {"thread-failed", UiStyle::red},
+  };
+  bool result = true;
+  for (const auto &[id, color] : expected) {
+    QListWidgetItem *item = threadItem(list, id);
+    QWidget *row = item && list ? list->itemWidget(item) : nullptr;
+    auto *dot = row ? row->findChild<QFrame *>(
+                          QStringLiteral("threadStatusDot"))
+                    : nullptr;
+    const std::string message =
+        id + " uses its canonical app-server runtime-state color";
+    result &= expect(
+        dot && dot->styleSheet().contains(QString::fromLatin1(color)),
+        message.c_str());
+  }
   return result;
 }
 
@@ -1219,8 +1398,9 @@ bool testThreadLastActivityRetention() {
       presentation::Authority::Merge, {{"threadId", "tracked"}}));
   thread = model.thread("tracked");
   result &=
-      expect(thread && thread->lastActivityAt == 40,
-             "stale provider hydration cannot replace newer live activity");
+      expect(thread && thread->lastActivityAt == 40 &&
+                 thread->updatedAt == 20 && thread->recencyAt == 35,
+             "live protocol traffic updates activity without rewriting sort keys");
   return result;
 }
 
@@ -2226,6 +2406,7 @@ int main(int argc, char **argv) {
   bool result = testPromptKeyboardSubmission();
   result &= testOverlayGeometryAndRegionRouting();
   result &= testThreadSelectionProjection();
+  result &= testThreadRuntimeStatusColors();
   result &= testThreadHierarchyExpansionAndNavigation();
   result &= testIncrementalThreadSettings();
   result &= testThreadAlphanumericSort();

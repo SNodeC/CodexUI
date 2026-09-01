@@ -59,7 +59,7 @@ constexpr int ViewerMaximumImageExtent = 4096;
 constexpr qsizetype MaximumGenericActivityCharacters = 4096;
 constexpr int CardHeaderActionSpacing = 4;
 constexpr int CopyMorphDurationMilliseconds = 160;
-constexpr int CopyCheckHoldMilliseconds = 1500;
+constexpr int CopyCheckHoldMilliseconds = 500;
 
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -1403,6 +1403,7 @@ public:
     title->setText(activity.type.empty()
                        ? QStringLiteral("Activity")
                        : UiStyle::humanizeLabel(text(activity.type)));
+    showStatus(text(activity.status), QStringLiteral("genericActivityStatus"));
     metadata->setText(boundedGenericActivity(activity.raw));
     metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
     metadata->show();

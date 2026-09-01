@@ -23,6 +23,7 @@
 #include <QScrollBar>
 #include <QTemporaryDir>
 #include <QTextBlock>
+#include <QTextDocument>
 #include <QTextLayout>
 #include <QThread>
 #include <QTimer>
@@ -1232,12 +1233,18 @@ bool testMutableCardsAndCommandOutput() {
           }),
       "pending prompts render file links before authoritative replacement");
 
+  commandCard->setCollapsed(false);
+  spin();
   auto &cards = snapshot.sections.front().cards;
   std::get<UserMessageData>(cards[0].payload).text += " updated";
   auto &agent = std::get<AgentMessageData>(cards[1].payload);
   agent.text += " updated";
   agent.finalAnswer = true;
   auto &command = std::get<CommandExecutionData>(cards[2].payload);
+  QString longCommand;
+  for (int line = 0; line < 30; ++line)
+    longCommand += QStringLiteral("command argument line %1\n").arg(line);
+  command.command = utf8(longCommand);
   command.output =
       utf8(QString(120, QLatin1Char('x')) + QStringLiteral("\nvisible\n\n \t"));
   command.status = "completed";
@@ -1265,6 +1272,11 @@ bool testMutableCardsAndCommandOutput() {
                  commandCard->height() == immediateCommandHeight &&
                  output->sizeHint().height() == immediatePreferredOutputHeight,
              "command output has no delayed outer geometry settlement");
+  result &= expect(
+      commandText->verticalScrollBar()->maximum() > 0 &&
+          commandText->verticalScrollBar()->value() ==
+              commandText->verticalScrollBar()->minimum(),
+      "long executed-command text opens at its beginning");
   for (const auto &value : cards)
     result &= expect(card(view, stableKey(value.key)) ==
                          identities[stableKey(value.key)],
@@ -2103,6 +2115,86 @@ bool testRootlessFinalAnswerGeometrySettlement() {
   return result;
 }
 
+bool testRetainedNestedFinalAnswerGeometrySettlement() {
+  const QString originalStyleSheet = qApp->styleSheet();
+  qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
+  const std::string thread = "retained-nested-final-answer";
+  const VisibleCardData prompt{
+      AuthoritativeItemKey{thread, "turn", "prompt"},
+      CardKind::UserMessage,
+      thread,
+      "turn",
+      "prompt",
+      UserMessageData{"Please provide the complete retained report.", {}}};
+  QString markdown = QStringLiteral(
+      "The retained report contains enough Markdown to require its final "
+      "nested width before height calculation.\n\n"
+      "Its complete list must remain inside the final-answer border:\n\n");
+  for (int index = 1; index <= 14; ++index)
+    markdown += QStringLiteral(
+                    "- Retained result %1 with explanatory text, **emphasis**, "
+                    "and enough detail to wrap naturally at the nested card "
+                    "width.\n")
+                    .arg(index);
+  const VisibleCardData answer{
+      AuthoritativeItemKey{thread, "turn", "answer"},
+      CardKind::AgentMessage,
+      thread,
+      "turn",
+      "answer",
+      AgentMessageData{"Retained final answer is materializing.", true}};
+  TurnSection section{"turn:retained", "turn", {prompt}, prompt.key};
+  for (int index = 0; index < 4; ++index)
+    section.cards.push_back(
+        agentCard(thread, "turn", index,
+                  QStringLiteral("Retained update %1 preceding the final "
+                                 "answer with enough text to wrap.")
+                      .arg(index)));
+  section.cards.push_back(answer);
+  ConversationSnapshot snapshot{thread, {std::move(section)}, 0, false};
+
+  ConversationView view;
+  view.resize(980, 420);
+  bool result = expect(
+      view.reconcile(snapshot),
+      "retained prompt and partial final answer materialize initially");
+  std::get<AgentMessageData>(snapshot.sections.front().cards.back().payload)
+      .text = utf8(markdown);
+  result &= expect(view.reconcile(snapshot),
+                   "retained hydration completes before first exposure");
+  view.resize(560, 420);
+  view.show();
+  ConversationCard *promptCard = card(view, stableKey(prompt.key));
+  ConversationCard *answerCard = card(view, stableKey(answer.key));
+  QLabel *answerBody = nullptr;
+  if (answerCard)
+    for (QLabel *label : answerCard->findChildren<QLabel *>())
+      if (label->property("markdownSource").toString() == markdown) {
+        answerBody = label;
+        break;
+      }
+  int documentHeight = 0;
+  if (answerBody) {
+    QTextDocument document;
+    document.setDefaultFont(answerBody->font());
+    document.setDocumentMargin(0);
+    document.setHtml(answerBody->text());
+    document.setTextWidth(answerBody->width());
+    documentHeight = static_cast<int>(std::ceil(document.size().height()));
+  }
+  result &= expect(
+      promptCard && answerCard && answerBody &&
+          promptCard->isAncestorOf(answerCard) &&
+          answerBody->height() >= documentHeight &&
+          answerBody->mapTo(answerCard, QPoint(0, answerBody->height())).y() <=
+              answerCard->contentsRect().bottom() + 1,
+      "an initially retained nested final answer fully fits its rendered "
+      "document and settled card");
+  spin();
+  qApp->setStyleSheet(originalStyleSheet);
+  return result;
+}
+
 bool testBottomAnchoredCommandOutputGrowth() {
   const std::string thread = "bottom-anchored-output";
   ConversationSnapshot snapshot = conversation(thread, 14);
@@ -2658,6 +2750,7 @@ int main(int argc, char **argv) {
   result &= testPresentationOptionsRetainCardsAndInitialFolding();
   result &= testInitialCommandGeometrySettlement();
   result &= testRootlessFinalAnswerGeometrySettlement();
+  result &= testRetainedNestedFinalAnswerGeometrySettlement();
   result &= testBottomAnchoredCommandOutputGrowth();
   result &= testCommandOutputStateAcrossNavigation();
   result &= testPendingPromptAnimation();

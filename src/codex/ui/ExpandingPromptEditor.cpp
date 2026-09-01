@@ -7,10 +7,12 @@
 #include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QResizeEvent>
+#include <QScrollBar>
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTextLayout>
 #include <QTimer>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <cmath>
@@ -37,7 +39,12 @@ ExpandingPromptEditor::ExpandingPromptEditor(QWidget *parent)
       "3px 2px;}"));
 
   connect(this, &QPlainTextEdit::textChanged, this,
-          &ExpandingPromptEditor::remeasure);
+          &ExpandingPromptEditor::scheduleRemeasure);
+  connect(verticalScrollBar(), &QScrollBar::valueChanged, this,
+          [this](int value) {
+            if (!contentScrollable && value != verticalScrollBar()->minimum())
+              verticalScrollBar()->setValue(verticalScrollBar()->minimum());
+          });
 }
 
 bool ExpandingPromptEditor::requiresExpandedLayout(int widgetWidth) const {
@@ -48,13 +55,17 @@ bool ExpandingPromptEditor::requiresExpandedLayout(int widgetWidth) const {
     return true;
 
   const int viewportReduction = std::max(0, width() - viewport()->width());
-  const qreal lineWidth = std::max(1, widgetWidth - viewportReduction);
+  const qreal contentWidth =
+      std::max<qreal>(1, widgetWidth - viewportReduction -
+                            2 * document()->documentMargin());
   QTextLayout layout(content, font());
-  layout.setTextOption(document()->defaultTextOption());
+  QTextOption option = document()->defaultTextOption();
+  option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+  layout.setTextOption(option);
   layout.beginLayout();
   QTextLine firstLine = layout.createLine();
   if (firstLine.isValid())
-    firstLine.setLineWidth(lineWidth);
+    firstLine.setLineWidth(contentWidth);
   const bool wraps = layout.createLine().isValid();
   layout.endLayout();
   return wraps;
@@ -91,12 +102,25 @@ void ExpandingPromptEditor::keyPressEvent(QKeyEvent *event) {
     return;
   }
 
-  if (!modifiers.testFlag(Qt::AltModifier) && !event->isAutoRepeat()) {
+  if (event->isAutoRepeat()) {
+    event->accept();
+    return;
+  }
+
+  if (!modifiers.testFlag(Qt::AltModifier)) {
     emit submitRequested();
     event->accept();
     return;
   }
   QPlainTextEdit::keyPressEvent(event);
+}
+
+void ExpandingPromptEditor::wheelEvent(QWheelEvent *event) {
+  if (contentScrollable)
+    QPlainTextEdit::wheelEvent(event);
+  // Composer-originated scrolling belongs to the prompt editor even at its
+  // boundary. It must never chain into the conversation behind the overlay.
+  event->accept();
 }
 
 void ExpandingPromptEditor::resizeEvent(QResizeEvent *event) {
@@ -127,9 +151,11 @@ void ExpandingPromptEditor::remeasure() {
   const int documentHeight = static_cast<int>(std::ceil(laidOutHeight)) + 10;
   const int wanted =
       std::clamp(documentHeight, compactHeight(), maximumEditorHeight);
-  setVerticalScrollBarPolicy(wanted >= maximumEditorHeight
-                                 ? Qt::ScrollBarAsNeeded
-                                 : Qt::ScrollBarAlwaysOff);
+  contentScrollable = documentHeight > maximumEditorHeight;
+  setVerticalScrollBarPolicy(contentScrollable ? Qt::ScrollBarAsNeeded
+                                               : Qt::ScrollBarAlwaysOff);
+  if (!contentScrollable)
+    verticalScrollBar()->setValue(verticalScrollBar()->minimum());
   if (wanted == currentContentHeight)
     return;
   currentContentHeight = wanted;

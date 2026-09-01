@@ -150,6 +150,8 @@ private:
   void assignChildOwnership(ThreadPresentation &parent,
                             AgentPresentation &agent,
                             const std::string &childThreadId, bool live);
+  void retainStructuralOwnership(const std::string &childThreadId,
+                                 const std::string &parentThreadId);
   void releaseChildOwnership(const std::string &childThreadId,
                              bool promoteToRoot);
   void synchronizeOwningAgent(const std::string &childThreadId,

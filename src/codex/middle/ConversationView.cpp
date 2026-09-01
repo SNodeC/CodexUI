@@ -610,6 +610,13 @@ void ConversationView::setTrailingSpaceHeight(int height) {
     mode_ = Mode::Paused;
   }
   trailingSpaceHeight_ = height;
+  QScrollBar *conversationScrollBar = verticalScrollBar();
+  conversationScrollBar->setProperty("composerBottomInset", height);
+  conversationScrollBar->setStyleSheet(
+      height == 0
+          ? QString{}
+          : QStringLiteral("QScrollBar:vertical{margin:2px 2px %1px 2px;}")
+                .arg(height + 2));
   recomputeGeometry();
   if (mode_ == Mode::Following)
     setScrollValue(verticalScrollBar()->maximum());
@@ -809,11 +816,16 @@ void ConversationView::recomputeGeometry() {
                                                 int cardWidth) {
     if (!card || !card->layout())
       return;
+    cardWidth = std::max(0, cardWidth);
     card->setMinimumHeight(0);
+    // Retained rich text is created and nested in one transaction. Establish
+    // its real width before measuring so QLabel cannot reuse pre-nesting
+    // document geometry until a later streamed update.
+    card->resize(cardWidth, card->height());
     card->layout()->invalidate();
+    card->layout()->setGeometry(card->contentsRect());
     activateCard(card);
     card->updateGeometry();
-    cardWidth = std::max(0, cardWidth);
     const int cardHeight =
         card->layout()->hasHeightForWidth()
             ? card->layout()->heightForWidth(cardWidth) +
@@ -822,6 +834,7 @@ void ConversationView::recomputeGeometry() {
     card->setMinimumHeight(cardHeight);
     card->resize(cardWidth, cardHeight);
     card->layout()->setGeometry(card->contentsRect());
+    activateCard(card);
   };
   for (const auto &[key, card] : cards_) {
     static_cast<void>(key);
@@ -853,8 +866,15 @@ void ConversationView::recomputeGeometry() {
         Qt::FindDirectChildrenOnly);
     if (!nested || !nested->layout())
       continue;
-    if (card->layout())
+    const int cardWidth = card->parentWidget()
+                              ? card->parentWidget()->contentsRect().width()
+                              : card->width();
+    card->resize(cardWidth, card->height());
+    if (card->layout()) {
+      card->layout()->invalidate();
+      card->layout()->setGeometry(card->contentsRect());
       card->layout()->activate();
+    }
     nested->layout()->activate();
     for (int index = 0; index < nested->layout()->count(); ++index) {
       auto *nestedCard = dynamic_cast<ConversationCard *>(
@@ -872,7 +892,7 @@ void ConversationView::recomputeGeometry() {
     nested->updateGeometry();
     nested->layout()->invalidate();
     nested->layout()->activate();
-    settleCardHeight(card, card->width());
+    settleCardHeight(card, cardWidth);
   }
   for (const auto &[key, section] : sections_) {
     static_cast<void>(key);

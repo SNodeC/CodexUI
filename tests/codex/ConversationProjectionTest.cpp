@@ -102,7 +102,9 @@ bool testCanonicalGroupingAndProjection() {
 
   ThreadPresentation emptyPlan = baseThread("thread-empty-plan");
   appendItem(emptyPlan, "turn-1",
-             item("empty-plan", {{"type", "plan"}, {"text", ""}}));
+             item("empty-plan", {{"type", "plan"},
+                                 {"text", ""},
+                                 {"status", "completed"}}));
   const ConversationSnapshot emptyPlanSnapshot =
       ConversationProjection::project(emptyPlan, {}, 80, 10);
   const VisibleCardData &emptyPlanCard =
@@ -110,8 +112,9 @@ bool testCanonicalGroupingAndProjection() {
   const auto *generic =
       std::get_if<GenericActivityData>(&emptyPlanCard.payload);
   result &= expect(emptyPlanCard.kind == CardKind::GenericActivity && generic &&
-                       generic->type == "plan",
-                   "an empty plan retains the generic raw-data fallback");
+                       generic->type == "plan" &&
+                       generic->status == "completed",
+                   "generic fallbacks retain an available lifecycle state");
   return result;
 }
 
@@ -795,8 +798,9 @@ bool testGeneratedImageProjection() {
   result &=
       expect(viewCard && viewCard->kind == CardKind::ImageGeneration &&
                  viewImage && viewImage->path == "/tmp/review.png" &&
-                 viewImage->status.empty() && viewImage->revisedPrompt.empty(),
-                   "image-view items reuse the local image presentation");
+                 viewImage->status == "completed" &&
+                 viewImage->revisedPrompt.empty(),
+             "materialized image-view items expose their completed state");
   return result;
 }
 

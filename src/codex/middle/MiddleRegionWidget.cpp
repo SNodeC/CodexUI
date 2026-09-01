@@ -11,6 +11,7 @@
 #include <QAbstractScrollArea>
 #include <QEvent>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPainter>
@@ -293,11 +294,16 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
     noticeTimer->stop();
     noticeBar->hide();
   });
-  contentLayout->addWidget(noticeBar);
-
-  conversationView = new ConversationView;
+  auto *conversationLayer = new QWidget(content);
+  conversationLayer->setObjectName(QStringLiteral("conversationLayer"));
+  auto *conversationLayerLayout = new QGridLayout(conversationLayer);
+  conversationLayerLayout->setContentsMargins(0, 0, 0, 0);
+  conversationLayerLayout->setSpacing(0);
+  conversationView = new ConversationView(conversationLayer);
   applyConversationPresentationOptions();
-  contentLayout->addWidget(conversationView, 1);
+  conversationLayerLayout->addWidget(conversationView, 0, 0);
+  conversationLayerLayout->addWidget(noticeBar, 0, 0, Qt::AlignTop);
+  contentLayout->addWidget(conversationLayer, 1);
   composerPane = new ComposerPane(conversationRegion);
   composerPane->setExtraOverlayHeightAction(
       [this](int height) { conversationView->setTrailingSpaceHeight(height); });
@@ -413,6 +419,7 @@ void MiddleRegionWidget::showNotice(QString message, bool error) {
     widget->update();
   }
   noticeBar->show();
+  noticeBar->raise();
   noticeTimer->start(error ? 10000 : 6000);
 }
 
@@ -463,6 +470,18 @@ bool MiddleRegionWidget::routeScrollEvent(QObject *watched, QEvent *event) {
     return false;
 
   auto *wheel = static_cast<QWheelEvent *>(event);
+  if (inCenter &&
+      (target == composerPane || composerPane->isAncestorOf(target))) {
+    // Scrollable composer children receive their own native event. If they
+    // decline it at a boundary, the first non-scrollable composer ancestor
+    // consumes the propagated event instead of leaking it to Conversation.
+    for (QWidget *ancestor = target; ancestor && ancestor != composerPane;
+         ancestor = ancestor->parentWidget())
+      if (qobject_cast<QAbstractScrollArea *>(ancestor))
+        return false;
+    wheel->accept();
+    return true;
+  }
   if (inCenter) {
     if (target == conversationView || target == conversationView->viewport() ||
         conversationView->isAncestorOf(target)) {

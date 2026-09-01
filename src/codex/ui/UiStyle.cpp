@@ -150,6 +150,7 @@ QString applicationStyleSheet() {
         QPushButton:disabled, QToolButton:disabled { color: #98a2b3; background: #f6f8fb; border-color: #d7dee8; }
         QPushButton[kind="primary"] { background: #2f6feb; border-color: #2f6feb; color: white; }
         QPushButton[kind="primary"]:hover { background: #285fca; border-color: #285fca; }
+        QPushButton[kind="primary"]:disabled { color: #98a2b3; background: #f6f8fb; border-color: #d7dee8; }
         QPushButton[kind="history"] { background: #e5eeff; border-color: #bfd3f9; color: #285fca; }
         QPushButton[kind="history"]:hover { background: #d8e7ff; border-color: #9ebcf3; }
         QPushButton[kind="request"] { background: #fff6df; border-color: #e5c77d; color: #8a5208; }
@@ -157,6 +158,7 @@ QString applicationStyleSheet() {
         QPushButton[kind="steer"] { background: #167b80; border-color: #167b80; color: white; }
         QPushButton[kind="steer"]:hover { background: #126b70; border-color: #126b70; color: white; }
         QPushButton[kind="steer"]:pressed { background: #0f595d; border-color: #0f595d; color: white; }
+        QPushButton[kind="steer"]:disabled { color: #98a2b3; background: #f6f8fb; border-color: #d7dee8; }
         QPushButton[kind="cancel"] { background: #eef1f5; border-color: #c8d0dc; color: #475467; }
         QPushButton[kind="cancel"]:hover { background: #e3e8ef; border-color: #aeb8c6; }
         QPushButton[kind="subtle"], QToolButton[kind="subtle"] {
@@ -256,7 +258,7 @@ QString applicationStyleSheet() {
         QFrame#conversationNoticeBar[tone="danger"] { background: #fff0f2; border: 1px solid #efb8c0; border-radius: 7px; }
         QWidget#composerOverlay { background: #f6f8fb; }
         QFrame[kind="composer"] { background: #ffffff; border: 1px solid #d7dee8; border-radius: 10px; }
-        QFrame[kind="composer"][focused="true"] { border: 2px solid #2f6feb; }
+        QFrame[kind="composer"][focused="true"] { border-color: #2f6feb; }
         QPlainTextEdit, QTextEdit {
             background: transparent;
             border: 0;

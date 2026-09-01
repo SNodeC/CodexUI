@@ -409,10 +409,6 @@ export class PresentationModel {
             if (!thread) break;
             if (thread.lastActivityAt === undefined || timestamp > thread.lastActivityAt)
                 thread.lastActivityAt = timestamp;
-            if (thread.updatedAt === undefined || timestamp > thread.updatedAt)
-                thread.updatedAt = timestamp;
-            if (thread.recencyAt === undefined || timestamp > thread.recencyAt)
-                thread.recencyAt = timestamp;
             const ownership = this.childOwnerships.get(current);
             if (!ownership) break;
             current = ownership.parentThreadId;
@@ -425,7 +421,20 @@ export class PresentationModel {
             if (thread.recencyAt !== undefined && thread.recencyAt >= timestamp)
                 timestamp = thread.recencyAt + 1;
         }
-        this.noteThreadActivity(threadId, timestamp);
+        let current = threadId;
+        const visited = new Set<string>();
+        while (current !== "" && !visited.has(current)) {
+            visited.add(current);
+            const thread = this.threads.get(current);
+            if (!thread) break;
+            if (thread.lastActivityAt === undefined || timestamp > thread.lastActivityAt)
+                thread.lastActivityAt = timestamp;
+            thread.updatedAt = timestamp;
+            thread.recencyAt = timestamp;
+            const ownership = this.childOwnerships.get(current);
+            if (!ownership) break;
+            current = ownership.parentThreadId;
+        }
     }
     childOwnership(childThreadId: string): ChildThreadOwnership | undefined {
         return this.childOwnerships.get(childThreadId);
@@ -609,7 +618,7 @@ export class PresentationModel {
         let thread = this.threads.get(threadId);
         if (!thread) {
             if (authority === "none" || authority === "remove") return;
-            this.upsertThread({id: threadId}, false);
+            this.upsertThread({id: threadId}, false, false);
             thread = this.threads.get(threadId);
             if (!thread) return;
         }
@@ -721,7 +730,6 @@ export class PresentationModel {
         if (!result) {
             result = newThread(id);
             this.threads.set(id, result);
-            if (prependNewThread) this.orderedThreads.unshift(id);
         }
         const previousThreadStatus = result.status;
         const terminalTurnStatuses = new Map<string, string>();
@@ -756,10 +764,19 @@ export class PresentationModel {
             && (result.lastActivityAt === undefined || result.recencyAt > result.lastActivityAt))
             result.lastActivityAt = result.recencyAt;
         result.archived = boolValue(raw, "archived", result.archived);
+        if (Object.hasOwn(raw, "parentThreadId")) {
+            const parentThreadId = stringMember(raw, "parentThreadId");
+            if (parentThreadId !== "") this.retainStructuralOwnership(id, parentThreadId);
+            else if (this.childOwnerships.get(id)?.agentId === "")
+                this.releaseChildOwnership(id, false);
+        }
+        if (prependNewThread && !this.childOwnerships.has(id) && !this.orderedThreads.includes(id))
+            this.orderedThreads.unshift(id);
         if (Array.isArray(raw.turns)) {
             let previouslyOwnedChildren: string[] = [];
             if (replaceTurns) {
-                previouslyOwnedChildren = [...result.childThreadOrder];
+                previouslyOwnedChildren = result.childThreadOrder.filter(child =>
+                    (this.childOwnerships.get(child)?.agentId ?? "") !== "");
                 for (const child of previouslyOwnedChildren) this.releaseChildOwnership(child, false);
                 result.turnOrder = [];
                 result.turns.clear();
@@ -935,6 +952,22 @@ export class PresentationModel {
         if (!this.threads.has(child)) this.threads.set(child, newThread(child));
         this.orderedThreads = this.orderedThreads.filter(id => id !== child);
         this.synchronizeOwningAgent(child);
+    }
+
+    private retainStructuralOwnership(child: string, parentId: string): void {
+        if (child === "" || parentId === "" || child === parentId) return;
+        const existing = this.childOwnerships.get(child);
+        if (existing?.parentThreadId === parentId) return;
+        if (existing) this.releaseChildOwnership(child, false);
+        let parent = this.threads.get(parentId);
+        if (!parent) {
+            parent = newThread(parentId);
+            this.threads.set(parentId, parent);
+        }
+        if (!this.threads.has(child)) this.threads.set(child, newThread(child));
+        this.childOwnerships.set(child, {parentThreadId: parentId, agentId: ""});
+        if (!parent.childThreadOrder.includes(child)) parent.childThreadOrder.push(child);
+        this.orderedThreads = this.orderedThreads.filter(id => id !== child);
     }
 
     private releaseChildOwnership(child: string, promoteToRoot: boolean): void {

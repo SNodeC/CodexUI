@@ -406,10 +406,6 @@ void PresentationModel::noteThreadActivity(const std::string &threadId,
       break;
     ThreadPresentation &thread = iterator->second;
     retainActivity(thread, timestamp);
-    if (!thread.updatedAt || timestamp > *thread.updatedAt)
-      thread.updatedAt = timestamp;
-    if (!thread.recencyAt || timestamp > *thread.recencyAt)
-      thread.recencyAt = timestamp;
     const auto ownership = childOwnerships.find(current);
     if (ownership == childOwnerships.end())
       break;
@@ -426,7 +422,21 @@ void PresentationModel::notePromptActivity(const std::string &threadId,
     if (thread.recencyAt && *thread.recencyAt >= timestamp)
       timestamp = *thread.recencyAt + 1;
   }
-  noteThreadActivity(threadId, timestamp);
+  std::string current = threadId;
+  std::unordered_set<std::string> visited;
+  while (!current.empty() && visited.insert(current).second) {
+    const auto iterator = threads.find(current);
+    if (iterator == threads.end())
+      break;
+    ThreadPresentation &thread = iterator->second;
+    retainActivity(thread, timestamp);
+    thread.updatedAt = timestamp;
+    thread.recencyAt = timestamp;
+    const auto ownership = childOwnerships.find(current);
+    if (ownership == childOwnerships.end())
+      break;
+    current = ownership->second.parentThreadId;
+  }
 }
 
 void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
@@ -655,7 +665,7 @@ void PresentationModel::applyValidatedEvent(const nlohmann::json &event) {
     if (authority == "none" || authority == "remove")
       return;
     nlohmann::json minimal{{"id", threadId}};
-    upsertThread(minimal, false);
+    upsertThread(minimal, false, false);
     threadIterator = threads.find(threadId);
     if (threadIterator == threads.end())
       return;
@@ -864,11 +874,8 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
   }
   auto [iterator, inserted] = threads.try_emplace(id);
   ThreadPresentation &result = iterator->second;
-  if (inserted) {
+  if (inserted)
     result.id = id;
-    if (prependNewThread)
-      orderedThreads.insert(orderedThreads.begin(), id);
-  }
   const std::string previousThreadStatus = result.status;
   std::unordered_map<std::string, std::string> terminalTurnStatuses;
   if (replaceTurns) {
@@ -908,11 +915,32 @@ ThreadPresentation &PresentationModel::upsertThread(const nlohmann::json &raw,
     retainActivity(result, *result.recencyAt);
   result.archived = boolValue(raw, "archived", result.archived);
 
+  if (raw.contains("parentThreadId")) {
+    const std::string parentThreadId = stringValue(raw, "parentThreadId");
+    if (!parentThreadId.empty())
+      retainStructuralOwnership(id, parentThreadId);
+    else {
+      const auto ownership = childOwnerships.find(id);
+      if (ownership != childOwnerships.end() &&
+          ownership->second.agentId.empty())
+        releaseChildOwnership(id, false);
+    }
+  }
+  if (prependNewThread && !childOwnerships.contains(id) &&
+      std::find(orderedThreads.begin(), orderedThreads.end(), id) ==
+          orderedThreads.end())
+    orderedThreads.insert(orderedThreads.begin(), id);
+
   const auto turns = raw.find("turns");
   if (turns != raw.end() && turns->is_array()) {
     std::vector<std::string> previouslyOwnedChildren;
     if (replaceTurns) {
-      previouslyOwnedChildren = result.childThreadOrder;
+      for (const std::string &childThreadId : result.childThreadOrder) {
+        const auto ownership = childOwnerships.find(childThreadId);
+        if (ownership != childOwnerships.end() &&
+            !ownership->second.agentId.empty())
+          previouslyOwnedChildren.push_back(childThreadId);
+      }
       for (const std::string &childThreadId : previouslyOwnedChildren)
         releaseChildOwnership(childThreadId, false);
       result.turnOrder.clear();
@@ -1182,6 +1210,32 @@ void PresentationModel::assignChildOwnership(ThreadPresentation &parent,
     child->second.id = childThreadId;
   std::erase(orderedThreads, childThreadId);
   synchronizeOwningAgent(childThreadId);
+}
+
+void PresentationModel::retainStructuralOwnership(
+    const std::string &childThreadId, const std::string &parentThreadId) {
+  if (childThreadId.empty() || parentThreadId.empty() ||
+      childThreadId == parentThreadId)
+    return;
+  const auto existing = childOwnerships.find(childThreadId);
+  if (existing != childOwnerships.end() &&
+      existing->second.parentThreadId == parentThreadId)
+    return;
+  if (existing != childOwnerships.end())
+    releaseChildOwnership(childThreadId, false);
+
+  auto [parent, parentInserted] = threads.try_emplace(parentThreadId);
+  if (parentInserted)
+    parent->second.id = parentThreadId;
+  auto [child, childInserted] = threads.try_emplace(childThreadId);
+  if (childInserted)
+    child->second.id = childThreadId;
+  childOwnerships[childThreadId] = {parentThreadId, {}};
+  if (std::find(parent->second.childThreadOrder.begin(),
+                parent->second.childThreadOrder.end(), childThreadId) ==
+      parent->second.childThreadOrder.end())
+    parent->second.childThreadOrder.push_back(childThreadId);
+  std::erase(orderedThreads, childThreadId);
 }
 
 void PresentationModel::releaseChildOwnership(const std::string &childThreadId,

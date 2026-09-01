@@ -223,16 +223,18 @@ void updateRow(QWidget *row, const std::string &threadId,
     titleText.prepend(QStringLiteral("! "));
   title->setText(titleText);
   const PresentationStatus classified = classifyStatus(threadStatus);
-  QString color = QStringLiteral("#cacccf");
+  QString color = QString::fromLatin1(UiStyle::threadInactive);
   if (optimistic)
     color = optimisticFailed ? QStringLiteral("#c43d4d")
                              : QStringLiteral("#d17b16");
   else if (requestCount != 0)
-    color = QStringLiteral("#a85d0c");
+    color = QString::fromLatin1(UiStyle::orange);
   else if (classified.kind == StatusKind::Active)
-    color = QStringLiteral("#2f6feb");
+    color = QString::fromLatin1(UiStyle::blue);
+  else if (classified.kind == StatusKind::Completed)
+    color = QString::fromLatin1(UiStyle::green);
   else if (classified.kind == StatusKind::Failed)
-    color = QStringLiteral("#c43d4d");
+    color = QString::fromLatin1(UiStyle::red);
   dot->setStyleSheet(
       QStringLiteral("background:%1;border-radius:5px;").arg(color));
 }

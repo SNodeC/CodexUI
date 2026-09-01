@@ -49,12 +49,15 @@ bottom or is owned by the user.
   meaningful thread-scoped protocol traffic in either direction advances it
   immediately. Selection-driven `thread/read` and `thread/resume` hydration,
   global connection traffic, and catalog traffic do not count as activity.
-  The same live activity advances the presentation model's effective
-  `updatedAt` and `recencyAt` values, while the provider payload remains
-  retained as received. These local values are not persisted by CodexUI.
-- Once selected, a hydrated thread remains visible in the sidebar for the
-  session even when it is outside the ordinary top-level thread ordering; an
-  authoritative removal still removes it.
+  Live traffic does not alter thread ordering. Only local prompt admission
+  advances the presentation model's effective `updatedAt` and `recencyAt`;
+  these local values are not persisted by CodexUI.
+- The visible sidebar order contains confirmed root threads only. Minimal
+  thread placeholders created by scoped protocol traffic remain retained but
+  invisible until an explicit list, read, resume, create, or fork admits them
+  as roots. A valued `parentThreadId` immediately assigns structural child
+  ownership, so child threads never flash in the root list while later agent
+  correlation is pending.
 - The sidebar sorts all visible rows by a user-selected criterion. `Recent` is
   the default and uses the app-server's provider-defined `recencyAt` value,
   newest first. `Created` uses `createdAt` newest first, and `Last changed`
@@ -109,7 +112,12 @@ the same admission path as the Send button. Shift+Enter always inserts a new
 line, including when Control or Meta is also held; Control+Enter and Meta+Enter
 remain submission aliases, while Alt+Enter does not submit. Auto-repeated Enter
 events and Enter used to confirm an active input-method composition never
-submit a prompt.
+submit a prompt. Auto-repeat is consumed instead of inserting an accidental
+newline. Send and Steer are enabled only when admission is available and the
+draft contains non-whitespace text. Focus uses the canonical blue composer
+border without changing its geometry. Whitespace is used only for admission
+validation: the exact authored text, including intentional leading and trailing
+space and blank lines, is passed to the submission path unchanged.
 
 Submitting a prompt creates a client-local pending prompt card at the bottom of
 the destination thread immediately. The card begins with the calm blue
@@ -213,6 +221,8 @@ updates remain neutral and identify their phase in the header. Process cards
 also remain neutral so they support rather than dominate the primary exchange.
 Their lifecycle status is a normal-weight lowercase value at the right of the
 header, immediately before Copy, and uses canonical semantic state colors.
+An `imageView` item is completed once it materializes; generated-image and
+fallback activity cards retain any lifecycle state supplied by the app-server.
 Thread rows, conversation metadata, Inspector entries, and process cards share
 the same vocabulary: `running`, `completed`, `failed`, `interrupted`, `pending`,
 and `not loaded`. Command exit
@@ -271,6 +281,8 @@ Web thread refresh, rename, fork, archive, and delete actions are single-flight.
 Mutation controls require current controller readiness, remain disabled while
 their operation is pending, and report operation failures through the canonical
 notice surface.
+Transient notices overlay the conversation workspace in native and WebUI. Their
+appearance, timeout, and dismissal never resize or reposition message content.
 
 Folding is an explicit geometry transaction. Collapsing keeps the selected
 title row fixed while the natural scroll range permits and shifts following
@@ -337,28 +349,40 @@ re-enable following. Composer contraction is the explicit exception: after its
 trailing space is removed, CodexUI recomputes whether the resulting clamped
 position is the new bottom.
 
-The complete center region is wheel- and touchpad-scroll sensitive. Wheel
-events over non-scrollable center chrome and the horizontal splitter handles
-are forwarded to the message view. Command text and output retain a gesture
-that started while they could scroll; only a fresh gesture begun at their
-current boundary is handed to the conversation.
+The complete unobscured center region is wheel- and touchpad-scroll sensitive.
+Wheel events over non-scrollable conversation chrome and the horizontal
+splitter handles are forwarded to the message view. A gesture begun in the
+prompt editor or turn-settings surface is always consumed by that composer
+region and never scrolls the conversation behind it. Command text and output
+retain a gesture that started while they could scroll; only a fresh gesture
+begun at their current boundary is handed to the conversation.
 
 ## Composer geometry
 
 The upcoming-turn controls are anchored to the bottom of the center pane. The
 prompt editor starts at one line, grows upward for multiline input, and stops at
-its configured maximum height, after which it scrolls internally.
+its configured maximum height, after which it scrolls internally. While all
+content fits, its hidden scrollbar is clamped to the top so a fully visible
+multiline draft cannot be displaced by a trailing blank-line offset. The
+compact-to-multiline transition is decided by an invisible `QTextLayout` using
+the editor's exact compact content width, including its document margins. The
+live document is never resized for measurement, and its height is updated only
+after the grid switch, so the first wrapping character moves directly into the
+expanded grid without an intermediate row.
 
 The message-view layout reserves only the composer's canonical height. When
 prompt text, attachments, settings, or attention controls increase that height,
 the composer grows upward as an overlay: the viewport keeps its normal geometry
 and may be partly covered. An equal logical trailing extent is added to the
 scrollable conversation content so the final card can still be moved to the
-overlay boundary. The conversation owns no permanent bottom padding; the moving
-composer uses the canonical Changes-tab treatment of 8 px space, a standard
-divider extending 10 px beyond the adjacent content on each side, and another
-8 px space. This boundary remains identical whether the conversation is at its
-bottom or paused higher in history.
+overlay boundary. The visible conversation scrollbar track is inset by the same
+extra height, so its lower endpoint remains at the uncovered message boundary
+rather than disappearing beneath the composer. Its value, range, and anchoring
+semantics remain those of the full conversation. The conversation owns no
+permanent bottom padding; the moving composer uses the canonical Changes-tab
+treatment of 8 px space, a standard divider extending 10 px beyond the adjacent
+content on each side, and another 8 px space. This boundary remains identical
+whether the conversation is at its bottom or paused higher in history.
 
 Growing this extent preserves the current scrollbar value and does not move the
 messages automatically. Reaching its new maximum re-enables bottom-follow for
@@ -377,6 +401,8 @@ has no non-content minimum height, grows from zero to a maximum of 220 pixels,
 and exposes a styled vertical scrollbar only when content exceeds that limit.
 The command surface uses the same content-height behavior with its existing
 90-pixel maximum. Trailing empty lines are omitted from both displayed texts.
+Executed command text opens at its beginning and never follows its bottom;
+tail-following belongs only to the streaming output surface.
 Their wrapped content height is measured at the final viewport width during the
 outer layout transaction. While the conversation follows its bottom, streaming
 output growth holds the card bottom and metadata in place and expands upward.

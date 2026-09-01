@@ -81,6 +81,7 @@ private:
   void refreshAttachments();
   void refreshAdaptiveLayout();
   void refreshActionStyle();
+  void refreshSubmissionEnabled();
 
   QWidget *anchor_ = nullptr;
   QWidget *reserve_ = nullptr;
@@ -108,6 +109,7 @@ private:
   int canonicalHeight_ = 0;
   int extraHeight_ = 0;
   bool activeTurn_ = false;
+  bool canSubmit_ = false;
   bool expanded_ = false;
   bool synchronizing_ = false;
   bool canonicalCaptureEnabled_ = false;
