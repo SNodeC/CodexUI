@@ -423,7 +423,9 @@ show vertical scrollbars only when needed. The Protocol log occupies the
 expanding area of its tab; protocol statistics are displayed below the log.
 Protocol and State data are diagnostic presentation only and do not create
 domain authority. Plan, Agents, and Requests use retained per-thread
-presentation snapshots. Changes instead resolves local Git repositories upward
+presentation snapshots. Agent cards start collapsed and expose status, copy,
+and fold actions in that order; folding changes presentation only and never
+discards agent content. Changes instead resolves local Git repositories upward
 from the selected thread's retained command working directories and refreshes
 them asynchronously through libgit2. When several repositories match, All
 repositories is the default and a selector can narrow the view. Resolution

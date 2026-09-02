@@ -17,6 +17,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 class QLabel;
@@ -49,7 +50,7 @@ public:
   [[nodiscard]] QTabWidget *tabs() const noexcept { return inspectorTabs; }
 
 private:
-  static QFrame *agentFrame(const ui::InspectorAgentRow &agent);
+  QFrame *agentFrame(const ui::InspectorAgentRow &agent);
   void refreshCurrentTab();
   void refreshPlan();
   void refreshAgents();
@@ -81,6 +82,7 @@ private:
 
   std::optional<ui::InspectorPlanSnapshot> planSnapshot;
   std::optional<ui::InspectorAgentsSnapshot> agentsSnapshot;
+  std::unordered_set<std::string> expandedAgents;
   std::optional<ui::InspectorRequestsSnapshot> requestsSnapshot;
   QByteArray stateSnapshot;
   QByteArray protocolStatsSnapshot;

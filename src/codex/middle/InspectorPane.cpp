@@ -6,9 +6,14 @@
 #include "codex/PresentationStatus.h"
 #include "codex/ui/UiStyle.h"
 
+#include <QApplication>
+#include <QClipboard>
 #include <QDateTime>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMimeData>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
@@ -18,6 +23,8 @@
 #include <QTabWidget>
 #include <QTextDocument>
 #include <QTimer>
+#include <QToolButton>
+#include <QToolTip>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -100,6 +107,118 @@ QLabel *makeMarkdownLabel(const QString &value) {
                                  Qt::LinksAccessibleByMouse |
                                  Qt::LinksAccessibleByKeyboard);
   return label;
+}
+
+class AgentDisclosureButton final : public QToolButton {
+public:
+  explicit AgentDisclosureButton(QWidget *parent = nullptr)
+      : QToolButton(parent) {
+    setObjectName(QStringLiteral("agentDisclosureButton"));
+    setFixedSize(14, 24);
+    setCursor(Qt::PointingHandCursor);
+    setFocusPolicy(Qt::StrongFocus);
+    setExpanded(false);
+  }
+
+  void setExpanded(bool expanded) {
+    expanded_ = expanded;
+    setAccessibleName(expanded ? QStringLiteral("Collapse agent")
+                               : QStringLiteral("Expand agent"));
+    setToolTip(accessibleName());
+    update();
+  }
+
+  [[nodiscard]] bool isExpanded() const noexcept { return expanded_; }
+
+protected:
+  void paintEvent(QPaintEvent *event) override {
+    static_cast<void>(event);
+    QRect indicator(0, 3, 12, height() - 6);
+    indicator.translate(expanded_ ? 3 : 5, 0);
+    UiStyle::drawChevron(this, indicator, isEnabled(),
+                         underMouse() || hasFocus(),
+                         expanded_ ? UiStyle::ChevronDirection::Down
+                                   : UiStyle::ChevronDirection::Left);
+  }
+
+private:
+  bool expanded_ = false;
+};
+
+class AgentCopyButton final : public QToolButton {
+public:
+  explicit AgentCopyButton(QWidget *parent = nullptr) : QToolButton(parent) {
+    setObjectName(QStringLiteral("agentCopyButton"));
+    setFixedSize(16, 24);
+    setCursor(Qt::PointingHandCursor);
+    setFocusPolicy(Qt::StrongFocus);
+    setAccessibleName(QStringLiteral("Copy agent content"));
+    setToolTip(accessibleName());
+  }
+
+  void showCopiedFeedback() {
+    copied_ = true;
+    update();
+    QToolTip::showText(mapToGlobal(QPoint(width() / 2, height())),
+                       QStringLiteral("Copied"), this, rect(), 500);
+    QTimer::singleShot(500, this, [this] {
+      copied_ = false;
+      update();
+    });
+  }
+
+protected:
+  void paintEvent(QPaintEvent *event) override {
+    static_cast<void>(event);
+    QColor color(copied_ ? QStringLiteral("#176b45")
+                         : QStringLiteral("#667085"));
+    if (!copied_ && (underMouse() || hasFocus()))
+      color = QColor(QStringLiteral("#1d2633"));
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(
+        QPen(color, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    if (copied_) {
+      QPainterPath check;
+      check.moveTo(3.0, 12.0);
+      check.lineTo(6.5, 15.5);
+      check.lineTo(14.0, 7.5);
+      painter.drawPath(check);
+      return;
+    }
+    painter.drawRoundedRect(QRectF(3.5, 4.5, 8.0, 9.0), 1.2, 1.2);
+    painter.drawRoundedRect(QRectF(6.5, 7.5, 8.0, 9.0), 1.2, 1.2);
+  }
+
+private:
+  bool copied_ = false;
+};
+
+QString agentCopyText(const ui::InspectorAgentRow &agent) {
+  QStringList lines{QStringLiteral("Agent")};
+  if (!agent.agentPath.empty())
+    lines << QStringLiteral("Path: %1").arg(text(agent.agentPath));
+  if (!agent.status.empty())
+    lines << QStringLiteral("Status: %1").arg(text(displayStatus(agent.status)));
+  if (!agent.tool.empty())
+    lines << QStringLiteral("Tool: %1").arg(text(agent.tool));
+  if (!agent.model.empty())
+    lines << QStringLiteral("Model: %1").arg(text(agent.model));
+  if (!agent.reasoningEffort.empty())
+    lines << QStringLiteral("Reasoning: %1").arg(text(agent.reasoningEffort));
+  if (!agent.prompt.empty())
+    lines << QString{} << text(agent.prompt);
+  if (!agent.resultText.empty())
+    lines << QString{} << text(agent.resultText);
+  if (!agent.childThreadId.empty())
+    lines << QString{} << QStringLiteral("Thread: %1").arg(text(agent.childThreadId));
+  if (!agent.senderThreadId.empty())
+    lines << QStringLiteral("Sender: %1").arg(text(agent.senderThreadId));
+  if (!agent.receiverThreadIds.empty())
+    lines << QStringLiteral("Receivers: %1")
+                 .arg(texts(agent.receiverThreadIds).join(QStringLiteral(", ")));
+  return lines.join(QLatin1Char('\n'));
 }
 
 void clearLayout(QLayout *layout) {
@@ -205,7 +324,7 @@ QFrame *InspectorPane::agentFrame(const ui::InspectorAgentRow &agent) {
     agentName = text(agent.tool);
   auto *heading = new QHBoxLayout;
   heading->setContentsMargins(0, 0, 0, 0);
-  heading->setSpacing(6);
+  heading->setSpacing(4);
   auto *titleLabel = makeLabel(QStringLiteral("Agent"), "title");
   titleLabel->setObjectName(QStringLiteral("agentTitle"));
   titleLabel->setWordWrap(false);
@@ -228,7 +347,16 @@ QFrame *InspectorPane::agentFrame(const ui::InspectorAgentRow &agent) {
   auto *status = statusLabel(agent.status);
   status->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
   heading->addWidget(status, 0, Qt::AlignBaseline);
+  auto *copy = new AgentCopyButton(frame);
+  auto *disclosure = new AgentDisclosureButton(frame);
+  heading->addWidget(copy, 0, Qt::AlignRight | Qt::AlignVCenter);
+  heading->addWidget(disclosure, 0, Qt::AlignRight | Qt::AlignVCenter);
   layout->addLayout(heading);
+  auto *content = new QWidget(frame);
+  content->setObjectName(QStringLiteral("agentCardContent"));
+  auto *contentLayout = new QVBoxLayout(content);
+  contentLayout->setContentsMargins(0, 0, 0, 0);
+  contentLayout->setSpacing(6);
   QStringList metadata;
   if (!agent.tool.empty() && !agentPath.isEmpty())
     metadata << text(agent.tool);
@@ -237,14 +365,15 @@ QFrame *InspectorPane::agentFrame(const ui::InspectorAgentRow &agent) {
       metadata << text(*value);
   }
   if (!metadata.isEmpty())
-    layout->addWidget(makeLabel(metadata.join(QStringLiteral("  ·  ")), "meta"));
+    contentLayout->addWidget(
+        makeLabel(metadata.join(QStringLiteral("  ·  ")), "meta"));
   if (!agent.prompt.empty())
-    layout->addWidget(makeLabel(text(agent.prompt)));
+    contentLayout->addWidget(makeLabel(text(agent.prompt)));
   if (!agent.resultText.empty()) {
     auto *result = makeMarkdownLabel(text(agent.resultText));
     result->setObjectName(QStringLiteral("agentResult"));
     result->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    layout->addWidget(result);
+    contentLayout->addWidget(result);
   }
   QStringList identities;
   if (!agent.childThreadId.empty())
@@ -256,8 +385,32 @@ QFrame *InspectorPane::agentFrame(const ui::InspectorAgentRow &agent) {
   if (!receivers.isEmpty())
     identities << QStringLiteral("receivers %1").arg(receivers);
   if (!identities.isEmpty())
-    layout->addWidget(
+    contentLayout->addWidget(
         makeLabel(identities.join(QStringLiteral("  |  ")), "meta"));
+  layout->addWidget(content);
+
+  const std::string expansionKey = agentsSnapshot->threadId + '\n' + agent.id;
+  const bool expanded = expandedAgents.contains(expansionKey);
+  disclosure->setExpanded(expanded);
+  content->setVisible(expanded);
+  QObject::connect(disclosure, &QToolButton::clicked, frame,
+                   [this, expansionKey, content, disclosure] {
+                     const bool expanded = !disclosure->isExpanded();
+                     disclosure->setExpanded(expanded);
+                     content->setVisible(expanded);
+                     if (expanded)
+                       expandedAgents.insert(expansionKey);
+                     else
+                       expandedAgents.erase(expansionKey);
+                   });
+  QObject::connect(copy, &QToolButton::clicked, frame, [copy, agent] {
+    const QString value = agentCopyText(agent);
+    auto *mime = new QMimeData;
+    mime->setText(value);
+    mime->setData("text/markdown", value.toUtf8());
+    QApplication::clipboard()->setMimeData(mime);
+    copy->showCopiedFeedback();
+  });
   return frame;
 }
 

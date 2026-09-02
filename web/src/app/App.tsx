@@ -15,6 +15,7 @@ import type {
     ImageGenerationData, PlanData, VisibleCardData,
 } from "../index.js";
 import type {BrowserFrontendSession, NewThreadDraft, ThreadSortCriterion} from "./BrowserFrontendSession.js";
+import type {AgentPresentation} from "../presentation/PresentationModel.js";
 import {shouldSubmitPromptFromKey} from "./ComposerKeyboard.js";
 import {humanizeProtocolLabel as humanize} from "./Humanize.js";
 import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
@@ -773,6 +774,48 @@ export function inspectorPlainState(selected: ThreadPresentation | undefined, en
     };
 }
 
+function inspectorAgentCopyText(id: string, agent: AgentPresentation): string {
+    const values = ["Agent"];
+    const append = (label: string, value: unknown) => {
+        if (typeof value === "string" && value !== "") values.push(`${label}: ${value}`);
+    };
+    append("Path", agent.raw.agentPath);
+    append("Status", displayStatus(agent.status));
+    append("Tool", agent.raw.tool);
+    append("Model", agent.raw.model);
+    append("Reasoning", agent.raw.reasoningEffort);
+    append("Prompt", agent.raw.prompt);
+    append("Result", agent.raw.resultText);
+    append("Thread", agent.childThreadId);
+    append("Sender", agent.raw.senderThreadId);
+    const receivers = agent.raw.receiverThreadIds;
+    if (Array.isArray(receivers) && receivers.length > 0)
+        values.push(`Receivers: ${receivers.map(String).join(", ")}`);
+    if (values.length === 1) values.push(`ID: ${id}`);
+    return values.join("\n");
+}
+
+export function InspectorAgentCard({id, agent}: {id: string; agent: AgentPresentation}) {
+    const [expanded, setExpanded] = useState(false);
+    const [copied, setCopied] = useState(false);
+    const feedbackTimer = useRef<ReturnType<typeof setTimeout>>();
+    useEffect(() => () => { if (feedbackTimer.current) clearTimeout(feedbackTimer.current); }, []);
+    const copy = async () => {
+        if (await writeCardClipboard({text: inspectorAgentCopyText(id, agent), markdown: true}) !== "copied") return;
+        if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
+        setCopied(true);
+        feedbackTimer.current = setTimeout(() => setCopied(false), 500);
+    };
+    const title = agent.raw.agentPath ? String(agent.raw.agentPath) : id;
+    return <article className={`agent-card${expanded ? " expanded" : " collapsed"}`}>
+        <header><strong>{title}</strong><span className="agent-card-actions"><span className={`status ${classifyStatus(agent.status).tone}`}>{displayStatus(agent.status)}</span>
+            <button className={`agent-copy-button${copied ? " copied" : ""}`} onClick={() => void copy()} aria-label="Copy agent content"><CopyIcon checked={copied} /></button>
+            <button className="agent-fold-button" onClick={() => setExpanded(value => !value)} aria-label={expanded ? "Collapse agent" : "Expand agent"}><FoldIcon collapsed={!expanded} /></button></span></header>
+        {expanded && <div className="agent-card-content">{agent.childThreadId && <small>Thread {agent.childThreadId}</small>}
+            {typeof agent.raw.resultText === "string" && <p>{agent.raw.resultText}</p>}</div>}
+    </article>;
+}
+
 function Inspector({session, revision, drawer = false, paneRef, onClose}: {session: BrowserFrontendSession; revision: number} & DrawerPaneProps) {
     void revision;
     const [tab, setTab] = useState<"plan" | "agents" | "requests" | "state" | "protocol">("plan");
@@ -796,10 +839,7 @@ function Inspector({session, revision, drawer = false, paneRef, onClose}: {sessi
                     return <div key={index}><StatusDot tone={classifyStatus(status).tone} /><span>{String((step as {step?: string}).step ?? "")}</span><small>{displayStatus(status)}</small></div>;
                 })}
             </div> : <p className="muted-copy">No structured plan is available for this thread.</p>)}
-            {tab === "agents" && (!selected || selected.agentOrder.length === 0 ? <p className="muted-copy">No correlated agents are present.</p> : selected.agentOrder.map(id => { const agent = selected.agents.get(id)!; return <div className="agent-card" key={id}>
-                <strong>{agent.raw.agentPath ? String(agent.raw.agentPath) : id}</strong><span>{displayStatus(agent.status)}</span>
-                {agent.childThreadId && <small>Thread {agent.childThreadId}</small>}{typeof agent.raw.resultText === "string" && <p>{agent.raw.resultText}</p>}
-            </div>; }))}
+            {tab === "agents" && (!selected || selected.agentOrder.length === 0 ? <p className="muted-copy">No correlated agents are present.</p> : selected.agentOrder.map(id => <InspectorAgentCard key={`${selected.id}:${id}`} id={id} agent={selected.agents.get(id)!} />))}
             {tab === "requests" && (requests.length === 0 ? <p className="muted-copy">No pending approval or input requests.</p> : requests.map(request => <RequestCard key={request.id} request={request} session={session} />))}
             {tab === "state" && <>{selected && <div className="state-summary"><Info label="Thread" value={selected.id} /><Info label="Status" value={displayStatus(selected.status)} /><Info label="Workspace" value={selected.cwd} /><Info label="Turns" value={String(selected.turnOrder.length)} /><Info label="Changed files" value={String(selected.changedPaths.length)} /></div>}<pre className="state-json">{JSON.stringify(plainState, null, 2)}</pre></>}
             {tab === "protocol" && <div className="protocol-list">{[...session.getSnapshot().protocolFrames].reverse().map((frame, index) => <details key={index}><summary>{humanize(String((frame as Record<string, unknown>).type ?? (frame as Record<string, unknown>).action ?? "Frame"))}</summary><pre>{JSON.stringify(frame, null, 2)}</pre></details>)}</div>}

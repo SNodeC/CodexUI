@@ -16,6 +16,7 @@
 
 #include <QApplication>
 #include <QAbstractTextDocumentLayout>
+#include <QClipboard>
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QCoreApplication>
@@ -1954,8 +1955,9 @@ bool testInspectorDetailParity() {
                    "running agent status uses the canonical active tone");
   auto *agentResult =
       inspector.findChild<QLabel *>(QStringLiteral("agentResult"));
-  auto *agentFrame = agentResult
-                         ? qobject_cast<QFrame *>(agentResult->parentWidget())
+  QWidget *agentContent = agentResult ? agentResult->parentWidget() : nullptr;
+  auto *agentFrame = agentContent
+                         ? qobject_cast<QFrame *>(agentContent->parentWidget())
                          : nullptr;
   auto *agentTitle =
       agentFrame ? agentFrame->findChild<QLabel *>(QStringLiteral("agentTitle"))
@@ -1963,6 +1965,31 @@ bool testInspectorDetailParity() {
   auto *agentName =
       agentFrame ? agentFrame->findChild<QLabel *>(QStringLiteral("agentName"))
                         : nullptr;
+  auto *agentCopy = agentFrame
+                        ? agentFrame->findChild<QToolButton *>(
+                              QStringLiteral("agentCopyButton"))
+                        : nullptr;
+  auto *agentDisclosure =
+      agentFrame ? agentFrame->findChild<QToolButton *>(
+                       QStringLiteral("agentDisclosureButton"))
+                 : nullptr;
+  result &= expect(agentContent && !agentContent->isVisible() &&
+                       agentDisclosure &&
+                       agentDisclosure->accessibleName() ==
+                           QStringLiteral("Expand agent"),
+                   "agent cards initially retain their content collapsed");
+  if (agentDisclosure) {
+    agentDisclosure->click();
+    spin();
+  }
+  if (agentCopy) {
+    agentCopy->click();
+    spin();
+  }
+  result &= expect(
+      agentCopy && QApplication::clipboard()->text().contains(
+                       QStringLiteral("No blocking Inspector findings.")),
+      "agent copy actions retain the complete agent content");
   const int statusBottom =
       agentStatus && agentFrame
           ? agentStatus->mapTo(agentFrame, QPoint()).y() + agentStatus->height()
@@ -1993,9 +2020,14 @@ bool testInspectorDetailParity() {
           agentName->toolTip() == QStringLiteral("/root/lifecycle_review") &&
           agentStatus &&
           agentStatus->geometry().left() > agentName->geometry().left() &&
+          agentCopy && agentDisclosure &&
+          agentCopy->geometry().left() > agentStatus->geometry().left() &&
+          agentDisclosure->geometry().left() > agentCopy->geometry().left() &&
+          agentDisclosure->accessibleName() ==
+              QStringLiteral("Collapse agent") &&
           !hasLabelContaining(inspector,
                               QStringLiteral("/root/lifecycle_review")),
-      "agent cards show a regular monospace identity and right-aligned status "
+      "agent cards show identity then status, copy, and disclosure actions "
       "while retaining the full path as a tooltip");
   result &= expect(
       agentFrame && agentFrame->layout() && agentResult &&

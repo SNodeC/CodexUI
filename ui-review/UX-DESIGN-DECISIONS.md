@@ -231,7 +231,9 @@ same raised card surface, border, radius, and internal spacing. Summary surfaces
 are reserved for subordinate content within a record. Inspector scroll areas
 are frameless and transparent so the panel background remains continuous.
 Plan, Agents, and Requests retain their last visible per-thread presentation
-across thread and tab navigation.
+across thread and tab navigation. Agent records start collapsed, with status,
+copy, and disclosure controls aligned at the right of the title row. Expanding
+reveals the retained metadata, prompt, result, and thread identities.
 
 Changes reflects the local Git worktrees resolved from the selected thread's
 retained command directories, never a patch reconstructed from conversation
