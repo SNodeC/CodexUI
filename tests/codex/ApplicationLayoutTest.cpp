@@ -2001,7 +2001,15 @@ bool testInspectorDetailParity() {
                 agentName && agentFrame
            ? agentName->mapTo(agentFrame, QPoint()).y() + agentName->height()
                     : 0,
-                statusBottom});
+                statusBottom,
+                agentCopy && agentFrame
+                    ? agentCopy->mapTo(agentFrame, QPoint()).y() +
+                          agentCopy->height()
+                    : 0,
+                agentDisclosure && agentFrame
+                    ? agentDisclosure->mapTo(agentFrame, QPoint()).y() +
+                          agentDisclosure->height()
+                    : 0});
   const int resultTop = agentResult && agentFrame
                             ? agentResult->mapTo(agentFrame, QPoint()).y()
                             : 0;
@@ -2014,9 +2022,10 @@ bool testInspectorDetailParity() {
   result &= expect(
       agentTitle && agentTitle->text() == QStringLiteral("Agent") &&
           agentTitle->property("kind").toString() == QStringLiteral("title") &&
-          agentTitle->contentsMargins().bottom() == 1 && agentName &&
+          agentTitle->contentsMargins().bottom() == 0 && agentName &&
           agentName->text() == QStringLiteral("lifecycle_review") &&
           agentName->property("kind").toString() == QStringLiteral("code") &&
+          agentName->sizePolicy().horizontalPolicy() == QSizePolicy::Ignored &&
           agentName->toolTip() == QStringLiteral("/root/lifecycle_review") &&
           agentStatus &&
           agentStatus->geometry().left() > agentName->geometry().left() &&
@@ -2029,6 +2038,19 @@ bool testInspectorDetailParity() {
                               QStringLiteral("/root/lifecycle_review")),
       "agent cards show identity then status, copy, and disclosure actions "
       "while retaining the full path as a tooltip");
+  const auto baseline = [agentFrame](QLabel *label) {
+    return label && agentFrame
+               ? label->mapTo(agentFrame, QPoint()).y() +
+                     label->contentsMargins().top() + label->fontMetrics().ascent()
+               : -1000;
+  };
+  result &= expect(
+      std::abs(baseline(agentTitle) - baseline(agentName)) <= 1 &&
+          std::abs(baseline(agentTitle) - baseline(agentStatus)) <= 1 &&
+          agentFrame && agentFrame->parentWidget() &&
+          agentFrame->geometry().right() <= agentFrame->parentWidget()->width(),
+      "agent heading text shares one baseline and the card remains within the "
+      "available Inspector width");
   result &= expect(
       agentFrame && agentFrame->layout() && agentResult &&
           resultTop - headingBottom <= agentFrame->layout()->spacing() &&

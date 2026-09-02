@@ -312,6 +312,7 @@ void restoreScrollPosition(QPlainTextEdit *view,
 QFrame *InspectorPane::agentFrame(const ui::InspectorAgentRow &agent) {
   auto *frame = new QFrame;
   frame->setProperty("kind", "raised");
+  frame->setMinimumWidth(0);
   auto *layout = new QVBoxLayout(frame);
   layout->setContentsMargins(12, 10, 12, 10);
   layout->setSpacing(6);
@@ -328,23 +329,24 @@ QFrame *InspectorPane::agentFrame(const ui::InspectorAgentRow &agent) {
   auto *titleLabel = makeLabel(QStringLiteral("Agent"), "title");
   titleLabel->setObjectName(QStringLiteral("agentTitle"));
   titleLabel->setWordWrap(false);
-  titleLabel->setContentsMargins(0, 0, 0, 1);
+  titleLabel->setContentsMargins(0, 0, 0, 0);
   titleLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
   heading->addWidget(titleLabel, 0, Qt::AlignBaseline);
   if (!agentName.isEmpty()) {
     auto *nameLabel = makeLabel(agentName, "code");
     nameLabel->setObjectName(QStringLiteral("agentName"));
     nameLabel->setWordWrap(false);
-    // The fixed-width font's descent sits one pixel below the proportional
-    // labels. Preserve their visual baseline without changing its font.
-    nameLabel->setContentsMargins(0, 0, 0, 1);
-    nameLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    nameLabel->setContentsMargins(0, 0, 0, 0);
+    nameLabel->setMinimumWidth(0);
+    nameLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     if (!agentPath.isEmpty())
       nameLabel->setToolTip(agentPath);
-    heading->addWidget(nameLabel, 0, Qt::AlignBottom);
+    heading->addWidget(nameLabel, 1, Qt::AlignBaseline);
+  } else {
+    heading->addStretch(1);
   }
-  heading->addStretch();
   auto *status = statusLabel(agent.status);
+  status->setContentsMargins(0, 0, 0, 0);
   status->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
   heading->addWidget(status, 0, Qt::AlignBaseline);
   auto *copy = new AgentCopyButton(frame);
