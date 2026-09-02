@@ -4,7 +4,7 @@ import test from "node:test";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 
-import {Card, cardCopyContent} from "../dist/app/App.js";
+import {Card, InspectorAgentCard, cardCopyContent} from "../dist/app/App.js";
 
 function itemCard(kind, itemId, payload) {
     return {
@@ -218,4 +218,20 @@ test("typed activity cards retain complete metadata and bounded diagnostics", ()
 
     const generic = itemCard("genericActivity", "generic", {type: "futureThing", raw: {text: "x".repeat(5000)}});
     assert.match(cardCopyContent(generic).text, /\[Activity details truncated\]$/u);
+});
+
+test("Inspector agent cards start collapsed with canonical heading actions", () => {
+    const markup = renderToStaticMarkup(createElement(InspectorAgentCard, {
+        id: "agent-one",
+        agent: {
+            id: "agent-one", status: "completed", childThreadId: "child-one",
+            raw: {agentPath: "/root/agent-one", resultText: "retained result"},
+        },
+    }));
+    assert.match(markup, /agent-card collapsed/u);
+    assert.match(markup, /status success">completed/u);
+    assert.ok(markup.indexOf("status success") < markup.indexOf("agent-copy-button"));
+    assert.ok(markup.indexOf("agent-copy-button") < markup.indexOf("agent-fold-button"));
+    assert.match(markup, /aria-label="Expand agent"/u);
+    assert.doesNotMatch(markup, /retained result/u);
 });
