@@ -91,6 +91,7 @@ set(
     src/codex/ui/ExpandingPromptEditor.h
     src/codex/ui/BrandMark.cpp
     src/codex/ui/BrandMark.h
+    src/codex/ui/QtNodeAttachment.h
     src/codex/ui/UiStyle.cpp
     src/codex/ui/UiStyle.h
     src/codex/ui/UiViewProjection.cpp
@@ -358,7 +359,7 @@ if(BUILD_TESTING)
     )
     target_include_directories(codexui-conversation-cards-test PRIVATE src)
     target_link_libraries(
-        codexui-conversation-cards-test PRIVATE Qt6::Widgets
+        codexui-conversation-cards-test PRIVATE codexui-nodegraph Qt6::Widgets
     )
     add_test(
         NAME codexui-conversation-cards
@@ -412,7 +413,11 @@ if(BUILD_TESTING)
     target_include_directories(codexui-application-layout-test PRIVATE src)
     target_link_libraries(
         codexui-application-layout-test
-        PRIVATE AISuite::OpenAICodex PkgConfig::LIBGIT2 Qt6::Widgets
+        PRIVATE
+            AISuite::OpenAICodex
+            codexui-nodegraph
+            PkgConfig::LIBGIT2
+            Qt6::Widgets
     )
     add_test(
         NAME codexui-application-layout
@@ -420,6 +425,33 @@ if(BUILD_TESTING)
     )
     set_tests_properties(
         codexui-application-layout
+        PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+
+    qt_add_executable(
+        codexui-inspector-graph-test
+        tests/codex/InspectorGraphTest.cpp
+        src/codex/DiffViewer.cpp
+        src/codex/DiffViewer.h
+        src/codex/GitDiffProvider.cpp
+        src/codex/GitDiffProvider.h
+        src/codex/middle/InspectorPane.cpp
+        src/codex/middle/InspectorPane.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
+    )
+    target_compile_features(codexui-inspector-graph-test PRIVATE cxx_std_20)
+    target_include_directories(codexui-inspector-graph-test PRIVATE src)
+    target_link_libraries(
+        codexui-inspector-graph-test
+        PRIVATE codexui-nodegraph PkgConfig::LIBGIT2 Qt6::Widgets
+    )
+    add_test(
+        NAME codexui-inspector-graph
+        COMMAND codexui-inspector-graph-test
+    )
+    set_tests_properties(
+        codexui-inspector-graph
         PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 

@@ -3,6 +3,7 @@
 #ifndef CODEXUI_CODEX_MIDDLE_INSPECTORPANE_H
 #define CODEXUI_CODEX_MIDDLE_INSPECTORPANE_H
 
+#include "codex/nodegraph/Messages.h"
 #include "codex/ui/UiViewState.h"
 
 #include <QByteArray>
@@ -17,6 +18,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -32,9 +34,9 @@ class DiffViewer;
 
 namespace middle {
 
-// The inspector owns only presentation snapshots.  It never clears a visible
-// tab in response to an unrelated frame and never participates in app-server
-// state ownership.
+// The legacy snapshot entry point remains a compatibility oracle. Graph mode
+// extracts only the currently visible tab's render values from the one shared
+// NodeGraph and never participates in app-server state ownership.
 class InspectorPane final : public QFrame {
 public:
   using RequestAction = std::function<void(const std::string &)>;
@@ -45,23 +47,37 @@ public:
   void setRequestActions(RequestAction review, RequestAction accept,
                          RequestAction reject);
   void refresh(const ui::InspectorSnapshot &snapshot);
+  void refresh(nodegraph::NodeGraph &graph,
+               nodegraph::NodeRef selectedThread = {});
+  void graphChanged(const nodegraph::GraphChanged &change);
   void appendProtocolFrame(const nlohmann::json &frame);
 
   [[nodiscard]] QTabWidget *tabs() const noexcept { return inspectorTabs; }
 
 private:
-  QFrame *agentFrame(const ui::InspectorAgentRow &agent);
+  QFrame *agentFrame(const ui::InspectorAgentRow &agent,
+                     std::string_view threadId);
   void refreshCurrentTab();
+  void scheduleGraphRefresh();
+  void runGraphRefresh();
   void refreshPlan();
   void refreshAgents();
   void refreshChanges();
   void refreshRequests();
   void refreshState();
   void refreshProtocolStats();
+  void renderPlan(const ui::InspectorPlanSnapshot &snapshot);
+  void renderAgents(const ui::InspectorAgentsSnapshot &snapshot);
+  void renderChanges(const ui::InspectorChangesSnapshot &snapshot);
+  void renderRequests(const ui::InspectorRequestsSnapshot &snapshot);
+  void renderGraphState(QString value);
+  void renderGraphProtocol(QString log, QString statistics);
   void showProtocolTail();
   void restoreProtocolScroll(bool followsTail, int pausedValue);
 
   std::optional<ui::InspectorSnapshot> currentSnapshot;
+  nodegraph::NodeGraph *graph = nullptr;
+  nodegraph::NodeRef selectedGraphThread;
   RequestAction reviewRequest;
   RequestAction acceptRequest;
   RequestAction rejectRequest;
@@ -90,6 +106,7 @@ private:
   std::uint64_t observedSequence = 0;
   bool protocolFollowsTail = true;
   bool mutatingProtocolLog = false;
+  bool graphRefreshScheduled = false;
   int protocolPausedScrollValue = 0;
   std::uint64_t protocolScrollRevision = 0;
 };
