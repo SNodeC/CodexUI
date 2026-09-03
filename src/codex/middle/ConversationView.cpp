@@ -3,6 +3,7 @@
 #include "codex/middle/ConversationView.h"
 
 #include "codex/middle/ConversationCards.h"
+#include "codex/ui/QtNodeAttachment.h"
 
 #include <QAbstractSlider>
 #include <QApplication>
@@ -22,7 +23,9 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <limits>
 #include <unordered_set>
 #include <utility>
 
@@ -54,8 +57,8 @@ private:
   int height_ = 0;
 };
 
-int initialCardHeight(const VisibleCardData &card) {
-  switch (card.kind) {
+int initialCardHeight(CardKind kind) {
+  switch (kind) {
   case CardKind::UserMessage:
   case CardKind::AgentMessage:
   case CardKind::LocalPrompt:
@@ -70,6 +73,420 @@ int initialCardHeight(const VisibleCardData &card) {
     return 58;
   }
   return 72;
+}
+
+int initialCardHeight(const VisibleCardData &card) {
+  return initialCardHeight(card.kind);
+}
+
+const nodegraph::Value *graphField(const nodegraph::NodeState &state,
+                                   std::string_view name) {
+  const auto found = state.fields.find(name);
+  return found == state.fields.end() ? nullptr : &found->second;
+}
+
+const nodegraph::Value *graphMember(const nodegraph::Value::Object &object,
+                                    std::string_view name) {
+  const auto found = object.find(name);
+  return found == object.end() ? nullptr : &found->second;
+}
+
+std::string graphString(const nodegraph::Value *value) {
+  if (!value)
+    return {};
+  if (const auto *text = value->asString())
+    return *text;
+  if (const auto *number = value->asInt64())
+    return std::to_string(*number);
+  if (const auto *number = value->asUInt64())
+    return std::to_string(*number);
+  return {};
+}
+
+std::string graphStatus(const nodegraph::NodeState &state) {
+  if (const nodegraph::Value *value = graphField(state, "status")) {
+    if (const auto *object = value->asObject())
+      return graphString(graphMember(*object, "type"));
+    if (std::string status = graphString(value); !status.empty())
+      return status;
+  }
+  switch (state.status) {
+  case nodegraph::NodeStatus::Pending:
+    return "pending";
+  case nodegraph::NodeStatus::Running:
+    return "inProgress";
+  case nodegraph::NodeStatus::Completed:
+    return "completed";
+  case nodegraph::NodeStatus::Failed:
+    return "failed";
+  case nodegraph::NodeStatus::Interrupted:
+    return "interrupted";
+  case nodegraph::NodeStatus::NotLoaded:
+    return "notLoaded";
+  case nodegraph::NodeStatus::Connected:
+    return "connected";
+  case nodegraph::NodeStatus::Disconnected:
+    return "disconnected";
+  case nodegraph::NodeStatus::Unknown:
+    return {};
+  }
+  return {};
+}
+
+std::optional<std::int64_t> graphInteger(const nodegraph::Value *value) {
+  if (!value)
+    return std::nullopt;
+  if (const auto *number = value->asInt64())
+    return *number;
+  if (const auto *number = value->asUInt64();
+      number && *number <= static_cast<std::uint64_t>(
+                               std::numeric_limits<std::int64_t>::max()))
+    return static_cast<std::int64_t>(*number);
+  return std::nullopt;
+}
+
+std::vector<std::string> graphStrings(const nodegraph::Value *value) {
+  std::vector<std::string> result;
+  const auto *array = value ? value->asArray() : nullptr;
+  if (!array)
+    return result;
+  result.reserve(array->size());
+  for (const nodegraph::Value &entry : *array)
+    if (const auto *text = entry.asString())
+      result.push_back(*text);
+  return result;
+}
+
+std::string graphMessageText(const nodegraph::NodeState &state) {
+  std::string result;
+  if (const auto *content = graphField(state, "content");
+      content && content->asArray()) {
+    for (const nodegraph::Value &entry : *content->asArray()) {
+      const auto *object = entry.asObject();
+      const std::string text =
+          object ? graphString(graphMember(*object, "text")) : std::string{};
+      if (text.empty())
+        continue;
+      if (!result.empty())
+        result.push_back('\n');
+      result += text;
+    }
+  }
+  return result.empty() ? graphString(graphField(state, "text")) : result;
+}
+
+std::vector<std::string> graphImagePaths(const nodegraph::NodeState &state) {
+  std::vector<std::string> result;
+  const auto *content = graphField(state, "content");
+  const auto *array = content ? content->asArray() : nullptr;
+  if (!array)
+    return result;
+  for (const nodegraph::Value &entry : *array) {
+    const auto *object = entry.asObject();
+    if (!object || graphString(graphMember(*object, "type")) != "localImage")
+      continue;
+    if (std::string path = graphString(graphMember(*object, "path"));
+        !path.empty())
+      result.push_back(std::move(path));
+  }
+  return result;
+}
+
+std::string graphJoinedText(const nodegraph::Value *value) {
+  const auto *array = value ? value->asArray() : nullptr;
+  if (!array)
+    return graphString(value);
+  std::string result;
+  for (const nodegraph::Value &entry : *array) {
+    std::string text = graphString(&entry);
+    if (text.empty())
+      if (const auto *object = entry.asObject())
+        text = graphString(graphMember(*object, "text"));
+    if (text.empty())
+      continue;
+    if (!result.empty())
+      result += ", ";
+    result += text;
+  }
+  return result;
+}
+
+std::pair<int, int> graphDiffCounts(std::string_view diff) {
+  int additions = 0;
+  int deletions = 0;
+  for (std::size_t offset = 0; offset <= diff.size();) {
+    const std::size_t end = diff.find('\n', offset);
+    const std::string_view line =
+        diff.substr(offset, end == std::string_view::npos ? diff.size() - offset
+                                                          : end - offset);
+    if (!line.starts_with("+++ ") && !line.starts_with("--- ")) {
+      if (line.starts_with('+'))
+        ++additions;
+      else if (line.starts_with('-'))
+        ++deletions;
+    }
+    if (end == std::string_view::npos)
+      break;
+    offset = end + 1;
+  }
+  return {additions, deletions};
+}
+
+constexpr std::size_t MaximumGraphActivityDetailCharacters = 4000;
+
+class GraphDetailBuilder final {
+public:
+  void append(std::string_view text) {
+    if (text.empty() || truncated_)
+      return;
+    const std::size_t remaining =
+        MaximumGraphActivityDetailCharacters - value_.size();
+    if (text.size() <= remaining) {
+      value_.append(text);
+      return;
+    }
+    value_.append(text.substr(0, remaining));
+    truncated_ = true;
+  }
+
+  void indent(int depth) {
+    for (int index = 0; index < depth; ++index)
+      append("  ");
+  }
+
+  [[nodiscard]] bool truncated() const noexcept { return truncated_; }
+
+  [[nodiscard]] std::string finish() && {
+    if (truncated_)
+      value_ += "\n\n[Activity details truncated]";
+    return std::move(value_);
+  }
+
+private:
+  std::string value_;
+  bool truncated_ = false;
+};
+
+void appendGraphDetail(GraphDetailBuilder &builder,
+                       const nodegraph::Value &value, int depth) {
+  if (builder.truncated())
+    return;
+  if (value.isNull()) {
+    builder.append("none");
+    return;
+  }
+  if (const auto *boolean = value.asBool()) {
+    builder.append(*boolean ? "true" : "false");
+    return;
+  }
+  if (const auto *number = value.asInt64()) {
+    builder.append(std::to_string(*number));
+    return;
+  }
+  if (const auto *number = value.asUInt64()) {
+    builder.append(std::to_string(*number));
+    return;
+  }
+  if (const auto *number = value.asDouble()) {
+    builder.append(std::to_string(*number));
+    return;
+  }
+  if (const auto *text = value.asString()) {
+    builder.append(*text);
+    return;
+  }
+  if (depth >= 4) {
+    builder.append("nested detail omitted");
+    return;
+  }
+  if (const auto *array = value.asArray()) {
+    if (array->empty()) {
+      builder.append("none");
+      return;
+    }
+    for (const nodegraph::Value &entry : *array) {
+      builder.append("\n");
+      builder.indent(depth + 1);
+      builder.append("- ");
+      appendGraphDetail(builder, entry, depth + 1);
+      if (builder.truncated())
+        return;
+    }
+    return;
+  }
+  const auto *object = value.asObject();
+  if (!object || object->empty()) {
+    builder.append("none");
+    return;
+  }
+  for (const auto &[key, entry] : *object) {
+    builder.append("\n");
+    builder.indent(depth + 1);
+    builder.append(key);
+    builder.append(": ");
+    appendGraphDetail(builder, entry, depth + 1);
+    if (builder.truncated())
+      return;
+  }
+}
+
+std::string graphDisplayDetail(const nodegraph::NodeState &state) {
+  GraphDetailBuilder builder;
+  for (const auto &[key, value] : state.fields) {
+    builder.append(key);
+    builder.append(": ");
+    appendGraphDetail(builder, value, 0);
+    if (builder.truncated())
+      break;
+    builder.append("\n");
+  }
+  return std::move(builder).finish();
+}
+
+CardKind graphCardKind(const nodegraph::NodeState &state) {
+  const std::string type = graphString(graphField(state, "type"));
+  if (type == "userMessage")
+    return CardKind::UserMessage;
+  if (type == "agentMessage")
+    return CardKind::AgentMessage;
+  if (type == "commandExecution")
+    return CardKind::CommandExecution;
+  if (type == "collabAgentToolCall" || type == "subAgentActivity")
+    return CardKind::AgentActivity;
+  if (type == "reasoning")
+    return CardKind::Reasoning;
+  if (type == "fileChange")
+    return CardKind::FileChanges;
+  if (type == "imageGeneration" || type == "imageView")
+    return CardKind::ImageGeneration;
+  if (type == "plan" && !graphMessageText(state).empty())
+    return CardKind::Plan;
+  return CardKind::GenericActivity;
+}
+
+bool graphCardVisible(const nodegraph::NodeState &state,
+                      const ConversationView::PresentationOptions &options) {
+  const CardKind kind = graphCardKind(state);
+  if (kind == CardKind::Reasoning)
+    return options.showReasoning;
+  if (kind != CardKind::AgentMessage)
+    return true;
+  return graphString(graphField(state, "phase")) == "final_answer" ||
+         options.showCodexUpdates;
+}
+
+VisibleCardData graphCardData(const nodegraph::NodeRef &item,
+                              std::string threadId, std::string turnId,
+                              const nodegraph::NodeState &state) {
+  const std::string itemId = item ? item->id().canonical : std::string{};
+  const std::string type = graphString(graphField(state, "type"));
+  GenericActivityData generic;
+  generic.type = type;
+  generic.status = graphStatus(state);
+  generic.displayDetail = graphDisplayDetail(state);
+  VisibleCardData result{AuthoritativeItemKey{threadId, turnId, itemId},
+                         CardKind::GenericActivity,
+                         std::move(threadId),
+                         std::move(turnId),
+                         itemId,
+                         std::move(generic)};
+
+  result.kind = graphCardKind(state);
+  switch (result.kind) {
+  case CardKind::UserMessage:
+    result.payload =
+        UserMessageData{graphMessageText(state), graphImagePaths(state)};
+    break;
+  case CardKind::AgentMessage:
+    result.payload = AgentMessageData{graphMessageText(state),
+                                      graphString(graphField(state, "phase")) ==
+                                          "final_answer"};
+    break;
+  case CardKind::CommandExecution: {
+    std::string output = graphString(graphField(state, "aggregatedOutput"));
+    if (output.empty())
+      output = graphString(graphField(state, "output"));
+    if (!terminalOutputHasVisibleText(output))
+      output.clear();
+    const auto exit = graphInteger(graphField(state, "exitCode"));
+    auto duration = graphInteger(graphField(state, "durationMs"));
+    if (!duration)
+      duration = graphInteger(graphField(state, "duration_ms"));
+    result.payload = CommandExecutionData{
+        graphString(graphField(state, "command")),
+        std::move(output),
+        graphStatus(state),
+        graphString(graphField(state, "cwd")),
+        exit ? std::optional<int>(static_cast<int>(*exit)) : std::nullopt,
+        duration};
+    break;
+  }
+  case CardKind::AgentActivity:
+    result.payload =
+        AgentActivityData{graphString(graphField(state, "tool")),
+                          graphStatus(state),
+                          graphString(graphField(state, "kind")),
+                          graphString(graphField(state, "prompt")),
+                          graphString(graphField(state, "resultText")),
+                          graphStrings(graphField(state, "receiverThreadIds")),
+                          graphString(graphField(state, "model")),
+                          graphString(graphField(state, "reasoningEffort")),
+                          graphString(graphField(state, "agentThreadId")),
+                          graphString(graphField(state, "agentPath")),
+                          graphString(graphField(state, "senderThreadId"))};
+    break;
+  case CardKind::Reasoning:
+    result.payload =
+        ReasoningData{graphJoinedText(graphField(state, "summary"))};
+    break;
+  case CardKind::FileChanges: {
+    FileChangesData projected{graphStatus(state), {}};
+    const auto *changes = graphField(state, "changes");
+    const auto *array = changes ? changes->asArray() : nullptr;
+    if (array) {
+      projected.changes.reserve(array->size());
+      for (const nodegraph::Value &value : *array) {
+        const auto *change = value.asObject();
+        if (!change)
+          continue;
+        FileChangeData entry{graphString(graphMember(*change, "path")),
+                             graphString(graphMember(*change, "kind")),
+                             std::nullopt, std::nullopt};
+        if (std::string diff = graphString(graphMember(*change, "diff"));
+            !diff.empty()) {
+          const auto [additions, deletions] = graphDiffCounts(diff);
+          entry.additions = additions;
+          entry.deletions = deletions;
+        }
+        projected.changes.push_back(std::move(entry));
+      }
+    }
+    result.payload = std::move(projected);
+    break;
+  }
+  case CardKind::ImageGeneration: {
+    std::string path = graphString(graphField(state, "path"));
+    if (path.empty())
+      path = graphString(graphField(state, "savedPath"));
+    if (path.empty())
+      path = graphString(graphField(state, "saved_path"));
+    std::string prompt = graphString(graphField(state, "revisedPrompt"));
+    if (prompt.empty())
+      prompt = graphString(graphField(state, "revised_prompt"));
+    result.payload = ImageGenerationData{
+        std::move(path), type == "imageView" ? "completed" : graphStatus(state),
+        std::move(prompt)};
+    break;
+  }
+  case CardKind::Plan:
+    result.payload = PlanData{{}, {}, graphMessageText(state)};
+    break;
+  case CardKind::GenericActivity:
+    break;
+  case CardKind::LocalPrompt:
+    break;
+  }
+  return result;
 }
 
 QLabel *makeEmptyLabel() {
@@ -88,7 +505,9 @@ class ConversationView::TurnSectionWidget final : public QWidget {
 public:
   struct CardSlot {
     std::string key;
+    nodegraph::NodeRef graphNode;
     QWidget *item = nullptr;
+    std::unique_ptr<ui::QtNodeAttachment> attachment;
     int measuredHeight = 0;
     bool projectionVisible = true;
     bool newlyAdded = false;
@@ -105,6 +524,8 @@ public:
   QVBoxLayout *cards = nullptr;
   std::vector<CardSlot> cardSlots;
   std::string rootKey;
+  nodegraph::NodeRef graphNode;
+  bool graphActive = false;
 };
 
 ConversationView::ConversationView(QWidget *parent)
@@ -199,6 +620,311 @@ ConversationView::ConversationView(QWidget *parent)
   recomputeGeometry();
 }
 
+ConversationView::~ConversationView() { leaveGraphMode(); }
+
+void ConversationView::bindGraph(nodegraph::NodeGraph &graph,
+                                 nodegraph::NodeRef selectedThread) {
+  if (graph_ == &graph && graphThread_ == selectedThread) {
+    graphChanged();
+    return;
+  }
+  if (graph_)
+    leaveGraphMode();
+  if (!sections_.empty() || !snapshot_.threadId.empty())
+    static_cast<void>(reconcile(ConversationSnapshot{}));
+
+  graph_ = &graph;
+  graphThread_ = std::move(selectedThread);
+  snapshot_ = {};
+  setThread(graphThread_ ? graphThread_->id().canonical : std::string{});
+  runGraphRefresh();
+}
+
+void ConversationView::graphChanged(
+    std::span<const nodegraph::NodeRef> removed) {
+  if (!graph_)
+    return;
+  if (!removed.empty())
+    detachGraphWidgets(removed);
+  scheduleGraphRefresh();
+}
+
+void ConversationView::leaveGraphMode() {
+  if (!graph_ && graphSections_.empty())
+    return;
+  for (TurnSectionWidget *section : graphSections_) {
+    for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
+      if (slot.graphNode && slot.attachment &&
+          slot.graphNode->uiAttachment() == slot.attachment.get())
+        slot.graphNode->setUiAttachment(nullptr);
+      slot.attachment.reset();
+    }
+    contentLayout_->removeWidget(section);
+    delete section;
+  }
+  graphSections_.clear();
+  graphThread_.reset();
+  graph_ = nullptr;
+  graphRefreshScheduled_ = false;
+  visibilityPassScheduled_ = false;
+}
+
+void ConversationView::scheduleGraphRefresh() {
+  if (!graph_ || graphRefreshScheduled_)
+    return;
+  graphRefreshScheduled_ = true;
+  QTimer::singleShot(0, this, [this] {
+    graphRefreshScheduled_ = false;
+    runGraphRefresh();
+  });
+}
+
+void ConversationView::runGraphRefresh() {
+  if (!graph_)
+    return;
+
+  struct ItemPin final {
+    nodegraph::NodeRef node;
+    std::shared_ptr<const nodegraph::NodeState> state;
+  };
+  struct TurnPin final {
+    nodegraph::NodeRef node;
+    std::shared_ptr<const nodegraph::NodeState> state;
+    std::vector<ItemPin> items;
+  };
+  struct Structure final {
+    bool threadRemoved = false;
+    std::vector<TurnPin> turns;
+  } structure;
+
+  {
+    std::optional<nodegraph::NodeGraph::ReadAccess> read = graph_->tryRead();
+    if (!read) {
+      scheduleGraphRefresh();
+      return;
+    }
+    if (!graphThread_ || read->removed(graphThread_)) {
+      structure.threadRemoved = true;
+    } else {
+      for (nodegraph::NodeRef turn : read->children(graphThread_)) {
+        if (!turn || turn->id().kind != nodegraph::NodeKind::Turn ||
+            read->removed(turn))
+          continue;
+        TurnPin pinned{turn, read->state(turn), {}};
+        for (nodegraph::NodeRef item : read->children(turn)) {
+          if (!item || item->id().kind != nodegraph::NodeKind::Item ||
+              read->removed(item))
+            continue;
+          pinned.items.push_back({item, read->state(item)});
+        }
+        structure.turns.push_back(std::move(pinned));
+      }
+    }
+  }
+
+  if (structure.threadRemoved) {
+    std::array<nodegraph::NodeRef, 1> removed{graphThread_};
+    detachGraphWidgets(removed);
+    return;
+  }
+
+  std::vector<const nodegraph::Node *> previousOrder;
+  for (TurnSectionWidget *section : graphSections_)
+    for (const TurnSectionWidget::CardSlot &slot : section->cardSlots)
+      previousOrder.push_back(slot.graphNode.get());
+  std::vector<const nodegraph::Node *> nextOrder;
+  for (const TurnPin &turn : structure.turns)
+    for (const ItemPin &item : turn.items)
+      nextOrder.push_back(item.node.get());
+  const bool appended =
+      nextOrder.size() > previousOrder.size() &&
+      std::equal(previousOrder.begin(), previousOrder.end(), nextOrder.begin());
+
+  const Anchor anchor = captureAnchor();
+  const bool follow = mode_ == Mode::Following;
+  applying_ = true;
+  viewport()->setUpdatesEnabled(false);
+  content_->setUpdatesEnabled(false);
+  const QSignalBlocker scrollSignals(verticalScrollBar());
+
+  std::unordered_map<const nodegraph::Node *, TurnSectionWidget *>
+      retainedSections;
+  std::unordered_map<const nodegraph::Node *, TurnSectionWidget::CardSlot>
+      retainedSlots;
+  for (TurnSectionWidget *section : graphSections_) {
+    retainedSections.emplace(section->graphNode.get(), section);
+    for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
+      retainedSlots.emplace(slot.graphNode.get(), std::move(slot));
+    section->cardSlots.clear();
+  }
+
+  const std::size_t newCount =
+      std::ranges::count_if(nextOrder, [&retainedSlots](const auto *node) {
+        return !retainedSlots.contains(node);
+      });
+  const bool smallAppend =
+      !previousOrder.empty() && appended &&
+      newCount <= static_cast<std::size_t>(MaxCardOperationsPerPass);
+  std::vector<TurnSectionWidget *> nextSections;
+  nextSections.reserve(structure.turns.size());
+  std::size_t visibleCards = 0;
+
+  for (const TurnPin &turn : structure.turns) {
+    TurnSectionWidget *section = nullptr;
+    if (auto retained = retainedSections.find(turn.node.get());
+        retained != retainedSections.end()) {
+      section = retained->second;
+      retainedSections.erase(retained);
+    } else {
+      section = new TurnSectionWidget(content_);
+      section->setProperty("turnSectionKey",
+                           QString::fromStdString(turn.node->id().canonical));
+    }
+    section->graphNode = turn.node;
+    section->setProperty("turnId",
+                         QString::fromStdString(turn.node->id().canonical));
+    section->graphActive =
+        turn.state && turn.state->status == nodegraph::NodeStatus::Running;
+    section->rootKey.clear();
+    section->cardSlots.reserve(turn.items.size());
+
+    for (const ItemPin &item : turn.items) {
+      TurnSectionWidget::CardSlot slot;
+      if (auto retained = retainedSlots.find(item.node.get());
+          retained != retainedSlots.end()) {
+        slot = std::move(retained->second);
+        retainedSlots.erase(retained);
+      } else {
+        slot.graphNode = item.node;
+        slot.key = stableKey(AuthoritativeItemKey{graphThread_->id().canonical,
+                                                  turn.node->id().canonical,
+                                                  item.node->id().canonical});
+        slot.measuredHeight = initialCardHeight(graphCardKind(*item.state));
+        slot.item =
+            new MeasuredCardPlaceholder(slot.key, slot.measuredHeight, section);
+        slot.newlyAdded = smallAppend;
+      }
+      slot.graphNode = item.node;
+      slot.projectionVisible =
+          graphCardVisible(*item.state, presentationOptions_);
+      if (section->rootKey.empty() &&
+          graphCardKind(*item.state) == CardKind::UserMessage)
+        section->rootKey = slot.key;
+      if (auto *placeholder =
+              dynamic_cast<MeasuredCardPlaceholder *>(slot.item))
+        placeholder->setMeasuredHeight(
+            slot.projectionVisible ? slot.measuredHeight : 0);
+      if (slot.item->isHidden() == slot.projectionVisible)
+        slot.item->setVisible(slot.projectionVisible);
+      if (slot.projectionVisible)
+        ++visibleCards;
+      section->cardSlots.push_back(std::move(slot));
+    }
+    arrangeSection(section);
+    section->setVisible(std::ranges::any_of(
+        section->cardSlots, [](const TurnSectionWidget::CardSlot &slot) {
+          return slot.projectionVisible;
+        }));
+    nextSections.push_back(section);
+  }
+
+  for (auto &[node, slot] : retainedSlots) {
+    static_cast<void>(node);
+    if (slot.graphNode && slot.attachment &&
+        slot.graphNode->uiAttachment() == slot.attachment.get())
+      slot.graphNode->setUiAttachment(nullptr);
+    slot.attachment.reset();
+    delete slot.item;
+  }
+  for (auto &[node, section] : retainedSections) {
+    static_cast<void>(node);
+    contentLayout_->removeWidget(section);
+    delete section;
+  }
+
+  for (TurnSectionWidget *section : graphSections_)
+    contentLayout_->removeWidget(section);
+  graphSections_ = std::move(nextSections);
+  for (std::size_t index = 0; index < graphSections_.size(); ++index)
+    contentLayout_->insertWidget(1 + static_cast<int>(index),
+                                 graphSections_[index]);
+  loadMore_->hide();
+  empty_->setVisible(visibleCards == 0);
+
+  recomputeGeometry();
+  if (follow && (previousOrder.empty() || appended))
+    setScrollValue(verticalScrollBar()->maximum());
+  else
+    restoreAnchor(anchor);
+  applying_ = false;
+  content_->setUpdatesEnabled(true);
+  viewport()->setUpdatesEnabled(true);
+  viewport()->update();
+  static_cast<void>(runGraphVisibilityPass());
+  storeCurrentThreadState();
+}
+
+void ConversationView::detachGraphWidgets(
+    std::span<const nodegraph::NodeRef> removed) {
+  if (!graph_ || removed.empty())
+    return;
+  const auto isRemoved = [removed](const nodegraph::NodeRef &node) {
+    return node && std::ranges::any_of(
+                       removed, [&node](const nodegraph::NodeRef &candidate) {
+                         return candidate == node;
+                       });
+  };
+  const Anchor anchor = captureAnchor();
+  const bool follow = mode_ == Mode::Following;
+  applying_ = true;
+  viewport()->setUpdatesEnabled(false);
+  content_->setUpdatesEnabled(false);
+  const QSignalBlocker scrollSignals(verticalScrollBar());
+
+  const bool removeThread = isRemoved(graphThread_);
+  for (auto section = graphSections_.begin();
+       section != graphSections_.end();) {
+    TurnSectionWidget *widget = *section;
+    if (ConversationCard *root = cardForStableKey(widget->rootKey))
+      root->setNestedItems({});
+    const bool removeSection = removeThread || isRemoved(widget->graphNode);
+    for (auto slot = widget->cardSlots.begin();
+         slot != widget->cardSlots.end();) {
+      if (!removeSection && !isRemoved(slot->graphNode)) {
+        ++slot;
+        continue;
+      }
+      if (slot->graphNode && slot->attachment &&
+          slot->graphNode->uiAttachment() == slot->attachment.get())
+        slot->graphNode->setUiAttachment(nullptr);
+      slot->attachment.reset();
+      delete slot->item;
+      slot = widget->cardSlots.erase(slot);
+    }
+    if (removeSection) {
+      contentLayout_->removeWidget(widget);
+      delete widget;
+      section = graphSections_.erase(section);
+      continue;
+    }
+    if (std::ranges::none_of(widget->cardSlots, [widget](const auto &slot) {
+          return slot.key == widget->rootKey;
+        }))
+      widget->rootKey.clear();
+    arrangeSection(widget);
+    ++section;
+  }
+  recomputeGeometry();
+  if (follow)
+    setScrollValue(verticalScrollBar()->maximum());
+  else
+    restoreAnchor(anchor);
+  applying_ = false;
+  content_->setUpdatesEnabled(true);
+  viewport()->setUpdatesEnabled(true);
+  viewport()->update();
+}
+
 void ConversationView::setLoadMoreAction(std::function<void()> action) {
   loadMoreAction_ = std::move(action);
 }
@@ -227,7 +953,11 @@ void ConversationView::setPresentationOptions(PresentationOptions options) {
   if (presentationOptions_ == options)
     return;
   presentationOptions_ = options;
-  static_cast<void>(reconcile(snapshot_, true, true));
+  if (graph_) {
+    scheduleGraphRefresh();
+  } else {
+    static_cast<void>(reconcile(snapshot_, true, true));
+  }
 }
 
 bool ConversationView::cardVisible(const VisibleCardData &card) const noexcept {
@@ -259,6 +989,8 @@ void ConversationView::setThread(const std::string &threadId) {
 }
 
 bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
+  if (graph_)
+    leaveGraphMode();
   return reconcile(snapshot, false, false);
 }
 
@@ -511,6 +1243,11 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
 void ConversationView::arrangeSection(TurnSectionWidget *section) {
   if (!section)
     return;
+  const auto slotCard = [this](TurnSectionWidget::CardSlot &slot) {
+    if (graph_ && slot.attachment)
+      return qobject_cast<ConversationCard *>(slot.attachment->widget.data());
+    return dynamic_cast<ConversationCard *>(slot.item);
+  };
 
   TurnSectionWidget::CardSlot *rootSlot = nullptr;
   if (!section->rootKey.empty()) {
@@ -521,8 +1258,7 @@ void ConversationView::arrangeSection(TurnSectionWidget *section) {
     if (root != section->cardSlots.end())
       rootSlot = &*root;
   }
-  auto *prompt =
-      rootSlot ? dynamic_cast<ConversationCard *>(rootSlot->item) : nullptr;
+  auto *prompt = rootSlot ? slotCard(*rootSlot) : nullptr;
 
   std::unordered_set<ConversationCard *> obsoleteOwners;
   for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
@@ -542,7 +1278,7 @@ void ConversationView::arrangeSection(TurnSectionWidget *section) {
   // A formerly materialized root can be replaced by its placeholder in the
   // same pass. Ensure no other card keeps an obsolete nested layout first.
   for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
-    auto *card = dynamic_cast<ConversationCard *>(slot.item);
+    auto *card = slotCard(slot);
     if (!card || card == prompt)
       continue;
     if (card->property("turnContainer").toBool())
@@ -560,9 +1296,11 @@ void ConversationView::arrangeSection(TurnSectionWidget *section) {
     prompt->setProperty("nestedConversationCard", false);
     prompt->setProperty("turnContainer", true);
     prompt->setNestedItems(nestedItems);
-    const bool active = snapshot_.activeTurnId &&
-                        section->property("turnId").toString().toStdString() ==
-                            *snapshot_.activeTurnId;
+    const bool active =
+        graph_ ? section->graphActive
+               : snapshot_.activeTurnId &&
+                     section->property("turnId").toString().toStdString() ==
+                         *snapshot_.activeTurnId;
     prompt->setAuthoritativeTurnActive(active);
     if (section->cards->indexOf(prompt) != 0)
       section->cards->insertWidget(0, prompt);
@@ -578,7 +1316,7 @@ void ConversationView::arrangeSection(TurnSectionWidget *section) {
       ordered.push_back(&slot);
   for (std::size_t position = 0; position < ordered.size(); ++position) {
     QWidget *item = ordered[position]->item;
-    if (auto *card = dynamic_cast<ConversationCard *>(item)) {
+    if (auto *card = slotCard(*ordered[position])) {
       if (card->property("turnContainer").toBool())
         card->setNestedItems({});
       card->setProperty("nestedConversationCard", false);
@@ -592,7 +1330,8 @@ void ConversationView::arrangeSection(TurnSectionWidget *section) {
 }
 
 void ConversationView::scheduleVisibilityPass() {
-  if (applying_ || visibilityPassScheduled_ || snapshot_.threadId.empty())
+  if (applying_ || visibilityPassScheduled_ ||
+      (!graph_ && snapshot_.threadId.empty()))
     return;
   visibilityPassScheduled_ = true;
   QTimer::singleShot(0, this, [this] {
@@ -603,6 +1342,8 @@ void ConversationView::scheduleVisibilityPass() {
 }
 
 bool ConversationView::runVisibilityPass() {
+  if (graph_)
+    return runGraphVisibilityPass();
   if (applying_ || !content_ || !viewport() || snapshot_.threadId.empty())
     return false;
 
@@ -836,6 +1577,306 @@ bool ConversationView::runVisibilityPass() {
   return operations > 0;
 }
 
+bool ConversationView::runGraphVisibilityPass() {
+  if (applying_ || !graph_ || !content_ || !viewport())
+    return false;
+
+  enum class Operation { Materialize, Render, Release };
+  struct Candidate final {
+    TurnSectionWidget *section = nullptr;
+    TurnSectionWidget::CardSlot *slot = nullptr;
+    Operation operation = Operation::Materialize;
+    bool inViewport = false;
+    int distance = 0;
+    std::uint64_t renderedRevision = 0;
+    std::uint64_t nodeRevision = 0;
+    std::shared_ptr<const nodegraph::NodeState> state;
+  };
+
+  const int scrollTop = verticalScrollBar()->value();
+  const int viewportHeight = std::max(1, viewport()->height());
+  const QRect visibleRect(0, scrollTop, std::max(1, content_->width()),
+                          viewportHeight);
+  const QRect materializationRect(0, std::max(0, scrollTop - viewportHeight),
+                                  std::max(1, content_->width()),
+                                  viewportHeight * 3);
+  const QRect retentionRect(0, std::max(0, scrollTop - 2 * viewportHeight),
+                            std::max(1, content_->width()), viewportHeight * 5);
+  std::vector<Candidate> candidates;
+
+  for (TurnSectionWidget *section : graphSections_) {
+    for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
+      QWidget *item = slot.item;
+      const QRect itemRect(item->mapTo(content_, QPoint{}), item->size());
+      const bool presented =
+          slot.projectionVisible && item->isVisibleTo(content_);
+      const bool wanted = presented && itemRect.intersects(materializationRect);
+      const bool retained = presented && itemRect.intersects(retentionRect);
+      const bool inViewport = presented && itemRect.intersects(visibleRect);
+      const int center = itemRect.center().y();
+      const int distance =
+          center < visibleRect.top()
+              ? visibleRect.top() - center
+              : (center > visibleRect.bottom() ? center - visibleRect.bottom()
+                                               : 0);
+      QWidget *widget =
+          slot.attachment ? slot.attachment->widget.data() : nullptr;
+      if (widget) {
+        QWidget *focus = QApplication::focusWidget();
+        const bool ownsFocus =
+            focus && (focus == widget || widget->isAncestorOf(focus));
+        if (!retained && !ownsFocus) {
+          candidates.push_back(
+              {section, &slot, Operation::Release, false, distance});
+        } else if (wanted) {
+          candidates.push_back({section, &slot, Operation::Render, inViewport,
+                                distance, slot.attachment->renderedRevision});
+        }
+      } else if (wanted) {
+        candidates.push_back(
+            {section, &slot, Operation::Materialize, inViewport, distance});
+      }
+    }
+  }
+
+  {
+    std::optional<nodegraph::NodeGraph::ReadAccess> read = graph_->tryRead();
+    if (!read) {
+      scheduleVisibilityPass();
+      return false;
+    }
+    for (Candidate &candidate : candidates) {
+      if (candidate.operation == Operation::Release ||
+          !candidate.slot->graphNode)
+        continue;
+      if (read->removed(candidate.slot->graphNode)) {
+        candidate.operation = Operation::Release;
+        continue;
+      }
+      candidate.nodeRevision = read->changedRevision(candidate.slot->graphNode);
+      if (candidate.operation == Operation::Render &&
+          candidate.renderedRevision >= candidate.nodeRevision)
+        continue;
+      candidate.state = read->state(candidate.slot->graphNode);
+    }
+  }
+  std::erase_if(candidates, [](const Candidate &candidate) {
+    return candidate.operation == Operation::Render && !candidate.state;
+  });
+
+  std::ranges::stable_sort(
+      candidates, [](const Candidate &left, const Candidate &right) {
+        if (left.inViewport != right.inViewport)
+          return left.inViewport > right.inViewport;
+        const auto urgency = [](Operation operation) {
+          return operation == Operation::Release ? 1 : 0;
+        };
+        if (urgency(left.operation) != urgency(right.operation))
+          return urgency(left.operation) < urgency(right.operation);
+        return left.distance < right.distance;
+      });
+  if (candidates.empty()) {
+    for (TurnSectionWidget *section : graphSections_)
+      for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
+        if (slot.attachment) {
+          QWidget *widget = slot.attachment->widget.data();
+          const bool visible =
+              widget && widget->isVisibleTo(viewport()) &&
+              QRect(widget->mapTo(viewport(), QPoint{}), widget->size())
+                  .intersects(viewport()->rect());
+          slot.attachment->viewportVisible = visible;
+          slot.attachment->materialization =
+              visible ? ui::NodeMaterialization::ViewportVisible
+                      : ui::NodeMaterialization::Overscan;
+        }
+    return false;
+  }
+
+  const Anchor anchor = captureAnchor();
+  const bool follow = mode_ == Mode::Following;
+  const bool followedBottom = follow && isAtBottom();
+  const int previousValue = verticalScrollBar()->value();
+  stopFollowingAnimation();
+  applying_ = true;
+  viewport()->setUpdatesEnabled(false);
+  content_->setUpdatesEnabled(false);
+  const QSignalBlocker scrollSignals(verticalScrollBar());
+  std::vector<std::pair<ConversationCard *, CommandOutputView::ScrollState>>
+      outputRestorations;
+  const auto configureCard =
+      [this, &outputRestorations](ConversationCard *card,
+                                  TurnSectionWidget::CardSlot &slot) {
+        card->setProperty("conversationAnchorKey",
+                          QString::fromStdString(slot.key));
+        if (const auto collapsed = cardCollapsedStates_.find(slot.key);
+            collapsed != cardCollapsedStates_.end())
+          card->setCollapsed(collapsed->second);
+        connect(card, &ConversationCard::foldRequested, this,
+                [this, key = slot.key, card](bool collapsed) {
+                  if (cardForStableKey(key) == card)
+                    setCardCollapsed(key, card, collapsed);
+                });
+        if (const auto saved = commandOutputStates_.find(slot.key);
+            saved != commandOutputStates_.end()) {
+          outputRestorations.emplace_back(card, saved->second);
+          commandOutputStates_.erase(saved);
+        }
+      };
+  int operations = 0;
+  bool workRemaining = false;
+
+  for (Candidate &candidate : candidates) {
+    if (operations >= MaxCardOperationsPerPass) {
+      workRemaining = true;
+      break;
+    }
+    TurnSectionWidget::CardSlot &slot = *candidate.slot;
+    if (candidate.operation == Operation::Materialize) {
+      if (!candidate.state)
+        continue;
+      auto *placeholder = dynamic_cast<MeasuredCardPlaceholder *>(slot.item);
+      if (!placeholder)
+        continue;
+      const VisibleCardData data = graphCardData(
+          slot.graphNode, graphThread_->id().canonical,
+          candidate.section->graphNode->id().canonical, *candidate.state);
+      auto *card = createConversationCard(
+          data, candidate.section,
+          !presentationOptions_.commandsInitiallyExpanded,
+          !presentationOptions_.imagesInitiallyExpanded);
+      configureCard(card, slot);
+      card->setVisible(slot.projectionVisible);
+      slot.item = card;
+      slot.newlyAdded = false;
+      slot.attachment = std::make_unique<ui::QtNodeAttachment>();
+      slot.attachment->widget = card;
+      slot.attachment->renderedRevision = candidate.nodeRevision;
+      slot.attachment->materialization =
+          candidate.inViewport ? ui::NodeMaterialization::ViewportVisible
+                               : ui::NodeMaterialization::Overscan;
+      slot.attachment->viewportVisible = candidate.inViewport;
+      Q_ASSERT(slot.graphNode->uiAttachment() == nullptr);
+      slot.graphNode->setUiAttachment(slot.attachment.get());
+      delete placeholder;
+      ++operations;
+      continue;
+    }
+
+    auto *card =
+        slot.attachment
+            ? qobject_cast<ConversationCard *>(slot.attachment->widget.data())
+            : nullptr;
+    if (candidate.operation == Operation::Render) {
+      if (!card || !candidate.state)
+        continue;
+      const VisibleCardData data = graphCardData(
+          slot.graphNode, graphThread_->id().canonical,
+          candidate.section->graphNode->id().canonical, *candidate.state);
+      if (!card->canApply(data)) {
+        if (operations + 2 > MaxCardOperationsPerPass) {
+          workRemaining = true;
+          break;
+        }
+        const auto outputState = card->commandOutputScrollState();
+        if (outputState && !outputState->followsLatest)
+          commandOutputStates_[slot.key] = *outputState;
+        if (slot.graphNode->uiAttachment() == slot.attachment.get())
+          slot.graphNode->setUiAttachment(nullptr);
+        slot.attachment.reset();
+        delete card;
+        auto *replacement = createConversationCard(
+            data, candidate.section,
+            !presentationOptions_.commandsInitiallyExpanded,
+            !presentationOptions_.imagesInitiallyExpanded);
+        configureCard(replacement, slot);
+        slot.item = replacement;
+        slot.attachment = std::make_unique<ui::QtNodeAttachment>();
+        slot.attachment->widget = replacement;
+        Q_ASSERT(slot.graphNode->uiAttachment() == nullptr);
+        slot.graphNode->setUiAttachment(slot.attachment.get());
+        card = replacement;
+        operations += 2;
+      } else {
+        card->apply(data);
+        ++operations;
+      }
+      card->setVisible(slot.projectionVisible);
+      slot.attachment->renderedRevision = candidate.nodeRevision;
+      slot.attachment->materialization =
+          candidate.inViewport ? ui::NodeMaterialization::ViewportVisible
+                               : ui::NodeMaterialization::Overscan;
+      slot.attachment->viewportVisible = candidate.inViewport;
+      continue;
+    }
+
+    if (!card)
+      continue;
+    const auto outputState = card->commandOutputScrollState();
+    if (outputState && !outputState->followsLatest)
+      commandOutputStates_[slot.key] = *outputState;
+    else
+      commandOutputStates_.erase(slot.key);
+    if (slot.key == candidate.section->rootKey) {
+      card->setNestedItems({});
+      card->setMinimumHeight(0);
+      if (card->layout()) {
+        card->layout()->invalidate();
+        card->layout()->activate();
+      }
+      slot.measuredHeight =
+          std::max(slot.measuredHeight, card->minimumSizeHint().height());
+    } else {
+      slot.measuredHeight = std::max(1, card->height());
+    }
+    auto *placeholder = new MeasuredCardPlaceholder(
+        slot.key, slot.projectionVisible ? slot.measuredHeight : 0,
+        candidate.section);
+    placeholder->setVisible(slot.projectionVisible);
+    if (slot.graphNode->uiAttachment() == slot.attachment.get())
+      slot.graphNode->setUiAttachment(nullptr);
+    slot.attachment.reset();
+    slot.item = placeholder;
+    delete card;
+    ++operations;
+  }
+
+  for (TurnSectionWidget *section : graphSections_)
+    arrangeSection(section);
+  recomputeGeometry();
+  for (const auto &[card, state] : outputRestorations)
+    card->restoreCommandOutputScrollState(state);
+  if (followedBottom)
+    setScrollValue(verticalScrollBar()->maximum());
+  else
+    restoreAnchor(anchor);
+  applying_ = false;
+  content_->setUpdatesEnabled(true);
+  viewport()->setUpdatesEnabled(true);
+  viewport()->update();
+
+  for (TurnSectionWidget *section : graphSections_)
+    for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
+      if (slot.attachment) {
+        QWidget *widget = slot.attachment->widget.data();
+        const bool visible =
+            widget && widget->isVisibleTo(viewport()) &&
+            QRect(widget->mapTo(viewport(), QPoint{}), widget->size())
+                .intersects(viewport()->rect());
+        slot.attachment->viewportVisible = visible;
+        slot.attachment->materialization =
+            visible ? ui::NodeMaterialization::ViewportVisible
+                    : ui::NodeMaterialization::Overscan;
+      }
+  if (follow && !followedBottom) {
+    const int stableValue = verticalScrollBar()->value();
+    if (verticalScrollBar()->maximum() > stableValue + 3)
+      animateToBottom(std::min(previousValue, stableValue));
+  }
+  if (workRemaining || operations == MaxCardOperationsPerPass)
+    scheduleVisibilityPass();
+  return operations > 0;
+}
+
 void ConversationView::setCardCollapsed(const std::string &key,
                                         ConversationCard *card,
                                         bool collapsed) {
@@ -863,8 +1904,7 @@ void ConversationView::setCardCollapsed(const std::string &key,
     turnContainer->setMinimumHeight(0);
   card->setCollapsed(collapsed);
   recomputeGeometry();
-  for (const auto &[sectionKey, section] : sections_) {
-    static_cast<void>(sectionKey);
+  const auto updateMeasuredHeight = [&key, card](TurnSectionWidget *section) {
     const auto slot = std::ranges::find_if(
         section->cardSlots,
         [&key](const TurnSectionWidget::CardSlot &candidate) {
@@ -872,6 +1912,15 @@ void ConversationView::setCardCollapsed(const std::string &key,
         });
     if (slot != section->cardSlots.end() && key != section->rootKey)
       slot->measuredHeight = std::max(1, card->height());
+  };
+  if (graph_) {
+    for (TurnSectionWidget *section : graphSections_)
+      updateMeasuredHeight(section);
+  } else {
+    for (const auto &[sectionKey, section] : sections_) {
+      static_cast<void>(sectionKey);
+      updateMeasuredHeight(section);
+    }
   }
   const int visibleHeight =
       std::max(0, viewport()->height() - trailingSpaceHeight_);
@@ -1020,20 +2069,34 @@ void ConversationView::wheelEvent(QWheelEvent *event) {
 ConversationView::Anchor ConversationView::captureAnchor() const {
   Anchor anchor;
   anchor.absoluteValue = verticalScrollBar()->value();
-  for (const std::string &key : displayedCardKeys_) {
+  const auto capture = [this, &anchor](const std::string &key) {
     QWidget *item = itemForStableKey(key);
     if (!item || !item->isVisible())
-      continue;
+      return false;
     const int viewportTop = item->mapTo(viewport(), QPoint(0, 0)).y();
     if (viewportTop + item->height() < 0)
-      continue;
+      return false;
     anchor.stableKey = key;
     // The contract is visual stability. Capture the actual painted offset
     // instead of deriving it from content coordinates while a layout/range
     // transaction may temporarily be between those coordinate systems.
     anchor.pixelOffset = viewportTop;
-    break;
+    return true;
+  };
+  if (graph_) {
+    for (TurnSectionWidget *section : graphSections_) {
+      if (!section->rootKey.empty() && capture(section->rootKey))
+        return anchor;
+      for (const TurnSectionWidget::CardSlot &slot : section->cardSlots)
+        if (slot.key != section->rootKey && slot.projectionVisible &&
+            capture(slot.key))
+          return anchor;
+    }
+    return anchor;
   }
+  for (const std::string &key : displayedCardKeys_)
+    if (capture(key))
+      break;
   return anchor;
 }
 
@@ -1087,23 +2150,41 @@ void ConversationView::animateToBottom(int previousValue) {
 void ConversationView::recomputeGeometry() {
   if (!content_ || !viewport())
     return;
+  std::vector<TurnSectionWidget *> layoutSections;
+  std::vector<ConversationCard *> layoutCards;
+  if (graph_) {
+    layoutSections = graphSections_;
+    for (TurnSectionWidget *section : graphSections_)
+      for (const TurnSectionWidget::CardSlot &slot : section->cardSlots)
+        if (slot.attachment)
+          if (auto *card = qobject_cast<ConversationCard *>(
+                  slot.attachment->widget.data()))
+            layoutCards.push_back(card);
+  } else {
+    layoutSections.reserve(sections_.size());
+    for (const auto &[key, section] : sections_) {
+      static_cast<void>(key);
+      layoutSections.push_back(section);
+    }
+    layoutCards.reserve(cards_.size());
+    for (const auto &[key, card] : cards_) {
+      static_cast<void>(key);
+      layoutCards.push_back(card);
+    }
+  }
   const int width = std::max(0, viewport()->width());
   trailingSpace_->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
   contentLayout_->invalidate();
-  for (const auto &[key, section] : sections_) {
-    static_cast<void>(key);
+  for (TurnSectionWidget *section : layoutSections)
     section->setMinimumHeight(0);
-  }
 
   // Give every nested layout its final width before asking for height.  This
   // makes wrapped labels and command output contribute to the same range
   // transaction as their insertion/update.
   content_->resize(width, std::max(viewport()->height(), contentHeight_));
   contentLayout_->setGeometry(content_->rect());
-  for (const auto &[key, section] : sections_) {
-    static_cast<void>(key);
+  for (TurnSectionWidget *section : layoutSections)
     section->layout()->activate();
-  }
   const auto activateCard = [](ConversationCard *card) {
     if (!card)
       return;
@@ -1138,15 +2219,12 @@ void ConversationView::recomputeGeometry() {
     card->layout()->setGeometry(card->contentsRect());
     activateCard(card);
   };
-  for (const auto &[key, card] : cards_) {
-    static_cast<void>(key);
+  for (ConversationCard *card : layoutCards)
     activateCard(card);
-  }
   // Child/subagent threads may have no visible You root. Their cards live
   // directly in a turn section, so settle them at the final section width
   // just as deliberately as cards nested inside a normal turn container.
-  for (const auto &[key, card] : cards_) {
-    static_cast<void>(key);
+  for (ConversationCard *card : layoutCards) {
     if (card->property("turnContainer").toBool() ||
         card->property("nestedConversationCard").toBool())
       continue;
@@ -1158,8 +2236,7 @@ void ConversationView::recomputeGeometry() {
   // A You turn container adds one real layout depth. Settle that depth in
   // dependency order so newly nested cards reach their final height inside
   // this transaction instead of posting a second visible LayoutRequest.
-  for (const auto &[key, card] : cards_) {
-    static_cast<void>(key);
+  for (ConversationCard *card : layoutCards) {
     if (!card->property("turnContainer").toBool())
       continue;
     card->setMinimumHeight(0);
@@ -1195,8 +2272,7 @@ void ConversationView::recomputeGeometry() {
     nested->layout()->activate();
     settleCardHeight(card, cardWidth);
   }
-  for (const auto &[key, section] : sections_) {
-    static_cast<void>(key);
+  for (TurnSectionWidget *section : layoutSections) {
     section->layout()->invalidate();
     const int sectionHeight = section->layout()->minimumSize().height();
     section->setMinimumHeight(sectionHeight);
@@ -1221,10 +2297,8 @@ void ConversationView::recomputeGeometry() {
   contentHeight_ = std::max(viewport()->height(), wanted);
   content_->resize(width, contentHeight_);
   contentLayout_->setGeometry(QRect(0, 0, width, contentHeight_));
-  for (const auto &[key, section] : sections_) {
-    static_cast<void>(key);
+  for (TurnSectionWidget *section : layoutSections)
     section->layout()->activate();
-  }
   contentLayout_->activate();
 
   verticalScrollBar()->setPageStep(viewport()->height());
@@ -1232,18 +2306,15 @@ void ConversationView::recomputeGeometry() {
       0, std::max(0, contentHeight_ - viewport()->height()));
   positionContent();
 
-  for (const auto &[key, card] : cards_) {
-    static_cast<void>(key);
+  for (ConversationCard *card : layoutCards) {
     if (QWidget *nested = card->findChild<QWidget *>(
             QStringLiteral("conversationNestedCards"),
             Qt::FindDirectChildrenOnly))
       QCoreApplication::sendPostedEvents(nested, QEvent::LayoutRequest);
     QCoreApplication::sendPostedEvents(card, QEvent::LayoutRequest);
   }
-  for (const auto &[key, section] : sections_) {
-    static_cast<void>(key);
+  for (TurnSectionWidget *section : layoutSections)
     QCoreApplication::sendPostedEvents(section, QEvent::LayoutRequest);
-  }
   QCoreApplication::sendPostedEvents(content_, QEvent::LayoutRequest);
 }
 
@@ -1299,11 +2370,29 @@ bool ConversationView::applyWheel(QWheelEvent *event) {
 
 ConversationCard *
 ConversationView::cardForStableKey(const std::string &key) const {
+  if (graph_) {
+    for (TurnSectionWidget *section : graphSections_)
+      for (const TurnSectionWidget::CardSlot &slot : section->cardSlots)
+        if (slot.key == key && slot.attachment)
+          return qobject_cast<ConversationCard *>(
+              slot.attachment->widget.data());
+    return nullptr;
+  }
   const auto card = cards_.find(key);
   return card == cards_.end() ? nullptr : card->second;
 }
 
 QWidget *ConversationView::itemForStableKey(const std::string &key) const {
+  if (graph_) {
+    for (TurnSectionWidget *section : graphSections_)
+      for (const TurnSectionWidget::CardSlot &slot : section->cardSlots)
+        if (slot.key == key) {
+          if (slot.attachment && slot.attachment->widget)
+            return slot.attachment->widget.data();
+          return slot.item;
+        }
+    return nullptr;
+  }
   for (const auto &[sectionKey, section] : sections_) {
     static_cast<void>(sectionKey);
     const auto item = std::ranges::find_if(

@@ -154,6 +154,9 @@ struct GenericActivityData {
   std::string type;
   nlohmann::json raw = nlohmann::json::object();
   std::string status;
+  // Graph-backed rendering supplies a bounded, human-readable description
+  // directly from NodeState. Legacy snapshot rendering continues to use raw.
+  std::string displayDetail;
 
   bool operator==(const GenericActivityData &) const = default;
 };

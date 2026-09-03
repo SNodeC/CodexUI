@@ -2,6 +2,8 @@
 
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
+#include "codex/nodegraph/NodeGraph.h"
+#include "codex/ui/QtNodeAttachment.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
@@ -180,6 +182,49 @@ ConversationSnapshot conversation(const std::string &threadId, int count) {
   result.sections.push_back(std::move(first));
   result.sections.push_back(std::move(second));
   return result;
+}
+
+struct GraphConversationFixture final {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  nodegraph::NodeRef reasoning;
+  std::vector<nodegraph::NodeRef> messages;
+
+  GraphConversationFixture() {
+    auto write = graph.write();
+    thread = write.upsert({nodegraph::NodeKind::Thread, "graph-thread"});
+    turn = write.upsert({nodegraph::NodeKind::Turn, "graph-turn"});
+    write.setParent(thread, turn);
+
+    nodegraph::NodeState reasoningState;
+    reasoningState.status = nodegraph::NodeStatus::Completed;
+    reasoningState.fields.emplace("type", "reasoning");
+    reasoningState.fields.emplace("summary", "latest hidden reasoning");
+    reasoning = write.upsert({nodegraph::NodeKind::Item, "reasoning-item"},
+                             std::move(reasoningState));
+    write.setParent(turn, reasoning);
+
+    messages.reserve(96);
+    for (int index = 0; index < 96; ++index) {
+      nodegraph::NodeState state;
+      state.status = nodegraph::NodeStatus::Completed;
+      state.fields.emplace("type", "agentMessage");
+      state.fields.emplace("phase", "final_answer");
+      state.fields.emplace("text", "Graph message " + std::to_string(index));
+      nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item, "graph-item-" + std::to_string(index)},
+          std::move(state));
+      write.setParent(turn, item);
+      messages.push_back(std::move(item));
+    }
+    static_cast<void>(write.finish());
+  }
+};
+
+ui::QtNodeAttachment *graphAttachment(const nodegraph::NodeRef &node) {
+  return node ? static_cast<ui::QtNodeAttachment *>(node->uiAttachment())
+              : nullptr;
 }
 
 bool testMessageIdentityPalette() {
@@ -2424,6 +2469,153 @@ bool testViewportLazyMaterialization() {
   return result;
 }
 
+bool testGraphBackedLazyRenderingAndLifetime() {
+  GraphConversationFixture fixture;
+  ConversationView view;
+  view.resize(620, 360);
+  view.show();
+  ConversationView::PresentationOptions options = view.presentationOptions();
+  options.showReasoning = false;
+  view.setPresentationOptions(options);
+  view.bindGraph(fixture.graph, fixture.thread);
+
+  const auto materializedCount = [&view] {
+    return static_cast<int>(std::ranges::count_if(
+        view.findChildren<QWidget *>(), [](QWidget *widget) {
+          return dynamic_cast<ConversationCard *>(widget) != nullptr;
+        }));
+  };
+  bool result = expect(
+      materializedCount() <= 8 && graphAttachment(fixture.reasoning) == nullptr,
+      "graph binding performs at most eight immediate renders and leaves a "
+      "filtered item unmaterialized");
+  spin(80);
+
+  nodegraph::NodeRef offscreen = fixture.messages.front();
+  nodegraph::NodeRef visible = fixture.messages.back();
+  result &= expect(graphAttachment(offscreen) == nullptr,
+                   "an off-screen graph node has no widget attachment");
+  ui::QtNodeAttachment *visibleAttachment = graphAttachment(visible);
+  QPointer<QWidget> visibleIdentity =
+      visibleAttachment ? visibleAttachment->widget : nullptr;
+  result &= expect(visibleAttachment && visibleIdentity,
+                   "a viewport graph node owns its Qt attachment");
+
+  nodegraph::GraphChange visibleChange;
+  {
+    auto graphWrite = fixture.graph.write();
+    graphWrite.setField(visible, "text", "Visible graph revision");
+    visibleChange = graphWrite.finish();
+  }
+  view.graphChanged(visibleChange.removed);
+  spin(40);
+  visibleAttachment = graphAttachment(visible);
+  auto *visibleCard =
+      visibleAttachment
+          ? qobject_cast<ConversationCard *>(visibleAttachment->widget.data())
+          : nullptr;
+  const auto *visibleMessage =
+      visibleCard ? std::get_if<AgentMessageData>(&visibleCard->data().payload)
+                  : nullptr;
+  result &= expect(
+      visibleAttachment && visibleAttachment->widget == visibleIdentity &&
+          visibleAttachment->renderedRevision == visibleChange.revision &&
+          visibleMessage && visibleMessage->text == "Visible graph revision",
+      "a visible node revision updates the existing attached card");
+
+  nodegraph::GraphChange deferredChange;
+  {
+    auto graphWrite = fixture.graph.write();
+    graphWrite.setField(offscreen, "text", "Deferred off-screen revision");
+    graphWrite.setField(fixture.reasoning, "summary",
+                        "Deferred filtered reasoning revision");
+    deferredChange = graphWrite.finish();
+  }
+  view.graphChanged(deferredChange.removed);
+  spin(40);
+  result &= expect(graphAttachment(offscreen) == nullptr &&
+                       graphAttachment(fixture.reasoning) == nullptr,
+                   "off-screen and filtered node updates perform no widget "
+                   "rendering");
+
+  options.showReasoning = true;
+  view.setPresentationOptions(options);
+  spin(20);
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  spin(100);
+  ui::QtNodeAttachment *offscreenAttachment = graphAttachment(offscreen);
+  auto *offscreenCard =
+      offscreenAttachment
+          ? qobject_cast<ConversationCard *>(offscreenAttachment->widget.data())
+          : nullptr;
+  const auto *offscreenMessage =
+      offscreenCard
+          ? std::get_if<AgentMessageData>(&offscreenCard->data().payload)
+          : nullptr;
+  ui::QtNodeAttachment *reasoningAttachment =
+      graphAttachment(fixture.reasoning);
+  auto *reasoningCard =
+      reasoningAttachment
+          ? qobject_cast<ConversationCard *>(reasoningAttachment->widget.data())
+          : nullptr;
+  const auto *reasoningData =
+      reasoningCard ? std::get_if<ReasoningData>(&reasoningCard->data().payload)
+                    : nullptr;
+  result &= expect(
+      offscreenAttachment &&
+          offscreenAttachment->renderedRevision == deferredChange.revision &&
+          offscreenMessage &&
+          offscreenMessage->text == "Deferred off-screen revision" &&
+          reasoningAttachment && reasoningData &&
+          reasoningData->summary == "Deferred filtered reasoning revision",
+      "newly visible nodes render once from their latest graph state");
+
+  const std::uint64_t renderedBeforeContention =
+      offscreenAttachment ? offscreenAttachment->renderedRevision : 0;
+  auto contendedWrite = fixture.graph.write();
+  contendedWrite.setField(offscreen, "text", "Rendered after lock retry");
+  view.graphChanged();
+  QElapsedTimer contentionTimer;
+  contentionTimer.start();
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+  result &= expect(
+      contentionTimer.elapsed() < 100 && graphAttachment(offscreen) &&
+          graphAttachment(offscreen)->renderedRevision ==
+              renderedBeforeContention,
+      "a contended graph read returns to Qt and leaves a zero-delay retry");
+  const nodegraph::GraphChange contentionChange = contendedWrite.finish();
+  view.graphChanged(contentionChange.removed);
+  spin(60);
+  offscreenAttachment = graphAttachment(offscreen);
+  offscreenCard =
+      offscreenAttachment
+          ? qobject_cast<ConversationCard *>(offscreenAttachment->widget.data())
+          : nullptr;
+  offscreenMessage =
+      offscreenCard
+          ? std::get_if<AgentMessageData>(&offscreenCard->data().payload)
+          : nullptr;
+  result &= expect(
+      offscreenAttachment &&
+          offscreenAttachment->renderedRevision == contentionChange.revision &&
+          offscreenMessage &&
+          offscreenMessage->text == "Rendered after lock retry",
+      "the scheduled retry renders the current revision after contention");
+
+  QPointer<QWidget> removedWidget =
+      offscreenAttachment ? offscreenAttachment->widget : nullptr;
+  auto removalWrite = fixture.graph.write();
+  removalWrite.remove(offscreen);
+  const nodegraph::GraphChange removal = removalWrite.finish();
+  view.graphChanged(removal.removed);
+  result &=
+      expect(offscreen->uiAttachment() == nullptr && removedWidget.isNull(),
+             "removal synchronously clears the node attachment and "
+             "deletes its widget");
+  spin(20);
+  return result;
+}
+
 bool testPendingPromptAnimation() {
   VisibleCardData pending{
       LocalPromptKey{901},
@@ -2814,6 +3006,13 @@ bool testGeneratedImagePresentationAndGenericBound() {
           details->text().endsWith(
               QStringLiteral("[Activity details truncated]")),
       "protocol labels are humanized without changing bounded raw details");
+  auto &genericData = std::get<GenericActivityData>(generic.payload);
+  genericData.displayDetail = "field: direct graph detail";
+  result &= expect(genericCard.apply(generic) && details &&
+                       details->text() ==
+                           QStringLiteral("field: direct graph detail"),
+                   "graph generic activity detail renders without JSON "
+                   "construction");
   return result;
 }
 
@@ -2840,6 +3039,7 @@ int main(int argc, char **argv) {
   result &= testBottomAnchoredCommandOutputGrowth();
   result &= testCommandOutputStateAcrossNavigation();
   result &= testViewportLazyMaterialization();
+  result &= testGraphBackedLazyRenderingAndLifetime();
   result &= testPendingPromptAnimation();
   result &= testMessageImagePresentation();
   result &= testGeneratedImagePresentationAndGenericBound();

@@ -671,6 +671,16 @@ QString boundedGenericActivity(const nlohmann::json &raw) {
   return rendered + QStringLiteral("\n\n[Activity details truncated]");
 }
 
+QString boundedGenericActivity(const GenericActivityData &activity) {
+  if (activity.displayDetail.empty())
+    return boundedGenericActivity(activity.raw);
+  QString rendered = text(activity.displayDetail);
+  if (rendered.size() <= MaximumGenericActivityCharacters)
+    return rendered;
+  rendered.truncate(MaximumGenericActivityCharacters);
+  return rendered + QStringLiteral("\n\n[Activity details truncated]");
+}
+
 CardCopyContent cardCopyContent(const VisibleCardData &card) {
   return std::visit(
       [](const auto &payload) -> CardCopyContent {
@@ -703,7 +713,7 @@ CardCopyContent cardCopyContent(const VisibleCardData &card) {
               joinedCopyText({text(payload.revisedPrompt), text(payload.path)}),
               false};
         } else if constexpr (std::is_same_v<Payload, GenericActivityData>) {
-          return {boundedGenericActivity(payload.raw), false};
+          return {boundedGenericActivity(payload), false};
         } else {
           return payload.prompt.empty()
                      ? CardCopyContent{textList(payload.imagePaths)
@@ -1412,7 +1422,7 @@ public:
                        ? QStringLiteral("Activity")
                        : UiStyle::humanizeLabel(text(activity.type)));
     showStatus(text(activity.status), QStringLiteral("genericActivityStatus"));
-    metadata->setText(boundedGenericActivity(activity.raw));
+    metadata->setText(boundedGenericActivity(activity));
     metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
     metadata->show();
   }

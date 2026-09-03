@@ -4,11 +4,13 @@
 #define CODEXUI_CODEX_MIDDLE_CONVERSATIONVIEW_H
 
 #include "codex/middle/ConversationCards.h"
+#include "codex/nodegraph/NodeGraph.h"
 
 #include <QAbstractScrollArea>
 
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -41,6 +43,7 @@ public:
   };
 
   explicit ConversationView(QWidget *parent = nullptr);
+  ~ConversationView() override;
 
   void setLoadMoreAction(std::function<void()> action);
   void setEmptyMessage(QString message);
@@ -52,6 +55,13 @@ public:
   // Returns false for a typed projection no-op.  Existing cards are mutated by
   // key; first render and later updates use this same reconciliation path.
   bool reconcile(const ConversationSnapshot &snapshot);
+
+  // Direct graph mode retains only the selected thread and its structural
+  // NodeRefs. Protocol-derived card state is read non-blockingly only when a
+  // card reaches the viewport or its overscan window.
+  void bindGraph(nodegraph::NodeGraph &graph,
+                 nodegraph::NodeRef selectedThread);
+  void graphChanged(std::span<const nodegraph::NodeRef> removed = {});
 
   // Extra composer height is represented after the final card, while the
   // viewport itself keeps its canonical geometry.
@@ -109,8 +119,13 @@ private:
   void animateToBottom(int previousValue);
   void recomputeGeometry();
   void arrangeSection(TurnSectionWidget *section);
+  void leaveGraphMode();
+  void scheduleGraphRefresh();
+  void runGraphRefresh();
+  void detachGraphWidgets(std::span<const nodegraph::NodeRef> removed = {});
   void scheduleVisibilityPass();
   [[nodiscard]] bool runVisibilityPass();
+  [[nodiscard]] bool runGraphVisibilityPass();
   void positionContent();
   void handleUserScrollValue(int value);
   [[nodiscard]] bool applyWheel(QWheelEvent *event);
@@ -129,6 +144,9 @@ private:
   std::function<void()> loadMoreAction_;
 
   ConversationSnapshot snapshot_;
+  nodegraph::NodeGraph *graph_ = nullptr;
+  nodegraph::NodeRef graphThread_;
+  std::vector<TurnSectionWidget *> graphSections_;
   std::string threadId_;
   std::unordered_map<std::string, TurnSectionWidget *> sections_;
   std::unordered_map<std::string, ConversationCard *> cards_;
@@ -151,6 +169,7 @@ private:
   bool userActionPending_ = false;
   bool pausedByComposerGrowth_ = false;
   bool dispatchingNativeWheel_ = false;
+  bool graphRefreshScheduled_ = false;
   bool visibilityPassScheduled_ = false;
 };
 
