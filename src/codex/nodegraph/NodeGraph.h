@@ -159,6 +159,9 @@ public:
     [[nodiscard]] std::uint64_t changedRevision(const NodeRef &node) const;
     [[nodiscard]] bool removed(const NodeRef &node) const;
     [[nodiscard]] NodeRef parent(const NodeRef &node) const;
+    [[nodiscard]] std::size_t childCount(const NodeRef &node) const;
+    [[nodiscard]] NodeRef childAt(const NodeRef &node,
+                                  std::size_t index) const;
     [[nodiscard]] std::vector<NodeRef> children(const NodeRef &node) const;
     [[nodiscard]] std::vector<NodeRef> related(const NodeRef &node,
                                                RelationKind kind) const;

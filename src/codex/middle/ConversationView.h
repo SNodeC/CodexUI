@@ -123,6 +123,7 @@ private:
   void scheduleGraphRefresh();
   void runGraphRefresh();
   void detachGraphWidgets(std::span<const nodegraph::NodeRef> removed = {});
+  void updateGraphChrome();
   void scheduleVisibilityPass();
   [[nodiscard]] bool runVisibilityPass();
   [[nodiscard]] bool runGraphVisibilityPass();
@@ -138,6 +139,7 @@ private:
   QWidget *content_ = nullptr;
   QVBoxLayout *contentLayout_ = nullptr;
   QPushButton *loadMore_ = nullptr;
+  QWidget *graphLeadingPlaceholder_ = nullptr;
   QSpacerItem *trailingSpace_ = nullptr;
   QLabel *empty_ = nullptr;
   QVariantAnimation *followAnimation_ = nullptr;
@@ -147,6 +149,10 @@ private:
   nodegraph::NodeGraph *graph_ = nullptr;
   nodegraph::NodeRef graphThread_;
   std::vector<TurnSectionWidget *> graphSections_;
+  std::size_t graphHistoryLimit_ = AuthoritativeHistoryPageSize;
+  std::size_t graphKnownItemCount_ = 0;
+  std::size_t graphHiddenItemCount_ = 0;
+  bool graphProviderHasMore_ = false;
   std::string threadId_;
   std::unordered_map<std::string, TurnSectionWidget *> sections_;
   std::unordered_map<std::string, ConversationCard *> cards_;

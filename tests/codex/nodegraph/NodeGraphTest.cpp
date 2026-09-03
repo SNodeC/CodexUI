@@ -260,11 +260,15 @@ bool testAtomicStateRelationsAndNoOp() {
             stream != current->fields.end() && stream->second.asString() &&
             *stream->second.asString() == "first second",
         "all state mutations become visible together");
-    passed &=
-        expect(sameOrder(read->children(parent), {firstChild, secondChild}) &&
-                   read->parent(firstChild) == parent &&
-                   read->parent(secondChild) == parent,
-               "parent and child relations preserve order and deduplicate");
+    passed &= expect(
+        sameOrder(read->children(parent), {firstChild, secondChild}) &&
+            read->childCount(parent) == 2 &&
+            read->childAt(parent, 0) == firstChild &&
+            read->childAt(parent, 1) == secondChild &&
+            !read->childAt(parent, 2) && read->childCount({}) == 0 &&
+            !read->childAt({}, 0) && read->parent(firstChild) == parent &&
+            read->parent(secondChild) == parent,
+        "parent and bounded child access preserve order and deduplicate");
     passed &=
         expect(sameOrder(read->related(parent, RelationKind::OperationTarget),
                          {firstTarget, secondTarget}),

@@ -116,6 +116,22 @@ NodeRef NodeGraph::ReadAccess::parent(const NodeRef &node) const {
   return pin(node->parent_);
 }
 
+std::size_t NodeGraph::ReadAccess::childCount(const NodeRef &node) const {
+  if (!node)
+    return 0;
+  requireMember(node);
+  return node->children_.size();
+}
+
+NodeRef NodeGraph::ReadAccess::childAt(const NodeRef &node,
+                                       std::size_t index) const {
+  if (!node)
+    return {};
+  requireMember(node);
+  return index < node->children_.size() ? pin(node->children_[index])
+                                        : NodeRef{};
+}
+
 std::vector<NodeRef>
 NodeGraph::ReadAccess::children(const NodeRef &node) const {
   std::vector<NodeRef> result;

@@ -205,8 +205,8 @@ struct GraphConversationFixture final {
                              std::move(reasoningState));
     write.setParent(turn, reasoning);
 
-    messages.reserve(96);
-    for (int index = 0; index < 96; ++index) {
+    messages.reserve(64);
+    for (int index = 0; index < 64; ++index) {
       nodegraph::NodeState state;
       state.status = nodegraph::NodeStatus::Completed;
       state.fields.emplace("type", "agentMessage");
@@ -225,6 +225,31 @@ struct GraphConversationFixture final {
 ui::QtNodeAttachment *graphAttachment(const nodegraph::NodeRef &node) {
   return node ? static_cast<ui::QtNodeAttachment *>(node->uiAttachment())
               : nullptr;
+}
+
+nodegraph::NodeState graphMessageState(std::string type, std::string text) {
+  nodegraph::NodeState state;
+  state.status = nodegraph::NodeStatus::Completed;
+  state.fields.emplace("type", std::move(type));
+  state.fields.emplace("text", std::move(text));
+  return state;
+}
+
+QPushButton *historyButton(ConversationView &view) {
+  const auto buttons = view.findChildren<QPushButton *>();
+  const auto found = std::ranges::find_if(buttons, [](QPushButton *button) {
+    return button->property("kind").toString() == QStringLiteral("history");
+  });
+  return found == buttons.end() ? nullptr : *found;
+}
+
+QLabel *conversationEmptyLabel(ConversationView &view) {
+  const auto labels = view.findChildren<QLabel *>();
+  const auto found = std::ranges::find_if(labels, [](QLabel *label) {
+    return label->text() ==
+           QStringLiteral("Conversation activity appears here.");
+  });
+  return found == labels.end() ? nullptr : *found;
 }
 
 bool testMessageIdentityPalette() {
@@ -2616,6 +2641,281 @@ bool testGraphBackedLazyRenderingAndLifetime() {
   return result;
 }
 
+bool testGraphBoundedHistoryAndExplicitRoot() {
+  constexpr std::size_t ItemCount = 5000;
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  nodegraph::NodeRef root;
+  nodegraph::NodeRef steering;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", ItemCount);
+    threadState.fields.emplace("historyHasMore", true);
+    threadState.fields.emplace("historyNextCursor", "older-page");
+    thread = write.upsert({nodegraph::NodeKind::Thread, "bounded-thread"},
+                          std::move(threadState));
+    turn = write.upsert({nodegraph::NodeKind::Turn, "bounded-turn"});
+    write.setParent(thread, turn);
+    for (std::size_t index = 0; index < ItemCount; ++index) {
+      const bool isRoot = index == 0;
+      const bool isSteering = index == ItemCount - 2;
+      nodegraph::NodeState state = graphMessageState(
+          isRoot || isSteering ? "userMessage" : "agentMessage",
+          isRoot ? "Original prompt"
+                 : (isSteering ? "Later steering prompt"
+                               : "History " + std::to_string(index)));
+      if (!isRoot && !isSteering)
+        state.fields.emplace("phase", "final_answer");
+      nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item,
+           "bounded-item-" + std::to_string(index)},
+          std::move(state));
+      write.setParent(turn, item);
+      if (isRoot)
+        root = item;
+      if (isSteering)
+        steering = item;
+    }
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, root);
+    // History suffix replacement may unparent the original prompt while its
+    // explicit protocol relation remains authoritative.
+    write.clearParent(root);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  int providerPageRequests = 0;
+  view.setLoadMoreAction([&providerPageRequests] { ++providerPageRequests; });
+  view.resize(620, 420);
+  view.show();
+  view.bindGraph(graph, thread);
+
+  const auto representationCount = [&view] {
+    return static_cast<int>(std::ranges::count_if(
+        view.findChildren<QWidget *>(), [](QWidget *widget) {
+          return dynamic_cast<ConversationCard *>(widget) ||
+                 widget->objectName() ==
+                     QStringLiteral("conversationCardPlaceholder");
+        }));
+  };
+  const auto hiddenItemCount = [&view] {
+    qulonglong count = 0;
+    for (QWidget *widget : view.findChildren<QWidget *>())
+      if (widget->objectName() ==
+          QStringLiteral("conversationHistoryPlaceholder"))
+        count += widget->property("hiddenItemCount").toULongLong();
+    return count;
+  };
+  QPushButton *loadMore = historyButton(view);
+  bool result = expect(
+      representationCount() <=
+              static_cast<int>(AuthoritativeHistoryPageSize + 1) &&
+          view.findChildren<QWidget *>().size() < 256 && loadMore &&
+          loadMore->isVisible() &&
+          loadMore->text() == QStringLiteral("Load 80 more activities") &&
+          hiddenItemCount() == ItemCount - AuthoritativeHistoryPageSize - 1,
+      "five thousand graph items create only the bounded visible history "
+      "window and one pinned root");
+
+  spin(80);
+  ui::QtNodeAttachment *steeringAttachment = graphAttachment(steering);
+  auto *steeringCard =
+      steeringAttachment
+          ? qobject_cast<ConversationCard *>(steeringAttachment->widget.data())
+          : nullptr;
+  result &= expect(
+      steeringCard && !steeringCard->property("turnContainer").toBool(),
+      "a loaded steering message is never inferred to be the turn root");
+
+  const qulonglong hiddenBeforePaging = hiddenItemCount();
+  loadMore->click();
+  result &= expect(providerPageRequests == 1,
+                   "graph Load More preserves the provider paging callback");
+  spin(80);
+  result &= expect(
+      hiddenItemCount() + AuthoritativeHistoryPageSize == hiddenBeforePaging &&
+          representationCount() <=
+              static_cast<int>(2 * AuthoritativeHistoryPageSize + 1),
+      "graph Load More expands the local window by one bounded page");
+
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  spin(120);
+  ui::QtNodeAttachment *rootAttachment = graphAttachment(root);
+  auto *rootCard =
+      rootAttachment
+          ? qobject_cast<ConversationCard *>(rootAttachment->widget.data())
+          : nullptr;
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMaximum);
+  spin(160);
+  steeringAttachment = graphAttachment(steering);
+  steeringCard =
+      steeringAttachment
+          ? qobject_cast<ConversationCard *>(steeringAttachment->widget.data())
+          : nullptr;
+  result &= expect(
+      rootCard && steeringCard && rootCard->isAncestorOf(steeringCard) &&
+          rootCard->property("turnContainer").toBool() &&
+          steeringCard->property("nestedConversationCard").toBool(),
+      "the explicit parentless root remains the container for a paged "
+      "steering message");
+  return result;
+}
+
+bool testGraphRootReplacementAndAttachmentRecovery() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  nodegraph::NodeRef root;
+  nodegraph::NodeRef sibling;
+  nodegraph::NodeRef steering;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{3});
+    thread = write.upsert({nodegraph::NodeKind::Thread, "replacement-thread"},
+                          std::move(threadState));
+    turn = write.upsert({nodegraph::NodeKind::Turn, "replacement-turn"});
+    write.setParent(thread, turn);
+    root = write.upsert({nodegraph::NodeKind::Item, "replacement-root"},
+                        graphMessageState("userMessage", "Prompt"));
+    sibling = write.upsert({nodegraph::NodeKind::Item, "replacement-sibling"},
+                           graphMessageState("agentMessage", "Answer"));
+    steering = write.upsert(
+        {nodegraph::NodeKind::Item, "replacement-steering"},
+        graphMessageState("userMessage", "Steer"));
+    write.setParent(turn, root);
+    write.setParent(turn, sibling);
+    write.setParent(turn, steering);
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, root);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 720);
+  view.show();
+  view.bindGraph(graph, thread);
+  spin(100);
+  ui::QtNodeAttachment *rootAttachment = graphAttachment(root);
+  ui::QtNodeAttachment *siblingAttachment = graphAttachment(sibling);
+  ui::QtNodeAttachment *steeringAttachment = graphAttachment(steering);
+  QPointer<QWidget> oldRoot = rootAttachment ? rootAttachment->widget : nullptr;
+  QPointer<QWidget> siblingIdentity =
+      siblingAttachment ? siblingAttachment->widget : nullptr;
+  QPointer<QWidget> steeringIdentity =
+      steeringAttachment ? steeringAttachment->widget : nullptr;
+  bool result = expect(
+      oldRoot && siblingIdentity && steeringIdentity &&
+          oldRoot->isAncestorOf(siblingIdentity) &&
+          oldRoot->isAncestorOf(steeringIdentity),
+      "the materialized root initially owns its nested turn cards");
+
+  nodegraph::GraphChange replacementChange;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState replacement =
+        graphMessageState("agentMessage", "Replacement root");
+    replacement.fields.emplace("phase", "final_answer");
+    write.replaceState(root, std::move(replacement));
+    replacementChange = write.finish();
+  }
+  view.graphChanged(replacementChange.removed);
+  spin(100);
+  rootAttachment = graphAttachment(root);
+  auto *replacementRoot =
+      rootAttachment
+          ? qobject_cast<ConversationCard *>(rootAttachment->widget.data())
+          : nullptr;
+  result &= expect(
+      oldRoot.isNull() && replacementRoot && siblingIdentity &&
+          steeringIdentity && graphAttachment(sibling) == siblingAttachment &&
+          graphAttachment(steering) == steeringAttachment &&
+          replacementRoot->isAncestorOf(siblingIdentity) &&
+          replacementRoot->isAncestorOf(steeringIdentity),
+      "replacing a root card detaches nested widgets before deleting their "
+      "former QObject owner");
+
+  nodegraph::GraphChange recoveryChange;
+  {
+    auto write = graph.write();
+    write.setField(sibling, "text", "Recovered current revision");
+    recoveryChange = write.finish();
+  }
+  delete siblingIdentity.data();
+  result &= expect(siblingIdentity.isNull() && sibling->uiAttachment(),
+                   "external QObject deletion leaves a detectable stale "
+                   "opaque attachment");
+  view.graphChanged(recoveryChange.removed);
+  spin(100);
+  siblingAttachment = graphAttachment(sibling);
+  auto *recoveredSibling =
+      siblingAttachment
+          ? qobject_cast<ConversationCard *>(siblingAttachment->widget.data())
+          : nullptr;
+  const auto *recoveredMessage =
+      recoveredSibling
+          ? std::get_if<AgentMessageData>(&recoveredSibling->data().payload)
+          : nullptr;
+  result &= expect(
+      recoveredSibling && recoveredMessage &&
+          recoveredMessage->text == "Recovered current revision" &&
+          replacementRoot->isAncestorOf(recoveredSibling) &&
+          siblingAttachment->renderedRevision == recoveryChange.revision,
+      "a null external QPointer clears the stale attachment and rematerializes "
+      "the latest node revision");
+  return result;
+}
+
+bool testGraphLastItemRemovalUpdatesChromeSynchronously() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  nodegraph::NodeRef item;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{1});
+    thread = write.upsert({nodegraph::NodeKind::Thread, "removal-thread"},
+                          std::move(threadState));
+    turn = write.upsert({nodegraph::NodeKind::Turn, "removal-turn"});
+    item = write.upsert({nodegraph::NodeKind::Item, "removal-item"},
+                        graphMessageState("agentMessage", "Only item"));
+    write.setParent(thread, turn);
+    write.setParent(turn, item);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 360);
+  view.show();
+  view.bindGraph(graph, thread);
+  spin(60);
+  ui::QtNodeAttachment *attachment = graphAttachment(item);
+  QPointer<QWidget> removedWidget = attachment ? attachment->widget : nullptr;
+  QPushButton *loadMore = historyButton(view);
+  QLabel *empty = conversationEmptyLabel(view);
+  bool result = expect(removedWidget && loadMore && !loadMore->isVisible() &&
+                           empty && !empty->isVisible(),
+                       "one graph item hides the empty state");
+
+  nodegraph::GraphChange removal;
+  {
+    auto write = graph.write();
+    write.setField(thread, "historyLoadedItemCount", std::uint64_t{0});
+    write.remove(item);
+    removal = write.finish();
+  }
+  view.graphChanged(removal.removed);
+  result &= expect(
+      item->uiAttachment() == nullptr && removedWidget.isNull() &&
+          !loadMore->isVisible() && empty->isVisible(),
+      "removing the last graph item synchronously deletes its widget and "
+      "recomputes empty and Load More chrome");
+  spin(20);
+  return result;
+}
+
 bool testPendingPromptAnimation() {
   VisibleCardData pending{
       LocalPromptKey{901},
@@ -3040,6 +3340,9 @@ int main(int argc, char **argv) {
   result &= testCommandOutputStateAcrossNavigation();
   result &= testViewportLazyMaterialization();
   result &= testGraphBackedLazyRenderingAndLifetime();
+  result &= testGraphBoundedHistoryAndExplicitRoot();
+  result &= testGraphRootReplacementAndAttachmentRecovery();
+  result &= testGraphLastItemRemovalUpdatesChromeSynchronously();
   result &= testPendingPromptAnimation();
   result &= testMessageImagePresentation();
   result &= testGeneratedImagePresentationAndGenericBound();
