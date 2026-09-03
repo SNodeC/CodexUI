@@ -155,7 +155,7 @@ struct GenericActivityData {
   nlohmann::json raw = nlohmann::json::object();
   std::string status;
   // Graph-backed rendering supplies a bounded, human-readable description
-  // directly from NodeState. Legacy snapshot rendering continues to use raw.
+  // directly from NodeState. Direct standalone cards may still use raw.
   std::string displayDetail;
 
   bool operator==(const GenericActivityData &) const = default;
@@ -186,34 +186,6 @@ struct VisibleCardData {
   CardPayload payload = GenericActivityData{};
 
   bool operator==(const VisibleCardData &) const = default;
-};
-
-// A section is a structural, visually transparent turn container. It contains
-// only data that can affect the conversation presentation; turn lifecycle
-// metadata belongs to the authoritative model and inspector.
-struct TurnSection {
-  std::string key;
-  std::string turnId;
-  std::vector<VisibleCardData> cards;
-  // The projection, which sees the complete authoritative turn, identifies
-  // its actual opening prompt. Rendering must never infer ownership from the
-  // first user message that happens to survive history paging.
-  std::optional<CardKey> rootCardKey;
-
-  bool operator==(const TurnSection &) const = default;
-};
-
-struct ConversationSnapshot {
-  std::string threadId;
-  std::vector<TurnSection> sections;
-  std::size_t hiddenAuthoritativeItemCount = 0;
-  bool hasMore = false;
-  std::optional<std::string> activeTurnId;
-
-  [[nodiscard]] std::vector<CardKey> cardKeys() const;
-  [[nodiscard]] const VisibleCardData *find(const CardKey &key) const noexcept;
-
-  bool operator==(const ConversationSnapshot &) const = default;
 };
 
 } // namespace codexui::codex::middle

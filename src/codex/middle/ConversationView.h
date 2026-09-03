@@ -46,20 +46,18 @@ public:
   ~ConversationView() override;
 
   void setLoadMoreAction(std::function<void()> action);
+  void setPromptMaterializedAction(
+      std::function<bool(nodegraph::NodeRef)> action);
   void setEmptyMessage(QString message);
   void setPresentationOptions(PresentationOptions options);
   [[nodiscard]] PresentationOptions presentationOptions() const noexcept {
     return presentationOptions_;
   }
 
-  // Returns false for a typed projection no-op.  Existing cards are mutated by
-  // key; first render and later updates use this same reconciliation path.
-  bool reconcile(const ConversationSnapshot &snapshot);
-
-  // Direct graph mode retains only the selected thread and its structural
-  // NodeRefs. Protocol-derived card state is read non-blockingly only when a
-  // card reaches the viewport or its overscan window.
-  void bindGraph(nodegraph::NodeGraph &graph,
+  // The view retains only the selected thread and its structural NodeRefs.
+  // Protocol-derived card state is read non-blockingly only when a card reaches
+  // the viewport or its overscan window.
+  void bindGraph(const nodegraph::NodeGraph &graph,
                  nodegraph::NodeRef selectedThread);
   void graphChanged(std::span<const nodegraph::NodeRef> removed = {});
 
@@ -105,9 +103,6 @@ private:
 
   class TurnSectionWidget;
 
-  bool reconcile(const ConversationSnapshot &snapshot, bool force,
-                 bool settleFollowImmediately);
-  [[nodiscard]] bool cardVisible(const VisibleCardData &card) const noexcept;
   void setThread(const std::string &threadId);
   void setCardCollapsed(const std::string &key, ConversationCard *card,
                         bool collapsed);
@@ -119,7 +114,7 @@ private:
   void animateToBottom(int previousValue);
   void recomputeGeometry();
   void arrangeSection(TurnSectionWidget *section);
-  void leaveGraphMode();
+  void clearGraph();
   void scheduleGraphRefresh();
   void runGraphRefresh();
   void detachGraphWidgets(std::span<const nodegraph::NodeRef> removed = {});
@@ -133,8 +128,6 @@ private:
   [[nodiscard]] ConversationCard *
   cardForStableKey(const std::string &stableKey) const;
   [[nodiscard]] QWidget *itemForStableKey(const std::string &stableKey) const;
-  [[nodiscard]] const VisibleCardData *
-  dataForStableKey(const std::string &stableKey) const;
 
   QWidget *content_ = nullptr;
   QVBoxLayout *contentLayout_ = nullptr;
@@ -144,9 +137,9 @@ private:
   QLabel *empty_ = nullptr;
   QVariantAnimation *followAnimation_ = nullptr;
   std::function<void()> loadMoreAction_;
+  std::function<bool(nodegraph::NodeRef)> promptMaterializedAction_;
 
-  ConversationSnapshot snapshot_;
-  nodegraph::NodeGraph *graph_ = nullptr;
+  const nodegraph::NodeGraph *graph_ = nullptr;
   nodegraph::NodeRef graphThread_;
   std::vector<TurnSectionWidget *> graphSections_;
   std::size_t graphHistoryLimit_ = AuthoritativeHistoryPageSize;
@@ -154,10 +147,6 @@ private:
   std::size_t graphHiddenItemCount_ = 0;
   bool graphProviderHasMore_ = false;
   std::string threadId_;
-  std::unordered_map<std::string, TurnSectionWidget *> sections_;
-  std::unordered_map<std::string, ConversationCard *> cards_;
-  std::vector<std::string> displayedSectionKeys_;
-  std::vector<std::string> displayedCardKeys_;
   std::unordered_map<std::string, ThreadScrollState> threadStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>
       commandOutputStates_;

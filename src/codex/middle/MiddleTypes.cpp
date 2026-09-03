@@ -225,21 +225,4 @@ std::string trimTrailingEmptyLines(std::string_view text) {
   return std::string(text.substr(0, end));
 }
 
-std::vector<CardKey> ConversationSnapshot::cardKeys() const {
-  std::vector<CardKey> result;
-  for (const TurnSection &section : sections)
-    for (const VisibleCardData &card : section.cards)
-      result.push_back(card.key);
-  return result;
-}
-
-const VisibleCardData *
-ConversationSnapshot::find(const CardKey &key) const noexcept {
-  for (const TurnSection &section : sections)
-    for (const VisibleCardData &card : section.cards)
-      if (card.key == key)
-        return &card;
-  return nullptr;
-}
-
 } // namespace codexui::codex::middle

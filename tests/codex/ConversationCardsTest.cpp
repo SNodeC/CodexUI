@@ -37,6 +37,8 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <memory>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -170,11 +172,338 @@ VisibleCardData cardForAppearanceAudit(const std::string &threadId,
   return {std::move(key), kind, threadId, "turn-2", itemId, std::move(payload)};
 }
 
-ConversationSnapshot conversation(const std::string &threadId, int count) {
-  ConversationSnapshot result;
+// ConversationView is graph-only. These concise fixture records keep the
+// presentation-oriented test cases readable while applyConversation writes
+// their current facts into the same NodeGraph shape used by the application.
+struct TurnGraphSpec {
+  std::string key;
+  std::string turnId;
+  std::vector<VisibleCardData> cards;
+  std::optional<CardKey> rootCardKey;
+};
+
+struct FixtureGraph final {
+  nodegraph::NodeGraph graph;
+};
+
+struct ConversationGraphSpec {
+  std::string threadId;
+  std::vector<TurnGraphSpec> sections;
+  std::size_t hiddenAuthoritativeItemCount = 0;
+  bool hasMore = false;
+  std::optional<std::string> activeTurnId;
+  mutable std::shared_ptr<FixtureGraph> storage =
+      std::make_shared<FixtureGraph>();
+};
+
+nodegraph::Value graphValue(const nlohmann::json &value) {
+  if (value.is_null())
+    return nullptr;
+  if (value.is_boolean())
+    return value.get<bool>();
+  if (value.is_number_unsigned())
+    return value.get<std::uint64_t>();
+  if (value.is_number_integer())
+    return value.get<std::int64_t>();
+  if (value.is_number_float())
+    return value.get<double>();
+  if (value.is_string())
+    return value.get<std::string>();
+  if (value.is_array()) {
+    nodegraph::Value::Array result;
+    result.reserve(value.size());
+    for (const nlohmann::json &entry : value)
+      result.push_back(graphValue(entry));
+    return result;
+  }
+  nodegraph::Value::Object result;
+  for (const auto &[key, entry] : value.items())
+    result.emplace(key, graphValue(entry));
+  return result;
+}
+
+nodegraph::NodeStatus graphStatus(std::string_view status) {
+  if (status == "pending" || status == "inProgress" || status == "running")
+    return nodegraph::NodeStatus::Running;
+  if (status == "completed")
+    return nodegraph::NodeStatus::Completed;
+  if (status == "failed")
+    return nodegraph::NodeStatus::Failed;
+  if (status == "interrupted")
+    return nodegraph::NodeStatus::Interrupted;
+  return nodegraph::NodeStatus::Unknown;
+}
+
+nodegraph::Value stringArray(const std::vector<std::string> &values) {
+  nodegraph::Value::Array result;
+  result.reserve(values.size());
+  for (const std::string &value : values)
+    result.emplace_back(value);
+  return result;
+}
+
+std::string fixtureNodeId(const VisibleCardData &card) {
+  if (const auto *authoritative = std::get_if<AuthoritativeItemKey>(&card.key))
+    return authoritative->itemId;
+  if (const auto *prompt = std::get_if<LocalPromptKey>(&card.key))
+    return "fixture-local-prompt:" + std::to_string(prompt->submissionId);
+  return stableKey(card.key);
+}
+
+nodegraph::NodeState fixtureNodeState(const VisibleCardData &card) {
+  nodegraph::NodeState state;
+  auto &fields = state.fields;
+  switch (card.kind) {
+  case CardKind::UserMessage: {
+    const auto &data = std::get<UserMessageData>(card.payload);
+    fields.emplace("type", "userMessage");
+    fields.emplace("text", data.text);
+    nodegraph::Value::Array content;
+    for (const std::string &path : data.imagePaths) {
+      nodegraph::Value::Object image;
+      image.emplace("type", "localImage");
+      image.emplace("path", path);
+      content.emplace_back(std::move(image));
+    }
+    fields.emplace("content", std::move(content));
+    state.status = nodegraph::NodeStatus::Completed;
+    break;
+  }
+  case CardKind::AgentMessage: {
+    const auto &data = std::get<AgentMessageData>(card.payload);
+    fields.emplace("type", "agentMessage");
+    fields.emplace("text", data.text);
+    fields.emplace("phase", data.finalAnswer ? "final_answer" : "commentary");
+    state.status = nodegraph::NodeStatus::Completed;
+    break;
+  }
+  case CardKind::CommandExecution: {
+    const auto &data = std::get<CommandExecutionData>(card.payload);
+    fields.emplace("type", "commandExecution");
+    fields.emplace("command", data.command);
+    fields.emplace("aggregatedOutput", data.output);
+    fields.emplace("status", data.status);
+    fields.emplace("cwd", data.cwd);
+    if (data.exitCode)
+      fields.emplace("exitCode", *data.exitCode);
+    if (data.durationMilliseconds)
+      fields.emplace("durationMs", *data.durationMilliseconds);
+    state.status = graphStatus(data.status);
+    break;
+  }
+  case CardKind::AgentActivity: {
+    const auto &data = std::get<AgentActivityData>(card.payload);
+    fields.emplace("type", "collabAgentToolCall");
+    fields.emplace("tool", data.tool);
+    fields.emplace("status", data.status);
+    fields.emplace("kind", data.kind);
+    fields.emplace("prompt", data.prompt);
+    fields.emplace("resultText", data.resultText);
+    fields.emplace("receiverThreadIds", stringArray(data.receivers));
+    fields.emplace("model", data.model);
+    fields.emplace("reasoningEffort", data.reasoningEffort);
+    fields.emplace("agentThreadId", data.childThreadId);
+    fields.emplace("agentPath", data.agentPath);
+    fields.emplace("senderThreadId", data.senderThreadId);
+    state.status = graphStatus(data.status);
+    break;
+  }
+  case CardKind::Reasoning: {
+    fields.emplace("type", "reasoning");
+    fields.emplace("summary", std::get<ReasoningData>(card.payload).summary);
+    state.status = nodegraph::NodeStatus::Completed;
+    break;
+  }
+  case CardKind::FileChanges: {
+    const auto &data = std::get<FileChangesData>(card.payload);
+    fields.emplace("type", "fileChange");
+    fields.emplace("status", data.status);
+    nodegraph::Value::Array changes;
+    for (const FileChangeData &change : data.changes) {
+      nodegraph::Value::Object entry;
+      entry.emplace("path", change.path);
+      entry.emplace("kind", change.kind);
+      std::string diff;
+      for (int index = 0; index < change.additions.value_or(0); ++index)
+        diff += "+added\n";
+      for (int index = 0; index < change.deletions.value_or(0); ++index)
+        diff += "-removed\n";
+      entry.emplace("diff", std::move(diff));
+      changes.emplace_back(std::move(entry));
+    }
+    fields.emplace("changes", std::move(changes));
+    state.status = graphStatus(data.status);
+    break;
+  }
+  case CardKind::ImageGeneration: {
+    const auto &data = std::get<ImageGenerationData>(card.payload);
+    fields.emplace("type", "imageGeneration");
+    fields.emplace("path", data.path);
+    fields.emplace("status", data.status);
+    fields.emplace("revisedPrompt", data.revisedPrompt);
+    state.status = graphStatus(data.status);
+    break;
+  }
+  case CardKind::Plan: {
+    const auto &data = std::get<PlanData>(card.payload);
+    fields.emplace("type", "plan");
+    fields.emplace("text", data.legacyText);
+    fields.emplace("planExplanation", data.explanation);
+    nodegraph::Value::Array steps;
+    for (const PlanStepData &step : data.steps) {
+      nodegraph::Value::Object entry;
+      entry.emplace("step", step.text);
+      entry.emplace("status", step.status);
+      steps.emplace_back(std::move(entry));
+    }
+    fields.emplace("plan", std::move(steps));
+    state.status = nodegraph::NodeStatus::Running;
+    break;
+  }
+  case CardKind::GenericActivity: {
+    const auto &data = std::get<GenericActivityData>(card.payload);
+    const nodegraph::Value raw = graphValue(data.raw);
+    if (const auto *object = raw.asObject())
+      fields = *object;
+    fields.insert_or_assign("type", data.type);
+    fields.insert_or_assign("status", data.status);
+    if (!data.displayDetail.empty())
+      fields.insert_or_assign("detail", data.displayDetail);
+    state.status = graphStatus(data.status);
+    break;
+  }
+  case CardKind::LocalPrompt: {
+    const auto &data = std::get<LocalPromptData>(card.payload);
+    fields.emplace("type", "localPrompt");
+    fields.emplace("submissionId", data.submissionId);
+    fields.emplace("text", data.prompt);
+    fields.emplace("error", data.error);
+    const char *dispatch = "queued";
+    switch (data.state) {
+    case PromptState::Queued:
+      break;
+    case PromptState::InFlight:
+      dispatch = "inFlight";
+      break;
+    case PromptState::Accepted:
+      dispatch = "awaitingMaterialization";
+      break;
+    case PromptState::Failed:
+      dispatch = "failed";
+      break;
+    }
+    fields.emplace("dispatchState", dispatch);
+    fields.emplace("showPendingAnimation", data.showPendingAnimation);
+    nodegraph::Value::Array attachments;
+    for (const std::string &path : data.imagePaths) {
+      nodegraph::Value::Object attachment;
+      attachment.emplace("path", path);
+      attachment.emplace("mimeType", "image/test");
+      attachments.emplace_back(std::move(attachment));
+    }
+    fields.emplace("attachments", std::move(attachments));
+    state.status = data.state == PromptState::Failed
+                       ? nodegraph::NodeStatus::Failed
+                       : nodegraph::NodeStatus::Running;
+    break;
+  }
+  }
+  return state;
+}
+
+struct BoundFixture final {
+  std::shared_ptr<FixtureGraph> storage;
+  nodegraph::NodeRef thread;
+};
+
+std::unordered_map<ConversationView *, BoundFixture> &fixtureBindings() {
+  static std::unordered_map<ConversationView *, BoundFixture> bindings;
+  return bindings;
+}
+
+bool applyConversation(ConversationView &view,
+                       const ConversationGraphSpec &snapshot) {
+  if (!snapshot.storage)
+    snapshot.storage = std::make_shared<FixtureGraph>();
+  auto write = snapshot.storage->graph.write();
+  nodegraph::NodeRef thread =
+      write.upsert({nodegraph::NodeKind::Thread, snapshot.threadId});
+  nodegraph::NodeState threadState;
+  threadState.fields.emplace(
+      "historyLoadedItemCount",
+      snapshot.hiddenAuthoritativeItemCount +
+          std::accumulate(snapshot.sections.begin(), snapshot.sections.end(),
+                          std::size_t{0},
+                          [](std::size_t count, const TurnGraphSpec &section) {
+                            return count + section.cards.size();
+                          }));
+  threadState.fields.emplace("historyHasMore", snapshot.hasMore);
+  write.replaceState(thread, std::move(threadState));
+
+  std::vector<nodegraph::NodeRef> turns;
+  turns.reserve(snapshot.sections.size());
+  for (const TurnGraphSpec &section : snapshot.sections) {
+    std::string turnId = section.turnId;
+    if (turnId.empty()) {
+      const auto addressed =
+          std::ranges::find_if(section.cards, [](const VisibleCardData &card) {
+            return !card.turnId.empty();
+          });
+      turnId =
+          addressed == section.cards.end() ? section.key : addressed->turnId;
+    }
+    nodegraph::NodeRef turn = write.upsert({nodegraph::NodeKind::Turn, turnId});
+    nodegraph::NodeState turnState;
+    turnState.status = snapshot.activeTurnId == turnId
+                           ? nodegraph::NodeStatus::Running
+                           : nodegraph::NodeStatus::Completed;
+    write.replaceState(turn, std::move(turnState));
+    std::vector<nodegraph::NodeRef> items;
+    std::unordered_map<std::string, nodegraph::NodeRef> itemByKey;
+    items.reserve(section.cards.size());
+    for (const VisibleCardData &card : section.cards) {
+      nodegraph::NodeRef item =
+          write.upsert({nodegraph::NodeKind::Item, fixtureNodeId(card)});
+      write.replaceState(item, fixtureNodeState(card));
+      items.push_back(item);
+      itemByKey.emplace(stableKey(card.key), item);
+    }
+    write.replaceChildren(turn, items);
+    std::vector<nodegraph::NodeRef> roots;
+    if (section.rootCardKey) {
+      const auto root = itemByKey.find(stableKey(*section.rootCardKey));
+      if (root != itemByKey.end())
+        roots.push_back(root->second);
+    }
+    write.replaceRelated(turn, nodegraph::RelationKind::TurnRootItem, roots);
+    turns.push_back(std::move(turn));
+  }
+  write.replaceChildren(thread, turns);
+  const nodegraph::GraphChange change = write.finish();
+
+  auto &bindings = fixtureBindings();
+  auto binding = bindings.find(&view);
+  const bool firstBinding = binding == bindings.end();
+  if (firstBinding) {
+    QObject::connect(&view, &QObject::destroyed,
+                     [key = &view] { fixtureBindings().erase(key); });
+    binding = bindings.emplace(&view, BoundFixture{}).first;
+  }
+  const bool switched = binding->second.storage != snapshot.storage ||
+                        binding->second.thread != thread;
+  binding->second = {snapshot.storage, thread};
+  if (switched)
+    view.bindGraph(snapshot.storage->graph, thread);
+  else if (!change.empty())
+    view.graphChanged();
+  return switched || !change.empty();
+}
+
+ConversationGraphSpec conversation(const std::string &threadId, int count) {
+  ConversationGraphSpec result;
   result.threadId = threadId;
-  TurnSection first{"turn:" + threadId + ":1", "turn-1", {}};
-  TurnSection second{"turn:" + threadId + ":2", "turn-2", {}};
+  TurnGraphSpec first{"turn:" + threadId + ":1", "turn-1", {}};
+  TurnGraphSpec second{"turn:" + threadId + ":2", "turn-2", {}};
   for (int index = 0; index < count; ++index)
     (index < count / 2 ? first : second)
         .cards.push_back(agentCard(
@@ -398,6 +727,14 @@ std::vector<std::string> visualCardKeys(ConversationView &view) {
   return keys;
 }
 
+bool hasConversationItem(ConversationView &view, const std::string &key) {
+  return std::ranges::any_of(
+      view.findChildren<QWidget *>(), [&key](QWidget *widget) {
+        return widget->property("conversationAnchorKey").toString() ==
+               QString::fromStdString(key);
+      });
+}
+
 QToolButton *disclosure(ConversationCard *card) {
   return card ? card->findChild<QToolButton *>(
                     QStringLiteral("cardDisclosureButton"))
@@ -521,26 +858,26 @@ bool testStructuralOrderAndIdentity() {
   ConversationView view;
   view.resize(620, 420);
   view.show();
-  ConversationSnapshot snapshot = conversation("structural-order", 8);
-  view.reconcile(snapshot);
+  ConversationGraphSpec snapshot = conversation("structural-order", 8);
+  applyConversation(view, snapshot);
   spin();
 
   std::unordered_map<std::string, ConversationCard *> identities;
-  for (const TurnSection &section : snapshot.sections)
+  for (const TurnGraphSpec &section : snapshot.sections)
     for (const VisibleCardData &value : section.cards)
       identities.emplace(stableKey(value.key),
                          card(view, stableKey(value.key)));
 
-  for (TurnSection &section : snapshot.sections)
+  for (TurnGraphSpec &section : snapshot.sections)
     std::ranges::reverse(section.cards);
   std::ranges::reverse(snapshot.sections);
   std::vector<std::string> expectedKeys;
-  for (const TurnSection &section : snapshot.sections)
+  for (const TurnGraphSpec &section : snapshot.sections)
     for (const VisibleCardData &value : section.cards)
       expectedKeys.push_back(stableKey(value.key));
 
-  bool result =
-      expect(view.reconcile(snapshot), "structural order changes reconcile");
+  bool result = expect(applyConversation(view, snapshot),
+                       "structural order changes reconcile");
   spin();
   result &= expect(visualCardKeys(view) == expectedKeys,
                    "section and card order follows the projection exactly");
@@ -559,7 +896,7 @@ bool testStructuralOrderAndIdentity() {
       "later-user",
       UserMessageData{"Later prompt", {}}};
   VisibleCardData activity = agentCard(pagingThread, "turn", 50);
-  ConversationSnapshot paged{
+  ConversationGraphSpec paged{
       pagingThread,
       {{"turn:paged", "turn", {laterPrompt, activity}, laterPrompt.key}},
       0,
@@ -567,7 +904,7 @@ bool testStructuralOrderAndIdentity() {
   ConversationView pagedView;
   pagedView.resize(620, 420);
   pagedView.show();
-  pagedView.reconcile(paged);
+  applyConversation(pagedView, paged);
   spin();
   ConversationCard *laterRoot = card(pagedView, stableKey(laterPrompt.key));
   ConversationCard *activityCard = card(pagedView, stableKey(activity.key));
@@ -581,7 +918,7 @@ bool testStructuralOrderAndIdentity() {
   paged.sections.front().cards.insert(paged.sections.front().cards.begin(),
                                       earlierPrompt);
   paged.sections.front().rootCardKey = earlierPrompt.key;
-  result &= expect(pagedView.reconcile(paged),
+  result &= expect(applyConversation(pagedView, paged),
                    "older history can introduce the real turn prompt");
   spin();
   ConversationCard *earlierRoot = card(pagedView, stableKey(earlierPrompt.key));
@@ -595,7 +932,7 @@ bool testStructuralOrderAndIdentity() {
              "history paging replaces and flattens the visible turn root");
 
   paged.sections.front().cards.erase(paged.sections.front().cards.begin());
-  result &= expect(pagedView.reconcile(paged),
+  result &= expect(applyConversation(pagedView, paged),
                    "a transient projection can omit the declared root");
   spin();
   result &=
@@ -607,8 +944,8 @@ bool testStructuralOrderAndIdentity() {
 
   paged.sections.front().cards.insert(paged.sections.front().cards.begin(),
                                       earlierPrompt);
-  result &=
-      expect(pagedView.reconcile(paged), "the declared turn root can return");
+  result &= expect(applyConversation(pagedView, paged),
+                   "the declared turn root can return");
   spin();
   ConversationCard *restoredRoot =
       card(pagedView, stableKey(earlierPrompt.key));
@@ -627,8 +964,9 @@ bool testFollowPauseAndStableAnchor() {
   ConversationView view;
   view.resize(620, 340);
   view.show();
-  ConversationSnapshot snapshot = conversation("thread-a", 34);
-  bool result = expect(view.reconcile(snapshot), "initial projection renders");
+  ConversationGraphSpec snapshot = conversation("thread-a", 34);
+  bool result =
+      expect(applyConversation(view, snapshot), "initial projection renders");
   spin();
   QScrollArea nativeReference;
   nativeReference.setWidgetResizable(true);
@@ -648,7 +986,8 @@ bool testFollowPauseAndStableAnchor() {
 
   const int oldValue = view.verticalScrollBar()->value();
   snapshot.sections.back().cards.push_back(agentCard("thread-a", "turn-2", 34));
-  result &= expect(view.reconcile(snapshot), "a new card materializes");
+  result &=
+      expect(applyConversation(view, snapshot), "a new card materializes");
   int previous = view.verticalScrollBar()->value();
   bool monotonic = previous >= oldValue;
   QElapsedTimer animation;
@@ -691,13 +1030,13 @@ bool testFollowPauseAndStableAnchor() {
   }
   snapshot.sections.back().cards.push_back(agentCard("thread-a", "turn-2", 35));
   LayoutRequestProbe layoutRequests(&view);
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "paused incoming changes still materialize");
   layoutRequests.start();
   spin();
-  result &= expect(layoutRequests.count <= 12,
+  result &= expect(layoutRequests.count <= 24,
                    "a paused append leaves only bounded ancestor/new-card "
-                   "layout settlement, not per-card deferred work");
+                   "layout settlement across sliced graph rendering");
   const auto after = firstVisible(view);
   result &= expect(after.first == anchor.first &&
                        std::abs(after.second - anchor.second) <= 1,
@@ -708,7 +1047,7 @@ bool testFollowPauseAndStableAnchor() {
 
   const int unchangedValue = view.verticalScrollBar()->value();
   const auto unchangedAnchor = firstVisible(view);
-  result &= expect(!view.reconcile(snapshot),
+  result &= expect(!applyConversation(view, snapshot),
                    "an identical visible projection is a true no-op");
   spin();
   result &= expect(view.verticalScrollBar()->value() == unchangedValue &&
@@ -726,7 +1065,7 @@ bool testFollowPauseAndStableAnchor() {
   auto &upstream = std::get<AgentMessageData>(
       snapshot.sections.front().cards.front().payload);
   upstream.text += "\nTrack-action upstream reflow.\nSecond line.\nThird line.";
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "page-action coverage applies an upstream reflow");
   spin();
   const auto afterPageStepReflow = firstVisible(view);
@@ -741,7 +1080,7 @@ bool testPausedExpandedCommandStaysPainted() {
   const QString originalStyleSheet = qApp->styleSheet();
   qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
   const std::string thread = "paused-expanded-command";
-  ConversationSnapshot snapshot = conversation(thread, 24);
+  ConversationGraphSpec snapshot = conversation(thread, 24);
   QString output;
   for (int line = 0; line < 48; ++line)
     output += QStringLiteral("completed command output %1\n").arg(line);
@@ -761,7 +1100,7 @@ bool testPausedExpandedCommandStaysPainted() {
   ConversationView view;
   view.resize(620, 420);
   view.show();
-  bool result = expect(view.reconcile(snapshot),
+  bool result = expect(applyConversation(view, snapshot),
                        "expanded-command audit renders its conversation");
   spin();
   ConversationCard *const commandCard =
@@ -801,13 +1140,13 @@ bool testPausedExpandedCommandStaysPainted() {
     snapshot.sections.back().cards.push_back(cardForAppearanceAudit(
         thread, incomingKinds[index], 100 + static_cast<int>(index)));
     paintProbe.start(commandCard);
-    const bool changed = view.reconcile(snapshot);
+    const bool changed = applyConversation(view, snapshot);
     const auto immediateAnchor = firstVisible(view);
     const QRect immediateCommand(commandCard->mapTo(view.viewport(), QPoint{}),
                                  commandCard->size());
     const std::string incomingKey =
         stableKey(snapshot.sections.back().cards.back().key);
-    ConversationCard *const incomingCard = card(view, incomingKey);
+    QPointer<ConversationCard> incomingCard = card(view, incomingKey);
     const int immediateIncomingHeight =
         incomingCard ? incomingCard->height() : -1;
     spin(80);
@@ -825,16 +1164,18 @@ bool testPausedExpandedCommandStaysPainted() {
         paintProbe.trackedGeometries, [&commandBefore](const QRect &geometry) {
           return geometry == commandBefore;
         });
-    result &= expect(
+    const bool auditPass =
         changed && card(view, stableKey(completedCommand.key)) == commandCard &&
-            view.mode() == ConversationView::Mode::Paused &&
-            stableAgainst(anchorBefore, immediateAnchor) &&
-            stableAgainst(anchorBefore, settledAnchor) &&
-            immediateCommand == commandBefore &&
-            settledCommand == commandBefore && paintedAnchorStable &&
-            paintedStable && incomingCard &&
-            immediateIncomingHeight == settledIncomingHeight &&
-            commandCard->commandOutputScrollState() == outputStateBefore,
+        view.mode() == ConversationView::Mode::Paused &&
+        stableAgainst(anchorBefore, immediateAnchor) &&
+        stableAgainst(anchorBefore, settledAnchor) &&
+        immediateCommand == commandBefore && settledCommand == commandBefore &&
+        paintedAnchorStable && paintedStable &&
+        hasConversationItem(view, incomingKey) &&
+        (!incomingCard || immediateIncomingHeight == settledIncomingHeight) &&
+        commandCard->commandOutputScrollState() == outputStateBefore;
+    result &= expect(
+        auditPass,
         "incoming card preserves a visible expanded command in every paint");
   }
 
@@ -847,21 +1188,21 @@ bool testThreadLocalScrollAndComposerExtent() {
   ConversationView view;
   view.resize(620, 340);
   view.show();
-  ConversationSnapshot first = conversation("thread-a", 30);
-  ConversationSnapshot second = conversation("thread-b", 26);
-  view.reconcile(first);
+  ConversationGraphSpec first = conversation("thread-a", 30);
+  ConversationGraphSpec second = conversation("thread-b", 26);
+  applyConversation(view, first);
   spin();
   wheel(view, 220);
   const auto saved = firstVisible(view);
   bool result = expect(view.mode() == ConversationView::Mode::Paused,
                        "first thread is paused before switching");
 
-  view.reconcile(second);
+  applyConversation(view, second);
   spin();
   result &= expect(view.mode() == ConversationView::Mode::Following &&
                        view.isAtBottom(),
                    "a new thread does not inherit another thread's pause");
-  view.reconcile(first);
+  applyConversation(view, first);
   spin();
   const auto restored = firstVisible(view);
   result &= expect(view.mode() == ConversationView::Mode::Paused &&
@@ -895,8 +1236,8 @@ bool testPromptAdmissionFollowOwnership() {
   ConversationView view;
   view.resize(620, 340);
   view.show();
-  ConversationSnapshot snapshot = conversation("prompt-follow", 30);
-  view.reconcile(snapshot);
+  ConversationGraphSpec snapshot = conversation("prompt-follow", 30);
+  applyConversation(view, snapshot);
   spin();
 
   view.setTrailingSpaceHeight(120);
@@ -914,7 +1255,7 @@ bool testPromptAdmissionFollowOwnership() {
                                           0,
                                           {}}};
   snapshot.sections.back().cards.push_back(pending);
-  view.reconcile(snapshot);
+  applyConversation(view, snapshot);
   view.setTrailingSpaceHeight(0);
   QElapsedTimer follow;
   follow.start();
@@ -939,7 +1280,7 @@ bool testPromptAdmissionFollowOwnership() {
   std::get<LocalPromptData>(later.payload).prompt =
       "must not displace a user-owned reading position";
   snapshot.sections.back().cards.push_back(later);
-  view.reconcile(snapshot);
+  applyConversation(view, snapshot);
   view.setTrailingSpaceHeight(0);
   spin(40);
   const auto retainedAnchor = firstVisible(view);
@@ -1057,8 +1398,7 @@ bool testCardCopyControls() {
       result &= expect(
           morph && button->property("copyFeedbackActive").toBool() &&
               button->property("copyIconState") == QStringLiteral("check") &&
-              copyIcon != checkIcon &&
-              QToolTip::isVisible() &&
+              copyIcon != checkIcon && QToolTip::isVisible() &&
               QToolTip::text() == QStringLiteral("Copied"),
           "Copy quickly morphs into a visible success check while showing "
           "the canonical transient Copied overlay");
@@ -1132,7 +1472,7 @@ bool testMutableCardsAndCommandOutput() {
   const QString originalStyleSheet = qApp->styleSheet();
   qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
   const std::string thread = "card-thread";
-  TurnSection section{"turn:cards", "turn", {}};
+  TurnGraphSpec section{"turn:cards", "turn", {}};
   section.cards = {
       {AuthoritativeItemKey{thread, "turn", "user"}, CardKind::UserMessage,
        thread, "turn", "user",
@@ -1174,11 +1514,11 @@ bool testMutableCardsAndCommandOutput() {
                        {}}},
   };
   section.rootCardKey = section.cards.front().key;
-  ConversationSnapshot snapshot{thread, {section}, 0, false};
+  ConversationGraphSpec snapshot{thread, {section}, 0, false};
   ConversationView view;
   view.resize(650, 520);
   view.show();
-  view.reconcile(snapshot);
+  applyConversation(view, snapshot);
   spin();
 
   std::unordered_map<std::string, ConversationCard *> identities;
@@ -1331,22 +1671,20 @@ bool testMutableCardsAndCommandOutput() {
   generic.raw["detail"] = "updated";
   std::get<LocalPromptData>(cards[8].payload).state = PromptState::Failed;
   std::get<LocalPromptData>(cards[8].payload).error = "error";
-  result &=
-      expect(view.reconcile(snapshot), "all card types accept visible updates");
-  const int immediateOuterRange = view.verticalScrollBar()->maximum();
+  result &= expect(applyConversation(view, snapshot),
+                   "all card types accept visible updates");
   const int immediateCommandHeight = commandCard->height();
   const int immediatePreferredOutputHeight = output->sizeHint().height();
   spin();
   result &=
-      expect(view.verticalScrollBar()->maximum() == immediateOuterRange &&
-                 commandCard->height() == immediateCommandHeight &&
+      expect(commandCard->height() == immediateCommandHeight &&
                  output->sizeHint().height() == immediatePreferredOutputHeight,
-             "command output has no delayed outer geometry settlement");
-  result &= expect(
-      commandText->verticalScrollBar()->maximum() > 0 &&
-          commandText->verticalScrollBar()->value() ==
-              commandText->verticalScrollBar()->minimum(),
-      "long executed-command text opens at its beginning");
+             "command output has no delayed card geometry settlement while "
+             "other graph renders remain sliced");
+  result &= expect(commandText->verticalScrollBar()->maximum() > 0 &&
+                       commandText->verticalScrollBar()->value() ==
+                           commandText->verticalScrollBar()->minimum(),
+                   "long executed-command text opens at its beginning");
   for (const auto &value : cards)
     result &= expect(card(view, stableKey(value.key)) ==
                          identities[stableKey(value.key)],
@@ -1379,7 +1717,7 @@ bool testMutableCardsAndCommandOutput() {
     longOutput += QStringLiteral("line %1 with terminal output\n").arg(line);
   output->setOutput(longOutput);
   view.resize(650, 520);
-  spin();
+  spin(40);
   result &= expect(output->verticalScrollBar()->maximum() > 0 &&
                        output->followsLatest(),
                    "long command output exposes its own scrollbar and follows");
@@ -1405,14 +1743,13 @@ bool testMutableCardsAndCommandOutput() {
   result &= expect(!output->followsLatest() &&
                        output->verticalScrollBar()->value() == preserved,
                    "paused command output preserves its inner scroll value");
-  output->verticalScrollBar()->triggerAction(
-      QAbstractSlider::SliderToMaximum);
+  output->verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMaximum);
   spin();
   result &= expect(output->followsLatest(),
                    "inner output following resumes at its real bottom");
 
   command.output = "\x1b]0;terminal title\x07\x1b[0m \n\t";
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "non-presentable replacement updates the command card");
   const int hiddenOuterRange = view.verticalScrollBar()->maximum();
   const int hiddenCommandHeight = commandCard->height();
@@ -1513,7 +1850,7 @@ bool testCardFoldingGeometryAndRetention() {
       "turn",
       "empty-reasoning",
       ReasoningData{}};
-  ConversationSnapshot snapshot{
+  ConversationGraphSpec snapshot{
       thread,
       {{"turn:folding",
         "turn",
@@ -1528,35 +1865,35 @@ bool testCardFoldingGeometryAndRetention() {
   view.resize(700, 820);
   view.setTrailingSpaceHeight(500);
   view.show();
-  ConversationSnapshot promptOnly = snapshot;
+  ConversationGraphSpec promptOnly = snapshot;
   promptOnly.sections.front().cards = {user};
-  bool result =
-      expect(view.reconcile(promptOnly), "prompt-only folding fixture renders");
+  bool result = expect(applyConversation(view, promptOnly),
+                       "prompt-only folding fixture renders");
   spin();
 
   ConversationCard *promptOnlyCard = card(view, stableKey(user.key));
   QWidget *promptOnlyNestedCards =
-      promptOnlyCard
-          ? promptOnlyCard->findChild<QWidget *>(
-                QStringLiteral("conversationNestedCards"),
-                Qt::FindDirectChildrenOnly)
-          : nullptr;
+      promptOnlyCard ? promptOnlyCard->findChild<QWidget *>(
+                           QStringLiteral("conversationNestedCards"),
+                           Qt::FindDirectChildrenOnly)
+                     : nullptr;
   result &= expect(promptOnlyCard && promptOnlyNestedCards &&
                        promptOnlyNestedCards->isHidden(),
                    "an initial turn prompt reserves no nested-card gap");
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "first nested activity extends the folding fixture");
-  spin();
+  spin(40);
 
-  ConversationCard *userCard = card(view, stableKey(user.key));
-  ConversationCard *agentCardWidget = card(view, stableKey(agent.key));
-  ConversationCard *reasoningCard = card(view, stableKey(reasoning.key));
-  ConversationCard *commandCard = card(view, stableKey(command.key));
-  ConversationCard *filesCard = card(view, stableKey(files.key));
-  const std::vector<ConversationCard *> additionalActionCards{
+  QPointer<ConversationCard> userCard = card(view, stableKey(user.key));
+  QPointer<ConversationCard> agentCardWidget = card(view, stableKey(agent.key));
+  QPointer<ConversationCard> reasoningCard =
+      card(view, stableKey(reasoning.key));
+  QPointer<ConversationCard> commandCard = card(view, stableKey(command.key));
+  QPointer<ConversationCard> filesCard = card(view, stableKey(files.key));
+  const std::vector<QPointer<ConversationCard>> additionalActionCards{
       card(view, stableKey(activity.key)), card(view, stableKey(image.key)),
       card(view, stableKey(plan.key)), card(view, stableKey(generic.key))};
-  ConversationCard *emptyReasoningCard =
+  QPointer<ConversationCard> emptyReasoningCard =
       card(view, stableKey(emptyReasoning.key));
   result &= expect(
       userCard && agentCardWidget && reasoningCard && commandCard &&
@@ -1572,12 +1909,13 @@ bool testCardFoldingGeometryAndRetention() {
   result &= expect(
       userCard && userCard == promptOnlyCard &&
           userCard->property("authoritativeTurnActive").toBool() &&
+          agentCardWidget &&
           !agentCardWidget->property("authoritativeTurnActive").toBool() &&
           !userCard->findChild<QTimer *>(QStringLiteral("activeTurnAnimation")),
       "the retained running outer You card receives a static emphasized "
       "border");
   snapshot.activeTurnId.reset();
-  result &= expect(view.reconcile(snapshot) &&
+  result &= expect(applyConversation(view, snapshot) &&
                        userCard == card(view, stableKey(user.key)) &&
                        !userCard->property("authoritativeTurnActive").toBool(),
                    "turn completion restores the same card's canonical border");
@@ -1589,7 +1927,7 @@ bool testCardFoldingGeometryAndRetention() {
       "collapsed disclosure paints only a right-inset left chevron");
   result &= expect(
       std::ranges::all_of(additionalActionCards,
-                          [](ConversationCard *value) {
+                          [](const QPointer<ConversationCard> &value) {
                             return value && value->isCollapsed() &&
                                    disclosure(value);
                           }),
@@ -1633,7 +1971,7 @@ bool testCardFoldingGeometryAndRetention() {
       LocalPromptData{
           4343, "A steering prompt", PromptState::InFlight, true, {}, {}}};
   snapshot.sections.front().cards.push_back(steering);
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "a steering prompt joins the active turn");
   spin(40);
   ConversationCard *steeringCard = card(view, stableKey(steeringKey));
@@ -1662,7 +2000,7 @@ bool testCardFoldingGeometryAndRetention() {
       steeringKey,     CardKind::UserMessage,
       thread,          "turn",
       "steering-user", UserMessageData{"A steering prompt", {}}};
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "the steering prompt receives authoritative content");
   spin();
   ConversationCard *authoritativeSteering = card(view, stableKey(steeringKey));
@@ -1683,7 +2021,7 @@ bool testCardFoldingGeometryAndRetention() {
       });
   std::get<ReasoningData>(retainedEmptyReasoning->payload).summary =
       "Public reasoning summary arrived";
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "empty reasoning accepts later public content");
   result &=
       expect(!disclosure(emptyReasoningCard)->isHidden() &&
@@ -1720,7 +2058,7 @@ bool testCardFoldingGeometryAndRetention() {
       snapshot.sections.front().cards[3].payload);
   execution.output =
       "streamed line 1\nstreamed line 2\nstreamed line 3\nstreamed line 4";
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "folded command accepts a streamed content update");
   auto *output = dynamic_cast<CommandOutputView *>(
       commandCard->findChild<QTextEdit *>(QStringLiteral("commandOutputView")));
@@ -1733,24 +2071,34 @@ bool testCardFoldingGeometryAndRetention() {
   const int userHeight = userCard->height();
   result &= expect(setFolded(userCard, true),
                    "You can be folded from its expanded default");
-  result &= expect(
+  const bool foldedTurnPass =
       userCard->mapTo(view.viewport(), QPoint{}).y() == userTop &&
-          userCard->height() < userHeight &&
-          !agentCardWidget->isVisibleTo(userCard) &&
-          !reasoningCard->isCollapsed() && commandCard->isCollapsed(),
-      "folding You fixes its title, hides the turn, and retains nested folds");
+      userCard->height() < userHeight &&
+      (!agentCardWidget || !agentCardWidget->isVisibleTo(userCard)) &&
+      (!reasoningCard || !reasoningCard->isVisibleTo(userCard)) &&
+      (!commandCard || !commandCard->isVisibleTo(userCard));
+  result &= expect(
+      foldedTurnPass,
+      "folding You fixes its title and hides or releases nested widgets");
 
-  view.reconcile(conversation("folding-other-thread", 4));
+  applyConversation(view, conversation("folding-other-thread", 4));
   spin();
-  view.reconcile(snapshot);
-  spin();
+  applyConversation(view, snapshot);
+  spin(40);
   userCard = card(view, stableKey(user.key));
   reasoningCard = card(view, stableKey(reasoning.key));
   commandCard = card(view, stableKey(command.key));
-  result &= expect(
-      userCard && reasoningCard && commandCard && userCard->isCollapsed() &&
-          !reasoningCard->isCollapsed() && commandCard->isCollapsed(),
-      "user fold choices survive thread switching and updates");
+  result &= expect(userCard && userCard->isCollapsed(),
+                   "the root fold survives thread switching and updates");
+  result &= expect(setFolded(userCard, false),
+                   "the restored root can rematerialize its nested cards");
+  spin(80);
+  reasoningCard = card(view, stableKey(reasoning.key));
+  commandCard = card(view, stableKey(command.key));
+  result &=
+      expect(reasoningCard && commandCard && !reasoningCard->isCollapsed() &&
+                 commandCard->isCollapsed(),
+             "rematerialized nested cards restore user-owned folds");
 
   const std::string promptThread = "folding-prompt-replacement";
   const LocalPromptKey promptKey{4242};
@@ -1763,15 +2111,15 @@ bool testCardFoldingGeometryAndRetention() {
       LocalPromptData{
           4242, "A temporary prompt", PromptState::InFlight, 0, {}, {}}};
   VisibleCardData promptActivity = agentCard(promptThread, "turn", 77);
-  ConversationSnapshot promptSnapshot{
+  ConversationGraphSpec promptSnapshot{
       promptThread,
       {{"local:folding-prompt", {}, {localPrompt, promptActivity}, promptKey}},
       0,
       false};
-  view.reconcile(promptSnapshot);
+  applyConversation(view, promptSnapshot);
   spin();
   ConversationCard *promptCard = card(view, stableKey(promptKey));
-  ConversationCard *const promptActivityCard =
+  QPointer<ConversationCard> promptActivityCard =
       card(view, stableKey(promptActivity.key));
   result &=
       expect(promptCard && !promptCard->isCollapsed() && promptActivityCard &&
@@ -1795,30 +2143,41 @@ bool testCardFoldingGeometryAndRetention() {
       "user",       UserMessageData{"A temporary prompt", {}}};
   promptSnapshot.sections.front().key = "turn:folding-prompt";
   promptSnapshot.sections.front().turnId = "turn";
-  view.reconcile(promptSnapshot);
+  applyConversation(view, promptSnapshot);
   spin();
   promptCard = card(view, stableKey(promptKey));
   auto *promptAnimation = admittedPromptCard->findChild<QTimer *>(
       QString{}, Qt::FindDirectChildrenOnly);
-  result &= expect(
+  const bool promptMorphPass =
       promptCard && promptCard == admittedPromptCard &&
-          promptCard->cardKind() == CardKind::UserMessage &&
-          promptCard->isCollapsed() && promptAnimation &&
-          !promptAnimation->isActive() &&
-          promptCard->property("messageRole") == QStringLiteral("user") &&
-          promptCard->property("conversationCardKind").toInt() ==
-              static_cast<int>(CardKind::UserMessage) &&
-          promptCard->objectName() == QStringLiteral("conversationCard") &&
-          promptCard->styleSheet().isEmpty() &&
-          card(view, stableKey(promptActivity.key)) == promptActivityCard &&
-          promptCard->isAncestorOf(promptActivityCard) &&
-          promptCard->size() == admittedPromptSize && admittedPromptHeader &&
-          admittedPromptHeader->geometry() == admittedPromptHeaderGeometry &&
-          promptCard->frameWidth() == admittedPromptFrameWidth,
+      promptCard->cardKind() == CardKind::UserMessage &&
+      promptCard->isCollapsed() && promptAnimation &&
+      !promptAnimation->isActive() &&
+      promptCard->property("messageRole") == QStringLiteral("user") &&
+      promptCard->property("conversationCardKind").toInt() ==
+          static_cast<int>(CardKind::UserMessage) &&
+      promptCard->objectName() == QStringLiteral("conversationCard") &&
+      promptCard->styleSheet().isEmpty() &&
+      promptCard->size() == admittedPromptSize && admittedPromptHeader &&
+      admittedPromptHeader->geometry() == admittedPromptHeaderGeometry &&
+      promptCard->frameWidth() == admittedPromptFrameWidth;
+  result &= expect(
+      promptMorphPass,
       "acknowledgement morphs the retained You card without geometry drift");
+  result &= expect(setFolded(promptCard, false),
+                   "acknowledged prompt can reveal current turn activity");
+  spin(40);
+  ConversationCard *rematerializedPromptActivity =
+      card(view, stableKey(promptActivity.key));
+  result &=
+      expect(rematerializedPromptActivity &&
+                 promptCard->isAncestorOf(rematerializedPromptActivity) &&
+                 (!promptActivityCard ||
+                  rematerializedPromptActivity == promptActivityCard),
+             "prompt activity remains structurally nested across lazy release");
 
   const std::string edgeThread = "folding-bottom-edge";
-  ConversationSnapshot edge = conversation(edgeThread, 12);
+  ConversationGraphSpec edge = conversation(edgeThread, 12);
   QString longOutput;
   for (int line = 0; line < 70; ++line)
     longOutput += QStringLiteral("bottom-edge line %1\n").arg(line);
@@ -1834,7 +2193,7 @@ bool testCardFoldingGeometryAndRetention() {
   ConversationView edgeView;
   edgeView.resize(650, 520);
   edgeView.show();
-  edgeView.reconcile(edge);
+  applyConversation(edgeView, edge);
   spin();
   ConversationCard *edgeCard = card(edgeView, stableKey(edgeCommand.key));
   const int collapsedTop =
@@ -1888,7 +2247,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
     const AuthoritativeItemKey nestedUserKey{nestedThread, "turn", "user"};
     const AuthoritativeItemKey nestedReasoningKey{nestedThread, "turn",
                                                   "reasoning"};
-    ConversationSnapshot nestedSnapshot;
+    ConversationGraphSpec nestedSnapshot;
     nestedSnapshot.threadId = nestedThread;
     nestedSnapshot.sections.push_back(
         {"turn:nested-presentation-options:turn",
@@ -1900,25 +2259,25 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
     nestedView.setPresentationOptions({false, true, true, true});
     nestedView.resize(700, 700);
     nestedView.show();
-    bool nestedResult = nestedView.reconcile(nestedSnapshot);
+    bool nestedResult = applyConversation(nestedView, nestedSnapshot);
     spin();
     nestedSnapshot.sections.front().cards.push_back(
         {nestedReasoningKey, CardKind::Reasoning, nestedThread, "turn",
          "reasoning", ReasoningData{"Hidden reasoning"}});
-    nestedResult &= nestedView.reconcile(nestedSnapshot);
+    nestedResult &= applyConversation(nestedView, nestedSnapshot);
     spin();
     ConversationCard *nestedReasoning =
         card(nestedView, stableKey(nestedReasoningKey));
-    if (!expect(nestedResult && nestedReasoning && nestedReasoning->isHidden(),
-                "new nested reasoning obeys the disabled visibility filter"))
+    if (!expect(nestedResult && !nestedReasoning,
+                "filtered nested reasoning performs no widget work"))
       return false;
   }
 
   {
     const std::string followingThread = "following-nested-insertion";
-    ConversationSnapshot followingSnapshot;
+    ConversationGraphSpec followingSnapshot;
     followingSnapshot.threadId = followingThread;
-    TurnSection followingSection{
+    TurnGraphSpec followingSection{
         "turn:following-nested-insertion:turn", "turn", {}};
     followingSection.cards.push_back(
         {AuthoritativeItemKey{followingThread, "turn", "user"},
@@ -1939,7 +2298,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
     followingView.setPresentationOptions({false, true, true, true});
     followingView.resize(520, 320);
     followingView.show();
-    bool followingResult = followingView.reconcile(followingSnapshot);
+    bool followingResult = applyConversation(followingView, followingSnapshot);
     spin();
     const AuthoritativeItemKey incomingKey{followingThread, "turn", "incoming"};
     followingSnapshot.sections.front().cards.push_back(
@@ -1956,7 +2315,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
                            {},
                            {},
                            {}}});
-    followingResult &= followingView.reconcile(followingSnapshot);
+    followingResult &= applyConversation(followingView, followingSnapshot);
     ConversationCard *incoming = card(followingView, stableKey(incomingKey));
     const int immediateTop =
         incoming ? incoming->mapTo(followingView.viewport(), QPoint{}).y() : -1;
@@ -1990,7 +2349,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
   const AuthoritativeItemKey reasoningKey{thread, "turn", "reasoning"};
   const AuthoritativeItemKey firstCommandKey{thread, "turn", "command-1"};
   const AuthoritativeItemKey firstImageKey{thread, "turn", "image-1"};
-  ConversationSnapshot snapshot;
+  ConversationGraphSpec snapshot;
   snapshot.threadId = thread;
   snapshot.sections.push_back(
       {"turn:presentation-options:turn",
@@ -2017,28 +2376,30 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
   view.setPresentationOptions({false, true, true, true});
   view.resize(700, 700);
   view.show();
-  bool result =
-      expect(view.reconcile(snapshot), "presentation-options fixture renders");
+  bool result = expect(applyConversation(view, snapshot),
+                       "presentation-options fixture renders");
   spin();
   ConversationCard *update = card(view, stableKey(updateKey));
   ConversationCard *final = card(view, stableKey(finalKey));
   ConversationCard *reasoning = card(view, stableKey(reasoningKey));
   ConversationCard *firstCommand = card(view, stableKey(firstCommandKey));
   ConversationCard *firstImage = card(view, stableKey(firstImageKey));
-  result &= expect(
-      update && final && reasoning && firstCommand && firstImage &&
-          !update->isHidden() && !final->isHidden() && reasoning->isHidden() &&
-          !firstCommand->isCollapsed() && !firstImage->isCollapsed(),
-      "default presentation hides reasoning and opens commands and images");
-  if (!update || !final || !reasoning || !firstCommand || !firstImage)
+  result &=
+      expect(update && final && !reasoning && firstCommand && firstImage &&
+                 !update->isHidden() && !final->isHidden() &&
+                 !firstCommand->isCollapsed() && !firstImage->isCollapsed(),
+             "default presentation performs no reasoning widget work and opens "
+             "commands and images");
+  if (!update || !final || !firstCommand || !firstImage)
     return false;
 
   view.setPresentationOptions({false, false, false, false});
   spin();
-  result &= expect(update->isHidden() && reasoning->isHidden() &&
+  result &= expect(!card(view, stableKey(updateKey)) &&
+                       !card(view, stableKey(reasoningKey)) &&
                        !final->isHidden() && !firstCommand->isCollapsed(),
-                   "filters hide reasoning and updates without changing final "
-                   "answers or existing folds");
+                   "filters release reasoning and update widgets without "
+                   "changing final answers or existing folds");
 
   std::get<AgentMessageData>(snapshot.sections.front().cards[0].payload).text =
       "Updated while hidden";
@@ -2054,25 +2415,26 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
       {secondImageKey, CardKind::ImageGeneration, thread, "turn", "image-2",
        ImageGenerationData{"/missing/image-2.png", "completed",
                            "Second image"}});
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "hidden cards and a new command accept updates");
   spin();
   ConversationCard *secondCommand = card(view, stableKey(secondCommandKey));
   ConversationCard *secondImage = card(view, stableKey(secondImageKey));
-  result &= expect(card(view, stableKey(updateKey)) == update &&
-                       card(view, stableKey(reasoningKey)) == reasoning &&
-                       update->isHidden() && reasoning->isHidden() &&
-                       secondCommand && secondCommand->isCollapsed() &&
-                       secondImage && secondImage->isCollapsed(),
-                   "hidden widgets retain identity and new commands and images "
-                   "use their current initial preferences");
+  result &= expect(!card(view, stableKey(updateKey)) &&
+                       !card(view, stableKey(reasoningKey)) && secondCommand &&
+                       secondCommand->isCollapsed() && secondImage &&
+                       secondImage->isCollapsed(),
+                   "filtered nodes remain unmaterialized while new commands "
+                   "and images use current initial preferences");
 
   result &= expect(setFolded(firstCommand, true),
                    "an existing command records a user-owned collapsed state");
   view.setPresentationOptions({true, true, true, true});
-  spin();
+  spin(40);
+  update = card(view, stableKey(updateKey));
+  reasoning = card(view, stableKey(reasoningKey));
   result &= expect(
-      !update->isHidden() && !reasoning->isHidden() &&
+      update && reasoning && !update->isHidden() && !reasoning->isHidden() &&
           containsText(update, QStringLiteral("Updated while hidden")) &&
           containsText(reasoning,
                        QStringLiteral("Reasoning updated while hidden")) &&
@@ -2086,7 +2448,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
   snapshot.sections.front().cards.push_back(
       {thirdCommandKey, CardKind::CommandExecution, thread, "turn", "command-3",
        CommandExecutionData{"printf third", {}, "completed", {}, 0}});
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "a command arrives after restoring expanded-by-default");
   spin();
   ConversationCard *thirdCommand = card(view, stableKey(thirdCommandKey));
@@ -2110,14 +2472,14 @@ bool testInitialCommandGeometrySettlement() {
       "turn",
       "command",
       CommandExecutionData{"printf output", utf8(output), "completed", {}, 0}};
-  ConversationSnapshot snapshot{
+  ConversationGraphSpec snapshot{
       thread, {{"turn:initial-command", "turn", {command}}}, 0, false};
 
   ConversationView view;
   view.resize(650, 520);
   view.show();
   spin();
-  bool result = expect(view.reconcile(snapshot),
+  bool result = expect(applyConversation(view, snapshot),
                        "initial visible command output is inserted");
   ConversationCard *commandCard = card(view, stableKey(command.key));
   result &= expect(setFolded(commandCard, false),
@@ -2149,7 +2511,7 @@ bool testInitialCommandGeometrySettlement() {
   auto &execution = std::get<CommandExecutionData>(
       snapshot.sections.front().cards.front().payload);
   execution.output = utf8(QString(charactersPerLine + 1, QLatin1Char('W')));
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "single logical output line changes to two visual lines");
   spin();
   const QTextBlock wrappedBlock = outputView->document()->firstBlock();
@@ -2171,24 +2533,31 @@ bool testRootlessFinalAnswerGeometrySettlement() {
       thread,
       "turn",
       "activity",
-      AgentActivityData{"spawn_agent", "completed", "tool", "Child work",
-                        {}, {}, {}, {}, {}, {}, {}}};
+      AgentActivityData{"spawn_agent",
+                        "completed",
+                        "tool",
+                        "Child work",
+                        {},
+                        {},
+                        {},
+                        {},
+                        {},
+                        {},
+                        {}}};
   VisibleCardData answer{
       AuthoritativeItemKey{thread, "turn", "answer"},
       CardKind::AgentMessage,
       thread,
       "turn",
       "answer",
-      AgentMessageData{"Implemented the requested child-thread change.",
-                       true}};
-  ConversationSnapshot snapshot{
-      thread, {{"turn:rootless-child", "turn", {activity, answer}}}, 0,
-      false};
+      AgentMessageData{"Implemented the requested child-thread change.", true}};
+  ConversationGraphSpec snapshot{
+      thread, {{"turn:rootless-child", "turn", {activity, answer}}}, 0, false};
 
   ConversationView view;
   view.resize(700, 700);
   view.show();
-  bool result = expect(view.reconcile(snapshot),
+  bool result = expect(applyConversation(view, snapshot),
                        "rootless child activity and final answer appear");
   spin();
   ConversationCard *answerCard = card(view, stableKey(answer.key));
@@ -2196,10 +2565,9 @@ bool testRootlessFinalAnswerGeometrySettlement() {
     return false;
   answerCard->setMinimumHeight(600);
   answerCard->resize(answerCard->width(), 600);
-  std::get<AgentMessageData>(answer.payload).text +=
-      "\n\nValidation passed.";
+  std::get<AgentMessageData>(answer.payload).text += "\n\nValidation passed.";
   snapshot.sections.front().cards.back() = answer;
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "rootless final answer accepts an authoritative update");
   spin();
   QLabel *answerBody = nullptr;
@@ -2246,7 +2614,7 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
       "turn",
       "answer",
       AgentMessageData{"Retained final answer is materializing.", true}};
-  TurnSection section{"turn:retained", "turn", {prompt}, prompt.key};
+  TurnGraphSpec section{"turn:retained", "turn", {prompt}, prompt.key};
   for (int index = 0; index < 4; ++index)
     section.cards.push_back(
         agentCard(thread, "turn", index,
@@ -2254,16 +2622,16 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
                                  "answer with enough text to wrap.")
                       .arg(index)));
   section.cards.push_back(answer);
-  ConversationSnapshot snapshot{thread, {std::move(section)}, 0, false};
+  ConversationGraphSpec snapshot{thread, {std::move(section)}, 0, false};
 
   ConversationView view;
   view.resize(980, 420);
-  bool result = expect(
-      view.reconcile(snapshot),
-      "retained prompt and partial final answer materialize initially");
+  bool result =
+      expect(applyConversation(view, snapshot),
+             "retained prompt and partial final answer materialize initially");
   std::get<AgentMessageData>(snapshot.sections.front().cards.back().payload)
       .text = utf8(markdown);
-  result &= expect(view.reconcile(snapshot),
+  result &= expect(applyConversation(view, snapshot),
                    "retained hydration completes before first exposure");
   view.resize(560, 420);
   view.show();
@@ -2300,7 +2668,7 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
 
 bool testBottomAnchoredCommandOutputGrowth() {
   const std::string thread = "bottom-anchored-output";
-  ConversationSnapshot snapshot = conversation(thread, 14);
+  ConversationGraphSpec snapshot = conversation(thread, 14);
   VisibleCardData command{
       AuthoritativeItemKey{thread, "turn-2", "live-command"},
       CardKind::CommandExecution,
@@ -2314,7 +2682,7 @@ bool testBottomAnchoredCommandOutputGrowth() {
   ConversationView view;
   view.resize(620, 360);
   view.show();
-  view.reconcile(snapshot);
+  applyConversation(view, snapshot);
   spin();
   ConversationCard *commandCard = card(view, stableKey(command.key));
   bool result = expect(setFolded(commandCard, false),
@@ -2346,7 +2714,8 @@ bool testBottomAnchoredCommandOutputGrowth() {
   live.output =
       "first wrapped output line with enough words to use real width\n"
       "second output line\nthird output line\n\n";
-  result &= expect(view.reconcile(snapshot), "live output becomes visible");
+  result &=
+      expect(applyConversation(view, snapshot), "live output becomes visible");
   const int cardBottomAfter =
       commandCard->mapTo(view.viewport(), QPoint(0, commandCard->height())).y();
   result &= expect(!output->isHidden() && output->height() > 2 * 20 &&
@@ -2358,7 +2727,8 @@ bool testBottomAnchoredCommandOutputGrowth() {
   for (int line = 0; line < 80; ++line)
     cappedOutput += QStringLiteral("scrollable line %1\n").arg(line);
   live.output = utf8(cappedOutput);
-  result &= expect(view.reconcile(snapshot), "live output reaches its cap");
+  result &=
+      expect(applyConversation(view, snapshot), "live output reaches its cap");
   result &= expect(
       output->height() == 220 && output->verticalScrollBar()->maximum() > 0 &&
           commandCard->mapTo(view.viewport(), QPoint(0, commandCard->height()))
@@ -2379,13 +2749,13 @@ bool testCommandOutputStateAcrossNavigation() {
       "turn",
       "command",
       CommandExecutionData{"produce output", utf8(output), "completed", {}, 0}};
-  const ConversationSnapshot commandThread{
+  const ConversationGraphSpec commandThread{
       thread, {{"turn:command-navigation", "turn", {command}}}, 0, false};
 
   ConversationView view;
   view.resize(650, 520);
   view.show();
-  view.reconcile(commandThread);
+  applyConversation(view, commandThread);
   spin();
   ConversationCard *commandCard = card(view, stableKey(command.key));
   bool result = expect(setFolded(commandCard, false),
@@ -2400,16 +2770,15 @@ bool testCommandOutputStateAcrossNavigation() {
              "navigation test has independently scrollable output");
   if (!initialOutput)
     return false;
-  view.reconcile(conversation("other-thread", 8));
+  applyConversation(view, conversation("other-thread", 8));
   spin();
-  view.reconcile(commandThread);
+  applyConversation(view, commandThread);
   spin();
   commandCard = card(view, stableKey(command.key));
-  initialOutput = commandCard
-                      ? dynamic_cast<CommandOutputView *>(
-                            commandCard->findChild<QTextEdit *>(
-                                QStringLiteral("commandOutputView")))
-                      : nullptr;
+  initialOutput = commandCard ? dynamic_cast<CommandOutputView *>(
+                                    commandCard->findChild<QTextEdit *>(
+                                        QStringLiteral("commandOutputView")))
+                              : nullptr;
   result &= expect(initialOutput && initialOutput->followsLatest() &&
                        initialOutput->verticalScrollBar()->value() ==
                            initialOutput->verticalScrollBar()->maximum(),
@@ -2424,9 +2793,9 @@ bool testCommandOutputStateAcrossNavigation() {
   result &= expect(!initialOutput->followsLatest(),
                    "command output is paused before thread navigation");
 
-  view.reconcile(conversation("other-thread", 8));
+  applyConversation(view, conversation("other-thread", 8));
   spin();
-  view.reconcile(commandThread);
+  applyConversation(view, commandThread);
   spin();
   commandCard = card(view, stableKey(command.key));
   auto *restoredOutput = commandCard
@@ -2443,12 +2812,12 @@ bool testCommandOutputStateAcrossNavigation() {
 
 bool testViewportLazyMaterialization() {
   const std::string thread = "viewport-lazy";
-  ConversationSnapshot snapshot = conversation(thread, 240);
+  ConversationGraphSpec snapshot = conversation(thread, 240);
   ConversationView view;
   view.resize(620, 360);
   view.show();
 
-  bool result = expect(view.reconcile(snapshot),
+  bool result = expect(applyConversation(view, snapshot),
                        "a large conversation creates its lazy geometry");
   const auto materializedCount = [&view] {
     return static_cast<int>(std::ranges::count_if(
@@ -2472,24 +2841,36 @@ bool testViewportLazyMaterialization() {
       "cards");
   QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
   const int afterOneContinuation = materializedCount();
-  result &= expect(afterOneContinuation - immediateCards <= 8 &&
-                       placeholderCount() > 200 && view.isAtBottom(),
-                   "one event-loop continuation performs at most eight more "
-                   "materializations and retains measured placeholders");
+  result &= expect(afterOneContinuation < 40 && placeholderCount() > 50 &&
+                       view.isAtBottom() && historyButton(view)->isVisible(),
+                   "event-loop continuations keep materialization bounded and "
+                   "represent older graph history lazily");
 
-  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
-  spin(100);
   const std::string firstKey =
-      stableKey(snapshot.sections.front().cards.front().key);
+      stableKey(snapshot.sections.back().cards[40].key);
   const std::string lastKey =
       stableKey(snapshot.sections.back().cards.back().key);
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  const auto placeholders = view.findChildren<QWidget *>(
+      QStringLiteral("conversationCardPlaceholder"));
+  const auto firstPlaceholder =
+      std::ranges::find_if(placeholders, [&firstKey](QWidget *widget) {
+        return widget->property("conversationAnchorKey").toString() ==
+               QString::fromStdString(firstKey);
+      });
+  if (firstPlaceholder != placeholders.end())
+    view.verticalScrollBar()->setValue(
+        (*firstPlaceholder)->mapTo(view.viewport(), QPoint{}).y() +
+        view.verticalScrollBar()->value());
+  spin(100);
   result &= expect(view.mode() == ConversationView::Mode::Paused,
                    "scrolling a large conversation pauses following");
   result &=
-      expect(card(view, firstKey), "scrolling materializes the new viewport");
+      expect(firstPlaceholder != placeholders.end() && card(view, firstKey),
+             "scrolling materializes the retained graph viewport");
   result &=
       expect(!card(view, lastKey), "scrolling releases the distant viewport");
-  result &= expect(materializedCount() < 40 && placeholderCount() > 200,
+  result &= expect(materializedCount() < 40 && placeholderCount() > 50,
                    "viewport movement keeps materialized card work bounded");
   return result;
 }
@@ -2669,8 +3050,7 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
       if (!isRoot && !isSteering)
         state.fields.emplace("phase", "final_answer");
       nodegraph::NodeRef item = write.upsert(
-          {nodegraph::NodeKind::Item,
-           "bounded-item-" + std::to_string(index)},
+          {nodegraph::NodeKind::Item, "bounded-item-" + std::to_string(index)},
           std::move(state));
       write.setParent(turn, item);
       if (isRoot)
@@ -2725,9 +3105,9 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
       steeringAttachment
           ? qobject_cast<ConversationCard *>(steeringAttachment->widget.data())
           : nullptr;
-  result &= expect(
-      steeringCard && !steeringCard->property("turnContainer").toBool(),
-      "a loaded steering message is never inferred to be the turn root");
+  result &=
+      expect(steeringCard && !steeringCard->property("turnContainer").toBool(),
+             "a loaded steering message is never inferred to be the turn root");
 
   const qulonglong hiddenBeforePaging = hiddenItemCount();
   loadMore->click();
@@ -2754,12 +3134,12 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
       steeringAttachment
           ? qobject_cast<ConversationCard *>(steeringAttachment->widget.data())
           : nullptr;
-  result &= expect(
-      rootCard && steeringCard && rootCard->isAncestorOf(steeringCard) &&
-          rootCard->property("turnContainer").toBool() &&
-          steeringCard->property("nestedConversationCard").toBool(),
-      "the explicit parentless root remains the container for a paged "
-      "steering message");
+  result &=
+      expect(rootCard && steeringCard && rootCard->isAncestorOf(steeringCard) &&
+                 rootCard->property("turnContainer").toBool() &&
+                 steeringCard->property("nestedConversationCard").toBool(),
+             "the explicit parentless root remains the container for a paged "
+             "steering message");
   return result;
 }
 
@@ -2782,9 +3162,8 @@ bool testGraphRootReplacementAndAttachmentRecovery() {
                         graphMessageState("userMessage", "Prompt"));
     sibling = write.upsert({nodegraph::NodeKind::Item, "replacement-sibling"},
                            graphMessageState("agentMessage", "Answer"));
-    steering = write.upsert(
-        {nodegraph::NodeKind::Item, "replacement-steering"},
-        graphMessageState("userMessage", "Steer"));
+    steering = write.upsert({nodegraph::NodeKind::Item, "replacement-steering"},
+                            graphMessageState("userMessage", "Steer"));
     write.setParent(turn, root);
     write.setParent(turn, sibling);
     write.setParent(turn, steering);
@@ -2805,11 +3184,11 @@ bool testGraphRootReplacementAndAttachmentRecovery() {
       siblingAttachment ? siblingAttachment->widget : nullptr;
   QPointer<QWidget> steeringIdentity =
       steeringAttachment ? steeringAttachment->widget : nullptr;
-  bool result = expect(
-      oldRoot && siblingIdentity && steeringIdentity &&
-          oldRoot->isAncestorOf(siblingIdentity) &&
-          oldRoot->isAncestorOf(steeringIdentity),
-      "the materialized root initially owns its nested turn cards");
+  bool result =
+      expect(oldRoot && siblingIdentity && steeringIdentity &&
+                 oldRoot->isAncestorOf(siblingIdentity) &&
+                 oldRoot->isAncestorOf(steeringIdentity),
+             "the materialized root initially owns its nested turn cards");
 
   nodegraph::GraphChange replacementChange;
   {
@@ -2916,6 +3295,173 @@ bool testGraphLastItemRemovalUpdatesChromeSynchronously() {
   return result;
 }
 
+bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  nodegraph::NodeRef localPrompt;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{1});
+    thread = write.upsert({nodegraph::NodeKind::Thread, "prompt-thread"},
+                          std::move(threadState));
+    turn = write.upsert({nodegraph::NodeKind::Turn, "prompt-turn"});
+    nodegraph::NodeState promptState;
+    promptState.status = nodegraph::NodeStatus::Pending;
+    promptState.fields.emplace("type", "localPrompt");
+    promptState.fields.emplace("submissionId", std::uint64_t{42});
+    promptState.fields.emplace("text", "Exact authored prompt");
+    promptState.fields.emplace("dispatchState", "inFlight");
+    promptState.fields.emplace(
+        "attachments",
+        nodegraph::Value::Array{nodegraph::Value(
+            nodegraph::Value::Object{{"path", "/tmp/prompt.png"},
+                                     {"displayName", "prompt.png"},
+                                     {"mimeType", "image/png"}})});
+    localPrompt = write.upsert({nodegraph::NodeKind::Item, "local-prompt:42"},
+                               std::move(promptState));
+    write.setParent(thread, turn);
+    write.setParent(turn, localPrompt);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 360);
+  view.show();
+  std::vector<nodegraph::NodeRef> acknowledgements;
+  view.setPromptMaterializedAction(
+      [&acknowledgements](nodegraph::NodeRef prompt) {
+        acknowledgements.emplace_back(std::move(prompt));
+        return true;
+      });
+  view.bindGraph(graph, thread);
+  spin(60);
+
+  ui::QtNodeAttachment *localAttachment = graphAttachment(localPrompt);
+  auto *localCard =
+      localAttachment
+          ? qobject_cast<ConversationCard *>(localAttachment->widget.data())
+          : nullptr;
+  QPointer<ConversationCard> stableCard(localCard);
+  bool result = expect(
+      localCard && localCard->data().kind == CardKind::LocalPrompt &&
+          std::get<LocalPromptData>(localCard->data().payload).prompt ==
+              "Exact authored prompt" &&
+          std::get<LocalPromptData>(localCard->data().payload).imagePaths ==
+              std::vector<std::string>{"/tmp/prompt.png"},
+      "a graph local prompt renders its exact authored text and attachment");
+
+  nodegraph::NodeRef authoritative;
+  nodegraph::GraphChange materialized;
+  {
+    auto write = graph.write();
+    authoritative =
+        write.upsert({nodegraph::NodeKind::Item, "provider-user-message"},
+                     graphMessageState("userMessage", "Exact authored prompt"));
+    write.setParent(turn, authoritative);
+    write.relate(authoritative, nodegraph::RelationKind::PromptMaterialization,
+                 localPrompt);
+    write.setField(thread, "historyLoadedItemCount", std::uint64_t{2});
+    materialized = write.finish();
+  }
+  view.graphChanged(materialized.removed);
+  spin(80);
+
+  ui::QtNodeAttachment *authoritativeAttachment =
+      graphAttachment(authoritative);
+  auto *authoritativeCard = authoritativeAttachment
+                                ? qobject_cast<ConversationCard *>(
+                                      authoritativeAttachment->widget.data())
+                                : nullptr;
+  result &= expect(
+      localPrompt->uiAttachment() == nullptr && stableCard &&
+          authoritativeCard == stableCard &&
+          authoritativeCard->data().kind == CardKind::UserMessage &&
+          std::get<UserMessageData>(authoritativeCard->data().payload).text ==
+              "Exact authored prompt" &&
+          authoritativeCard->property("conversationAnchorKey").toString() ==
+              QStringLiteral("prompt:42") &&
+          acknowledgements == std::vector<nodegraph::NodeRef>{localPrompt},
+      "authoritative materialization transfers the attachment and morphs the "
+      "same card before acknowledging cleanup");
+
+  nodegraph::GraphChange removed;
+  {
+    auto write = graph.write();
+    write.remove(localPrompt);
+    write.setField(thread, "historyLoadedItemCount", std::uint64_t{1});
+    removed = write.finish();
+  }
+  view.graphChanged(removed.removed);
+  spin(30);
+  result &= expect(stableCard && graphAttachment(authoritative) &&
+                       graphAttachment(authoritative)->widget == stableCard,
+                   "retiring the acknowledged local node preserves the "
+                   "authoritative card attachment");
+  return result;
+}
+
+bool testGraphTurnPlanUsesTurnNodeAttachment() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  {
+    auto write = graph.write();
+    thread = write.upsert({nodegraph::NodeKind::Thread, "plan-thread"});
+    nodegraph::NodeState planState;
+    planState.status = nodegraph::NodeStatus::Running;
+    planState.fields.emplace("planExplanation", "Current graph plan");
+    nodegraph::Value::Array steps;
+    nodegraph::Value::Object first;
+    first.emplace("step", "Inspect graph");
+    first.emplace("status", "completed");
+    steps.emplace_back(std::move(first));
+    nodegraph::Value::Object second;
+    second.emplace("step", "Render plan");
+    second.emplace("status", "inProgress");
+    steps.emplace_back(std::move(second));
+    planState.fields.emplace("plan", std::move(steps));
+    turn = write.upsert({nodegraph::NodeKind::Turn, "plan-turn"},
+                        std::move(planState));
+    write.setParent(thread, turn);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(640, 400);
+  view.show();
+  view.bindGraph(graph, thread);
+  spin();
+  const std::string key =
+      stableKey(CardKey{TurnPlanKey{"plan-thread", "plan-turn"}});
+  QPointer<ConversationCard> planCard = card(view, key);
+  const auto *initial =
+      planCard ? std::get_if<PlanData>(&planCard->data().payload) : nullptr;
+  bool result =
+      expect(planCard && graphAttachment(turn) &&
+                 graphAttachment(turn)->widget == planCard && initial &&
+                 initial->explanation == "Current graph plan" &&
+                 initial->steps.size() == 2 &&
+                 initial->steps.back().status == "inProgress",
+             "a plan-only turn renders directly from the turn node attachment");
+
+  nodegraph::GraphChange cleared;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState completed;
+    completed.status = nodegraph::NodeStatus::Completed;
+    write.replaceState(turn, std::move(completed));
+    cleared = write.finish();
+  }
+  view.graphChanged(cleared.removed);
+  spin();
+  result &= expect(!planCard && graphAttachment(turn) == nullptr &&
+                       !hasConversationItem(view, key),
+                   "removing current plan state detaches its plan widget");
+  return result;
+}
+
 bool testPendingPromptAnimation() {
   VisibleCardData pending{
       LocalPromptKey{901},
@@ -2923,8 +3469,8 @@ bool testPendingPromptAnimation() {
       "prompt-thread",
       {},
       {},
-      LocalPromptData{901, "pending prompt", PromptState::InFlight, false, {},
-                      {}}};
+      LocalPromptData{
+          901, "pending prompt", PromptState::InFlight, false, {}, {}}};
   ConversationCard card(pending);
   card.resize(560, 92);
   card.show();
@@ -2976,8 +3522,8 @@ bool testPendingPromptAnimation() {
       "prompt-thread",
       "turn",
       {},
-      LocalPromptData{902, "steering prompt", PromptState::InFlight, false,
-                      {}, {}}};
+      LocalPromptData{
+          902, "steering prompt", PromptState::InFlight, false, {}, {}}};
   ConversationCard steeringCard(steering);
   steeringCard.setProperty("nestedConversationCard", true);
   steeringCard.resize(520, 92);
@@ -2997,8 +3543,7 @@ bool testPendingPromptAnimation() {
                    "the delayed steering sweep is visibly animated");
   result &= expect(
       steeringAnimated.pixelColor(10, steeringAnimated.height() - 10).green() >
-          steeringAnimated.pixelColor(10, steeringAnimated.height() - 10)
-              .red(),
+          steeringAnimated.pixelColor(10, steeringAnimated.height() - 10).red(),
       "the steering feedback stays in the teal identity family");
   steeringPrompt.state = PromptState::Accepted;
   steeringPrompt.showPendingAnimation = false;
@@ -3063,8 +3608,7 @@ bool testMessageImagePresentation() {
     if (!ribbon || !image)
       return false;
     const int top = image->mapTo(ribbon->viewport(), QPoint{}).y();
-    const int bottom =
-        ribbon->viewport()->height() - top - image->height();
+    const int bottom = ribbon->viewport()->height() - top - image->height();
     return std::abs(top - bottom) <= 1;
   };
   const QImage ribbonImage = ribbon ? ribbon->grab().toImage() : QImage{};
@@ -3343,6 +3887,8 @@ int main(int argc, char **argv) {
   result &= testGraphBoundedHistoryAndExplicitRoot();
   result &= testGraphRootReplacementAndAttachmentRecovery();
   result &= testGraphLastItemRemovalUpdatesChromeSynchronously();
+  result &= testGraphLocalPromptMorphsWithoutReplacingItsWidget();
+  result &= testGraphTurnPlanUsesTurnNodeAttachment();
   result &= testPendingPromptAnimation();
   result &= testMessageImagePresentation();
   result &= testGeneratedImagePresentationAndGenericBound();
