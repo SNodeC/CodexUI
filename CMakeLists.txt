@@ -7,6 +7,21 @@ project(CodexUI VERSION 1.0.0 LANGUAGES CXX)
 include(GNUInstallDirs)
 include(CTest)
 
+option(
+    CODEXUI_NODEGRAPH_ONLY
+    "Configure only the standalone codexui-nodegraph library and tests"
+    OFF
+)
+
+add_subdirectory(src/codex/nodegraph)
+if(BUILD_TESTING)
+    add_subdirectory(tests/codex/nodegraph)
+endif()
+
+if(CODEXUI_NODEGRAPH_ONLY)
+    return()
+endif()
+
 set(CMAKE_AUTOMOC ON)
 
 find_package(AISuite CONFIG REQUIRED)
