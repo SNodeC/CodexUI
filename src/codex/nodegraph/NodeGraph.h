@@ -81,6 +81,8 @@ struct NodeState final {
 };
 
 enum class RelationKind : std::uint8_t {
+  RootThread,
+  StructuralChildThread,
   AgentChildThread,
   ForkChildThread,
   ProjectMembership,
@@ -180,9 +182,14 @@ public:
 
     [[nodiscard]] std::uint64_t revision() const noexcept;
     [[nodiscard]] NodeRef find(const NodeId &id) const;
+    [[nodiscard]] const std::vector<NodeRef> &orderedNodes() const noexcept;
     [[nodiscard]] NodeRef upsert(NodeId id, NodeState initial = {});
     [[nodiscard]] std::shared_ptr<const NodeState>
     state(const NodeRef &node) const;
+    [[nodiscard]] NodeRef parent(const NodeRef &node) const;
+    [[nodiscard]] std::vector<NodeRef> children(const NodeRef &node) const;
+    [[nodiscard]] std::vector<NodeRef> related(const NodeRef &node,
+                                               RelationKind kind) const;
 
     void replaceState(const NodeRef &node, NodeState state);
     void setField(const NodeRef &node, std::string key, Value value);
@@ -192,10 +199,14 @@ public:
     void setStatus(const NodeRef &node, NodeStatus status);
     void setParent(const NodeRef &parent, const NodeRef &child);
     void clearParent(const NodeRef &child);
+    void replaceChildren(const NodeRef &parent,
+                         std::span<const NodeRef> children);
     void relate(const NodeRef &source, RelationKind kind,
                 const NodeRef &target);
     void unrelate(const NodeRef &source, RelationKind kind,
                   const NodeRef &target);
+    void replaceRelated(const NodeRef &source, RelationKind kind,
+                        std::span<const NodeRef> targets);
     void remove(const NodeRef &node);
 
     // Removed nodes remain reachable only for UI-detachment recovery when a

@@ -178,6 +178,11 @@ NodeRef NodeGraph::WriteAccess::find(const NodeId &id) const {
   return found == graph_->nodes_.end() ? NodeRef{} : found->second;
 }
 
+const std::vector<NodeRef> &
+NodeGraph::WriteAccess::orderedNodes() const noexcept {
+  return graph_->orderedNodes_;
+}
+
 NodeRef NodeGraph::WriteAccess::upsert(NodeId id, NodeState initial) {
   if (NodeRef existing = find(id))
     return existing;
@@ -192,6 +197,34 @@ std::shared_ptr<const NodeState>
 NodeGraph::WriteAccess::state(const NodeRef &node) const {
   requireLive(node);
   return node->state_;
+}
+
+NodeRef NodeGraph::WriteAccess::parent(const NodeRef &node) const {
+  requireLive(node);
+  return pin(node->parent_);
+}
+
+std::vector<NodeRef>
+NodeGraph::WriteAccess::children(const NodeRef &node) const {
+  requireLive(node);
+  std::vector<NodeRef> result;
+  result.reserve(node->children_.size());
+  for (Node *child : node->children_)
+    result.emplace_back(pin(child));
+  return result;
+}
+
+std::vector<NodeRef> NodeGraph::WriteAccess::related(const NodeRef &node,
+                                                     RelationKind kind) const {
+  requireLive(node);
+  std::vector<NodeRef> result;
+  const auto found = node->relations_.find(kind);
+  if (found == node->relations_.end())
+    return result;
+  result.reserve(found->second.size());
+  for (Node *target : found->second)
+    result.emplace_back(pin(target));
+  return result;
 }
 
 void NodeGraph::WriteAccess::replaceState(const NodeRef &node,
@@ -277,6 +310,64 @@ void NodeGraph::WriteAccess::clearParent(const NodeRef &child) {
   markAffected(child);
 }
 
+void NodeGraph::WriteAccess::replaceChildren(
+    const NodeRef &parent, std::span<const NodeRef> children) {
+  requireLive(parent);
+  std::vector<NodeRef> next;
+  next.reserve(children.size());
+  for (const NodeRef &child : children) {
+    requireLive(child);
+    if (parent == child)
+      throw std::invalid_argument("a node cannot parent itself");
+    for (Node *ancestor = parent.get(); ancestor;
+         ancestor = ancestor->parent_) {
+      if (ancestor == child.get())
+        throw std::invalid_argument("a parent relation cannot form a cycle");
+    }
+    if (!contains(next, child))
+      next.emplace_back(child);
+  }
+
+  bool unchanged = parent->children_.size() == next.size();
+  if (unchanged) {
+    for (std::size_t index = 0; index < next.size(); ++index) {
+      if (parent->children_[index] != next[index].get() ||
+          next[index]->parent_ != parent.get()) {
+        unchanged = false;
+        break;
+      }
+    }
+  }
+  if (unchanged)
+    return;
+
+  const std::vector<Node *> previous = parent->children_;
+  for (Node *oldChildPointer : previous) {
+    if (std::ranges::none_of(next, [oldChildPointer](const NodeRef &child) {
+          return child.get() == oldChildPointer;
+        })) {
+      NodeRef oldChild = pin(oldChildPointer);
+      oldChild->parent_ = nullptr;
+      markAffected(oldChild);
+    }
+  }
+
+  for (const NodeRef &child : next) {
+    if (child->parent_ && child->parent_ != parent.get()) {
+      NodeRef previousParent = pin(child->parent_);
+      eraseValue(previousParent->children_, child.get());
+      markAffected(previousParent);
+    }
+    child->parent_ = parent.get();
+    markAffected(child);
+  }
+  parent->children_.clear();
+  parent->children_.reserve(next.size());
+  for (const NodeRef &child : next)
+    parent->children_.emplace_back(child.get());
+  markAffected(parent);
+}
+
 void NodeGraph::WriteAccess::relate(const NodeRef &source, RelationKind kind,
                                     const NodeRef &target) {
   requireLive(source);
@@ -302,6 +393,49 @@ void NodeGraph::WriteAccess::unrelate(const NodeRef &source, RelationKind kind,
     source->relations_.erase(found);
   markAffected(source);
   markAffected(target);
+}
+
+void NodeGraph::WriteAccess::replaceRelated(const NodeRef &source,
+                                            RelationKind kind,
+                                            std::span<const NodeRef> targets) {
+  requireLive(source);
+  std::vector<NodeRef> next;
+  next.reserve(targets.size());
+  for (const NodeRef &target : targets) {
+    requireLive(target);
+    if (!contains(next, target))
+      next.emplace_back(target);
+  }
+
+  const auto found = source->relations_.find(kind);
+  const std::vector<Node *> previous =
+      found == source->relations_.end() ? std::vector<Node *>{} : found->second;
+  bool unchanged = previous.size() == next.size();
+  if (unchanged) {
+    for (std::size_t index = 0; index < next.size(); ++index) {
+      if (previous[index] != next[index].get()) {
+        unchanged = false;
+        break;
+      }
+    }
+  }
+  if (unchanged)
+    return;
+
+  if (next.empty()) {
+    source->relations_.erase(kind);
+  } else {
+    std::vector<Node *> ordered;
+    ordered.reserve(next.size());
+    for (const NodeRef &target : next)
+      ordered.emplace_back(target.get());
+    source->relations_.insert_or_assign(kind, std::move(ordered));
+  }
+  markAffected(source);
+  for (Node *target : previous)
+    markAffected(pin(target));
+  for (const NodeRef &target : next)
+    markAffected(target);
 }
 
 void NodeGraph::WriteAccess::unlinkNode(const NodeRef &node) {

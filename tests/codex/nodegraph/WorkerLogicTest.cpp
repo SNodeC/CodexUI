@@ -2,6 +2,7 @@
 
 #include "codex/nodegraph/WorkerLogic.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -75,9 +76,16 @@ void protocolUpdatesPublishForUnlockedReads() {
           "protocol graph update is admitted to Qt");
 
   const std::optional<GraphChanged> changed = takeGraphChanged(channels);
+  const bool includesThread =
+      changed && std::ranges::find_if(
+                     changed->affected, [](const NodeRef &node) {
+                       return node->id() ==
+                              NodeId{NodeKind::Thread, "worker-thread"};
+                     }) != changed->affected.end();
   require(changed && changed->revision == graph.publishedRevision() &&
-              !changed->rescanRequired && changed->affected.size() == 1,
-          "protocol update queues its committed revision and NodeRef");
+              !changed->rescanRequired && includesThread,
+          "protocol update queues its committed revision and addressed "
+          "NodeRef");
 
   auto qtRead = graph.tryRead();
   require(qtRead.has_value(),

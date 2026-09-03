@@ -3,6 +3,7 @@
 #include "codex/nodegraph/NodeGraph.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <initializer_list>
 #include <iostream>
@@ -292,6 +293,74 @@ bool testAtomicStateRelationsAndNoOp() {
   return passed;
 }
 
+bool testAuthoritativeOrderingReplacement() {
+  NodeGraph graph;
+  NodeRef runtime;
+  NodeRef firstRoot;
+  NodeRef secondRoot;
+  NodeRef thirdRoot;
+  NodeRef thread;
+  NodeRef firstTurn;
+  NodeRef secondTurn;
+  NodeRef thirdTurn;
+  {
+    auto write = graph.write();
+    runtime = write.upsert(id(NodeKind::Runtime, "runtime"));
+    firstRoot = write.upsert(id(NodeKind::Thread, "root-1"));
+    secondRoot = write.upsert(id(NodeKind::Thread, "root-2"));
+    thirdRoot = write.upsert(id(NodeKind::Thread, "root-3"));
+    thread = write.upsert(id(NodeKind::Thread, "ordered-thread"));
+    firstTurn = write.upsert(id(NodeKind::Turn, "turn-1"));
+    secondTurn = write.upsert(id(NodeKind::Turn, "turn-2"));
+    thirdTurn = write.upsert(id(NodeKind::Turn, "turn-3"));
+    write.relate(runtime, RelationKind::RootThread, firstRoot);
+    write.relate(runtime, RelationKind::RootThread, secondRoot);
+    write.setParent(thread, firstTurn);
+    write.setParent(thread, secondTurn);
+    static_cast<void>(write.finish());
+  }
+
+  GraphChange changed;
+  {
+    auto write = graph.write();
+    const std::array roots{thirdRoot, firstRoot, thirdRoot};
+    write.replaceRelated(runtime, RelationKind::RootThread, roots);
+    const std::array turns{secondTurn, thirdTurn, secondTurn};
+    write.replaceChildren(thread, turns);
+    changed = write.finish();
+  }
+
+  bool passed = expect(changed.revision == 2,
+                       "ordered replacements publish in one transaction");
+  {
+    auto read = graph.tryRead();
+    if (!expect(read.has_value(), "replacement ordering is readable"))
+      return false;
+    passed &= expect(
+        sameOrder(read->related(runtime, RelationKind::RootThread),
+                  {thirdRoot, firstRoot}) &&
+            sameOrder(read->children(thread), {secondTurn, thirdTurn}),
+        "provider order replaces stale order and deduplicates identities");
+    passed &=
+        expect(!read->parent(firstTurn) && read->parent(secondTurn) == thread &&
+                   read->parent(thirdTurn) == thread,
+               "omitted children are unlinked while retained children "
+               "keep stable NodeRefs");
+  }
+
+  {
+    auto write = graph.write();
+    const std::array roots{thirdRoot, firstRoot};
+    const std::array turns{secondTurn, thirdTurn};
+    write.replaceRelated(runtime, RelationKind::RootThread, roots);
+    write.replaceChildren(thread, turns);
+    const GraphChange unchanged = write.finish();
+    passed &= expect(unchanged.revision == 2 && unchanged.empty(),
+                     "identical authoritative order is a semantic no-op");
+  }
+  return passed;
+}
+
 bool testRemovalLifetimeAndAttachment() {
   NodeGraph graph;
   NodeRef parent;
@@ -489,6 +558,7 @@ int main() {
   passed &= testValue();
   passed &= testInsertionLookupAndOrder();
   passed &= testAtomicStateRelationsAndNoOp();
+  passed &= testAuthoritativeOrderingReplacement();
   passed &= testRemovalLifetimeAndAttachment();
   passed &= testMisuseRejection();
   return passed ? 0 : 1;

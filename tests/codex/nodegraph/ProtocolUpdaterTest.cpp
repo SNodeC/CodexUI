@@ -3,12 +3,14 @@
 #include "codex/nodegraph/ProtocolUpdater.h"
 #include "codex/nodegraph/ProtocolCatalog.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <set>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -43,6 +45,14 @@ const Value *field(const std::shared_ptr<const NodeState> &state,
     return nullptr;
   const auto found = state->fields.find(key);
   return found == state->fields.end() ? nullptr : &found->second;
+}
+
+std::vector<std::string> canonicalIds(const std::vector<NodeRef> &nodes) {
+  std::vector<std::string> result;
+  result.reserve(nodes.size());
+  for (const NodeRef &node : nodes)
+    result.emplace_back(node->id().canonical);
+  return result;
 }
 
 void catalogIsComplete() {
@@ -176,11 +186,187 @@ void nestedEntitiesAndStreamsStayCurrent() {
   }
   {
     auto read = graph.tryRead();
-    const Value *stream =
-        field(read->state(itemRef), "item/agentMessage/delta");
+    const auto state = read->state(itemRef);
+    const Value *stream = field(state, "text");
     require(stream && stream->asString() &&
                 *stream->asString() == "hello world",
             "stream fragments append in arrival order on the item");
+    require(!field(state, "item/agentMessage/delta"),
+            "stream state uses its semantic field instead of a method key");
+  }
+}
+
+void rootOrderAndThreadHierarchyAreExplicit() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+
+  for (const std::string_view id : {"retained-a", "retained-b"}) {
+    static_cast<void>(updater.apply(
+        {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+         Value::Object{{"thread", Value(Value::Object{{"id", Value(id)}})}}}));
+  }
+
+  const ProtocolRequestId listId("ordered-list");
+  Value::Array listed{
+      Value(Value::Object{{"id", Value("provider-a")}}),
+      Value(Value::Object{{"id", Value("structural-child")},
+                          {"parentThreadId", Value("structural-parent")}}),
+      Value(Value::Object{{"id", Value("structural-parent")},
+                          {"parentThreadId", Value(nullptr)}}),
+      Value(Value::Object{{"id", Value("provider-b")}}),
+      Value(Value::Object{{"id", Value("provider-a")}})};
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ClientResult, "thread/list", listId,
+                     Value::Object{{"data", Value(std::move(listed))}}}));
+
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const NodeRef parent = read->find({NodeKind::Thread, "structural-parent"});
+    const NodeRef child = read->find({NodeKind::Thread, "structural-child"});
+    require(runtime && canonicalIds(
+                           read->related(runtime, RelationKind::RootThread)) ==
+                           std::vector<std::string>{
+                               "provider-a", "structural-parent", "provider-b",
+                               "retained-b", "retained-a"},
+            "thread/list replaces the provider prefix and preserves one "
+            "ordered retained tail");
+    require(parent && child &&
+                canonicalIds(read->related(
+                    parent, RelationKind::StructuralChildThread)) ==
+                    std::vector<std::string>{"structural-child"},
+            "parentThreadId creates a direct structural thread relation");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/fork",
+       ProtocolRequestId("fork-result"),
+       Value::Object{
+           {"thread", Value(Value::Object{
+                          {"id", Value("fork-child")},
+                          {"forkedFromId", Value("structural-parent")}})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const NodeRef parent = read->find({NodeKind::Thread, "structural-parent"});
+    const NodeRef fork = read->find({NodeKind::Thread, "fork-child"});
+    const auto roots = read->related(runtime, RelationKind::RootThread);
+    require(!roots.empty() && roots.front() == fork &&
+                canonicalIds(
+                    read->related(parent, RelationKind::ForkChildThread)) ==
+                    std::vector<std::string>{"fork-child"},
+            "forkedFromId keeps a fork relation while the fork remains a "
+            "visible root");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{
+           {"thread", Value(Value::Object{{"id", Value("agent-child")}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("structural-parent")},
+           {"turnId", Value("agent-turn")},
+           {"item",
+            Value(Value::Object{{"id", Value("spawn-item")},
+                                {"type", Value("subAgentActivity")},
+                                {"agentThreadId", Value("agent-child")}})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const NodeRef parent = read->find({NodeKind::Thread, "structural-parent"});
+    const NodeRef item = read->find({NodeKind::Item, "spawn-item"});
+    const NodeRef child = read->find({NodeKind::Thread, "agent-child"});
+    const auto roots =
+        canonicalIds(read->related(runtime, RelationKind::RootThread));
+    require(std::find(roots.begin(), roots.end(), "agent-child") == roots.end(),
+            "an agent-owned child is removed from canonical root order");
+    require(parent && item && child &&
+                read->related(parent, RelationKind::AgentChildThread) ==
+                    std::vector<NodeRef>{child} &&
+                read->related(item, RelationKind::AgentChildThread) ==
+                    std::vector<NodeRef>{child},
+            "agent activity relates both its owner thread and source item to "
+            "the stable child thread");
+  }
+}
+
+void semanticDeltasAndHydratedOrderStayCurrent() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+
+  const auto delta = [&](std::string method, std::string itemId,
+                         std::string text, std::string indexName = {},
+                         std::uint64_t index = 0) {
+    Value::Object payload{{"threadId", Value("semantic-thread")},
+                          {"turnId", Value("semantic-turn")},
+                          {"itemId", Value(std::move(itemId))},
+                          {"delta", Value(std::move(text))}};
+    if (!indexName.empty())
+      payload.emplace(std::move(indexName), Value(index));
+    static_cast<void>(
+        updater.apply({DecodedMessageKind::ServerNotification,
+                       std::move(method), std::nullopt, std::move(payload)}));
+  };
+  delta("item/plan/delta", "plan-item", "step one");
+  delta("item/reasoning/summaryTextDelta", "reasoning-item", "second",
+        "summaryIndex", 1);
+  delta("item/reasoning/summaryTextDelta", "reasoning-item", " part",
+        "summaryIndex", 1);
+  delta("item/reasoning/textDelta", "reasoning-item", "details", "contentIndex",
+        0);
+  delta("item/commandExecution/outputDelta", "command-item", "line one\n");
+
+  {
+    auto read = graph.tryRead();
+    const auto plan = read->state(read->find({NodeKind::Item, "plan-item"}));
+    const auto reasoning =
+        read->state(read->find({NodeKind::Item, "reasoning-item"}));
+    const auto command =
+        read->state(read->find({NodeKind::Item, "command-item"}));
+    const Value *text = field(plan, "text");
+    const Value *summary = field(reasoning, "summary");
+    const Value *content = field(reasoning, "content");
+    const Value *output = field(command, "aggregatedOutput");
+    require(
+        text && text->asString() && *text->asString() == "step one" &&
+            summary && summary->asArray() && summary->asArray()->size() == 2 &&
+            summary->asArray()->at(1).asString() &&
+            *summary->asArray()->at(1).asString() == "second part" && content &&
+            content->asArray() && content->asArray()->front().asString() &&
+            *content->asArray()->front().asString() == "details" && output &&
+            output->asString() && *output->asString() == "line one\n",
+        "all item deltas append to their concrete semantic fields");
+  }
+
+  Value::Object hydrated{
+      {"id", Value("semantic-thread")},
+      {"turns",
+       Value(Value::Array{
+           Value(Value::Object{
+               {"id", Value("turn-two")},
+               {"items",
+                Value(Value::Array{
+                    Value(Value::Object{{"id", Value("item-two")}}),
+                    Value(Value::Object{{"id", Value("item-one")}})})}}),
+           Value(Value::Object{
+               {"id", Value("turn-one")},
+               {"items", Value(Value::Array{Value(Value::Object{
+                             {"id", Value("item-three")}})})}})})}};
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ClientResult, "thread/read",
+                     ProtocolRequestId("hydrate-order"),
+                     Value::Object{{"thread", Value(std::move(hydrated))}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "semantic-thread"});
+    const NodeRef turnTwo = read->find({NodeKind::Turn, "turn-two"});
+    require(canonicalIds(read->children(thread)) ==
+                    std::vector<std::string>{"turn-two", "turn-one"} &&
+                canonicalIds(read->children(turnTwo)) ==
+                    std::vector<std::string>{"item-two", "item-one"},
+            "thread/read publishes exact turn and item order in one revision");
   }
 }
 
@@ -261,6 +447,11 @@ void interactionsAndRemovalKeepLifetime() {
     require(targets.size() == 1 &&
                 targets.front()->id().canonical == "item-approval",
             "interaction directly relates to its addressed item");
+    const NodeRef turn = read->find({NodeKind::Turn, "turn-approval"});
+    const NodeRef thread = read->find({NodeKind::Thread, "thread-approval"});
+    require(turn && thread && read->parent(targets.front()) == turn &&
+                read->parent(turn) == thread,
+            "interaction targets retain their addressed containment chain");
   }
 
   GraphChange rejected =
@@ -329,6 +520,69 @@ void unknownAndNeutralAreIsolated() {
   }
 }
 
+void lifecycleFactsAndRemovalPreserveThreadHierarchy() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  Value::Array threads{
+      Value(Value::Object{{"id", Value("lifecycle-parent")}}),
+      Value(Value::Object{{"id", Value("lifecycle-child")},
+                          {"parentThreadId", Value("lifecycle-parent")}}),
+      Value(Value::Object{{"id", Value("lifecycle-grandchild")},
+                          {"parentThreadId", Value("lifecycle-child")}})};
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ClientResult, "thread/list",
+                     ProtocolRequestId("lifecycle-list"),
+                     Value::Object{{"data", Value(std::move(threads))}}}));
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/archived", std::nullopt,
+       Value::Object{{"threadId", Value("lifecycle-parent")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const NodeRef parent = read->find({NodeKind::Thread, "lifecycle-parent"});
+    const auto state = read->state(parent);
+    const Value *archived = field(state, "archived");
+    require(
+        archived && archived->asBool() && *archived->asBool() &&
+            canonicalIds(read->related(runtime, RelationKind::RootThread)) ==
+                std::vector<std::string>{"lifecycle-parent"},
+        "archive is retained as a lifecycle fact without deleting the "
+        "visible thread");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/closed", std::nullopt,
+       Value::Object{{"threadId", Value("lifecycle-parent")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef parent = read->find({NodeKind::Thread, "lifecycle-parent"});
+    require(parent && read->state(parent)->status == NodeStatus::NotLoaded,
+            "thread/closed marks provider loading state without removal");
+  }
+
+  const ApplyResult deleted = updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/deleted", std::nullopt,
+       Value::Object{{"threadId", Value("lifecycle-parent")}}});
+  require(deleted.change.removed.size() == 1,
+          "deleting a thread does not delete independently retained child "
+          "threads");
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const NodeRef child = read->find({NodeKind::Thread, "lifecycle-child"});
+    const NodeRef grandchild =
+        read->find({NodeKind::Thread, "lifecycle-grandchild"});
+    require(canonicalIds(read->related(runtime, RelationKind::RootThread)) ==
+                    std::vector<std::string>{"lifecycle-child"} &&
+                child && grandchild &&
+                read->related(child, RelationKind::StructuralChildThread) ==
+                    std::vector<NodeRef>{grandchild},
+            "parent removal promotes direct children and preserves their "
+            "descendant hierarchy");
+  }
+}
+
 void deletionUnlinksWholeGraph() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -338,24 +592,31 @@ void deletionUnlinksWholeGraph() {
            {"threadId", Value("delete-thread")},
            {"turn", Value(Value::Object{{"id", Value("delete-turn")}})}}}));
   NodeRef removed;
+  NodeRef removedTurn;
   {
     auto read = graph.tryRead();
     removed = read->find({NodeKind::Thread, "delete-thread"});
+    removedTurn = read->find({NodeKind::Turn, "delete-turn"});
   }
   ApplyResult result = updater.apply(
       {DecodedMessageKind::ServerNotification, "thread/deleted", std::nullopt,
        Value::Object{{"threadId", Value("delete-thread")}}});
-  require(result.change.removed.size() == 1 &&
-              result.change.removed.front() == removed,
-          "thread deletion queues its stable removed reference");
+  require(
+      result.change.removed.size() == 2 &&
+          std::find(result.change.removed.begin(), result.change.removed.end(),
+                    removed) != result.change.removed.end() &&
+          std::find(result.change.removed.begin(), result.change.removed.end(),
+                    removedTurn) != result.change.removed.end(),
+      "thread deletion queues stable references for its whole contained "
+      "lifecycle");
   {
     auto read = graph.tryRead();
     require(read->removed(removed), "removed node is marked removed");
     require(read->children(removed).empty(),
             "removed thread is unlinked from child turns");
     NodeRef turn = read->find({NodeKind::Turn, "delete-turn"});
-    require(turn && !read->parent(turn),
-            "surviving turn no longer points at removed thread");
+    require(!turn && read->removed(removedTurn),
+            "contained turns are removed rather than retained as orphans");
   }
 }
 
@@ -365,9 +626,12 @@ int main() {
   catalogIsComplete();
   everyKnownMethodDispatches();
   nestedEntitiesAndStreamsStayCurrent();
+  rootOrderAndThreadHierarchyAreExplicit();
+  semanticDeltasAndHydratedOrderStayCurrent();
   resultsAndListsCorrelate();
   interactionsAndRemovalKeepLifetime();
   unknownAndNeutralAreIsolated();
+  lifecycleFactsAndRemovalPreserveThreadHierarchy();
   deletionUnlinksWholeGraph();
 
   if (failures != 0) {

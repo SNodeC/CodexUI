@@ -76,15 +76,22 @@ private:
 
   [[nodiscard]] NodeRef ingestThread(NodeGraph::WriteAccess &write,
                                      const Value::Object &object,
-                                     std::string_view fallbackId = {});
+                                     std::string_view fallbackId = {},
+                                     bool replaceTurns = false);
   [[nodiscard]] NodeRef ingestTurn(NodeGraph::WriteAccess &write,
                                    const Value::Object &object,
                                    const NodeRef &thread,
-                                   std::string_view fallbackId = {});
+                                   std::string_view fallbackId = {},
+                                   bool replaceItems = false);
   [[nodiscard]] NodeRef ingestItem(NodeGraph::WriteAccess &write,
                                    const Value::Object &object,
                                    const NodeRef &turn,
                                    std::string_view fallbackId = {});
+  void admitRootThread(NodeGraph::WriteAccess &write, const NodeRef &thread,
+                       bool prepend);
+  void replaceThreadList(NodeGraph::WriteAccess &write,
+                         const Value::Array &threads);
+  void removeThread(NodeGraph::WriteAccess &write, const NodeRef &thread);
 
   NodeGraph *graph_;
   std::uint64_t unknownSequence_ = 0;
