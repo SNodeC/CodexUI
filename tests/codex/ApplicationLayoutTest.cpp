@@ -11,6 +11,7 @@
 #include "codex/middle/MiddleRegionWidget.h"
 #include "codex/middle/ThreadPane.h"
 #include "codex/ui/ExpandingPromptEditor.h"
+#include "codex/ui/QtNodeAttachment.h"
 #include "codex/ui/UiStyle.h"
 #include "codex/ui/UiViewProjection.h"
 
@@ -1625,6 +1626,136 @@ bool testThreadRowReorderOwnership() {
   return result;
 }
 
+bool testThreadPaneDirectGraphBinding() {
+  nodegraph::NodeGraph graph;
+  std::vector<nodegraph::NodeRef> roots;
+  {
+    auto write = graph.write();
+    const nodegraph::NodeRef runtime =
+        write.upsert({nodegraph::NodeKind::Runtime, "runtime"});
+    for (int index = 0; index < 48; ++index) {
+      const std::string id = QStringLiteral("thread-%1")
+                                 .arg(index, 2, 10, QLatin1Char('0'))
+                                 .toStdString();
+      nodegraph::NodeState state;
+      state.status = nodegraph::NodeStatus::Completed;
+      state.fields.emplace("name", nodegraph::Value("Graph " + id));
+      state.fields.emplace("cwd", nodegraph::Value("/workspace/" + id));
+      state.fields.emplace("createdAt", nodegraph::Value(index));
+      state.fields.emplace("updatedAt", nodegraph::Value(index));
+      state.fields.emplace("recencyAt", nodegraph::Value(index));
+      roots.emplace_back(
+          write.upsert({nodegraph::NodeKind::Thread, id}, std::move(state)));
+    }
+    write.replaceRelated(runtime, nodegraph::RelationKind::RootThread, roots);
+    static_cast<void>(write.finish());
+  }
+
+  bool result = true;
+  {
+    ThreadPane pane;
+    int legacySelections = 0;
+    int nodeSelections = 0;
+    nodegraph::NodeRef selectedByNodeAction;
+    ThreadPane::Actions legacyActions;
+    legacyActions.select = [&](const std::string &) { ++legacySelections; };
+    pane.setActions(std::move(legacyActions));
+    ThreadPane::NodeActions nodeActions;
+    nodeActions.select = [&](const nodegraph::NodeRef &node) {
+      ++nodeSelections;
+      selectedByNodeAction = node;
+    };
+    pane.setNodeActions(std::move(nodeActions));
+    pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
+    pane.resize(320, 220);
+    pane.show();
+
+    // Calling the entry point while the writer holds the graph proves that Qt
+    // only schedules a try-read; it never waits synchronously.
+    {
+      auto write = graph.write();
+      pane.refresh(graph, roots.front());
+      static_cast<void>(write.finish());
+    }
+    spin(100);
+
+    auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
+    std::size_t materialized = 0;
+    for (const nodegraph::NodeRef &node : roots) {
+      auto *attachment =
+          static_cast<ui::QtNodeAttachment *>(node->uiAttachment());
+      if (attachment && attachment->widget)
+        ++materialized;
+    }
+    result &= expect(
+        list && list->count() == static_cast<int>(roots.size()) &&
+            pane.visiblySelectedThread() == roots.front() && materialized > 0 &&
+            materialized < roots.size(),
+        "ThreadPane reads one shared graph and materializes only its visible "
+        "rows plus overscan");
+    if (!list)
+      return false;
+
+    list->setCurrentRow(1);
+    result &= expect(nodeSelections == 1 && legacySelections == 0 &&
+                         selectedByNodeAction == roots[1],
+                     "graph-bound selection dispatches one pinned NodeRef");
+
+    nodegraph::GraphChange pendingChange;
+    {
+      auto write = graph.write();
+      nodegraph::NodeState state;
+      state.status = nodegraph::NodeStatus::Pending;
+      const nodegraph::NodeRef interaction =
+          write.upsert({nodegraph::NodeKind::Interaction, "string:pending"},
+                       std::move(state));
+      write.relate(interaction, nodegraph::RelationKind::InteractionTarget,
+                   roots[1]);
+      pendingChange = write.finish();
+    }
+    pane.graphChanged(nodegraph::GraphChanged{pendingChange.revision,
+                                              pendingChange.affected,
+                                              pendingChange.removed, false});
+    spin(40);
+    QListWidgetItem *pendingItem = threadItem(list, "thread-01");
+    QWidget *pendingRow = pendingItem ? list->itemWidget(pendingItem) : nullptr;
+    QLabel *pendingTitle =
+        pendingRow
+            ? pendingRow->findChild<QLabel *>(QStringLiteral("threadTitle"))
+            : nullptr;
+    result &= expect(pendingTitle && pendingTitle->text().startsWith("! "),
+                     "pending graph interactions update the visible thread "
+                     "badge without a copied view model");
+
+    auto *removedAttachment =
+        static_cast<ui::QtNodeAttachment *>(roots.front()->uiAttachment());
+    QPointer<QWidget> removedWidget =
+        removedAttachment ? removedAttachment->widget : nullptr;
+    nodegraph::GraphChange removedChange;
+    {
+      auto write = graph.write();
+      write.remove(roots.front());
+      removedChange = write.finish();
+    }
+    pane.graphChanged(nodegraph::GraphChanged{removedChange.revision,
+                                              removedChange.affected,
+                                              removedChange.removed, false});
+    result &= expect(
+        roots.front()->uiAttachment() == nullptr && removedWidget.isNull() &&
+            threadItem(list, "thread-00") == nullptr,
+        "removed nodes synchronously detach and destroy their row before "
+        "UiDetached acknowledgement");
+  }
+
+  result &= expect(
+      std::ranges::all_of(roots,
+                          [](const nodegraph::NodeRef &node) {
+                            return node->uiAttachment() == nullptr;
+                          }),
+      "destroying ThreadPane clears every remaining opaque node attachment");
+  return result;
+}
+
 bool testNestedCommandScrollOwnership() {
   MiddleRegionWidget region;
   region.resize(1500, 820);
@@ -2471,6 +2602,7 @@ int main(int argc, char **argv) {
   result &= testPromptActivityNaturallyOrdersThreads();
   result &= testOptimisticThreadRowLifecycle();
   result &= testThreadRowReorderOwnership();
+  result &= testThreadPaneDirectGraphBinding();
   result &= testNestedCommandScrollOwnership();
   result &= testInfoViewerLayout();
   result &= testInspectorDetailParity();
