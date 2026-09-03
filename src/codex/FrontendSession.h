@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -153,6 +154,7 @@ private:
   void drainWorkerMessages();
   void scheduleWorkerMessageDrain();
   void collectRescanRetirements();
+  void collectDetachedNodes(std::span<const nodegraph::NodeRef> nodes);
   void flushDetachAcknowledgements();
 
   nodegraph::NodeGraph graph;

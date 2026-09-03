@@ -151,10 +151,18 @@ bool verifyNodeGraphFrontendBoundary(Configuration &configuration) {
   nodegraph::WorkerLogic worker(session.nodeGraph(), channels);
   std::size_t graphNotifications = 0;
   nodegraph::NodeRef removedNode;
+  int attachedSentinel = 0;
+  bool detachedDuringRescan = false;
   session.setGraphChangedHandler([&](const nodegraph::GraphChanged &changed) {
     ++graphNotifications;
-    if (!changed.removed.empty())
+    if (!changed.removed.empty()) {
       removedNode = changed.removed.front();
+      if (changed.rescanRequired &&
+          removedNode->uiAttachment() == &attachedSentinel) {
+        removedNode->setUiAttachment(nullptr);
+        detachedDuringRescan = true;
+      }
+    }
   });
 
   static_cast<void>(worker.apply(nodegraph::DecodedMessage{
@@ -192,11 +200,71 @@ bool verifyNodeGraphFrontendBoundary(Configuration &configuration) {
   auto afterDetach = session.nodeGraph().tryRead();
   const bool retirementReleased =
       afterDetach && afterDetach->retiredNodes().empty();
+  afterDetach.reset();
 
-  return expect(inserted && graphNotifications == 2,
+  static_cast<void>(worker.apply(nodegraph::DecodedMessage{
+      nodegraph::DecodedMessageKind::ServerNotification,
+      "thread/started",
+      std::nullopt,
+      {{"thread", nodegraph::Value(nodegraph::Value::Object{
+                      {"id", nodegraph::Value("coalesced-boundary")}})}}}));
+  spin(5);
+  auto beforeCoalescedRemoval = session.nodeGraph().tryRead();
+  nodegraph::NodeRef attachedNode =
+      beforeCoalescedRemoval
+          ? beforeCoalescedRemoval->find(
+                {nodegraph::NodeKind::Thread, "coalesced-boundary"})
+          : nodegraph::NodeRef{};
+  beforeCoalescedRemoval.reset();
+  if (attachedNode)
+    attachedNode->setUiAttachment(&attachedSentinel);
+
+  bool filledWorkerMailbox = true;
+  for (std::size_t index = 0;
+       index + 1 < nodegraph::ThreadChannels::WorkerToQtCapacity; ++index) {
+    nodegraph::UiEffect effect;
+    effect.text = "saturate-" + std::to_string(index);
+    filledWorkerMailbox &=
+        channels.sendUiEffect(effect) == nodegraph::ChannelSendStatus::Accepted;
+  }
+  const nodegraph::ChannelSendStatus coalescedStatus = worker.apply(
+      nodegraph::DecodedMessage{nodegraph::DecodedMessageKind::ServerNotification,
+                                "thread/deleted",
+                                std::nullopt,
+                                {{"threadId", nodegraph::Value(
+                                                  "coalesced-boundary")}}});
+  spin(30);
+
+  static_cast<void>(channels.drainQtToWorkerWake());
+  nodegraph::QtToWorkerMessage coalescedAcknowledgement;
+  const bool receivedCoalescedAcknowledgement =
+      channels.tryReceiveForWorker(coalescedAcknowledgement) &&
+      std::holds_alternative<nodegraph::NodeAction>(
+          coalescedAcknowledgement) &&
+      std::get<nodegraph::NodeAction>(coalescedAcknowledgement).kind ==
+          nodegraph::NodeActionKind::UiDetached &&
+      std::get<nodegraph::NodeAction>(coalescedAcknowledgement).target ==
+          attachedNode;
+  if (receivedCoalescedAcknowledgement) {
+    auto &action =
+        std::get<nodegraph::NodeAction>(coalescedAcknowledgement);
+    static_cast<void>(worker.acknowledgeUiDetached(std::move(action.target)));
+  }
+  auto afterCoalescedDetach = session.nodeGraph().tryRead();
+  const bool coalescedRetirementReleased =
+      afterCoalescedDetach && afterCoalescedDetach->retiredNodes().empty();
+
+  return expect(inserted && graphNotifications >= 2,
                 "Qt receives committed graph changes through eventfd") &&
          expect(removedNode && receivedAcknowledgement && retirementReleased,
-                "Qt removal emits a typed UiDetached acknowledgement");
+                "Qt removal emits a typed UiDetached acknowledgement") &&
+         expect(filledWorkerMailbox &&
+                    coalescedStatus ==
+                        nodegraph::ChannelSendStatus::CoalescedRescan &&
+                    detachedDuringRescan &&
+                    receivedCoalescedAcknowledgement &&
+                    coalescedRetirementReleased,
+                "coalesced removal detaches Qt before releasing retirement");
 }
 
 class PresentationPeer final {

@@ -631,12 +631,7 @@ void FrontendSession::drainWorkerMessages() {
                 reportLocalError("node graph rendering callback failed");
               }
             }
-            for (const nodegraph::NodeRef &removed : payload.removed) {
-              if (std::find(pendingDetachAcknowledgements.begin(),
-                            pendingDetachAcknowledgements.end(),
-                            removed) == pendingDetachAcknowledgements.end())
-                pendingDetachAcknowledgements.emplace_back(removed);
-            }
+            collectDetachedNodes(payload.removed);
             if (payload.rescanRequired) {
               rescanRetirementPending = true;
               collectRescanRetirements();
@@ -678,17 +673,52 @@ void FrontendSession::collectRescanRetirements() {
     scheduleWorkerMessageDrain();
     return;
   }
-  for (const nodegraph::NodeRef &retired : read->retiredNodes()) {
+  std::vector<nodegraph::NodeRef> retired(read->retiredNodes().begin(),
+                                          read->retiredNodes().end());
+  const std::uint64_t revision = read->revision();
+  read.reset();
+
+  if (graphChangedHandler && !retired.empty()) {
+    try {
+      graphChangedHandler(
+          nodegraph::GraphChanged{revision, {}, retired, true});
+    } catch (...) {
+      reportLocalError("node graph rescan detachment callback failed");
+    }
+  }
+  collectDetachedNodes(retired);
+
+  rescanRetirementPending = std::ranges::any_of(
+      retired, [](const nodegraph::NodeRef &node) {
+        return node && node->uiAttachment() != nullptr;
+      });
+}
+
+void FrontendSession::collectDetachedNodes(
+    std::span<const nodegraph::NodeRef> nodes) {
+  for (const nodegraph::NodeRef &node : nodes) {
+    // A pane handling removal must clear and destroy its attachment before its
+    // graph callback returns. Never let the worker release the recovery pin
+    // while a QWidget still refers to the node.
+    if (!node)
+      continue;
+    if (node->uiAttachment() != nullptr) {
+      rescanRetirementPending = true;
+      continue;
+    }
     if (std::find(pendingDetachAcknowledgements.begin(),
                   pendingDetachAcknowledgements.end(),
-                  retired) == pendingDetachAcknowledgements.end())
-      pendingDetachAcknowledgements.emplace_back(retired);
+                  node) == pendingDetachAcknowledgements.end())
+      pendingDetachAcknowledgements.emplace_back(node);
   }
-  rescanRetirementPending = false;
 }
 
 void FrontendSession::flushDetachAcknowledgements() {
   while (!pendingDetachAcknowledgements.empty()) {
+    if (pendingDetachAcknowledgements.back()->uiAttachment() != nullptr) {
+      rescanRetirementPending = true;
+      return;
+    }
     nodegraph::NodeAction action;
     action.target = pendingDetachAcknowledgements.back();
     action.kind = nodegraph::NodeActionKind::UiDetached;
