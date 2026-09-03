@@ -49,6 +49,7 @@ set(
     src/codex/ClientRuntime.h
     src/codex/Configuration.cpp
     src/codex/Configuration.h
+    src/codex/CurrentProtocolAdapters.h
     src/codex/ConnectionDialog.cpp
     src/codex/ConnectionDialog.h
     src/codex/DiffViewer.cpp
@@ -63,6 +64,8 @@ set(
     src/codex/MainWindow.h
     src/codex/NewThreadDialog.cpp
     src/codex/NewThreadDialog.h
+    src/codex/NodeGraphJson.cpp
+    src/codex/NodeGraphJson.h
     src/codex/PendingRequestPolicy.cpp
     src/codex/PendingRequestPolicy.h
     src/codex/PresentationModel.cpp
@@ -75,6 +78,8 @@ set(
     src/codex/ProtocolNormalizer.h
     src/codex/UiSession.cpp
     src/codex/UiSession.h
+    src/codex/WorkerMailboxReceiver.cpp
+    src/codex/WorkerMailboxReceiver.h
     src/codex/ipc/QtSocketPairEndpoint.cpp
     src/codex/ipc/QtSocketPairEndpoint.h
     src/codex/ipc/SNodeSocketPairEndpoint.cpp
@@ -133,6 +138,7 @@ function(configure_codexui_target target)
         ${target}
         PRIVATE
             AISuite::OpenAICodex
+            codexui-nodegraph
             PkgConfig::LIBGIT2
             Qt6::Widgets
             Threads::Threads
@@ -171,6 +177,42 @@ if(TARGET snodec::http-client AND TARGET snodec::websocket-client)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(
+        codexui-nodegraph-json-test
+        tests/codex/nodegraph/NodeGraphJsonTest.cpp
+        src/codex/NodeGraphJson.cpp
+        src/codex/NodeGraphJson.h
+    )
+    target_compile_features(codexui-nodegraph-json-test PRIVATE cxx_std_20)
+    target_include_directories(codexui-nodegraph-json-test PRIVATE src)
+    target_link_libraries(
+        codexui-nodegraph-json-test PRIVATE AISuite::OpenAICodex codexui-nodegraph
+    )
+    add_test(NAME codexui-nodegraph-json COMMAND codexui-nodegraph-json-test)
+    set_tests_properties(codexui-nodegraph-json PROPERTIES TIMEOUT 10)
+
+    add_executable(
+        codexui-current-protocol-adapters-test
+        tests/codex/nodegraph/CurrentProtocolAdaptersTest.cpp
+        src/codex/CurrentProtocolAdapters.h
+    )
+    target_compile_features(
+        codexui-current-protocol-adapters-test PRIVATE cxx_std_20
+    )
+    target_include_directories(
+        codexui-current-protocol-adapters-test PRIVATE src
+    )
+    target_link_libraries(
+        codexui-current-protocol-adapters-test PRIVATE AISuite::OpenAICodex
+    )
+    add_test(
+        NAME codexui-current-protocol-adapters
+        COMMAND codexui-current-protocol-adapters-test
+    )
+    set_tests_properties(
+        codexui-current-protocol-adapters PROPERTIES TIMEOUT 10
+    )
+
     add_executable(
         codexui-socketpair-contract-test
         tests/codex/SocketPairContractTest.cpp

@@ -9,6 +9,7 @@
 #include "codex/PresentationProtocol.h"
 #include "codex/ShellWidget.h"
 #include "codex/middle/ConversationCards.h"
+#include "codex/nodegraph/WorkerLogic.h"
 #include "codex/ui/ExpandingPromptEditor.h"
 
 #include <QApplication>
@@ -56,6 +57,10 @@ public:
   static void failOutstanding(FrontendSession &session, int code,
                               std::string message) {
     session.failAllPending(code, std::move(message));
+  }
+
+  static nodegraph::ThreadChannels &channels(FrontendSession &session) {
+    return session.channels;
   }
 };
 
@@ -137,6 +142,61 @@ void spin(int milliseconds = 0) {
     if (milliseconds > 0)
       QThread::msleep(1);
   } while (timer.elapsed() < milliseconds);
+}
+
+bool verifyNodeGraphFrontendBoundary(Configuration &configuration) {
+  FrontendSession session(configuration);
+  nodegraph::ThreadChannels &channels =
+      FrontendSessionTestPeer::channels(session);
+  nodegraph::WorkerLogic worker(session.nodeGraph(), channels);
+  std::size_t graphNotifications = 0;
+  nodegraph::NodeRef removedNode;
+  session.setGraphChangedHandler([&](const nodegraph::GraphChanged &changed) {
+    ++graphNotifications;
+    if (!changed.removed.empty())
+      removedNode = changed.removed.front();
+  });
+
+  static_cast<void>(worker.apply(nodegraph::DecodedMessage{
+      nodegraph::DecodedMessageKind::ServerNotification,
+      "thread/started",
+      std::nullopt,
+      {{"thread", nodegraph::Value(nodegraph::Value::Object{
+                      {"id", nodegraph::Value("graph-boundary")},
+                      {"name", nodegraph::Value("Graph boundary")}})}}}));
+  spin(5);
+  auto read = session.nodeGraph().tryRead();
+  const bool inserted =
+      read && read->find({nodegraph::NodeKind::Thread, "graph-boundary"});
+  read.reset();
+
+  static_cast<void>(worker.apply(nodegraph::DecodedMessage{
+      nodegraph::DecodedMessageKind::ServerNotification,
+      "thread/deleted",
+      std::nullopt,
+      {{"threadId", nodegraph::Value("graph-boundary")}}}));
+  spin(5);
+
+  const nodegraph::EventFd::DrainResult wake = channels.drainQtToWorkerWake();
+  nodegraph::QtToWorkerMessage acknowledgement;
+  const bool receivedAcknowledgement =
+      wake.accepted() && channels.tryReceiveForWorker(acknowledgement) &&
+      std::holds_alternative<nodegraph::NodeAction>(acknowledgement) &&
+      std::get<nodegraph::NodeAction>(acknowledgement).kind ==
+          nodegraph::NodeActionKind::UiDetached &&
+      std::get<nodegraph::NodeAction>(acknowledgement).target == removedNode;
+  if (receivedAcknowledgement) {
+    auto &action = std::get<nodegraph::NodeAction>(acknowledgement);
+    static_cast<void>(worker.acknowledgeUiDetached(std::move(action.target)));
+  }
+  auto afterDetach = session.nodeGraph().tryRead();
+  const bool retirementReleased =
+      afterDetach && afterDetach->retiredNodes().empty();
+
+  return expect(inserted && graphNotifications == 2,
+                "Qt receives committed graph changes through eventfd") &&
+         expect(removedNode && receivedAcknowledgement && retirementReleased,
+                "Qt removal emits a typed UiDetached acknowledgement");
 }
 
 class PresentationPeer final {
@@ -1313,12 +1373,14 @@ int main(int argc, char **argv) {
 
   const bool frontendBoundary =
       codexui::codex::verifyFrontendBoundaryOrdering(*configuration);
+  const bool graphBoundary =
+      codexui::codex::verifyNodeGraphFrontendBoundary(*configuration);
   codexui::codex::FrontendSession session(*configuration);
   codexui::codex::PresentationPeer peer(
       codexui::codex::FrontendSessionTestPeer::takeClientDescriptor(session));
   const bool validationRetainsInput =
       codexui::codex::verifyPendingRequestValidationRetainsInput();
-  const bool result = frontendBoundary &&
+  const bool result = frontendBoundary && graphBoundary &&
                       codexui::codex::verifyPendingRequestTextBoundaries() &&
                       validationRetainsInput &&
                       codexui::codex::verifyPermissionRequestDisclosure() &&

@@ -8,6 +8,7 @@ add_library(
     ProtocolUpdater.cpp
     EventFd.cpp
     ThreadChannels.cpp
+    WorkerLogic.cpp
 )
 
 target_compile_features(codexui-nodegraph PUBLIC cxx_std_20)

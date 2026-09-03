@@ -15,6 +15,11 @@ target_link_libraries(codexui-thread-channels-test PRIVATE codexui-nodegraph)
 add_test(NAME codexui-thread-channels COMMAND codexui-thread-channels-test)
 set_tests_properties(codexui-thread-channels PROPERTIES TIMEOUT 10)
 
+add_executable(codexui-worker-logic-test WorkerLogicTest.cpp)
+target_link_libraries(codexui-worker-logic-test PRIVATE codexui-nodegraph)
+add_test(NAME codexui-worker-logic COMMAND codexui-worker-logic-test)
+set_tests_properties(codexui-worker-logic PROPERTIES TIMEOUT 10)
+
 add_executable(codexui-graph-concurrency-test GraphConcurrencyTest.cpp)
 target_link_libraries(
     codexui-graph-concurrency-test PRIVATE codexui-nodegraph Threads::Threads

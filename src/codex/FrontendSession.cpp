@@ -11,15 +11,19 @@
 
 #include <QCoreApplication>
 #include <QEventLoop>
+#include <QSocketNotifier>
 #include <QThread>
 #include <QTimer>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <stdexcept>
 #include <system_error>
+#include <type_traits>
 #include <unistd.h>
 #include <utility>
+#include <variant>
 
 namespace codexui::codex {
 namespace {
@@ -34,6 +38,14 @@ FrontendSession::FrontendSession(Configuration &configuration)
     : framer(std::make_unique<ai::openai::codex::protocol::JsonLineFramer>(
           MaximumFrameBytes)),
       configuration(configuration) {
+  if (!channels.valid()) {
+    const int error = channels.workerToQtCreationError() != 0
+                          ? channels.workerToQtCreationError()
+                          : channels.qtToWorkerCreationError();
+    throw std::system_error(error != 0 ? error : EIO, std::generic_category(),
+                            "unable to create CodexUI eventfds");
+  }
+
   ipc::SocketPair pair;
   if (!pair.isValid())
     throw std::system_error(pair.error(), std::generic_category(),
@@ -47,7 +59,9 @@ FrontendSession::FrontendSession(Configuration &configuration)
     try {
       const bool accepted = framer->consume(
           std::string_view(data, size),
-          [this](nlohmann::json message) { receiveMessage(std::move(message)); },
+          [this](nlohmann::json message) {
+            receiveMessage(std::move(message));
+          },
           [&framingError](std::string message) {
             framingError = std::move(message);
           });
@@ -74,6 +88,11 @@ FrontendSession::FrontendSession(Configuration &configuration)
       notifyRuntimeStopped();
     }
   });
+
+  workerNotifier = std::make_unique<QSocketNotifier>(
+      channels.workerToQtEventFd(), QSocketNotifier::Read);
+  QObject::connect(workerNotifier.get(), &QSocketNotifier::activated,
+                   workerNotifier.get(), [this] { drainWorkerMessages(); });
 }
 
 FrontendSession::~FrontendSession() { shutdown(); }
@@ -84,8 +103,8 @@ void FrontendSession::start(bool connectBridge) {
   started = true;
   const int descriptor = std::exchange(clientDescriptor, -1);
   clientThread = std::thread([this, descriptor, connectBridge] {
-    static_cast<void>(
-        runClientRuntime(descriptor, configuration, connectBridge));
+    static_cast<void>(runClientRuntime(descriptor, configuration, graph,
+                                       channels, connectBridge));
   });
 }
 
@@ -122,6 +141,11 @@ void FrontendSession::shutdown() {
     clientDescriptor = -1;
   }
   wait();
+  if (workerNotifier) {
+    workerNotifier->setEnabled(false);
+    workerNotifier.reset();
+  }
+  channels.close();
 }
 
 void FrontendSession::setEventHandler(EventHandler handler) {
@@ -134,6 +158,33 @@ void FrontendSession::setActivityHandler(ActivityHandler handler) {
 
 void FrontendSession::setRuntimeStoppedHandler(RuntimeStoppedHandler handler) {
   runtimeStoppedHandler = std::move(handler);
+}
+
+void FrontendSession::setGraphChangedHandler(GraphChangedHandler handler) {
+  graphChangedHandler = std::move(handler);
+}
+
+void FrontendSession::setGraphUiEffectHandler(GraphUiEffectHandler handler) {
+  graphUiEffectHandler = std::move(handler);
+}
+
+nodegraph::NodeGraph &FrontendSession::nodeGraph() noexcept { return graph; }
+
+const nodegraph::NodeGraph &FrontendSession::nodeGraph() const noexcept {
+  return graph;
+}
+
+nodegraph::ChannelSendStatus
+FrontendSession::sendNodeAction(nodegraph::NodeAction &action) {
+  if (action.kind != nodegraph::NodeActionKind::UiDetached)
+    return nodegraph::ChannelSendStatus::QueueFull;
+  return channels.sendNodeAction(action);
+}
+
+nodegraph::ChannelSendStatus
+FrontendSession::sendRuntimeAction(nodegraph::RuntimeAction &action) {
+  static_cast<void>(action);
+  return nodegraph::ChannelSendStatus::QueueFull;
 }
 
 PresentationClient FrontendSession::presentationClient() {
@@ -173,8 +224,8 @@ std::string FrontendSession::request(std::string operation,
     }
     return requestId;
   }
-  outstanding.emplace(
-      requestId, OutstandingRequest{action, threadId, std::move(handler)});
+  outstanding.emplace(requestId,
+                      OutstandingRequest{action, threadId, std::move(handler)});
   const bool sent = sendMessage(presentation::command(
       std::move(operation), std::move(parameters), requestId));
   if (sent && !threadId.empty() &&
@@ -191,8 +242,7 @@ std::string FrontendSession::request(std::string operation,
       try {
         failed(presentation::result(
             0, activeGeneration, failedAction, requestId, false,
-            {{"code", -32020},
-             {"message", "CodexUI IPC rejected operation"}}));
+            {{"code", -32020}, {"message", "CodexUI IPC rejected operation"}}));
       } catch (...) {
       }
     }
@@ -472,8 +522,8 @@ void FrontendSession::receiveMessage(nlohmann::json message) {
   }
   if (presentation::stringMember(message, "kind") == "event") {
     const std::string type = presentation::stringMember(message, "type");
-    const nlohmann::json data = presentation::member(
-        message, "data", nlohmann::json::object());
+    const nlohmann::json data =
+        presentation::member(message, "data", nlohmann::json::object());
     if (type == "connection.lifecycle") {
       const std::string state = presentation::stringMember(data, "state");
       if (state == "disconnected" || state == "failure")
@@ -554,6 +604,98 @@ void FrontendSession::notifyRuntimeStopped() noexcept {
       runtimeStoppedHandler();
     } catch (...) {
     }
+  }
+}
+
+void FrontendSession::drainWorkerMessages() {
+  if (stopping)
+    return;
+
+  static_cast<void>(channels.drainWorkerToQtWake());
+  if (rescanRetirementPending)
+    collectRescanRetirements();
+  constexpr std::size_t MaximumMessagesPerPass = 128;
+  std::size_t processed = 0;
+  nodegraph::WorkerToQtMessage message;
+  while (processed < MaximumMessagesPerPass &&
+         channels.tryReceiveForQt(message)) {
+    ++processed;
+    std::visit(
+        [this](auto &payload) {
+          using Message = std::decay_t<decltype(payload)>;
+          if constexpr (std::is_same_v<Message, nodegraph::GraphChanged>) {
+            if (graphChangedHandler) {
+              try {
+                graphChangedHandler(payload);
+              } catch (...) {
+                reportLocalError("node graph rendering callback failed");
+              }
+            }
+            for (const nodegraph::NodeRef &removed : payload.removed) {
+              if (std::find(pendingDetachAcknowledgements.begin(),
+                            pendingDetachAcknowledgements.end(),
+                            removed) == pendingDetachAcknowledgements.end())
+                pendingDetachAcknowledgements.emplace_back(removed);
+            }
+            if (payload.rescanRequired) {
+              rescanRetirementPending = true;
+              collectRescanRetirements();
+            }
+          } else if constexpr (std::is_same_v<Message, nodegraph::UiEffect>) {
+            if (graphUiEffectHandler) {
+              try {
+                graphUiEffectHandler(payload);
+              } catch (...) {
+                reportLocalError("node graph UI effect callback failed");
+              }
+            }
+          } else {
+            notifyRuntimeStopped();
+          }
+        },
+        message);
+  }
+
+  flushDetachAcknowledgements();
+  if (channels.workerToQtSizeApprox() != 0 || channels.rescanPending() ||
+      rescanRetirementPending || !pendingDetachAcknowledgements.empty())
+    scheduleWorkerMessageDrain();
+}
+
+void FrontendSession::scheduleWorkerMessageDrain() {
+  if (workerDrainScheduled || stopping)
+    return;
+  workerDrainScheduled = true;
+  QTimer::singleShot(0, workerNotifier.get(), [this] {
+    workerDrainScheduled = false;
+    drainWorkerMessages();
+  });
+}
+
+void FrontendSession::collectRescanRetirements() {
+  auto read = graph.tryRead();
+  if (!read) {
+    scheduleWorkerMessageDrain();
+    return;
+  }
+  for (const nodegraph::NodeRef &retired : read->retiredNodes()) {
+    if (std::find(pendingDetachAcknowledgements.begin(),
+                  pendingDetachAcknowledgements.end(),
+                  retired) == pendingDetachAcknowledgements.end())
+      pendingDetachAcknowledgements.emplace_back(retired);
+  }
+  rescanRetirementPending = false;
+}
+
+void FrontendSession::flushDetachAcknowledgements() {
+  while (!pendingDetachAcknowledgements.empty()) {
+    nodegraph::NodeAction action;
+    action.target = pendingDetachAcknowledgements.back();
+    action.kind = nodegraph::NodeActionKind::UiDetached;
+    const nodegraph::ChannelSendStatus status = channels.sendNodeAction(action);
+    if (!nodegraph::messageAdmitted(status))
+      return;
+    pendingDetachAcknowledgements.pop_back();
   }
 }
 

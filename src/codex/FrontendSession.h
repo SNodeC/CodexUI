@@ -4,6 +4,9 @@
 #define CODEXUI_CODEX_FRONTENDSESSION_H
 
 #include "codex/PresentationClient.h"
+#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
+#include "codex/nodegraph/ThreadChannels.h"
 
 #include <nlohmann/json.hpp>
 
@@ -13,6 +16,9 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
+
+class QSocketNotifier;
 
 namespace ai::openai::codex::protocol {
 class JsonLineFramer;
@@ -33,6 +39,9 @@ public:
   using ActivityHandler = std::function<void(const std::string &)>;
   using ResponseHandler = std::function<void(const nlohmann::json &)>;
   using RuntimeStoppedHandler = std::function<void()>;
+  using GraphChangedHandler =
+      std::function<void(const nodegraph::GraphChanged &)>;
+  using GraphUiEffectHandler = std::function<void(const nodegraph::UiEffect &)>;
 
   explicit FrontendSession(Configuration &configuration);
   ~FrontendSession();
@@ -46,6 +55,15 @@ public:
   void setEventHandler(EventHandler handler);
   void setActivityHandler(ActivityHandler handler);
   void setRuntimeStoppedHandler(RuntimeStoppedHandler handler);
+  void setGraphChangedHandler(GraphChangedHandler handler);
+  void setGraphUiEffectHandler(GraphUiEffectHandler handler);
+
+  [[nodiscard]] nodegraph::NodeGraph &nodeGraph() noexcept;
+  [[nodiscard]] const nodegraph::NodeGraph &nodeGraph() const noexcept;
+  [[nodiscard]] nodegraph::ChannelSendStatus
+  sendNodeAction(nodegraph::NodeAction &action);
+  [[nodiscard]] nodegraph::ChannelSendStatus
+  sendRuntimeAction(nodegraph::RuntimeAction &action);
 
   // Returns the slim, toolkit-neutral command API consumed by UI logic.
   // FrontendSession continues to own the current Qt endpoint, socketpair, and
@@ -132,7 +150,14 @@ private:
   void failAllPending(int code, std::string message,
                       bool transient = false) noexcept;
   void notifyRuntimeStopped() noexcept;
+  void drainWorkerMessages();
+  void scheduleWorkerMessageDrain();
+  void collectRescanRetirements();
+  void flushDetachAcknowledgements();
 
+  nodegraph::NodeGraph graph;
+  nodegraph::ThreadChannels channels;
+  std::unique_ptr<QSocketNotifier> workerNotifier;
   std::unique_ptr<ipc::QtSocketPairEndpoint> endpoint;
   std::unique_ptr<ai::openai::codex::protocol::JsonLineFramer> framer;
   std::thread clientThread;
@@ -142,10 +167,15 @@ private:
   EventHandler eventHandler;
   ActivityHandler activityHandler;
   RuntimeStoppedHandler runtimeStoppedHandler;
+  GraphChangedHandler graphChangedHandler;
+  GraphUiEffectHandler graphUiEffectHandler;
+  std::vector<nodegraph::NodeRef> pendingDetachAcknowledgements;
   bool started = false;
   bool stopping = false;
   bool terminal = false;
   bool runtimeStopReported = false;
+  bool workerDrainScheduled = false;
+  bool rescanRetirementPending = false;
   std::uint64_t activeGeneration = 0;
   std::uint64_t providerGeneration = 0;
   std::uint64_t lastSequenceReceived = 0;

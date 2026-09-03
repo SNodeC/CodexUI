@@ -3,9 +3,13 @@
 #include "codex/ClientRuntime.h"
 
 #include "codex/Configuration.h"
+#include "codex/CurrentProtocolAdapters.h"
+#include "codex/NodeGraphJson.h"
 #include "codex/PresentationProtocol.h"
 #include "codex/ProtocolNormalizer.h"
+#include "codex/WorkerMailboxReceiver.h"
 #include "codex/ipc/SNodeSocketPairEndpoint.h"
+#include "codex/nodegraph/WorkerLogic.h"
 
 #include <ai/openai/codex/frontend/CodexBridge.h>
 #include <ai/openai/codex/frontend/client/ClientConnection.h>
@@ -42,8 +46,12 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <utility>
+#include <variant>
 
 namespace codexui::codex {
 namespace {
@@ -52,6 +60,42 @@ namespace codex = ai::openai::codex;
 namespace client = ai::openai::codex::frontend::client;
 
 constexpr std::size_t MaximumIpcReadBytesPerEvent = 256U * 1024U;
+
+nodegraph::Value::Object decodedObject(const nlohmann::json &value) {
+  if (value.is_object())
+    return objectFromJson(value);
+  return {{"value", valueFromJson(value)}};
+}
+
+std::optional<nodegraph::ProtocolRequestId>
+decodedRequestId(const nlohmann::json &value) {
+  if (value.is_null())
+    return std::nullopt;
+  return requestIdFromJson(value);
+}
+
+void applyBridgeState(nodegraph::WorkerLogic &logic,
+                      const codex::frontend::CodexBridge &sdk,
+                      const nlohmann::json &message) {
+  const std::string kind = presentation::stringMember(message, "kind");
+  if (kind != "bridge.connection" && kind != "bridge.controller" &&
+      kind != "bridge.provider")
+    return;
+
+  const std::string connectionId = sdk.connectionId().value_or("");
+  const std::string controllerId = sdk.controllerConnectionId().value_or("");
+  const std::string role =
+      sdk.role() ? std::string(codex::protocol::toString(*sdk.role())) : "";
+  std::optional<std::string> providerState;
+  std::string detail;
+  if (kind == "bridge.provider") {
+    providerState = presentation::stringMember(message, "state");
+    detail = presentation::stringMember(message, "reason");
+  }
+  static_cast<void>(logic.bridgeState(
+      connectionId, role, controllerId, sdk.providerGeneration(),
+      std::move(providerState), std::move(detail)));
+}
 
 template <typename Client>
 void configureStreamClient(Client &configuredClient, bool disabled) {
@@ -67,24 +111,54 @@ void configureStreamClient(Client &configuredClient, bool disabled) {
 template <typename Operation>
 void dispatchRequest(codex::frontend::CodexBridge &sdk,
                      const nlohmann::json &parameters, std::string action,
-                     std::string correlationId,
-                     ProtocolNormalizer &normalizer) {
+                     std::string correlationId, ProtocolNormalizer &normalizer,
+                     nodegraph::WorkerLogic &workerLogic) {
+  struct RequestPublication final {
+    bool requestPublished = false;
+    std::optional<nodegraph::DecodedMessage> synchronousResult;
+  };
+
+  auto publication = std::make_shared<RequestPublication>();
   const std::uint64_t startedAtSequence = normalizer.sequence();
-  sdk.request<Operation>(
+  const std::string requestId = sdk.request<Operation>(
       typename Operation::Params{parameters},
       [action = std::move(action), correlationId = std::move(correlationId),
-       context = parameters, startedAtSequence,
-       &normalizer](typename Operation::Response &response) mutable {
+       context = parameters, startedAtSequence, publication, &normalizer,
+       &workerLogic](typename Operation::Response &response) mutable {
+        const bool ok = response.ok();
+        const nlohmann::json &raw = response.getRaw();
+        const nlohmann::json payload =
+            ok ? response.getPayload()
+               : (raw.is_object() && raw.contains("error") ? raw["error"]
+                                                           : raw);
+        nodegraph::DecodedMessage decoded{
+            ok ? nodegraph::DecodedMessageKind::ClientResult
+               : nodegraph::DecodedMessageKind::ClientError,
+            std::string(Operation::method),
+            decodedRequestId(response.jsonRpcId()), decodedObject(payload)};
+        if (publication->requestPublished)
+          static_cast<void>(workerLogic.apply(std::move(decoded)));
+        else
+          publication->synchronousResult.emplace(std::move(decoded));
         normalizer.operationResult(std::move(action), std::move(correlationId),
                                    std::move(context), response.getRaw(),
                                    startedAtSequence);
       });
+  static_cast<void>(workerLogic.apply(nodegraph::DecodedMessage{
+      nodegraph::DecodedMessageKind::ClientRequest,
+      std::string(Operation::method), nodegraph::ProtocolRequestId(requestId),
+      decodedObject(parameters)}));
+  publication->requestPublished = true;
+  if (publication->synchronousResult)
+    static_cast<void>(
+        workerLogic.apply(std::move(*publication->synchronousResult)));
 }
 
 } // namespace
 
 int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
-                     bool connectBridge) {
+                     nodegraph::NodeGraph &graph,
+                     nodegraph::ThreadChannels &channels, bool connectBridge) {
   using StreamFactory = client::StreamSocketContextFactory;
 
   const std::size_t maximumFrameBytes = configuration.maximumFrameBytes();
@@ -97,6 +171,7 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
 
   codex::protocol::JsonLineFramer ipcFramer(maximumFrameBytes);
   codex::frontend::CodexBridge sdk({});
+  nodegraph::WorkerLogic workerLogic(graph, channels);
 
   const auto sendToQt = [&ipcEndpoint,
                          maximumFrameBytes](const nlohmann::json &message) {
@@ -122,36 +197,65 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   std::string expectedDisconnectReason;
   bool desiredConnected = connectBridge;
   client::ClientConnection connection(
-      sdk, client::ClientConnectionCallbacks{
-               .onConnected =
-                   [&normalizer] { normalizer.transportEvent("connected"); },
-               .onDisconnected =
-                   [&normalizer, &expectedDisconnectReason,
-                    &desiredConnected] {
-                     std::string reason =
-                         std::exchange(expectedDisconnectReason, {});
-                     normalizer.transportEvent(
-                         desiredConnected ? "retrying" : "disconnected",
-                         std::move(reason));
-                   },
-               .onFailure =
-                   [&normalizer](std::string reason) {
-                     normalizer.transportEvent("failure", std::move(reason));
-                   }});
+      sdk,
+      client::ClientConnectionCallbacks{
+          .onConnected =
+              [&normalizer, &workerLogic] {
+                static_cast<void>(workerLogic.transportEvent("connected"));
+                normalizer.transportEvent("connected");
+              },
+          .onDisconnected =
+              [&normalizer, &expectedDisconnectReason, &desiredConnected,
+               &workerLogic] {
+                std::string reason =
+                    std::exchange(expectedDisconnectReason, {});
+                static_cast<void>(workerLogic.transportEvent(
+                    desiredConnected ? "retrying" : "disconnected", reason));
+                normalizer.transportEvent(desiredConnected ? "retrying"
+                                                           : "disconnected",
+                                          std::move(reason));
+              },
+          .onFailure =
+              [&normalizer, &workerLogic](std::string reason) {
+                static_cast<void>(
+                    workerLogic.transportEvent("failure", reason));
+                normalizer.transportEvent("failure", std::move(reason));
+              }});
 
-  sdk.onRawJson([&normalizer](codex::protocol::AppServerDirection direction,
-                              const nlohmann::json &message) {
-    if (direction == codex::protocol::AppServerDirection::FromAppServer)
+  sdk.onRawJson([&normalizer,
+                 &workerLogic](codex::protocol::AppServerDirection direction,
+                               const nlohmann::json &message) {
+    if (direction == codex::protocol::AppServerDirection::FromAppServer) {
       normalizer.observeRawInbound(message);
+      return;
+    }
+    const std::optional<std::string> method =
+        codex::protocol::jsonRpcMethod(message);
+    if (method && *method == "initialized") {
+      const auto parameters = message.find("params");
+      const nlohmann::json payload =
+          parameters == message.end() ? nlohmann::json::object() : *parameters;
+      static_cast<void>(workerLogic.apply(nodegraph::DecodedMessage{
+          nodegraph::DecodedMessageKind::ClientNotification, *method,
+          std::nullopt, decodedObject(payload)}));
+    }
   });
-  sdk.onBridgeEvent([&normalizer](const nlohmann::json &message) {
-    normalizer.bridgeEvent(message);
-  });
+  sdk.onBridgeEvent(
+      [&normalizer, &workerLogic, &sdk](const nlohmann::json &message) {
+        applyBridgeState(workerLogic, sdk, message);
+        normalizer.bridgeEvent(message);
+      });
 
 #define CODEXUI_REGISTER_SERVER_REQUEST(OperationName, methodName)             \
   sdk.on##OperationName(                                                       \
-      [&normalizer](                                                           \
+      [&normalizer, &workerLogic](                                             \
           codex::generated::server_requests::OperationName::Params &request) { \
+        static_cast<void>(workerLogic.apply(nodegraph::DecodedMessage{         \
+            nodegraph::DecodedMessageKind::ServerRequest,                      \
+            std::string(                                                       \
+                codex::generated::server_requests::OperationName::method),     \
+            decodedRequestId(request.jsonRpcId()),                             \
+            decodedObject(request.getPayload())}));                            \
         normalizer.serverRequest(                                              \
             codex::generated::server_requests::OperationName::method,          \
             request.jsonRpcId(), request.getPayload());                        \
@@ -160,16 +264,71 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
 #undef CODEXUI_REGISTER_SERVER_REQUEST
 
 #define CODEXUI_REGISTER_SERVER_NOTIFICATION(OperationName, methodName)        \
-  sdk.on##OperationName(                                                       \
-      [&normalizer](                                                           \
-          codex::generated::server_notifications::OperationName::Params        \
-              &notification) {                                                 \
-        normalizer.serverNotification(                                         \
-            codex::generated::server_notifications::OperationName::method,     \
-            notification.getPayload());                                        \
-      });
+  sdk.on##OperationName([&normalizer, &workerLogic](                           \
+                            codex::generated::server_notifications::           \
+                                OperationName::Params &notification) {         \
+    static_cast<void>(workerLogic.apply(nodegraph::DecodedMessage{             \
+        nodegraph::DecodedMessageKind::ServerNotification,                     \
+        std::string(                                                           \
+            codex::generated::server_notifications::OperationName::method),    \
+        std::nullopt, decodedObject(notification.getPayload())}));             \
+    normalizer.serverNotification(                                             \
+        codex::generated::server_notifications::OperationName::method,         \
+        notification.getPayload());                                            \
+  });
   AI_OPENAI_CODEX_SERVER_NOTIFICATIONS(CODEXUI_REGISTER_SERVER_NOTIFICATION)
 #undef CODEXUI_REGISTER_SERVER_NOTIFICATION
+
+  using CurrentTimeRead = current_protocol::server_requests::CurrentTimeRead;
+  sdk.onServerRequest<CurrentTimeRead>(
+      [&normalizer, &workerLogic, &sdk](CurrentTimeRead::Params &request) {
+        const auto requestId = requestIdFromJson(request.jsonRpcId());
+        static_cast<void>(workerLogic.apply(nodegraph::DecodedMessage{
+            nodegraph::DecodedMessageKind::ServerRequest,
+            std::string(CurrentTimeRead::method), requestId,
+            decodedObject(request.getPayload())}));
+        const std::int64_t currentTime =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        const CurrentTimeRead::Response response(
+            nlohmann::json{{"currentTimeAt", currentTime}});
+        const bool accepted = sdk.respond<CurrentTimeRead>(request, response);
+        static_cast<void>(workerLogic.resolveInteraction(
+            requestId, accepted,
+            accepted ? std::string{}
+                     : "CodexBridge rejected current-time response"));
+        if (!accepted)
+          normalizer.transportEvent(
+              "failure", "current-time server response was rejected");
+      });
+
+#define CODEXUI_REGISTER_CURRENT_NOTIFICATION(OperationName)                   \
+  sdk.onServerNotification<                                                    \
+      current_protocol::server_notifications::OperationName>(                  \
+      [&workerLogic](                                                          \
+          current_protocol::server_notifications::OperationName::Params        \
+              &notification) {                                                 \
+        static_cast<void>(workerLogic.apply(nodegraph::DecodedMessage{         \
+            nodegraph::DecodedMessageKind::ServerNotification,                 \
+            std::string(current_protocol::server_notifications::               \
+                            OperationName::method),                            \
+            std::nullopt, decodedObject(notification.getPayload())}));         \
+      });
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ModelProviderAuthRecoveryStarted)
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ModelProviderAuthRecoveryCompleted)
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(RawResponseItemCompleted)
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(RawResponseCompleted)
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ThreadRealtimeItemStarted)
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ThreadRealtimeItemTranscriptDelta)
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ThreadRealtimeItemCompleted)
+#undef CODEXUI_REGISTER_CURRENT_NOTIFICATION
+
+  const auto publishTransportEvent =
+      [&normalizer, &workerLogic](std::string state, std::string detail = {}) {
+        static_cast<void>(workerLogic.transportEvent(state, detail));
+        normalizer.transportEvent(std::move(state), std::move(detail));
+      };
 
   net::un::stream::legacy::SocketClient<StreamFactory,
                                         client::ClientConnection &, std::size_t>
@@ -291,8 +450,7 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     selectedTransportLabel = std::move(label);
     const std::string connectionLabel = selectedTransportLabel;
     connectSelected = [&, clientHandle, flow, connectionLabel] {
-      normalizer.transportEvent("retrying",
-                                "Connecting using " + connectionLabel);
+      publishTransportEvent("retrying", "Connecting using " + connectionLabel);
       clientHandle->connect([&, flow, connectionLabel](
                                 const auto &, core::socket::State state) {
         if (state == core::socket::State::OK ||
@@ -302,7 +460,7 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
             "failed to connect using " + connectionLabel + ": " + state.what();
         core::EventReceiver::atNextTick([&, flow, failure] {
           if (eventLoopRunning && !shutdownRequested && flow->isTerminated())
-            normalizer.transportEvent("failure", failure);
+            publishTransportEvent("failure", failure);
         });
       });
     };
@@ -372,7 +530,9 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   };
 
   const auto publishConnectionSettings = [&] {
-    normalizer.connectionSettings(connectionSettings());
+    nlohmann::json settings = connectionSettings();
+    static_cast<void>(workerLogic.connectionSettings(decodedObject(settings)));
+    normalizer.connectionSettings(std::move(settings));
   };
 
   continueTransition = [&] {
@@ -381,7 +541,7 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     if ((terminatingFlowTerminated && !terminatingFlowTerminated()) ||
         connection.attached()) {
       if (std::chrono::steady_clock::now() >= transitionDeadline) {
-        normalizer.transportEvent("failure", "connection transition timed out");
+        publishTransportEvent("failure", "connection transition timed out");
         requestShutdown();
         return;
       }
@@ -481,8 +641,7 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   const auto dispatchCommand = [&](nlohmann::json command) {
     if (!presentation::isPresentationFrame(command) ||
         presentation::stringMember(command, "kind") != "command") {
-      normalizer.transportEvent("failure",
-                                "invalid CodexUI presentation command");
+      publishTransportEvent("failure", "invalid CodexUI presentation command");
       return;
     }
 
@@ -493,8 +652,9 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
         presentation::member(command, "data", nlohmann::json::object());
 
     if (!parameters.is_object()) {
-      normalizer.operationRejected(action, correlationId, -32602,
-                                   "presentation command data must be an object");
+      normalizer.operationRejected(
+          action, correlationId, -32602,
+          "presentation command data must be an object");
       return;
     }
 
@@ -684,8 +844,7 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     if (action == "diagnostic.raw.send") {
       const auto message = parameters.find("message");
       if (message == parameters.end() || !sdk.sendRawJson(*message))
-        normalizer.transportEvent("failure",
-                                  "raw app-server message was rejected");
+        publishTransportEvent("failure", "raw app-server message was rejected");
       return;
     }
 
@@ -698,84 +857,91 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
       if (parameters.contains("error"))
         response["error"] = parameters["error"];
       else
-        response["result"] = presentation::member(
-            parameters, "result", nlohmann::json::object());
-      if (requestId.is_null() || !sdk.sendRawJson(response))
-        normalizer.transportEvent("failure",
-                                  "server-request response was rejected");
+        response["result"] = presentation::member(parameters, "result",
+                                                  nlohmann::json::object());
+      const bool accepted = !requestId.is_null() && sdk.sendRawJson(response);
+      if (!requestId.is_null()) {
+        static_cast<void>(workerLogic.resolveInteraction(
+            requestIdFromJson(requestId), accepted,
+            accepted ? std::string{}
+                     : "CodexBridge rejected the server-request response"));
+      }
+      if (!accepted)
+        publishTransportEvent("failure",
+                              "server-request response was rejected");
       return;
     }
 
     using namespace codex::generated::client_requests;
     if (action == "threads.list")
       dispatchRequest<ThreadList>(sdk, parameters, action, correlationId,
-                                  normalizer);
+                                  normalizer, workerLogic);
     else if (action == "thread.read")
       dispatchRequest<ThreadRead>(sdk, parameters, action, correlationId,
-                                  normalizer);
+                                  normalizer, workerLogic);
     else if (action == "thread.create")
       dispatchRequest<ThreadStart>(sdk, parameters, action, correlationId,
-                                   normalizer);
+                                   normalizer, workerLogic);
     else if (action == "thread.resume")
       dispatchRequest<ThreadResume>(sdk, parameters, action, correlationId,
-                                    normalizer);
+                                    normalizer, workerLogic);
     else if (action == "thread.fork")
       dispatchRequest<ThreadFork>(sdk, parameters, action, correlationId,
-                                  normalizer);
+                                  normalizer, workerLogic);
     else if (action == "thread.rename")
       dispatchRequest<ThreadSetName>(sdk, parameters, action, correlationId,
-                                     normalizer);
+                                     normalizer, workerLogic);
     else if (action == "thread.archive")
       dispatchRequest<ThreadArchive>(sdk, parameters, action, correlationId,
-                                     normalizer);
+                                     normalizer, workerLogic);
     else if (action == "thread.unarchive")
       dispatchRequest<ThreadUnarchive>(sdk, parameters, action, correlationId,
-                                       normalizer);
+                                       normalizer, workerLogic);
     else if (action == "thread.delete")
       dispatchRequest<ThreadDelete>(sdk, parameters, action, correlationId,
-                                    normalizer);
+                                    normalizer, workerLogic);
     else if (action == "models.list")
       dispatchRequest<ModelList>(sdk, parameters, action, correlationId,
-                                 normalizer);
+                                 normalizer, workerLogic);
     else if (action == "model-provider-capabilities.read")
-      dispatchRequest<ModelProviderCapabilitiesRead>(sdk, parameters, action,
-                                                     correlationId, normalizer);
+      dispatchRequest<ModelProviderCapabilitiesRead>(
+          sdk, parameters, action, correlationId, normalizer, workerLogic);
     else if (action == "account.read")
       dispatchRequest<GetAccount>(sdk, parameters, action, correlationId,
-                                  normalizer);
+                                  normalizer, workerLogic);
     else if (action == "account.rate-limits.read")
-      dispatchRequest<GetAccountRateLimits>(sdk, parameters, action,
-                                            correlationId, normalizer);
+      dispatchRequest<GetAccountRateLimits>(
+          sdk, parameters, action, correlationId, normalizer, workerLogic);
     else if (action == "account.token-usage.read")
-      dispatchRequest<GetAccountTokenUsage>(sdk, parameters, action,
-                                            correlationId, normalizer);
+      dispatchRequest<GetAccountTokenUsage>(
+          sdk, parameters, action, correlationId, normalizer, workerLogic);
     else if (action == "config.read")
       dispatchRequest<ConfigRead>(sdk, parameters, action, correlationId,
-                                  normalizer);
+                                  normalizer, workerLogic);
     else if (action == "permission-profiles.list")
-      dispatchRequest<PermissionProfileList>(sdk, parameters, action,
-                                             correlationId, normalizer);
+      dispatchRequest<PermissionProfileList>(
+          sdk, parameters, action, correlationId, normalizer, workerLogic);
     else if (action == "experimental-features.list")
-      dispatchRequest<ExperimentalFeatureList>(sdk, parameters, action,
-                                               correlationId, normalizer);
+      dispatchRequest<ExperimentalFeatureList>(
+          sdk, parameters, action, correlationId, normalizer, workerLogic);
     else if (action == "skills.list")
       dispatchRequest<SkillsList>(sdk, parameters, action, correlationId,
-                                  normalizer);
+                                  normalizer, workerLogic);
     else if (action == "hooks.list")
       dispatchRequest<HooksList>(sdk, parameters, action, correlationId,
-                                 normalizer);
+                                 normalizer, workerLogic);
     else if (action == "plugins.list")
       dispatchRequest<PluginList>(sdk, parameters, action, correlationId,
-                                  normalizer);
+                                  normalizer, workerLogic);
     else if (action == "apps.list")
       dispatchRequest<AppsList>(sdk, parameters, action, correlationId,
-                                normalizer);
+                                normalizer, workerLogic);
     else if (action == "mcp-servers.list")
-      dispatchRequest<McpServerStatusList>(sdk, parameters, action,
-                                           correlationId, normalizer);
+      dispatchRequest<McpServerStatusList>(
+          sdk, parameters, action, correlationId, normalizer, workerLogic);
 #define CODEXUI_DISPATCH_PRESENTATION_REQUEST(ActionName, OperationName)       \
   else if (action == ActionName) dispatchRequest<OperationName>(               \
-      sdk, parameters, action, correlationId, normalizer);
+      sdk, parameters, action, correlationId, normalizer, workerLogic);
     CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.unsubscribe",
                                           ThreadUnsubscribe)
     CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.goal.set", ThreadGoalSet)
@@ -893,42 +1059,78 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
                                           FuzzyFileSearch)
 #undef CODEXUI_DISPATCH_PRESENTATION_REQUEST
     else if (action == "turn.start") dispatchRequest<TurnStart>(
-        sdk, parameters, action, correlationId, normalizer);
+        sdk, parameters, action, correlationId, normalizer, workerLogic);
     else if (action == "turn.steer") dispatchRequest<TurnSteer>(
-        sdk, parameters, action, correlationId, normalizer);
+        sdk, parameters, action, correlationId, normalizer, workerLogic);
     else if (action == "turn.interrupt") dispatchRequest<TurnInterrupt>(
-        sdk, parameters, action, correlationId, normalizer);
+        sdk, parameters, action, correlationId, normalizer, workerLogic);
     else normalizer.operationRejected(
         action, correlationId, -32601,
         "unsupported CodexUI presentation action");
   };
 
+  const bool workerMailboxReady =
+      WorkerMailboxReceiver::create(channels, [&workerLogic, &requestShutdown,
+                                               &channels](
+                                                  nodegraph::QtToWorkerMessage
+                                                      message) {
+        std::visit(
+            [&](auto &payload) {
+              using Message = std::decay_t<decltype(payload)>;
+              if constexpr (std::is_same_v<Message, nodegraph::NodeAction>) {
+                if (payload.kind == nodegraph::NodeActionKind::UiDetached) {
+                  static_cast<void>(workerLogic.acknowledgeUiDetached(
+                      std::move(payload.target)));
+                  return;
+                }
+                nodegraph::UiEffect rejected{
+                    nodegraph::UiEffectKind::ShowNotice,
+                    payload.target,
+                    "Typed user action is disabled during graph comparison",
+                    {}};
+                static_cast<void>(channels.sendUiEffect(rejected));
+              } else if constexpr (std::is_same_v<Message,
+                                                  nodegraph::RuntimeAction>) {
+                nodegraph::UiEffect rejected{
+                    nodegraph::UiEffectKind::ShowNotice,
+                    std::nullopt,
+                    "Typed runtime action is disabled during graph "
+                    "comparison",
+                    {}};
+                static_cast<void>(channels.sendUiEffect(rejected));
+              } else if (requestShutdown) {
+                requestShutdown();
+              }
+            },
+            message);
+      }) != nullptr;
+
   ipcEndpoint->setOnData([&](const char *data, std::size_t size) {
     try {
       const bool accepted = ipcFramer.consume(
           std::string_view(data, size), dispatchCommand,
-          [&normalizer, &requestShutdown](std::string message) {
-            normalizer.transportEvent("failure", std::move(message));
+          [&publishTransportEvent, &requestShutdown](std::string message) {
+            publishTransportEvent("failure", std::move(message));
             requestShutdown();
           });
       if (!accepted)
         requestShutdown();
     } catch (const std::exception &exception) {
-      normalizer.transportEvent(
+      publishTransportEvent(
           "failure", std::string("presentation command dispatch failed: ") +
                          exception.what());
       requestShutdown();
     } catch (...) {
-      normalizer.transportEvent("failure",
-                                "presentation command dispatch failed");
+      publishTransportEvent("failure", "presentation command dispatch failed");
       requestShutdown();
     }
   });
-  ipcEndpoint->setOnError([&normalizer, &requestShutdown](int errorNumber) {
-    normalizer.transportEvent("failure", std::string("socketpair failure: ") +
+  ipcEndpoint->setOnError(
+      [&publishTransportEvent, &requestShutdown](int errorNumber) {
+        publishTransportEvent("failure", std::string("socketpair failure: ") +
                                              std::to_string(errorNumber));
-    requestShutdown();
-  });
+        requestShutdown();
+      });
   ipcEndpoint->setOnClosed([&ipcEndpoint, &requestShutdown] {
     ipcEndpoint = nullptr;
     requestShutdown();
@@ -936,7 +1138,13 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
 
   eventLoopRunning = true;
   core::EventReceiver::atNextTick([&] {
-    normalizer.transportEvent("runtime-started");
+    publishTransportEvent("runtime-started");
+    if (!workerMailboxReady) {
+      publishTransportEvent("failure",
+                            "unable to observe the Qt-to-worker eventfd");
+      requestShutdown();
+      return;
+    }
     const std::array disabled{
         unixClient.getConfig()->Instance::getDisabled(),
         ipv4Client.getConfig()->Instance::getDisabled(),
@@ -961,7 +1169,7 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     const std::size_t enabled = static_cast<std::size_t>(
         std::count(disabled.begin(), disabled.end(), false));
     if (enabled != 1) {
-      normalizer.transportEvent(
+      publishTransportEvent(
           "failure",
           "exactly one outgoing bridge transport must be enabled; found " +
               std::to_string(enabled));
@@ -1012,6 +1220,8 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   if (terminateSelected)
     terminateSelected();
   connection.shutdown();
+  static_cast<void>(workerLogic.sendWorkerStopped(
+      result == 0 ? "SNode.C worker stopped" : "SNode.C worker failed"));
   return result;
 }
 
