@@ -578,6 +578,131 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
   }
 }
 
+void earlyMaterializationWaitsForTheExactRequestResult() {
+  NodeGraph graph;
+  ThreadChannels channels;
+  WorkerLogic logic(graph, channels);
+
+  static_cast<void>(logic.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{{"thread", Value(Value::Object{
+                                    {"id", Value("early-materialization")}})}}}));
+  static_cast<void>(takeWorkerMessages(channels));
+  NodeRef thread;
+  {
+    auto read = graph.tryRead();
+    thread = read->find({NodeKind::Thread, "early-materialization"});
+  }
+
+  NodeAction first{thread, NodeActionKind::SubmitPrompt};
+  first.promptText = "first request";
+  PromptTransition admitted = logic.admitPrompt(std::move(first));
+  require(admitted.command.has_value(), "the first request is dispatched");
+  if (!admitted.command)
+    return;
+  const NodeRef firstPrompt = admitted.command->localPrompt;
+  static_cast<void>(takeWorkerMessages(channels));
+
+  NodeAction second{thread, NodeActionKind::SubmitPrompt};
+  second.promptText = "second request";
+  require(!logic.admitPrompt(std::move(second)).command,
+          "the second request waits behind the first request result");
+  static_cast<void>(takeWorkerMessages(channels));
+  static_cast<void>(logic.markPromptDispatched(
+      firstPrompt, ProtocolRequestId("early-result")));
+  static_cast<void>(takeWorkerMessages(channels));
+
+  require(logic.promptMaterialized(firstPrompt) ==
+              ChannelSendStatus::Accepted,
+          "an early authoritative widget handoff is acknowledged");
+  static_cast<void>(takeWorkerMessages(channels));
+  {
+    auto read = graph.tryRead();
+    const NodeRef retained = read->find(firstPrompt->id());
+    const Value *materialized =
+        retained ? field(read->state(retained), "uiMaterialized") : nullptr;
+    require(retained == firstPrompt && materialized &&
+                materialized->asBool() && *materialized->asBool(),
+            "the current local node retains the dispatch slot until its exact "
+            "JSON-RPC result");
+  }
+
+  PromptTransition completed = logic.completePrompt(firstPrompt, true);
+  static_cast<void>(takeWorkerMessages(channels));
+  require(completed.command &&
+              completed.command->promptText == "second request",
+          "the exact result advances one queued prompt after early "
+          "materialization");
+  {
+    auto read = graph.tryRead();
+    require(!read->find(firstPrompt->id()),
+            "the handed-off local node retires with the completed request");
+  }
+}
+
+void stalePromptTargetsRetainAuthoredInputInRecoveryNodes() {
+  NodeGraph graph;
+  ThreadChannels channels;
+  WorkerLogic logic(graph, channels);
+
+  static_cast<void>(logic.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{{"thread", Value(Value::Object{
+                                    {"id", Value("removed-destination")}})}}}));
+  static_cast<void>(takeWorkerMessages(channels));
+  NodeRef staleThread;
+  {
+    auto read = graph.tryRead();
+    staleThread = read->find({NodeKind::Thread, "removed-destination"});
+  }
+  static_cast<void>(logic.apply(
+      {DecodedMessageKind::ServerNotification, "thread/deleted", std::nullopt,
+       Value::Object{{"threadId", Value("removed-destination")}}}));
+  static_cast<void>(takeWorkerMessages(channels));
+
+  NodeAction action{staleThread, NodeActionKind::SubmitPrompt};
+  action.promptText = "retain this authored prompt";
+  action.attachments.push_back(
+      {"/tmp/recovery.png", "recovery.png", "image/png", std::nullopt});
+  PromptTransition retained = logic.admitPrompt(std::move(action));
+  require(!retained.command,
+          "a stale target is never dispatched by canonical id");
+  const std::vector<WorkerToQtMessage> messages = takeWorkerMessages(channels);
+  require(std::ranges::any_of(messages, [](const WorkerToQtMessage &message) {
+            const auto *effect = std::get_if<UiEffect>(&message);
+            return effect && effect->kind == UiEffectKind::ShowNotice;
+          }),
+          "the rejected stale target is reported visibly");
+
+  auto read = graph.tryRead();
+  const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+  const std::vector<NodeRef> roots =
+      read->related(runtime, RelationKind::RootThread);
+  const NodeRef recovery =
+      roots.empty() || !roots.front()->id().canonical.starts_with(
+                           "local-recovery-thread:")
+          ? NodeRef{}
+          : roots.front();
+  const NodeRef turn = recovery && read->childCount(recovery) != 0
+                           ? read->childAt(recovery, 0)
+                           : NodeRef{};
+  const NodeRef prompt = turn && read->childCount(turn) != 0
+                             ? read->childAt(turn, 0)
+                             : NodeRef{};
+  const auto state = prompt ? read->state(prompt) : nullptr;
+  const Value *attachments = state ? field(state, "attachments") : nullptr;
+  require(recovery && turn && prompt && state &&
+              state->status == NodeStatus::Failed &&
+              stringFieldEquals(state, "text", "retain this authored prompt") &&
+              stringFieldEquals(state, "dispatchState", "failed") &&
+              attachments && attachments->asArray() &&
+              attachments->asArray()->size() == 1 &&
+              read->related(runtime, RelationKind::PendingPrompt) ==
+                  std::vector<NodeRef>{prompt},
+          "worker-side rejection keeps exact authored text and attachment "
+          "metadata in a visible recovery graph node");
+}
+
 void firstPromptCreatesAndMigratesOneDraftThread() {
   NodeGraph graph;
   ThreadChannels channels;
@@ -869,6 +994,8 @@ int main() {
   uiDetachAcknowledgementIsRevisionNeutral();
   reverseInteractionResolutionUpdatesTheGraph();
   localPromptsAreGraphNodesAndDispatchPerThread();
+  earlyMaterializationWaitsForTheExactRequestResult();
+  stalePromptTargetsRetainAuthoredInputInRecoveryNodes();
   firstPromptCreatesAndMigratesOneDraftThread();
   providerGenerationResetIsAtomicAndKeepsOnlyRecoveryPrompts();
   workerStoppedDeliveryIsExplicit();

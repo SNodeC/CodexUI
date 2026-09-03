@@ -254,25 +254,51 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending) {
         invalidTarget = true;
     }
 
-    if (invalidTarget || !pending.thread) {
-      // An invalid target does not consume the authored data into a graph
-      // node. Qt only clears its draft after a successful admission.
+    if (invalidTarget) {
+      // Queue admission already moved the user's draft off Qt-main. Preserve
+      // it as an explicit failed local prompt if its target disappeared
+      // before the worker consumed the command.
+      NodeState threadState;
+      threadState.status = NodeStatus::Failed;
+      threadState.fields = {{"type", Value("localRecoveryThread")},
+                            {"local", Value(true)},
+                            {"recoveryOnly", Value(true)},
+                            {"name", Value("Unsent prompt")}};
+      pending.thread = write.upsert(
+          {NodeKind::Thread, "local-recovery-thread:" + suffix},
+          std::move(threadState));
+      NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
+      std::vector<NodeRef> roots =
+          write.related(runtime, RelationKind::RootThread);
+      roots.insert(roots.begin(), pending.thread);
+      write.replaceRelated(runtime, RelationKind::RootThread, roots);
+      selectedDraft = pending.thread;
+    }
+
+    if (!pending.thread) {
       change = write.finish();
     } else {
       NodeRef turn = activeTurn(write, pending.thread);
       const bool startsTurn = !turn;
       if (!turn) {
         NodeState turnState;
-        turnState.status = NodeStatus::Pending;
-        turnState.fields = {{"type", Value("localTurn")},
+        turnState.status = invalidTarget ? NodeStatus::Failed
+                                         : NodeStatus::Pending;
+        turnState.fields = {{"type", Value(invalidTarget
+                                                ? "localRecoveryTurn"
+                                                : "localTurn")},
                             {"local", Value(true)}};
-        turn = write.upsert({NodeKind::Turn, "local-turn:" + suffix},
-                            std::move(turnState));
+        turn = write.upsert(
+            {NodeKind::Turn, (invalidTarget ? "local-recovery-turn:"
+                                           : "local-turn:") +
+                                 suffix},
+            std::move(turnState));
         write.setParent(pending.thread, turn);
       }
 
       NodeState promptState;
-      promptState.status = NodeStatus::Pending;
+      promptState.status = invalidTarget ? NodeStatus::Failed
+                                         : NodeStatus::Pending;
       promptState.fields = {
           {"type", Value("localPrompt")},
           {"local", Value(true)},
@@ -280,9 +306,14 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending) {
           {"clientUserMessageId", Value(pending.clientUserMessageId)},
           {"text", Value(pending.promptText)},
           {"attachments", attachmentSummaries(pending.attachments)},
-          {"dispatchState", Value("queued")},
+          {"dispatchState", Value(invalidTarget ? "failed" : "queued")},
           {"startsTurn", Value(startsTurn)},
           {"threadId", Value(pending.thread->id().canonical)}};
+      if (invalidTarget) {
+        promptState.fields.emplace(
+            "error", Value("The destination thread is no longer available"));
+        promptState.fields.emplace("requiresExplicitRecovery", Value(true));
+      }
       if (!startsTurn)
         promptState.fields.emplace("expectedTurnId",
                                    Value(turn->id().canonical));
@@ -293,9 +324,11 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending) {
       write.relate(runtime, RelationKind::PendingPrompt, pending.localPrompt);
       write.relate(pending.thread, RelationKind::PendingPrompt,
                    pending.localPrompt);
-      const NodeRef ownerThread = pending.thread;
-      promptQueues_[pending.thread.get()].emplace_back(std::move(pending));
-      command = takeNextPrompt(write, ownerThread);
+      if (!invalidTarget) {
+        const NodeRef ownerThread = pending.thread;
+        promptQueues_[pending.thread.get()].emplace_back(std::move(pending));
+        command = takeNextPrompt(write, ownerThread);
+      }
       change = write.finish();
     }
   }
@@ -303,12 +336,13 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending) {
   if (selectedDraft) {
     UiEffect select{UiEffectKind::SelectThread, selectedDraft, {}, {}};
     static_cast<void>(channels_.sendUiEffect(select));
-  } else if (invalidTarget) {
+  }
+  if (invalidTarget) {
     UiEffect effect{UiEffectKind::ShowNotice,
                     std::nullopt,
                     "The destination thread is no longer available",
                     {}};
-    return {channels_.sendUiEffect(effect), std::nullopt};
+    static_cast<void>(channels_.sendUiEffect(effect));
   }
   return {publish(std::move(change)), std::move(command)};
 }
@@ -484,7 +518,21 @@ WorkerLogic::completePrompt(const NodeRef &localPrompt, bool accepted,
         inFlight != promptInFlight_.end() && inFlight->second == localPrompt)
       promptInFlight_.erase(inFlight);
 
-    if (accepted) {
+    const std::shared_ptr<const NodeState> promptState =
+        write.state(localPrompt);
+    const Value *materialized = field(*promptState, "uiMaterialized");
+    const bool uiMaterialized =
+        materialized && materialized->asBool() && *materialized->asBool();
+
+    if (uiMaterialized) {
+      NodeRef provisionalTurn = write.parent(localPrompt);
+      write.remove(localPrompt);
+      if (provisionalTurn && isLocalShell(provisionalTurn) &&
+          write.children(provisionalTurn).empty())
+        write.remove(provisionalTurn);
+      if (thread && isLocalShell(thread) && write.children(thread).empty())
+        write.remove(thread);
+    } else if (accepted) {
       write.setField(localPrompt, "dispatchState",
                      Value("awaitingMaterialization"));
       write.eraseField(localPrompt, "error");
@@ -544,20 +592,34 @@ PromptTransition WorkerLogic::failPrompt(const NodeRef &localPrompt,
 
 ChannelSendStatus WorkerLogic::promptMaterialized(const NodeRef &localPrompt) {
   GraphChange change;
+  bool retainedForResult = false;
   {
     auto write = graph_.write();
     if (!localPrompt || write.find(localPrompt->id()) != localPrompt)
       return ChannelSendStatus::Accepted;
     NodeRef turn = write.parent(localPrompt);
     NodeRef thread = turn ? write.parent(turn) : NodeRef{};
-    write.remove(localPrompt);
-    if (turn && isLocalShell(turn) && write.children(turn).empty())
-      write.remove(turn);
-    if (thread && isLocalShell(thread) && write.children(thread).empty())
-      write.remove(thread);
+    const auto inFlight = thread ? promptInFlight_.find(thread.get())
+                                 : promptInFlight_.end();
+    retainedForResult =
+        inFlight != promptInFlight_.end() && inFlight->second == localPrompt;
+    if (retainedForResult) {
+      // The authoritative user item can arrive before the turn request's
+      // JSON-RPC result. The widget has moved to that item, but this small
+      // current node must keep the per-thread dispatch slot until the exact
+      // result advances the queue.
+      write.setField(localPrompt, "uiMaterialized", Value(true));
+    } else {
+      write.remove(localPrompt);
+      if (turn && isLocalShell(turn) && write.children(turn).empty())
+        write.remove(turn);
+      if (thread && isLocalShell(thread) && write.children(thread).empty())
+        write.remove(thread);
+    }
     change = write.finish();
   }
-  forgetPrompt(localPrompt);
+  if (!retainedForResult)
+    forgetPrompt(localPrompt);
   return publish(std::move(change));
 }
 
