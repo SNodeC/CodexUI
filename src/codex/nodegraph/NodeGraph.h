@@ -91,6 +91,8 @@ enum class RelationKind : std::uint8_t {
   OperationTarget,
   InteractionTarget,
   PendingInteraction,
+  PendingPrompt,
+  PromptMaterialization,
   ProcessOwner,
 };
 

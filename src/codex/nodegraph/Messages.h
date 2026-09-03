@@ -24,6 +24,7 @@ struct GraphChanged final {
 
 enum class UiEffectKind : std::uint8_t {
   ShowNotice,
+  SelectThread,
   FocusComposer,
   ClearComposerDraft,
   PrepareLocalPromptAdmission,
@@ -57,26 +58,16 @@ struct Attachment final {
 
 enum class NodeActionKind : std::uint8_t {
   Hydrate,
-  Resume,
   LoadHistory,
   Rename,
   Fork,
   Archive,
   Unarchive,
   Delete,
-  Compact,
-  StartShellCommand,
-  ApproveGuardianDenied,
-  SetGoal,
-  ClearGoal,
-  MoveSection,
-  UpdateMetadata,
-  UpdateSettings,
   SubmitPrompt,
-  SteerPrompt,
   InterruptTurn,
   ResolveInteraction,
-  UploadFeedback,
+  PromptMaterialized,
   UiDetached,
 };
 
@@ -103,16 +94,16 @@ enum class RuntimeActionKind : std::uint8_t {
   ClaimController,
   ReleaseController,
   RefreshCatalogs,
-  AccountLogin,
-  AccountLogout,
-  InstallPlugin,
-  UninstallPlugin,
 };
 
 struct RuntimeAction final {
   RuntimeActionKind kind = RuntimeActionKind::RefreshThreads;
   Value::Object payload;
   std::string correlation;
+  // CreateThread owns its first prompt until the worker admits and dispatches
+  // it. Other runtime actions leave these fields empty.
+  std::string promptText;
+  std::vector<Attachment> attachments;
 
   bool operator==(const RuntimeAction &) const = default;
 };
