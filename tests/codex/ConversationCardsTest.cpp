@@ -1519,6 +1519,16 @@ bool testCardFoldingGeometryAndRetention() {
                  userCard->isAncestorOf(reasoningCard) &&
                  agentCardWidget->property("nestedConversationCard").toBool(),
              "the first You card structurally owns its turn activity");
+  QWidget *promptContent = userCard->findChild<QWidget *>(
+      QStringLiteral("conversationCardContent"), Qt::FindDirectChildrenOnly);
+  const int promptContentBottom =
+      promptContent ? promptContent->geometry().y() + promptContent->height()
+                    : -1;
+  const int firstNestedTop = agentCardWidget->mapTo(userCard, QPoint{}).y();
+  result &= expect(promptContent &&
+                       firstNestedTop - promptContentBottom == 8,
+                   "turn prompt content and its first nested card use the "
+                   "canonical 8 px boundary");
 
   const LocalPromptKey steeringKey{4343};
   VisibleCardData steering{

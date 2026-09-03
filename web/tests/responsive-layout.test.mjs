@@ -93,6 +93,7 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /\.thread-row \.status-dot\.danger\s*\{[^}]*background:\s*#c43d4d/u);
     assert.match(css, /\.conversation-card\.userMessage\.steering\s*\{[^}]*background:\s*#eefafa;[^}]*border-color:\s*#9fd7d8/u);
     assert.match(css, /\.conversation-card\.localPrompt\.steering\s*\{[^}]*background:\s*#eefafa;[^}]*border-color:\s*#5caeb1/u);
+    assert.match(css, /\.turn-nested\s*\{[^}]*gap:\s*8px;[^}]*margin-top:\s*8px/u);
     assert.doesNotMatch(css, /acknowledgment-fade/u);
     assert.match(css, /conversation-card\.turn-container\.active-turn[^}]*#6f98e8/u);
     assert.match(css, /\.send-button\.steer\s*\{[^}]*background:\s*#167b80[^}]*color:\s*#fff/u);

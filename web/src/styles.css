@@ -89,7 +89,7 @@ h1, h2, h3, p { margin: 0; }
 .conversation-scroll::-webkit-scrollbar-track { margin-block-end: calc(var(--composer-overlay-height) + 8px); }
 .turn-section { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
 .turn-section:last-child { margin-bottom: 0; }
-.turn-nested { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.turn-nested { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .conversation-card { border: 1px solid #dce2eb; border-radius: 11px; background: #fff; padding: 13px 15px; box-shadow: 0 2px 5px #1720330a; overflow: hidden; }
 .conversation-card > header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; color: #667085; }
 .conversation-card > header span { color: #38445a; font-size: 11px; font-weight: 750; text-transform: uppercase; letter-spacing: .07em; }
