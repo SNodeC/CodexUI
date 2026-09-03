@@ -17,6 +17,7 @@
 namespace {
 
 namespace adapters = codexui::codex::current_protocol;
+namespace clientRequests = adapters::client_requests;
 namespace requests = adapters::server_requests;
 namespace notifications = adapters::server_notifications;
 
@@ -35,6 +36,16 @@ concept BridgeServerRequest =
     };
 
 template <typename Operation>
+concept BridgeClientRequest =
+    requires(Bridge &bridge,
+             Bridge::ResponseHandler<Operation> handler,
+             const typename Operation::Params &params) {
+      {
+        bridge.template request<Operation>(params, std::move(handler))
+      } -> std::same_as<std::string>;
+    };
+
+template <typename Operation>
 concept BridgeServerNotification =
     requires(Bridge &bridge, Bridge::EventHandler<Operation> handler) {
       bridge.template onServerNotification<Operation>(std::move(handler));
@@ -50,6 +61,11 @@ static_assert(BridgeServerRequest<requests::CurrentTimeRead>);
 static_assert(RequiredValueParams<requests::CurrentTimeRead>);
 static_assert(
     std::same_as<requests::CurrentTimeRead::Response, GeneratedValue>);
+
+static_assert(BridgeClientRequest<clientRequests::ThreadTurnsList>);
+static_assert(RequiredValueParams<clientRequests::ThreadTurnsList>);
+static_assert(
+    std::same_as<clientRequests::ThreadTurnsList::Response, GeneratedValue>);
 
 static_assert(
     BridgeServerNotification<notifications::ModelProviderAuthRecoveryStarted>);
@@ -92,6 +108,7 @@ bool notificationPayloadRoundTrips(nlohmann::json payload) {
 
 bool testExactMethods() {
   constexpr std::array methods{
+      clientRequests::ThreadTurnsList::method,
       requests::CurrentTimeRead::method,
       notifications::ModelProviderAuthRecoveryStarted::method,
       notifications::ModelProviderAuthRecoveryCompleted::method,
@@ -102,6 +119,7 @@ bool testExactMethods() {
       notifications::ThreadRealtimeItemCompleted::method,
   };
   constexpr std::array expected{
+      std::string_view("thread/turns/list"),
       std::string_view("currentTime/read"),
       std::string_view("modelProvider/authRecoveryStarted"),
       std::string_view("modelProvider/authRecoveryCompleted"),
