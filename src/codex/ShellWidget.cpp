@@ -29,6 +29,7 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
@@ -184,6 +185,12 @@ struct ShellWidget::Impl final {
       if (*token)
         uiSession.noteThreadActivity(threadId);
     });
+    session.setGraphChangedHandler(
+        [this, token](const nodegraph::GraphChanged &change) {
+          if (*token)
+            handleGraphChanged(change);
+        });
+    graphModeRequested = session.nodeGraph().publishedRevision() != 0;
     render();
   }
 
@@ -192,6 +199,7 @@ struct ShellWidget::Impl final {
     uiSession.setChangedHandler({});
     uiSession.setWakeupHandler({});
     uiSession.setProtocolFrameObserver({});
+    session.setGraphChangedHandler({});
     session.setEventHandler({});
     session.setActivityHandler({});
     if (qApp)
@@ -202,6 +210,10 @@ struct ShellWidget::Impl final {
   void connectUi();
   void scheduleLogicWakeup(std::int64_t atMilliseconds);
   void scheduleRender();
+  void scheduleGraphBinding();
+  void runGraphBinding();
+  void handleGraphChanged(const nodegraph::GraphChanged &change);
+  void scheduleDraftSelection();
   void render();
   void renderStatus(const UiSessionView &view);
   void synchronizeOptimisticThread(
@@ -230,7 +242,13 @@ struct ShellWidget::Impl final {
   std::optional<UiPendingRequestView> attentionSnapshot;
   std::optional<UiOptimisticThreadView> optimisticSnapshot;
   std::optional<std::int64_t> scheduledLogicWakeup;
+  std::string selectedGraphThreadId;
+  nodegraph::NodeRef boundGraphThread;
   bool renderScheduled = false;
+  bool graphModeRequested = false;
+  bool graphPanesBound = false;
+  bool graphBindingScheduled = false;
+  bool draftSelectionScheduled = false;
 
   middle::MiddleRegionWidget *middleRegion = nullptr;
   QPushButton *restoreSidebarButton = nullptr;
@@ -481,6 +499,93 @@ void ShellWidget::Impl::scheduleRender() {
   });
 }
 
+void ShellWidget::Impl::scheduleGraphBinding() {
+  if (!graphModeRequested || graphBindingScheduled)
+    return;
+  graphBindingScheduled = true;
+  const auto token = alive;
+  QTimer::singleShot(0, owner, [this, token] {
+    if (!*token)
+      return;
+    graphBindingScheduled = false;
+    runGraphBinding();
+  });
+}
+
+void ShellWidget::Impl::runGraphBinding() {
+  if (!graphModeRequested)
+    return;
+
+  nodegraph::NodeRef selectedThread;
+  if (!selectedGraphThreadId.empty()) {
+    {
+      auto graphRead = session.nodeGraph().tryRead();
+      if (!graphRead) {
+        scheduleGraphBinding();
+        return;
+      }
+      selectedThread = graphRead->find(
+          {nodegraph::NodeKind::Thread, selectedGraphThreadId});
+    }
+  }
+
+  if (!graphPanesBound || boundGraphThread != selectedThread) {
+    boundGraphThread = selectedThread;
+    graphPanesBound = true;
+    nodegraph::NodeGraph &graph = session.nodeGraph();
+    middleRegion->threads().refresh(graph, selectedThread);
+    middleRegion->conversation().bindGraph(graph, selectedThread);
+    middleRegion->inspector().refresh(graph, selectedThread);
+  }
+
+  if (renderedView && renderedView->newThreadIntent)
+    scheduleDraftSelection();
+}
+
+void ShellWidget::Impl::handleGraphChanged(
+    const nodegraph::GraphChanged &change) {
+  graphModeRequested = true;
+
+  // These calls synchronously release every removed node's QWidget
+  // attachment before FrontendSession acknowledges the notification.
+  middleRegion->threads().graphChanged(change);
+  middleRegion->conversation().graphChanged(change.removed);
+  middleRegion->inspector().graphChanged(change);
+  scheduleGraphBinding();
+}
+
+void ShellWidget::Impl::scheduleDraftSelection() {
+  if (draftSelectionScheduled || !graphPanesBound || !renderedView ||
+      !renderedView->newThreadIntent)
+    return;
+  draftSelectionScheduled = true;
+  const auto token = alive;
+  QTimer::singleShot(0, owner, [this, token] {
+    if (!*token)
+      return;
+    draftSelectionScheduled = false;
+    if (!graphPanesBound || !renderedView ||
+        !renderedView->newThreadIntent)
+      return;
+
+    auto *threadList =
+        middleRegion->threads().findChild<QListWidget *>(
+            QStringLiteral("threadList"));
+    if (!threadList)
+      return;
+    for (int row = 0; row < threadList->count(); ++row) {
+      QListWidgetItem *item = threadList->item(row);
+      if (item->data(Qt::UserRole).toString() !=
+          QString::fromUtf8(DraftThreadId))
+        continue;
+      if (threadList->currentItem() != item)
+        threadList->setCurrentItem(item);
+      return;
+    }
+    scheduleDraftSelection();
+  });
+}
+
 void ShellWidget::Impl::synchronizeOptimisticThread(
     const std::optional<UiOptimisticThreadView> &optimistic) {
   if (optimisticSnapshot == optimistic)
@@ -549,13 +654,18 @@ void ShellWidget::Impl::render() {
   const UiSessionView &view =
       uiSession.refreshView(following, draftWorkspace);
   renderedView = &view;
+  selectedGraphThreadId = view.selectedThreadId;
 
   synchronizeOptimisticThread(view.optimisticThread);
-  middleRegion->threads().refresh(view.threads);
+  if (graphModeRequested)
+    scheduleGraphBinding();
+  else
+    middleRegion->threads().refresh(view.threads);
 
   middleRegion->conversation().setEmptyMessage(
       text(view.conversation.emptyMessage));
-  middleRegion->conversation().reconcile(view.conversation.snapshot);
+  if (!graphModeRequested)
+    middleRegion->conversation().reconcile(view.conversation.snapshot);
   if (view.conversation.mode == UiConversationMode::Thread) {
     const QString activity = view.conversation.lastActivityAt
                                  ? lastActivityText(
@@ -572,7 +682,10 @@ void ShellWidget::Impl::render() {
     middleRegion->setThreadHeading(text(view.conversation.title), {});
   }
 
-  middleRegion->inspector().refresh(view.inspector);
+  if (!graphModeRequested)
+    middleRegion->inspector().refresh(view.inspector);
+  else if (view.newThreadIntent)
+    scheduleDraftSelection();
   if (!settingsSnapshot || *settingsSnapshot != view.settings) {
     settingsSnapshot = view.settings;
     middleRegion->composer().turnSettings()->setContext(
