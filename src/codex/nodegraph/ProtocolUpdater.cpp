@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 
 namespace codexui::nodegraph {
@@ -312,6 +313,32 @@ std::string agentChildId(const Value::Object &item) {
   return canonicalValue(&receivers->front());
 }
 
+bool isUserMessage(const Value::Object &item) {
+  return canonicalValue(member(item, "type")) == "userMessage";
+}
+
+void updateLoadedHistoryItemCount(NodeGraph::WriteAccess &write,
+                                  const NodeRef &thread) {
+  if (!thread)
+    return;
+  std::unordered_set<const Node *> loaded;
+  for (const NodeRef &turn : write.children(thread)) {
+    if (!turn || turn->id().kind != NodeKind::Turn)
+      continue;
+    for (const NodeRef &item : write.children(turn)) {
+      if (item && item->id().kind == NodeKind::Item)
+        loaded.insert(item.get());
+    }
+    for (const NodeRef &root :
+         write.related(turn, RelationKind::TurnRootItem)) {
+      if (root && root->id().kind == NodeKind::Item)
+        loaded.insert(root.get());
+    }
+  }
+  write.setField(thread, "historyLoadedItemCount",
+                 Value(static_cast<std::uint64_t>(loaded.size())));
+}
+
 } // namespace
 
 std::string ProtocolRequestId::canonical() const {
@@ -571,6 +598,42 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
     return;
   }
 
+  if (message.kind == DecodedMessageKind::ClientResult &&
+      method == "thread/turns/list") {
+    const std::string id = addressedId(message.payload, NodeKind::Thread);
+    if (id.empty())
+      return;
+    NodeRef thread = write.upsert({NodeKind::Thread, id});
+    const std::vector<NodeRef> previous = write.children(thread);
+    std::vector<NodeRef> page;
+    const Value::Array *turns = arrayMember(message.payload, "data");
+    if (!turns)
+      turns = arrayMember(message.payload, "turns");
+    if (turns) {
+      page.reserve(turns->size());
+      for (const Value &value : *turns) {
+        const Value::Object *turnObject = value.asObject();
+        if (!turnObject)
+          continue;
+        NodeRef turn = ingestTurn(write, *turnObject, thread, {}, true);
+        if (turn && std::find(page.begin(), page.end(), turn) == page.end())
+          page.emplace_back(std::move(turn));
+      }
+      write.replaceChildren(thread,
+                            mergeExistingTail(std::move(page), previous));
+    }
+
+    const std::string nextCursor =
+        canonicalValue(member(message.payload, "nextCursor"));
+    write.setField(thread, "historyHasMore", Value(!nextCursor.empty()));
+    if (nextCursor.empty())
+      write.eraseField(thread, "historyNextCursor");
+    else
+      write.setField(thread, "historyNextCursor", Value(nextCursor));
+    updateLoadedHistoryItemCount(write, thread);
+    return;
+  }
+
   if (isItemDeltaMethod(method)) {
     const std::string threadId = addressedId(message.payload, NodeKind::Thread);
     const std::string turnId = addressedId(message.payload, NodeKind::Turn);
@@ -578,27 +641,42 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
     NodeRef thread;
     NodeRef turn;
     NodeRef item;
+    bool historyMembershipMayChange = false;
     if (!threadId.empty())
       thread = write.upsert({NodeKind::Thread, threadId});
     if (!turnId.empty()) {
+      const NodeRef previousTurn = write.find({NodeKind::Turn, turnId});
+      const NodeRef previousParent =
+          previousTurn ? write.parent(previousTurn) : NodeRef{};
       turn = write.upsert({NodeKind::Turn, turnId});
-      if (thread)
+      if (thread) {
+        historyMembershipMayChange |= previousParent != thread;
         write.setParent(thread, turn);
+      }
     }
     if (!itemId.empty()) {
+      const NodeRef previousItem = write.find({NodeKind::Item, itemId});
+      const NodeRef previousParent =
+          previousItem ? write.parent(previousItem) : NodeRef{};
       item = write.upsert({NodeKind::Item, itemId});
-      if (turn)
+      if (turn) {
+        historyMembershipMayChange |= previousParent != turn;
         write.setParent(turn, item);
+      }
       appendSemanticDelta(write, item, method, message.payload);
     }
+    if (historyMembershipMayChange)
+      updateLoadedHistoryItemCount(write, thread);
     return;
   }
 
   NodeRef thread;
   NodeRef turn;
   NodeRef item;
+  bool historyMembershipMayChange = false;
   if (const Value::Object *threadObject =
           objectMember(message.payload, "thread")) {
+    historyMembershipMayChange = arrayMember(*threadObject, "turns") != nullptr;
     const bool replaceTurns =
         message.kind == DecodedMessageKind::ClientResult &&
         method == "thread/read";
@@ -615,6 +693,14 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
   }
 
   if (const Value::Object *turnObject = objectMember(message.payload, "turn")) {
+    const std::string id = nestedId(*turnObject);
+    const NodeRef previousTurn =
+        id.empty() ? NodeRef{} : write.find({NodeKind::Turn, id});
+    const NodeRef previousParent =
+        previousTurn ? write.parent(previousTurn) : NodeRef{};
+    historyMembershipMayChange |=
+        arrayMember(*turnObject, "items") != nullptr ||
+        (thread && previousParent != thread);
     turn = ingestTurn(write, *turnObject, thread);
     if (turn && method == "turn/started" &&
         write.state(turn)->status == NodeStatus::Unknown)
@@ -625,13 +711,24 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
   } else {
     const std::string id = addressedId(message.payload, NodeKind::Turn);
     if (!id.empty()) {
+      const NodeRef previousTurn = write.find({NodeKind::Turn, id});
+      const NodeRef previousParent =
+          previousTurn ? write.parent(previousTurn) : NodeRef{};
       turn = write.upsert({NodeKind::Turn, id});
-      if (thread)
+      if (thread) {
+        historyMembershipMayChange |= previousParent != thread;
         write.setParent(thread, turn);
+      }
     }
   }
 
   if (const Value::Object *itemObject = objectMember(message.payload, "item")) {
+    const std::string id = nestedId(*itemObject);
+    const NodeRef previousItem =
+        id.empty() ? NodeRef{} : write.find({NodeKind::Item, id});
+    const NodeRef previousParent =
+        previousItem ? write.parent(previousItem) : NodeRef{};
+    historyMembershipMayChange |= turn && previousParent != turn;
     item = ingestItem(write, *itemObject, turn);
     if (const Value *startedAt = member(message.payload, "startedAtMs"))
       write.setField(item, "startedAtMs", *startedAt);
@@ -646,9 +743,14 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
   } else {
     const std::string id = addressedId(message.payload, NodeKind::Item);
     if (!id.empty()) {
+      const NodeRef previousItem = write.find({NodeKind::Item, id});
+      const NodeRef previousParent =
+          previousItem ? write.parent(previousItem) : NodeRef{};
       item = write.upsert({NodeKind::Item, id});
-      if (turn)
+      if (turn) {
+        historyMembershipMayChange |= previousParent != turn;
         write.setParent(turn, item);
+      }
     }
   }
 
@@ -657,12 +759,16 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
       write.setField(turn, "planExplanation", *explanation);
     if (const Value *plan = member(message.payload, "plan"))
       write.setField(turn, "plan", *plan);
+    if (historyMembershipMayChange)
+      updateLoadedHistoryItemCount(write, thread);
     return;
   }
 
   if (method == "turn/diff/updated" && turn) {
     if (const Value *diff = member(message.payload, "diff"))
       write.setField(turn, "diff", *diff);
+    if (historyMembershipMayChange)
+      updateLoadedHistoryItemCount(write, thread);
     return;
   }
 
@@ -686,12 +792,17 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
 
   if (objectMember(message.payload, "thread") ||
       objectMember(message.payload, "turn") ||
-      objectMember(message.payload, "item"))
+      objectMember(message.payload, "item")) {
+    if (historyMembershipMayChange)
+      updateLoadedHistoryItemCount(write, thread);
     return;
+  }
 
   NodeRef addressed = item ? item : (turn ? turn : thread);
   if (addressed)
     mergeObject(write, addressed, message.payload);
+  if (historyMembershipMayChange)
+    updateLoadedHistoryItemCount(write, thread);
 }
 
 void ProtocolUpdater::applyUnknown(NodeGraph::WriteAccess &write,
@@ -802,8 +913,12 @@ NodeRef ProtocolUpdater::ingestItem(NodeGraph::WriteAccess &write,
     return {};
   NodeRef item = write.upsert({NodeKind::Item, id});
   mergeObject(write, item, object);
-  if (turn)
+  if (turn) {
     write.setParent(turn, item);
+    if (isUserMessage(object) &&
+        write.related(turn, RelationKind::TurnRootItem).empty())
+      write.relate(turn, RelationKind::TurnRootItem, item);
+  }
 
   const std::string childThreadId = agentChildId(object);
   if (!childThreadId.empty()) {
@@ -891,8 +1006,17 @@ void ProtocolUpdater::removeThread(NodeGraph::WriteAccess &write,
                         write.related(thread, RelationKind::AgentChildThread));
 
   std::vector<NodeRef> descendants;
+  std::unordered_set<const Node *> collected;
   const auto collect = [&](const auto &self, const NodeRef &node) -> void {
-    for (const NodeRef &child : write.children(node)) {
+    std::vector<NodeRef> contained = write.children(node);
+    if (node->id().kind == NodeKind::Turn) {
+      contained = mergeExistingTail(
+          std::move(contained),
+          write.related(node, RelationKind::TurnRootItem));
+    }
+    for (const NodeRef &child : contained) {
+      if (!collected.insert(child.get()).second)
+        continue;
       self(self, child);
       descendants.emplace_back(child);
     }

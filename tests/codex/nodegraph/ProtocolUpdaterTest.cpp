@@ -370,6 +370,178 @@ void semanticDeltasAndHydratedOrderStayCurrent() {
   }
 }
 
+void turnRootsAndPagedHistoryStayExplicit() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+
+  Value::Array completeItems;
+  completeItems.emplace_back(Value::Object{{"id", Value("opening-prompt")},
+                                           {"type", Value("userMessage")}});
+  for (std::size_t index = 0; index < 82; ++index) {
+    completeItems.emplace_back(
+        Value::Object{{"id", Value("activity-" + std::to_string(index))},
+                      {"type", Value("agentMessage")}});
+  }
+  completeItems.emplace_back(Value::Object{{"id", Value("later-steering")},
+                                           {"type", Value("userMessage")}});
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read",
+       ProtocolRequestId("complete-history"),
+       Value::Object{
+           {"thread",
+            Value(Value::Object{
+                {"id", Value("history-thread")},
+                {"turns",
+                 Value(Value::Array{Value(Value::Object{
+                     {"id", Value("long-turn")},
+                     {"items", Value(std::move(completeItems))}})})}})}}}));
+
+  NodeRef openingPrompt;
+  std::uint64_t threadRevision = 0;
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "history-thread"});
+    const NodeRef turn = read->find({NodeKind::Turn, "long-turn"});
+    openingPrompt = read->find({NodeKind::Item, "opening-prompt"});
+    const Value *loaded = field(read->state(thread), "historyLoadedItemCount");
+    require(turn && openingPrompt &&
+                read->related(turn, RelationKind::TurnRootItem) ==
+                    std::vector<NodeRef>{openingPrompt},
+            "a turn directly relates to its authoritative opening prompt");
+    require(loaded && loaded->asUInt64() && *loaded->asUInt64() == 84,
+            "thread history records the complete loaded item count for local "
+            "windowing");
+    threadRevision = read->changedRevision(thread);
+  }
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/agentMessage/delta",
+       std::nullopt,
+       Value::Object{{"threadId", Value("history-thread")},
+                     {"turnId", Value("long-turn")},
+                     {"itemId", Value("activity-81")},
+                     {"delta", Value("streamed")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "history-thread"});
+    require(read->changedRevision(thread) == threadRevision,
+            "an existing-item stream delta does not touch thread history "
+            "metadata");
+  }
+
+  Value::Array retainedSuffix{
+      Value(Value::Object{{"id", Value("later-steering")},
+                          {"type", Value("userMessage")}}),
+      Value(Value::Object{{"id", Value("latest-activity")},
+                          {"type", Value("agentMessage")}})};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read",
+       ProtocolRequestId("suffix-history"),
+       Value::Object{
+           {"thread",
+            Value(Value::Object{
+                {"id", Value("history-thread")},
+                {"turns",
+                 Value(Value::Array{Value(Value::Object{
+                     {"id", Value("long-turn")},
+                     {"items", Value(std::move(retainedSuffix))}})})}})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "history-thread"});
+    const NodeRef turn = read->find({NodeKind::Turn, "long-turn"});
+    const NodeRef steering = read->find({NodeKind::Item, "later-steering"});
+    const Value *loaded = field(read->state(thread), "historyLoadedItemCount");
+    require(read->children(turn) ==
+                    std::vector<NodeRef>{
+                        steering,
+                        read->find({NodeKind::Item, "latest-activity"})} &&
+                read->related(turn, RelationKind::TurnRootItem) ==
+                    std::vector<NodeRef>{openingPrompt},
+            "a retained suffix cannot promote a later steering message over "
+            "the known opening prompt");
+    require(loaded && loaded->asUInt64() && *loaded->asUInt64() == 3,
+            "loaded history count includes a pinned opening prompt outside "
+            "the current item suffix");
+  }
+
+  const ApplyResult removedHistory = updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/deleted", std::nullopt,
+       Value::Object{{"threadId", Value("history-thread")}}});
+  require(std::find(removedHistory.change.removed.begin(),
+                    removedHistory.change.removed.end(), openingPrompt) !=
+              removedHistory.change.removed.end(),
+          "removing a hydrated thread also removes its pinned opening prompt");
+
+  const ProtocolRequestId firstPage("turn-page-1");
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/turns/list", firstPage,
+       Value::Object{{"threadId", Value("paged-thread")}}}));
+  Value::Array firstTurns{Value(Value::Object{
+      {"id", Value("newer-turn")},
+      {"items", Value(Value::Array{
+                    Value(Value::Object{{"id", Value("newer-root")},
+                                        {"type", Value("userMessage")}}),
+                    Value(Value::Object{{"id", Value("newer-steering")},
+                                        {"type", Value("userMessage")}})})}})};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/turns/list", firstPage,
+       Value::Object{{"data", Value(std::move(firstTurns))},
+                     {"nextCursor", Value("older-page")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "paged-thread"});
+    const NodeRef turn = read->find({NodeKind::Turn, "newer-turn"});
+    const NodeRef root = read->find({NodeKind::Item, "newer-root"});
+    const NodeRef operation =
+        read->find({NodeKind::Operation, firstPage.canonical()});
+    const auto state = read->state(thread);
+    const Value *hasMore = field(state, "historyHasMore");
+    const Value *cursor = field(state, "historyNextCursor");
+    const Value *loaded = field(state, "historyLoadedItemCount");
+    require(thread && turn && root &&
+                read->related(turn, RelationKind::TurnRootItem) ==
+                    std::vector<NodeRef>{root},
+            "a turns page retains the opening item relation for each turn");
+    require(operation &&
+                read->state(operation)->status == NodeStatus::Completed,
+            "a turns/list result without threadId uses its correlated request "
+            "scope");
+    require(hasMore && hasMore->asBool() && *hasMore->asBool() && cursor &&
+                cursor->asString() && *cursor->asString() == "older-page" &&
+                loaded && loaded->asUInt64() && *loaded->asUInt64() == 2,
+            "a turns page exposes provider continuation and loaded history "
+            "size on its thread");
+  }
+
+  const ProtocolRequestId lastPage("turn-page-2");
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/turns/list", lastPage,
+       Value::Object{{"threadId", Value("paged-thread")},
+                     {"cursor", Value("older-page")}}}));
+  Value::Array olderTurns{Value(Value::Object{
+      {"id", Value("older-turn")},
+      {"items",
+       Value(Value::Array{Value(Value::Object{
+           {"id", Value("older-root")}, {"type", Value("userMessage")}})})}})};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/turns/list", lastPage,
+       Value::Object{{"data", Value(std::move(olderTurns))},
+                     {"nextCursor", Value(nullptr)}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "paged-thread"});
+    const auto state = read->state(thread);
+    const Value *hasMore = field(state, "historyHasMore");
+    const Value *loaded = field(state, "historyLoadedItemCount");
+    require(canonicalIds(read->children(thread)) ==
+                    std::vector<std::string>{"older-turn", "newer-turn"} &&
+                hasMore && hasMore->asBool() && !*hasMore->asBool() &&
+                !field(state, "historyNextCursor") && loaded &&
+                loaded->asUInt64() && *loaded->asUInt64() == 3,
+            "the final turns page clears provider continuation while "
+            "retaining accumulated chronological history");
+  }
+}
+
 void resultsAndListsCorrelate() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -643,6 +815,7 @@ int main() {
   nestedEntitiesAndStreamsStayCurrent();
   rootOrderAndThreadHierarchyAreExplicit();
   semanticDeltasAndHydratedOrderStayCurrent();
+  turnRootsAndPagedHistoryStayExplicit();
   resultsAndListsCorrelate();
   interactionsAndRemovalKeepLifetime();
   unknownAndNeutralAreIsolated();

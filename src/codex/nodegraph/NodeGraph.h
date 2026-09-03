@@ -87,6 +87,7 @@ enum class RelationKind : std::uint8_t {
   ForkChildThread,
   ProjectMembership,
   SectionMembership,
+  TurnRootItem,
   OperationTarget,
   InteractionTarget,
   ProcessOwner,
