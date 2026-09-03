@@ -3,6 +3,7 @@
 #include "codex/nodegraph/NodeGraph.h"
 
 #include <algorithm>
+#include <exception>
 #include <functional>
 #include <stdexcept>
 
@@ -89,20 +90,30 @@ std::shared_ptr<const NodeState>
 NodeGraph::ReadAccess::state(const NodeRef &node) const {
   if (!node)
     return {};
+  requireMember(node);
   return node->state_;
 }
 
 std::uint64_t
 NodeGraph::ReadAccess::changedRevision(const NodeRef &node) const {
-  return node ? node->changedRevision_ : 0;
+  if (!node)
+    return 0;
+  requireMember(node);
+  return node->changedRevision_;
 }
 
 bool NodeGraph::ReadAccess::removed(const NodeRef &node) const {
-  return !node || node->removed_;
+  if (!node)
+    return true;
+  requireMember(node);
+  return node->removed_;
 }
 
 NodeRef NodeGraph::ReadAccess::parent(const NodeRef &node) const {
-  return node ? pin(node->parent_) : NodeRef{};
+  if (!node)
+    return {};
+  requireMember(node);
+  return pin(node->parent_);
 }
 
 std::vector<NodeRef>
@@ -110,6 +121,7 @@ NodeGraph::ReadAccess::children(const NodeRef &node) const {
   std::vector<NodeRef> result;
   if (!node)
     return result;
+  requireMember(node);
   result.reserve(node->children_.size());
   for (Node *child : node->children_)
     result.emplace_back(pin(child));
@@ -121,6 +133,7 @@ std::vector<NodeRef> NodeGraph::ReadAccess::related(const NodeRef &node,
   std::vector<NodeRef> result;
   if (!node)
     return result;
+  requireMember(node);
   const auto found = node->relations_.find(kind);
   if (found == node->relations_.end())
     return result;
@@ -128,6 +141,14 @@ std::vector<NodeRef> NodeGraph::ReadAccess::related(const NodeRef &node,
   for (Node *target : found->second)
     result.emplace_back(pin(target));
   return result;
+}
+
+void NodeGraph::ReadAccess::requireMember(const NodeRef &node) const {
+  const auto active = graph_->nodes_.find(node->id_);
+  if ((active != graph_->nodes_.end() && active->second == node) ||
+      contains(graph_->retiredNodes_, node))
+    return;
+  throw std::invalid_argument("node does not belong to this graph");
 }
 
 NodeGraph::WriteAccess::WriteAccess(
@@ -145,7 +166,7 @@ NodeGraph::WriteAccess::WriteAccess(WriteAccess &&other) noexcept
 
 NodeGraph::WriteAccess::~WriteAccess() {
   if (graph_ && lock_.owns_lock() && !finished_ && dirty_)
-    static_cast<void>(publish());
+    std::terminate();
 }
 
 std::uint64_t NodeGraph::WriteAccess::revision() const noexcept {
@@ -337,7 +358,6 @@ void NodeGraph::WriteAccess::releaseRetired(std::span<const NodeRef> nodes) {
     if (found == graph_->retiredNodes_.end())
       continue;
     graph_->retiredNodes_.erase(found);
-    dirty_ = true;
   }
 }
 

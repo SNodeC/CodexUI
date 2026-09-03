@@ -164,6 +164,7 @@ public:
     friend class NodeGraph;
     ReadAccess(const NodeGraph &graph,
                std::shared_lock<std::shared_mutex> lock) noexcept;
+    void requireMember(const NodeRef &node) const;
 
     const NodeGraph *graph_;
     std::shared_lock<std::shared_mutex> lock_;

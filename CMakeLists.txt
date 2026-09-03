@@ -6,6 +6,7 @@ project(CodexUI VERSION 1.0.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CTest)
+find_package(Threads REQUIRED)
 
 option(
     CODEXUI_NODEGRAPH_ONLY
@@ -40,7 +41,6 @@ find_package(
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBGIT2 REQUIRED IMPORTED_TARGET libgit2)
-find_package(Threads REQUIRED)
 
 set(
     CODEXUI_CODEX_COMMON_SOURCES

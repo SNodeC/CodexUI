@@ -6,6 +6,8 @@ add_library(
     NodeGraph.cpp
     ProtocolCatalog.cpp
     ProtocolUpdater.cpp
+    EventFd.cpp
+    ThreadChannels.cpp
 )
 
 target_compile_features(codexui-nodegraph PUBLIC cxx_std_20)

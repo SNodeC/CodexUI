@@ -375,7 +375,10 @@ bool testRemovalLifetimeAndAttachment() {
     std::vector<NodeRef> acknowledged{detaching};
     auto write = graph.write();
     write.releaseRetired(acknowledged);
-    static_cast<void>(write.finish());
+    const GraphChange released = write.finish();
+    passed &= expect(released.revision == 2 && released.empty() &&
+                         graph.publishedRevision() == 2,
+                     "UI detachment acknowledgement is revision-neutral");
   }
   {
     auto read = graph.tryRead();
@@ -412,6 +415,28 @@ bool testMisuseRejection() {
   }
 
   bool passed = true;
+  {
+    auto read = graph.tryRead();
+    if (!expect(read.has_value(), "the graph is readable for misuse checks"))
+      return false;
+    passed &=
+        expect(throws<std::invalid_argument>(
+                   [&] { static_cast<void>(read->state(foreign)); }) &&
+                   throws<std::invalid_argument>([&] {
+                     static_cast<void>(read->changedRevision(foreign));
+                   }) &&
+                   throws<std::invalid_argument>(
+                       [&] { static_cast<void>(read->removed(foreign)); }) &&
+                   throws<std::invalid_argument>(
+                       [&] { static_cast<void>(read->parent(foreign)); }) &&
+                   throws<std::invalid_argument>(
+                       [&] { static_cast<void>(read->children(foreign)); }) &&
+                   throws<std::invalid_argument>([&] {
+                     static_cast<void>(
+                         read->related(foreign, RelationKind::ForkChildThread));
+                   }),
+               "foreign NodeRefs cannot be read under the wrong graph lock");
+  }
   {
     auto write = graph.write();
     passed &= expect(
