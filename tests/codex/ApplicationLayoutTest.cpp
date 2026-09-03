@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/GitDiffProvider.h"
-#include "codex/PresentationModel.h"
-#include "codex/PresentationProtocol.h"
 #include "codex/TurnSettingsWidget.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationCards.h"
@@ -10,13 +8,13 @@
 #include "codex/middle/InspectorPane.h"
 #include "codex/middle/MiddleRegionWidget.h"
 #include "codex/middle/ThreadPane.h"
+#include "codex/nodegraph/NodeGraph.h"
 #include "codex/ui/ExpandingPromptEditor.h"
 #include "codex/ui/QtNodeAttachment.h"
 #include "codex/ui/UiStyle.h"
-#include "codex/ui/UiViewProjection.h"
 
-#include <QApplication>
 #include <QAbstractTextDocumentLayout>
+#include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
 #include <QContextMenuEvent>
@@ -50,11 +48,13 @@
 
 #include <git2.h>
 
+#include <algorithm>
+#include <array>
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -99,123 +99,76 @@ nodegraph::NodeStatus graphStatus(std::string_view status) {
   return nodegraph::NodeStatus::Unknown;
 }
 
-template <typename Pane> nodegraph::NodeGraph &fixtureGraph(Pane &pane) {
-  static std::unordered_map<const Pane *, std::unique_ptr<nodegraph::NodeGraph>>
-      graphs;
-  auto &graph = graphs[&pane];
-  if (!graph)
-    graph = std::make_unique<nodegraph::NodeGraph>();
-  return *graph;
-}
-
-template <typename Pane>
-void clearFixtureGraph(Pane &pane, nodegraph::NodeGraph &graph) {
-  auto read = graph.tryRead();
-  std::vector<nodegraph::NodeRef> nodes = read->orderedNodes();
-  read.reset();
-  if (nodes.empty())
-    return;
-  auto write = graph.write();
-  for (const nodegraph::NodeRef &node : nodes)
-    write.remove(node);
-  nodegraph::GraphChange change = write.finish();
-  pane.graphChanged({change.revision, std::move(change.affected),
-                     std::move(change.removed), false});
-}
-
 void addTimestamp(nodegraph::Value::Object &fields, std::string name,
                   const std::optional<std::int64_t> &value) {
   if (value)
     fields.emplace(std::move(name), nodegraph::Value(*value));
 }
 
-void refresh(ThreadPane &pane, const PresentationModel &model,
-             std::string selectedThreadId) {
-  const ui::ThreadListSnapshot snapshot =
-      ui::projectThreadListSnapshot(model, selectedThreadId);
-  nodegraph::NodeGraph &graph = fixtureGraph(pane);
-  auto priorRead = graph.tryRead();
-  const std::vector<nodegraph::NodeRef> priorNodes = priorRead->orderedNodes();
-  priorRead.reset();
+nodegraph::NodeRef findNode(const nodegraph::NodeGraph &graph,
+                            nodegraph::NodeKind kind,
+                            std::string_view canonical) {
+  auto read = graph.tryRead();
+  return read ? read->find({kind, std::string(canonical)})
+              : nodegraph::NodeRef{};
+}
 
-  nodegraph::NodeRef selected;
-  std::unordered_set<std::string> retainedThreads;
-  std::unordered_set<std::string> retainedInteractions;
-  auto write = graph.write();
-  const nodegraph::NodeRef runtime =
-      write.upsert({nodegraph::NodeKind::Runtime, "runtime"});
-  nodegraph::NodeState connectionState;
-  connectionState.status = snapshot.providerReady
-                               ? nodegraph::NodeStatus::Connected
-                               : nodegraph::NodeStatus::Disconnected;
-  connectionState.fields = {
-      {"providerState",
-       nodegraph::Value(snapshot.providerReady ? "ready" : "disconnected")},
-      {"role",
-       nodegraph::Value(snapshot.canControl ? "controller" : "observer")}};
-  const nodegraph::NodeRef connection =
-      write.upsert({nodegraph::NodeKind::Connection, "connection"});
-  write.replaceState(connection, std::move(connectionState));
-
-  std::vector<nodegraph::NodeRef> roots;
-  const auto addThread =
-      [&](const auto &self,
-          const ui::ThreadListRow &row) -> nodegraph::NodeRef {
-    nodegraph::NodeState state;
-    state.status = graphStatus(row.status);
-    state.fields = {{"name", nodegraph::Value(row.title)},
-                    {"cwd", nodegraph::Value(row.cwd)},
-                    {"status", nodegraph::Value(row.status)},
-                    {"archived", nodegraph::Value(row.archived)}};
-    addTimestamp(state.fields, "createdAt", row.createdAt);
-    addTimestamp(state.fields, "updatedAt", row.updatedAt);
-    addTimestamp(state.fields, "recencyAt", row.recencyAt);
-    addTimestamp(state.fields, "lastActivityAt", row.lastActivityAt);
-    retainedThreads.insert(row.id);
-    const nodegraph::NodeRef thread =
-        write.upsert({nodegraph::NodeKind::Thread, row.id});
-    write.replaceState(thread, std::move(state));
-    if (row.id == selectedThreadId)
-      selected = thread;
-    std::vector<nodegraph::NodeRef> requests;
-    for (std::size_t index = 0; index < row.pending; ++index) {
-      const std::string id = "fixture:" + row.id + ':' + std::to_string(index);
-      retainedInteractions.insert(id);
-      nodegraph::NodeState requestState;
-      requestState.status = nodegraph::NodeStatus::Pending;
-      const nodegraph::NodeRef request =
-          write.upsert({nodegraph::NodeKind::Interaction, id});
-      write.replaceState(request, std::move(requestState));
-      requests.push_back(request);
-    }
-    write.replaceRelated(thread, nodegraph::RelationKind::PendingInteraction,
-                         requests);
-    std::vector<nodegraph::NodeRef> children;
-    children.reserve(row.children.size());
-    for (const ui::ThreadListRow &child : row.children)
-      children.push_back(self(self, child));
-    write.replaceRelated(thread, nodegraph::RelationKind::StructuralChildThread,
-                         children);
-    return thread;
-  };
-  for (const ui::ThreadListRow &row : snapshot.roots)
-    roots.push_back(addThread(addThread, row));
-  write.replaceRelated(runtime, nodegraph::RelationKind::RootThread, roots);
-  for (const nodegraph::NodeRef &node : priorNodes) {
-    if (node->id().kind == nodegraph::NodeKind::Thread &&
-        !retainedThreads.contains(node->id().canonical))
-      write.remove(node);
-    else if (node->id().kind == nodegraph::NodeKind::Interaction &&
-             node->id().canonical.starts_with("fixture:") &&
-             !retainedInteractions.contains(node->id().canonical))
-      write.remove(node);
-  }
-  nodegraph::GraphChange change = write.finish();
-  pane.graphChanged({change.revision, std::move(change.affected),
-                     std::move(change.removed), false});
-  pane.refresh(graph, std::move(selected));
+void refresh(ThreadPane &pane, const nodegraph::NodeGraph &graph,
+             std::string_view selectedThreadId = {}) {
+  pane.refresh(graph, selectedThreadId.empty()
+                          ? nodegraph::NodeRef{}
+                          : findNode(graph, nodegraph::NodeKind::Thread,
+                                     selectedThreadId));
   for (int pass = 0; pass < 3; ++pass)
     QCoreApplication::processEvents(QEventLoop::AllEvents);
+}
+
+void refresh(InspectorPane &pane, const nodegraph::NodeGraph &graph,
+             std::string_view selectedThreadId = {}) {
+  pane.refresh(graph, selectedThreadId.empty()
+                          ? nodegraph::NodeRef{}
+                          : findNode(graph, nodegraph::NodeKind::Thread,
+                                     selectedThreadId));
+  for (int pass = 0; pass < 3; ++pass)
+    QCoreApplication::processEvents(QEventLoop::AllEvents);
+}
+
+nodegraph::NodeRef addThread(nodegraph::NodeGraph::WriteAccess &write,
+                             std::string id, std::string name = {},
+                             std::string status = {},
+                             std::optional<std::int64_t> createdAt = {},
+                             std::optional<std::int64_t> updatedAt = {},
+                             std::optional<std::int64_t> recencyAt = {}) {
+  nodegraph::NodeState state;
+  state.status = graphStatus(status);
+  state.fields = {{"name", nodegraph::Value(std::move(name))},
+                  {"status", nodegraph::Value(std::move(status))}};
+  addTimestamp(state.fields, "createdAt", createdAt);
+  addTimestamp(state.fields, "updatedAt", updatedAt);
+  addTimestamp(state.fields, "recencyAt", recencyAt);
+  std::optional<std::int64_t> lastActivityAt = createdAt;
+  for (const std::optional<std::int64_t> candidate : {updatedAt, recencyAt})
+    if (candidate && (!lastActivityAt || *candidate > *lastActivityAt))
+      lastActivityAt = candidate;
+  addTimestamp(state.fields, "lastActivityAt", lastActivityAt);
+  return write.upsert({nodegraph::NodeKind::Thread, std::move(id)},
+                      std::move(state));
+}
+
+nodegraph::NodeRef runtimeWithRoots(nodegraph::NodeGraph::WriteAccess &write,
+                                    std::span<const nodegraph::NodeRef> roots) {
+  const nodegraph::NodeRef runtime =
+      write.upsert({nodegraph::NodeKind::Runtime, "runtime"});
+  write.replaceRelated(runtime, nodegraph::RelationKind::RootThread, roots);
+  nodegraph::NodeState connectionState;
+  connectionState.status = nodegraph::NodeStatus::Connected;
+  connectionState.fields = {{"providerState", nodegraph::Value("ready")},
+                            {"transportState", nodegraph::Value("connected")},
+                            {"role", nodegraph::Value("controller")}};
+  static_cast<void>(
+      write.upsert({nodegraph::NodeKind::Connection, "connection"},
+                   std::move(connectionState)));
+  return runtime;
 }
 
 std::string requestMethod(std::string_view kind) {
@@ -234,150 +187,24 @@ std::string requestMethod(std::string_view kind) {
   return "item/tool/requestUserInput";
 }
 
-void refresh(InspectorPane &pane, const PresentationModel &model,
-             std::string selectedThreadId) {
-  const ui::InspectorSnapshot snapshot =
-      ui::projectInspectorSnapshot(model, selectedThreadId);
-  nodegraph::NodeGraph &graph = fixtureGraph(pane);
-  clearFixtureGraph(pane, graph);
-
-  auto write = graph.write();
-  const nodegraph::NodeRef runtime =
-      write.upsert({nodegraph::NodeKind::Runtime, "runtime"});
-  nodegraph::NodeState connectionState;
-  connectionState.status = nodegraph::NodeStatus::Connected;
-  const bool actionable = std::ranges::any_of(
-      snapshot.requests.requests,
-      [](const ui::InspectorRequestRow &row) { return row.actionable; });
-  connectionState.fields = {
-      {"transportState", nodegraph::Value("connected")},
-      {"providerState", nodegraph::Value("ready")},
-      {"role", nodegraph::Value(actionable ? "controller" : "observer")}};
-  static_cast<void>(
-      write.upsert({nodegraph::NodeKind::Connection, "connection"},
-                   std::move(connectionState)));
-
-  const bool threadPresent = snapshot.plan.threadPresent ||
-                             snapshot.agents.threadPresent ||
-                             !snapshot.changes.threadId.empty();
-  nodegraph::NodeRef thread;
-  nodegraph::NodeRef turn;
-  if (threadPresent && !selectedThreadId.empty()) {
-    nodegraph::NodeState threadState;
-    threadState.fields = {{"cwd", nodegraph::Value(snapshot.changes.cwd)}};
-    thread = write.upsert({nodegraph::NodeKind::Thread, selectedThreadId},
-                          std::move(threadState));
-    turn = write.upsert(
-        {nodegraph::NodeKind::Turn, "fixture-turn:" + selectedThreadId});
-    write.setParent(thread, turn);
-  }
-
-  if (turn && (snapshot.plan.plan || snapshot.plan.planItem)) {
-    nodegraph::NodeState planState;
-    planState.fields.emplace("type", nodegraph::Value("plan"));
-    if (snapshot.plan.plan) {
-      nodegraph::Value::Array steps;
-      for (const ui::InspectorPlanStep &step : snapshot.plan.plan->steps) {
-        steps.emplace_back(nodegraph::Value::Object{
-            {"step", nodegraph::Value(step.step)},
-            {"status", nodegraph::Value(step.status)}});
-      }
-      write.setField(turn, "plan", nodegraph::Value(std::move(steps)));
-      write.setField(turn, "planExplanation",
-                     nodegraph::Value(snapshot.plan.plan->explanation));
-    } else {
-      planState.fields.emplace(
-          "text", nodegraph::Value(snapshot.plan.planItem.value_or("")));
-    }
-    const nodegraph::NodeRef item = write.upsert(
-        {nodegraph::NodeKind::Item, "fixture-plan:" + selectedThreadId},
-        std::move(planState));
-    write.setParent(turn, item);
-  }
-
-  if (turn) {
-    for (const ui::InspectorAgentRow &agent : snapshot.agents.agents) {
-      nodegraph::Value::Array receivers;
-      for (const std::string &receiver : agent.receiverThreadIds)
-        receivers.emplace_back(receiver);
-      nodegraph::NodeState state;
-      state.status = graphStatus(agent.status);
-      state.fields = {
-          {"type", nodegraph::Value("subAgentActivity")},
-          {"status", nodegraph::Value(agent.status)},
-          {"agentThreadId", nodegraph::Value(agent.childThreadId)},
-          {"agentPath", nodegraph::Value(agent.agentPath)},
-          {"tool", nodegraph::Value(agent.tool)},
-          {"model", nodegraph::Value(agent.model)},
-          {"reasoningEffort", nodegraph::Value(agent.reasoningEffort)},
-          {"prompt", nodegraph::Value(agent.prompt)},
-          {"resultText", nodegraph::Value(agent.resultText)},
-          {"senderThreadId", nodegraph::Value(agent.senderThreadId)},
-          {"receiverThreadIds", nodegraph::Value(std::move(receivers))}};
-      const nodegraph::NodeRef item =
-          write.upsert({nodegraph::NodeKind::Item, agent.id}, std::move(state));
-      write.setParent(turn, item);
-    }
-    for (const std::string &cwd : snapshot.changes.commandCwds) {
-      nodegraph::NodeState state;
-      state.fields = {{"type", nodegraph::Value("commandExecution")},
-                      {"cwd", nodegraph::Value(cwd)}};
-      const nodegraph::NodeRef item = write.upsert(
-          {nodegraph::NodeKind::Item,
-           "fixture-command:" + std::to_string(write.orderedNodes().size())},
-          std::move(state));
-      write.setParent(turn, item);
-    }
-    if (!snapshot.changes.changedPaths.empty()) {
-      nodegraph::Value::Array changes;
-      for (const std::string &path : snapshot.changes.changedPaths)
-        changes.emplace_back(
-            nodegraph::Value::Object{{"path", nodegraph::Value(path)}});
-      nodegraph::NodeState state;
-      state.fields = {{"type", nodegraph::Value("fileChange")},
-                      {"changes", nodegraph::Value(std::move(changes))}};
-      const nodegraph::NodeRef item = write.upsert(
-          {nodegraph::NodeKind::Item, "fixture-file-change"}, std::move(state));
-      write.setParent(turn, item);
-    }
-  }
-
-  for (const ui::InspectorRequestRow &request : snapshot.requests.requests) {
-    nodegraph::Value::Object payload{
-        {"command", nodegraph::Value(request.command)},
-        {"reason", nodegraph::Value(request.reason)},
-        {"message", nodegraph::Value(request.message)}};
-    if (request.questionCount) {
-      nodegraph::Value::Array questions(*request.questionCount);
-      payload.emplace("questions", nodegraph::Value(std::move(questions)));
-    }
-    nodegraph::NodeState state;
-    state.status = nodegraph::NodeStatus::Pending;
-    state.fields = {{"method", nodegraph::Value(requestMethod(request.kind))},
-                    {"payload", nodegraph::Value(std::move(payload))}};
-    const nodegraph::NodeRef interaction = write.upsert(
-        {nodegraph::NodeKind::Interaction, request.id}, std::move(state));
-    nodegraph::NodeRef target = thread;
-    if (!target) {
-      nodegraph::NodeState targetState;
-      targetState.fields = {{"name", nodegraph::Value(request.threadContext)}};
-      target = write.upsert(
-          {nodegraph::NodeKind::Thread, "fixture-target:" + request.id},
-          std::move(targetState));
-    } else if (!request.threadContext.empty()) {
-      write.setField(target, "name", nodegraph::Value(request.threadContext));
-    }
-    write.relate(interaction, nodegraph::RelationKind::InteractionTarget,
-                 target);
-    write.relate(runtime, nodegraph::RelationKind::PendingInteraction,
-                 interaction);
-  }
-  static_cast<void>(write.finish());
-  pane.refresh(graph, std::move(thread));
-  for (int pass = 0; pass < 3; ++pass)
-    QCoreApplication::processEvents(QEventLoop::AllEvents);
+nodegraph::NodeRef addInteraction(nodegraph::NodeGraph::WriteAccess &write,
+                                  const nodegraph::NodeRef &runtime,
+                                  const nodegraph::NodeRef &target,
+                                  std::string id, std::string_view kind,
+                                  nodegraph::Value::Object payload = {}) {
+  nodegraph::NodeState state;
+  state.status = nodegraph::NodeStatus::Pending;
+  state.fields = {{"method", nodegraph::Value(requestMethod(kind))},
+                  {"payload", nodegraph::Value(std::move(payload))}};
+  const nodegraph::NodeRef interaction = write.upsert(
+      {nodegraph::NodeKind::Interaction, std::move(id)}, std::move(state));
+  write.relate(interaction, nodegraph::RelationKind::InteractionTarget, target);
+  write.relate(target, nodegraph::RelationKind::PendingInteraction,
+               interaction);
+  write.relate(runtime, nodegraph::RelationKind::PendingInteraction,
+               interaction);
+  return interaction;
 }
-
 void sendPromptKey(codexui::ExpandingPromptEditor &editor, int key,
                    Qt::KeyboardModifiers modifiers = Qt::NoModifier,
                    bool autoRepeat = false) {
@@ -483,10 +310,10 @@ bool testPromptKeyboardSubmission() {
   QCoreApplication::processEvents();
   const qreal liveWidth = editor.document()->textWidth();
   int liveLayoutChanges = 0;
-  const QMetaObject::Connection layoutConnection = QObject::connect(
-      editor.document()->documentLayout(),
-      &QAbstractTextDocumentLayout::documentSizeChanged, &editor,
-      [&liveLayoutChanges] { ++liveLayoutChanges; });
+  const QMetaObject::Connection layoutConnection =
+      QObject::connect(editor.document()->documentLayout(),
+                       &QAbstractTextDocumentLayout::documentSizeChanged,
+                       &editor, [&liveLayoutChanges] { ++liveLayoutChanges; });
   const bool boundaryExpands = editor.requiresExpandedLayout(compactWidth);
   QObject::disconnect(layoutConnection);
   result &= expect(!beforeBoundary.isEmpty(),
@@ -497,9 +324,9 @@ bool testPromptKeyboardSubmission() {
                    "the first wrapped character enters multiline mode");
   result &= expect(editor.document()->textWidth() == liveWidth,
                    "compact layout probing preserves the live document width");
-  result &= expect(
-      liveLayoutChanges == 0,
-      "compact layout probing does not relay out the visible document");
+  result &=
+      expect(liveLayoutChanges == 0,
+             "compact layout probing does not relay out the visible document");
   return result;
 }
 
@@ -566,31 +393,36 @@ void spin(int milliseconds = 0) {
   } while (timer.elapsed() < milliseconds);
 }
 
-VisibleCardData textCard(const std::string &thread, int index) {
-  const std::string turn = index < 15 ? "turn-1" : "turn-2";
-  const std::string item = "item-" + std::to_string(index);
-  return {AuthoritativeItemKey{thread, turn, item},
-          CardKind::AgentMessage,
-          thread,
-          turn,
-          item,
-          AgentMessageData{
-              utf8(QStringLiteral("A materialized response line %1 with enough "
-                             "content to occupy normal card height.")
-                       .arg(index)),
-              false}};
+void populateLongConversation(nodegraph::NodeGraph &graph,
+                              nodegraph::NodeRef &thread,
+                              std::string threadId) {
+  auto write = graph.write();
+  thread =
+      addThread(write, std::move(threadId), "Long conversation", "completed");
+  const nodegraph::NodeRef firstTurn =
+      write.upsert({nodegraph::NodeKind::Turn, "turn-1"});
+  const nodegraph::NodeRef secondTurn =
+      write.upsert({nodegraph::NodeKind::Turn, "turn-2"});
+  write.setParent(thread, firstTurn);
+  write.setParent(thread, secondTurn);
+  for (int index = 0; index < 30; ++index) {
+    nodegraph::NodeState state;
+    state.status = nodegraph::NodeStatus::Completed;
+    state.fields = {
+        {"type", nodegraph::Value("agentMessage")},
+        {"phase", nodegraph::Value("final_answer")},
+        {"text",
+         nodegraph::Value(
+             utf8(QStringLiteral("A materialized response line %1 with enough "
+                                 "content to occupy normal card height.")
+                      .arg(index)))}};
+    const nodegraph::NodeRef item = write.upsert(
+        {nodegraph::NodeKind::Item, "item-" + std::to_string(index)},
+        std::move(state));
+    write.setParent(index < 15 ? firstTurn : secondTurn, item);
+  }
+  static_cast<void>(write.finish());
 }
-
-ConversationSnapshot longConversation(const std::string &thread) {
-  ConversationSnapshot snapshot;
-  snapshot.threadId = thread;
-  snapshot.sections = {{"turn-one", "turn-1", {}}, {"turn-two", "turn-2", {}}};
-  for (int index = 0; index < 30; ++index)
-    snapshot.sections[index < 15 ? 0 : 1].cards.push_back(
-        textCard(thread, index));
-  return snapshot;
-}
-
 QWheelEvent wheelFor(QWidget *target, int pixelDelta,
                      Qt::ScrollPhase phase = Qt::ScrollUpdate) {
   const QPointF local(target->rect().center());
@@ -648,32 +480,31 @@ bool testOverlayGeometryAndRegionRouting() {
                    "pane width constraints match the visual contract");
 
   auto *threadHeaderDivider = splitter->widget(0)->findChild<QFrame *>(
-          QStringLiteral("threadHeaderDivider"));
+      QStringLiteral("threadHeaderDivider"));
   auto *conversationHeaderDivider = splitter->widget(1)->findChild<QFrame *>(
-          QStringLiteral("conversationHeaderDivider"));
+      QStringLiteral("conversationHeaderDivider"));
   auto *conversationTitle = splitter->widget(1)->findChild<QLabel *>(
-          QStringLiteral("conversationTitle"));
+      QStringLiteral("conversationTitle"));
   auto *conversationMetadata = splitter->widget(1)->findChild<QLabel *>(
-          QStringLiteral("conversationMetadata"));
-  auto *conversationTrailingMetadata =
-      splitter->widget(1)->findChild<QLabel *>(
-          QStringLiteral("conversationTrailingMetadata"));
+      QStringLiteral("conversationMetadata"));
+  auto *conversationTrailingMetadata = splitter->widget(1)->findChild<QLabel *>(
+      QStringLiteral("conversationTrailingMetadata"));
   auto *conversationState = splitter->widget(1)->findChild<QLabel *>(
       QStringLiteral("conversationState"));
   auto *reasoningToggle = splitter->widget(1)->findChild<QToolButton *>(
-          QStringLiteral("conversationReasoningToggle"));
+      QStringLiteral("conversationReasoningToggle"));
   auto *updatesToggle = splitter->widget(1)->findChild<QToolButton *>(
-          QStringLiteral("conversationUpdatesToggle"));
+      QStringLiteral("conversationUpdatesToggle"));
   auto *commandFoldingToggle = splitter->widget(1)->findChild<QToolButton *>(
-          QStringLiteral("conversationCommandFoldingToggle"));
+      QStringLiteral("conversationCommandFoldingToggle"));
   auto *imageFoldingToggle = splitter->widget(1)->findChild<QToolButton *>(
-          QStringLiteral("conversationImageFoldingToggle"));
+      QStringLiteral("conversationImageFoldingToggle"));
   const auto paneRect = [](QWidget *widget, QWidget *pane) {
     return QRect(widget->mapTo(pane, QPoint()), widget->size());
   };
   const QRect threadDividerRect =
       threadHeaderDivider ? paneRect(threadHeaderDivider, splitter->widget(0))
-          : QRect{};
+                          : QRect{};
   const QRect conversationDividerRect =
       conversationHeaderDivider
           ? paneRect(conversationHeaderDivider, splitter->widget(1))
@@ -744,12 +575,12 @@ bool testOverlayGeometryAndRegionRouting() {
             commandFoldingToggle->accessibleName() ==
                 QStringLiteral("New command cards start collapsed") &&
             persisted.value(QStringLiteral("conversation/showReasoning"), false)
-                 .toBool() &&
+                .toBool() &&
             !persisted
                  .value(
                      QStringLiteral("conversation/commandsInitiallyExpanded"),
-                       true)
-                .toBool(),
+                     true)
+                 .toBool(),
         "Conversation presentation controls update the view and persistent "
         "settings together");
     reasoningToggle->click();
@@ -757,32 +588,35 @@ bool testOverlayGeometryAndRegionRouting() {
   }
 
   ConversationView &view = region.conversation();
-  view.reconcile(longConversation("layout-thread"));
+  nodegraph::NodeGraph conversationGraph;
+  nodegraph::NodeRef conversationThread;
+  populateLongConversation(conversationGraph, conversationThread,
+                           "layout-thread");
+  view.bindGraph(conversationGraph, conversationThread);
   spin(20);
   const QRect viewGeometry = view.geometry();
   const QRect viewportGeometry = view.viewport()->geometry();
-  auto *notice = region.findChild<QFrame *>(
-      QStringLiteral("conversationNoticeBar"));
-  auto *dismissNotice =
-      notice ? notice->findChild<QPushButton *>() : nullptr;
+  auto *notice =
+      region.findChild<QFrame *>(QStringLiteral("conversationNoticeBar"));
+  auto *dismissNotice = notice ? notice->findChild<QPushButton *>() : nullptr;
   region.showNotice(QStringLiteral("Transient interaction notice"), false);
   spin(10);
   const auto regionRect = [&region](QWidget *widget) {
     return QRect(widget->mapTo(&region, QPoint()), widget->size());
   };
-  result &= expect(
-      notice && notice->isVisible() && dismissNotice &&
-          view.geometry() == viewGeometry &&
-          view.viewport()->geometry() == viewportGeometry &&
-          regionRect(notice).intersects(regionRect(&view)),
-      "transient interaction notice overlays without shifting messages");
+  result &=
+      expect(notice && notice->isVisible() && dismissNotice &&
+                 view.geometry() == viewGeometry &&
+                 view.viewport()->geometry() == viewportGeometry &&
+                 regionRect(notice).intersects(regionRect(&view)),
+             "transient interaction notice overlays without shifting messages");
   if (dismissNotice)
     dismissNotice->click();
   spin(10);
-  result &= expect(notice && notice->isHidden() &&
-                       view.geometry() == viewGeometry &&
-                       view.viewport()->geometry() == viewportGeometry,
-                   "dismissing the notice preserves message geometry");
+  result &=
+      expect(notice && notice->isHidden() && view.geometry() == viewGeometry &&
+                 view.viewport()->geometry() == viewportGeometry,
+             "dismissing the notice preserves message geometry");
   const int canonical = region.composer().canonicalReserveHeight();
   result &=
       expect(canonical > 0 &&
@@ -865,17 +699,16 @@ bool testOverlayGeometryAndRegionRouting() {
                    "prompt focus activates the canonical composer focus state");
   QString submittedPrompt;
   ComposerPane::Actions exactSubmission;
-  exactSubmission.submit = [&submittedPrompt](
-                                QString prompt,
-                                std::vector<AttachmentDraft>) {
+  exactSubmission.submit = [&submittedPrompt](QString prompt,
+                                              std::vector<AttachmentDraft>) {
     submittedPrompt = std::move(prompt);
     return false;
   };
   region.composer().setActions(std::move(exactSubmission));
   const QString exactPrompt = QStringLiteral("  indented Markdown\n\n");
   region.composer().promptEditor()->setPlainText(exactPrompt);
-  QMetaObject::invokeMethod(region.composer().promptEditor(),
-                            "submitRequested", Qt::DirectConnection);
+  QMetaObject::invokeMethod(region.composer().promptEditor(), "submitRequested",
+                            Qt::DirectConnection);
   result &= expect(submittedPrompt == exactPrompt,
                    "submission validates whitespace without rewriting it");
   region.composer().clearDraft();
@@ -931,12 +764,12 @@ bool testOverlayGeometryAndRegionRouting() {
   view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
   spin(10);
   result &= expect(stableComposerGeometry() &&
-          region.composer().extraOverlayHeight() > extra &&
-          view.viewport()->height() - finalCardBottom() ==
-              region.composer().extraOverlayHeight() &&
+                       region.composer().extraOverlayHeight() > extra &&
+                       view.viewport()->height() - finalCardBottom() ==
+                           region.composer().extraOverlayHeight() &&
                        view.trailingSpaceHeight() ==
                            region.composer().extraOverlayHeight(),
-      "attachments retain the canonical settings-to-composer gap");
+                   "attachments retain the canonical settings-to-composer gap");
   region.composer().clearDraft();
   spin(30);
   view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
@@ -944,9 +777,8 @@ bool testOverlayGeometryAndRegionRouting() {
   result &= expect(
       region.composer().extraOverlayHeight() == 0 &&
           view.trailingSpaceHeight() == 0 && view.geometry() == viewGeometry &&
-          view.verticalScrollBar()
-                  ->property("composerBottomInset")
-                  .toInt() == 0 &&
+          view.verticalScrollBar()->property("composerBottomInset").toInt() ==
+              0 &&
           view.verticalScrollBar()->styleSheet().isEmpty() &&
           view.viewport()->geometry() == viewportGeometry &&
           finalCardBottom() == view.viewport()->height() &&
@@ -994,14 +826,14 @@ bool testOverlayGeometryAndRegionRouting() {
 
   QString oversizedPrompt;
   for (int line = 0; line < 30; ++line)
-    oversizedPrompt += QStringLiteral("scroll-owned prompt line %1\n").arg(line);
+    oversizedPrompt +=
+        QStringLiteral("scroll-owned prompt line %1\n").arg(line);
   region.composer().promptEditor()->setPlainText(oversizedPrompt);
   spin(20);
   auto *promptScroll = region.composer().promptEditor()->verticalScrollBar();
   promptScroll->setValue(promptScroll->minimum());
   view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum() / 2);
-  const int conversationBeforePromptWheel =
-      view.verticalScrollBar()->value();
+  const int conversationBeforePromptWheel = view.verticalScrollBar()->value();
   QWheelEvent promptRoute =
       wheelFor(region.composer().promptEditor(), 120, Qt::ScrollBegin);
   result &= expect(
@@ -1010,9 +842,9 @@ bool testOverlayGeometryAndRegionRouting() {
   QWheelEvent promptNative =
       wheelFor(region.composer().promptEditor(), 120, Qt::ScrollUpdate);
   QCoreApplication::sendEvent(region.composer().promptEditor(), &promptNative);
-  result &= expect(
-      view.verticalScrollBar()->value() == conversationBeforePromptWheel,
-      "prompt overscroll cannot move the conversation");
+  result &=
+      expect(view.verticalScrollBar()->value() == conversationBeforePromptWheel,
+             "prompt overscroll cannot move the conversation");
   QWheelEvent settingsWheel = wheelFor(settings, 120, Qt::ScrollBegin);
   result &= expect(region.routeScrollEvent(settings, &settingsWheel) &&
                        view.verticalScrollBar()->value() ==
@@ -1049,58 +881,59 @@ bool testStableComposerLayoutRequests() {
     spin(80);
     result =
         expect(composerLayoutRequests.count <= 1,
-        "stable composer geometry does not perpetually request layout");
+               "stable composer geometry does not perpetually request layout");
   }
   qApp->setStyleSheet(QString{});
   return result;
 }
 
 bool testThreadSelectionProjection() {
-  PresentationModel model;
-  model.applyEvent(presentation::event(
-      1, 1, "thread.upsert", {{"thread", {{"id", "thread-a"}, {"name", "A"}}}},
-      presentation::Authority::Merge, {{"threadId", "thread-a"}}));
-  model.applyEvent(presentation::event(
-      2, 1, "thread.upsert",
-      {{"thread",
-        {{"id", "thread-b"}, {"name", "B"}, {"status", {{"type", "active"}}}}}},
-      presentation::Authority::Merge, {{"threadId", "thread-b"}}));
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef threadA;
+  nodegraph::NodeRef threadB;
+  {
+    auto write = graph.write();
+    threadA = addThread(write, "thread-a", "A", "idle");
+    threadB = addThread(write, "thread-b", "B", "active");
+    const std::vector roots{threadA, threadB};
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
 
   ThreadPane pane;
   pane.resize(340, 620);
   pane.show();
-  refresh(pane, model, "thread-a");
+  refresh(pane, graph, "thread-a");
   bool result = expect(pane.visiblySelectedThreadId() == "thread-a",
                        "thread selection is projected from Shell state");
-  refresh(pane, model, "draft:new-thread");
+  refresh(pane, graph, "draft:new-thread");
   result &= expect(pane.visiblySelectedThreadId().empty(),
                    "a New Thread draft cannot retain an old visible row");
 
-  model.applyEvent(presentation::event(3, 1, "agents.activity.upsert",
-                                       {{"activity",
-                                         {{"id", "thread-b"},
-                                          {"type", "subAgentActivity"},
-                                          {"status", "inProgress"},
-                                          {"agentThreadId", "thread-b"}}}},
-                                       presentation::Authority::Merge,
-                                       {{"threadId", "thread-a"},
-                                        {"turnId", "turn-a"},
-                                        {"itemId", "thread-b"}}));
-  refresh(pane, model, "thread-b");
+  {
+    auto write = graph.write();
+    write.replaceRelated(threadA,
+                         nodegraph::RelationKind::StructuralChildThread,
+                         std::span(&threadB, 1));
+    const std::array roots{threadA};
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
+  refresh(pane, graph, "thread-b");
   auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
   QListWidgetItem *selected = list ? list->currentItem() : nullptr;
   result &=
       expect(selected &&
-          selected->data(Qt::UserRole).toString() ==
-              QStringLiteral("thread-b") &&
-          pane.visiblySelectedThreadId() == "thread-b",
-      "navigating to a nested thread reveals and selects it beneath its "
-      "parent");
+                 selected->data(Qt::UserRole).toString() ==
+                     QStringLiteral("thread-b") &&
+                 pane.visiblySelectedThreadId() == "thread-b",
+             "navigating to a nested thread reveals and selects it beneath its "
+             "parent");
   QWidget *row = selected && list ? list->itemWidget(selected) : nullptr;
   auto *title =
       row ? row->findChild<QLabel *>(QStringLiteral("threadTitle")) : nullptr;
   auto *dot = row ? row->findChild<QFrame *>(QStringLiteral("threadStatusDot"))
-          : nullptr;
+                  : nullptr;
   auto *rowLayout = row ? qobject_cast<QHBoxLayout *>(row->layout()) : nullptr;
   auto *sortButton =
       pane.findChild<QToolButton *>(QStringLiteral("threadSortButton"));
@@ -1109,17 +942,17 @@ bool testThreadSelectionProjection() {
       list && parentItem ? list->itemWidget(parentItem) : nullptr;
   QWidget *disclosure = parentRow
                             ? parentRow->findChild<QWidget *>(
-                      QStringLiteral("threadExpansionIndicator"))
-                : nullptr;
+                                  QStringLiteral("threadExpansionIndicator"))
+                            : nullptr;
   auto *parentDot =
       parentRow
           ? parentRow->findChild<QFrame *>(QStringLiteral("threadStatusDot"))
-                : nullptr;
+          : nullptr;
   const QString selectedAccessible =
       selected ? selected->data(Qt::AccessibleTextRole).toString() : QString{};
   const QString parentAccessible =
       parentItem ? parentItem->data(Qt::AccessibleTextRole).toString()
-                                       : QString{};
+                 : QString{};
   result &= expect(
       selected && selected->sizeHint().height() == 40 && rowLayout &&
           rowLayout->contentsMargins() == QMargins(0, 2, 0, 2) &&
@@ -1148,7 +981,7 @@ bool testThreadSelectionProjection() {
           selected->toolTip().contains(QStringLiteral("Parent: A")),
       "compact thread cards retain their status dot and expose canonical "
       "details through hover and accessibility");
-  refresh(pane, model, "thread-a");
+  refresh(pane, graph, "thread-a");
   bool childPresent = false;
   if (list) {
     for (int index = 0; index < list->count(); ++index) {
@@ -1159,10 +992,15 @@ bool testThreadSelectionProjection() {
   result &=
       expect(childPresent && pane.visiblySelectedThreadId() == "thread-a",
              "a child thread remains nested while its parent is selected");
-  model.applyEvent(presentation::event(
-      4, 1, "thread.removed", nlohmann::json::object(),
-      presentation::Authority::Remove, {{"threadId", "thread-b"}}));
-  refresh(pane, model, "thread-a");
+  nodegraph::GraphChange removed;
+  {
+    auto write = graph.write();
+    write.remove(threadB);
+    removed = write.finish();
+  }
+  pane.graphChanged(
+      {removed.revision, removed.affected, removed.removed, false});
+  refresh(pane, graph, "thread-a");
   bool retainedAfterRemoval = false;
   if (list) {
     for (int index = 0; index < list->count(); ++index) {
@@ -1177,26 +1015,26 @@ bool testThreadSelectionProjection() {
 }
 
 bool testThreadRuntimeStatusColors() {
-  PresentationModel model;
+  nodegraph::NodeGraph graph;
   const std::vector<std::pair<std::string, std::string>> statuses{
       {"thread-not-loaded", "notLoaded"},
       {"thread-completed", "idle"},
       {"thread-running", "active"},
       {"thread-failed", "systemError"},
   };
-  std::uint64_t sequence = 1;
-  for (const auto &[id, status] : statuses) {
-    model.applyEvent(presentation::event(
-        sequence++, 1, "thread.upsert",
-        {{"thread", {{"id", id}, {"name", id},
-                     {"status", {{"type", status}}}}}},
-        presentation::Authority::Merge, {{"threadId", id}}));
+  {
+    auto write = graph.write();
+    std::vector<nodegraph::NodeRef> roots;
+    for (const auto &[id, status] : statuses)
+      roots.push_back(addThread(write, id, id, status));
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
   }
 
   ThreadPane pane;
   pane.resize(340, 620);
   pane.show();
-  refresh(pane, model, "thread-completed");
+  refresh(pane, graph, "thread-completed");
   auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
   const std::vector<std::pair<std::string, const char *>> expected{
       {"thread-not-loaded", UiStyle::threadInactive},
@@ -1208,14 +1046,14 @@ bool testThreadRuntimeStatusColors() {
   for (const auto &[id, color] : expected) {
     QListWidgetItem *item = threadItem(list, id);
     QWidget *row = item && list ? list->itemWidget(item) : nullptr;
-    auto *dot = row ? row->findChild<QFrame *>(
-                          QStringLiteral("threadStatusDot"))
-                    : nullptr;
+    auto *dot =
+        row ? row->findChild<QFrame *>(QStringLiteral("threadStatusDot"))
+            : nullptr;
     const std::string message =
         id + " uses its canonical app-server runtime-state color";
-    result &= expect(
-        dot && dot->styleSheet().contains(QString::fromLatin1(color)),
-        message.c_str());
+    result &=
+        expect(dot && dot->styleSheet().contains(QString::fromLatin1(color)),
+               message.c_str());
   }
   return result;
 }
@@ -1273,45 +1111,45 @@ bool testIncrementalThreadSettings() {
                    "authoritative settings clear their pending overrides");
 
   settings.setContext("thread-b",
-      {{"model", "gpt-a"},
-       {"reasoningEffort", "medium"},
-       {"personality", "friendly"},
-       {"sandboxPolicy",
-        {{"type", "workspaceWrite"}, {"networkAccess", false}}},
-       {"approvalPolicy", "never"},
-       {"approvalsReviewer", "user"},
-       {"cwd", "/workspace"},
-       {"activePermissionProfile", {{"id", "managed"}}},
-       {"serviceTier", "priority"},
-       {"summary", "concise"},
-       {"collaborationMode", {{"mode", "default"}}}},
-      models, nlohmann::json::array());
+                      {{"model", "gpt-a"},
+                       {"reasoningEffort", "medium"},
+                       {"personality", "friendly"},
+                       {"sandboxPolicy",
+                        {{"type", "workspaceWrite"}, {"networkAccess", false}}},
+                       {"approvalPolicy", "never"},
+                       {"approvalsReviewer", "user"},
+                       {"cwd", "/workspace"},
+                       {"activePermissionProfile", {{"id", "managed"}}},
+                       {"serviceTier", "priority"},
+                       {"summary", "concise"},
+                       {"collaborationMode", {{"mode", "default"}}}},
+                      models, nlohmann::json::array());
   result &= expect(model->currentData().toString() == QStringLiteral("gpt-a"),
                    "thread selection restores that thread's retained value");
   result &=
       expect(settings.turnStartOptions() ==
                      nlohmann::json{{"collaborationMode",
-                   {{"mode", "default"},
-                    {"settings",
-                     {{"model", "gpt-a"},
-                      {"developer_instructions", nullptr},
-                      {"reasoning_effort", "medium"}}}}}} &&
-          settings.threadStartOptions().empty(),
-      "untouched settings emit only the displayed collaboration mode");
+                                     {{"mode", "default"},
+                                      {"settings",
+                                       {{"model", "gpt-a"},
+                                        {"developer_instructions", nullptr},
+                                        {"reasoning_effort", "medium"}}}}}} &&
+                 settings.threadStartOptions().empty(),
+             "untouched settings emit only the displayed collaboration mode");
   result &= expect(access->isEnabled() && network->isEnabled(),
                    "a permission preset does not lock its effective access "
                    "controls");
 
   settings.setContext("full-access-thread",
-      {{"sandboxPolicy", {{"type", "dangerFullAccess"}}},
-       {"activePermissionProfile", {{"id", ":full-access"}}}},
-      nlohmann::json::array(),
+                      {{"sandboxPolicy", {{"type", "dangerFullAccess"}}},
+                       {"activePermissionProfile", {{"id", ":full-access"}}}},
+                      nlohmann::json::array(),
                       {{"data", nlohmann::json::array({{{"id", ":full-access"},
                                                         {"allowed", true}}})}});
   result &=
       expect(access->isEnabled() && !network->isEnabled() &&
                  network->currentData().toString() == QStringLiteral("enabled"),
-                   "only logically redundant network selection is disabled");
+             "only logically redundant network selection is disabled");
 
   settings.setContext(
       "workspace-profile-thread",
@@ -1349,13 +1187,13 @@ bool testIncrementalThreadSettings() {
       "an explicit access choice replaces the active permission profile");
 
   settings.setContext("individual-overrides-thread",
-      {{"model", "gpt-a"},
-       {"approvalPolicy", "never"},
-       {"personality", "friendly"},
-       {"sandboxPolicy",
-        {{"type", "workspaceWrite"}, {"networkAccess", false}}},
-       {"activePermissionProfile", {{"id", ":workspace"}}}},
-      models,
+                      {{"model", "gpt-a"},
+                       {"approvalPolicy", "never"},
+                       {"personality", "friendly"},
+                       {"sandboxPolicy",
+                        {{"type", "workspaceWrite"}, {"networkAccess", false}}},
+                       {"activePermissionProfile", {{"id", ":workspace"}}}},
+                      models,
                       {{"data", nlohmann::json::array({{{"id", ":workspace"},
                                                         {"allowed", true}}})}});
   model->setCurrentIndex(model->findData(QStringLiteral("gpt-b")));
@@ -1378,42 +1216,26 @@ bool testIncrementalThreadSettings() {
 }
 
 bool testThreadHierarchyExpansionAndNavigation() {
-  PresentationModel model;
-  model.applyEvent(presentation::result(
-      1, 1, "threads.list", "hierarchy-roots", true,
-      {{"threads",
-        nlohmann::json::array({{{"id", "root-z"}, {"name", "Z root"}},
-                               {{"id", "root-a"}, {"name", "A root"}}})}},
-      presentation::Authority::Merge));
-  const auto addChild =
-      [&model](std::uint64_t sequence, const std::string &parent,
-               const std::string &child, const std::string &title) {
-    model.applyEvent(presentation::event(
-        sequence, 1, "thread.upsert",
-        {{"thread", {{"id", child}, {"name", title}}}},
-        presentation::Authority::Merge, {{"threadId", child}}));
-        model.applyEvent(presentation::event(sequence + 1, 1,
-                                             "agents.activity.upsert",
-        {{"activity",
-          {{"id", "spawn-" + child},
-           {"type", "subAgentActivity"},
-           {"status", "started"},
-           {"agentThreadId", child}}}},
-        presentation::Authority::Merge,
-        {{"threadId", parent},
-         {"turnId", "turn-" + parent},
-         {"itemId", "spawn-" + child}}));
-  };
-  addChild(2, "root-a", "child-z", "Z child");
-  addChild(4, "root-a", "child-a", "A child");
-  addChild(6, "child-z", "grandchild", "Nested child");
-  model.applyEvent(presentation::event(
-      8, 1, "pending-request.upsert",
-      {{"requestId", "nested-request"},
-       {"category", "userInput"},
-       {"request", {{"message", "Review nested work"}}}},
-      presentation::Authority::Merge,
-      {{"threadId", "grandchild"}, {"requestId", "nested-request"}}));
+  nodegraph::NodeGraph graph;
+  {
+    auto write = graph.write();
+    const nodegraph::NodeRef rootZ = addThread(write, "root-z", "Z root");
+    const nodegraph::NodeRef rootA = addThread(write, "root-a", "A root");
+    const nodegraph::NodeRef childZ = addThread(write, "child-z", "Z child");
+    const nodegraph::NodeRef childA = addThread(write, "child-a", "A child");
+    const nodegraph::NodeRef grandchild =
+        addThread(write, "grandchild", "Nested child");
+    const std::array rootChildren{childZ, childA};
+    write.replaceRelated(rootA, nodegraph::RelationKind::StructuralChildThread,
+                         rootChildren);
+    write.replaceRelated(childZ, nodegraph::RelationKind::StructuralChildThread,
+                         std::span(&grandchild, 1));
+    const std::array roots{rootZ, rootA};
+    const nodegraph::NodeRef runtime = runtimeWithRoots(write, roots);
+    addInteraction(write, runtime, grandchild, "nested-request", "user-input",
+                   {{"message", nodegraph::Value("Review nested work")}});
+    static_cast<void>(write.finish());
+  }
 
   ThreadPane pane;
   pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
@@ -1423,12 +1245,12 @@ bool testThreadHierarchyExpansionAndNavigation() {
   actions.select = [&](const nodegraph::NodeRef &node) {
     selectedThread = node ? node->id().canonical : std::string{};
     ++selections;
-    refresh(pane, model, selectedThread);
+    refresh(pane, graph, selectedThread);
   };
   pane.setNodeActions(std::move(actions));
   pane.resize(340, 620);
   pane.show();
-  refresh(pane, model, selectedThread);
+  refresh(pane, graph, selectedThread);
   spin(20);
 
   auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
@@ -1454,8 +1276,8 @@ bool testThreadHierarchyExpansionAndNavigation() {
   const auto clickExpansion = [list](QListWidgetItem *item) {
     QWidget *row = item ? list->itemWidget(item) : nullptr;
     QWidget *indicator = row ? row->findChild<QWidget *>(
-                  QStringLiteral("threadExpansionIndicator"))
-            : nullptr;
+                                   QStringLiteral("threadExpansionIndicator"))
+                             : nullptr;
     const QPoint position =
         indicator
             ? indicator->mapTo(list->viewport(), indicator->rect().center())
@@ -1473,8 +1295,8 @@ bool testThreadHierarchyExpansionAndNavigation() {
   rootA = threadItem(list, "root-a");
   rootRow = rootA ? list->itemWidget(rootA) : nullptr;
   rootDisclosure = rootRow ? rootRow->findChild<QWidget *>(
-                    QStringLiteral("threadExpansionIndicator"))
-              : nullptr;
+                                 QStringLiteral("threadExpansionIndicator"))
+                           : nullptr;
   result &= expect(
       threadOrder(pane) == std::vector<std::string>{"root-a", "child-z",
                                                     "child-a", "root-z"} &&
@@ -1489,7 +1311,7 @@ bool testThreadHierarchyExpansionAndNavigation() {
     return false;
 
   selectedThread = "grandchild";
-  refresh(pane, model, selectedThread);
+  refresh(pane, graph, selectedThread);
   spin();
   QListWidgetItem *grandchild = threadItem(list, "grandchild");
   QWidget *grandchildRow =
@@ -1497,7 +1319,7 @@ bool testThreadHierarchyExpansionAndNavigation() {
   QLabel *grandchildTitle =
       grandchildRow
           ? grandchildRow->findChild<QLabel *>(QStringLiteral("threadTitle"))
-                                : nullptr;
+          : nullptr;
   result &= expect(
       threadOrder(pane) == std::vector<std::string>{"root-a", "child-z",
                                                     "grandchild", "child-a",
@@ -1544,9 +1366,9 @@ bool testThreadHierarchyExpansionAndNavigation() {
   spin();
   result &=
       expect(selectedThread == "grandchild" &&
-                       pane.visiblySelectedThreadId() == "grandchild" &&
-                       selections == beforeKeyboard + 1,
-                   "Right navigates from an expanded parent to its first child");
+                 pane.visiblySelectedThreadId() == "grandchild" &&
+                 selections == beforeKeyboard + 1,
+             "Right navigates from an expanded parent to its first child");
   QKeyEvent leftToParent(QEvent::KeyPress, Qt::Key_Left, Qt::NoModifier);
   QApplication::sendEvent(list, &leftToParent);
   spin();
@@ -1568,28 +1390,29 @@ bool testThreadHierarchyExpansionAndNavigation() {
   spin();
   result &=
       expect(threadOrder(pane) ==
-              std::vector<std::string>{"root-a", "child-z", "grandchild",
-                                       "child-a", "root-z"} &&
-          pane.visiblySelectedThreadId() == "child-z" &&
-          selections == beforeKeyboard + 2,
-      "Right expands a collapsed parent without changing selection");
+                     std::vector<std::string>{"root-a", "child-z", "grandchild",
+                                              "child-a", "root-z"} &&
+                 pane.visiblySelectedThreadId() == "child-z" &&
+                 selections == beforeKeyboard + 2,
+             "Right expands a collapsed parent without changing selection");
   return result;
 }
 
 bool testThreadAlphanumericSort() {
-  PresentationModel model;
-  model.applyEvent(presentation::result(
-      1, 1, "threads.list", "alpha-threads", true,
-      {{"threads",
-        nlohmann::json::array({{{"id", "alpha"}, {"name", "Alpha"}},
-                               {{"id", "ten"}, {"name", "10 Release"}},
-                               {{"id", "two"}, {"name", "2 Review"}},
-                               {{"id", "one"}, {"name", "1 Setup"}},
-                               {{"id", "beta"}, {"name", "beta"}}})}},
-      presentation::Authority::Merge));
+  nodegraph::NodeGraph graph;
+  {
+    auto write = graph.write();
+    const std::vector roots{addThread(write, "alpha", "Alpha"),
+                            addThread(write, "ten", "10 Release"),
+                            addThread(write, "two", "2 Review"),
+                            addThread(write, "one", "1 Setup"),
+                            addThread(write, "beta", "beta")};
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
   ThreadPane pane;
   pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
-  refresh(pane, model, "two");
+  refresh(pane, graph, "two");
   const std::vector<std::string> order = threadOrder(pane);
   const bool correct = order == std::vector<std::string>(
                                     {"one", "two", "ten", "alpha", "beta"}) &&
@@ -1605,55 +1428,54 @@ bool testThreadAlphanumericSort() {
 }
 
 bool testThreadCreatedSort() {
-  PresentationModel model;
-  model.applyEvent(presentation::result(
-      1, 1, "threads.list", "created-threads", true,
-      {{"threads",
-        nlohmann::json::array({{{"id", "old"}, {"createdAt", 10}},
-                               {{"id", "missing"}},
-                               {{"id", "new"}, {"createdAt", 30}},
-                               {{"id", "middle"}, {"createdAt", 20}}})}},
-      presentation::Authority::Merge));
+  nodegraph::NodeGraph graph;
+  {
+    auto write = graph.write();
+    const std::vector roots{addThread(write, "old", {}, {}, 10),
+                            addThread(write, "missing"),
+                            addThread(write, "new", {}, {}, 30),
+                            addThread(write, "middle", {}, {}, 20)};
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
   ThreadPane pane;
   pane.setSortCriterion(ThreadPane::SortCriterion::Created);
-  refresh(pane, model, {});
+  refresh(pane, graph);
   return expect(threadOrder(pane) == std::vector<std::string>(
                                          {"new", "middle", "old", "missing"}),
                 "Created sorting is newest first with missing values last");
 }
 
 bool testThreadLastChangedSort() {
-  PresentationModel model;
-  model.applyEvent(presentation::result(
-      1, 1, "threads.list", "changed-threads", true,
-      {{"threads",
-        nlohmann::json::array({{{"id", "first"}, {"updatedAt", 20}},
-                               {{"id", "second"}, {"updatedAt", 10}},
-                               {{"id", "third"}, {"updatedAt", 30}}})}},
-      presentation::Authority::Merge));
-  model.applyEvent(presentation::event(
-      2, 1, "thread.upsert",
-      {{"thread", {{"id", "first"}, {"name", "Renamed"}}}},
-      presentation::Authority::Merge, {{"threadId", "first"}}));
+  nodegraph::NodeGraph graph;
+  {
+    auto write = graph.write();
+    const std::vector roots{addThread(write, "first", "Renamed", {}, {}, 20),
+                            addThread(write, "second", {}, {}, {}, 10),
+                            addThread(write, "third", {}, {}, {}, 30)};
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
   ThreadPane pane;
   pane.setSortCriterion(ThreadPane::SortCriterion::LastChanged);
-  refresh(pane, model, {});
+  refresh(pane, graph);
   return expect(threadOrder(pane) ==
                     std::vector<std::string>({"third", "first", "second"}),
                 "Last changed sorting uses retained updated timestamps");
 }
 
 bool testThreadRecencySort() {
-  PresentationModel model;
-  model.applyEvent(presentation::result(
-      1, 1, "threads.list", "recent-threads", true,
-      {{"threads",
-        nlohmann::json::array({{{"id", "older"}, {"recencyAt", 10}},
-                               {{"id", "recent"}, {"recencyAt", 30}},
-                               {{"id", "middle"}, {"recencyAt", 20}}})}},
-      presentation::Authority::Merge));
+  nodegraph::NodeGraph graph;
+  {
+    auto write = graph.write();
+    const std::vector roots{addThread(write, "older", {}, {}, {}, {}, 10),
+                            addThread(write, "recent", {}, {}, {}, {}, 30),
+                            addThread(write, "middle", {}, {}, {}, {}, 20)};
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
   ThreadPane pane;
-  refresh(pane, model, "older");
+  refresh(pane, graph, "older");
   return expect(
       pane.currentSortCriterion() == ThreadPane::SortCriterion::Recency &&
           threadOrder(pane) ==
@@ -1663,103 +1485,140 @@ bool testThreadRecencySort() {
 }
 
 bool testThreadLastActivityRetention() {
-  PresentationModel model;
-  model.applyEvent(presentation::result(
-      1, 1, "threads.list", "activity-threads", true,
-      {{"threads",
-        nlohmann::json::array(
-            {{{"id", "tracked"}, {"updatedAt", 20}, {"recencyAt", 30}},
-             {{"id", "updated-only"}, {"updatedAt", 25}}})}},
-      presentation::Authority::Merge));
-  const ThreadPresentation *thread = model.thread("tracked");
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef tracked;
+  nodegraph::NodeRef updatedOnly;
+  {
+    auto write = graph.write();
+    tracked = addThread(write, "tracked", {}, {}, {}, 20, 30);
+    updatedOnly = addThread(write, "updated-only", {}, {}, {}, 25);
+    const std::array roots{tracked, updatedOnly};
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
+  const auto integerField = [&graph](const nodegraph::NodeRef &node,
+                                     std::string_view name) {
+    std::optional<std::int64_t> result;
+    auto read = graph.tryRead();
+    if (!read)
+      return result;
+    const auto state = read->state(node);
+    if (!state)
+      return result;
+    const auto found = state->fields.find(name);
+    if (found != state->fields.end()) {
+      if (const auto *value = found->second.asInt64())
+        result = *value;
+      else if (const auto *value = found->second.asUInt64())
+        result = static_cast<std::int64_t>(*value);
+    }
+    return result;
+  };
+
   bool result =
-      expect(thread && thread->lastActivityAt == 30,
+      expect(integerField(tracked, "lastActivityAt") == 30,
              "provider recency and update timestamps seed activity by maximum");
-  const ThreadPresentation *updatedOnly = model.thread("updated-only");
-  result &= expect(updatedOnly && updatedOnly->lastActivityAt == 25,
+  result &= expect(integerField(updatedOnly, "lastActivityAt") == 25,
                    "provider update timestamp seeds activity without recency");
-  model.noteThreadActivity("tracked", 25);
-  thread = model.thread("tracked");
-  result &= expect(thread && thread->lastActivityAt == 30,
-                   "older local traffic cannot move activity backwards");
-  model.noteThreadActivity("tracked", 40);
-  model.applyEvent(presentation::event(
-      2, 1, "thread.upsert",
-      {{"thread", {{"id", "tracked"}, {"recencyAt", 35}}}},
-      presentation::Authority::Merge, {{"threadId", "tracked"}}));
-  thread = model.thread("tracked");
-  result &=
-      expect(thread && thread->lastActivityAt == 40 &&
-                 thread->updatedAt == 20 && thread->recencyAt == 35,
-             "live protocol traffic updates activity without rewriting sort keys");
+
+  {
+    auto write = graph.write();
+    write.setField(tracked, "localActivityAt", nodegraph::Value(40));
+    write.setField(tracked, "recencyAt", nodegraph::Value(35));
+    static_cast<void>(write.finish());
+  }
+  result &= expect(integerField(tracked, "localActivityAt") == 40 &&
+                       integerField(tracked, "updatedAt") == 20 &&
+                       integerField(tracked, "recencyAt") == 35,
+                   "live activity remains independent from provider sort keys");
   return result;
 }
 
 bool testPromptActivityNaturallyOrdersThreads() {
-  PresentationModel model;
-  model.applyEvent(presentation::result(
-      1, 1, "threads.list", "prompt-promotion", true,
-      {{"threads", nlohmann::json::array({{{"id", "older"},
-              {"name", "Older"},
-              {"createdAt", 10},
-              {"updatedAt", 10},
-              {"recencyAt", 10}},
-             {{"id", "recent"},
-              {"name", "Recent"},
-              {"createdAt", 30},
-              {"updatedAt", 30},
-              {"recencyAt", 30}}})}},
-      presentation::Authority::Merge));
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef older;
+  nodegraph::NodeRef recent;
+  {
+    auto write = graph.write();
+    older = addThread(write, "older", "Older", {}, 10, 10, 10);
+    recent = addThread(write, "recent", "Recent", {}, 30, 30, 30);
+    const std::array roots{older, recent};
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
+
   ThreadPane pane;
-  refresh(pane, model, "older");
+  refresh(pane, graph, "older");
   bool result =
       expect(threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
-      "provider recency initially determines thread order");
+             "provider recency initially determines thread order");
 
-  model.notePromptActivity("older", 40);
-  refresh(pane, model, "older");
+  {
+    auto write = graph.write();
+    write.setField(older, "localActivityAt", nodegraph::Value(40));
+    write.setField(older, "localPromptActivityAt", nodegraph::Value(40));
+    static_cast<void>(write.finish());
+  }
+  refresh(pane, graph, "older");
   result &=
       expect(threadOrder(pane) == std::vector<std::string>({"older", "recent"}),
-      "prompt activity immediately updates natural Recent ordering");
+             "prompt activity immediately updates natural Recent ordering");
   pane.setSortCriterion(ThreadPane::SortCriterion::LastChanged);
   spin();
   result &=
       expect(threadOrder(pane) == std::vector<std::string>({"older", "recent"}),
-      "the same activity updates natural Last changed ordering");
+             "the same activity updates natural Last changed ordering");
   pane.setSortCriterion(ThreadPane::SortCriterion::Created);
   spin();
   result &=
       expect(threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
-      "prompt activity does not affect Created ordering");
+             "prompt activity does not affect Created ordering");
 
   pane.setSortCriterion(ThreadPane::SortCriterion::Recency);
   spin();
-  model.notePromptActivity("recent", 40);
-  refresh(pane, model, "recent");
-  result &=
-      expect(threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
+  {
+    auto write = graph.write();
+    write.setField(recent, "localActivityAt", nodegraph::Value(41));
+    write.setField(recent, "localPromptActivityAt", nodegraph::Value(41));
+    static_cast<void>(write.finish());
+  }
+  refresh(pane, graph, "recent");
+  result &= expect(
+      threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
       "a later prompt moves its thread first without losing prior activity");
-  model.applyEvent(presentation::event(
-      2, 1, "thread.upsert", {{"thread", {{"id", "older"}, {"recencyAt", 20}}}},
-      presentation::Authority::Merge, {{"threadId", "older"}}));
-  refresh(pane, model, "recent");
-  const ThreadPresentation *older = model.thread("older");
-  result &=
-      expect(older && older->recencyAt == 40 && older->updatedAt == 40 &&
-                 threadOrder(pane) ==
-                     std::vector<std::string>({"recent", "older"}),
-             "stale provider timestamps cannot undo newer local ordering");
+  {
+    auto write = graph.write();
+    write.setField(older, "recencyAt", nodegraph::Value(20));
+    static_cast<void>(write.finish());
+  }
+  refresh(pane, graph, "recent");
+  auto read = graph.tryRead();
+  const auto olderState = read ? read->state(older) : nullptr;
+  const nodegraph::Value *localPrompt = nullptr;
+  if (olderState) {
+    const auto found = olderState->fields.find("localPromptActivityAt");
+    if (found != olderState->fields.end())
+      localPrompt = &found->second;
+  }
+  result &= expect(
+      localPrompt && localPrompt->asInt64() && *localPrompt->asInt64() == 40 &&
+          threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
+      "stale provider timestamps cannot undo newer local ordering");
   return result;
 }
-
 bool testOptimisticThreadRowLifecycle() {
-  PresentationModel model;
+  nodegraph::NodeGraph graph;
+  {
+    auto write = graph.write();
+    static_cast<void>(runtimeWithRoots(write, {}));
+    static_cast<void>(write.finish());
+  }
   ThreadPane pane;
   pane.resize(320, 520);
   pane.show();
   pane.beginOptimisticThread("draft:new-thread", "Draft title",
                              "/workspace/draft");
-  refresh(pane, model, "draft:new-thread");
+  refresh(pane, graph, "draft:new-thread");
   spin();
 
   auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
@@ -1775,48 +1634,49 @@ bool testOptimisticThreadRowLifecycle() {
   if (!draft)
     return false;
 
-  model.applyEvent(presentation::event(1, 1, "thread.upsert",
-                                       {{"thread",
-                                         {{"id", "thread-created"},
-                    {"name", "Created title"},
-                    {"cwd", "/workspace/created"},
-                    {"status", "idle"}}}},
-                                       presentation::Authority::Merge,
-                                       {{"threadId", "thread-created"}}));
+  {
+    auto write = graph.write();
+    const nodegraph::NodeRef created =
+        addThread(write, "thread-created", "Created title", "idle");
+    write.setField(created, "cwd", nodegraph::Value("/workspace/created"));
+    const std::array roots{created};
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
   pane.promoteOptimisticThread("draft:new-thread", "thread-created");
-  refresh(pane, model, "thread-created");
+  refresh(pane, graph, "thread-created");
   spin();
   QListWidgetItem *promoted = threadItem(list, "thread-created");
   result &=
       expect(promoted == draft && promoted->data(Qt::UserRole + 6).toBool() &&
-          pane.visiblySelectedThreadId() == "thread-created" &&
-          animation->isActive(),
+                 pane.visiblySelectedThreadId() == "thread-created" &&
+                 animation->isActive(),
              "thread/start rekeys the existing row without replacing its item "
              "or animation");
 
   pane.beginOptimisticThread("draft:second", "Second draft",
                              "/workspace/second");
-  refresh(pane, model, "draft:second");
+  refresh(pane, graph, "draft:second");
   spin();
   QListWidgetItem *second = threadItem(list, "draft:second");
   result &= expect(second && threadItem(list, "thread-created") == draft &&
-          animation->isActive(),
+                       animation->isActive(),
                    "a second draft can animate while the first created thread "
                    "still awaits acknowledgment");
 
   pane.confirmOptimisticThread("thread-created");
-  refresh(pane, model, "draft:second");
+  refresh(pane, graph, "draft:second");
   spin();
   result &= expect(threadItem(list, "thread-created") == draft &&
-          !draft->data(Qt::UserRole + 6).toBool() &&
-          !pane.isOptimisticThread("thread-created") &&
-          threadItem(list, "draft:second") == second &&
+                       !draft->data(Qt::UserRole + 6).toBool() &&
+                       !pane.isOptimisticThread("thread-created") &&
+                       threadItem(list, "draft:second") == second &&
                        second->data(Qt::UserRole + 6).toBool() &&
                        animation->isActive(),
-      "acknowledging one new thread canonicalizes only that row");
+                   "acknowledging one new thread canonicalizes only that row");
 
   pane.failOptimisticThread("draft:second");
-  refresh(pane, model, "draft:second");
+  refresh(pane, graph, "draft:second");
   spin();
   result &= expect(
       threadItem(list, "draft:second") == second &&
@@ -1826,13 +1686,17 @@ bool testOptimisticThreadRowLifecycle() {
 }
 
 bool testThreadRowReorderOwnership() {
-  PresentationModel model;
-  model.applyEvent(presentation::event(
-      1, 1, "thread.upsert", {{"thread", {{"id", "thread-a"}, {"name", "A"}}}},
-      presentation::Authority::Merge, {{"threadId", "thread-a"}}));
-  model.applyEvent(presentation::event(
-      2, 1, "thread.upsert", {{"thread", {{"id", "thread-b"}, {"name", "B"}}}},
-      presentation::Authority::Merge, {{"threadId", "thread-b"}}));
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef nodeA;
+  nodegraph::NodeRef nodeB;
+  {
+    auto write = graph.write();
+    nodeA = addThread(write, "thread-a", "A");
+    nodeB = addThread(write, "thread-b", "B");
+    const std::array roots{nodeA, nodeB};
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
 
   ThreadPane pane;
   int selectedByUser = 0;
@@ -1842,7 +1706,7 @@ bool testThreadRowReorderOwnership() {
   pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
   pane.resize(320, 500);
   pane.show();
-  refresh(pane, model, "thread-a");
+  refresh(pane, graph, "thread-a");
   spin(20);
   auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
   QListWidgetItem *threadA = nullptr;
@@ -1884,21 +1748,23 @@ bool testThreadRowReorderOwnership() {
   QPointer<QWidget> stableThreadARow = list->itemWidget(threadA);
   QPointer<QWidget> originalRow = list->itemWidget(threadB);
 
-  model.applyEvent(presentation::event(
-      3, 1, "thread.status.changed", {{"status", "completed"}},
-      presentation::Authority::Merge, {{"threadId", "thread-b"}}));
-  refresh(pane, model, "thread-a");
+  {
+    auto write = graph.write();
+    write.setStatus(nodeB, nodegraph::NodeStatus::Completed);
+    write.setField(nodeB, "status", nodegraph::Value("completed"));
+    static_cast<void>(write.finish());
+  }
+  refresh(pane, graph, "thread-a");
   result &= expect(stableThreadARow == list->itemWidget(threadA) &&
                        originalRow == list->itemWidget(threadB),
                    "content-only refreshes preserve thread row widgets");
 
-  model.applyEvent(presentation::result(
-      4, 1, "threads.list", "reordered-threads", true,
-      {{"threads",
-        nlohmann::json::array({{{"id", "thread-a"}, {"name", "Z"}},
-                               {{"id", "thread-b"}, {"name", "B"}}})}},
-      presentation::Authority::Replace));
-  refresh(pane, model, "thread-a");
+  {
+    auto write = graph.write();
+    write.setField(nodeA, "name", nodegraph::Value("Z"));
+    static_cast<void>(write.finish());
+  }
+  refresh(pane, graph, "thread-a");
   QPointer<QWidget> movedRow = list->itemWidget(threadB);
   result &= expect(movedRow && originalRow != movedRow,
                    "moving an item never reattaches its deferred-delete row");
@@ -1952,23 +1818,22 @@ bool testThreadPaneDirectGraphBinding() {
     std::vector<nodegraph::NodeRef> backgroundItems;
     backgroundItems.reserve(2048);
     for (int index = 0; index < 2048; ++index) {
-      backgroundItems.emplace_back(write.upsert(
-          {nodegraph::NodeKind::Item,
-           "background-item-" + std::to_string(index)}));
+      backgroundItems.emplace_back(
+          write.upsert({nodegraph::NodeKind::Item,
+                        "background-item-" + std::to_string(index)}));
     }
     write.replaceChildren(backgroundTurn, backgroundItems);
     for (int index = 0; index < 256; ++index) {
       nodegraph::NodeState pendingState;
       pendingState.status = nodegraph::NodeStatus::Pending;
-      const nodegraph::NodeRef interaction = write.upsert(
-          {nodegraph::NodeKind::Interaction,
-           "string:background-pending-" + std::to_string(index)},
-          std::move(pendingState));
-      write.relate(interaction,
-                   nodegraph::RelationKind::InteractionTarget,
+      const nodegraph::NodeRef interaction =
+          write.upsert({nodegraph::NodeKind::Interaction,
+                        "string:background-pending-" + std::to_string(index)},
+                       std::move(pendingState));
+      write.relate(interaction, nodegraph::RelationKind::InteractionTarget,
                    backgroundItems[static_cast<std::size_t>(index * 8)]);
-      write.relate(background,
-                   nodegraph::RelationKind::PendingInteraction, interaction);
+      write.relate(background, nodegraph::RelationKind::PendingInteraction,
+                   interaction);
       write.relate(runtime, nodegraph::RelationKind::PendingInteraction,
                    interaction);
     }
@@ -2068,11 +1933,11 @@ bool testThreadPaneDirectGraphBinding() {
         pendingRow
             ? pendingRow->findChild<QLabel *>(QStringLiteral("threadTitle"))
             : nullptr;
-    result &= expect(
-        pendingItem && stablePendingRow == pendingRow && pendingTitle &&
-            !pendingTitle->text().startsWith("! "),
-        "interaction-only resolution clears the visible badge without "
-        "rebuilding thread topology across large unrelated history");
+    result &=
+        expect(pendingItem && stablePendingRow == pendingRow && pendingTitle &&
+                   !pendingTitle->text().startsWith("! "),
+               "interaction-only resolution clears the visible badge without "
+               "rebuilding thread topology across large unrelated history");
 
     auto *removedAttachment =
         static_cast<ui::QtNodeAttachment *>(roots.front()->uiAttachment());
@@ -2107,19 +1972,29 @@ bool testNestedCommandScrollOwnership() {
   MiddleRegionWidget region;
   region.resize(1500, 820);
   region.show();
-  ConversationSnapshot snapshot = longConversation("command-thread");
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  populateLongConversation(graph, thread, "command-thread");
   QString output;
   for (int line = 0; line < 100; ++line)
     output += QStringLiteral("command output line %1\n").arg(line);
   QString command;
   for (int line = 0; line < 30; ++line)
     command += QStringLiteral("command argument line %1\n").arg(line);
-  snapshot.sections.back().cards.push_back(
-      {AuthoritativeItemKey{"command-thread", "turn-2", "command"},
-       CardKind::CommandExecution, "command-thread", "turn-2", "command",
-       CommandExecutionData{
-           utf8(command), utf8(output), "inProgress", {}, std::nullopt}});
-  region.conversation().reconcile(snapshot);
+  {
+    auto write = graph.write();
+    nodegraph::NodeState state;
+    state.status = nodegraph::NodeStatus::Running;
+    state.fields = {{"type", nodegraph::Value("commandExecution")},
+                    {"command", nodegraph::Value(utf8(command))},
+                    {"aggregatedOutput", nodegraph::Value(utf8(output))},
+                    {"status", nodegraph::Value("inProgress")}};
+    const nodegraph::NodeRef item =
+        write.upsert({nodegraph::NodeKind::Item, "command"}, std::move(state));
+    write.setParent(write.find({nodegraph::NodeKind::Turn, "turn-2"}), item);
+    static_cast<void>(write.finish());
+  }
+  region.conversation().bindGraph(graph, thread);
   spin(30);
 
   CommandOutputView *commandOutput = nullptr;
@@ -2158,16 +2033,16 @@ bool testNestedCommandScrollOwnership() {
     QWheelEvent sameGesture = wheelFor(view, 120, Qt::ScrollUpdate);
     passed &=
         expect(!region.routeScrollEvent(view, &sameGesture) &&
-                         outer->value() == outerBeforeOverscroll,
-                     "a gesture reaching the top cannot leak to the conversation");
+                   outer->value() == outerBeforeOverscroll,
+               "a gesture reaching the top cannot leak to the conversation");
     QWheelEvent end = wheelFor(view, 0, Qt::ScrollEnd);
     region.routeScrollEvent(view, &end);
 
     QWheelEvent freshAtTop = wheelFor(view, 120, Qt::ScrollBegin);
     passed &=
         expect(region.routeScrollEvent(view, &freshAtTop) &&
-                         outer->value() < outerBeforeOverscroll,
-                     "a fresh outward gesture at the top scrolls the conversation");
+                   outer->value() < outerBeforeOverscroll,
+               "a fresh outward gesture at the top scrolls the conversation");
     QWheelEvent topEnd = wheelFor(view, 0, Qt::ScrollEnd);
     region.routeScrollEvent(view, &topEnd);
 
@@ -2180,16 +2055,16 @@ bool testNestedCommandScrollOwnership() {
     QWheelEvent sameDownGesture = wheelFor(view, -120, Qt::ScrollUpdate);
     passed &=
         expect(!region.routeScrollEvent(view, &sameDownGesture) &&
-                         outer->value() == outerBeforeBottomOverscroll,
-                     "a gesture reaching the bottom cannot leak to the conversation");
+                   outer->value() == outerBeforeBottomOverscroll,
+               "a gesture reaching the bottom cannot leak to the conversation");
     QWheelEvent downEnd = wheelFor(view, 0, Qt::ScrollEnd);
     region.routeScrollEvent(view, &downEnd);
 
     QWheelEvent freshAtBottom = wheelFor(view, -120, Qt::ScrollBegin);
     passed &= expect(
         region.routeScrollEvent(view, &freshAtBottom) &&
-                         outer->value() > outerBeforeBottomOverscroll,
-                     "a fresh outward gesture at the bottom scrolls the conversation");
+            outer->value() > outerBeforeBottomOverscroll,
+        "a fresh outward gesture at the bottom scrolls the conversation");
     QWheelEvent bottomEnd = wheelFor(view, 0, Qt::ScrollEnd);
     region.routeScrollEvent(view, &bottomEnd);
 
@@ -2204,8 +2079,8 @@ bool testNestedCommandScrollOwnership() {
     QWheelEvent boundaryNotch = wheelFor(view, 120, Qt::NoScrollPhase);
     passed &=
         expect(region.routeScrollEvent(view, &boundaryNotch) &&
-                         outer->value() < outerBeforeMouseWheel,
-                     "a mouse-wheel notch at the boundary scrolls the conversation");
+                   outer->value() < outerBeforeMouseWheel,
+               "a mouse-wheel notch at the boundary scrolls the conversation");
     return passed;
   };
 
@@ -2368,74 +2243,79 @@ bool testInfoViewerLayout() {
 bool testInspectorDetailParity() {
   const QString previousStyleSheet = qApp->styleSheet();
   qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
-  PresentationModel model;
-  model.applyEvent(presentation::event(
-      1, 1, "thread.upsert",
-      {{"thread", {{"id", "owner-thread"}, {"name", "Original title"}}}},
-      presentation::Authority::Merge, {{"threadId", "owner-thread"}}));
-  model.applyEvent(presentation::event(
-      2, 1, "agents.activity.upsert",
-      {{"activity",
-        {{"id", "agent-one"},
-         {"type", "subAgentActivity"},
-         {"status", "inProgress"},
-         {"agentPath", "/root/lifecycle_review"},
-         {"agentThreadId", "child-thread"},
-         {"resultText",
-          "No blocking Inspector findings.\n\n"
-          "* Typed snapshots cover all rendered Plan, Agent, and Request "
-          "fields, with default equality and optional first-render state.\n"
-          "* Rendering now uses those typed projections directly.\n"
-          "* Request thread titles participate in equality, so rename-only "
-          "changes invalidate correctly.\n"
-          "* optional size correctly distinguishes absent questions from a "
-          "visible zero questions.\n"
-          "* The added Application Layout regression is minimal and well "
-          "targeted: render the original title, rename without changing the "
-          "request, refresh, then require the new label and reject the old "
-          "one.\n"
-          "* Application Layout tests pass offscreen.\n\n"
-          "No files were edited."},
-         {"senderThreadId", "sender-thread"},
-         {"receiverThreadIds",
-          nlohmann::json::array({"receiver-one", "receiver-two"})}}}},
-      presentation::Authority::Merge,
-      {{"threadId", "owner-thread"},
-       {"turnId", "turn-one"},
-       {"itemId", "agent-one"}}));
-  model.applyEvent(presentation::event(
-      3, 1, "agents.activity.upsert",
-      {{"activity",
-        {{"id", "agent-two"},
-         {"type", "subAgentActivity"},
-         {"status", "completed"},
-         {"agentPath", "/root/hierarchy_ui_review"},
-         {"agentThreadId", "child-thread-two"},
-         {"resultText",
-          "No blocking Git snapshot issues found.\n\n"
-          "* Add defaulted equality to the file and snapshot records.\n"
-          "* Replace both retained snapshot hashes with optional typed "
-          "snapshots so an initial empty result still renders.\n"
-          "* Preserve the current snapshot fallback and repository context "
-          "behavior."}}}},
-      presentation::Authority::Merge,
-      {{"threadId", "owner-thread"},
-       {"turnId", "turn-one"},
-       {"itemId", "agent-two"}}));
-  model.applyEvent(presentation::event(
-      4, 1, "pending-request.upsert",
-      {{"requestId", "request-one"},
-       {"category", "userInput"},
-       {"request",
-        {{"message", "Choose an option"},
-         {"questions", nlohmann::json::array({1, 2, 3})}}}},
-      presentation::Authority::Merge,
-      {{"threadId", "owner-thread"}, {"requestId", "request-one"}}));
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef ownerThread;
+  nodegraph::NodeRef runtime;
+  {
+    auto write = graph.write();
+    ownerThread = addThread(write, "owner-thread", "Original title");
+    const nodegraph::NodeRef turn =
+        write.upsert({nodegraph::NodeKind::Turn, "turn-one"});
+    write.setParent(ownerThread, turn);
 
+    nodegraph::Value::Array receivers{nodegraph::Value("receiver-one"),
+                                      nodegraph::Value("receiver-two")};
+    nodegraph::NodeState firstAgent;
+    firstAgent.status = nodegraph::NodeStatus::Running;
+    firstAgent.fields = {
+        {"type", nodegraph::Value("subAgentActivity")},
+        {"status", nodegraph::Value("inProgress")},
+        {"agentPath", nodegraph::Value("/root/lifecycle_review")},
+        {"agentThreadId", nodegraph::Value("child-thread")},
+        {"resultText",
+         nodegraph::Value(
+             "No blocking Inspector findings.\n\n"
+             "* Typed snapshots cover all rendered Plan, Agent, and Request "
+             "fields, with default equality and optional first-render state.\n"
+             "* Rendering now uses those typed projections directly.\n"
+             "* Request thread titles participate in equality, so rename-only "
+             "changes invalidate correctly.\n"
+             "* optional size correctly distinguishes absent questions from a "
+             "visible zero questions.\n"
+             "* The added Application Layout regression is minimal and well "
+             "targeted: render the original title, rename without changing the "
+             "request, refresh, then require the new label and reject the old "
+             "one.\n"
+             "* Application Layout tests pass offscreen.\n\n"
+             "No files were edited.")},
+        {"senderThreadId", nodegraph::Value("sender-thread")},
+        {"receiverThreadIds", nodegraph::Value(std::move(receivers))}};
+    const nodegraph::NodeRef first = write.upsert(
+        {nodegraph::NodeKind::Item, "agent-one"}, std::move(firstAgent));
+    write.setParent(turn, first);
+
+    nodegraph::NodeState secondAgent;
+    secondAgent.status = nodegraph::NodeStatus::Completed;
+    secondAgent.fields = {
+        {"type", nodegraph::Value("subAgentActivity")},
+        {"status", nodegraph::Value("completed")},
+        {"agentPath", nodegraph::Value("/root/hierarchy_ui_review")},
+        {"agentThreadId", nodegraph::Value("child-thread-two")},
+        {"resultText",
+         nodegraph::Value(
+             "No blocking Git snapshot issues found.\n\n"
+             "* Add defaulted equality to the file and snapshot records.\n"
+             "* Replace both retained snapshot hashes with optional typed "
+             "snapshots so an initial empty result still renders.\n"
+             "* Preserve the current snapshot fallback and repository context "
+             "behavior.")}};
+    const nodegraph::NodeRef second = write.upsert(
+        {nodegraph::NodeKind::Item, "agent-two"}, std::move(secondAgent));
+    write.setParent(turn, second);
+
+    const std::array roots{ownerThread};
+    runtime = runtimeWithRoots(write, roots);
+    addInteraction(write, runtime, ownerThread, "request-one", "user-input",
+                   {{"message", nodegraph::Value("Choose an option")},
+                    {"questions", nodegraph::Value(nodegraph::Value::Array{
+                                      nodegraph::Value(1), nodegraph::Value(2),
+                                      nodegraph::Value(3)})}});
+    static_cast<void>(write.finish());
+  }
   InspectorPane inspector;
   inspector.resize(420, 700);
   inspector.show();
-  refresh(inspector, model, "owner-thread");
+  refresh(inspector, graph, "owner-thread");
   inspector.tabs()->setCurrentIndex(1);
   spin(20);
   bool result = expect(
@@ -2464,20 +2344,18 @@ bool testInspectorDetailParity() {
                  : nullptr;
   auto *agentName =
       agentFrame ? agentFrame->findChild<QLabel *>(QStringLiteral("agentName"))
-                        : nullptr;
-  auto *agentCopy = agentFrame
-                        ? agentFrame->findChild<QToolButton *>(
-                              QStringLiteral("agentCopyButton"))
-                        : nullptr;
-  auto *agentDisclosure =
-      agentFrame ? agentFrame->findChild<QToolButton *>(
-                       QStringLiteral("agentDisclosureButton"))
                  : nullptr;
-  result &= expect(agentContent && !agentContent->isVisible() &&
-                       agentDisclosure &&
-                       agentDisclosure->accessibleName() ==
-                           QStringLiteral("Expand agent"),
-                   "agent cards initially retain their content collapsed");
+  auto *agentCopy = agentFrame ? agentFrame->findChild<QToolButton *>(
+                                     QStringLiteral("agentCopyButton"))
+                               : nullptr;
+  auto *agentDisclosure = agentFrame
+                              ? agentFrame->findChild<QToolButton *>(
+                                    QStringLiteral("agentDisclosureButton"))
+                              : nullptr;
+  result &= expect(
+      agentContent && !agentContent->isVisible() && agentDisclosure &&
+          agentDisclosure->accessibleName() == QStringLiteral("Expand agent"),
+      "agent cards initially retain their content collapsed");
   if (agentDisclosure) {
     agentDisclosure->click();
     spin();
@@ -2486,10 +2364,10 @@ bool testInspectorDetailParity() {
     agentCopy->click();
     spin();
   }
-  result &= expect(
-      agentCopy && QApplication::clipboard()->text().contains(
-                       QStringLiteral("No blocking Inspector findings.")),
-      "agent copy actions retain the complete agent content");
+  result &= expect(agentCopy &&
+                       QApplication::clipboard()->text().contains(
+                           QStringLiteral("No blocking Inspector findings.")),
+                   "agent copy actions retain the complete agent content");
   const int statusBottom =
       agentStatus && agentFrame
           ? agentStatus->mapTo(agentFrame, QPoint()).y() + agentStatus->height()
@@ -2497,19 +2375,18 @@ bool testInspectorDetailParity() {
   const int headingBottom = std::max(
       {agentTitle && agentFrame
            ? agentTitle->mapTo(agentFrame, QPoint()).y() + agentTitle->height()
-                    : 0,
-                agentName && agentFrame
+           : 0,
+       agentName && agentFrame
            ? agentName->mapTo(agentFrame, QPoint()).y() + agentName->height()
-                    : 0,
-                statusBottom,
-                agentCopy && agentFrame
-                    ? agentCopy->mapTo(agentFrame, QPoint()).y() +
-                          agentCopy->height()
-                    : 0,
-                agentDisclosure && agentFrame
-                    ? agentDisclosure->mapTo(agentFrame, QPoint()).y() +
-                          agentDisclosure->height()
-                    : 0});
+           : 0,
+       statusBottom,
+       agentCopy && agentFrame
+           ? agentCopy->mapTo(agentFrame, QPoint()).y() + agentCopy->height()
+           : 0,
+       agentDisclosure && agentFrame
+           ? agentDisclosure->mapTo(agentFrame, QPoint()).y() +
+                 agentDisclosure->height()
+           : 0});
   const int resultTop = agentResult && agentFrame
                             ? agentResult->mapTo(agentFrame, QPoint()).y()
                             : 0;
@@ -2539,10 +2416,10 @@ bool testInspectorDetailParity() {
       "agent cards show identity then status, copy, and disclosure actions "
       "while retaining the full path as a tooltip");
   const auto baseline = [agentFrame](QLabel *label) {
-    return label && agentFrame
-               ? label->mapTo(agentFrame, QPoint()).y() +
-                     label->contentsMargins().top() + label->fontMetrics().ascent()
-               : -1000;
+    return label && agentFrame ? label->mapTo(agentFrame, QPoint()).y() +
+                                     label->contentsMargins().top() +
+                                     label->fontMetrics().ascent()
+                               : -1000;
   };
   result &= expect(
       std::abs(baseline(agentTitle) - baseline(agentName)) <= 1 &&
@@ -2579,8 +2456,8 @@ bool testInspectorDetailParity() {
     agentsScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
   spin(20);
   result &= expect(agentsScrollBar && agentsScrollBar->isVisible() &&
-          agentsScrollBar->width() == 8 &&
-          !hasNativeBlackFrame(agentsScrollBar),
+                       agentsScrollBar->width() == 8 &&
+                       !hasNativeBlackFrame(agentsScrollBar),
                    "a visible Inspector scrollbar renders with the canonical "
                    "frameless style");
   auto *compactDiff =
@@ -2589,7 +2466,7 @@ bool testInspectorDetailParity() {
   for (int line = 0; line < 80; ++line)
     diffLines << QStringLiteral("+%1 a deliberately long changed line for "
                                 "scrollbar verification")
-               .arg(line);
+                     .arg(line);
   inspector.tabs()->setCurrentIndex(2);
   spin(20);
   if (compactDiff)
@@ -2614,10 +2491,12 @@ bool testInspectorDetailParity() {
                                     QStringLiteral("thread Original title")) &&
                  hasLabelContaining(inspector, QStringLiteral("3 questions")),
              "Requests show their thread title and retained question count");
-  model.applyEvent(presentation::event(
-      5, 1, "thread.name.changed", {{"name", "Renamed title"}},
-      presentation::Authority::Replace, {{"threadId", "owner-thread"}}));
-  refresh(inspector, model, "owner-thread");
+  {
+    auto write = graph.write();
+    write.setField(ownerThread, "name", nodegraph::Value("Renamed title"));
+    static_cast<void>(write.finish());
+  }
+  refresh(inspector, graph, "owner-thread");
   spin(20);
   result &= expect(
       hasLabelContaining(inspector, QStringLiteral("thread Renamed title")) &&
@@ -2644,17 +2523,16 @@ bool testInspectorDetailParity() {
           rejectButton->property("kind") == "destructive" &&
           reviewButton->property("kind") == "request",
       "complex pending requests use warning surfaces and a review action");
-  model.applyEvent(presentation::event(
-      6, 1, "pending-request.upsert",
-      {{"requestId", "request-two"},
-       {"category", "command-approval"},
-       {"request",
-        {{"command", "gh auth status"},
-         {"reason", "Verify GitHub authentication"},
-         {"cwd", "/home/voc/projects/drafts"}}}},
-      presentation::Authority::Merge,
-      {{"threadId", "owner-thread"}, {"requestId", "request-two"}}));
-  refresh(inspector, model, "owner-thread");
+  {
+    auto write = graph.write();
+    addInteraction(
+        write, runtime, ownerThread, "request-two", "command-approval",
+        {{"command", nodegraph::Value("gh auth status")},
+         {"reason", nodegraph::Value("Verify GitHub authentication")},
+         {"cwd", nodegraph::Value("/home/voc/projects/drafts")}});
+    static_cast<void>(write.finish());
+  }
+  refresh(inspector, graph, "owner-thread");
   spin(20);
   QPushButton *acceptButton = nullptr;
   for (QPushButton *button : inspector.findChildren<QPushButton *>()) {
@@ -2671,34 +2549,41 @@ bool testInspectorDetailParity() {
                              QStringLiteral("Command: gh auth status")) &&
           hasLabelContaining(
               inspector,
-                             QStringLiteral("Reason: Verify GitHub authentication")),
+              QStringLiteral("Reason: Verify GitHub authentication")),
       "simple approval requests show decision details and direct accept");
   qApp->setStyleSheet(previousStyleSheet);
   return result;
 }
 
 bool testTerminalPlanStatusReconciliation() {
-  PresentationModel model;
-  model.applyEvent(presentation::event(
-      1, 1, "thread.upsert",
-      {{"thread", {{"id", "plan-thread"}, {"status", "active"}}}},
-      presentation::Authority::Merge, {{"threadId", "plan-thread"}}));
-  model.applyEvent(presentation::event(
-      2, 1, "turn.upsert",
-      {{"turn", {{"id", "plan-turn"}, {"status", "inProgress"}}}},
-      presentation::Authority::Merge,
-      {{"threadId", "plan-thread"}, {"turnId", "plan-turn"}}));
-  model.applyEvent(presentation::event(
-      3, 1, "plan.replaced",
-      {{"explanation", "Lifecycle [plan](https://example.com)"},
-       {"steps", nlohmann::json::array(
-                     {{{"step", "Active step"}, {"status", "inProgress"}},
-                      {{"step", "Pending step"}, {"status", "pending"}}})}},
-      presentation::Authority::Replace,
-      {{"threadId", "plan-thread"}, {"turnId", "plan-turn"}}));
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  {
+    auto write = graph.write();
+    thread = addThread(write, "plan-thread", {}, "active");
+    nodegraph::NodeState turnState;
+    turnState.status = nodegraph::NodeStatus::Running;
+    turnState.fields = {
+        {"status", nodegraph::Value("inProgress")},
+        {"planExplanation",
+         nodegraph::Value("Lifecycle [plan](https://example.com)")},
+        {"plan", nodegraph::Value(nodegraph::Value::Array{
+                     nodegraph::Value(nodegraph::Value::Object{
+                         {"step", nodegraph::Value("Active step")},
+                         {"status", nodegraph::Value("inProgress")}}),
+                     nodegraph::Value(nodegraph::Value::Object{
+                         {"step", nodegraph::Value("Pending step")},
+                         {"status", nodegraph::Value("pending")}})})}};
+    const nodegraph::NodeRef turn = write.upsert(
+        {nodegraph::NodeKind::Turn, "plan-turn"}, std::move(turnState));
+    write.setParent(thread, turn);
+    const std::array roots{thread};
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
 
   InspectorPane inspector;
-  refresh(inspector, model, "plan-thread");
+  refresh(inspector, graph, "plan-thread");
   const auto hasExactLabel = [&inspector](const QString &value) {
     return std::ranges::any_of(
         inspector.findChildren<QLabel *>(),
@@ -2712,31 +2597,32 @@ bool testTerminalPlanStatusReconciliation() {
       expect(std::ranges::any_of(
                  markdownLabels,
                  [](const QLabel *label) {
-        return label->textFormat() == Qt::RichText &&
-               label->text().contains(QStringLiteral("href=")) &&
-               label->textInteractionFlags().testFlag(
-                   Qt::LinksAccessibleByKeyboard);
-      }),
-      "Inspector Markdown links are keyboard accessible");
+                   return label->textFormat() == Qt::RichText &&
+                          label->text().contains(QStringLiteral("href=")) &&
+                          label->textInteractionFlags().testFlag(
+                              Qt::LinksAccessibleByKeyboard);
+                 }),
+             "Inspector Markdown links are keyboard accessible");
 
-  const auto setThreadStatus = [&](std::uint64_t sequence, const char *status) {
-    model.applyEvent(presentation::event(
-        sequence, 1, "thread.upsert",
-        {{"thread", {{"id", "plan-thread"}, {"status", status}}}},
-        presentation::Authority::Merge, {{"threadId", "plan-thread"}}));
-    refresh(inspector, model, "plan-thread");
+  const auto setThreadStatus = [&](nodegraph::NodeStatus nodeStatus,
+                                   const char *status) {
+    auto write = graph.write();
+    write.setStatus(thread, nodeStatus);
+    write.setField(thread, "status", nodegraph::Value(status));
+    static_cast<void>(write.finish());
+    refresh(inspector, graph, "plan-thread");
   };
-  setThreadStatus(4, "completed");
+  setThreadStatus(nodegraph::NodeStatus::Completed, "completed");
   result &= expect(!hasExactLabel(QStringLiteral("running")) &&
                        hasExactLabel(QStringLiteral("completed")) &&
                        hasExactLabel(QStringLiteral("pending")),
                    "a terminal thread reconciles stale running to completed "
                    "without changing pending");
-  setThreadStatus(5, "failed");
+  setThreadStatus(nodegraph::NodeStatus::Failed, "failed");
   result &= expect(hasExactLabel(QStringLiteral("failed")) &&
                        hasExactLabel(QStringLiteral("pending")),
                    "a failed thread reconciles stale running to failed");
-  setThreadStatus(6, "interrupted");
+  setThreadStatus(nodegraph::NodeStatus::Interrupted, "interrupted");
   result &=
       expect(hasExactLabel(QStringLiteral("interrupted")) &&
                  hasExactLabel(QStringLiteral("pending")),
@@ -2753,7 +2639,7 @@ bool testGitDiffScopes() {
   git_repository *repository = nullptr;
   if (!expect(git_repository_init(
                   &repository, repositoryDirectory.path().toUtf8().constData(),
-                                  0) == 0,
+                  0) == 0,
               "Git diff test initializes an in-process repository"))
     return false;
   QFile file(repositoryDirectory.filePath(QStringLiteral("notes.txt")));
@@ -2776,24 +2662,24 @@ bool testGitDiffScopes() {
       [&](const QString &workspace, const QStringList &directories,
           const QStringList &paths, const QString &selectedRepository,
           GitDiffScope scope, bool includeHiddenRepositories = false) {
-    ready = false;
-    provider.request(workspace, directories, paths, selectedRepository,
+        ready = false;
+        provider.request(workspace, directories, paths, selectedRepository,
                          includeHiddenRepositories, scope,
                          GitDiffContext::Compact);
-    QElapsedTimer timeout;
-    timeout.start();
-    while (!ready && timeout.elapsed() < 3000)
-      spin(1);
-    return ready;
-  };
+        QElapsedTimer timeout;
+        timeout.start();
+        while (!ready && timeout.elapsed() < 3000)
+          spin(1);
+        return ready;
+      };
 
   bool result = expect(
       request(repositoryDirectory.path(), {}, {}, {}, GitDiffScope::Unstaged) &&
-                           received.repository && received.error.isEmpty() &&
-                           received.files.size() == 1 &&
+          received.repository && received.error.isEmpty() &&
+          received.files.size() == 1 &&
           received.files.front().status == QStringLiteral("Untracked") &&
           received.files.front().patch.contains(QStringLiteral("+first line")),
-                       "Unstaged scope includes untracked file content");
+      "Unstaged scope includes untracked file content");
 
   git_index *index = nullptr;
   if (git_repository_index(&index, repository) == 0) {
@@ -2803,24 +2689,24 @@ bool testGitDiffScopes() {
   }
   result &= expect(
       request(repositoryDirectory.path(), {}, {}, {}, GitDiffScope::Staged) &&
-                       received.files.size() == 1 &&
+          received.files.size() == 1 &&
           received.files.front().status == QStringLiteral("Added"),
-                   "Staged scope compares the index with HEAD");
+      "Staged scope compares the index with HEAD");
   result &= expect(
       request(repositoryDirectory.path(), {}, {}, {},
-                           GitDiffScope::Uncommitted) &&
-                       received.files.size() == 1 &&
+              GitDiffScope::Uncommitted) &&
+          received.files.size() == 1 &&
           received.files.front().patch.contains(QStringLiteral("+second line")),
-                   "Since-HEAD scope combines index and worktree state");
+      "Since-HEAD scope combines index and worktree state");
 
   QTemporaryDir ordinaryDirectory;
   result &=
       expect(ordinaryDirectory.isValid() &&
-                       request(ordinaryDirectory.path(), {}, {}, {},
-                               GitDiffScope::Unstaged) &&
-                       !received.repository &&
-                       received.error.contains(QStringLiteral("Git repository")),
-                   "ordinary folders expose an explicit non-repository state");
+                 request(ordinaryDirectory.path(), {}, {}, {},
+                         GitDiffScope::Unstaged) &&
+                 !received.repository &&
+                 received.error.contains(QStringLiteral("Git repository")),
+             "ordinary folders expose an explicit non-repository state");
 
   QTemporaryDir multiWorkspace;
   const QString firstRoot = multiWorkspace.filePath(QStringLiteral("first"));
@@ -2876,10 +2762,10 @@ bool testGitDiffScopes() {
       expect(request(multiWorkspace.path(), {firstRoot, secondRoot},
                      {QDir(secondRoot).filePath(QStringLiteral("shared.txt"))},
                      {}, GitDiffScope::Unstaged) &&
-          received.repositoryRoots ==
-              QStringList{QDir::cleanPath(secondRoot)} &&
-          received.files.size() == 1,
-      "an absolute path resolves only its owning repository");
+                 received.repositoryRoots ==
+                     QStringList{QDir::cleanPath(secondRoot)} &&
+                 received.files.size() == 1,
+             "an absolute path resolves only its owning repository");
   result &= expect(
       request(multiWorkspace.path(), {firstRoot, secondRoot},
               {QStringLiteral("not-applied-yet.txt")},
@@ -2899,8 +2785,8 @@ bool testGitDiffScopes() {
       secondPriority.write("baseline\n") > 0;
   secondPriority.close();
   const bool priorityCommitted = priorityFiles && secondPriorityFile &&
-      commitPath(firstRepository, "priority.txt") &&
-      commitPath(secondRepository, "priority.txt");
+                                 commitPath(firstRepository, "priority.txt") &&
+                                 commitPath(secondRepository, "priority.txt");
   if (firstPriority.open(QIODevice::WriteOnly | QIODevice::Truncate))
     firstPriority.write("changed\n");
   firstPriority.close();
