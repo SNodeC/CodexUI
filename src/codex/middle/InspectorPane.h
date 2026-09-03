@@ -24,6 +24,7 @@
 
 class QLabel;
 class QPlainTextEdit;
+class QScrollArea;
 class QStackedWidget;
 class QTabWidget;
 class QVBoxLayout;
@@ -57,9 +58,22 @@ public:
 private:
   QFrame *agentFrame(const ui::InspectorAgentRow &agent,
                      std::string_view threadId);
+  QFrame *requestFrame(const ui::InspectorRequestRow &request);
   void refreshCurrentTab();
+  [[nodiscard]] bool
+  graphChangeAffectsCurrentTab(const nodegraph::GraphChanged &change);
   void scheduleGraphRefresh();
   void runGraphRefresh();
+  void cancelGraphRowRenders();
+  void renderGraphPlan(ui::InspectorPlanSnapshot snapshot);
+  void renderGraphAgents(ui::InspectorAgentsSnapshot snapshot);
+  void renderGraphRequests(ui::InspectorRequestsSnapshot snapshot);
+  void scheduleGraphPlanRender();
+  void scheduleGraphAgentsRender();
+  void scheduleGraphRequestsRender();
+  void runGraphPlanRender();
+  void runGraphAgentsRender();
+  void runGraphRequestsRender();
   void refreshPlan();
   void refreshAgents();
   void refreshChanges();
@@ -87,10 +101,13 @@ private:
   QStackedWidget *infoStack = nullptr;
   QWidget *planContent = nullptr;
   QVBoxLayout *planLayout = nullptr;
+  QScrollArea *planScroll = nullptr;
   QWidget *agentsContent = nullptr;
   QVBoxLayout *agentsLayout = nullptr;
+  QScrollArea *agentsScroll = nullptr;
   QWidget *requestsContent = nullptr;
   QVBoxLayout *requestsLayout = nullptr;
+  QScrollArea *requestsScroll = nullptr;
   DiffViewer *diffViewer = nullptr;
   QPlainTextEdit *stateView = nullptr;
   QPlainTextEdit *protocolLog = nullptr;
@@ -100,6 +117,11 @@ private:
   std::optional<ui::InspectorAgentsSnapshot> agentsSnapshot;
   std::unordered_set<std::string> expandedAgents;
   std::optional<ui::InspectorRequestsSnapshot> requestsSnapshot;
+  std::optional<ui::InspectorChangesSnapshot> changesSnapshot;
+  std::optional<ui::InspectorPlanSnapshot> pendingPlanSnapshot;
+  std::optional<ui::InspectorAgentsSnapshot> pendingAgentsSnapshot;
+  std::optional<ui::InspectorRequestsSnapshot> pendingRequestsSnapshot;
+  std::unordered_set<const nodegraph::Node *> activeGraphDependencies;
   QByteArray stateSnapshot;
   QByteArray protocolStatsSnapshot;
   std::deque<QString> protocolLines;
@@ -107,6 +129,22 @@ private:
   bool protocolFollowsTail = true;
   bool mutatingProtocolLog = false;
   bool graphRefreshScheduled = false;
+  bool planRenderScheduled = false;
+  bool agentsRenderScheduled = false;
+  bool requestsRenderScheduled = false;
+  bool planRenderClearing = false;
+  bool agentsRenderClearing = false;
+  bool requestsRenderClearing = false;
+  std::size_t planRenderCursor = 0;
+  std::size_t agentsRenderCursor = 0;
+  std::size_t requestsRenderCursor = 0;
+  std::size_t agentsPreservedRows = 0;
+  std::size_t requestsPreservedRows = 0;
+  int planScrollValue = 0;
+  int agentsScrollValue = 0;
+  int requestsScrollValue = 0;
+  int graphDependenciesTab = -1;
+  int graphDependenciesInfoPage = -1;
   int protocolPausedScrollValue = 0;
   std::uint64_t protocolScrollRevision = 0;
 };

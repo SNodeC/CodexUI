@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/InspectorPane.h"
+#include "codex/DiffViewer.h"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -8,10 +9,12 @@
 #include <QEventLoop>
 #include <QLabel>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QThread>
+#include <QTimer>
 
 #include <iostream>
 #include <string>
@@ -45,6 +48,20 @@ bool hasLabelContaining(const QWidget &root, const QString &text) {
   return false;
 }
 
+QLabel *labelContaining(const QWidget &root, const QString &text) {
+  for (QLabel *label : root.findChildren<QLabel *>()) {
+    if (label->text().contains(text))
+      return label;
+  }
+  return nullptr;
+}
+
+void runOneQueuedPass() {
+  QEventLoop loop;
+  QTimer::singleShot(0, &loop, &QEventLoop::quit);
+  loop.exec();
+}
+
 nodegraph::GraphChanged notification(nodegraph::GraphChange change) {
   return {change.revision, std::move(change.affected),
           std::move(change.removed), false};
@@ -54,6 +71,9 @@ bool directGraphRenderingIsLazyAndCurrent() {
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef thread;
   nodegraph::NodeRef turn;
+  nodegraph::NodeRef agentItem;
+  nodegraph::NodeRef fileChangeItem;
+  nodegraph::NodeRef interaction;
   {
     auto write = graph.write();
     nodegraph::NodeState threadState;
@@ -82,10 +102,22 @@ bool directGraphRenderingIsLazyAndCurrent() {
         {"agentPath", nodegraph::Value("/root/graph_agent")},
         {"agentThreadId", nodegraph::Value("agent-thread")},
         {"prompt", nodegraph::Value("Inspect the shared graph")}};
-    const nodegraph::NodeRef agentItem =
-        write.upsert({nodegraph::NodeKind::Item, "agent-item"},
-                     std::move(agentState));
+    agentItem = write.upsert({nodegraph::NodeKind::Item, "agent-item"},
+                             std::move(agentState));
     write.setParent(turn, agentItem);
+    for (int index = 0; index < 30; ++index) {
+      nodegraph::NodeState extraAgentState;
+      extraAgentState.status = nodegraph::NodeStatus::Completed;
+      extraAgentState.fields = {
+          {"type", nodegraph::Value("subAgentActivity")},
+          {"agentPath",
+           nodegraph::Value("/root/batched_agent_" + std::to_string(index))}};
+      const nodegraph::NodeRef extraAgent = write.upsert(
+          {nodegraph::NodeKind::Item,
+           "batched-agent-" + std::to_string(index)},
+          std::move(extraAgentState));
+      write.setParent(turn, extraAgent);
+    }
     nodegraph::NodeState childState;
     childState.status = nodegraph::NodeStatus::Completed;
     const nodegraph::NodeRef child =
@@ -114,11 +146,30 @@ bool directGraphRenderingIsLazyAndCurrent() {
              {"questions",
               nodegraph::Value(nodegraph::Value::Array{
                   nodegraph::Value("first"), nodegraph::Value("second")})}})}};
-    const nodegraph::NodeRef interaction = write.upsert(
+    nodegraph::NodeState fileChangeState;
+    fileChangeState.status = nodegraph::NodeStatus::Completed;
+    fileChangeState.fields = {
+        {"type", nodegraph::Value("fileChange")},
+        {"changes",
+         nodegraph::Value(nodegraph::Value::Array{nodegraph::Value(
+             nodegraph::Value::Object{
+                 {"path", nodegraph::Value("src/original.cpp")}})})}};
+    fileChangeItem = write.upsert(
+        {nodegraph::NodeKind::Item, "file-change-item"},
+        std::move(fileChangeState));
+    write.setParent(turn, fileChangeItem);
+
+    interaction = write.upsert(
         {nodegraph::NodeKind::Interaction, "string:request-graph"},
         std::move(interactionState));
     write.relate(interaction, nodegraph::RelationKind::InteractionTarget,
                  thread);
+    const nodegraph::NodeRef runtime =
+        write.upsert({nodegraph::NodeKind::Runtime, "runtime"});
+    write.relate(runtime, nodegraph::RelationKind::PendingInteraction,
+                 interaction);
+    write.relate(thread, nodegraph::RelationKind::PendingInteraction,
+                 interaction);
 
     nodegraph::NodeState operationState;
     operationState.status = nodegraph::NodeStatus::Pending;
@@ -172,12 +223,106 @@ bool directGraphRenderingIsLazyAndCurrent() {
   result &= expect(thread->uiAttachment() == nullptr,
                    "the composite Inspector does not claim node attachment");
 
+  QPointer<QLabel> stablePlan = labelContaining(
+      pane, QStringLiteral("Graph-only explanation"));
+  nodegraph::NodeRef unrelatedItem;
+  nodegraph::GraphChange unrelatedChange;
+  {
+    auto write = graph.write();
+    const nodegraph::NodeRef unrelatedThread = write.upsert(
+        {nodegraph::NodeKind::Thread, "unrelated-thread"});
+    const nodegraph::NodeRef unrelatedTurn =
+        write.upsert({nodegraph::NodeKind::Turn, "unrelated-turn"});
+    write.setParent(unrelatedThread, unrelatedTurn);
+    nodegraph::NodeState unrelatedState;
+    unrelatedState.fields = {{"type", nodegraph::Value("agentMessage")},
+                             {"text", nodegraph::Value("unrelated")}};
+    unrelatedItem = write.upsert(
+        {nodegraph::NodeKind::Item, "unrelated-item"},
+        std::move(unrelatedState));
+    write.setParent(unrelatedTurn, unrelatedItem);
+    unrelatedChange = write.finish();
+  }
+  pane.graphChanged(notification(std::move(unrelatedChange)));
+  spin(10);
+  result &= expect(stablePlan && stablePlan == labelContaining(
+                                             pane, QStringLiteral(
+                                                       "Graph-only explanation")),
+                   "an unrelated thread update preserves Plan widgets");
+
   pane.tabs()->setCurrentIndex(1);
-  spin(20);
+  runOneQueuedPass();
+  runOneQueuedPass();
+  const qsizetype firstAgentSlice =
+      pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame")).size();
+  result &= expect(firstAgentSlice > 0 && firstAgentSlice <= 12,
+                   "Agents bounds widget construction per Qt pass");
+  spin(80);
   result &= expect(
       hasLabelContaining(pane, QStringLiteral("graph_agent")) &&
           hasLabelContaining(pane, QStringLiteral("completed")),
       "Agents reads current source and child-thread facts on visibility");
+  result &= expect(
+      pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame")).size() ==
+          31,
+      "Agents completes sliced projection without omitting rows");
+  QPointer<QFrame> stableAgent =
+      pane.findChild<QFrame *>(QStringLiteral("inspectorAgentFrame"));
+  nodegraph::GraphChange agentIrrelevantChange;
+  {
+    auto write = graph.write();
+    write.setField(turn, "planExplanation",
+                   nodegraph::Value("Changed outside the Agents projection"));
+    agentIrrelevantChange = write.finish();
+  }
+  pane.graphChanged(notification(std::move(agentIrrelevantChange)));
+  spin(20);
+  result &= expect(
+      stableAgent && stableAgent ==
+                         pane.findChild<QFrame *>(
+                             QStringLiteral("inspectorAgentFrame")),
+      "a revision-irrelevant selected-thread change preserves Agent cards");
+
+  pane.tabs()->setCurrentIndex(2);
+  spin(160);
+  auto *diffViewer = static_cast<DiffViewer *>(pane.tabs()->widget(2));
+  QTimer *diffRefresh = nullptr;
+  if (diffViewer) {
+    for (QTimer *timer : diffViewer->findChildren<QTimer *>(
+             QString{}, Qt::FindDirectChildrenOnly)) {
+      if (timer->isSingleShot()) {
+        diffRefresh = timer;
+        break;
+      }
+    }
+  }
+  result &= expect(diffRefresh && !diffRefresh->isActive(),
+                   "the initial Changes refresh settles before relevance checks");
+  nodegraph::GraphChange changesIrrelevantChange;
+  {
+    auto write = graph.write();
+    write.appendStringField(agentItem, "prompt", " but not Git context");
+    changesIrrelevantChange = write.finish();
+  }
+  pane.graphChanged(notification(std::move(changesIrrelevantChange)));
+  spin(10);
+  result &= expect(diffRefresh && !diffRefresh->isActive(),
+                   "an unrelated item delta does not launch a Git diff refresh");
+  nodegraph::GraphChange changesRelevantChange;
+  {
+    auto write = graph.write();
+    write.setField(
+        fileChangeItem, "changes",
+        nodegraph::Value(nodegraph::Value::Array{nodegraph::Value(
+            nodegraph::Value::Object{
+                {"path", nodegraph::Value("src/updated.cpp")}})}));
+    changesRelevantChange = write.finish();
+  }
+  pane.graphChanged(notification(std::move(changesRelevantChange)));
+  spin(10);
+  result &= expect(diffRefresh && diffRefresh->isActive(),
+                   "a changed file hint launches one deferred Git refresh");
+  spin(130);
 
   pane.tabs()->setCurrentIndex(3);
   spin(20);
@@ -186,6 +331,30 @@ bool directGraphRenderingIsLazyAndCurrent() {
           hasLabelContaining(pane, QStringLiteral("2 questions")) &&
           hasLabelContaining(pane, QStringLiteral("thread Graph thread")),
       "Requests reads current pending interactions and target relations");
+  QPointer<QFrame> pendingRequest =
+      pane.findChild<QFrame *>(QStringLiteral("inspectorRequestFrame"));
+  const bool hadPendingRequest = pendingRequest;
+  nodegraph::GraphChange failedChange;
+  {
+    auto write = graph.write();
+    write.setStatus(interaction, nodegraph::NodeStatus::Failed);
+    write.setField(interaction, "error",
+                   nodegraph::Value("the response was rejected"));
+    failedChange = write.finish();
+  }
+  pane.graphChanged(notification(std::move(failedChange)));
+  spin(20);
+  auto *failedRequest =
+      pane.findChild<QFrame *>(QStringLiteral("inspectorRequestFrame"));
+  auto *failedReject = failedRequest
+                           ? failedRequest->findChild<QPushButton *>(QString{},
+                                                                    Qt::FindChildrenRecursively)
+                           : nullptr;
+  result &= expect(hadPendingRequest && failedRequest &&
+                       hasLabelContaining(*failedRequest,
+                                          QStringLiteral("Choose from the graph")) &&
+                       failedReject && !failedReject->isEnabled(),
+                   "a failed interaction remains visible but is no longer actionable");
 
   pane.tabs()->setCurrentIndex(4);
   auto *stateChoice =
