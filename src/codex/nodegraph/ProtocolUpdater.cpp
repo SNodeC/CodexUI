@@ -372,22 +372,24 @@ ApplyResult ProtocolUpdater::apply(DecodedMessage message) {
   if (!descriptor) {
     auto write = graph_->write();
     applyUnknown(write, message);
-    return ApplyResult{false, MessageDisposition::GraphUpdate, write.finish()};
+    return ApplyResult{false, MessageDisposition::GraphUpdate, write.finish(),
+                       {}};
   }
 
   if (descriptor->get().disposition ==
       MessageDisposition::IntentionallyStateNeutral) {
     return ApplyResult{true, descriptor->get().disposition,
-                       GraphChange{graph_->publishedRevision(), {}, {}}};
+                       GraphChange{graph_->publishedRevision(), {}, {}}, {}};
   }
 
   auto write = graph_->write();
+  NodeRef primary;
   switch (descriptor->get().disposition) {
   case MessageDisposition::WorkerOperationResult:
-    applyOperation(write, message);
+    primary = applyOperation(write, message);
     break;
   case MessageDisposition::ReverseInteraction:
-    applyInteraction(write, message);
+    primary = applyInteraction(write, message);
     break;
   case MessageDisposition::GraphUpdate:
   case MessageDisposition::TypedUiEffect:
@@ -396,7 +398,8 @@ ApplyResult ProtocolUpdater::apply(DecodedMessage message) {
   case MessageDisposition::IntentionallyStateNeutral:
     break;
   }
-  return ApplyResult{true, descriptor->get().disposition, write.finish()};
+  return ApplyResult{true, descriptor->get().disposition, write.finish(),
+                     std::move(primary)};
 }
 
 GraphChange
@@ -406,6 +409,24 @@ ProtocolUpdater::resolveInteraction(const ProtocolRequestId &requestId,
   NodeRef interaction =
       write.find({NodeKind::Interaction, requestId.canonical()});
   if (!interaction)
+    return write.finish();
+  if (!accepted) {
+    write.setStatus(interaction, NodeStatus::Failed);
+    write.setField(interaction, "error", Value(std::move(error)));
+    return write.finish();
+  }
+  write.remove(interaction);
+  return write.finish();
+}
+
+GraphChange ProtocolUpdater::resolveInteraction(const NodeRef &interaction,
+                                                bool accepted,
+                                                std::string error) {
+  auto write = graph_->write();
+  if (!interaction || interaction->id().kind != NodeKind::Interaction)
+    return write.finish();
+  const NodeRef current = write.find(interaction->id());
+  if (current != interaction)
     return write.finish();
   if (!accepted) {
     write.setStatus(interaction, NodeStatus::Failed);
@@ -433,21 +454,23 @@ ProtocolUpdater::catalogDirection(DecodedMessageKind kind) const noexcept {
   return ProtocolDirection::ServerNotification;
 }
 
-void ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
-                                     const DecodedMessage &message) {
+NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
+                                        const DecodedMessage &message) {
   if (message.kind == DecodedMessageKind::ClientNotification) {
     NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
     write.setField(runtime, "initialized", Value(true));
     write.setField(runtime, "lastMethod", Value(message.method));
-    return;
+    return runtime;
   }
 
   const std::string operationId = message.requestId
                                       ? message.requestId->canonical()
                                       : "uncorrelated:" + message.method;
-  NodeRef operation = write.upsert({NodeKind::Operation, operationId});
-  write.setField(operation, "method", Value(message.method));
   if (message.kind == DecodedMessageKind::ClientRequest) {
+    if (NodeRef previous = write.find({NodeKind::Operation, operationId}))
+      write.remove(previous);
+    NodeRef operation = write.upsert({NodeKind::Operation, operationId});
+    write.setField(operation, "method", Value(message.method));
     write.setField(operation, "requestPayload", Value(message.payload));
     write.setStatus(operation, NodeStatus::Pending);
     const std::string threadId = addressedId(message.payload, NodeKind::Thread);
@@ -462,20 +485,32 @@ void ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
       target = write.upsert({NodeKind::Thread, threadId});
     if (target)
       write.relate(operation, RelationKind::OperationTarget, target);
-    return;
+    return operation;
   }
-  write.setField(operation,
-                 message.kind == DecodedMessageKind::ClientError
-                     ? "errorPayload"
-                     : "resultPayload",
-                 Value(message.payload));
-  write.setStatus(operation, message.kind == DecodedMessageKind::ClientError
-                                 ? NodeStatus::Failed
-                                 : NodeStatus::Completed);
+
+  NodeRef operation = write.find({NodeKind::Operation, operationId});
+  if (!operation) {
+    // Tests and bridge integrations may deliver an already-correlated result
+    // without asking the graph to expose its transient request. Exact worker
+    // callbacks always supply expectedNode, in which case absence means stale.
+    if (!message.expectedNode &&
+        message.kind == DecodedMessageKind::ClientResult)
+      applyGraphUpdate(write, message);
+    return {};
+  }
+  if (message.expectedNode && message.expectedNode != operation)
+    return {};
+  const std::shared_ptr<const NodeState> operationState = write.state(operation);
+  const Value *storedMethod = nullptr;
+  if (const auto found = operationState->fields.find("method");
+      found != operationState->fields.end())
+    storedMethod = &found->second;
+  if (operationState->status != NodeStatus::Pending || !storedMethod ||
+      !storedMethod->asString() || *storedMethod->asString() != message.method)
+    return {};
 
   if (message.kind == DecodedMessageKind::ClientResult) {
     DecodedMessage correlated = message;
-    const auto operationState = write.state(operation);
     const auto request = operationState->fields.find("requestPayload");
     if (request != operationState->fields.end()) {
       if (const Value::Object *requestObject = request->second.asObject()) {
@@ -485,12 +520,20 @@ void ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
     }
     applyGraphUpdate(write, correlated);
   }
+  // Operations model only work that is currently pending. Results/errors are
+  // applied to current state and then the operation is retired in this same
+  // graph transaction; retaining terminal operations would be an event log.
+  write.remove(operation);
+  return {};
 }
 
-void ProtocolUpdater::applyInteraction(NodeGraph::WriteAccess &write,
-                                       const DecodedMessage &message) {
+NodeRef ProtocolUpdater::applyInteraction(NodeGraph::WriteAccess &write,
+                                          const DecodedMessage &message) {
   if (!message.requestId)
     throw std::invalid_argument("a server request requires an id");
+  if (NodeRef previous =
+          write.find({NodeKind::Interaction, message.requestId->canonical()}))
+    write.remove(previous);
   NodeRef interaction =
       write.upsert({NodeKind::Interaction, message.requestId->canonical()});
   clearPendingInteractionOwner(write, interaction);
@@ -537,6 +580,7 @@ void ProtocolUpdater::applyInteraction(NodeGraph::WriteAccess &write,
   }
   NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
   write.relate(runtime, RelationKind::PendingInteraction, interaction);
+  return interaction;
 }
 
 void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
@@ -551,7 +595,8 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
           write.find({NodeKind::Interaction, requestId && requestId->asString()
                                                  ? "string:" + canonical
                                                  : "number:" + canonical});
-      if (interaction)
+      if (interaction &&
+          (!message.expectedNode || message.expectedNode == interaction))
         write.remove(interaction);
     }
     return;

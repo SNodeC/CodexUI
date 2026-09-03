@@ -472,9 +472,9 @@ void turnRootsAndPagedHistoryStayExplicit() {
           "removing a hydrated thread also removes its pinned opening prompt");
 
   const ProtocolRequestId firstPage("turn-page-1");
-  static_cast<void>(updater.apply(
+  const ApplyResult firstPageRequest = updater.apply(
       {DecodedMessageKind::ClientRequest, "thread/turns/list", firstPage,
-       Value::Object{{"threadId", Value("paged-thread")}}}));
+       Value::Object{{"threadId", Value("paged-thread")}}});
   Value::Array firstTurns{Value(Value::Object{
       {"id", Value("newer-turn")},
       {"items", Value(Value::Array{
@@ -482,10 +482,11 @@ void turnRootsAndPagedHistoryStayExplicit() {
                                         {"type", Value("userMessage")}}),
                     Value(Value::Object{{"id", Value("newer-steering")},
                                         {"type", Value("userMessage")}})})}})};
-  static_cast<void>(updater.apply(
+  const ApplyResult firstPageResult = updater.apply(
       {DecodedMessageKind::ClientResult, "thread/turns/list", firstPage,
        Value::Object{{"data", Value(std::move(firstTurns))},
-                     {"nextCursor", Value("older-page")}}}));
+                     {"nextCursor", Value("older-page")}},
+       firstPageRequest.primary});
   {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "paged-thread"});
@@ -501,10 +502,12 @@ void turnRootsAndPagedHistoryStayExplicit() {
                 read->related(turn, RelationKind::TurnRootItem) ==
                     std::vector<NodeRef>{root},
             "a turns page retains the opening item relation for each turn");
-    require(operation &&
-                read->state(operation)->status == NodeStatus::Completed,
-            "a turns/list result without threadId uses its correlated request "
-            "scope");
+    require(!operation && firstPageRequest.primary &&
+                std::ranges::find(firstPageResult.change.removed,
+                                  firstPageRequest.primary) !=
+                    firstPageResult.change.removed.end(),
+            "a turns/list result uses its correlated request scope then "
+            "retires the completed operation");
     require(hasMore && hasMore->asBool() && *hasMore->asBool() && cursor &&
                 cursor->asString() && *cursor->asString() == "older-page" &&
                 loaded && loaded->asUInt64() && *loaded->asUInt64() == 2,
@@ -565,32 +568,124 @@ void resultsAndListsCorrelate() {
   ApplyResult result =
       updater.apply({DecodedMessageKind::ClientResult, "thread/list", requestId,
                      Value::Object{{"data", Value(std::move(threads))},
-                                   {"nextCursor", Value("next")}}});
+                                   {"nextCursor", Value("next")}},
+                     operation});
   require(result.change.revision == request.change.revision + 1,
           "correlated result is one later atomic revision");
   {
     auto read = graph.tryRead();
-    require(read->state(operation)->status == NodeStatus::Completed,
-            "successful result completes the same operation node");
+    require(!read->find({NodeKind::Operation, requestId.canonical()}) &&
+                std::ranges::find(result.change.removed, operation) !=
+                    result.change.removed.end(),
+            "successful result applies current state then retires its pending "
+            "operation");
     require(read->find({NodeKind::Thread, "listed-1"}) &&
                 read->find({NodeKind::Thread, "listed-2"}),
             "thread list result materializes its current entities");
   }
 
   const ProtocolRequestId failedId(22);
-  static_cast<void>(
-      updater.apply({DecodedMessageKind::ClientRequest, "thread/read", failedId,
-                     Value::Object{{"threadId", Value("missing")}}}));
-  static_cast<void>(
-      updater.apply({DecodedMessageKind::ClientError, "thread/read", failedId,
-                     Value::Object{{"code", Value(-32001)},
-                                   {"message", Value("overloaded")}}}));
+  const ApplyResult failedRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/read", failedId,
+       Value::Object{{"threadId", Value("missing")}}});
+  const ApplyResult failedResult = updater.apply(
+      {DecodedMessageKind::ClientError, "thread/read", failedId,
+       Value::Object{{"code", Value(-32001)},
+                     {"message", Value("overloaded")}},
+       failedRequest.primary});
   {
     auto read = graph.tryRead();
     NodeRef failed = read->find({NodeKind::Operation, failedId.canonical()});
-    require(failed && read->state(failed)->status == NodeStatus::Failed,
-            "failed result marks its correlated operation failed");
+    require(!failed && failedRequest.primary &&
+                std::ranges::find(failedResult.change.removed,
+                                  failedRequest.primary) !=
+                    failedResult.change.removed.end(),
+            "failed result retires its pending operation instead of keeping "
+            "terminal history");
   }
+}
+
+void reusedWireIdsRequireExactCurrentNodes() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  const ProtocolRequestId reused("reused-request");
+
+  const ApplyResult first = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/read", reused,
+       Value::Object{{"threadId", Value("old-thread")}}});
+  const ApplyResult second = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/list", reused,
+       Value::Object{{"limit", Value(10)}}});
+  require(first.primary && second.primary && first.primary != second.primary &&
+              std::ranges::find(second.change.removed, first.primary) !=
+                  second.change.removed.end(),
+          "reusing a request id replaces rather than mutates its old "
+          "Operation NodeRef");
+
+  const std::uint64_t beforeLate = graph.publishedRevision();
+  const ApplyResult late = updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read", reused,
+       Value::Object{{"thread", Value(Value::Object{
+                                         {"id", Value("late-thread")}})}},
+       first.primary});
+  {
+    auto read = graph.tryRead();
+    require(late.change.empty() && late.change.revision == beforeLate &&
+                read->find({NodeKind::Operation, reused.canonical()}) ==
+                    second.primary &&
+                !read->find({NodeKind::Thread, "late-thread"}),
+            "a late result retaining the replaced NodeRef cannot mutate the "
+            "new operation or graph");
+  }
+
+  Value::Array currentThreads{
+      Value(Value::Object{{"id", Value("current-thread")}})};
+  const ApplyResult current = updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/list", reused,
+       Value::Object{{"data", Value(std::move(currentThreads))}},
+       second.primary});
+  {
+    auto read = graph.tryRead();
+    require(read->find({NodeKind::Thread, "current-thread"}) &&
+                !read->find({NodeKind::Operation, reused.canonical()}) &&
+                std::ranges::find(current.change.removed, second.primary) !=
+                    current.change.removed.end(),
+            "the exact current operation accepts its result and is pruned");
+  }
+
+  const ProtocolRequestId interactionId("reused-interaction");
+  const ApplyResult oldInteraction = updater.apply(
+      {DecodedMessageKind::ServerRequest,
+       "item/commandExecution/requestApproval", interactionId,
+       Value::Object{{"threadId", Value("old-interaction-thread")}}});
+  const ApplyResult newInteraction = updater.apply(
+      {DecodedMessageKind::ServerRequest, "item/fileChange/requestApproval",
+       interactionId,
+       Value::Object{{"threadId", Value("new-interaction-thread")}}});
+  require(oldInteraction.primary && newInteraction.primary &&
+              oldInteraction.primary != newInteraction.primary &&
+              std::ranges::find(newInteraction.change.removed,
+                                oldInteraction.primary) !=
+                  newInteraction.change.removed.end(),
+          "reusing a server-request id creates a distinct Interaction "
+          "NodeRef");
+  const GraphChange staleResolution =
+      updater.resolveInteraction(oldInteraction.primary, true);
+  {
+    auto read = graph.tryRead();
+    require(staleResolution.empty() &&
+                read->find({NodeKind::Interaction,
+                            interactionId.canonical()}) ==
+                    newInteraction.primary,
+            "an exact response for the retired interaction cannot resolve its "
+            "replacement");
+  }
+  const GraphChange exactResolution =
+      updater.resolveInteraction(newInteraction.primary, true);
+  require(std::ranges::find(exactResolution.removed,
+                            newInteraction.primary) !=
+              exactResolution.removed.end(),
+          "the exact current interaction resolves normally");
 }
 
 void interactionsAndRemovalKeepLifetime() {
@@ -843,6 +938,7 @@ int main() {
   semanticDeltasAndHydratedOrderStayCurrent();
   turnRootsAndPagedHistoryStayExplicit();
   resultsAndListsCorrelate();
+  reusedWireIdsRequireExactCurrentNodes();
   interactionsAndRemovalKeepLifetime();
   unknownAndNeutralAreIsolated();
   lifecycleFactsAndRemovalPreserveThreadHierarchy();

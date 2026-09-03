@@ -41,6 +41,10 @@ struct DecodedMessage final {
   std::string method;
   std::optional<ProtocolRequestId> requestId;
   Value::Object payload;
+  // Worker callbacks retain the exact request/interaction node they created.
+  // Supplying it prevents a late response from mutating a newer node after a
+  // provider reuses the same JSON-RPC id.
+  NodeRef expectedNode;
 };
 
 struct ApplyResult final {
@@ -48,6 +52,8 @@ struct ApplyResult final {
   MessageDisposition disposition =
       MessageDisposition::IntentionallyStateNeutral;
   GraphChange change;
+  // The exact newly-created Operation or Interaction, when applicable.
+  NodeRef primary;
 };
 
 class ProtocolUpdater final {
@@ -61,14 +67,17 @@ public:
   [[nodiscard]] GraphChange
   resolveInteraction(const ProtocolRequestId &requestId, bool accepted,
                      std::string error = {});
+  [[nodiscard]] GraphChange resolveInteraction(const NodeRef &interaction,
+                                               bool accepted,
+                                               std::string error = {});
 
 private:
   [[nodiscard]] ProtocolDirection
   catalogDirection(DecodedMessageKind kind) const noexcept;
-  void applyOperation(NodeGraph::WriteAccess &write,
-                      const DecodedMessage &message);
-  void applyInteraction(NodeGraph::WriteAccess &write,
-                        const DecodedMessage &message);
+  [[nodiscard]] NodeRef applyOperation(NodeGraph::WriteAccess &write,
+                                       const DecodedMessage &message);
+  [[nodiscard]] NodeRef applyInteraction(NodeGraph::WriteAccess &write,
+                                         const DecodedMessage &message);
   void applyGraphUpdate(NodeGraph::WriteAccess &write,
                         const DecodedMessage &message);
   void applyUnknown(NodeGraph::WriteAccess &write,
