@@ -245,6 +245,23 @@ std::string catalogKey(std::string_view method) {
   return std::string(method.substr(0, slash));
 }
 
+NodeRef containingThread(NodeGraph::WriteAccess &write, NodeRef node) {
+  while (node && node->id().kind != NodeKind::Thread)
+    node = write.parent(node);
+  return node;
+}
+
+void clearPendingInteractionOwner(NodeGraph::WriteAccess &write,
+                                  const NodeRef &interaction) {
+  if (NodeRef runtime = write.find({NodeKind::Runtime, "runtime"}))
+    write.unrelate(runtime, RelationKind::PendingInteraction, interaction);
+  for (const NodeRef &target :
+       write.related(interaction, RelationKind::InteractionTarget)) {
+    if (NodeRef thread = containingThread(write, target))
+      write.unrelate(thread, RelationKind::PendingInteraction, interaction);
+  }
+}
+
 std::vector<NodeRef> mergeExistingTail(std::vector<NodeRef> first,
                                        const std::vector<NodeRef> &existing) {
   for (const NodeRef &node : existing) {
@@ -476,6 +493,11 @@ void ProtocolUpdater::applyInteraction(NodeGraph::WriteAccess &write,
     throw std::invalid_argument("a server request requires an id");
   NodeRef interaction =
       write.upsert({NodeKind::Interaction, message.requestId->canonical()});
+  clearPendingInteractionOwner(write, interaction);
+  const std::vector<NodeRef> previousTargets =
+      write.related(interaction, RelationKind::InteractionTarget);
+  for (const NodeRef &previous : previousTargets)
+    write.unrelate(interaction, RelationKind::InteractionTarget, previous);
   NodeState state;
   state.status = NodeStatus::Pending;
   state.fields.emplace("method", Value(message.method));
@@ -508,8 +530,13 @@ void ProtocolUpdater::applyInteraction(NodeGraph::WriteAccess &write,
     target = turn;
   else if (thread)
     target = thread;
-  if (target)
+  if (target) {
     write.relate(interaction, RelationKind::InteractionTarget, target);
+    if (NodeRef owner = containingThread(write, target))
+      write.relate(owner, RelationKind::PendingInteraction, interaction);
+  }
+  NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
+  write.relate(runtime, RelationKind::PendingInteraction, interaction);
 }
 
 void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,

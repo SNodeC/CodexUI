@@ -90,6 +90,7 @@ enum class RelationKind : std::uint8_t {
   TurnRootItem,
   OperationTarget,
   InteractionTarget,
+  PendingInteraction,
   ProcessOwner,
 };
 

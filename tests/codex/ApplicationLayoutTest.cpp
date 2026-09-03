@@ -1629,10 +1629,10 @@ bool testThreadRowReorderOwnership() {
 bool testThreadPaneDirectGraphBinding() {
   nodegraph::NodeGraph graph;
   std::vector<nodegraph::NodeRef> roots;
+  nodegraph::NodeRef runtime;
   {
     auto write = graph.write();
-    const nodegraph::NodeRef runtime =
-        write.upsert({nodegraph::NodeKind::Runtime, "runtime"});
+    runtime = write.upsert({nodegraph::NodeKind::Runtime, "runtime"});
     for (int index = 0; index < 48; ++index) {
       const std::string id = QStringLiteral("thread-%1")
                                  .arg(index, 2, 10, QLatin1Char('0'))
@@ -1648,6 +1648,38 @@ bool testThreadPaneDirectGraphBinding() {
           write.upsert({nodegraph::NodeKind::Thread, id}, std::move(state)));
     }
     write.replaceRelated(runtime, nodegraph::RelationKind::RootThread, roots);
+
+    // This history is intentionally absent from RootThread. Pending badge
+    // rendering must stay proportional to the visible thread candidates, not
+    // to unrelated protocol history retained by the shared graph.
+    const nodegraph::NodeRef background =
+        write.upsert({nodegraph::NodeKind::Thread, "background-history"});
+    const nodegraph::NodeRef backgroundTurn =
+        write.upsert({nodegraph::NodeKind::Turn, "background-turn"});
+    write.setParent(background, backgroundTurn);
+    std::vector<nodegraph::NodeRef> backgroundItems;
+    backgroundItems.reserve(2048);
+    for (int index = 0; index < 2048; ++index) {
+      backgroundItems.emplace_back(write.upsert(
+          {nodegraph::NodeKind::Item,
+           "background-item-" + std::to_string(index)}));
+    }
+    write.replaceChildren(backgroundTurn, backgroundItems);
+    for (int index = 0; index < 256; ++index) {
+      nodegraph::NodeState pendingState;
+      pendingState.status = nodegraph::NodeStatus::Pending;
+      const nodegraph::NodeRef interaction = write.upsert(
+          {nodegraph::NodeKind::Interaction,
+           "string:background-pending-" + std::to_string(index)},
+          std::move(pendingState));
+      write.relate(interaction,
+                   nodegraph::RelationKind::InteractionTarget,
+                   backgroundItems[static_cast<std::size_t>(index * 8)]);
+      write.relate(background,
+                   nodegraph::RelationKind::PendingInteraction, interaction);
+      write.relate(runtime, nodegraph::RelationKind::PendingInteraction,
+                   interaction);
+    }
     static_cast<void>(write.finish());
   }
 
@@ -1701,16 +1733,21 @@ bool testThreadPaneDirectGraphBinding() {
                          selectedByNodeAction == roots[1],
                      "graph-bound selection dispatches one pinned NodeRef");
 
+    nodegraph::NodeRef pendingInteraction;
     nodegraph::GraphChange pendingChange;
     {
       auto write = graph.write();
       nodegraph::NodeState state;
       state.status = nodegraph::NodeStatus::Pending;
-      const nodegraph::NodeRef interaction =
+      pendingInteraction =
           write.upsert({nodegraph::NodeKind::Interaction, "string:pending"},
                        std::move(state));
-      write.relate(interaction, nodegraph::RelationKind::InteractionTarget,
-                   roots[1]);
+      write.relate(pendingInteraction,
+                   nodegraph::RelationKind::InteractionTarget, roots[1]);
+      write.relate(roots[1], nodegraph::RelationKind::PendingInteraction,
+                   pendingInteraction);
+      write.relate(runtime, nodegraph::RelationKind::PendingInteraction,
+                   pendingInteraction);
       pendingChange = write.finish();
     }
     pane.graphChanged(nodegraph::GraphChanged{pendingChange.revision,
@@ -1726,6 +1763,29 @@ bool testThreadPaneDirectGraphBinding() {
     result &= expect(pendingTitle && pendingTitle->text().startsWith("! "),
                      "pending graph interactions update the visible thread "
                      "badge without a copied view model");
+
+    QPointer<QWidget> stablePendingRow = pendingRow;
+    nodegraph::GraphChange resolvedChange;
+    {
+      auto write = graph.write();
+      write.remove(pendingInteraction);
+      resolvedChange = write.finish();
+    }
+    pane.graphChanged(nodegraph::GraphChanged{resolvedChange.revision,
+                                              resolvedChange.affected,
+                                              resolvedChange.removed, false});
+    spin(40);
+    pendingItem = threadItem(list, "thread-01");
+    pendingRow = pendingItem ? list->itemWidget(pendingItem) : nullptr;
+    pendingTitle =
+        pendingRow
+            ? pendingRow->findChild<QLabel *>(QStringLiteral("threadTitle"))
+            : nullptr;
+    result &= expect(
+        pendingItem && stablePendingRow == pendingRow && pendingTitle &&
+            !pendingTitle->text().startsWith("! "),
+        "interaction-only resolution clears the visible badge without "
+        "rebuilding thread topology across large unrelated history");
 
     auto *removedAttachment =
         static_cast<ui::QtNodeAttachment *>(roots.front()->uiAttachment());

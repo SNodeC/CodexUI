@@ -624,6 +624,14 @@ void interactionsAndRemovalKeepLifetime() {
     require(turn && thread && read->parent(targets.front()) == turn &&
                 read->parent(turn) == thread,
             "interaction targets retain their addressed containment chain");
+    require(read->related(thread, RelationKind::PendingInteraction) ==
+                std::vector<NodeRef>{interaction},
+            "the addressed thread directly indexes its pending interaction");
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    require(runtime &&
+                read->related(runtime, RelationKind::PendingInteraction) ==
+                    std::vector<NodeRef>{interaction},
+            "runtime directly indexes the complete pending interaction set");
   }
 
   GraphChange rejected =
@@ -631,8 +639,18 @@ void interactionsAndRemovalKeepLifetime() {
   require(!rejected.empty(), "rejected response updates interaction state");
   {
     auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "thread-approval"});
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
     require(read->state(interaction)->status == NodeStatus::Failed,
             "rejected response remains visibly failed");
+    require(thread &&
+                read->related(thread, RelationKind::PendingInteraction) ==
+                    std::vector<NodeRef>{interaction},
+            "a rejected response remains discoverable for thread recovery");
+    require(runtime &&
+                read->related(runtime, RelationKind::PendingInteraction) ==
+                    std::vector<NodeRef>{interaction},
+            "a rejected response remains in the runtime interaction set");
   }
 
   GraphChange accepted = updater.resolveInteraction(interactionId, true);
@@ -645,6 +663,14 @@ void interactionsAndRemovalKeepLifetime() {
             "resolved interaction leaves canonical indexes");
     require(read->retiredNodes().size() == 1,
             "removed interaction stays reachable for Qt detachment");
+    const NodeRef thread = read->find({NodeKind::Thread, "thread-approval"});
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    require(thread && runtime &&
+                read->related(thread, RelationKind::PendingInteraction)
+                    .empty() &&
+                read->related(runtime, RelationKind::PendingInteraction)
+                    .empty(),
+            "interaction removal unlinks both direct pending indexes");
   }
 }
 

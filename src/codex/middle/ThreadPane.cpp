@@ -1073,9 +1073,29 @@ void ThreadPane::graphChanged(const nodegraph::GraphChanged &change) {
     return;
   detachRemoved(change);
   // All removal work above is complete before the FrontendSession handler can
-  // enqueue UiDetached. Relation/order changes are projected on a later Qt
-  // pass and therefore cannot re-enter the notification drain.
-  scheduleGraphRefresh();
+  // enqueue UiDetached. A reverse-interaction transaction only changes the
+  // pending relation/revision of its addressed thread, so visible badges can
+  // update without rebuilding the thread topology.
+  const auto hasKind = [&change](nodegraph::NodeKind kind,
+                                 bool removedOnly = false) {
+    const auto matches = [kind](const nodegraph::NodeRef &node) {
+      return node && node->id().kind == kind;
+    };
+    return (!removedOnly && std::ranges::any_of(change.affected, matches)) ||
+           std::ranges::any_of(change.removed, matches);
+  };
+  const bool interactionChanged =
+      hasKind(nodegraph::NodeKind::Interaction);
+  const bool topologyChanged =
+      change.rescanRequired || hasKind(nodegraph::NodeKind::Runtime, true) ||
+      hasKind(nodegraph::NodeKind::Thread, true) ||
+      (!interactionChanged &&
+       (hasKind(nodegraph::NodeKind::Runtime) ||
+        hasKind(nodegraph::NodeKind::Thread)));
+  if (topologyChanged)
+    scheduleGraphRefresh();
+  else if (interactionChanged)
+    scheduleVisibilityPass();
 }
 
 void ThreadPane::detachRemoved(const nodegraph::GraphChanged &change) {
@@ -1542,33 +1562,6 @@ void ThreadPane::runVisibilityPass() {
     }
   }
 
-  std::unordered_map<const nodegraph::Node *, std::size_t> pendingByThread;
-  std::unordered_map<const nodegraph::Node *, std::uint64_t>
-      pendingRevisionByThread;
-  if (read) {
-    for (const nodegraph::NodeRef &candidate : read->orderedNodes()) {
-      if (candidate->id().kind != nodegraph::NodeKind::Interaction)
-        continue;
-      const std::shared_ptr<const nodegraph::NodeState> state =
-          read->state(candidate);
-      if (state->status != nodegraph::NodeStatus::Pending)
-        continue;
-      const std::vector<nodegraph::NodeRef> targets =
-          read->related(candidate, nodegraph::RelationKind::InteractionTarget);
-      const std::uint64_t interactionRevision =
-          read->changedRevision(candidate);
-      for (nodegraph::NodeRef target : targets) {
-        while (target && target->id().kind != nodegraph::NodeKind::Thread)
-          target = read->parent(target);
-        if (target) {
-          ++pendingByThread[target.get()];
-          pendingRevisionByThread[target.get()] = std::max(
-              pendingRevisionByThread[target.get()], interactionRevision);
-        }
-      }
-    }
-  }
-
   std::vector<std::pair<GraphThreadItem *, GraphRowRender>> renders;
   int nextCursor = last + 1;
   for (int offset = 0; offset < static_cast<int>(candidates.size()); ++offset) {
@@ -1595,8 +1588,20 @@ void ThreadPane::runVisibilityPass() {
       std::uint64_t revision = read->changedRevision(item.node);
       if (item.parent)
         revision = std::max(revision, read->changedRevision(item.parent));
-      revision = std::max(revision, pendingRevisionByThread[item.node.get()]);
-      const std::size_t pending = pendingByThread[item.node.get()];
+      std::size_t pending = 0;
+      for (const nodegraph::NodeRef &interaction : read->related(
+               item.node, nodegraph::RelationKind::PendingInteraction)) {
+        if (!interaction ||
+            interaction->id().kind != nodegraph::NodeKind::Interaction)
+          continue;
+        const std::shared_ptr<const nodegraph::NodeState> interactionState =
+            read->state(interaction);
+        if (interactionState->status != nodegraph::NodeStatus::Pending)
+          continue;
+        ++pending;
+        revision =
+            std::max(revision, read->changedRevision(interaction));
+      }
       if (candidate.hasWidget &&
           item.attachment->renderedRevision == revision &&
           item.renderedPending == pending)
