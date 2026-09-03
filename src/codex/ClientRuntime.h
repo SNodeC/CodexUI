@@ -16,8 +16,7 @@ class ThreadChannels;
 
 namespace codexui::codex {
 
-int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
-                     nodegraph::NodeGraph &graph,
+int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
                      nodegraph::ThreadChannels &channels, bool connectBridge);
 
 } // namespace codexui::codex
