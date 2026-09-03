@@ -43,9 +43,11 @@
 
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -54,6 +56,47 @@ namespace codexui::codex {
 namespace {
 
 constexpr auto DraftThreadId = "draft:new-thread";
+constexpr int GraphRetryDelayMilliseconds = 8;
+
+bool containsKind(const nodegraph::GraphChanged &change,
+                  std::initializer_list<nodegraph::NodeKind> kinds) {
+  const auto matches = [kinds](const nodegraph::NodeRef &node) {
+    return node && std::ranges::find(kinds, node->id().kind) != kinds.end();
+  };
+  return std::ranges::any_of(change.affected, matches) ||
+         std::ranges::any_of(change.removed, matches);
+}
+
+bool threadPaneAffected(const nodegraph::GraphChanged &change) {
+  return change.rescanRequired ||
+         containsKind(change, {nodegraph::NodeKind::Runtime,
+                               nodegraph::NodeKind::Thread,
+                               nodegraph::NodeKind::Interaction});
+}
+
+bool conversationAffected(const nodegraph::GraphChanged &change) {
+  return change.rescanRequired ||
+         containsKind(change, {nodegraph::NodeKind::Thread,
+                               nodegraph::NodeKind::Turn,
+                               nodegraph::NodeKind::Item});
+}
+
+bool inspectorAffected(const nodegraph::GraphChanged &change, int tab) {
+  if (change.rescanRequired)
+    return true;
+  if (tab == 3) {
+    return containsKind(change, {nodegraph::NodeKind::Connection,
+                                 nodegraph::NodeKind::Thread,
+                                 nodegraph::NodeKind::Turn,
+                                 nodegraph::NodeKind::Item,
+                                 nodegraph::NodeKind::Interaction});
+  }
+  if (tab == 4)
+    return true;
+  return containsKind(change, {nodegraph::NodeKind::Thread,
+                               nodegraph::NodeKind::Turn,
+                               nodegraph::NodeKind::Item});
+}
 
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -210,10 +253,11 @@ struct ShellWidget::Impl final {
   void connectUi();
   void scheduleLogicWakeup(std::int64_t atMilliseconds);
   void scheduleRender();
-  void scheduleGraphBinding();
+  void scheduleGraphBinding(bool replenishRetry = true);
   void runGraphBinding();
+  void bindGraphPanes(nodegraph::NodeRef selectedThread);
   void handleGraphChanged(const nodegraph::GraphChanged &change);
-  void scheduleDraftSelection();
+  void scheduleDraftSelection(bool replenishRetry = true);
   void render();
   void renderStatus(const UiSessionView &view);
   void synchronizeOptimisticThread(
@@ -248,7 +292,9 @@ struct ShellWidget::Impl final {
   bool graphModeRequested = false;
   bool graphPanesBound = false;
   bool graphBindingScheduled = false;
+  unsigned graphBindingRetriesRemaining = 0;
   bool draftSelectionScheduled = false;
+  unsigned draftSelectionRetriesRemaining = 0;
 
   middle::MiddleRegionWidget *middleRegion = nullptr;
   QPushButton *restoreSidebarButton = nullptr;
@@ -422,6 +468,17 @@ void ShellWidget::Impl::connectUi() {
       [this](const std::string &id) { confirmDeleteThread(id); };
   middleRegion->threads().setActions(std::move(threadActions));
 
+  middle::ThreadPane::NodeActions threadNodeActions;
+  threadNodeActions.select = [this](const nodegraph::NodeRef &thread) {
+    if (!thread || thread->id().kind != nodegraph::NodeKind::Thread)
+      return;
+    selectedGraphThreadId = thread->id().canonical;
+    graphModeRequested = true;
+    bindGraphPanes(thread);
+    uiSession.selectThread(selectedGraphThreadId);
+  };
+  middleRegion->threads().setNodeActions(std::move(threadNodeActions));
+
   middle::ComposerPane::Actions composerActions;
   composerActions.submit = [this](QString prompt,
                                   std::vector<AttachmentDraft> attachments) {
@@ -499,12 +556,15 @@ void ShellWidget::Impl::scheduleRender() {
   });
 }
 
-void ShellWidget::Impl::scheduleGraphBinding() {
+void ShellWidget::Impl::scheduleGraphBinding(bool replenishRetry) {
+  if (replenishRetry)
+    graphBindingRetriesRemaining = 1;
   if (!graphModeRequested || graphBindingScheduled)
     return;
   graphBindingScheduled = true;
   const auto token = alive;
-  QTimer::singleShot(0, owner, [this, token] {
+  const int delay = replenishRetry ? 0 : GraphRetryDelayMilliseconds;
+  QTimer::singleShot(delay, owner, [this, token] {
     if (!*token)
       return;
     graphBindingScheduled = false;
@@ -521,7 +581,10 @@ void ShellWidget::Impl::runGraphBinding() {
     {
       auto graphRead = session.nodeGraph().tryRead();
       if (!graphRead) {
-        scheduleGraphBinding();
+        if (graphBindingRetriesRemaining != 0) {
+          --graphBindingRetriesRemaining;
+          scheduleGraphBinding(false);
+        }
         return;
       }
       selectedThread = graphRead->find(
@@ -529,17 +592,22 @@ void ShellWidget::Impl::runGraphBinding() {
     }
   }
 
-  if (!graphPanesBound || boundGraphThread != selectedThread) {
-    boundGraphThread = selectedThread;
-    graphPanesBound = true;
-    nodegraph::NodeGraph &graph = session.nodeGraph();
-    middleRegion->threads().refresh(graph, selectedThread);
-    middleRegion->conversation().bindGraph(graph, selectedThread);
-    middleRegion->inspector().refresh(graph, selectedThread);
-  }
+  graphBindingRetriesRemaining = 0;
+  bindGraphPanes(std::move(selectedThread));
 
   if (renderedView && renderedView->newThreadIntent)
     scheduleDraftSelection();
+}
+
+void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
+  if (graphPanesBound && boundGraphThread == selectedThread)
+    return;
+  boundGraphThread = std::move(selectedThread);
+  graphPanesBound = true;
+  nodegraph::NodeGraph &graph = session.nodeGraph();
+  middleRegion->threads().refresh(graph, boundGraphThread);
+  middleRegion->conversation().bindGraph(graph, boundGraphThread);
+  middleRegion->inspector().refresh(graph, boundGraphThread);
 }
 
 void ShellWidget::Impl::handleGraphChanged(
@@ -548,19 +616,40 @@ void ShellWidget::Impl::handleGraphChanged(
 
   // These calls synchronously release every removed node's QWidget
   // attachment before FrontendSession acknowledges the notification.
-  middleRegion->threads().graphChanged(change);
-  middleRegion->conversation().graphChanged(change.removed);
-  middleRegion->inspector().graphChanged(change);
-  scheduleGraphBinding();
+  const bool updateThreads = threadPaneAffected(change);
+  if (updateThreads)
+    middleRegion->threads().graphChanged(change);
+  if (conversationAffected(change))
+    middleRegion->conversation().graphChanged(change.removed);
+  if (inspectorAffected(change, middleRegion->inspector().tabs()->currentIndex()))
+    middleRegion->inspector().graphChanged(change);
+
+  const bool selectedChanged =
+      !graphPanesBound || change.rescanRequired ||
+      std::ranges::any_of(change.affected, [this](const auto &node) {
+        return node && node->id().kind == nodegraph::NodeKind::Thread &&
+               node->id().canonical == selectedGraphThreadId;
+      }) ||
+      std::ranges::any_of(change.removed, [this](const auto &node) {
+        return node && node->id().kind == nodegraph::NodeKind::Thread &&
+               node->id().canonical == selectedGraphThreadId;
+      });
+  if (selectedChanged)
+    scheduleGraphBinding();
+  if (updateThreads && renderedView && renderedView->newThreadIntent)
+    scheduleDraftSelection();
 }
 
-void ShellWidget::Impl::scheduleDraftSelection() {
+void ShellWidget::Impl::scheduleDraftSelection(bool replenishRetry) {
+  if (replenishRetry)
+    draftSelectionRetriesRemaining = 1;
   if (draftSelectionScheduled || !graphPanesBound || !renderedView ||
       !renderedView->newThreadIntent)
     return;
   draftSelectionScheduled = true;
   const auto token = alive;
-  QTimer::singleShot(0, owner, [this, token] {
+  const int delay = replenishRetry ? 0 : GraphRetryDelayMilliseconds;
+  QTimer::singleShot(delay, owner, [this, token] {
     if (!*token)
       return;
     draftSelectionScheduled = false;
@@ -580,9 +669,13 @@ void ShellWidget::Impl::scheduleDraftSelection() {
         continue;
       if (threadList->currentItem() != item)
         threadList->setCurrentItem(item);
+      draftSelectionRetriesRemaining = 0;
       return;
     }
-    scheduleDraftSelection();
+    if (draftSelectionRetriesRemaining != 0) {
+      --draftSelectionRetriesRemaining;
+      scheduleDraftSelection(false);
+    }
   });
 }
 
@@ -654,13 +747,17 @@ void ShellWidget::Impl::render() {
   const UiSessionView &view =
       uiSession.refreshView(following, draftWorkspace);
   renderedView = &view;
+  const bool graphSelectionChanged =
+      selectedGraphThreadId != view.selectedThreadId;
   selectedGraphThreadId = view.selectedThreadId;
 
   synchronizeOptimisticThread(view.optimisticThread);
-  if (graphModeRequested)
-    scheduleGraphBinding();
-  else
+  if (graphModeRequested) {
+    if (graphSelectionChanged || !graphPanesBound)
+      scheduleGraphBinding();
+  } else {
     middleRegion->threads().refresh(view.threads);
+  }
 
   middleRegion->conversation().setEmptyMessage(
       text(view.conversation.emptyMessage));

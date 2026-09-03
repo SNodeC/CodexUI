@@ -267,6 +267,72 @@ bool verifyNodeGraphFrontendBoundary(Configuration &configuration) {
                 "coalesced removal detaches Qt before releasing retirement");
 }
 
+bool verifyGraphModeDraftSurvivesUnrelatedChanges(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  nodegraph::WorkerLogic worker(
+      session.nodeGraph(), FrontendSessionTestPeer::channels(session));
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  static_cast<void>(worker.apply(nodegraph::DecodedMessage{
+      nodegraph::DecodedMessageKind::ServerNotification,
+      "thread/started",
+      std::nullopt,
+      {{"thread", nodegraph::Value(nodegraph::Value::Object{
+                      {"id", nodegraph::Value("graph-shell-thread")},
+                      {"name", nodegraph::Value("Graph shell thread")}})}}}));
+  spin(20);
+  auto graphRead = session.nodeGraph().tryRead();
+  nodegraph::NodeRef graphThread =
+      graphRead ? graphRead->find(
+                      {nodegraph::NodeKind::Thread, "graph-shell-thread"})
+                : nodegraph::NodeRef{};
+  graphRead.reset();
+
+  auto *newThread =
+      shell.findChild<QPushButton *>(QStringLiteral("threadNewButton"));
+  auto *list =
+      shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  QTimer::singleShot(0, &shell, [] {
+    if (auto *dialog =
+            qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+      dialog->accept();
+  });
+  if (newThread)
+    newThread->click();
+  spin(20);
+
+  QListWidgetItem *draft = nullptr;
+  if (list) {
+    for (int row = 0; row < list->count(); ++row) {
+      QListWidgetItem *candidate = list->item(row);
+      if (candidate && candidate->data(Qt::UserRole).toString() ==
+                           QStringLiteral("draft:new-thread")) {
+        draft = candidate;
+        break;
+      }
+    }
+  }
+  bool result = expect(newThread && draft && list->currentItem() == draft &&
+                           graphThread && graphThread->uiAttachment(),
+                       "graph mode materializes and selects its draft row");
+
+  static_cast<void>(worker.apply(nodegraph::DecodedMessage{
+      nodegraph::DecodedMessageKind::ClientRequest, "model/list", "catalog",
+      {}}));
+  static_cast<void>(worker.apply(nodegraph::DecodedMessage{
+      nodegraph::DecodedMessageKind::ClientResult, "model/list", "catalog",
+      {{"models", nodegraph::Value(nodegraph::Value::Array{})}}}));
+  static_cast<void>(worker.transportEvent("connected"));
+  spin(20);
+  result &= expect(draft && list->currentItem() == draft,
+                   "catalog and connection updates preserve the graph-mode "
+                   "draft selection");
+  return result;
+}
+
 class PresentationPeer final {
 public:
   explicit PresentationPeer(int descriptor) : descriptor_(descriptor) {}
@@ -1443,12 +1509,15 @@ int main(int argc, char **argv) {
       codexui::codex::verifyFrontendBoundaryOrdering(*configuration);
   const bool graphBoundary =
       codexui::codex::verifyNodeGraphFrontendBoundary(*configuration);
+  const bool graphShellBoundary =
+      codexui::codex::verifyGraphModeDraftSurvivesUnrelatedChanges(
+          *configuration);
   codexui::codex::FrontendSession session(*configuration);
   codexui::codex::PresentationPeer peer(
       codexui::codex::FrontendSessionTestPeer::takeClientDescriptor(session));
   const bool validationRetainsInput =
       codexui::codex::verifyPendingRequestValidationRetainsInput();
-  const bool result = frontendBoundary && graphBoundary &&
+  const bool result = frontendBoundary && graphBoundary && graphShellBoundary &&
                       codexui::codex::verifyPendingRequestTextBoundaries() &&
                       validationRetainsInput &&
                       codexui::codex::verifyPermissionRequestDisclosure() &&
