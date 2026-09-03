@@ -1458,7 +1458,24 @@ bool testCardFoldingGeometryAndRetention() {
   view.resize(700, 820);
   view.setTrailingSpaceHeight(500);
   view.show();
-  bool result = expect(view.reconcile(snapshot), "folding fixture renders");
+  ConversationSnapshot promptOnly = snapshot;
+  promptOnly.sections.front().cards = {user};
+  bool result =
+      expect(view.reconcile(promptOnly), "prompt-only folding fixture renders");
+  spin();
+
+  ConversationCard *promptOnlyCard = card(view, stableKey(user.key));
+  QWidget *promptOnlyNestedCards =
+      promptOnlyCard
+          ? promptOnlyCard->findChild<QWidget *>(
+                QStringLiteral("conversationNestedCards"),
+                Qt::FindDirectChildrenOnly)
+          : nullptr;
+  result &= expect(promptOnlyCard && promptOnlyNestedCards &&
+                       promptOnlyNestedCards->isHidden(),
+                   "an initial turn prompt reserves no nested-card gap");
+  result &= expect(view.reconcile(snapshot),
+                   "first nested activity extends the folding fixture");
   spin();
 
   ConversationCard *userCard = card(view, stableKey(user.key));
@@ -1483,10 +1500,12 @@ bool testCardFoldingGeometryAndRetention() {
           disclosure(reasoningCard)->property("chevronDirection") == "left",
       "all cards share disclosure controls with role-correct initial state");
   result &= expect(
-      userCard && userCard->property("authoritativeTurnActive").toBool() &&
+      userCard && userCard == promptOnlyCard &&
+          userCard->property("authoritativeTurnActive").toBool() &&
           !agentCardWidget->property("authoritativeTurnActive").toBool() &&
           !userCard->findChild<QTimer *>(QStringLiteral("activeTurnAnimation")),
-      "only the running outer You card receives a static emphasized border");
+      "the retained running outer You card receives a static emphasized "
+      "border");
   snapshot.activeTurnId.reset();
   result &= expect(view.reconcile(snapshot) &&
                        userCard == card(view, stableKey(user.key)) &&
@@ -1525,10 +1544,14 @@ bool testCardFoldingGeometryAndRetention() {
       promptContent ? promptContent->geometry().y() + promptContent->height()
                     : -1;
   const int firstNestedTop = agentCardWidget->mapTo(userCard, QPoint{}).y();
-  result &= expect(promptContent &&
-                       firstNestedTop - promptContentBottom == 8,
-                   "turn prompt content and its first nested card use the "
-                   "canonical 8 px boundary");
+  QWidget *nestedCards = userCard->findChild<QWidget *>(
+      QStringLiteral("conversationNestedCards"), Qt::FindDirectChildrenOnly);
+  result &= expect(
+      promptContent && nestedCards && nestedCards->layout() &&
+          nestedCards->layout()->contentsMargins().top() == 8 &&
+          firstNestedTop - promptContentBottom == 14,
+      "turn prompt content adds a visible canonical 8 px section boundary "
+      "before its first nested card");
 
   const LocalPromptKey steeringKey{4343};
   VisibleCardData steering{

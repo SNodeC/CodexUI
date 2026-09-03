@@ -1009,9 +1009,9 @@ public:
     nestedCards = new QWidget(owner);
     nestedCards->setObjectName(QStringLiteral("conversationNestedCards"));
     nestedLayout = new QVBoxLayout(nestedCards);
-    // The outer card contributes 6 px here; complete the canonical 8 px
-    // boundary between prompt content and the first nested turn card.
-    nestedLayout->setContentsMargins(0, 2, 0, 0);
+    // Keep a visible section boundary between the complete prompt and the
+    // activity nested beneath it, in addition to ordinary widget spacing.
+    nestedLayout->setContentsMargins(0, 8, 0, 0);
     nestedLayout->setSpacing(8);
     nestedCards->hide();
     layout->addWidget(nestedCards);
