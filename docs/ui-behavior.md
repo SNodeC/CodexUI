@@ -31,6 +31,9 @@ keyed by stable thread, turn, and item IDs; local prompt cards are keyed by
 their submission IDs. The same keyed reconcile path handles initial display
 and updates, mutating a card in place when its visible data changes. An
 identical visible projection does not rebuild widgets or change geometry.
+The complete prompt content, including attachments, adds the canonical 8 px
+structural section gap before its first nested turn card. This spacing is
+layout geometry and never becomes part of authored Markdown.
 
 Local prompt admission resumes bottom following when the only pause was caused
 by composer overlay growth, so the complete pending prompt becomes visible.
