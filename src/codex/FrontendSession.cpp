@@ -95,14 +95,14 @@ const nodegraph::NodeGraph &FrontendSession::nodeGraph() const noexcept {
 
 nodegraph::ChannelSendStatus
 FrontendSession::sendNodeAction(nodegraph::NodeAction &action) {
-  if (!started || stopping || workerFinished.load(std::memory_order_acquire))
+  if (stopping || (started && workerFinished.load(std::memory_order_acquire)))
     return nodegraph::ChannelSendStatus::QueueFull;
   return channels.sendNodeAction(action);
 }
 
 nodegraph::ChannelSendStatus
 FrontendSession::sendRuntimeAction(nodegraph::RuntimeAction &action) {
-  if (!started || stopping || workerFinished.load(std::memory_order_acquire))
+  if (stopping || (started && workerFinished.load(std::memory_order_acquire)))
     return nodegraph::ChannelSendStatus::QueueFull;
   return channels.sendRuntimeAction(action);
 }
