@@ -4,7 +4,6 @@
 #define CODEXUI_CODEX_MIDDLE_THREADPANE_H
 
 #include "codex/nodegraph/Messages.h"
-#include "codex/ui/UiViewState.h"
 
 #include <QFrame>
 
@@ -29,21 +28,14 @@ class ThreadPane final : public QFrame {
 public:
   enum class SortCriterion { Alphanumeric, Created, LastChanged, Recency };
 
-  struct Actions {
+  // These controls are local shell actions. Operations addressed to a
+  // protocol thread always use NodeActions and its already-pinned NodeRef.
+  struct Controls {
     std::function<void()> newThread;
     std::function<void()> refresh;
     std::function<void()> hide;
-    std::function<void(const std::string &)> select;
-    std::function<void(const std::string &)> reload;
-    std::function<void(const std::string &)> rename;
-    std::function<void(const std::string &)> fork;
-    std::function<void(const std::string &)> toggleArchive;
-    std::function<void(const std::string &)> remove;
   };
 
-  // During the graph cutover row actions carry the already-pinned node.  A
-  // configured NodeActions callback takes precedence over the legacy
-  // canonical-id callback, so an operation is never dispatched twice.
   struct NodeActions {
     std::function<void(const nodegraph::NodeRef &)> select;
     std::function<void(const nodegraph::NodeRef &)> reload;
@@ -57,13 +49,9 @@ public:
   explicit ThreadPane(QWidget *parent = nullptr);
   ~ThreadPane() override;
 
-  void setActions(Actions actions);
+  void setControls(Controls controls);
   void setNodeActions(NodeActions actions);
-  void refresh(const ui::ThreadListSnapshot &snapshot);
-  // This is the direct shared-graph entry point. The selected NodeRef is local
-  // navigation state; protocol-derived row state continues to live only in
-  // the graph.
-  void refresh(nodegraph::NodeGraph &graph,
+  void refresh(const nodegraph::NodeGraph &graph,
                nodegraph::NodeRef selectedThread = {});
   void graphChanged();
   // Removal detachment is synchronous: FrontendSession may acknowledge the
@@ -85,47 +73,19 @@ private:
   struct GraphThreadItem;
   struct GraphTopology;
   struct GraphRowRender;
-  struct RenderedThreadRow {
-    std::string id;
-    std::string title;
-    std::string cwd;
-    std::string status;
-    std::optional<std::int64_t> lastActivityAt;
-    std::string parentId;
-    std::size_t pending = 0;
-    std::size_t depth = 0;
-    bool hasChildren = false;
-    bool expanded = false;
-    bool optimistic = false;
-    bool optimisticFailed = false;
-
-    bool operator==(const RenderedThreadRow &) const = default;
-  };
-  struct RenderedThreadList {
-    std::string selectedThreadId;
-    SortCriterion sortCriterion = SortCriterion::Recency;
-    std::vector<RenderedThreadRow> rows;
-
-    bool operator==(const RenderedThreadList &) const = default;
-  };
   struct OptimisticThread {
     std::string id;
     std::string title;
     std::string cwd;
     bool failed = false;
+    std::string previousId;
   };
   void updateSortButton();
-  void sortRootThreads(std::vector<ui::ThreadListRow> &rows) const;
-  void appendVisibleThread(RenderedThreadList &snapshot,
-                           const ui::ThreadListRow &thread,
-                           const std::string &parentId, std::size_t depth,
-                           std::unordered_set<std::string> &visited) const;
   void toggleExpanded(const std::string &threadId);
   void navigateHierarchy(int key);
   void setContextHighlight(const std::string &threadId, bool highlighted);
   void showContextMenu(const QPoint &position);
-  void showGraphContextMenu(const QPoint &position);
-  void leaveGraphMode();
+  void leaveGraph();
   void scheduleGraphRefresh();
   void runGraphRefresh();
   void applyGraphTopology(GraphTopology topology);
@@ -136,24 +96,20 @@ private:
   void renderGraphRow(GraphThreadItem &item, const GraphRowRender &render);
   [[nodiscard]] GraphThreadItem *graphItem(const QListWidgetItem *item) const;
 
-  std::optional<ui::ThreadListSnapshot> currentSnapshot;
-  Actions actions;
+  Controls controls;
   NodeActions nodeActions;
   SortCriterion sortCriterion = SortCriterion::Recency;
   QToolButton *sortButton = nullptr;
   QListWidget *list = nullptr;
-  std::unordered_map<std::string, QListWidgetItem *> rows;
-  std::unordered_set<std::string> expandedThreads;
-  std::string projectedSelectedThreadId;
   std::string contextThreadId;
   QMenu *contextMenu = nullptr;
   QTimer *optimisticAnimation = nullptr;
   std::vector<OptimisticThread> optimisticThreads;
-  std::optional<RenderedThreadList> visibleSnapshot;
-
-  nodegraph::NodeGraph *graph = nullptr;
+  const nodegraph::NodeGraph *graph = nullptr;
   nodegraph::NodeRef selectedGraphThread;
+  std::string selectedOptimisticThreadId;
   std::unordered_set<const nodegraph::Node *> graphExpandedThreads;
+  bool revealSelectedGraphThread = false;
   bool graphRefreshScheduled = false;
   bool visibilityPassScheduled = false;
   int visibilityFirst = -1;

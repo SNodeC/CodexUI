@@ -8,7 +8,6 @@
 
 #include <QApplication>
 #include <QClipboard>
-#include <QDateTime>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMimeData>
@@ -55,14 +54,6 @@ QStringList texts(const std::vector<std::string> &values) {
   return result;
 }
 
-std::string stringValue(const nlohmann::json &object, const char *key) {
-  if (!object.is_object())
-    return {};
-  const auto found = object.find(key);
-  return found != object.end() && found->is_string() ? found->get<std::string>()
-                                                     : std::string{};
-}
-
 bool supportsDirectAccept(std::string_view kind) {
   return kind == "command-approval" || kind == "file-change-approval" ||
          kind == "permissions-approval" || kind == "legacy-patch-approval" ||
@@ -96,10 +87,9 @@ QLabel *statusLabel(const std::string &status) {
 
 QLabel *makeMarkdownLabel(const QString &value) {
   QTextDocument document;
-  document.setMarkdown(
-      value,
-      QTextDocument::MarkdownFeatures(QTextDocument::MarkdownDialectGitHub) |
-          QTextDocument::MarkdownNoHTML);
+  document.setMarkdown(value, QTextDocument::MarkdownFeatures(
+                                  QTextDocument::MarkdownDialectGitHub) |
+                                  QTextDocument::MarkdownNoHTML);
   auto *label = new QLabel(document.toHtml());
   label->setProperty("kind", "body");
   label->setTextFormat(Qt::RichText);
@@ -199,12 +189,13 @@ private:
   bool copied_ = false;
 };
 
-QString agentCopyText(const ui::InspectorAgentRow &agent) {
+QString agentCopyText(const InspectorAgentRender &agent) {
   QStringList lines{QStringLiteral("Agent")};
   if (!agent.agentPath.empty())
     lines << QStringLiteral("Path: %1").arg(text(agent.agentPath));
   if (!agent.status.empty())
-    lines << QStringLiteral("Status: %1").arg(text(displayStatus(agent.status)));
+    lines
+        << QStringLiteral("Status: %1").arg(text(displayStatus(agent.status)));
   if (!agent.tool.empty())
     lines << QStringLiteral("Tool: %1").arg(text(agent.tool));
   if (!agent.model.empty())
@@ -216,12 +207,14 @@ QString agentCopyText(const ui::InspectorAgentRow &agent) {
   if (!agent.resultText.empty())
     lines << QString{} << text(agent.resultText);
   if (!agent.childThreadId.empty())
-    lines << QString{} << QStringLiteral("Thread: %1").arg(text(agent.childThreadId));
+    lines << QString{}
+          << QStringLiteral("Thread: %1").arg(text(agent.childThreadId));
   if (!agent.senderThreadId.empty())
     lines << QStringLiteral("Sender: %1").arg(text(agent.senderThreadId));
   if (!agent.receiverThreadIds.empty())
     lines << QStringLiteral("Receivers: %1")
-                 .arg(texts(agent.receiverThreadIds).join(QStringLiteral(", ")));
+                 .arg(
+                     texts(agent.receiverThreadIds).join(QStringLiteral(", ")));
   return lines.join(QLatin1Char('\n'));
 }
 
@@ -257,14 +250,14 @@ protected:
     QPushButton::paintEvent(event);
     QStyleOptionButton option;
     initStyleOption(&option);
-    const QRect contents = style()->subElementRect(
-        QStyle::SE_PushButtonContents, &option, this);
+    const QRect contents =
+        style()->subElementRect(QStyle::SE_PushButtonContents, &option, this);
     const QRect indicator(contents.right() - 18, contents.top(), 18,
                           contents.height());
-    UiStyle::drawChevron(
-        this, indicator, option.state & QStyle::State_Enabled,
-        option.state & (QStyle::State_MouseOver | QStyle::State_HasFocus),
-        UiStyle::ChevronDirection::Right);
+    UiStyle::drawChevron(this, indicator, option.state & QStyle::State_Enabled,
+                         option.state &
+                             (QStyle::State_MouseOver | QStyle::State_HasFocus),
+                         UiStyle::ChevronDirection::Right);
   }
 };
 
@@ -525,8 +518,7 @@ void appendDiagnostic(QString &target, QString value) {
   target += value;
 }
 
-void appendGraphObject(QString &target,
-                       const nodegraph::Value::Object &object,
+void appendGraphObject(QString &target, const nodegraph::Value::Object &object,
                        int indentation, int depth);
 
 void appendGraphValue(QString &target, const nodegraph::Value &value,
@@ -549,19 +541,18 @@ void appendGraphValue(QString &target, const nodegraph::Value &value,
   } else if (const double *number = value.asDouble()) {
     appendDiagnostic(target, QString::number(*number, 'g', 15));
   } else if (const std::string *string = value.asString()) {
-    const qsizetype remaining =
-        std::max<qsizetype>(0, MaximumGraphDiagnosticCharacters -
-                                  target.size() - 2);
+    const qsizetype remaining = std::max<qsizetype>(
+        0, MaximumGraphDiagnosticCharacters - target.size() - 2);
     const std::size_t maximumBytes = static_cast<std::size_t>(remaining);
     const std::size_t bytes = std::min(string->size(), maximumBytes);
-    QString displayed = QString::fromUtf8(
-        string->data(), static_cast<qsizetype>(bytes));
+    QString displayed =
+        QString::fromUtf8(string->data(), static_cast<qsizetype>(bytes));
     displayed.replace(QLatin1Char('\r'), QStringLiteral("\\r"));
     displayed.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
     if (displayed.size() > remaining)
       displayed.truncate(remaining);
-    appendDiagnostic(target, QStringLiteral("\"") + displayed +
-                                 QStringLiteral("\""));
+    appendDiagnostic(target,
+                     QStringLiteral("\"") + displayed + QStringLiteral("\""));
   } else if (const nodegraph::Value::Array *array = value.asArray()) {
     if (array->empty()) {
       appendDiagnostic(target, QStringLiteral("[]"));
@@ -576,15 +567,13 @@ void appendGraphValue(QString &target, const nodegraph::Value &value,
       if (target.size() >= MaximumGraphDiagnosticCharacters)
         break;
     }
-    appendDiagnostic(target,
-                     QString(indentation, QLatin1Char(' ')) +
-                         QStringLiteral("]"));
+    appendDiagnostic(target, QString(indentation, QLatin1Char(' ')) +
+                                 QStringLiteral("]"));
   } else if (const nodegraph::Value::Object *object = value.asObject())
     appendGraphObject(target, *object, indentation, depth);
 }
 
-void appendGraphObject(QString &target,
-                       const nodegraph::Value::Object &object,
+void appendGraphObject(QString &target, const nodegraph::Value::Object &object,
                        int indentation, int depth) {
   if (object.empty()) {
     appendDiagnostic(target, QStringLiteral("{}"));
@@ -599,14 +588,13 @@ void appendGraphObject(QString &target,
     if (target.size() >= MaximumGraphDiagnosticCharacters)
       break;
   }
-  appendDiagnostic(target,
-                   QString(indentation, QLatin1Char(' ')) +
-                       QStringLiteral("}"));
+  appendDiagnostic(target, QString(indentation, QLatin1Char(' ')) +
+                               QStringLiteral("}"));
 }
 
 } // namespace
 
-QFrame *InspectorPane::agentFrame(const ui::InspectorAgentRow &agent,
+QFrame *InspectorPane::agentFrame(const InspectorAgentRender &agent,
                                   std::string_view threadId) {
   auto *frame = new QFrame;
   frame->setObjectName(QStringLiteral("inspectorAgentFrame"));
@@ -691,8 +679,7 @@ QFrame *InspectorPane::agentFrame(const ui::InspectorAgentRow &agent,
         makeLabel(identities.join(QStringLiteral("  |  ")), "meta"));
   layout->addWidget(content);
 
-  const std::string expansionKey =
-      std::string(threadId) + '\n' + agent.id;
+  const std::string expansionKey = std::string(threadId) + '\n' + agent.id;
   const bool expanded = expandedAgents.contains(expansionKey);
   disclosure->setExpanded(expanded);
   content->setVisible(expanded);
@@ -717,8 +704,7 @@ QFrame *InspectorPane::agentFrame(const ui::InspectorAgentRow &agent,
   return frame;
 }
 
-QFrame *InspectorPane::requestFrame(
-    const ui::InspectorRequestRow &request) {
+QFrame *InspectorPane::requestFrame(const InspectorRequestRender &request) {
   auto *frame = new QFrame;
   frame->setObjectName(QStringLiteral("inspectorRequestFrame"));
   frame->setProperty("nodeCanonicalId", text(request.id));
@@ -752,10 +738,9 @@ QFrame *InspectorPane::requestFrame(
                   "meta"));
   if (request.command.empty() && request.reason.empty() &&
       request.message.empty() && !request.questionCount)
-    layout->addWidget(
-        makeLabel(QStringLiteral("Request %1 needs a decision.")
-                      .arg(text(request.id)),
-                  "meta"));
+    layout->addWidget(makeLabel(
+        QStringLiteral("Request %1 needs a decision.").arg(text(request.id)),
+        "meta"));
   auto *actions = new QHBoxLayout;
   actions->setContentsMargins(0, 2, 0, 0);
   auto *reject = new QPushButton(QStringLiteral("Reject"));
@@ -869,15 +854,6 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   protocolLog->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   protocolLog->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
   protocolLog->document()->setMaximumBlockCount(MaximumProtocolLines);
-  connect(protocolLog->verticalScrollBar(), &QScrollBar::valueChanged, this,
-          [this](int value) {
-            if (mutatingProtocolLog)
-              return;
-            QScrollBar *scrollBar = protocolLog->verticalScrollBar();
-            protocolFollowsTail = value >= scrollBar->maximum() - 1;
-            if (!protocolFollowsTail)
-              protocolPausedScrollValue = value;
-          });
   protocolStats = makeLabel({}, "meta");
   protocolStats->setObjectName(QStringLiteral("protocolInfoStats"));
   protocolLayout->addWidget(protocolLog, 1);
@@ -889,11 +865,11 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   auto *choicesLayout = new QVBoxLayout(choices);
   choicesLayout->setContentsMargins(8, 8, 8, 8);
   choicesLayout->setSpacing(8);
-  auto *stateChoice = infoChoice(
-      QStringLiteral("State"), QStringLiteral("Current application state"));
+  auto *stateChoice = infoChoice(QStringLiteral("State"),
+                                 QStringLiteral("Current application state"));
   stateChoice->setObjectName(QStringLiteral("stateInfoChoice"));
-  auto *protocolChoice = infoChoice(
-      QStringLiteral("Protocol"), QStringLiteral("App-server protocol messages"));
+  auto *protocolChoice = infoChoice(QStringLiteral("Protocol"),
+                                    QStringLiteral("Current protocol state"));
   protocolChoice->setObjectName(QStringLiteral("protocolInfoChoice"));
   choicesLayout->addWidget(stateChoice);
   choicesLayout->addWidget(protocolChoice);
@@ -902,18 +878,16 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   QPushButton *stateBack = nullptr;
   QPushButton *protocolBack = nullptr;
   infoStack->addWidget(choices);
-  infoStack->addWidget(infoDetail(QStringLiteral("State"), stateView,
-                                  &stateBack));
-  infoStack->addWidget(infoDetail(QStringLiteral("Protocol"), protocolContent,
-                                  &protocolBack));
+  infoStack->addWidget(
+      infoDetail(QStringLiteral("State"), stateView, &stateBack));
+  infoStack->addWidget(
+      infoDetail(QStringLiteral("Protocol"), protocolContent, &protocolBack));
   connect(stateChoice, &QPushButton::clicked, this, [this] {
     infoStack->setCurrentIndex(StatePage);
     refreshCurrentTab();
   });
   connect(protocolChoice, &QPushButton::clicked, this, [this] {
     infoStack->setCurrentIndex(ProtocolPage);
-    if (!graph)
-      showProtocolTail();
     refreshCurrentTab();
   });
   const auto showInfoChoices = [this] {
@@ -948,32 +922,11 @@ void InspectorPane::setRequestActions(RequestAction review,
   rejectRequest = std::move(reject);
 }
 
-void InspectorPane::refresh(const ui::InspectorSnapshot &snapshot) {
-  if (graph) {
-    cancelGraphRowRenders();
-    graph = nullptr;
-    selectedGraphThread.reset();
-    graphRefreshScheduled = false;
-    planSnapshot.reset();
-    agentsSnapshot.reset();
-    requestsSnapshot.reset();
-    changesSnapshot.reset();
-    activeGraphDependencies.clear();
-    graphDependenciesTab = -1;
-    graphDependenciesInfoPage = -1;
-    stateSnapshot.clear();
-    protocolStatsSnapshot.clear();
-  }
-  currentSnapshot = snapshot;
-  refreshCurrentTab();
-}
-
-void InspectorPane::refresh(nodegraph::NodeGraph &nextGraph,
+void InspectorPane::refresh(const nodegraph::NodeGraph &nextGraph,
                             nodegraph::NodeRef selectedThread) {
   if (graph != &nextGraph) {
     cancelGraphRowRenders();
     graph = &nextGraph;
-    currentSnapshot.reset();
     planSnapshot.reset();
     agentsSnapshot.reset();
     requestsSnapshot.reset();
@@ -1009,9 +962,8 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
     if (infoPage == StatePage)
       return !change.affected.empty() || !change.removed.empty();
     const auto protocolNode = [](const nodegraph::NodeRef &node) {
-      return node &&
-             (node->id().kind == nodegraph::NodeKind::Operation ||
-              node->id().kind == nodegraph::NodeKind::UnknownProtocol);
+      return node && (node->id().kind == nodegraph::NodeKind::Operation ||
+                      node->id().kind == nodegraph::NodeKind::UnknownProtocol);
     };
     return std::ranges::any_of(change.affected, protocolNode) ||
            std::ranges::any_of(change.removed, protocolNode);
@@ -1019,11 +971,11 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
 
   const bool dependenciesCurrent =
       graphDependenciesTab == tab && graphDependenciesInfoPage == infoPage;
-  const auto knownDependency = [this, dependenciesCurrent](
-                                   const nodegraph::NodeRef &node) {
-    return dependenciesCurrent && node &&
-           activeGraphDependencies.contains(node.get());
-  };
+  const auto knownDependency =
+      [this, dependenciesCurrent](const nodegraph::NodeRef &node) {
+        return dependenciesCurrent && node &&
+               activeGraphDependencies.contains(node.get());
+      };
   const auto selectedThread = [this](const nodegraph::NodeRef &node) {
     return node && selectedGraphThread && node == selectedGraphThread;
   };
@@ -1084,8 +1036,7 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
       if (type == "agentMessage" && belowActiveDependency)
         return true;
     }
-    if (tab == 2 &&
-        (type == "commandExecution" || type == "fileChange"))
+    if (tab == 2 && (type == "commandExecution" || type == "fileChange"))
       return true;
   }
   return false;
@@ -1106,39 +1057,10 @@ void InspectorPane::cancelGraphRowRenders() {
 }
 
 void InspectorPane::refreshCurrentTab() {
-  if (graph) {
-    activeGraphDependencies.clear();
-    graphDependenciesTab = -1;
-    graphDependenciesInfoPage = -1;
-    scheduleGraphRefresh();
-    return;
-  }
-  if (!currentSnapshot)
-    return;
-  switch (inspectorTabs->currentIndex()) {
-  case 0:
-    refreshPlan();
-    break;
-  case 1:
-    refreshAgents();
-    break;
-  case 2:
-    refreshChanges();
-    break;
-  case 3:
-    refreshRequests();
-    break;
-  case 4:
-    if (infoStack->currentIndex() == StatePage)
-      refreshState();
-    else if (infoStack->currentIndex() == ProtocolPage) {
-      showProtocolTail();
-      refreshProtocolStats();
-    }
-    break;
-  default:
-    break;
-  }
+  activeGraphDependencies.clear();
+  graphDependenciesTab = -1;
+  graphDependenciesInfoPage = -1;
+  scheduleGraphRefresh();
 }
 
 void InspectorPane::scheduleGraphRefresh() {
@@ -1175,8 +1097,8 @@ void InspectorPane::runGraphRefresh() {
   std::unordered_set<const nodegraph::Node *> dependencies;
   if (thread)
     dependencies.insert(thread.get());
-  const auto publishDependencies = [this, tab, infoPage](
-                                       auto nextDependencies) {
+  const auto publishDependencies = [this, tab,
+                                    infoPage](auto nextDependencies) {
     activeGraphDependencies = std::move(nextDependencies);
     graphDependenciesTab = tab;
     graphDependenciesInfoPage = infoPage;
@@ -1237,13 +1159,12 @@ void InspectorPane::runGraphRefresh() {
     read.reset();
     publishDependencies(std::move(dependencies));
 
-    ui::InspectorPlanSnapshot snapshot;
+    InspectorPlanData snapshot;
     snapshot.threadId = thread ? thread->id().canonical : std::string{};
     snapshot.threadPresent = static_cast<bool>(thread);
     if (threadState && source.turnState) {
       const std::string threadStatus = graphStatus(*threadState);
-      const nodegraph::Value *planValue =
-          graphField(*source.turnState, "plan");
+      const nodegraph::Value *planValue = graphField(*source.turnState, "plan");
       const nodegraph::Value::Array *steps = nullptr;
       std::string explanation =
           graphString(graphField(*source.turnState, "planExplanation"));
@@ -1261,7 +1182,7 @@ void InspectorPane::runGraphRefresh() {
           explanation = graphString(graphField(*plan, "explanation"));
       }
       if (hasStructuredPlan) {
-        ui::InspectorPlan plan;
+        InspectorPlanRender plan;
         plan.explanation = std::move(explanation);
         if (steps) {
           plan.steps.reserve(steps->size());
@@ -1270,8 +1191,7 @@ void InspectorPane::runGraphRefresh() {
             const nodegraph::Value::Object *step = entry.asObject();
             if (!step)
               continue;
-            const std::string status =
-                graphString(graphField(*step, "status"));
+            const std::string status = graphString(graphField(*step, "status"));
             plan.steps.push_back(
                 {graphString(graphField(*step, "step")),
                  effectivePlanStepStatus(status, turnStatus, threadStatus)});
@@ -1279,8 +1199,7 @@ void InspectorPane::runGraphRefresh() {
         }
         snapshot.plan = std::move(plan);
       } else if (source.itemState) {
-        snapshot.planItem =
-            graphString(graphField(*source.itemState, "text"));
+        snapshot.planItem = graphString(graphField(*source.itemState, "text"));
       }
     }
     renderGraphPlan(std::move(snapshot));
@@ -1312,8 +1231,8 @@ void InspectorPane::runGraphRefresh() {
           dependencies.insert(item.get());
 
           nodegraph::NodeRef childThread;
-          for (const nodegraph::NodeRef &candidate : read->related(
-                   item, nodegraph::RelationKind::AgentChildThread)) {
+          for (const nodegraph::NodeRef &candidate :
+               read->related(item, nodegraph::RelationKind::AgentChildThread)) {
             if (candidate->id().kind == nodegraph::NodeKind::Thread) {
               childThread = candidate;
               break;
@@ -1321,9 +1240,9 @@ void InspectorPane::runGraphRefresh() {
           }
           if (type == "collabAgentToolCall") {
             const std::string tool = graphString(graphField(*state, "tool"));
-            const bool spawn =
-                tool == "spawn_agent" || tool == "spawnAgent" ||
-                tool == "spawn_agents_on_csv" || tool == "spawnAgentsOnCsv";
+            const bool spawn = tool == "spawn_agent" || tool == "spawnAgent" ||
+                               tool == "spawn_agents_on_csv" ||
+                               tool == "spawnAgentsOnCsv";
             if (!spawn || !childThread)
               continue;
           }
@@ -1366,12 +1285,12 @@ void InspectorPane::runGraphRefresh() {
     read.reset();
     publishDependencies(std::move(dependencies));
 
-    ui::InspectorAgentsSnapshot snapshot;
+    InspectorAgentsData snapshot;
     snapshot.threadId = thread ? thread->id().canonical : std::string{};
     snapshot.threadPresent = static_cast<bool>(thread);
     snapshot.agents.reserve(sources.size());
     for (const AgentSource &source : sources) {
-      ui::InspectorAgentRow row;
+      InspectorAgentRender row;
       row.id = source.item->id().canonical;
       row.status = graphStatus(*source.state);
       row.agentPath = graphString(graphField(*source.state, "agentPath"));
@@ -1441,16 +1360,16 @@ void InspectorPane::runGraphRefresh() {
     read.reset();
     publishDependencies(std::move(dependencies));
 
-    ui::InspectorChangesSnapshot snapshot;
+    InspectorChangesData snapshot;
     snapshot.threadId = thread ? thread->id().canonical : std::string{};
     if (threadState) {
       snapshot.cwd = graphString(graphField(*threadState, "cwd"));
       for (const ItemSource &source : sources) {
         const std::string type = graphString(graphField(*source.state, "type"));
         if (type == "commandExecution") {
-          appendUniqueBounded(
-              snapshot.commandCwds,
-              graphString(graphField(*source.state, "cwd")), 64);
+          appendUniqueBounded(snapshot.commandCwds,
+                              graphString(graphField(*source.state, "cwd")),
+                              64);
         } else if (const nodegraph::Value::Array *changes =
                        graphField(*source.state, "changes")
                            ? graphField(*source.state, "changes")->asArray()
@@ -1525,7 +1444,7 @@ void InspectorPane::runGraphRefresh() {
     read.reset();
     publishDependencies(std::move(dependencies));
 
-    ui::InspectorRequestsSnapshot snapshot;
+    InspectorRequestsData snapshot;
     bool canControl = false;
     std::uint64_t generation = 0;
     if (connectionState) {
@@ -1541,8 +1460,8 @@ void InspectorPane::runGraphRefresh() {
           provider == "ready" && role == "controller";
       generation =
           graphUnsigned(graphField(*connectionState, "connectionGeneration"))
-              .value_or(graphUnsigned(graphField(*connectionState,
-                                                 "providerGeneration"))
+              .value_or(graphUnsigned(
+                            graphField(*connectionState, "providerGeneration"))
                             .value_or(0));
     }
 
@@ -1555,7 +1474,7 @@ void InspectorPane::runGraphRefresh() {
       const nodegraph::Value::Object *payload =
           payloadValue ? payloadValue->asObject() : nullptr;
 
-      ui::InspectorRequestRow row;
+      InspectorRequestRender row;
       row.id = source.interaction->id().canonical;
       row.kind = requestKind(method);
       row.generation = generation;
@@ -1576,7 +1495,8 @@ void InspectorPane::runGraphRefresh() {
 
       if (source.targetThread) {
         row.threadContext = source.targetThread->id().canonical;
-        std::string title = graphString(graphField(*source.targetState, "name"));
+        std::string title =
+            graphString(graphField(*source.targetState, "name"));
         if (title.empty())
           title = graphString(graphField(*source.targetState, "title"));
         if (!title.empty())
@@ -1600,10 +1520,9 @@ void InspectorPane::runGraphRefresh() {
     std::vector<StateNodeSource> nodes;
     nodes.reserve(nodeCount);
     for (const nodegraph::NodeRef &node : read->orderedNodes()) {
-      nodes.push_back(
-          {node, node->id().kind == nodegraph::NodeKind::Interaction
-                     ? read->state(node)
-                     : nullptr});
+      nodes.push_back({node, node->id().kind == nodegraph::NodeKind::Interaction
+                                 ? read->state(node)
+                                 : nullptr});
     }
 
     std::string selectedId;
@@ -1641,23 +1560,22 @@ void InspectorPane::runGraphRefresh() {
                         .arg(pendingInteractions);
     appendDiagnostic(value, QStringLiteral("Node kinds:\n"));
     for (const auto &[kind, count] : kindCounts) {
-      appendDiagnostic(value, QStringLiteral("  %1: %2\n")
-                                  .arg(text(kind))
-                                  .arg(count));
+      appendDiagnostic(value,
+                       QStringLiteral("  %1: %2\n").arg(text(kind)).arg(count));
     }
     appendDiagnostic(value, QStringLiteral("\nSelected thread:\n"));
     if (!selectedState) {
       appendDiagnostic(value, QStringLiteral("  <none>\n"));
     } else {
-      appendDiagnostic(value,
-                       QStringLiteral("  id: %1\n  status: %2\n"
-                                      "  changed revision: %3\n"
-                                      "  parent: %4\n  turns: %5\n  fields: ")
-                           .arg(text(selectedId), text(selectedStatus))
-                           .arg(selectedRevision)
-                           .arg(parentId.empty() ? QStringLiteral("<root>")
-                                                 : text(parentId))
-                           .arg(childCount));
+      appendDiagnostic(
+          value,
+          QStringLiteral("  id: %1\n  status: %2\n"
+                         "  changed revision: %3\n"
+                         "  parent: %4\n  turns: %5\n  fields: ")
+              .arg(text(selectedId), text(selectedStatus))
+              .arg(selectedRevision)
+              .arg(parentId.empty() ? QStringLiteral("<root>") : text(parentId))
+              .arg(childCount));
       appendGraphObject(value, selectedState->fields, 2, 0);
       appendDiagnostic(value, QStringLiteral("\n"));
     }
@@ -1683,8 +1601,8 @@ void InspectorPane::runGraphRefresh() {
           node->id().kind != nodegraph::NodeKind::UnknownProtocol)
         continue;
       dependencies.insert(node.get());
-      sources.push_back({node->id().kind, node->id().canonical,
-                         read->state(node)});
+      sources.push_back(
+          {node->id().kind, node->id().canonical, read->state(node)});
     }
     read.reset();
     publishDependencies(std::move(dependencies));
@@ -1700,8 +1618,8 @@ void InspectorPane::runGraphRefresh() {
     std::size_t unknownCount = 0;
     std::size_t pendingCount = 0;
     std::vector<DiagnosticEntry> entries;
-    entries.reserve(std::min<std::size_t>(sources.size(),
-                                          MaximumProtocolLines));
+    entries.reserve(
+        std::min<std::size_t>(sources.size(), MaximumProtocolLines));
     for (const DiagnosticSource &source : sources) {
       if (source.kind == nodegraph::NodeKind::Operation) {
         ++operationCount;
@@ -1732,23 +1650,22 @@ void InspectorPane::runGraphRefresh() {
     }
     if (!wroteOperation)
       appendDiagnostic(log, QStringLiteral("<none>\n"));
-    appendDiagnostic(log,
-                     QStringLiteral("\nUnknown protocol alternatives\n"));
+    appendDiagnostic(log, QStringLiteral("\nUnknown protocol alternatives\n"));
     bool wroteUnknown = false;
     for (const DiagnosticEntry &entry : entries) {
       if (entry.kind != nodegraph::NodeKind::UnknownProtocol)
         continue;
       wroteUnknown = true;
-      appendDiagnostic(log, QStringLiteral("%1  %2  %3\n")
-                                .arg(entry.direction, text(entry.id),
-                                     text(entry.method)));
+      appendDiagnostic(
+          log, QStringLiteral("%1  %2  %3\n")
+                   .arg(entry.direction, text(entry.id), text(entry.method)));
     }
     if (!wroteUnknown)
       appendDiagnostic(log, QStringLiteral("<none>\n"));
     if (operationCount + unknownCount > entries.size())
-      appendDiagnostic(log, QStringLiteral("\n%1 more entries omitted\n")
-                                .arg(operationCount + unknownCount -
-                                     entries.size()));
+      appendDiagnostic(
+          log, QStringLiteral("\n%1 more entries omitted\n")
+                   .arg(operationCount + unknownCount - entries.size()));
     const QString statistics =
         QStringLiteral("revision %1  |  nodes %2  |  operations %3  |  "
                        "pending %4  |  unknown %5")
@@ -1761,7 +1678,7 @@ void InspectorPane::runGraphRefresh() {
   }
 }
 
-void InspectorPane::renderGraphPlan(ui::InspectorPlanSnapshot snapshot) {
+void InspectorPane::renderGraphPlan(InspectorPlanData snapshot) {
   if (pendingPlanSnapshot && *pendingPlanSnapshot == snapshot) {
     scheduleGraphPlanRender();
     return;
@@ -1775,7 +1692,7 @@ void InspectorPane::renderGraphPlan(ui::InspectorPlanSnapshot snapshot) {
   scheduleGraphPlanRender();
 }
 
-void InspectorPane::renderGraphAgents(ui::InspectorAgentsSnapshot snapshot) {
+void InspectorPane::renderGraphAgents(InspectorAgentsData snapshot) {
   if (pendingAgentsSnapshot && *pendingAgentsSnapshot == snapshot) {
     scheduleGraphAgentsRender();
     return;
@@ -1803,8 +1720,7 @@ void InspectorPane::renderGraphAgents(ui::InspectorAgentsSnapshot snapshot) {
   scheduleGraphAgentsRender();
 }
 
-void InspectorPane::renderGraphRequests(
-    ui::InspectorRequestsSnapshot snapshot) {
+void InspectorPane::renderGraphRequests(InspectorRequestsData snapshot) {
   if (pendingRequestsSnapshot && *pendingRequestsSnapshot == snapshot) {
     scheduleGraphRequestsRender();
     return;
@@ -1818,8 +1734,8 @@ void InspectorPane::renderGraphRequests(
   if (!interruptedRender && requestsSnapshot) {
     const std::size_t common =
         std::min(requestsSnapshot->requests.size(), snapshot.requests.size());
-    while (preserved < common &&
-           requestsSnapshot->requests[preserved] == snapshot.requests[preserved])
+    while (preserved < common && requestsSnapshot->requests[preserved] ==
+                                     snapshot.requests[preserved])
       ++preserved;
   }
   pendingRequestsSnapshot = std::move(snapshot);
@@ -1876,15 +1792,13 @@ void InspectorPane::runGraphPlanRender() {
   }
   planRenderClearing = false;
 
-  const ui::InspectorPlanSnapshot &snapshot = *pendingPlanSnapshot;
+  const InspectorPlanData &snapshot = *pendingPlanSnapshot;
   const bool hasExplanation =
       snapshot.plan && !snapshot.plan->explanation.empty();
   const std::size_t componentCount =
-      !snapshot.threadPresent
-          ? 1
-          : snapshot.plan
-                ? snapshot.plan->steps.size() + (hasExplanation ? 1U : 0U)
-                : 1;
+      !snapshot.threadPresent ? 1
+      : snapshot.plan ? snapshot.plan->steps.size() + (hasExplanation ? 1U : 0U)
+                      : 1;
   while (planRenderCursor < componentCount &&
          work < MaximumInspectorWidgetChangesPerPass) {
     QWidget *component = nullptr;
@@ -1896,7 +1810,7 @@ void InspectorPane::runGraphPlanRender() {
       } else {
         const std::size_t stepIndex =
             planRenderCursor - (hasExplanation ? 1U : 0U);
-        const ui::InspectorPlanStep &step = snapshot.plan->steps[stepIndex];
+        const InspectorPlanStepRender &step = snapshot.plan->steps[stepIndex];
         auto *row = new QFrame;
         row->setObjectName(QStringLiteral("inspectorPlanStep"));
         row->setProperty("kind", "raised");
@@ -1929,12 +1843,12 @@ void InspectorPane::runGraphPlanRender() {
   planLayout->addStretch();
   planSnapshot = std::move(*pendingPlanSnapshot);
   pendingPlanSnapshot.reset();
-  QTimer::singleShot(0, planScroll, [scroll = planScroll,
-                                    value = planScrollValue] {
-    scroll->verticalScrollBar()->setValue(
-        std::clamp(value, scroll->verticalScrollBar()->minimum(),
-                   scroll->verticalScrollBar()->maximum()));
-  });
+  QTimer::singleShot(
+      0, planScroll, [scroll = planScroll, value = planScrollValue] {
+        scroll->verticalScrollBar()->setValue(
+            std::clamp(value, scroll->verticalScrollBar()->minimum(),
+                       scroll->verticalScrollBar()->maximum()));
+      });
 }
 
 void InspectorPane::runGraphAgentsRender() {
@@ -1955,7 +1869,7 @@ void InspectorPane::runGraphAgentsRender() {
   }
   agentsRenderClearing = false;
 
-  const ui::InspectorAgentsSnapshot &snapshot = *pendingAgentsSnapshot;
+  const InspectorAgentsData &snapshot = *pendingAgentsSnapshot;
   const std::size_t componentCount =
       !snapshot.threadPresent || snapshot.agents.empty()
           ? 1
@@ -1983,12 +1897,12 @@ void InspectorPane::runGraphAgentsRender() {
   agentsLayout->addStretch();
   agentsSnapshot = std::move(*pendingAgentsSnapshot);
   pendingAgentsSnapshot.reset();
-  QTimer::singleShot(0, agentsScroll, [scroll = agentsScroll,
-                                      value = agentsScrollValue] {
-    scroll->verticalScrollBar()->setValue(
-        std::clamp(value, scroll->verticalScrollBar()->minimum(),
-                   scroll->verticalScrollBar()->maximum()));
-  });
+  QTimer::singleShot(
+      0, agentsScroll, [scroll = agentsScroll, value = agentsScrollValue] {
+        scroll->verticalScrollBar()->setValue(
+            std::clamp(value, scroll->verticalScrollBar()->minimum(),
+                       scroll->verticalScrollBar()->maximum()));
+      });
 }
 
 void InspectorPane::runGraphRequestsRender() {
@@ -2009,7 +1923,7 @@ void InspectorPane::runGraphRequestsRender() {
   }
   requestsRenderClearing = false;
 
-  const ui::InspectorRequestsSnapshot &snapshot = *pendingRequestsSnapshot;
+  const InspectorRequestsData &snapshot = *pendingRequestsSnapshot;
   const std::size_t componentCount =
       snapshot.requests.empty() ? 1 : snapshot.requests.size();
   while (requestsRenderCursor < componentCount &&
@@ -2032,153 +1946,18 @@ void InspectorPane::runGraphRequestsRender() {
   requestsLayout->addStretch();
   requestsSnapshot = std::move(*pendingRequestsSnapshot);
   pendingRequestsSnapshot.reset();
-  QTimer::singleShot(0, requestsScroll, [scroll = requestsScroll,
-                                        value = requestsScrollValue] {
-    scroll->verticalScrollBar()->setValue(
-        std::clamp(value, scroll->verticalScrollBar()->minimum(),
-                   scroll->verticalScrollBar()->maximum()));
-  });
+  QTimer::singleShot(0, requestsScroll,
+                     [scroll = requestsScroll, value = requestsScrollValue] {
+                       scroll->verticalScrollBar()->setValue(std::clamp(
+                           value, scroll->verticalScrollBar()->minimum(),
+                           scroll->verticalScrollBar()->maximum()));
+                     });
 }
 
-void InspectorPane::refreshPlan() {
-  const ui::InspectorPlanSnapshot &next = currentSnapshot->plan;
-  if (planSnapshot && *planSnapshot == next)
-    return;
-  planSnapshot = next;
-  renderPlan(*planSnapshot);
-}
-
-void InspectorPane::renderPlan(const ui::InspectorPlanSnapshot &snapshot) {
-  setUpdatesEnabled(false);
-  clearLayout(planLayout);
-  if (!snapshot.threadPresent) {
-    planLayout->addWidget(
-        makeLabel(QStringLiteral("No selected thread."), "muted"));
-  } else if (snapshot.plan) {
-    const QString explanation = text(snapshot.plan->explanation);
-    if (!explanation.isEmpty())
-      planLayout->addWidget(makeMarkdownLabel(explanation));
-    for (const ui::InspectorPlanStep &step : snapshot.plan->steps) {
-      auto *row = new QFrame;
-      row->setObjectName(QStringLiteral("inspectorPlanStep"));
-      row->setProperty("kind", "raised");
-      auto *layout = new QVBoxLayout(row);
-      layout->setContentsMargins(12, 10, 12, 10);
-      layout->setSpacing(6);
-      layout->addWidget(makeLabel(text(step.step)));
-      layout->addWidget(statusLabel(step.status));
-      planLayout->addWidget(row);
-    }
-  } else if (snapshot.planItem) {
-    const QString value = text(*snapshot.planItem);
-    planLayout->addWidget(
-        value.isEmpty()
-            ? makeLabel(QStringLiteral("Plan is being prepared."), "muted")
-            : makeMarkdownLabel(value));
-  } else {
-    planLayout->addWidget(
-        makeLabel(QStringLiteral("No plan for this thread."), "muted"));
-  }
-  planLayout->addStretch();
-  setUpdatesEnabled(true);
-}
-
-void InspectorPane::refreshAgents() {
-  const ui::InspectorAgentsSnapshot &next = currentSnapshot->agents;
-  if (agentsSnapshot && *agentsSnapshot == next)
-    return;
-  agentsSnapshot = next;
-  renderAgents(*agentsSnapshot);
-}
-
-void InspectorPane::renderAgents(
-    const ui::InspectorAgentsSnapshot &snapshot) {
-  setUpdatesEnabled(false);
-  clearLayout(agentsLayout);
-  if (!snapshot.threadPresent)
-    agentsLayout->addWidget(
-        makeLabel(QStringLiteral("No selected thread."), "muted"));
-  else if (snapshot.agents.empty())
-    agentsLayout->addWidget(makeLabel(
-        QStringLiteral("No agent activity for this thread."), "muted"));
-  else
-    for (const ui::InspectorAgentRow &agent : snapshot.agents)
-      agentsLayout->addWidget(agentFrame(agent, snapshot.threadId));
-  agentsLayout->addStretch();
-  setUpdatesEnabled(true);
-}
-
-void InspectorPane::refreshChanges() {
-  const ui::InspectorChangesSnapshot &next = currentSnapshot->changes;
-  if (changesSnapshot && *changesSnapshot == next)
-    return;
-  changesSnapshot = next;
-  renderChanges(*changesSnapshot);
-}
-
-void InspectorPane::renderChanges(
-    const ui::InspectorChangesSnapshot &snapshot) {
-  diffViewer->setRepositoryContext(
-      text(snapshot.threadId), text(snapshot.cwd), texts(snapshot.commandCwds),
-      texts(snapshot.changedPaths));
-}
-
-void InspectorPane::refreshRequests() {
-  const ui::InspectorRequestsSnapshot &next = currentSnapshot->requests;
-  if (requestsSnapshot && *requestsSnapshot == next)
-    return;
-  requestsSnapshot = next;
-  renderRequests(*requestsSnapshot);
-}
-
-void InspectorPane::renderRequests(
-    const ui::InspectorRequestsSnapshot &requestSnapshot) {
-  const std::vector<ui::InspectorRequestRow> &snapshot =
-      requestSnapshot.requests;
-  setUpdatesEnabled(false);
-  clearLayout(requestsLayout);
-  for (const ui::InspectorRequestRow &request : snapshot)
-    requestsLayout->addWidget(requestFrame(request));
-  if (snapshot.empty())
-    requestsLayout->addWidget(
-        makeLabel(QStringLiteral("No pending requests."), "muted"));
-  requestsLayout->addStretch();
-  setUpdatesEnabled(true);
-}
-
-void InspectorPane::refreshState() {
-  std::string rendered = currentSnapshot->state.state.dump(2);
-  constexpr std::size_t MaximumBytes = 32U * 1024U;
-  if (rendered.size() > MaximumBytes) {
-    const std::size_t total = rendered.size();
-    rendered.resize(MaximumBytes);
-    rendered += "\n\n[State display truncated at 32 KiB; retained bytes: " +
-                std::to_string(total) + "]";
-  }
-  const QByteArray next(rendered.data(),
-                        static_cast<qsizetype>(rendered.size()));
-  if (next == stateSnapshot)
-    return;
-  stateSnapshot = next;
-  stateView->setPlainText(text(rendered));
-}
-
-void InspectorPane::refreshProtocolStats() {
-  const ui::InspectorStateSnapshot &snapshot = currentSnapshot->state;
-  const QString value =
-      QStringLiteral("seq %1  |  threads %2  |  models %3  |  turns %4  |  "
-                     "items %5  |  pending %6  |  telemetry %7")
-          .arg(static_cast<qulonglong>(observedSequence))
-          .arg(static_cast<qulonglong>(snapshot.threadCount))
-          .arg(static_cast<qulonglong>(snapshot.modelCount))
-          .arg(static_cast<qulonglong>(snapshot.selectedThreadTurnCount))
-          .arg(static_cast<qulonglong>(snapshot.selectedThreadItemCount))
-          .arg(static_cast<qulonglong>(snapshot.pendingRequestCount))
-          .arg(static_cast<qulonglong>(snapshot.telemetryCount));
-  if (value.toUtf8() == protocolStatsSnapshot)
-    return;
-  protocolStatsSnapshot = value.toUtf8();
-  protocolStats->setText(value);
+void InspectorPane::renderChanges(const InspectorChangesData &snapshot) {
+  diffViewer->setRepositoryContext(text(snapshot.threadId), text(snapshot.cwd),
+                                   texts(snapshot.commandCwds),
+                                   texts(snapshot.changedPaths));
 }
 
 void InspectorPane::renderGraphState(QString value) {
@@ -2191,106 +1970,24 @@ void InspectorPane::renderGraphState(QString value) {
 
 void InspectorPane::renderGraphProtocol(QString log, QString statistics) {
   if (protocolLog->toPlainText() != log) {
-    const ScrollPosition position{protocolFollowsTail,
-                                  protocolPausedScrollValue};
-    mutatingProtocolLog = true;
+    QScrollBar *scrollBar = protocolLog->verticalScrollBar();
+    const ScrollPosition position{protocolStatsSnapshot.isEmpty() ||
+                                      scrollBar->value() >=
+                                          scrollBar->maximum() - 1,
+                                  scrollBar->value()};
     protocolLog->setPlainText(std::move(log));
-    restoreProtocolScroll(position.followsTail, position.value);
+    restoreScrollPosition(protocolLog, position);
+    QTimer::singleShot(0, protocolLog, [view = protocolLog, position] {
+      restoreScrollPosition(view, position);
+      QTimer::singleShot(
+          0, view, [view, position] { restoreScrollPosition(view, position); });
+    });
   }
   const QByteArray next = statistics.toUtf8();
   if (next != protocolStatsSnapshot) {
     protocolStatsSnapshot = next;
     protocolStats->setText(std::move(statistics));
   }
-}
-
-void InspectorPane::showProtocolTail() {
-  QStringList lines;
-  lines.reserve(static_cast<qsizetype>(protocolLines.size()));
-  for (const QString &line : protocolLines)
-    lines << line;
-  const QString value = lines.join(QLatin1Char('\n'));
-  if (protocolLog->toPlainText() == value)
-    return;
-  const ScrollPosition position{protocolFollowsTail, protocolPausedScrollValue};
-  mutatingProtocolLog = true;
-  protocolLog->setPlainText(value);
-  restoreProtocolScroll(position.followsTail, position.value);
-}
-
-void InspectorPane::restoreProtocolScroll(bool followsTail, int pausedValue) {
-  const ScrollPosition position{followsTail, pausedValue};
-  restoreScrollPosition(protocolLog, position);
-  const std::uint64_t revision = ++protocolScrollRevision;
-  QTimer::singleShot(0, this, [this, position, revision] {
-    if (revision != protocolScrollRevision)
-      return;
-    restoreScrollPosition(protocolLog, position);
-    protocolFollowsTail = position.followsTail;
-    if (!position.followsTail)
-      protocolPausedScrollValue = protocolLog->verticalScrollBar()->value();
-    mutatingProtocolLog = false;
-  });
-}
-
-void InspectorPane::appendProtocolFrame(const nlohmann::json &frame) {
-  if (graph)
-    return;
-  const auto record = [this](QString line) {
-    if (protocolLines.size() >= MaximumProtocolLines)
-      protocolLines.pop_front();
-    protocolLines.push_back(line);
-    const ScrollPosition position{protocolFollowsTail,
-                                  protocolPausedScrollValue};
-    mutatingProtocolLog = true;
-    protocolLog->appendPlainText(line);
-    restoreProtocolScroll(position.followsTail, position.value);
-  };
-  const std::uint64_t sequence = frame.value("sequence", 0ULL);
-  if (sequence != 0) {
-    if (observedSequence != 0 && sequence != observedSequence + 1) {
-      record(QStringLiteral("[%1] %2 expected=%3 received=%4")
-                 .arg(QDateTime::currentDateTime().toString(
-                          QStringLiteral("HH:mm:ss.zzz")),
-                      sequence <= observedSequence
-                          ? QStringLiteral("NON-MONOTONIC")
-                          : QStringLiteral("SEQUENCE GAP"))
-                 .arg(static_cast<qulonglong>(observedSequence + 1))
-                 .arg(static_cast<qulonglong>(sequence)));
-    }
-    observedSequence = std::max(observedSequence, sequence);
-  }
-  const std::string kind = stringValue(frame, "kind");
-  const std::string subject = kind == "result" ? stringValue(frame, "action")
-                                               : stringValue(frame, "type");
-  const nlohmann::json scope = frame.value("scope", nlohmann::json::object());
-  QStringList parts{QStringLiteral("[%1]").arg(
-      QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz")))};
-  if (sequence != 0)
-    parts << QStringLiteral("#%1").arg(static_cast<qulonglong>(sequence));
-  parts << QStringLiteral("g%1").arg(
-               static_cast<qulonglong>(frame.value("generation", 0ULL)))
-        << text(kind) << text(subject) << text(stringValue(frame, "authority"));
-  if (kind == "result")
-    parts << (frame.value("ok", false) ? QStringLiteral("ok")
-                                       : QStringLiteral("ERROR"));
-  for (const char *key :
-       {"threadId", "turnId", "itemId", "requestId", "processId"}) {
-    const std::string value = stringValue(scope, key);
-    if (!value.empty())
-      parts << QStringLiteral("%1=%2").arg(QString::fromLatin1(key),
-                                           text(value));
-  }
-  const std::string correlation = stringValue(frame, "correlationId");
-  if (!correlation.empty())
-    parts << QStringLiteral("correlation=%1").arg(text(correlation));
-  if (kind == "result" && !frame.value("ok", false)) {
-    const std::string message =
-        stringValue(frame.value("error", nlohmann::json::object()), "message");
-    if (!message.empty())
-      parts << text(message);
-  }
-  record(parts.join(QStringLiteral("  ")));
 }
 
 } // namespace codexui::codex::middle

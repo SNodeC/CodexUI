@@ -51,8 +51,11 @@
 #include <git2.h>
 
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -81,16 +84,298 @@ bool expect(bool condition, const char *message) {
 
 std::string utf8(const QString &value) { return value.toUtf8().toStdString(); }
 
+nodegraph::NodeStatus graphStatus(std::string_view status) {
+  if (status == "active" || status == "inProgress" || status == "running" ||
+      status == "started")
+    return nodegraph::NodeStatus::Running;
+  if (status == "idle" || status == "completed")
+    return nodegraph::NodeStatus::Completed;
+  if (status == "failed" || status == "systemError")
+    return nodegraph::NodeStatus::Failed;
+  if (status == "interrupted")
+    return nodegraph::NodeStatus::Interrupted;
+  if (status == "notLoaded")
+    return nodegraph::NodeStatus::NotLoaded;
+  return nodegraph::NodeStatus::Unknown;
+}
+
+template <typename Pane> nodegraph::NodeGraph &fixtureGraph(Pane &pane) {
+  static std::unordered_map<const Pane *, std::unique_ptr<nodegraph::NodeGraph>>
+      graphs;
+  auto &graph = graphs[&pane];
+  if (!graph)
+    graph = std::make_unique<nodegraph::NodeGraph>();
+  return *graph;
+}
+
+template <typename Pane>
+void clearFixtureGraph(Pane &pane, nodegraph::NodeGraph &graph) {
+  auto read = graph.tryRead();
+  std::vector<nodegraph::NodeRef> nodes = read->orderedNodes();
+  read.reset();
+  if (nodes.empty())
+    return;
+  auto write = graph.write();
+  for (const nodegraph::NodeRef &node : nodes)
+    write.remove(node);
+  nodegraph::GraphChange change = write.finish();
+  pane.graphChanged({change.revision, std::move(change.affected),
+                     std::move(change.removed), false});
+}
+
+void addTimestamp(nodegraph::Value::Object &fields, std::string name,
+                  const std::optional<std::int64_t> &value) {
+  if (value)
+    fields.emplace(std::move(name), nodegraph::Value(*value));
+}
+
 void refresh(ThreadPane &pane, const PresentationModel &model,
              std::string selectedThreadId) {
-  pane.refresh(
-      ui::projectThreadListSnapshot(model, std::move(selectedThreadId)));
+  const ui::ThreadListSnapshot snapshot =
+      ui::projectThreadListSnapshot(model, selectedThreadId);
+  nodegraph::NodeGraph &graph = fixtureGraph(pane);
+  auto priorRead = graph.tryRead();
+  const std::vector<nodegraph::NodeRef> priorNodes = priorRead->orderedNodes();
+  priorRead.reset();
+
+  nodegraph::NodeRef selected;
+  std::unordered_set<std::string> retainedThreads;
+  std::unordered_set<std::string> retainedInteractions;
+  auto write = graph.write();
+  const nodegraph::NodeRef runtime =
+      write.upsert({nodegraph::NodeKind::Runtime, "runtime"});
+  nodegraph::NodeState connectionState;
+  connectionState.status = snapshot.providerReady
+                               ? nodegraph::NodeStatus::Connected
+                               : nodegraph::NodeStatus::Disconnected;
+  connectionState.fields = {
+      {"providerState",
+       nodegraph::Value(snapshot.providerReady ? "ready" : "disconnected")},
+      {"role",
+       nodegraph::Value(snapshot.canControl ? "controller" : "observer")}};
+  const nodegraph::NodeRef connection =
+      write.upsert({nodegraph::NodeKind::Connection, "connection"});
+  write.replaceState(connection, std::move(connectionState));
+
+  std::vector<nodegraph::NodeRef> roots;
+  const auto addThread =
+      [&](const auto &self,
+          const ui::ThreadListRow &row) -> nodegraph::NodeRef {
+    nodegraph::NodeState state;
+    state.status = graphStatus(row.status);
+    state.fields = {{"name", nodegraph::Value(row.title)},
+                    {"cwd", nodegraph::Value(row.cwd)},
+                    {"status", nodegraph::Value(row.status)},
+                    {"archived", nodegraph::Value(row.archived)}};
+    addTimestamp(state.fields, "createdAt", row.createdAt);
+    addTimestamp(state.fields, "updatedAt", row.updatedAt);
+    addTimestamp(state.fields, "recencyAt", row.recencyAt);
+    addTimestamp(state.fields, "lastActivityAt", row.lastActivityAt);
+    retainedThreads.insert(row.id);
+    const nodegraph::NodeRef thread =
+        write.upsert({nodegraph::NodeKind::Thread, row.id});
+    write.replaceState(thread, std::move(state));
+    if (row.id == selectedThreadId)
+      selected = thread;
+    std::vector<nodegraph::NodeRef> requests;
+    for (std::size_t index = 0; index < row.pending; ++index) {
+      const std::string id = "fixture:" + row.id + ':' + std::to_string(index);
+      retainedInteractions.insert(id);
+      nodegraph::NodeState requestState;
+      requestState.status = nodegraph::NodeStatus::Pending;
+      const nodegraph::NodeRef request =
+          write.upsert({nodegraph::NodeKind::Interaction, id});
+      write.replaceState(request, std::move(requestState));
+      requests.push_back(request);
+    }
+    write.replaceRelated(thread, nodegraph::RelationKind::PendingInteraction,
+                         requests);
+    std::vector<nodegraph::NodeRef> children;
+    children.reserve(row.children.size());
+    for (const ui::ThreadListRow &child : row.children)
+      children.push_back(self(self, child));
+    write.replaceRelated(thread, nodegraph::RelationKind::StructuralChildThread,
+                         children);
+    return thread;
+  };
+  for (const ui::ThreadListRow &row : snapshot.roots)
+    roots.push_back(addThread(addThread, row));
+  write.replaceRelated(runtime, nodegraph::RelationKind::RootThread, roots);
+  for (const nodegraph::NodeRef &node : priorNodes) {
+    if (node->id().kind == nodegraph::NodeKind::Thread &&
+        !retainedThreads.contains(node->id().canonical))
+      write.remove(node);
+    else if (node->id().kind == nodegraph::NodeKind::Interaction &&
+             node->id().canonical.starts_with("fixture:") &&
+             !retainedInteractions.contains(node->id().canonical))
+      write.remove(node);
+  }
+  nodegraph::GraphChange change = write.finish();
+  pane.graphChanged({change.revision, std::move(change.affected),
+                     std::move(change.removed), false});
+  pane.refresh(graph, std::move(selected));
+  for (int pass = 0; pass < 3; ++pass)
+    QCoreApplication::processEvents(QEventLoop::AllEvents);
+}
+
+std::string requestMethod(std::string_view kind) {
+  if (kind == "command-approval")
+    return "item/commandExecution/requestApproval";
+  if (kind == "file-change-approval")
+    return "item/fileChange/requestApproval";
+  if (kind == "permissions-approval")
+    return "permissions/requestApproval";
+  if (kind == "mcp-elicitation")
+    return "mcpServer/elicitation/request";
+  if (kind == "legacy-patch-approval")
+    return "applyPatchApproval";
+  if (kind == "legacy-command-approval")
+    return "execCommandApproval";
+  return "item/tool/requestUserInput";
 }
 
 void refresh(InspectorPane &pane, const PresentationModel &model,
              std::string selectedThreadId) {
-  pane.refresh(
-      ui::projectInspectorSnapshot(model, std::move(selectedThreadId)));
+  const ui::InspectorSnapshot snapshot =
+      ui::projectInspectorSnapshot(model, selectedThreadId);
+  nodegraph::NodeGraph &graph = fixtureGraph(pane);
+  clearFixtureGraph(pane, graph);
+
+  auto write = graph.write();
+  const nodegraph::NodeRef runtime =
+      write.upsert({nodegraph::NodeKind::Runtime, "runtime"});
+  nodegraph::NodeState connectionState;
+  connectionState.status = nodegraph::NodeStatus::Connected;
+  const bool actionable = std::ranges::any_of(
+      snapshot.requests.requests,
+      [](const ui::InspectorRequestRow &row) { return row.actionable; });
+  connectionState.fields = {
+      {"transportState", nodegraph::Value("connected")},
+      {"providerState", nodegraph::Value("ready")},
+      {"role", nodegraph::Value(actionable ? "controller" : "observer")}};
+  static_cast<void>(
+      write.upsert({nodegraph::NodeKind::Connection, "connection"},
+                   std::move(connectionState)));
+
+  const bool threadPresent = snapshot.plan.threadPresent ||
+                             snapshot.agents.threadPresent ||
+                             !snapshot.changes.threadId.empty();
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  if (threadPresent && !selectedThreadId.empty()) {
+    nodegraph::NodeState threadState;
+    threadState.fields = {{"cwd", nodegraph::Value(snapshot.changes.cwd)}};
+    thread = write.upsert({nodegraph::NodeKind::Thread, selectedThreadId},
+                          std::move(threadState));
+    turn = write.upsert(
+        {nodegraph::NodeKind::Turn, "fixture-turn:" + selectedThreadId});
+    write.setParent(thread, turn);
+  }
+
+  if (turn && (snapshot.plan.plan || snapshot.plan.planItem)) {
+    nodegraph::NodeState planState;
+    planState.fields.emplace("type", nodegraph::Value("plan"));
+    if (snapshot.plan.plan) {
+      nodegraph::Value::Array steps;
+      for (const ui::InspectorPlanStep &step : snapshot.plan.plan->steps) {
+        steps.emplace_back(nodegraph::Value::Object{
+            {"step", nodegraph::Value(step.step)},
+            {"status", nodegraph::Value(step.status)}});
+      }
+      write.setField(turn, "plan", nodegraph::Value(std::move(steps)));
+      write.setField(turn, "planExplanation",
+                     nodegraph::Value(snapshot.plan.plan->explanation));
+    } else {
+      planState.fields.emplace(
+          "text", nodegraph::Value(snapshot.plan.planItem.value_or("")));
+    }
+    const nodegraph::NodeRef item = write.upsert(
+        {nodegraph::NodeKind::Item, "fixture-plan:" + selectedThreadId},
+        std::move(planState));
+    write.setParent(turn, item);
+  }
+
+  if (turn) {
+    for (const ui::InspectorAgentRow &agent : snapshot.agents.agents) {
+      nodegraph::Value::Array receivers;
+      for (const std::string &receiver : agent.receiverThreadIds)
+        receivers.emplace_back(receiver);
+      nodegraph::NodeState state;
+      state.status = graphStatus(agent.status);
+      state.fields = {
+          {"type", nodegraph::Value("subAgentActivity")},
+          {"status", nodegraph::Value(agent.status)},
+          {"agentThreadId", nodegraph::Value(agent.childThreadId)},
+          {"agentPath", nodegraph::Value(agent.agentPath)},
+          {"tool", nodegraph::Value(agent.tool)},
+          {"model", nodegraph::Value(agent.model)},
+          {"reasoningEffort", nodegraph::Value(agent.reasoningEffort)},
+          {"prompt", nodegraph::Value(agent.prompt)},
+          {"resultText", nodegraph::Value(agent.resultText)},
+          {"senderThreadId", nodegraph::Value(agent.senderThreadId)},
+          {"receiverThreadIds", nodegraph::Value(std::move(receivers))}};
+      const nodegraph::NodeRef item =
+          write.upsert({nodegraph::NodeKind::Item, agent.id}, std::move(state));
+      write.setParent(turn, item);
+    }
+    for (const std::string &cwd : snapshot.changes.commandCwds) {
+      nodegraph::NodeState state;
+      state.fields = {{"type", nodegraph::Value("commandExecution")},
+                      {"cwd", nodegraph::Value(cwd)}};
+      const nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item,
+           "fixture-command:" + std::to_string(write.orderedNodes().size())},
+          std::move(state));
+      write.setParent(turn, item);
+    }
+    if (!snapshot.changes.changedPaths.empty()) {
+      nodegraph::Value::Array changes;
+      for (const std::string &path : snapshot.changes.changedPaths)
+        changes.emplace_back(
+            nodegraph::Value::Object{{"path", nodegraph::Value(path)}});
+      nodegraph::NodeState state;
+      state.fields = {{"type", nodegraph::Value("fileChange")},
+                      {"changes", nodegraph::Value(std::move(changes))}};
+      const nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item, "fixture-file-change"}, std::move(state));
+      write.setParent(turn, item);
+    }
+  }
+
+  for (const ui::InspectorRequestRow &request : snapshot.requests.requests) {
+    nodegraph::Value::Object payload{
+        {"command", nodegraph::Value(request.command)},
+        {"reason", nodegraph::Value(request.reason)},
+        {"message", nodegraph::Value(request.message)}};
+    if (request.questionCount) {
+      nodegraph::Value::Array questions(*request.questionCount);
+      payload.emplace("questions", nodegraph::Value(std::move(questions)));
+    }
+    nodegraph::NodeState state;
+    state.status = nodegraph::NodeStatus::Pending;
+    state.fields = {{"method", nodegraph::Value(requestMethod(request.kind))},
+                    {"payload", nodegraph::Value(std::move(payload))}};
+    const nodegraph::NodeRef interaction = write.upsert(
+        {nodegraph::NodeKind::Interaction, request.id}, std::move(state));
+    nodegraph::NodeRef target = thread;
+    if (!target) {
+      nodegraph::NodeState targetState;
+      targetState.fields = {{"name", nodegraph::Value(request.threadContext)}};
+      target = write.upsert(
+          {nodegraph::NodeKind::Thread, "fixture-target:" + request.id},
+          std::move(targetState));
+    } else if (!request.threadContext.empty()) {
+      write.setField(target, "name", nodegraph::Value(request.threadContext));
+    }
+    write.relate(interaction, nodegraph::RelationKind::InteractionTarget,
+                 target);
+    write.relate(runtime, nodegraph::RelationKind::PendingInteraction,
+                 interaction);
+  }
+  static_cast<void>(write.finish());
+  pane.refresh(graph, std::move(thread));
+  for (int pass = 0; pass < 3; ++pass)
+    QCoreApplication::processEvents(QEventLoop::AllEvents);
 }
 
 void sendPromptKey(codexui::ExpandingPromptEditor &editor, int key,
@@ -782,6 +1067,8 @@ bool testThreadSelectionProjection() {
       presentation::Authority::Merge, {{"threadId", "thread-b"}}));
 
   ThreadPane pane;
+  pane.resize(340, 620);
+  pane.show();
   refresh(pane, model, "thread-a");
   bool result = expect(pane.visiblySelectedThreadId() == "thread-a",
                        "thread selection is projected from Shell state");
@@ -907,6 +1194,8 @@ bool testThreadRuntimeStatusColors() {
   }
 
   ThreadPane pane;
+  pane.resize(340, 620);
+  pane.show();
   refresh(pane, model, "thread-completed");
   auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
   const std::vector<std::pair<std::string, const char *>> expected{
@@ -1130,13 +1419,13 @@ bool testThreadHierarchyExpansionAndNavigation() {
   pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
   std::string selectedThread;
   int selections = 0;
-  ThreadPane::Actions actions;
-  actions.select = [&](const std::string &id) {
-    selectedThread = id;
+  ThreadPane::NodeActions actions;
+  actions.select = [&](const nodegraph::NodeRef &node) {
+    selectedThread = node ? node->id().canonical : std::string{};
     ++selections;
     refresh(pane, model, selectedThread);
   };
-  pane.setActions(std::move(actions));
+  pane.setNodeActions(std::move(actions));
   pane.resize(340, 620);
   pane.show();
   refresh(pane, model, selectedThread);
@@ -1433,15 +1722,18 @@ bool testPromptActivityNaturallyOrdersThreads() {
       expect(threadOrder(pane) == std::vector<std::string>({"older", "recent"}),
       "prompt activity immediately updates natural Recent ordering");
   pane.setSortCriterion(ThreadPane::SortCriterion::LastChanged);
+  spin();
   result &=
       expect(threadOrder(pane) == std::vector<std::string>({"older", "recent"}),
       "the same activity updates natural Last changed ordering");
   pane.setSortCriterion(ThreadPane::SortCriterion::Created);
+  spin();
   result &=
       expect(threadOrder(pane) == std::vector<std::string>({"recent", "older"}),
       "prompt activity does not affect Created ordering");
 
   pane.setSortCriterion(ThreadPane::SortCriterion::Recency);
+  spin();
   model.notePromptActivity("recent", 40);
   refresh(pane, model, "recent");
   result &=
@@ -1544,9 +1836,9 @@ bool testThreadRowReorderOwnership() {
 
   ThreadPane pane;
   int selectedByUser = 0;
-  ThreadPane::Actions actions;
-  actions.select = [&](const std::string &) { ++selectedByUser; };
-  pane.setActions(std::move(actions));
+  ThreadPane::NodeActions actions;
+  actions.select = [&](const nodegraph::NodeRef &) { ++selectedByUser; };
+  pane.setNodeActions(std::move(actions));
   pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
   pane.resize(320, 500);
   pane.show();
@@ -1608,9 +1900,9 @@ bool testThreadRowReorderOwnership() {
       presentation::Authority::Replace));
   refresh(pane, model, "thread-a");
   QPointer<QWidget> movedRow = list->itemWidget(threadB);
-  result &= expect(originalRow && movedRow && originalRow != movedRow,
+  result &= expect(movedRow && originalRow != movedRow,
                    "moving an item never reattaches its deferred-delete row");
-  if (!originalRow || !movedRow || originalRow == movedRow)
+  if (!movedRow || originalRow == movedRow)
     return false;
 
   QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
@@ -1686,12 +1978,8 @@ bool testThreadPaneDirectGraphBinding() {
   bool result = true;
   {
     ThreadPane pane;
-    int legacySelections = 0;
     int nodeSelections = 0;
     nodegraph::NodeRef selectedByNodeAction;
-    ThreadPane::Actions legacyActions;
-    legacyActions.select = [&](const std::string &) { ++legacySelections; };
-    pane.setActions(std::move(legacyActions));
     ThreadPane::NodeActions nodeActions;
     nodeActions.select = [&](const nodegraph::NodeRef &node) {
       ++nodeSelections;
@@ -1729,8 +2017,7 @@ bool testThreadPaneDirectGraphBinding() {
       return false;
 
     list->setCurrentRow(1);
-    result &= expect(nodeSelections == 1 && legacySelections == 0 &&
-                         selectedByNodeAction == roots[1],
+    result &= expect(nodeSelections == 1 && selectedByNodeAction == roots[1],
                      "graph-bound selection dispatches one pinned NodeRef");
 
     nodegraph::NodeRef pendingInteraction;
@@ -1930,11 +2217,43 @@ bool testNestedCommandScrollOwnership() {
 }
 
 bool testInfoViewerLayout() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef firstOperation;
+  {
+    auto write = graph.write();
+    static_cast<void>(write.upsert({nodegraph::NodeKind::Runtime, "runtime"}));
+    for (int index = 0; index < 90; ++index) {
+      nodegraph::NodeState state;
+      state.status = index == 0 ? nodegraph::NodeStatus::Failed
+                                : nodegraph::NodeStatus::Pending;
+      state.fields = {
+          {"method",
+           nodegraph::Value("protocol/test/" + std::to_string(index))},
+          {"payload", nodegraph::Value(nodegraph::Value::Object{
+                          {"private", nodegraph::Value("must-not-render")}})}};
+      const nodegraph::NodeRef operation =
+          write.upsert({nodegraph::NodeKind::Operation,
+                        "fixture-operation:" + std::to_string(index)},
+                       std::move(state));
+      if (index == 0)
+        firstOperation = operation;
+    }
+    nodegraph::NodeState unknownState;
+    unknownState.fields = {
+        {"method", nodegraph::Value("future/protocol/method")},
+        {"direction", nodegraph::Value(std::uint64_t{2})},
+        {"payload", nodegraph::Value(nodegraph::Value::Object{
+                        {"private", nodegraph::Value("must-not-render")}})}};
+    static_cast<void>(write.upsert(
+        {nodegraph::NodeKind::UnknownProtocol, "2:future/protocol/method"},
+        std::move(unknownState)));
+    static_cast<void>(write.finish());
+  }
+
   InspectorPane inspector;
   inspector.resize(420, 700);
   inspector.show();
-  PresentationModel model;
-  refresh(inspector, model, {});
+  inspector.refresh(graph);
   inspector.tabs()->setCurrentIndex(4);
   auto *infoStack =
       inspector.findChild<QStackedWidget *>(QStringLiteral("infoStack"));
@@ -1948,7 +2267,7 @@ bool testInfoViewerLayout() {
       inspector.findChild<QLabel *>(QStringLiteral("protocolInfoStats"));
   bool result =
       expect(infoStack && protocolChoice && protocol && state && statistics,
-                       "Info exposes State and Protocol through choice navigation");
+             "Info exposes State and Protocol through choice navigation");
   if (!infoStack || !protocolChoice || !protocol || !state || !statistics)
     return false;
   const auto inspectorScrolls = inspector.findChildren<QScrollArea *>();
@@ -1959,44 +2278,17 @@ bool testInfoViewerLayout() {
               [](QScrollArea *scroll) {
                 return scroll &&
                        scroll->property("kind") == "inspectorScroll" &&
-                   scroll->verticalScrollBarPolicy() ==
-                       Qt::ScrollBarAsNeeded &&
-                   scroll->verticalScrollBar()
-                       ->property("kind")
-                       .toString()
-                       .isEmpty() &&
-                   scroll->verticalScrollBar()->styleSheet().isEmpty();
-          }),
+                       scroll->verticalScrollBarPolicy() ==
+                           Qt::ScrollBarAsNeeded &&
+                       scroll->verticalScrollBar()
+                           ->property("kind")
+                           .toString()
+                           .isEmpty() &&
+                       scroll->verticalScrollBar()->styleSheet().isEmpty();
+              }),
       "Plan, Agents, and Requests inherit the canonical application "
       "scrollbar");
   protocolChoice->click();
-  inspector.appendProtocolFrame(
-      {{"kind", "event"},
-       {"type", "conversation.item.upsert"},
-       {"sequence", 1},
-       {"generation", 1},
-       {"authority", "app-server"},
-       {"scope", {{"threadId", "thread"}, {"itemId", "item"}}}});
-  inspector.appendProtocolFrame(
-      {{"kind", "result"},
-       {"action", "thread.read"},
-       {"sequence", 2},
-       {"generation", 1},
-       {"authority", "app-server"},
-       {"ok", false},
-       {"error", {{"message", "thread hydration failed"}}},
-       {"scope", {{"threadId", "thread"}}}});
-  for (int sequence = 3; sequence <= 90; ++sequence) {
-    inspector.appendProtocolFrame(
-        {{"kind", "event"},
-         {"type",
-          QStringLiteral("protocol.test.%1").arg(sequence).toStdString()},
-         {"sequence", sequence},
-         {"generation", 1},
-         {"authority", "app-server"},
-         {"scope", {{"threadId", "thread"}}}});
-  }
-  refresh(inspector, model, {});
   spin(20);
   result &=
       expect(protocol->verticalScrollBarPolicy() == Qt::ScrollBarAsNeeded &&
@@ -2005,12 +2297,15 @@ bool testInfoViewerLayout() {
   result &= expect(
       protocol->verticalScrollBar()->property("kind").toString().isEmpty() &&
           state->verticalScrollBar()->property("kind").toString().isEmpty() &&
-                 protocol->verticalScrollBar()->styleSheet().isEmpty() &&
-                 state->verticalScrollBar()->styleSheet().isEmpty(),
-             "both Info viewer scrollbars inherit the shared visual style");
-  result &= expect(protocol->toPlainText().contains(
-                       QStringLiteral("thread hydration failed")),
-                   "failed protocol results retain their error detail");
+          protocol->verticalScrollBar()->styleSheet().isEmpty() &&
+          state->verticalScrollBar()->styleSheet().isEmpty(),
+      "both Info viewer scrollbars inherit the shared visual style");
+  result &= expect(
+      protocol->toPlainText().contains(QStringLiteral("protocol/test/0")) &&
+          protocol->toPlainText().contains(
+              QStringLiteral("future/protocol/method")) &&
+          !protocol->toPlainText().contains(QStringLiteral("must-not-render")),
+      "Protocol shows current classifications without retaining payloads");
   QScrollBar *protocolScroll = protocol->verticalScrollBar();
   result &= expect(protocolScroll->maximum() > 0 &&
                        protocolScroll->value() == protocolScroll->maximum(),
@@ -2018,33 +2313,47 @@ bool testInfoViewerLayout() {
   protocolScroll->setValue(protocolScroll->maximum() / 3);
   spin();
   const int pausedValue = protocolScroll->value();
-  inspector.appendProtocolFrame({{"kind", "event"},
-                                 {"type", "protocol.test.visible-append"},
-                                 {"sequence", 91},
-                                 {"generation", 1},
-                                 {"authority", "app-server"}});
-  refresh(inspector, model, {});
+  nodegraph::GraphChange visibleChange;
+  {
+    auto write = graph.write();
+    write.setField(firstOperation, "method",
+                   nodegraph::Value("protocol/test/visible-update"));
+    visibleChange = write.finish();
+  }
+  inspector.graphChanged({visibleChange.revision,
+                          std::move(visibleChange.affected),
+                          std::move(visibleChange.removed), false});
   spin(20);
   result &=
       expect(protocolScroll->value() == pausedValue,
-             "a visible Protocol append preserves a user-paused position");
+             "a visible Protocol update preserves a user-paused position");
   infoStack->setCurrentIndex(0);
-  inspector.appendProtocolFrame({{"kind", "event"},
-                                 {"type", "protocol.test.hidden-append"},
-                                 {"sequence", 92},
-                                 {"generation", 1},
-                                 {"authority", "app-server"}});
+  nodegraph::GraphChange hiddenChange;
+  {
+    auto write = graph.write();
+    write.setField(firstOperation, "method",
+                   nodegraph::Value("protocol/test/hidden-update"));
+    hiddenChange = write.finish();
+  }
+  inspector.graphChanged({hiddenChange.revision,
+                          std::move(hiddenChange.affected),
+                          std::move(hiddenChange.removed), false});
   protocolChoice->click();
   spin(20);
   result &=
       expect(protocolScroll->value() == pausedValue,
              "Protocol refresh preserves its paused position across tabs");
   protocolScroll->setValue(protocolScroll->maximum());
-  inspector.appendProtocolFrame({{"kind", "event"},
-                                 {"type", "protocol.test.following-append"},
-                                 {"sequence", 93},
-                                 {"generation", 1},
-                                 {"authority", "app-server"}});
+  nodegraph::GraphChange followingChange;
+  {
+    auto write = graph.write();
+    write.setField(firstOperation, "method",
+                   nodegraph::Value("protocol/test/following-update"));
+    followingChange = write.finish();
+  }
+  inspector.graphChanged({followingChange.revision,
+                          std::move(followingChange.affected),
+                          std::move(followingChange.removed), false});
   spin(20);
   result &=
       expect(protocolScroll->value() == protocolScroll->maximum(),

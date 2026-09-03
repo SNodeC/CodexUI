@@ -300,48 +300,6 @@ QString activityText(const std::optional<std::int64_t> &timestamp) {
              : activity.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
 }
 
-std::optional<std::int64_t> timestampFor(const ui::ThreadListRow &thread,
-                                         ThreadPane::SortCriterion criterion) {
-  if (criterion == ThreadPane::SortCriterion::Created)
-    return thread.createdAt;
-  if (criterion == ThreadPane::SortCriterion::LastChanged)
-    return thread.updatedAt;
-  return thread.recencyAt;
-}
-
-const ui::ThreadListRow *findThread(const ui::ThreadListRow &row,
-                                    std::string_view id) {
-  if (row.id == id)
-    return &row;
-  for (const ui::ThreadListRow &child : row.children) {
-    if (const ui::ThreadListRow *found = findThread(child, id))
-      return found;
-  }
-  return nullptr;
-}
-
-const ui::ThreadListRow *findThread(
-    const std::vector<ui::ThreadListRow> &roots, std::string_view id) {
-  for (const ui::ThreadListRow &root : roots) {
-    if (const ui::ThreadListRow *found = findThread(root, id))
-      return found;
-  }
-  return nullptr;
-}
-
-bool expandAncestors(const ui::ThreadListRow &row, std::string_view id,
-                     std::unordered_set<std::string> &expanded) {
-  if (row.id == id)
-    return true;
-  for (const ui::ThreadListRow &child : row.children) {
-    if (expandAncestors(child, id, expanded)) {
-      expanded.insert(row.id);
-      return true;
-    }
-  }
-  return false;
-}
-
 const nodegraph::Value *graphField(const nodegraph::NodeState &state,
                                    std::string_view name) {
   const auto found = state.fields.find(name);
@@ -464,6 +422,7 @@ struct ThreadPane::GraphTopology final {
     bool expanded = false;
     bool optimistic = false;
     bool optimisticFailed = false;
+    std::string previousLocalId;
   };
 
   std::vector<Row> rows;
@@ -501,8 +460,8 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   hide->setProperty("kind", "subtle");
   hide->setFixedSize(52, 24);
   connect(hide, &QPushButton::clicked, this, [this] {
-    if (actions.hide)
-      actions.hide();
+    if (controls.hide)
+      controls.hide();
   });
   header->addWidget(hide);
   layout->addLayout(header);
@@ -523,8 +482,8 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
       "QPushButton:disabled{background:#f6f8fb;color:#98a2b3;"
       "border-color:#d7dee8;}"));
   connect(create, &QPushButton::clicked, this, [this] {
-    if (actions.newThread)
-      actions.newThread();
+    if (controls.newThread)
+      controls.newThread();
   });
   layout->addWidget(create);
   layout->addSpacing(8);
@@ -535,8 +494,8 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   refresh->setProperty("kind", "subtle");
   refresh->setFixedHeight(28);
   connect(refresh, &QPushButton::clicked, this, [this] {
-    if (actions.refresh)
-      actions.refresh();
+    if (controls.refresh)
+      controls.refresh();
   });
   toolbar->addWidget(refresh);
   toolbar->addStretch();
@@ -610,20 +569,17 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
     if (id.empty())
       return;
     if (nodegraph::NodeRef node = visiblySelectedThread();
-        node && nodeActions.select) {
+        node && nodeActions.select)
       nodeActions.select(node);
-    } else if (actions.select) {
-      actions.select(id);
-    }
   });
   connect(list, &QListWidget::customContextMenuRequested, this,
           [this](const QPoint &position) { showContextMenu(position); });
   layout->addWidget(list);
 }
 
-ThreadPane::~ThreadPane() { leaveGraphMode(); }
+ThreadPane::~ThreadPane() { leaveGraph(); }
 
-void ThreadPane::setActions(Actions next) { actions = std::move(next); }
+void ThreadPane::setControls(Controls next) { controls = std::move(next); }
 
 void ThreadPane::setNodeActions(NodeActions next) {
   nodeActions = std::move(next);
@@ -637,8 +593,8 @@ void ThreadPane::beginOptimisticThread(std::string id, std::string title,
   optimisticThreads.insert(
       optimisticThreads.begin(),
       OptimisticThread{std::move(id), std::move(title), std::move(cwd), false});
+  selectedOptimisticThreadId = optimisticThreads.front().id;
   optimisticAnimation->start();
-  visibleSnapshot.reset();
   if (graph)
     scheduleGraphRefresh();
 }
@@ -650,13 +606,10 @@ void ThreadPane::promoteOptimisticThread(const std::string &draftId,
   if (optimistic == optimisticThreads.end() || authoritativeId.empty() ||
       draftId == authoritativeId)
     return;
-  if (auto node = rows.extract(draftId); !node.empty()) {
-    node.key() = authoritativeId;
-    node.mapped()->setData(Qt::UserRole, text(authoritativeId));
-    rows.insert(std::move(node));
-  }
+  optimistic->previousId = draftId;
   optimistic->id = authoritativeId;
-  visibleSnapshot.reset();
+  if (selectedOptimisticThreadId == draftId)
+    selectedOptimisticThreadId = authoritativeId;
   if (graph)
     scheduleGraphRefresh();
 }
@@ -671,7 +624,6 @@ void ThreadPane::confirmOptimisticThread(const std::string &threadId) {
           optimisticThreads,
           [](const OptimisticThread &thread) { return !thread.failed; }))
     optimisticAnimation->stop();
-  visibleSnapshot.reset();
   if (graph)
     scheduleGraphRefresh();
 }
@@ -686,9 +638,8 @@ void ThreadPane::failOptimisticThread(const std::string &threadId) {
           optimisticThreads,
           [](const OptimisticThread &thread) { return !thread.failed; }))
     optimisticAnimation->stop();
-  visibleSnapshot.reset();
   if (graph)
-    scheduleVisibilityPass();
+    scheduleGraphRefresh();
 }
 
 bool ThreadPane::isOptimisticThread(const std::string &threadId) const {
@@ -703,11 +654,8 @@ void ThreadPane::setSortCriterion(SortCriterion criterion) {
     return;
   sortCriterion = criterion;
   updateSortButton();
-  visibleSnapshot.reset();
   if (graph)
     scheduleGraphRefresh();
-  else if (currentSnapshot)
-    refresh(*currentSnapshot);
 }
 
 ThreadPane::SortCriterion ThreadPane::currentSortCriterion() const noexcept {
@@ -744,89 +692,24 @@ void ThreadPane::updateSortButton() {
                             : QStringLiteral("Recent")));
 }
 
-void ThreadPane::sortRootThreads(std::vector<ui::ThreadListRow> &rows) const {
-  QCollator collator(QLocale::system().language() == QLocale::C
-                         ? QLocale(QLocale::English)
-                         : QLocale::system());
-  collator.setCaseSensitivity(Qt::CaseInsensitive);
-  collator.setIgnorePunctuation(true);
-  collator.setNumericMode(true);
-  std::sort(rows.begin(), rows.end(),
-            [&](const ui::ThreadListRow &left,
-                const ui::ThreadListRow &right) {
-              if (sortCriterion == SortCriterion::Alphanumeric) {
-                const QString leftTitle = text(left.title).trimmed();
-                const QString rightTitle = text(right.title).trimmed();
-                const bool leftStartsWithNumber =
-                    !leftTitle.isEmpty() && leftTitle.front().isDigit();
-                const bool rightStartsWithNumber =
-                    !rightTitle.isEmpty() && rightTitle.front().isDigit();
-                if (leftStartsWithNumber != rightStartsWithNumber)
-                  return leftStartsWithNumber;
-                const int comparison = collator.compare(leftTitle, rightTitle);
-                if (comparison != 0)
-                  return comparison < 0;
-              } else {
-                const auto leftTimestamp = timestampFor(left, sortCriterion);
-                const auto rightTimestamp = timestampFor(right, sortCriterion);
-                if (leftTimestamp != rightTimestamp) {
-                  if (!leftTimestamp)
-                    return false;
-                  if (!rightTimestamp)
-                    return true;
-                  return *leftTimestamp > *rightTimestamp;
-                }
-              }
-              return left.id < right.id;
-            });
-}
-
-void ThreadPane::appendVisibleThread(
-    RenderedThreadList &snapshot, const ui::ThreadListRow &thread,
-    const std::string &parentId, std::size_t depth,
-    std::unordered_set<std::string> &visited) const {
-  if (!visited.insert(thread.id).second)
-    return;
-  const bool hasChildren = !thread.children.empty();
-  const bool expanded = hasChildren && expandedThreads.contains(thread.id);
-  snapshot.rows.push_back(
-      {thread.id, thread.title, thread.cwd, thread.status,
-       thread.lastActivityAt, parentId,
-       thread.pending, depth, hasChildren, expanded});
-  if (!expanded)
-    return;
-  for (const ui::ThreadListRow &child : thread.children)
-    appendVisibleThread(snapshot, child, thread.id, depth + 1, visited);
-}
-
 void ThreadPane::toggleExpanded(const std::string &threadId) {
-  if (graph) {
-    GraphThreadItem *binding = nullptr;
-    for (int index = 0; index < list->count(); ++index) {
-      auto *candidate = graphItem(list->item(index));
-      if (candidate && candidate->node &&
-          candidate->node->id().canonical == threadId) {
-        binding = candidate;
-        break;
-      }
+  GraphThreadItem *binding = nullptr;
+  for (int index = 0; index < list->count(); ++index) {
+    auto *candidate = graphItem(list->item(index));
+    if (candidate && candidate->node &&
+        candidate->node->id().canonical == threadId) {
+      binding = candidate;
+      break;
     }
-    if (!binding)
-      return;
-    const nodegraph::Node *node = binding->node.get();
-    if (graphExpandedThreads.contains(node))
-      graphExpandedThreads.erase(node);
-    else
-      graphExpandedThreads.insert(node);
-    scheduleGraphRefresh();
-    return;
   }
-  if (expandedThreads.contains(threadId))
-    expandedThreads.erase(threadId);
+  if (!binding)
+    return;
+  const nodegraph::Node *node = binding->node.get();
+  if (graphExpandedThreads.contains(node))
+    graphExpandedThreads.erase(node);
   else
-    expandedThreads.insert(threadId);
-  visibleSnapshot.reset();
-  if (currentSnapshot)
-    refresh(*currentSnapshot);
+    graphExpandedThreads.insert(node);
+  scheduleGraphRefresh();
 }
 
 void ThreadPane::navigateHierarchy(int key) {
@@ -856,210 +739,38 @@ void ThreadPane::navigateHierarchy(int key) {
   const QString parentId = current->data(ParentIdRole).toString();
   if (parentId.isEmpty())
     return;
-  if (graph) {
-    for (int index = 0; index < list->count(); ++index) {
-      QListWidgetItem *candidate = list->item(index);
-      if (candidate->data(Qt::UserRole).toString() == parentId) {
-        list->setCurrentItem(candidate);
-        break;
-      }
+  for (int index = 0; index < list->count(); ++index) {
+    QListWidgetItem *candidate = list->item(index);
+    if (candidate->data(Qt::UserRole).toString() == parentId) {
+      list->setCurrentItem(candidate);
+      break;
     }
-    return;
   }
-  const auto parent = rows.find(parentId.toStdString());
-  if (parent != rows.end())
-    list->setCurrentItem(parent->second);
 }
 
 void ThreadPane::setContextHighlight(const std::string &threadId,
                                      bool highlighted) {
-  if (graph) {
-    for (int index = 0; index < list->count(); ++index) {
-      QListWidgetItem *candidate = list->item(index);
-      if (candidate->data(Qt::UserRole).toString().toStdString() == threadId) {
-        candidate->setData(ContextMenuRole, highlighted);
-        break;
-      }
+  for (int index = 0; index < list->count(); ++index) {
+    QListWidgetItem *candidate = list->item(index);
+    if (candidate->data(Qt::UserRole).toString().toStdString() == threadId) {
+      candidate->setData(ContextMenuRole, highlighted);
+      break;
     }
-    return;
   }
-  const auto found = rows.find(threadId);
-  if (found == rows.end())
-    return;
-  found->second->setData(ContextMenuRole, highlighted);
 }
 
-void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
-  if (graph)
-    leaveGraphMode();
-  currentSnapshot = input;
-  const ui::ThreadListSnapshot &view = *currentSnapshot;
-  const std::string &selectedThreadId = view.selectedThreadId;
-  const bool selectionChanged = selectedThreadId != projectedSelectedThreadId;
-  projectedSelectedThreadId = selectedThreadId;
-  if (selectionChanged) {
-    for (const ui::ThreadListRow &root : view.roots)
-      if (expandAncestors(root, selectedThreadId, expandedThreads))
-        break;
-  }
-  std::erase_if(expandedThreads, [&view](const std::string &id) {
-    const ui::ThreadListRow *thread = findThread(view.roots, id);
-    return !thread || thread->children.empty();
-  });
-  std::vector<ui::ThreadListRow> rootRows = view.roots;
-  sortRootThreads(rootRows);
-
-  RenderedThreadList next{selectedThreadId, sortCriterion, {}};
-  std::unordered_set<std::string> visited;
-  visited.reserve(rootRows.size());
-  for (const OptimisticThread &optimisticThread : optimisticThreads) {
-    if (const ui::ThreadListRow *thread =
-            findThread(view.roots, optimisticThread.id)) {
-      next.rows.push_back({thread->id,
-                           thread->title,
-                           thread->cwd,
-                           thread->status,
-                           thread->lastActivityAt,
-                           {},
-                           0,
-                           0,
-                           false,
-                           false,
-                           true,
-                           optimisticThread.failed});
-    } else {
-      next.rows.push_back({optimisticThread.id,
-                           optimisticThread.title,
-                           optimisticThread.cwd,
-                           {},
-                           {},
-                           {},
-                           0,
-                           0,
-                           false,
-                           false,
-                           true,
-                           optimisticThread.failed});
-    }
-    visited.insert(optimisticThread.id);
-  }
-  for (const ui::ThreadListRow &row : rootRows)
-    appendVisibleThread(next, row, {}, 0, visited);
-  if (visibleSnapshot && *visibleSnapshot == next)
-    return;
-  visibleSnapshot = std::move(next);
-  const RenderedThreadList &snapshot = *visibleSnapshot;
-  list->blockSignals(true);
-  list->setUpdatesEnabled(false);
-  // Selection is a projection of selectedThreadId, never retained widget
-  // state. This also makes an explicit New Thread draft visibly select no
-  // existing row.
-  list->clearSelection();
-  list->setCurrentRow(-1);
-
-  std::unordered_set<std::string> wanted;
-  wanted.reserve(snapshot.rows.size());
-  for (const RenderedThreadRow &row : snapshot.rows)
-    wanted.insert(row.id);
-  for (int index = list->count() - 1; index >= 0; --index) {
-    QListWidgetItem *item = list->item(index);
-    const std::string id = item->data(Qt::UserRole).toString().toStdString();
-    if (wanted.contains(id))
-      continue;
-    rows.erase(id);
-    delete list->takeItem(index);
-  }
-
-  std::unordered_map<std::string, int> existingPositions;
-  existingPositions.reserve(rows.size());
-  int existingIndex = 0;
-  for (const RenderedThreadRow &row : snapshot.rows) {
-    if (rows.contains(row.id))
-      existingPositions.emplace(row.id, existingIndex++);
-  }
-
-  std::unordered_set<std::string> moved;
-  moved.reserve(rows.size());
-  for (int index = list->count() - 1; index >= 0; --index) {
-    QListWidgetItem *item = list->item(index);
-    const std::string id = item->data(Qt::UserRole).toString().toStdString();
-    if (existingPositions.at(id) == index)
-      continue;
-    // Removing an index widget transfers it into Qt's deferred-deletion path.
-    // A changed row receives a fresh widget when its item is reinserted.
-    list->removeItemWidget(item);
-    list->takeItem(index);
-    moved.insert(id);
-  }
-  int wantedIndex = 0;
-  for (const RenderedThreadRow &row : snapshot.rows) {
-    auto found = rows.find(row.id);
-    if (found == rows.end()) {
-      auto *item = new QListWidgetItem;
-      item->setSizeHint(QSize(0, 40));
-      item->setData(Qt::UserRole, text(row.id));
-      list->insertItem(wantedIndex, item);
-      list->setItemWidget(item, createRow());
-      found = rows.emplace(row.id, item).first;
-    } else if (moved.contains(row.id)) {
-      list->insertItem(wantedIndex, found->second);
-      list->setItemWidget(found->second, createRow());
-    }
-    QListWidgetItem *item = found->second;
-    const QString title = text(row.title);
-    const QString status = text(displayStatus(row.status));
-    QStringList accessibleParts{title, status,
-                                QStringLiteral("level %1").arg(row.depth + 1)};
-    if (row.hasChildren)
-      accessibleParts.push_back(row.expanded ? QStringLiteral("expanded")
-                                             : QStringLiteral("collapsed"));
-    item->setData(Qt::DisplayRole, {});
-    item->setData(Qt::AccessibleTextRole, accessibleParts.join(", "));
-    QStringList details{title,
-                        QStringLiteral("Workspace: %1").arg(
-                            row.cwd.empty() ? QStringLiteral("Unknown")
-                                            : text(row.cwd)),
-                        QStringLiteral("Status: %1").arg(status),
-                        QStringLiteral("Last activity: %1").arg(
-                            activityText(row.lastActivityAt))};
-    if (!row.parentId.empty()) {
-      const ui::ThreadListRow *parent =
-          findThread(currentSnapshot->roots, row.parentId);
-      details.push_back(QStringLiteral("Parent: %1").arg(
-          parent && !parent->title.empty() ? text(parent->title)
-                                           : text(row.parentId)));
-    }
-    item->setToolTip(details.join(QLatin1Char('\n')));
-    item->setData(DepthRole, static_cast<qulonglong>(row.depth));
-    item->setData(HasChildrenRole, row.hasChildren);
-    item->setData(ExpandedRole, row.expanded);
-    item->setData(ParentIdRole, text(row.parentId));
-    item->setData(OptimisticRole, row.optimistic);
-    item->setData(OptimisticFailedRole, row.optimisticFailed);
-    updateRow(list->itemWidget(item), row.id, row.title, row.status,
-              row.pending, row.depth, row.hasChildren, row.expanded,
-              row.optimistic, row.optimisticFailed);
-    if (row.id == contextThreadId)
-      setContextHighlight(row.id, true);
-    if (row.id == snapshot.selectedThreadId)
-      list->setCurrentItem(item);
-    ++wantedIndex;
-  }
-  list->setUpdatesEnabled(true);
-  list->blockSignals(false);
-}
-
-void ThreadPane::refresh(nodegraph::NodeGraph &nextGraph,
+void ThreadPane::refresh(const nodegraph::NodeGraph &nextGraph,
                          nodegraph::NodeRef selectedThread) {
   if (graph != &nextGraph) {
-    leaveGraphMode();
-    rows.clear();
-    currentSnapshot.reset();
-    visibleSnapshot.reset();
+    leaveGraph();
     list->clear();
     graph = &nextGraph;
   }
+  if (selectedGraphThread != selectedThread)
+    revealSelectedGraphThread = true;
   selectedGraphThread = std::move(selectedThread);
+  if (selectedGraphThread)
+    selectedOptimisticThreadId.clear();
   scheduleGraphRefresh();
 }
 
@@ -1084,14 +795,12 @@ void ThreadPane::graphChanged(const nodegraph::GraphChanged &change) {
     return (!removedOnly && std::ranges::any_of(change.affected, matches)) ||
            std::ranges::any_of(change.removed, matches);
   };
-  const bool interactionChanged =
-      hasKind(nodegraph::NodeKind::Interaction);
+  const bool interactionChanged = hasKind(nodegraph::NodeKind::Interaction);
   const bool topologyChanged =
       change.rescanRequired || hasKind(nodegraph::NodeKind::Runtime, true) ||
       hasKind(nodegraph::NodeKind::Thread, true) ||
-      (!interactionChanged &&
-       (hasKind(nodegraph::NodeKind::Runtime) ||
-        hasKind(nodegraph::NodeKind::Thread)));
+      (!interactionChanged && (hasKind(nodegraph::NodeKind::Runtime) ||
+                               hasKind(nodegraph::NodeKind::Thread)));
   if (topologyChanged)
     scheduleGraphRefresh();
   else if (interactionChanged)
@@ -1114,8 +823,10 @@ void ThreadPane::detachRemoved(const nodegraph::GraphChanged &change) {
     if (!item || !item->node || !removed.contains(item->node.get()))
       continue;
     graphExpandedThreads.erase(item->node.get());
-    if (selectedGraphThread == item->node)
+    if (selectedGraphThread == item->node) {
       selectedGraphThread.reset();
+      revealSelectedGraphThread = false;
+    }
     if (contextThreadId == item->localId && contextMenu)
       contextMenu->close();
     dematerialize(*item, false);
@@ -1126,7 +837,7 @@ void ThreadPane::detachRemoved(const nodegraph::GraphChanged &change) {
   list->blockSignals(signalsWereBlocked);
 }
 
-void ThreadPane::leaveGraphMode() {
+void ThreadPane::leaveGraph() {
   graphRefreshScheduled = false;
   visibilityPassScheduled = false;
   visibilityFirst = -1;
@@ -1139,6 +850,8 @@ void ThreadPane::leaveGraphMode() {
   list->clear();
   graphExpandedThreads.clear();
   selectedGraphThread.reset();
+  selectedOptimisticThreadId.clear();
+  revealSelectedGraphThread = false;
   graph = nullptr;
   list->blockSignals(false);
 }
@@ -1222,7 +935,9 @@ void ThreadPane::runGraphRefresh() {
                 [&positions](const nodegraph::Node *node) {
                   return !positions.contains(node);
                 });
-  if (selectedGraphThread) {
+  const bool selectedIsPresent =
+      selectedGraphThread && positions.contains(selectedGraphThread.get());
+  if (selectedIsPresent && revealSelectedGraphThread) {
     auto selected = positions.find(selectedGraphThread.get());
     while (selected != positions.end()) {
       const nodegraph::NodeRef &parent = threads[selected->second].parent;
@@ -1231,6 +946,7 @@ void ThreadPane::runGraphRefresh() {
       graphExpandedThreads.insert(parent.get());
       selected = positions.find(parent.get());
     }
+    revealSelectedGraphThread = false;
   }
 
   const auto timestamp = [this](const ReadThread &thread) {
@@ -1282,8 +998,13 @@ void ThreadPane::runGraphRefresh() {
       });
 
   GraphTopology topology;
-  if (selectedGraphThread && positions.contains(selectedGraphThread.get()))
+  if (selectedIsPresent)
     topology.selectedId = selectedGraphThread->id().canonical;
+  else if (std::ranges::any_of(
+               optimisticThreads, [this](const OptimisticThread &optimistic) {
+                 return optimistic.id == selectedOptimisticThreadId;
+               }))
+    topology.selectedId = selectedOptimisticThreadId;
   std::unordered_set<const nodegraph::Node *> appended;
   const auto append = [&](const auto &self, const nodegraph::NodeRef &node,
                           nodegraph::NodeRef parent,
@@ -1325,7 +1046,8 @@ void ThreadPane::runGraphRefresh() {
                                false,
                                false,
                                true,
-                               optimistic.failed});
+                               optimistic.failed,
+                               optimistic.previousId});
     } else {
       topology.rows.push_back({{},
                                {},
@@ -1336,7 +1058,8 @@ void ThreadPane::runGraphRefresh() {
                                false,
                                false,
                                true,
-                               optimistic.failed});
+                               optimistic.failed,
+                               optimistic.previousId});
     }
   }
   for (const nodegraph::NodeRef &root : roots)
@@ -1389,7 +1112,10 @@ void ThreadPane::applyGraphTopology(GraphTopology topology) {
         // Promotion from a local optimistic id to its authoritative NodeRef
         // keeps the QListWidgetItem stable.
         existing = std::ranges::find_if(old, [&row](GraphThreadItem *item) {
-          return item && !item->node && item->localId == row.localId;
+          return item && !item->node &&
+                 (item->localId == row.localId ||
+                  (!row.previousLocalId.empty() &&
+                   item->localId == row.previousLocalId));
         });
       }
 
@@ -1599,8 +1325,7 @@ void ThreadPane::runVisibilityPass() {
         if (interactionState->status != nodegraph::NodeStatus::Pending)
           continue;
         ++pending;
-        revision =
-            std::max(revision, read->changedRevision(interaction));
+        revision = std::max(revision, read->changedRevision(interaction));
       }
       if (candidate.hasWidget &&
           item.attachment->renderedRevision == revision &&
@@ -1727,66 +1452,8 @@ nodegraph::NodeRef ThreadPane::visiblySelectedThread() const {
 }
 
 void ThreadPane::showContextMenu(const QPoint &position) {
-  if (graph) {
-    showGraphContextMenu(position);
+  if (!graph)
     return;
-  }
-  QListWidgetItem *item = list->itemAt(position);
-  if (!item || !currentSnapshot)
-    return;
-  const std::string id = item->data(Qt::UserRole).toString().toStdString();
-  const ui::ThreadListRow *thread = findThread(currentSnapshot->roots, id);
-  if (!thread)
-    return;
-  if (contextMenu)
-    contextMenu->close();
-  contextThreadId = id;
-  setContextHighlight(contextThreadId, true);
-  auto *menu = new QMenu(list);
-  contextMenu = menu;
-  connect(menu, &QMenu::aboutToHide, this, [this, menu] {
-    if (contextMenu == menu) {
-      setContextHighlight(contextThreadId, false);
-      contextThreadId.clear();
-      contextMenu = nullptr;
-    }
-    menu->deleteLater();
-  });
-  QAction *reload = menu->addAction(QStringLiteral("Reload"), this, [this, id] {
-    if (actions.reload)
-      actions.reload(id);
-  });
-  const bool providerReady = currentSnapshot->providerReady;
-  const bool canControl = currentSnapshot->canControl;
-  QAction *rename = menu->addAction(QStringLiteral("Rename"), this, [this, id] {
-    if (actions.rename)
-      actions.rename(id);
-  });
-  QAction *fork = menu->addAction(QStringLiteral("Fork"), this, [this, id] {
-    if (actions.fork)
-      actions.fork(id);
-  });
-  QAction *archive =
-      menu->addAction(thread->archived ? QStringLiteral("Unarchive")
-                                       : QStringLiteral("Archive"),
-                      this, [this, id] {
-                        if (actions.toggleArchive)
-                          actions.toggleArchive(id);
-                      });
-  menu->addSeparator();
-  QAction *remove = menu->addAction(QStringLiteral("Delete"), this, [this, id] {
-    if (actions.remove)
-      actions.remove(id);
-  });
-  reload->setEnabled(providerReady);
-  rename->setEnabled(canControl);
-  fork->setEnabled(canControl);
-  archive->setEnabled(canControl);
-  remove->setEnabled(canControl);
-  menu->popup(list->viewport()->mapToGlobal(position));
-}
-
-void ThreadPane::showGraphContextMenu(const QPoint &position) {
   QListWidgetItem *listItem = list->itemAt(position);
   GraphThreadItem *item = graphItem(listItem);
   if (!item || !item->node)
@@ -1797,7 +1464,7 @@ void ThreadPane::showGraphContextMenu(const QPoint &position) {
   auto read = graph->tryRead();
   if (!read) {
     QTimer::singleShot(0, this,
-                       [this, position] { showGraphContextMenu(position); });
+                       [this, position] { showContextMenu(position); });
     return;
   }
   const std::shared_ptr<const nodegraph::NodeState> threadState =
@@ -1833,44 +1500,32 @@ void ThreadPane::showGraphContextMenu(const QPoint &position) {
     menu->deleteLater();
   });
   QAction *reload =
-      menu->addAction(QStringLiteral("Reload"), this, [this, node, id] {
+      menu->addAction(QStringLiteral("Reload"), this, [this, node] {
         if (nodeActions.reload)
           nodeActions.reload(node);
-        else if (actions.reload)
-          actions.reload(id);
       });
   QAction *rename =
-      menu->addAction(QStringLiteral("Rename"), this, [this, node, id] {
+      menu->addAction(QStringLiteral("Rename"), this, [this, node] {
         if (nodeActions.rename)
           nodeActions.rename(node);
-        else if (actions.rename)
-          actions.rename(id);
       });
-  QAction *fork =
-      menu->addAction(QStringLiteral("Fork"), this, [this, node, id] {
-        if (nodeActions.fork)
-          nodeActions.fork(node);
-        else if (actions.fork)
-          actions.fork(id);
+  QAction *fork = menu->addAction(QStringLiteral("Fork"), this, [this, node] {
+    if (nodeActions.fork)
+      nodeActions.fork(node);
+  });
+  QAction *archive = menu->addAction(
+      archived ? QStringLiteral("Unarchive") : QStringLiteral("Archive"), this,
+      [this, node, archived] {
+        if (archived && nodeActions.unarchive)
+          nodeActions.unarchive(node);
+        else if (!archived && nodeActions.archive)
+          nodeActions.archive(node);
       });
-  QAction *archive = menu->addAction(archived ? QStringLiteral("Unarchive")
-                                              : QStringLiteral("Archive"),
-                                     this, [this, node, id, archived] {
-                                       if (archived && nodeActions.unarchive)
-                                         nodeActions.unarchive(node);
-                                       else if (!archived &&
-                                                nodeActions.archive)
-                                         nodeActions.archive(node);
-                                       else if (actions.toggleArchive)
-                                         actions.toggleArchive(id);
-                                     });
   menu->addSeparator();
   QAction *remove =
-      menu->addAction(QStringLiteral("Delete"), this, [this, node, id] {
+      menu->addAction(QStringLiteral("Delete"), this, [this, node] {
         if (nodeActions.remove)
           nodeActions.remove(node);
-        else if (actions.remove)
-          actions.remove(id);
       });
   reload->setEnabled(providerReady);
   rename->setEnabled(canControl);

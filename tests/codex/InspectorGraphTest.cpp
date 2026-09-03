@@ -11,6 +11,7 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QStackedWidget>
 #include <QTabWidget>
 #include <QThread>
@@ -181,6 +182,17 @@ bool directGraphRenderingIsLazyAndCurrent() {
     static_cast<void>(write.upsert(
         {nodegraph::NodeKind::Operation, "string:operation-graph"},
         std::move(operationState)));
+    for (int index = 0; index < 96; ++index) {
+      nodegraph::NodeState extraOperationState;
+      extraOperationState.status = nodegraph::NodeStatus::Pending;
+      extraOperationState.fields = {
+          {"method", nodegraph::Value("fixture/protocol/" +
+                                      std::to_string(index))}};
+      static_cast<void>(write.upsert(
+          {nodegraph::NodeKind::Operation,
+           "fixture-operation:" + std::to_string(index)},
+          std::move(extraOperationState)));
+    }
 
     nodegraph::NodeState unknownState;
     unknownState.fields = {
@@ -198,9 +210,6 @@ bool directGraphRenderingIsLazyAndCurrent() {
 
   InspectorPane pane;
   pane.resize(440, 700);
-  pane.appendProtocolFrame({{"kind", "event"},
-                            {"type", "legacy.raw.frame"},
-                            {"sequence", 1}});
   pane.show();
 
   // The graph entry point schedules a non-blocking try-read. Running its first
@@ -388,6 +397,11 @@ bool directGraphRenderingIsLazyAndCurrent() {
           !protocolText.contains(QStringLiteral("payload-must-not-render")) &&
           !protocolText.contains(QStringLiteral("unknown-payload")),
       "Protocol replaces raw history with current operation/unknown diagnostics");
+  result &= expect(
+      protocol && protocol->verticalScrollBar()->maximum() > 0 &&
+          protocol->verticalScrollBar()->value() ==
+              protocol->verticalScrollBar()->maximum(),
+      "the first current-protocol render follows the log tail");
 
   nodegraph::GraphChange changed;
   {
