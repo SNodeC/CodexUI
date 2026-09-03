@@ -93,6 +93,10 @@ public:
   void setCollapsed(bool collapsed);
   bool setAuthoritativeTurnActive(bool active);
   void setNestedCards(const std::vector<ConversationCard *> &cards);
+  // ConversationView uses lightweight measured placeholders for nested cards
+  // that are outside the viewport.  They share the existing nested layout so
+  // materializing a card does not change the turn's visual structure.
+  void setNestedItems(const std::vector<QWidget *> &items);
   [[nodiscard]] std::optional<CommandOutputView::ScrollState>
   commandOutputScrollState() const;
   void

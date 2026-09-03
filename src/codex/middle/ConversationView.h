@@ -108,11 +108,17 @@ private:
   void stopFollowingAnimation();
   void animateToBottom(int previousValue);
   void recomputeGeometry();
+  void arrangeSection(TurnSectionWidget *section);
+  void scheduleVisibilityPass();
+  [[nodiscard]] bool runVisibilityPass();
   void positionContent();
   void handleUserScrollValue(int value);
   [[nodiscard]] bool applyWheel(QWheelEvent *event);
   [[nodiscard]] ConversationCard *
   cardForStableKey(const std::string &stableKey) const;
+  [[nodiscard]] QWidget *itemForStableKey(const std::string &stableKey) const;
+  [[nodiscard]] const VisibleCardData *
+  dataForStableKey(const std::string &stableKey) const;
 
   QWidget *content_ = nullptr;
   QVBoxLayout *contentLayout_ = nullptr;
@@ -145,6 +151,7 @@ private:
   bool userActionPending_ = false;
   bool pausedByComposerGrowth_ = false;
   bool dispatchingNativeWheel_ = false;
+  bool visibilityPassScheduled_ = false;
 };
 
 } // namespace codexui::codex::middle

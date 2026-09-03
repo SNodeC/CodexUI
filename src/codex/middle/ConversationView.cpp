@@ -16,12 +16,14 @@
 #include <QSignalBlocker>
 #include <QSpacerItem>
 #include <QTextEdit>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QVariantAnimation>
 #include <QWheelEvent>
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
 #include <utility>
 
 namespace codexui::codex::middle {
@@ -29,6 +31,46 @@ namespace {
 
 constexpr int CardSpacing = 8;
 constexpr int NativeScrollLineStep = 20;
+constexpr int MaxCardOperationsPerPass = 8;
+
+class MeasuredCardPlaceholder final : public QWidget {
+public:
+  MeasuredCardPlaceholder(const std::string &key, int height, QWidget *parent)
+      : QWidget(parent) {
+    setObjectName(QStringLiteral("conversationCardPlaceholder"));
+    setProperty("conversationAnchorKey", QString::fromStdString(key));
+    setAttribute(Qt::WA_TransparentForMouseEvents);
+    setAttribute(Qt::WA_NoSystemBackground);
+    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    setMeasuredHeight(height);
+  }
+
+  void setMeasuredHeight(int height) {
+    height_ = std::max(0, height);
+    setFixedHeight(height_);
+  }
+
+private:
+  int height_ = 0;
+};
+
+int initialCardHeight(const VisibleCardData &card) {
+  switch (card.kind) {
+  case CardKind::UserMessage:
+  case CardKind::AgentMessage:
+  case CardKind::LocalPrompt:
+    return 88;
+  case CardKind::CommandExecution:
+  case CardKind::AgentActivity:
+  case CardKind::Reasoning:
+  case CardKind::FileChanges:
+  case CardKind::ImageGeneration:
+  case CardKind::Plan:
+  case CardKind::GenericActivity:
+    return 58;
+  }
+  return 72;
+}
 
 QLabel *makeEmptyLabel() {
   auto *label =
@@ -44,6 +86,14 @@ QLabel *makeEmptyLabel() {
 
 class ConversationView::TurnSectionWidget final : public QWidget {
 public:
+  struct CardSlot {
+    std::string key;
+    QWidget *item = nullptr;
+    int measuredHeight = 0;
+    bool projectionVisible = true;
+    bool newlyAdded = false;
+  };
+
   explicit TurnSectionWidget(QWidget *parent = nullptr) : QWidget(parent) {
     setAttribute(Qt::WA_StyledBackground, false);
     setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
@@ -53,7 +103,8 @@ public:
   }
 
   QVBoxLayout *cards = nullptr;
-  std::vector<std::string> cardKeys;
+  std::vector<CardSlot> cardSlots;
+  std::string rootKey;
 };
 
 ConversationView::ConversationView(QWidget *parent)
@@ -136,6 +187,7 @@ ConversationView::ConversationView(QWidget *parent)
   connect(verticalScrollBar(), &QScrollBar::valueChanged, this,
           [this](int value) {
             positionContent();
+            scheduleVisibilityPass();
             if (programmaticScroll_ || applying_)
               return;
             if (sliderDown_ || userActionPending_) {
@@ -250,7 +302,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
   viewport()->setUpdatesEnabled(false);
   content_->setUpdatesEnabled(false);
   const QSignalBlocker scrollSignals(verticalScrollBar());
-  bool visualChange = switchedThread;
+  bool visualChange = switchedThread || snapshot != snapshot_;
   const bool showLoadMore = snapshot.hasMore;
   if (loadMore_->isVisible() != showLoadMore) {
     loadMore_->setVisible(showLoadMore);
@@ -272,21 +324,11 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
 
   struct DesiredSection {
     TurnSectionWidget *widget = nullptr;
-    int position = 0;
-    bool insert = false;
-    std::vector<std::string> cardKeys;
-  };
-  struct DesiredCard {
-    TurnSectionWidget *section = nullptr;
-    const VisibleCardData *data = nullptr;
   };
   std::unordered_map<std::string, DesiredSection> desiredSections;
-  std::unordered_map<std::string, DesiredCard> desiredCards;
   std::vector<std::string> desiredSectionKeys;
   desiredSectionKeys.reserve(snapshot.sections.size());
   std::vector<std::string> displayedKeys;
-  std::vector<std::pair<ConversationCard *, CommandOutputView::ScrollState>>
-      commandOutputRestorations;
   const auto retainCommandOutputState = [this](const std::string &key,
                                                ConversationCard *card) {
     const auto state = card ? card->commandOutputScrollState() : std::nullopt;
@@ -296,7 +338,23 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
       commandOutputStates_.erase(key);
   };
 
-  int sectionIndex = 0;
+  std::unordered_map<std::string, TurnSectionWidget::CardSlot> retainedSlots;
+  for (const auto &[sectionKey, section] : sections_) {
+    static_cast<void>(sectionKey);
+    for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
+      retainedSlots.emplace(slot.key, std::move(slot));
+    section->cardSlots.clear();
+  }
+
+  std::size_t newCardCount = 0;
+  for (const TurnSection &section : snapshot.sections)
+    for (const VisibleCardData &card : section.cards)
+      if (!retainedSlots.contains(stableKey(card.key)))
+        ++newCardCount;
+  const bool smallIncrementalAppend =
+      !switchedThread && newCardCount > 0 &&
+      newCardCount <= static_cast<std::size_t>(MaxCardOperationsPerPass);
+
   for (const TurnSection &sectionData : snapshot.sections) {
     desiredSectionKeys.push_back(sectionData.key);
     TurnSectionWidget *section = nullptr;
@@ -312,187 +370,91 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
       section = existingSection->second;
     }
     section->setProperty("turnId", QString::fromStdString(sectionData.turnId));
-
-    DesiredSection desiredSection{section, sectionIndex++, newSection};
-    desiredSection.cardKeys.reserve(sectionData.cards.size());
-    int cardIndex = 0;
+    section->rootKey =
+        sectionData.rootCardKey ? stableKey(*sectionData.rootCardKey) : "";
+    section->cardSlots.reserve(sectionData.cards.size());
     for (const VisibleCardData &cardData : sectionData.cards) {
-      desiredSection.cardKeys.push_back(stableKey(cardData.key));
-      const std::string &key = desiredSection.cardKeys.back();
-      if (cardVisible(cardData))
-        displayedKeys.push_back(key);
-      desiredCards.emplace(key, DesiredCard{section, &cardData});
-      ++cardIndex;
+      const std::string key = stableKey(cardData.key);
+      TurnSectionWidget::CardSlot slot;
+      if (auto retained = retainedSlots.find(key);
+          retained != retainedSlots.end()) {
+        slot = std::move(retained->second);
+        retainedSlots.erase(retained);
+      } else {
+        slot.key = key;
+        slot.measuredHeight = initialCardHeight(cardData);
+        slot.item =
+            new MeasuredCardPlaceholder(key, slot.measuredHeight, section);
+        slot.newlyAdded = smallIncrementalAppend;
+        visualChange = true;
+      }
+      slot.projectionVisible = cardVisible(cardData);
+      if (auto *placeholder =
+              dynamic_cast<MeasuredCardPlaceholder *>(slot.item))
+        placeholder->setMeasuredHeight(
+            slot.projectionVisible ? slot.measuredHeight : 0);
+      if (slot.item->isHidden() == slot.projectionVisible)
+        slot.item->setVisible(slot.projectionVisible);
+      section->cardSlots.push_back(std::move(slot));
     }
-    desiredSections.emplace(sectionData.key, std::move(desiredSection));
+    desiredSections.emplace(sectionData.key, DesiredSection{section});
+
+    const auto appendDisplayed = [&](const std::string &key) {
+      const auto cardData = std::ranges::find_if(
+          sectionData.cards, [&key](const VisibleCardData &candidate) {
+            return stableKey(candidate.key) == key;
+          });
+      if (cardData != sectionData.cards.end() && cardVisible(*cardData))
+        displayedKeys.push_back(key);
+    };
+    if (!section->rootKey.empty())
+      appendDisplayed(section->rootKey);
+    for (const VisibleCardData &cardData : sectionData.cards) {
+      const std::string key = stableKey(cardData.key);
+      if (key != section->rootKey && cardVisible(cardData))
+        displayedKeys.push_back(key);
+    }
   }
   const bool appendedVisibleCards =
       displayedKeys.size() > displayedCardKeys_.size() &&
       std::equal(displayedCardKeys_.begin(), displayedCardKeys_.end(),
                  displayedKeys.begin());
+  visualChange = visualChange || displayedKeys != displayedCardKeys_ ||
+                 desiredSectionKeys != displayedSectionKeys_;
 
-  for (std::size_t offset = displayedSectionKeys_.size(); offset > 0;
-       --offset) {
-    const std::size_t index = offset - 1;
-    const std::string &key = displayedSectionKeys_[index];
-    const auto desired = desiredSections.find(key);
-    if (desired != desiredSections.end() &&
-        desired->second.position == static_cast<int>(index))
-      continue;
-    delete contentLayout_->takeAt(1 + static_cast<int>(index));
-    if (desired != desiredSections.end())
-      desired->second.insert = true;
-    visualChange = true;
-  }
-
-  // A prompt card may currently own desired nested cards while itself falls
-  // outside the retained window. Detach those children before deleting the
-  // obsolete prompt so their stable widgets can move to the transparent
-  // section fallback instead of being destroyed with their QObject parent.
-  for (const auto &[key, card] : cards_) {
-    static_cast<void>(key);
-    ConversationCard *owner = nullptr;
-    for (QWidget *parent = card->parentWidget(); parent;
-         parent = parent->parentWidget()) {
-      owner = dynamic_cast<ConversationCard *>(parent);
-      if (owner)
-        break;
-    }
-    if (!owner)
-      continue;
-    const std::string ownerKey =
-        owner->property("conversationCardKey").toString().toStdString();
-    const auto desiredOwner = desiredCards.find(ownerKey);
-    const bool ownerRetained =
-        desiredOwner != desiredCards.end() &&
-        owner->canApply(*desiredOwner->second.data);
-    if (ownerRetained)
-      continue;
-    const auto desiredCard = desiredCards.find(key);
-    QWidget *safeParent = desiredCard == desiredCards.end()
-                              ? owner->parentWidget()
-                              : desiredCard->second.section;
-    card->setParent(safeParent);
-  }
-
-  for (auto iterator = cards_.begin(); iterator != cards_.end();) {
-    const auto desired = desiredCards.find(iterator->first);
-    if (desired != desiredCards.end() &&
-        iterator->second->canApply(*desired->second.data)) {
-      ++iterator;
-      continue;
-    }
-    retainCommandOutputState(iterator->first, iterator->second);
-    delete iterator->second;
-    iterator = cards_.erase(iterator);
-    visualChange = true;
-  }
-
-  for (const TurnSection &sectionData : snapshot.sections) {
-    DesiredSection &desiredSection = desiredSections.at(sectionData.key);
-    TurnSectionWidget *section = desiredSection.widget;
-    int cardIndex = 0;
-    for (const VisibleCardData &cardData : sectionData.cards) {
-      const std::string &key =
-          desiredSection.cardKeys[static_cast<std::size_t>(cardIndex)];
-
-      ConversationCard *card = nullptr;
-      const auto existingCard = cards_.find(key);
-      if (existingCard != cards_.end()) {
-        card = existingCard->second;
-        visualChange = card->apply(cardData) || visualChange;
-      } else {
-        card = createConversationCard(
-            cardData, section, !presentationOptions_.commandsInitiallyExpanded,
-            !presentationOptions_.imagesInitiallyExpanded);
-        card->setProperty("conversationAnchorKey", QString::fromStdString(key));
-        if (const auto collapsed = cardCollapsedStates_.find(key);
-            collapsed != cardCollapsedStates_.end())
-          card->setCollapsed(collapsed->second);
-        connect(card, &ConversationCard::foldRequested, this,
-                [this, key, card](bool collapsed) {
-                  const auto retained = cards_.find(key);
-                  if (retained != cards_.end() && retained->second == card)
-                    setCardCollapsed(key, card, collapsed);
-                });
-        if (const auto saved = commandOutputStates_.find(key);
-            saved != commandOutputStates_.end()) {
-          commandOutputRestorations.emplace_back(card, saved->second);
-          commandOutputStates_.erase(saved);
-        }
-        cards_.emplace(key, card);
-        visualChange = true;
-      }
-
-      const bool visible = cardVisible(cardData);
-      if (card->isHidden() == visible) {
-        card->setVisible(visible);
-        visualChange = true;
-      }
-      ++cardIndex;
-    }
-
-    ConversationCard *prompt = nullptr;
-    if (sectionData.rootCardKey) {
-      const auto root = cards_.find(stableKey(*sectionData.rootCardKey));
-      if (root != cards_.end())
-        prompt = root->second;
-    }
-    std::vector<ConversationCard *> orderedCards;
-    orderedCards.reserve(sectionData.cards.size());
-    for (const VisibleCardData &cardData : sectionData.cards) {
-      ConversationCard *card = cards_.at(stableKey(cardData.key));
-      orderedCards.push_back(card);
-    }
-    if (prompt) {
-      for (ConversationCard *card : orderedCards) {
-        if (card != prompt && card->property("turnContainer").toBool())
-          card->setNestedCards({});
-        if (card != prompt)
-          visualChange =
-              card->setAuthoritativeTurnActive(false) || visualChange;
-        card->setProperty("turnContainer", false);
-      }
-      std::vector<ConversationCard *> nestedCards;
-      nestedCards.reserve(orderedCards.size() - 1);
-      for (ConversationCard *card : orderedCards)
-        if (card != prompt)
-          nestedCards.push_back(card);
-      prompt->setProperty("nestedConversationCard", false);
-      prompt->setProperty("turnContainer", true);
-      prompt->setNestedCards(nestedCards);
-      visualChange =
-          prompt->setAuthoritativeTurnActive(
-              snapshot.activeTurnId &&
-              sectionData.turnId == *snapshot.activeTurnId) ||
-          visualChange;
-      if (section->cards->indexOf(prompt) != 0)
-        section->cards->insertWidget(0, prompt);
-    } else {
-      for (std::size_t position = 0; position < orderedCards.size(); ++position) {
-        ConversationCard *card = orderedCards[position];
-        if (card->property("turnContainer").toBool())
-          card->setNestedCards({});
-        card->setProperty("nestedConversationCard", false);
-        card->setProperty("turnContainer", false);
-        visualChange = card->setAuthoritativeTurnActive(false) || visualChange;
-        card->setMinimumHeight(0);
-        if (section->cards->indexOf(card) != static_cast<int>(position))
-          section->cards->insertWidget(static_cast<int>(position), card);
-      }
-    }
-    section->cardKeys = std::move(desiredSection.cardKeys);
-    const bool sectionVisible =
-        std::ranges::any_of(sectionData.cards, [this](const auto &card) {
-          return cardVisible(card);
+  for (const std::string &key : desiredSectionKeys) {
+    TurnSectionWidget *section = desiredSections.at(key).widget;
+    arrangeSection(section);
+    const bool sectionVisible = std::ranges::any_of(
+        section->cardSlots, [](const TurnSectionWidget::CardSlot &slot) {
+          return slot.projectionVisible;
         });
     if (section->isHidden() == sectionVisible) {
       section->setVisible(sectionVisible);
       visualChange = true;
     }
-    if (desiredSection.insert)
-      contentLayout_->insertWidget(1 + desiredSection.position, section);
   }
+
+  // Desired layouts have now pulled retained items out of obsolete roots.
+  // Save the only widget-local state that survives materialization and release
+  // before deleting whatever remains outside the new projection.
+  for (auto &[key, slot] : retainedSlots) {
+    if (auto *card = dynamic_cast<ConversationCard *>(slot.item)) {
+      retainCommandOutputState(key, card);
+      cards_.erase(key);
+    }
+    delete slot.item;
+    visualChange = true;
+  }
+
+  for (const auto &[key, section] : sections_) {
+    static_cast<void>(key);
+    contentLayout_->removeWidget(section);
+  }
+  for (std::size_t index = 0; index < desiredSectionKeys.size(); ++index)
+    contentLayout_->insertWidget(
+        1 + static_cast<int>(index),
+        desiredSections.at(desiredSectionKeys[index]).widget);
 
   for (auto iterator = sections_.begin(); iterator != sections_.end();) {
     if (desiredSections.contains(iterator->first)) {
@@ -514,12 +476,8 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
   snapshot_ = snapshot;
 
   recomputeGeometry();
-  const bool outputGrew = visibleOutputFootprint() > outputFootprintBefore;
-  for (const auto &[card, state] : commandOutputRestorations)
-    card->restoreCommandOutputScrollState(state);
   if (follow) {
-    if (switchedThread || outputGrew || appendedVisibleCards ||
-        settleFollowImmediately) {
+    if (switchedThread || appendedVisibleCards || settleFollowImmediately) {
       setScrollValue(verticalScrollBar()->maximum());
     } else {
       // Reflow above the viewport must preserve the same painted card/pixel
@@ -532,6 +490,10 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
   applying_ = false;
   content_->setUpdatesEnabled(true);
   viewport()->setUpdatesEnabled(true);
+  const bool materializationChange = runVisibilityPass();
+  const bool outputGrew = visibleOutputFootprint() > outputFootprintBefore;
+  if (follow && outputGrew)
+    setScrollValue(verticalScrollBar()->maximum());
   viewport()->update();
 
   if (follow && !switchedThread && !outputGrew && !appendedVisibleCards &&
@@ -543,7 +505,335 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
       setScrollValue(verticalScrollBar()->maximum());
   }
   storeCurrentThreadState();
-  return visualChange;
+  return visualChange || materializationChange;
+}
+
+void ConversationView::arrangeSection(TurnSectionWidget *section) {
+  if (!section)
+    return;
+
+  TurnSectionWidget::CardSlot *rootSlot = nullptr;
+  if (!section->rootKey.empty()) {
+    const auto root = std::ranges::find_if(
+        section->cardSlots, [section](const TurnSectionWidget::CardSlot &slot) {
+          return slot.key == section->rootKey;
+        });
+    if (root != section->cardSlots.end())
+      rootSlot = &*root;
+  }
+  auto *prompt =
+      rootSlot ? dynamic_cast<ConversationCard *>(rootSlot->item) : nullptr;
+
+  std::unordered_set<ConversationCard *> obsoleteOwners;
+  for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
+    for (QWidget *parent = slot.item->parentWidget(); parent;
+         parent = parent->parentWidget()) {
+      auto *owner = dynamic_cast<ConversationCard *>(parent);
+      if (!owner)
+        continue;
+      if (owner != prompt)
+        obsoleteOwners.insert(owner);
+      break;
+    }
+  }
+  for (ConversationCard *owner : obsoleteOwners)
+    owner->setNestedItems({});
+
+  // A formerly materialized root can be replaced by its placeholder in the
+  // same pass. Ensure no other card keeps an obsolete nested layout first.
+  for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
+    auto *card = dynamic_cast<ConversationCard *>(slot.item);
+    if (!card || card == prompt)
+      continue;
+    if (card->property("turnContainer").toBool())
+      card->setNestedItems({});
+    card->setProperty("turnContainer", false);
+    card->setAuthoritativeTurnActive(false);
+  }
+
+  if (prompt) {
+    std::vector<QWidget *> nestedItems;
+    nestedItems.reserve(section->cardSlots.size() - 1);
+    for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
+      if (&slot != rootSlot)
+        nestedItems.push_back(slot.item);
+    prompt->setProperty("nestedConversationCard", false);
+    prompt->setProperty("turnContainer", true);
+    prompt->setNestedItems(nestedItems);
+    const bool active = snapshot_.activeTurnId &&
+                        section->property("turnId").toString().toStdString() ==
+                            *snapshot_.activeTurnId;
+    prompt->setAuthoritativeTurnActive(active);
+    if (section->cards->indexOf(prompt) != 0)
+      section->cards->insertWidget(0, prompt);
+    return;
+  }
+
+  std::vector<TurnSectionWidget::CardSlot *> ordered;
+  ordered.reserve(section->cardSlots.size());
+  if (rootSlot)
+    ordered.push_back(rootSlot);
+  for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
+    if (&slot != rootSlot)
+      ordered.push_back(&slot);
+  for (std::size_t position = 0; position < ordered.size(); ++position) {
+    QWidget *item = ordered[position]->item;
+    if (auto *card = dynamic_cast<ConversationCard *>(item)) {
+      if (card->property("turnContainer").toBool())
+        card->setNestedItems({});
+      card->setProperty("nestedConversationCard", false);
+      card->setProperty("turnContainer", false);
+      card->setAuthoritativeTurnActive(false);
+      card->setMinimumHeight(0);
+    }
+    if (section->cards->indexOf(item) != static_cast<int>(position))
+      section->cards->insertWidget(static_cast<int>(position), item);
+  }
+}
+
+void ConversationView::scheduleVisibilityPass() {
+  if (applying_ || visibilityPassScheduled_ || snapshot_.threadId.empty())
+    return;
+  visibilityPassScheduled_ = true;
+  QTimer::singleShot(0, this, [this] {
+    visibilityPassScheduled_ = false;
+    if (runVisibilityPass())
+      scheduleVisibilityPass();
+  });
+}
+
+bool ConversationView::runVisibilityPass() {
+  if (applying_ || !content_ || !viewport() || snapshot_.threadId.empty())
+    return false;
+
+  enum class Operation { Materialize, Render, Release };
+  struct Candidate {
+    TurnSectionWidget *section = nullptr;
+    TurnSectionWidget::CardSlot *slot = nullptr;
+    const VisibleCardData *data = nullptr;
+    Operation operation = Operation::Materialize;
+    bool inViewport = false;
+    int distance = 0;
+  };
+
+  const int scrollTop = verticalScrollBar()->value();
+  const int viewportHeight = std::max(1, viewport()->height());
+  const QRect visibleRect(0, scrollTop, std::max(1, content_->width()),
+                          viewportHeight);
+  const QRect materializationRect(0, std::max(0, scrollTop - viewportHeight),
+                                  std::max(1, content_->width()),
+                                  viewportHeight * 3);
+  const QRect retentionRect(0, std::max(0, scrollTop - 2 * viewportHeight),
+                            std::max(1, content_->width()), viewportHeight * 5);
+  std::vector<Candidate> candidates;
+
+  for (const auto &[sectionKey, section] : sections_) {
+    static_cast<void>(sectionKey);
+    const QRect sectionRect(section->mapTo(content_, QPoint{}),
+                            section->size());
+    const bool sectionNear = sectionRect.intersects(materializationRect);
+    for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
+      const VisibleCardData *data = dataForStableKey(slot.key);
+      if (!data)
+        continue;
+      QWidget *item = slot.item;
+      const QRect itemRect(item->mapTo(content_, QPoint{}), item->size());
+      const bool isRoot = slot.key == section->rootKey;
+      const bool presented =
+          slot.projectionVisible && item->isVisibleTo(content_);
+      // Filtered cards are retained only while their containing turn is near;
+      // they have no geometry of their own but existing controls rely on their
+      // stable folded/output state when the filter is toggled back on.
+      const bool wanted =
+          slot.newlyAdded ||
+          (isRoot ? sectionNear
+                  : (presented ? itemRect.intersects(materializationRect)
+                               : (!slot.projectionVisible && sectionNear)));
+      const bool retained =
+          isRoot ? sectionRect.intersects(retentionRect)
+                 : (presented ? itemRect.intersects(retentionRect)
+                              : sectionRect.intersects(retentionRect));
+      const bool inViewport = presented && itemRect.intersects(visibleRect);
+      const int center = itemRect.center().y();
+      const int distance =
+          center < visibleRect.top()
+              ? visibleRect.top() - center
+              : (center > visibleRect.bottom() ? center - visibleRect.bottom()
+                                               : 0);
+
+      if (auto *card = dynamic_cast<ConversationCard *>(item)) {
+        QWidget *focus = QApplication::focusWidget();
+        const bool ownsFocus =
+            focus && (focus == card || card->isAncestorOf(focus));
+        if (!card->canApply(*data)) {
+          candidates.push_back(
+              {section, &slot, data, Operation::Release, inViewport, distance});
+        } else if (!retained && !ownsFocus) {
+          candidates.push_back(
+              {section, &slot, data, Operation::Release, false, distance});
+        } else if (wanted) {
+          const bool rootShouldBeActive =
+              isRoot && snapshot_.activeTurnId &&
+              section->property("turnId").toString().toStdString() ==
+                  *snapshot_.activeTurnId;
+          if (card->data() != *data ||
+              card->property("authoritativeTurnActive").toBool() !=
+                  rootShouldBeActive)
+            candidates.push_back({section, &slot, data, Operation::Render,
+                                  inViewport, distance});
+        }
+      } else if (wanted) {
+        candidates.push_back({section, &slot, data, Operation::Materialize,
+                              inViewport, distance});
+      }
+    }
+  }
+
+  std::ranges::stable_sort(candidates, [](const Candidate &left,
+                                          const Candidate &right) {
+    if (left.inViewport != right.inViewport)
+      return left.inViewport > right.inViewport;
+    const auto geometryStableRender = [](const Candidate &candidate) {
+      if (candidate.operation != Operation::Render || !candidate.data ||
+          !candidate.slot)
+        return false;
+      const auto *card = dynamic_cast<ConversationCard *>(candidate.slot->item);
+      const auto *before =
+          card ? std::get_if<PlanData>(&card->data().payload) : nullptr;
+      const auto *after = std::get_if<PlanData>(&candidate.data->payload);
+      if (!before || !after || before->explanation != after->explanation ||
+          before->legacyText != after->legacyText ||
+          before->steps.size() != after->steps.size())
+        return false;
+      for (std::size_t index = 0; index < before->steps.size(); ++index)
+        if (before->steps[index].text != after->steps[index].text)
+          return false;
+      // Status glyph changes retain the established plan row geometry, so
+      // they are the safest work to defer when a frame's budget is full.
+      return true;
+    };
+    if (geometryStableRender(left) != geometryStableRender(right))
+      return geometryStableRender(right);
+    const auto urgency = [](Operation operation) {
+      return operation == Operation::Release ? 1 : 0;
+    };
+    if (urgency(left.operation) != urgency(right.operation))
+      return urgency(left.operation) < urgency(right.operation);
+    return left.distance < right.distance;
+  });
+  if (candidates.empty())
+    return false;
+
+  const Anchor anchor = captureAnchor();
+  const bool follow = mode_ == Mode::Following;
+  const bool followedBottom = follow && isAtBottom();
+  const int previousValue = verticalScrollBar()->value();
+  stopFollowingAnimation();
+  applying_ = true;
+  viewport()->setUpdatesEnabled(false);
+  content_->setUpdatesEnabled(false);
+  const QSignalBlocker scrollSignals(verticalScrollBar());
+  std::vector<std::pair<ConversationCard *, CommandOutputView::ScrollState>>
+      outputRestorations;
+  int operations = 0;
+
+  for (const Candidate &candidate : candidates) {
+    if (operations >= MaxCardOperationsPerPass)
+      break;
+    TurnSectionWidget::CardSlot &slot = *candidate.slot;
+    if (candidate.operation == Operation::Materialize) {
+      auto *placeholder = dynamic_cast<MeasuredCardPlaceholder *>(slot.item);
+      if (!placeholder)
+        continue;
+      auto *card = createConversationCard(
+          *candidate.data, candidate.section,
+          !presentationOptions_.commandsInitiallyExpanded,
+          !presentationOptions_.imagesInitiallyExpanded);
+      card->setProperty("conversationAnchorKey",
+                        QString::fromStdString(slot.key));
+      if (const auto collapsed = cardCollapsedStates_.find(slot.key);
+          collapsed != cardCollapsedStates_.end())
+        card->setCollapsed(collapsed->second);
+      connect(card, &ConversationCard::foldRequested, this,
+              [this, key = slot.key, card](bool collapsed) {
+                const auto retained = cards_.find(key);
+                if (retained != cards_.end() && retained->second == card)
+                  setCardCollapsed(key, card, collapsed);
+              });
+      if (const auto saved = commandOutputStates_.find(slot.key);
+          saved != commandOutputStates_.end()) {
+        outputRestorations.emplace_back(card, saved->second);
+        commandOutputStates_.erase(saved);
+      }
+      card->setVisible(slot.projectionVisible);
+      slot.item = card;
+      slot.newlyAdded = false;
+      cards_[slot.key] = card;
+      delete placeholder;
+      ++operations;
+      continue;
+    }
+
+    auto *card = dynamic_cast<ConversationCard *>(slot.item);
+    if (!card)
+      continue;
+    if (candidate.operation == Operation::Render) {
+      card->apply(*candidate.data);
+      card->setVisible(slot.projectionVisible);
+      ++operations;
+      continue;
+    }
+
+    const auto outputState = card->commandOutputScrollState();
+    if (outputState && !outputState->followsLatest)
+      commandOutputStates_[slot.key] = *outputState;
+    else
+      commandOutputStates_.erase(slot.key);
+    if (slot.key == candidate.section->rootKey) {
+      card->setNestedItems({});
+      if (card->layout()) {
+        card->layout()->invalidate();
+        card->layout()->activate();
+      }
+      slot.measuredHeight = std::max(initialCardHeight(*candidate.data),
+                                     card->minimumSizeHint().height());
+    } else {
+      slot.measuredHeight = std::max(1, card->height());
+    }
+    auto *placeholder = new MeasuredCardPlaceholder(
+        slot.key, slot.projectionVisible ? slot.measuredHeight : 0,
+        candidate.section);
+    placeholder->setVisible(slot.projectionVisible);
+    slot.item = placeholder;
+    cards_.erase(slot.key);
+    delete card;
+    ++operations;
+  }
+
+  for (const auto &[sectionKey, section] : sections_) {
+    static_cast<void>(sectionKey);
+    arrangeSection(section);
+  }
+  recomputeGeometry();
+  for (const auto &[card, state] : outputRestorations)
+    card->restoreCommandOutputScrollState(state);
+  if (followedBottom)
+    setScrollValue(verticalScrollBar()->maximum());
+  else
+    restoreAnchor(anchor);
+  applying_ = false;
+  content_->setUpdatesEnabled(true);
+  viewport()->setUpdatesEnabled(true);
+  viewport()->update();
+
+  if (follow && !followedBottom) {
+    const int stableValue = verticalScrollBar()->value();
+    if (verticalScrollBar()->maximum() > stableValue + 3)
+      animateToBottom(std::min(previousValue, stableValue));
+  }
+  if (operations == MaxCardOperationsPerPass)
+    scheduleVisibilityPass();
+  return operations > 0;
 }
 
 void ConversationView::setCardCollapsed(const std::string &key,
@@ -573,19 +863,29 @@ void ConversationView::setCardCollapsed(const std::string &key,
     turnContainer->setMinimumHeight(0);
   card->setCollapsed(collapsed);
   recomputeGeometry();
+  for (const auto &[sectionKey, section] : sections_) {
+    static_cast<void>(sectionKey);
+    const auto slot = std::ranges::find_if(
+        section->cardSlots,
+        [&key](const TurnSectionWidget::CardSlot &candidate) {
+          return candidate.key == key;
+        });
+    if (slot != section->cardSlots.end() && key != section->rootKey)
+      slot->measuredHeight = std::max(1, card->height());
+  }
   const int visibleHeight =
       std::max(0, viewport()->height() - trailingSpaceHeight_);
   const int visibleTop =
-      collapsed
-          ? titleTop
-          : std::clamp(titleTop, 0,
-                       std::max(0, visibleHeight - card->height()));
+      collapsed ? titleTop
+                : std::clamp(titleTop, 0,
+                             std::max(0, visibleHeight - card->height()));
   setScrollValue(card->mapTo(content_, QPoint{}).y() - visibleTop);
 
   applying_ = false;
   content_->setUpdatesEnabled(true);
   viewport()->setUpdatesEnabled(true);
   viewport()->update();
+  scheduleVisibilityPass();
   storeCurrentThreadState();
 }
 
@@ -685,6 +985,7 @@ bool ConversationView::eventFilter(QObject *watched, QEvent *event) {
       animateToBottom(stableValue);
     else if (follow)
       setScrollValue(verticalScrollBar()->maximum());
+    scheduleVisibilityPass();
     storeCurrentThreadState();
     return true;
   }
@@ -707,6 +1008,7 @@ void ConversationView::resizeEvent(QResizeEvent *event) {
   applying_ = false;
   viewport()->setUpdatesEnabled(true);
   viewport()->update();
+  scheduleVisibilityPass();
   storeCurrentThreadState();
 }
 
@@ -719,11 +1021,11 @@ ConversationView::Anchor ConversationView::captureAnchor() const {
   Anchor anchor;
   anchor.absoluteValue = verticalScrollBar()->value();
   for (const std::string &key : displayedCardKeys_) {
-    ConversationCard *card = cardForStableKey(key);
-    if (!card || !card->isVisible())
+    QWidget *item = itemForStableKey(key);
+    if (!item || !item->isVisible())
       continue;
-    const int viewportTop = card->mapTo(viewport(), QPoint(0, 0)).y();
-    if (viewportTop + card->height() < 0)
+    const int viewportTop = item->mapTo(viewport(), QPoint(0, 0)).y();
+    if (viewportTop + item->height() < 0)
       continue;
     anchor.stableKey = key;
     // The contract is visual stability. Capture the actual painted offset
@@ -738,8 +1040,8 @@ ConversationView::Anchor ConversationView::captureAnchor() const {
 void ConversationView::restoreAnchor(const Anchor &anchor) {
   int value = anchor.absoluteValue;
   if (!anchor.stableKey.empty()) {
-    if (ConversationCard *card = cardForStableKey(anchor.stableKey)) {
-      const int top = card->mapTo(content_, QPoint(0, 0)).y();
+    if (QWidget *item = itemForStableKey(anchor.stableKey)) {
+      const int top = item->mapTo(content_, QPoint(0, 0)).y();
       value = top - anchor.pixelOffset;
     }
   }
@@ -754,6 +1056,7 @@ void ConversationView::setScrollValue(int value) {
   verticalScrollBar()->setValue(value);
   programmaticScroll_ = false;
   positionContent();
+  scheduleVisibilityPass();
 }
 
 void ConversationView::stopFollowingAnimation() {
@@ -828,8 +1131,7 @@ void ConversationView::recomputeGeometry() {
     card->updateGeometry();
     const int cardHeight =
         card->layout()->hasHeightForWidth()
-            ? card->layout()->heightForWidth(cardWidth) +
-                  2 * card->frameWidth()
+            ? card->layout()->heightForWidth(cardWidth) + 2 * card->frameWidth()
             : card->sizeHint().height();
     card->setMinimumHeight(cardHeight);
     card->resize(cardWidth, cardHeight);
@@ -862,8 +1164,7 @@ void ConversationView::recomputeGeometry() {
       continue;
     card->setMinimumHeight(0);
     QWidget *nested = card->findChild<QWidget *>(
-        QStringLiteral("conversationNestedCards"),
-        Qt::FindDirectChildrenOnly);
+        QStringLiteral("conversationNestedCards"), Qt::FindDirectChildrenOnly);
     if (!nested || !nested->layout())
       continue;
     const int cardWidth = card->parentWidget()
@@ -1000,6 +1301,28 @@ ConversationCard *
 ConversationView::cardForStableKey(const std::string &key) const {
   const auto card = cards_.find(key);
   return card == cards_.end() ? nullptr : card->second;
+}
+
+QWidget *ConversationView::itemForStableKey(const std::string &key) const {
+  for (const auto &[sectionKey, section] : sections_) {
+    static_cast<void>(sectionKey);
+    const auto item = std::ranges::find_if(
+        section->cardSlots, [&key](const TurnSectionWidget::CardSlot &slot) {
+          return slot.key == key;
+        });
+    if (item != section->cardSlots.end())
+      return item->item;
+  }
+  return nullptr;
+}
+
+const VisibleCardData *
+ConversationView::dataForStableKey(const std::string &key) const {
+  for (const TurnSection &section : snapshot_.sections)
+    for (const VisibleCardData &card : section.cards)
+      if (stableKey(card.key) == key)
+        return &card;
+  return nullptr;
 }
 
 } // namespace codexui::codex::middle

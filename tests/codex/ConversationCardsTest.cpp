@@ -2371,6 +2371,59 @@ bool testCommandOutputStateAcrossNavigation() {
   return result;
 }
 
+bool testViewportLazyMaterialization() {
+  const std::string thread = "viewport-lazy";
+  ConversationSnapshot snapshot = conversation(thread, 240);
+  ConversationView view;
+  view.resize(620, 360);
+  view.show();
+
+  bool result = expect(view.reconcile(snapshot),
+                       "a large conversation creates its lazy geometry");
+  const auto materializedCount = [&view] {
+    return static_cast<int>(std::ranges::count_if(
+        view.findChildren<QWidget *>(), [](QWidget *widget) {
+          return dynamic_cast<ConversationCard *>(widget) != nullptr;
+        }));
+  };
+  const auto placeholderCount = [&view] {
+    return static_cast<int>(std::ranges::count_if(
+        view.findChildren<QWidget *>(), [](QWidget *widget) {
+          return widget->objectName() ==
+                 QStringLiteral("conversationCardPlaceholder");
+        }));
+  };
+
+  const int immediateCards = materializedCount();
+  result &= expect(
+      immediateCards <= 8 &&
+          card(view, stableKey(snapshot.sections.back().cards.back().key)),
+      "the initial pass materializes at most eight bottom-visible "
+      "cards");
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+  const int afterOneContinuation = materializedCount();
+  result &= expect(afterOneContinuation - immediateCards <= 8 &&
+                       placeholderCount() > 200 && view.isAtBottom(),
+                   "one event-loop continuation performs at most eight more "
+                   "materializations and retains measured placeholders");
+
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  spin(100);
+  const std::string firstKey =
+      stableKey(snapshot.sections.front().cards.front().key);
+  const std::string lastKey =
+      stableKey(snapshot.sections.back().cards.back().key);
+  result &= expect(view.mode() == ConversationView::Mode::Paused,
+                   "scrolling a large conversation pauses following");
+  result &=
+      expect(card(view, firstKey), "scrolling materializes the new viewport");
+  result &=
+      expect(!card(view, lastKey), "scrolling releases the distant viewport");
+  result &= expect(materializedCount() < 40 && placeholderCount() > 200,
+                   "viewport movement keeps materialized card work bounded");
+  return result;
+}
+
 bool testPendingPromptAnimation() {
   VisibleCardData pending{
       LocalPromptKey{901},
@@ -2786,6 +2839,7 @@ int main(int argc, char **argv) {
   result &= testRetainedNestedFinalAnswerGeometrySettlement();
   result &= testBottomAnchoredCommandOutputGrowth();
   result &= testCommandOutputStateAcrossNavigation();
+  result &= testViewportLazyMaterialization();
   result &= testPendingPromptAnimation();
   result &= testMessageImagePresentation();
   result &= testGeneratedImagePresentationAndGenericBound();
