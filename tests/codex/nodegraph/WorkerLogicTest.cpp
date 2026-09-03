@@ -12,6 +12,7 @@
 #include <string_view>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace {
 
@@ -62,6 +63,17 @@ std::optional<GraphChanged> takeGraphChanged(ThreadChannels &channels,
   return std::move(*changed);
 }
 
+std::vector<WorkerToQtMessage> takeWorkerMessages(ThreadChannels &channels) {
+  static_cast<void>(channels.drainWorkerToQtWake());
+  std::vector<WorkerToQtMessage> messages;
+  WorkerToQtMessage message;
+  while (channels.tryReceiveForQt(message)) {
+    messages.emplace_back(std::move(message));
+    message = WorkerToQtMessage(GraphChanged{});
+  }
+  return messages;
+}
+
 void protocolUpdatesPublishForUnlockedReads() {
   NodeGraph graph;
   ThreadChannels channels;
@@ -77,11 +89,10 @@ void protocolUpdatesPublishForUnlockedReads() {
 
   const std::optional<GraphChanged> changed = takeGraphChanged(channels);
   const bool includesThread =
-      changed && std::ranges::find_if(
-                     changed->affected, [](const NodeRef &node) {
-                       return node->id() ==
-                              NodeId{NodeKind::Thread, "worker-thread"};
-                     }) != changed->affected.end();
+      changed &&
+      std::ranges::find_if(changed->affected, [](const NodeRef &node) {
+        return node->id() == NodeId{NodeKind::Thread, "worker-thread"};
+      }) != changed->affected.end();
   require(changed && changed->revision == graph.publishedRevision() &&
               !changed->rescanRequired && includesThread,
           "protocol update queues its committed revision and addressed "
@@ -182,12 +193,12 @@ void connectionStateAndGenerationsStayCurrent() {
     const NodeRef connection =
         read ? read->find({NodeKind::Connection, "connection"}) : NodeRef{};
     const auto state = read && connection ? read->state(connection) : nullptr;
-    require(state && stringFieldEquals(state, "role", "observer") &&
-                stringFieldEquals(state, "controllerConnectionId",
-                                  "bridge-2") &&
-                stringFieldEquals(state, "providerState", "ready") &&
-                stringFieldEquals(state, "providerDetail", "provider ready"),
-            "unrelated bridge events preserve same-generation provider facts");
+    require(
+        state && stringFieldEquals(state, "role", "observer") &&
+            stringFieldEquals(state, "controllerConnectionId", "bridge-2") &&
+            stringFieldEquals(state, "providerState", "ready") &&
+            stringFieldEquals(state, "providerDetail", "provider ready"),
+        "unrelated bridge events preserve same-generation provider facts");
   }
 
   const std::uint64_t beforeStale = graph.publishedRevision();
@@ -374,12 +385,12 @@ void reverseInteractionResolutionUpdatesTheGraph() {
   ThreadChannels channels;
   WorkerLogic logic(graph, channels);
 
-  static_cast<void>(logic.apply(
-      {DecodedMessageKind::ServerRequest, "item/commandExecution/requestApproval",
-       ProtocolRequestId("approval-1"),
-       {{"threadId", Value("thread-1")},
-        {"turnId", Value("turn-1")},
-        {"itemId", Value("item-1")}}}));
+  static_cast<void>(logic.apply({DecodedMessageKind::ServerRequest,
+                                 "item/commandExecution/requestApproval",
+                                 ProtocolRequestId("approval-1"),
+                                 {{"threadId", Value("thread-1")},
+                                  {"turnId", Value("turn-1")},
+                                  {"itemId", Value("item-1")}}}));
   require(takeGraphChanged(channels).has_value(),
           "reverse interaction creation wakes Qt");
 
@@ -391,13 +402,12 @@ void reverseInteractionResolutionUpdatesTheGraph() {
               removed->removed.front()->id().kind == NodeKind::Interaction,
           "accepted response removes the pending interaction atomically");
   if (removed && !removed->removed.empty())
-    static_cast<void>(
-        logic.acknowledgeUiDetached(removed->removed.front()));
+    static_cast<void>(logic.acknowledgeUiDetached(removed->removed.front()));
 
-  static_cast<void>(logic.apply(
-      {DecodedMessageKind::ServerRequest, "item/fileChange/requestApproval",
-       ProtocolRequestId("approval-2"),
-       {{"threadId", Value("thread-1")}}}));
+  static_cast<void>(logic.apply({DecodedMessageKind::ServerRequest,
+                                 "item/fileChange/requestApproval",
+                                 ProtocolRequestId("approval-2"),
+                                 {{"threadId", Value("thread-1")}}}));
   require(takeGraphChanged(channels).has_value(),
           "second reverse interaction creation wakes Qt");
   require(logic.resolveInteraction(ProtocolRequestId("approval-2"), false,
@@ -415,6 +425,406 @@ void reverseInteractionResolutionUpdatesTheGraph() {
   require(state && state->status == NodeStatus::Failed &&
               stringFieldEquals(state, "error", "transport rejected response"),
           "failed response remains visible with its concrete error");
+}
+
+void localPromptsAreGraphNodesAndDispatchPerThread() {
+  NodeGraph graph;
+  ThreadChannels channels;
+  WorkerLogic logic(graph, channels);
+
+  for (const std::string_view id : {"prompt-thread", "independent-thread"}) {
+    static_cast<void>(logic.apply(
+        {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+         Value::Object{{"thread", Value(Value::Object{{"id", Value(id)}})}}}));
+    static_cast<void>(takeWorkerMessages(channels));
+  }
+  NodeRef thread;
+  NodeRef independent;
+  {
+    auto read = graph.tryRead();
+    thread = read->find({NodeKind::Thread, "prompt-thread"});
+    independent = read->find({NodeKind::Thread, "independent-thread"});
+  }
+
+  NodeAction first;
+  first.target = thread;
+  first.kind = NodeActionKind::SubmitPrompt;
+  first.promptText = std::string(4096, 'p');
+  first.promptText.front() = 'A';
+  first.attachments.push_back({"/tmp/prompt.png", "prompt.png", "image/png",
+                               std::vector<std::uint8_t>(4096, 7)});
+  first.payload.emplace("model", Value("gpt-current"));
+  const char *const textStorage = first.promptText.data();
+  const std::uint8_t *const bytesStorage =
+      first.attachments.front().bytes->data();
+  PromptTransition admitted = logic.admitPrompt(std::move(first));
+  require(admitted.command &&
+              admitted.command->kind == PromptCommandKind::StartTurn &&
+              admitted.command->thread == thread &&
+              admitted.command->promptText.data() == textStorage &&
+              admitted.command->attachments.front().bytes->data() ==
+                  bytesStorage,
+          "first prompt moves its exact large text and attachment storage into "
+          "a start-turn command");
+  const NodeRef firstPrompt =
+      admitted.command ? admitted.command->localPrompt : NodeRef{};
+  const std::string firstClientId =
+      admitted.command ? admitted.command->clientUserMessageId : std::string{};
+  static_cast<void>(takeWorkerMessages(channels));
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const NodeRef localTurn = read->parent(firstPrompt);
+    const auto state = read->state(firstPrompt);
+    const Value *text = field(state, "text");
+    const Value *dispatch = field(state, "dispatchState");
+    require(firstPrompt && localTurn &&
+                localTurn->id().canonical.starts_with("local-turn:") &&
+                read->parent(localTurn) == thread && text && text->asString() &&
+                *text->asString() == admitted.command->promptText && dispatch &&
+                dispatch->asString() &&
+                *dispatch->asString() == "dispatching" &&
+                read->related(runtime, RelationKind::PendingPrompt) ==
+                    std::vector<NodeRef>{firstPrompt} &&
+                read->related(thread, RelationKind::PendingPrompt) ==
+                    std::vector<NodeRef>{firstPrompt},
+            "admission stores one directly-related local prompt under a "
+            "provisional turn");
+  }
+
+  NodeAction queued;
+  queued.target = thread;
+  queued.kind = NodeActionKind::SubmitPrompt;
+  queued.promptText = "second exact prompt";
+  PromptTransition second = logic.admitPrompt(std::move(queued));
+  require(!second.command,
+          "a second prompt for the same thread remains queued while one "
+          "request is in flight");
+  static_cast<void>(takeWorkerMessages(channels));
+
+  NodeAction parallel;
+  parallel.target = independent;
+  parallel.kind = NodeActionKind::SubmitPrompt;
+  parallel.promptText = "independent prompt";
+  PromptTransition independentAdmission =
+      logic.admitPrompt(std::move(parallel));
+  require(independentAdmission.command &&
+              independentAdmission.command->thread == independent,
+          "different threads dispatch independently");
+  static_cast<void>(takeWorkerMessages(channels));
+
+  require(logic.markPromptDispatched(firstPrompt,
+                                     ProtocolRequestId("turn-request-1")) ==
+              ChannelSendStatus::Accepted,
+          "the direct bridge request marks only its exact local prompt");
+  static_cast<void>(takeWorkerMessages(channels));
+  static_cast<void>(logic.apply(
+      {DecodedMessageKind::ServerNotification, "turn/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("prompt-thread")},
+           {"turn", Value(Value::Object{{"id", Value("authoritative-turn")},
+                                        {"status", Value("inProgress")}})}}}));
+  static_cast<void>(takeWorkerMessages(channels));
+
+  PromptTransition completed =
+      logic.completePrompt(firstPrompt, true, {}, "authoritative-turn");
+  require(completed.command &&
+              completed.command->kind == PromptCommandKind::SteerTurn &&
+              completed.command->expectedTurnId == "authoritative-turn" &&
+              completed.command->promptText == "second exact prompt",
+          "a successful request releases exactly the next same-thread prompt "
+          "as a steer command");
+  static_cast<void>(takeWorkerMessages(channels));
+
+  static_cast<void>(logic.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{{"threadId", Value("prompt-thread")},
+                     {"turnId", Value("authoritative-turn")},
+                     {"item", Value(Value::Object{
+                                  {"id", Value("user-item")},
+                                  {"type", Value("userMessage")},
+                                  {"clientId", Value(firstClientId)}})}}}));
+  static_cast<void>(takeWorkerMessages(channels));
+  NodeRef authoritative;
+  {
+    auto read = graph.tryRead();
+    authoritative = read->find({NodeKind::Item, "user-item"});
+    require(
+        authoritative &&
+            read->related(authoritative, RelationKind::PromptMaterialization) ==
+                std::vector<NodeRef>{firstPrompt} &&
+            read->state(firstPrompt)->status == NodeStatus::Completed &&
+            stringFieldEquals(read->state(firstPrompt), "dispatchState",
+                              "materialized"),
+        "matching authoritative clientId directly relates the user item "
+        "to its local visual identity");
+  }
+
+  const ChannelSendStatus removed = logic.promptMaterialized(firstPrompt);
+  static_cast<void>(takeWorkerMessages(channels));
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const std::vector<NodeRef> pending =
+        read->related(runtime, RelationKind::PendingPrompt);
+    require(
+        removed == ChannelSendStatus::Accepted &&
+            !read->find(firstPrompt->id()) && authoritative &&
+            read->related(authoritative, RelationKind::PromptMaterialization)
+                .empty() &&
+            std::ranges::find(pending, firstPrompt) == pending.end(),
+        "Qt materialization acknowledgement removes the local node and "
+        "all of its graph relations");
+  }
+}
+
+void firstPromptCreatesAndMigratesOneDraftThread() {
+  NodeGraph graph;
+  ThreadChannels channels;
+  WorkerLogic logic(graph, channels);
+
+  RuntimeAction action;
+  action.kind = RuntimeActionKind::CreateThread;
+  action.promptText = "first prompt exactly";
+  action.payload = {
+      {"threadStart", Value(Value::Object{{"cwd", Value("/workspace")},
+                                          {"model", Value("gpt-current")}})},
+      {"turnStart",
+       Value(Value::Object{{"approvalPolicy", Value("on-request")}})},
+      {"requestedName", Value("Named locally")}};
+  PromptTransition admitted = logic.admitFirstPrompt(std::move(action));
+  require(admitted.command &&
+              admitted.command->kind == PromptCommandKind::CreateThread &&
+              admitted.command->requestedName == "Named locally" &&
+              admitted.command->options.contains("cwd") &&
+              !admitted.command->options.contains("requestedName") &&
+              admitted.command->turnOptions.contains("approvalPolicy"),
+          "new-thread admission separates exact thread, turn, and rename "
+          "parameters");
+  const NodeRef draft = admitted.command ? admitted.command->thread : NodeRef{};
+  const NodeRef localPrompt =
+      admitted.command ? admitted.command->localPrompt : NodeRef{};
+  const std::vector<WorkerToQtMessage> admissionMessages =
+      takeWorkerMessages(channels);
+  require(std::ranges::any_of(
+              admissionMessages,
+              [&](const auto &message) {
+                const UiEffect *effect = std::get_if<UiEffect>(&message);
+                return effect && effect->kind == UiEffectKind::SelectThread &&
+                       effect->target == std::optional<NodeRef>(draft);
+              }),
+          "new-thread admission selects its materialized local draft NodeRef");
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    require(draft && draft->id().canonical.starts_with("local-thread:") &&
+                read->related(runtime, RelationKind::RootThread).front() ==
+                    draft &&
+                read->parent(read->parent(localPrompt)) == draft,
+            "the first prompt is immediately renderable under one draft "
+            "thread and provisional turn");
+  }
+
+  static_cast<void>(logic.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{{"thread", Value(Value::Object{
+                                    {"id", Value("created-thread")},
+                                    {"name", Value("Provider default")}})}}}));
+  static_cast<void>(takeWorkerMessages(channels));
+  require(admitted.command &&
+              logic.attachCreatedThread(*admitted.command, "created-thread") ==
+                  ChannelSendStatus::Accepted,
+          "thread/start result migrates the draft prompt atomically");
+  const std::vector<WorkerToQtMessage> migrationMessages =
+      takeWorkerMessages(channels);
+  {
+    auto read = graph.tryRead();
+    const NodeRef actual = read->find({NodeKind::Thread, "created-thread"});
+    require(admitted.command->kind == PromptCommandKind::StartTurn &&
+                admitted.command->thread == actual &&
+                admitted.command->options.contains("approvalPolicy") &&
+                !read->find(draft->id()) &&
+                read->parent(read->parent(localPrompt)) == actual &&
+                read->related(actual, RelationKind::PendingPrompt) ==
+                    std::vector<NodeRef>{localPrompt} &&
+                std::ranges::any_of(
+                    migrationMessages,
+                    [&](const auto &message) {
+                      const UiEffect *effect = std::get_if<UiEffect>(&message);
+                      return effect &&
+                             effect->kind == UiEffectKind::SelectThread &&
+                             effect->target == std::optional<NodeRef>(actual);
+                    }),
+            "migration removes the draft shell, selects the canonical thread, "
+            "and changes the retained command to turn/start");
+  }
+
+  NodeGraph failedGraph;
+  ThreadChannels failedChannels;
+  WorkerLogic failedLogic(failedGraph, failedChannels);
+  RuntimeAction failingCreate;
+  failingCreate.kind = RuntimeActionKind::CreateThread;
+  failingCreate.promptText = "first unsent draft";
+  PromptTransition firstDraft =
+      failedLogic.admitFirstPrompt(std::move(failingCreate));
+  require(firstDraft.command.has_value(),
+          "failing draft is admitted before its provider failure");
+  if (!firstDraft.command)
+    return;
+  NodeAction laterDraft;
+  laterDraft.kind = NodeActionKind::SubmitPrompt;
+  laterDraft.target = firstDraft.command->thread;
+  laterDraft.promptText = "second unsent draft";
+  PromptTransition queuedDraft = failedLogic.admitPrompt(std::move(laterDraft));
+  require(!queuedDraft.command,
+          "later input queues behind the in-flight draft creation");
+  PromptTransition failed = failedLogic.failPrompt(
+      firstDraft.command->localPrompt, "thread creation failed");
+  {
+    auto read = failedGraph.tryRead();
+    const std::vector<NodeRef> prompts =
+        read->related(firstDraft.command->thread, RelationKind::PendingPrompt);
+    require(!failed.command && prompts.size() == 2 &&
+                std::ranges::all_of(prompts,
+                                    [&](const NodeRef &prompt) {
+                                      return read->state(prompt)->status ==
+                                                 NodeStatus::Failed &&
+                                             stringFieldEquals(
+                                                 read->state(prompt),
+                                                 "dispatchState", "failed");
+                                    }),
+            "failed thread creation keeps every authored draft visible and "
+            "never auto-dispatches one against a local thread id");
+  }
+}
+
+void providerGenerationResetIsAtomicAndKeepsOnlyRecoveryPrompts() {
+  NodeGraph graph;
+  ThreadChannels channels;
+  WorkerLogic logic(graph, channels);
+
+  static_cast<void>(logic.connectionSettings(
+      {{"selected", Value("unix")}, {"endpoint", Value("local")}}));
+  static_cast<void>(takeWorkerMessages(channels));
+  static_cast<void>(logic.transportEvent("connected"));
+  static_cast<void>(takeWorkerMessages(channels));
+  static_cast<void>(
+      logic.bridgeState("bridge", "controller", "bridge", 7, "ready"));
+  static_cast<void>(takeWorkerMessages(channels));
+  static_cast<void>(logic.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{{"thread", Value(Value::Object{
+                                    {"id", Value("reset-thread")},
+                                    {"name", Value("Provider fact")}})}}}));
+  static_cast<void>(takeWorkerMessages(channels));
+  static_cast<void>(logic.apply(
+      {DecodedMessageKind::ServerNotification, "turn/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("reset-thread")},
+           {"turn", Value(Value::Object{{"id", Value("reset-turn")},
+                                        {"status", Value("inProgress")}})}}}));
+  static_cast<void>(takeWorkerMessages(channels));
+  NodeRef thread;
+  NodeRef turn;
+  {
+    auto read = graph.tryRead();
+    thread = read->find({NodeKind::Thread, "reset-thread"});
+    turn = read->find({NodeKind::Turn, "reset-turn"});
+  }
+  NodeAction action;
+  action.kind = NodeActionKind::SubmitPrompt;
+  action.target = thread;
+  action.promptText = "recover this exact text";
+  PromptTransition prompt = logic.admitPrompt(std::move(action));
+  const NodeRef localPrompt =
+      prompt.command ? prompt.command->localPrompt : NodeRef{};
+  static_cast<void>(takeWorkerMessages(channels));
+  static_cast<void>(
+      logic.apply({DecodedMessageKind::ClientRequest, "model/list",
+                   ProtocolRequestId("pending-catalog"), Value::Object{}}));
+  static_cast<void>(takeWorkerMessages(channels));
+  static_cast<void>(logic.apply(
+      {DecodedMessageKind::ServerRequest,
+       "item/commandExecution/requestApproval", ProtocolRequestId("pending"),
+       Value::Object{{"threadId", Value("reset-thread")}}}));
+  static_cast<void>(takeWorkerMessages(channels));
+
+  const std::uint64_t before = graph.publishedRevision();
+  require(logic.bridgeState("bridge", "controller", "bridge", 8, "ready",
+                            "provider replaced") == ChannelSendStatus::Accepted,
+          "new provider generation is admitted");
+  const std::vector<WorkerToQtMessage> resetMessages =
+      takeWorkerMessages(channels);
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const NodeRef connection = read->find({NodeKind::Connection, "connection"});
+    const NodeRef owner = read->find({NodeKind::Thread, "reset-thread"});
+    const NodeRef recoveryTurn = read->parent(localPrompt);
+    const NodeRef recoveryOwner =
+        recoveryTurn ? read->parent(recoveryTurn) : NodeRef{};
+    bool onlyAllowed = true;
+    for (const NodeRef &node : read->orderedNodes()) {
+      onlyAllowed &= node->id().kind == NodeKind::Runtime ||
+                     node->id().kind == NodeKind::Connection ||
+                     node->id().kind == NodeKind::Thread ||
+                     node->id().kind == NodeKind::Turn ||
+                     node->id().kind == NodeKind::Item;
+    }
+    const auto promptState = read->state(localPrompt);
+    const Value *recovery = field(promptState, "requiresExplicitRecovery");
+    const Value *settings = field(read->state(connection), "settings");
+    require(
+        read->revision() == before + 1 && resetMessages.size() == 1 &&
+            std::holds_alternative<GraphChanged>(resetMessages.front()) &&
+            onlyAllowed && runtime && connection && !owner &&
+            !read->find({NodeKind::Turn, "reset-turn"}) && localPrompt &&
+            recoveryOwner &&
+            recoveryOwner->id().canonical.starts_with(
+                "local-recovery-thread:") &&
+            recoveryTurn->id().canonical.starts_with("local-recovery-turn:") &&
+            !read->find({NodeKind::Operation,
+                         ProtocolRequestId("pending-catalog").canonical()}) &&
+            !read->find({NodeKind::Interaction,
+                         ProtocolRequestId("pending").canonical()}) &&
+            promptState->status == NodeStatus::Failed &&
+            stringFieldEquals(promptState, "dispatchState", "uncertain") &&
+            recovery && recovery->asBool() && *recovery->asBool() && settings &&
+            settings->asObject() &&
+            read->related(runtime, RelationKind::PendingPrompt) ==
+                std::vector<NodeRef>{localPrompt} &&
+            read->related(recoveryOwner, RelationKind::PendingPrompt) ==
+                std::vector<NodeRef>{localPrompt},
+        "provider reset publishes one complete revision, removes stale "
+        "canonical owners and work, preserves settings, and reparents only "
+        "explicit prompt recovery state to local shells");
+  }
+  require(logic.generations() == WorkerGenerations{1, 8},
+          "callback generation snapshot advances with the atomic reset");
+
+  static_cast<void>(logic.apply(
+      {DecodedMessageKind::ServerNotification, "turn/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("reset-thread")},
+           {"turn", Value(Value::Object{{"id", Value("reset-turn")},
+                                        {"status", Value("inProgress")}})}}}));
+  static_cast<void>(takeWorkerMessages(channels));
+  {
+    auto read = graph.tryRead();
+    const NodeRef reusedThread = read->find({NodeKind::Thread, "reset-thread"});
+    const NodeRef reusedTurn = read->find({NodeKind::Turn, "reset-turn"});
+    const auto threadState = read->state(reusedThread);
+    const auto turnState = read->state(reusedTurn);
+    const NodeRef recoveryOwner = read->parent(read->parent(localPrompt));
+    require(
+        reusedThread && reusedThread != thread && reusedTurn &&
+            reusedTurn != turn && !field(threadState, "local") &&
+            !field(threadState, "recoveryOnly") && !field(turnState, "local") &&
+            recoveryOwner && recoveryOwner != reusedThread &&
+            read->related(reusedThread, RelationKind::PendingPrompt).empty(),
+        "reused provider Thread/Turn ids allocate fresh nodes without "
+        "inheriting recovery state or stealing the retained prompt");
+  }
 }
 
 void workerStoppedDeliveryIsExplicit() {
@@ -458,6 +868,9 @@ int main() {
   graphNotificationSaturationCoalesces();
   uiDetachAcknowledgementIsRevisionNeutral();
   reverseInteractionResolutionUpdatesTheGraph();
+  localPromptsAreGraphNodesAndDispatchPerThread();
+  firstPromptCreatesAndMigratesOneDraftThread();
+  providerGenerationResetIsAtomicAndKeepsOnlyRecoveryPrompts();
   workerStoppedDeliveryIsExplicit();
 
   if (failures != 0) {

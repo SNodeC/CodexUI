@@ -271,6 +271,20 @@ std::vector<NodeRef> mergeExistingTail(std::vector<NodeRef> first,
   return first;
 }
 
+std::vector<NodeRef> mergeLocalTail(NodeGraph::WriteAccess &write,
+                                    std::vector<NodeRef> first,
+                                    const std::vector<NodeRef> &existing) {
+  for (const NodeRef &node : existing) {
+    const std::shared_ptr<const NodeState> state = write.state(node);
+    const Value *local = member(state->fields, "local");
+    if ((!local || !local->asBool() || !*local->asBool()) ||
+        std::find(first.begin(), first.end(), node) != first.end())
+      continue;
+    first.emplace_back(node);
+  }
+  return first;
+}
+
 bool hasThreadOwner(NodeGraph::WriteAccess &write, const NodeRef &child) {
   for (const NodeRef &candidate : write.orderedNodes()) {
     if (candidate->id().kind != NodeKind::Thread || candidate == child)
@@ -334,6 +348,35 @@ bool isUserMessage(const Value::Object &item) {
   return canonicalValue(member(item, "type")) == "userMessage";
 }
 
+void correlateLocalPrompt(NodeGraph::WriteAccess &write,
+                          const NodeRef &authoritative,
+                          const Value::Object &item) {
+  if (!authoritative || !isUserMessage(item))
+    return;
+  const std::string clientId = canonicalValue(member(item, "clientId"));
+  if (clientId.empty())
+    return;
+  NodeRef runtime = write.find({NodeKind::Runtime, "runtime"});
+  if (!runtime)
+    return;
+  for (const NodeRef &local :
+       write.related(runtime, RelationKind::PendingPrompt)) {
+    if (!local || local->id().kind != NodeKind::Item)
+      continue;
+    const std::shared_ptr<const NodeState> state = write.state(local);
+    const auto found = state->fields.find("clientUserMessageId");
+    if (found == state->fields.end() || !found->second.asString() ||
+        *found->second.asString() != clientId)
+      continue;
+    std::array<NodeRef, 1> alias{local};
+    write.replaceRelated(authoritative, RelationKind::PromptMaterialization,
+                         alias);
+    write.setField(local, "dispatchState", Value("materialized"));
+    write.setStatus(local, NodeStatus::Completed);
+    break;
+  }
+}
+
 void updateLoadedHistoryItemCount(NodeGraph::WriteAccess &write,
                                   const NodeRef &thread) {
   if (!thread)
@@ -372,14 +415,16 @@ ApplyResult ProtocolUpdater::apply(DecodedMessage message) {
   if (!descriptor) {
     auto write = graph_->write();
     applyUnknown(write, message);
-    return ApplyResult{false, MessageDisposition::GraphUpdate, write.finish(),
-                       {}};
+    return ApplyResult{
+        false, MessageDisposition::GraphUpdate, write.finish(), {}};
   }
 
   if (descriptor->get().disposition ==
       MessageDisposition::IntentionallyStateNeutral) {
-    return ApplyResult{true, descriptor->get().disposition,
-                       GraphChange{graph_->publishedRevision(), {}, {}}, {}};
+    return ApplyResult{true,
+                       descriptor->get().disposition,
+                       GraphChange{graph_->publishedRevision(), {}, {}},
+                       {}};
   }
 
   auto write = graph_->write();
@@ -500,7 +545,8 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
   }
   if (message.expectedNode && message.expectedNode != operation)
     return {};
-  const std::shared_ptr<const NodeState> operationState = write.state(operation);
+  const std::shared_ptr<const NodeState> operationState =
+      write.state(operation);
   const Value *storedMethod = nullptr;
   if (const auto found = operationState->fields.find("method");
       found != operationState->fields.end())
@@ -880,13 +926,13 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
 void ProtocolUpdater::applyUnknown(NodeGraph::WriteAccess &write,
                                    const DecodedMessage &message) {
   const ProtocolDirection direction = catalogDirection(message.kind);
-  const std::string id = std::to_string(static_cast<unsigned>(direction)) +
-                         ":" + message.method;
+  const std::string id =
+      std::to_string(static_cast<unsigned>(direction)) + ":" + message.method;
   NodeState state;
   state.fields.emplace("method", Value(message.method));
   state.fields.emplace("payload", Value(message.payload));
-  state.fields.emplace(
-      "direction", Value(static_cast<std::uint64_t>(direction)));
+  state.fields.emplace("direction",
+                       Value(static_cast<std::uint64_t>(direction)));
   NodeRef unknown = write.upsert({NodeKind::UnknownProtocol, id});
   write.replaceState(unknown, std::move(state));
 }
@@ -937,7 +983,8 @@ NodeRef ProtocolUpdater::ingestThread(NodeGraph::WriteAccess &write,
       }
     }
     if (replaceTurns)
-      write.replaceChildren(thread, order);
+      write.replaceChildren(thread, mergeLocalTail(write, std::move(order),
+                                                   write.children(thread)));
     else if (!order.empty())
       write.replaceChildren(
           thread, mergeExistingTail(std::move(order), write.children(thread)));
@@ -968,7 +1015,8 @@ NodeRef ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess &write,
       }
     }
     if (replaceItems)
-      write.replaceChildren(turn, order);
+      write.replaceChildren(
+          turn, mergeLocalTail(write, std::move(order), write.children(turn)));
     else if (!order.empty())
       write.replaceChildren(
           turn, mergeExistingTail(std::move(order), write.children(turn)));
@@ -985,6 +1033,7 @@ NodeRef ProtocolUpdater::ingestItem(NodeGraph::WriteAccess &write,
     return {};
   NodeRef item = write.upsert({NodeKind::Item, id});
   mergeObject(write, item, object);
+  correlateLocalPrompt(write, item, object);
   if (turn) {
     write.setParent(turn, item);
     if (isUserMessage(object) &&
@@ -1082,9 +1131,9 @@ void ProtocolUpdater::removeThread(NodeGraph::WriteAccess &write,
   const auto collect = [&](const auto &self, const NodeRef &node) -> void {
     std::vector<NodeRef> contained = write.children(node);
     if (node->id().kind == NodeKind::Turn) {
-      contained = mergeExistingTail(
-          std::move(contained),
-          write.related(node, RelationKind::TurnRootItem));
+      contained =
+          mergeExistingTail(std::move(contained),
+                            write.related(node, RelationKind::TurnRootItem));
     }
     for (const NodeRef &child : contained) {
       if (!collected.insert(child.get()).second)
