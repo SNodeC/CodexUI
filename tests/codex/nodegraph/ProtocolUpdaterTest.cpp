@@ -518,6 +518,21 @@ void unknownAndNeutralAreIsolated() {
     }
     require(foundUnknown, "unknown alternative has a discoverable node");
   }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "future/newAlternative",
+       std::nullopt,
+       Value::Object{{"threadId", Value("known-thread")},
+                     {"future", Value("latest")}}}));
+  {
+    auto read = graph.tryRead();
+    std::size_t unknownCount = 0;
+    for (const NodeRef &node : read->orderedNodes())
+      unknownCount += node->id().kind == NodeKind::UnknownProtocol ? 1U : 0U;
+    require(unknownCount == 1 && read->state(known) == before,
+            "repeated unknown alternatives replace current fallback state "
+            "without creating a journal or mutating known state");
+  }
 }
 
 void lifecycleFactsAndRemovalPreserveThreadHierarchy() {

@@ -94,7 +94,6 @@ private:
   void removeThread(NodeGraph::WriteAccess &write, const NodeRef &thread);
 
   NodeGraph *graph_;
-  std::uint64_t unknownSequence_ = 0;
 };
 
 } // namespace codexui::nodegraph

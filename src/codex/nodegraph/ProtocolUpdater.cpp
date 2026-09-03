@@ -696,15 +696,16 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
 
 void ProtocolUpdater::applyUnknown(NodeGraph::WriteAccess &write,
                                    const DecodedMessage &message) {
-  const std::string id =
-      message.method + "#" + std::to_string(++unknownSequence_);
+  const ProtocolDirection direction = catalogDirection(message.kind);
+  const std::string id = std::to_string(static_cast<unsigned>(direction)) +
+                         ":" + message.method;
   NodeState state;
   state.fields.emplace("method", Value(message.method));
   state.fields.emplace("payload", Value(message.payload));
-  state.fields.emplace("direction", Value(static_cast<std::uint64_t>(
-                                        catalogDirection(message.kind))));
-  static_cast<void>(
-      write.upsert({NodeKind::UnknownProtocol, id}, std::move(state)));
+  state.fields.emplace(
+      "direction", Value(static_cast<std::uint64_t>(direction)));
+  NodeRef unknown = write.upsert({NodeKind::UnknownProtocol, id});
+  write.replaceState(unknown, std::move(state));
 }
 
 NodeRef ProtocolUpdater::ingestThread(NodeGraph::WriteAccess &write,
