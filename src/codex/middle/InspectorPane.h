@@ -64,6 +64,9 @@ struct InspectorPlanData final {
 };
 
 struct InspectorAgentRender final {
+  // Tagged scan identity keeps a child-thread key distinct from the rare
+  // source-item fallback while `id` remains the canonical value shown to Qt.
+  std::string logicalKey;
   std::string id;
   std::string status;
   std::string childThreadId;

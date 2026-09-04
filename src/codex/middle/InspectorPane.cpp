@@ -37,6 +37,7 @@
 #include <map>
 #include <ranges>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -572,6 +573,35 @@ bool terminalStatus(std::string_view status) {
          kind == StatusKind::Interrupted;
 }
 
+bool spawnAgentTool(std::string_view tool) {
+  return tool == "spawn_agent" || tool == "spawnAgent" ||
+         tool == "spawn_agents_on_csv" || tool == "spawnAgentsOnCsv";
+}
+
+std::string agentActivityStatus(const nodegraph::NodeState &state) {
+  const std::string kind = graphString(graphField(state, "kind"));
+  if (kind == "completed" || kind == "interrupted" || kind == "failed")
+    return kind;
+  if (kind == "interacted")
+    return {};
+  if (std::string status = graphString(graphField(state, "status"));
+      !status.empty())
+    return status;
+  const std::string publishedStatus = graphStatus(state);
+  if (terminalStatus(publishedStatus))
+    return publishedStatus;
+  if (kind == "started" || kind == "progress")
+    return "inProgress";
+  return publishedStatus;
+}
+
+void updateAgentStatus(std::string &current, std::string candidate) {
+  if (candidate.empty() ||
+      (terminalStatus(current) && isActiveStatus(candidate)))
+    return;
+  current = std::move(candidate);
+}
+
 std::string_view nodeKindName(nodegraph::NodeKind kind) {
   switch (kind) {
   case nodegraph::NodeKind::Runtime:
@@ -866,8 +896,30 @@ struct InspectorPane::AgentsGraphScan final {
     MainTurns,
     MainItems,
     ChildRelations,
+    SourceChildren,
+    PrepareChild,
     ChildTurns,
     ChildItems,
+  };
+
+  struct SourceChild final {
+    std::string key;
+    std::string id;
+    nodegraph::NodeRef thread;
+    std::string status;
+    std::string resultText;
+    bool hasCanonicalThreadId = true;
+  };
+
+  struct ChildFacts final {
+    std::string status;
+    std::string resultText;
+  };
+
+  struct LogicalAgent final {
+    std::size_t rowIndex = 0;
+    std::optional<std::size_t> renderIndex;
+    std::string status;
   };
 
   std::uint64_t revision = 0;
@@ -884,14 +936,27 @@ struct InspectorPane::AgentsGraphScan final {
   std::size_t itemCount = 0;
   nodegraph::NodeRef sourceItem;
   std::shared_ptr<const nodegraph::NodeState> sourceState;
+  bool sourceCanCreate = false;
+  std::vector<SourceChild> sourceChildren;
+  std::unordered_map<std::string, std::size_t> sourceChildIndexes;
+  std::vector<std::string> sourceReceiverIds;
+  std::size_t sourceFieldPhase = 0;
+  std::size_t receiverCursor = 0;
+  nodegraph::Value::Object::const_iterator agentStateCursor;
+  bool agentStateCursorInitialized = false;
+  std::size_t sourceChildCursor = 0;
   nodegraph::NodeRef childThread;
   std::shared_ptr<const nodegraph::NodeState> childState;
-  std::shared_ptr<const nodegraph::NodeState> latestResultState;
+  std::string childResultText;
   std::size_t relationCursor = 0;
   std::size_t relationCount = 0;
   std::size_t childTurnCursor = 0;
   nodegraph::NodeRef currentChildTurn;
   std::size_t childItemCursor = 0;
+  std::size_t logicalAgentCount = 0;
+  std::unordered_map<std::string, LogicalAgent> logicalAgents;
+  // Full child result text is retained only for the requested viewport rows.
+  std::unordered_map<std::string, ChildFacts> visibleChildFacts;
 };
 
 struct InspectorPane::RequestsGraphScan final {
@@ -1077,7 +1142,9 @@ QFrame *InspectorPane::agentFrame(const InspectorAgentRender &agent,
         makeLabel(identities.join(QStringLiteral("  |  ")), "meta"));
   layout->addWidget(content);
 
-  const std::string expansionKey = std::string(threadId) + '\n' + agent.id;
+  const std::string expansionKey =
+      std::string(threadId) + '\n' +
+      (agent.logicalKey.empty() ? agent.id : agent.logicalKey);
   const bool expanded = expandedAgents.contains(expansionKey);
   disclosure->setExpanded(expanded);
   content->setVisible(expanded);
@@ -2055,9 +2122,17 @@ void InspectorPane::runAgentsGraphScan() {
   const auto clearSource = [&scan] {
     scan.sourceItem.reset();
     scan.sourceState.reset();
+    scan.sourceCanCreate = false;
+    scan.sourceChildren.clear();
+    scan.sourceChildIndexes.clear();
+    scan.sourceReceiverIds.clear();
+    scan.sourceFieldPhase = 0;
+    scan.receiverCursor = 0;
+    scan.agentStateCursorInitialized = false;
+    scan.sourceChildCursor = 0;
     scan.childThread.reset();
     scan.childState.reset();
-    scan.latestResultState.reset();
+    scan.childResultText.clear();
     scan.relationCursor = 0;
     scan.relationCount = 0;
     scan.childTurnCursor = 0;
@@ -2065,53 +2140,100 @@ void InspectorPane::runAgentsGraphScan() {
     scan.childItemCursor = 0;
     scan.phase = AgentsGraphScan::Phase::MainItems;
   };
-  const auto appendSource = [&scan, &clearSource] {
-    const std::size_t rowIndex = scan.matchingCount++;
-    if (rowIndex < scan.snapshot.firstRow || rowIndex >= scan.renderEnd) {
-      clearSource();
+  const auto addSourceChild = [&scan](std::string id,
+                                      nodegraph::NodeRef thread = {},
+                                      std::string status = {},
+                                      std::string resultText = {}) {
+    if (id.empty())
+      return;
+    const std::string key = "child\n" + id;
+    const auto [found, inserted] =
+        scan.sourceChildIndexes.try_emplace(key, scan.sourceChildren.size());
+    if (inserted) {
+      scan.sourceChildren.push_back({key, std::move(id), std::move(thread),
+                                     std::move(status), std::move(resultText),
+                                     true});
       return;
     }
-    scan.dependencies.insert(scan.sourceItem.get());
-    if (scan.childThread)
-      scan.dependencies.insert(scan.childThread.get());
-    InspectorAgentRender row;
-    row.id = nodegraph::protocolCanonicalId(*scan.sourceState, scan.sourceItem);
-    row.status = graphStatus(*scan.sourceState);
-    row.agentPath = graphString(graphField(*scan.sourceState, "agentPath"));
-    row.tool = graphString(graphField(*scan.sourceState, "tool"));
-    row.model = graphString(graphField(*scan.sourceState, "model"));
-    row.reasoningEffort =
-        graphString(graphField(*scan.sourceState, "reasoningEffort"));
-    row.prompt = graphString(graphField(*scan.sourceState, "prompt"));
-    row.resultText = graphString(graphField(*scan.sourceState, "resultText"));
-    row.senderThreadId =
-        graphString(graphField(*scan.sourceState, "senderThreadId"));
-    if (const nodegraph::Value *receiversValue =
-            graphField(*scan.sourceState, "receiverThreadIds")) {
-      if (const nodegraph::Value::Array *receivers =
-              receiversValue->asArray()) {
-        row.receiverThreadIds.reserve(receivers->size());
-        for (const nodegraph::Value &receiver : *receivers) {
-          std::string id = graphString(&receiver);
-          if (!id.empty())
-            row.receiverThreadIds.emplace_back(std::move(id));
-        }
+    AgentsGraphScan::SourceChild &child = scan.sourceChildren.at(found->second);
+    if (thread)
+      child.thread = std::move(thread);
+    updateAgentStatus(child.status, std::move(status));
+    if (!resultText.empty())
+      child.resultText = std::move(resultText);
+  };
+  const auto mergeSource = [&scan](const AgentsGraphScan::SourceChild &child,
+                                   const AgentsGraphScan::ChildFacts &facts) {
+    auto found = scan.logicalAgents.find(child.key);
+    if (found == scan.logicalAgents.end()) {
+      if (!scan.sourceCanCreate)
+        return;
+      AgentsGraphScan::LogicalAgent logical;
+      logical.rowIndex = scan.logicalAgentCount++;
+      if (logical.rowIndex >= scan.snapshot.firstRow &&
+          logical.rowIndex < scan.renderEnd) {
+        logical.renderIndex = scan.snapshot.agents.size();
+        scan.snapshot.agents.push_back(InspectorAgentRender{});
+        scan.snapshot.agents.back().logicalKey = child.key;
+        scan.snapshot.agents.back().id = child.id;
       }
+      found = scan.logicalAgents.emplace(child.key, std::move(logical)).first;
     }
-    if (scan.childThread) {
-      row.childThreadId = scan.childThread->id().canonical;
-      const std::string childStatus = graphStatus(*scan.childState);
-      if (row.status.empty() || terminalStatus(childStatus))
-        row.status = childStatus;
-      if (scan.latestResultState)
-        row.resultText =
-            graphString(graphField(*scan.latestResultState, "text"));
-    } else {
-      row.childThreadId =
-          graphString(graphField(*scan.sourceState, "agentThreadId"));
+
+    AgentsGraphScan::LogicalAgent &logical = found->second;
+    const std::string type = graphString(graphField(*scan.sourceState, "type"));
+    if (type == "subAgentActivity" || scan.sourceCanCreate)
+      updateAgentStatus(logical.status, agentActivityStatus(*scan.sourceState));
+    updateAgentStatus(logical.status, child.status);
+    updateAgentStatus(logical.status, facts.status);
+    if (!logical.renderIndex)
+      return;
+
+    InspectorAgentRender &row = scan.snapshot.agents.at(*logical.renderIndex);
+    const auto update = [](std::string &target, std::string value) {
+      if (!value.empty())
+        target = std::move(value);
+    };
+    const bool sourceCarriesAgentFields =
+        type == "subAgentActivity" || scan.sourceCanCreate;
+    if (sourceCarriesAgentFields) {
+      update(row.agentPath,
+             graphString(graphField(*scan.sourceState, "agentPath")));
+      update(row.tool, graphString(graphField(*scan.sourceState, "tool")));
+      update(row.model, graphString(graphField(*scan.sourceState, "model")));
+      update(row.reasoningEffort,
+             graphString(graphField(*scan.sourceState, "reasoningEffort")));
+      update(row.prompt, graphString(graphField(*scan.sourceState, "prompt")));
+      update(row.resultText,
+             graphString(graphField(*scan.sourceState, "resultText")));
+      update(row.senderThreadId,
+             graphString(graphField(*scan.sourceState, "senderThreadId")));
+      if (!scan.sourceReceiverIds.empty())
+        row.receiverThreadIds = scan.sourceReceiverIds;
     }
-    scan.snapshot.agents.emplace_back(std::move(row));
-    clearSource();
+    if (child.hasCanonicalThreadId)
+      row.childThreadId = child.id;
+    row.status = logical.status;
+    update(row.resultText, child.resultText);
+    update(row.resultText, facts.resultText);
+  };
+  const auto finishChild = [&scan, &mergeSource] {
+    const AgentsGraphScan::SourceChild &child =
+        scan.sourceChildren.at(scan.sourceChildCursor);
+    AgentsGraphScan::ChildFacts facts{
+        scan.childState ? graphStatus(*scan.childState) : std::string{},
+        scan.childResultText};
+    if (child.hasCanonicalThreadId)
+      scan.visibleChildFacts.insert_or_assign(child.key, facts);
+    mergeSource(child, facts);
+    ++scan.sourceChildCursor;
+    scan.childThread.reset();
+    scan.childState.reset();
+    scan.childResultText.clear();
+    scan.childTurnCursor = 0;
+    scan.currentChildTurn.reset();
+    scan.childItemCursor = 0;
+    scan.phase = AgentsGraphScan::Phase::PrepareChild;
   };
 
   bool complete = false;
@@ -2150,14 +2272,14 @@ void InspectorPane::runAgentsGraphScan() {
       const std::string type = graphString(graphField(*state, "type"));
       if (type != "subAgentActivity" && type != "collabAgentToolCall")
         break;
-      if (type == "collabAgentToolCall") {
-        const std::string tool = graphString(graphField(*state, "tool"));
-        if (tool != "spawn_agent" && tool != "spawnAgent" &&
-            tool != "spawn_agents_on_csv" && tool != "spawnAgentsOnCsv")
-          break;
-      }
       scan.sourceItem = item;
       scan.sourceState = state;
+      scan.dependencies.insert(item.get());
+      scan.sourceCanCreate =
+          type == "subAgentActivity"
+              ? (graphString(graphField(*state, "kind")).empty() ||
+                 graphString(graphField(*state, "kind")) == "started")
+              : spawnAgentTool(graphString(graphField(*state, "tool")));
       scan.relationCursor = 0;
       scan.relationCount =
           read->relatedCount(item, nodegraph::RelationKind::AgentChildThread);
@@ -2165,33 +2287,126 @@ void InspectorPane::runAgentsGraphScan() {
       break;
     }
     case AgentsGraphScan::Phase::ChildRelations: {
-      if (!scan.childThread && scan.relationCursor < scan.relationCount) {
+      if (scan.relationCursor < scan.relationCount) {
         const nodegraph::NodeRef candidate = read->relatedAt(
             scan.sourceItem, nodegraph::RelationKind::AgentChildThread,
             scan.relationCursor++);
         ++work;
-        if (candidate && candidate->id().kind == nodegraph::NodeKind::Thread)
-          scan.childThread = candidate;
+        if (candidate && candidate->id().kind == nodegraph::NodeKind::Thread) {
+          addSourceChild(candidate->id().canonical, candidate);
+          scan.dependencies.insert(candidate.get());
+        }
         break;
       }
-      const std::string type =
-          graphString(graphField(*scan.sourceState, "type"));
-      if (type == "collabAgentToolCall" && !scan.childThread) {
+      scan.phase = AgentsGraphScan::Phase::SourceChildren;
+      break;
+    }
+    case AgentsGraphScan::Phase::SourceChildren: {
+      if (scan.sourceFieldPhase == 0) {
+        addSourceChild(
+            graphString(graphField(*scan.sourceState, "agentThreadId")));
+        scan.sourceFieldPhase = 1;
+        break;
+      }
+      if (scan.sourceFieldPhase == 1) {
+        const nodegraph::Value *value =
+            graphField(*scan.sourceState, "receiverThreadIds");
+        const nodegraph::Value::Array *receivers =
+            value ? value->asArray() : nullptr;
+        if (receivers && scan.receiverCursor < receivers->size()) {
+          std::string id = graphString(&receivers->at(scan.receiverCursor++));
+          if (!id.empty() && std::ranges::find(scan.sourceReceiverIds, id) ==
+                                 scan.sourceReceiverIds.end())
+            scan.sourceReceiverIds.push_back(id);
+          addSourceChild(std::move(id));
+          ++work;
+          break;
+        }
+        scan.sourceFieldPhase = 2;
+      }
+      if (scan.sourceFieldPhase == 2) {
+        const nodegraph::Value *value =
+            graphField(*scan.sourceState, "agentsStates");
+        const nodegraph::Value::Object *states =
+            value ? value->asObject() : nullptr;
+        if (states && !scan.agentStateCursorInitialized) {
+          scan.agentStateCursor = states->begin();
+          scan.agentStateCursorInitialized = true;
+        }
+        if (states && scan.agentStateCursor != states->end()) {
+          const auto &[id, value] = *scan.agentStateCursor++;
+          const nodegraph::Value::Object *state = value.asObject();
+          addSourceChild(id, {},
+                         state ? graphString(graphField(*state, "status"))
+                               : std::string{},
+                         state ? graphString(graphField(*state, "message"))
+                               : std::string{});
+          ++work;
+          break;
+        }
+        scan.sourceFieldPhase = 3;
+      }
+      if (scan.sourceChildren.empty() && scan.sourceCanCreate) {
+        std::string displayId =
+            nodegraph::protocolCanonicalId(*scan.sourceState, scan.sourceItem);
+        if (!displayId.empty()) {
+          std::string key = "source\n" + scan.sourceItem->id().canonical;
+          scan.sourceChildIndexes.emplace(key, 0);
+          scan.sourceChildren.push_back(
+              {std::move(key), std::move(displayId), {}, {}, {}, false});
+        }
+      }
+      if (scan.sourceChildren.empty()) {
         clearSource();
         break;
       }
-      if (!scan.childThread) {
-        appendSource();
+      scan.sourceChildCursor = 0;
+      scan.phase = AgentsGraphScan::Phase::PrepareChild;
+      break;
+    }
+    case AgentsGraphScan::Phase::PrepareChild: {
+      if (scan.sourceChildCursor == scan.sourceChildren.size()) {
+        clearSource();
         break;
       }
+      const AgentsGraphScan::SourceChild &child =
+          scan.sourceChildren.at(scan.sourceChildCursor);
+      mergeSource(child, {});
+      const auto logical = scan.logicalAgents.find(child.key);
+      if (logical == scan.logicalAgents.end() || !logical->second.renderIndex) {
+        ++scan.sourceChildCursor;
+        if (child.hasCanonicalThreadId)
+          ++work;
+        break;
+      }
+      if (child.hasCanonicalThreadId) {
+        if (const auto cached = scan.visibleChildFacts.find(child.key);
+            cached != scan.visibleChildFacts.end()) {
+          mergeSource(child, cached->second);
+          ++scan.sourceChildCursor;
+          ++work;
+          break;
+        }
+      }
+      scan.childThread = child.thread;
+      if (!scan.childThread && child.hasCanonicalThreadId) {
+        scan.childThread = read->find({nodegraph::NodeKind::Thread, child.id});
+        ++work;
+      }
+      if (!scan.childThread || read->removed(scan.childThread)) {
+        finishChild();
+        break;
+      }
+      scan.dependencies.insert(scan.childThread.get());
       scan.childState = read->state(scan.childThread);
       scan.childTurnCursor = read->childCount(scan.childThread);
+      ++work;
       scan.phase = AgentsGraphScan::Phase::ChildTurns;
       break;
     }
     case AgentsGraphScan::Phase::ChildTurns: {
       if (scan.childTurnCursor == 0) {
-        appendSource();
+        finishChild();
         break;
       }
       const nodegraph::NodeRef childTurn =
@@ -2199,6 +2414,7 @@ void InspectorPane::runAgentsGraphScan() {
       ++work;
       if (!childTurn || childTurn->id().kind != nodegraph::NodeKind::Turn)
         break;
+      scan.dependencies.insert(childTurn.get());
       scan.currentChildTurn = childTurn;
       scan.childItemCursor = read->childCount(childTurn);
       scan.phase = AgentsGraphScan::Phase::ChildItems;
@@ -2221,8 +2437,9 @@ void InspectorPane::runAgentsGraphScan() {
         break;
       if (graphString(graphField(*childItemState, "text")).empty())
         break;
-      scan.latestResultState = childItemState;
-      appendSource();
+      scan.dependencies.insert(childItem.get());
+      scan.childResultText = graphString(graphField(*childItemState, "text"));
+      finishChild();
       break;
     }
     }
@@ -2241,6 +2458,7 @@ void InspectorPane::runAgentsGraphScan() {
   activeGraphDependencies = std::move(finished->dependencies);
   graphDependenciesTab = 1;
   graphDependenciesInfoPage = InfoChoicePage;
+  finished->matchingCount = finished->logicalAgentCount;
   if (finished->matchingCount == 0) {
     finished->snapshot.firstRow = 0;
     finished->snapshot.totalRows = 1;

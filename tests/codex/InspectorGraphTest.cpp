@@ -17,10 +17,14 @@
 #include <QTabWidget>
 #include <QThread>
 #include <QTimer>
+#include <QToolButton>
 
+#include <algorithm>
+#include <array>
 #include <iostream>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace codexui::codex::middle {
 namespace {
@@ -56,6 +60,28 @@ QLabel *labelContaining(const QWidget &root, const QString &text) {
       return label;
   }
   return nullptr;
+}
+
+QFrame *agentFrame(QWidget &root, const QString &id) {
+  for (QFrame *frame :
+       root.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame")))
+    if (frame->property("nodeCanonicalId").toString() == id)
+      return frame;
+  return nullptr;
+}
+
+std::vector<QString> agentIdsInVisualOrder(QWidget &root) {
+  const QList<QFrame *> found =
+      root.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"));
+  std::vector<QFrame *> frames(found.cbegin(), found.cend());
+  std::ranges::sort(frames, [&root](const QFrame *left, const QFrame *right) {
+    return left->mapTo(&root, QPoint{}).y() < right->mapTo(&root, QPoint{}).y();
+  });
+  std::vector<QString> result;
+  result.reserve(frames.size());
+  for (const QFrame *frame : frames)
+    result.push_back(frame->property("nodeCanonicalId").toString());
+  return result;
 }
 
 void runOneQueuedPass() {
@@ -638,6 +664,351 @@ bool directGraphRenderingIsLazyAndCurrent() {
   return result;
 }
 
+bool agentsProjectionTracksLogicalChildren() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef owner;
+  nodegraph::NodeRef turn;
+  nodegraph::NodeRef childOne;
+  {
+    auto write = graph.write();
+    owner = write.upsert({nodegraph::NodeKind::Thread, "agents-owner"});
+    turn = write.upsert({nodegraph::NodeKind::Turn, "agents-turn"});
+    write.setParent(owner, turn);
+    childOne = write.upsert({nodegraph::NodeKind::Thread, "child-one"},
+                            {nodegraph::NodeStatus::Running, {}});
+    for (const std::string_view itemId :
+         {"child-one-start", "child-one-replay"}) {
+      nodegraph::NodeState state;
+      state.status = nodegraph::NodeStatus::Running;
+      state.fields = {{"type", nodegraph::Value("subAgentActivity")},
+                      {"kind", nodegraph::Value("started")},
+                      {"status", nodegraph::Value("inProgress")},
+                      {"agentThreadId", nodegraph::Value("child-one")},
+                      {"agentPath", nodegraph::Value("/root/child_one")},
+                      {"prompt", nodegraph::Value("Original child prompt")}};
+      const nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item, std::string(itemId)}, std::move(state));
+      write.setParent(turn, item);
+      write.relate(item, nodegraph::RelationKind::AgentChildThread, childOne);
+    }
+    static_cast<void>(write.finish());
+  }
+
+  InspectorPane pane;
+  pane.resize(440, 700);
+  pane.show();
+  pane.refresh(graph, owner);
+  pane.tabs()->setCurrentIndex(1);
+  spin(40);
+
+  bool result = expect(
+      pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"))
+                  .size() == 1 &&
+          agentFrame(pane, QStringLiteral("child-one")) &&
+          hasLabelContaining(*agentFrame(pane, QStringLiteral("child-one")),
+                             QStringLiteral("running")),
+      "start and replay records for one canonical child render one Agent row");
+
+  if (QFrame *frame = agentFrame(pane, QStringLiteral("child-one"))) {
+    if (QToolButton *disclosure = frame->findChild<QToolButton *>(
+            QStringLiteral("agentDisclosureButton")))
+      disclosure->click();
+  }
+  QFrame *expanded = agentFrame(pane, QStringLiteral("child-one"));
+  QWidget *expandedContent =
+      expanded
+          ? expanded->findChild<QWidget *>(QStringLiteral("agentCardContent"))
+          : nullptr;
+  result &= expect(expandedContent && expandedContent->isVisible(),
+                   "the existing Agent disclosure behavior remains available");
+
+  nodegraph::GraphChange progressed;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState progress;
+    progress.status = nodegraph::NodeStatus::Running;
+    progress.fields = {
+        {"type", nodegraph::Value("subAgentActivity")},
+        {"kind", nodegraph::Value("progress")},
+        {"status", nodegraph::Value("inProgress")},
+        {"agentThreadId", nodegraph::Value("child-one")},
+        {"agentPath", nodegraph::Value("/root/child_one_progress")}};
+    const nodegraph::NodeRef progressItem = write.upsert(
+        {nodegraph::NodeKind::Item, "child-one-progress"}, std::move(progress));
+    write.setParent(turn, progressItem);
+    write.relate(progressItem, nodegraph::RelationKind::AgentChildThread,
+                 childOne);
+
+    nodegraph::NodeState interacted;
+    interacted.status = nodegraph::NodeStatus::Completed;
+    interacted.fields = {
+        {"type", nodegraph::Value("subAgentActivity")},
+        {"kind", nodegraph::Value("interacted")},
+        {"status", nodegraph::Value("completed")},
+        {"agentThreadId", nodegraph::Value("child-one")},
+        {"agentPath", nodegraph::Value("/root/child_one_interacted")}};
+    const nodegraph::NodeRef interactedItem =
+        write.upsert({nodegraph::NodeKind::Item, "child-one-interacted"},
+                     std::move(interacted));
+    write.setParent(turn, interactedItem);
+    write.relate(interactedItem, nodegraph::RelationKind::AgentChildThread,
+                 childOne);
+    progressed = write.finish();
+  }
+  pane.graphChanged(notification(std::move(progressed)));
+  spin(40);
+  QFrame *first = agentFrame(pane, QStringLiteral("child-one"));
+  result &= expect(
+      first &&
+          pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"))
+                  .size() == 1 &&
+          hasLabelContaining(*first, QStringLiteral("child_one_interacted")) &&
+          hasLabelContaining(*first, QStringLiteral("running")) &&
+          first->findChild<QWidget *>(QStringLiteral("agentCardContent"))
+              ->isVisible(),
+      "progress and interacted records update the same expanded row without "
+      "terminalizing it");
+
+  nodegraph::GraphChange completed;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState state;
+    state.status = nodegraph::NodeStatus::Running;
+    state.fields = {{"type", nodegraph::Value("subAgentActivity")},
+                    {"kind", nodegraph::Value("completed")},
+                    {"status", nodegraph::Value("inProgress")},
+                    {"agentThreadId", nodegraph::Value("child-one")},
+                    {"resultText", nodegraph::Value("Logical child result")}};
+    const nodegraph::NodeRef item = write.upsert(
+        {nodegraph::NodeKind::Item, "child-one-completed"}, std::move(state));
+    write.setParent(turn, item);
+    write.relate(item, nodegraph::RelationKind::AgentChildThread, childOne);
+    completed = write.finish();
+  }
+  pane.graphChanged(notification(std::move(completed)));
+  spin(40);
+  first = agentFrame(pane, QStringLiteral("child-one"));
+  result &= expect(
+      first && hasLabelContaining(*first, QStringLiteral("completed")) &&
+          hasLabelContaining(*first, QStringLiteral("Logical child result")),
+      "completion semantics and result text update the existing child row");
+
+  nodegraph::GraphChange staleActive;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState state;
+    state.status = nodegraph::NodeStatus::Running;
+    state.fields = {{"type", nodegraph::Value("subAgentActivity")},
+                    {"kind", nodegraph::Value("started")},
+                    {"status", nodegraph::Value("inProgress")},
+                    {"agentThreadId", nodegraph::Value("child-one")}};
+    const nodegraph::NodeRef item =
+        write.upsert({nodegraph::NodeKind::Item, "child-one-stale-active"},
+                     std::move(state));
+    write.setParent(turn, item);
+    write.relate(item, nodegraph::RelationKind::AgentChildThread, childOne);
+    staleActive = write.finish();
+  }
+  pane.graphChanged(notification(std::move(staleActive)));
+  spin(40);
+  first = agentFrame(pane, QStringLiteral("child-one"));
+  result &=
+      expect(first && hasLabelContaining(*first, QStringLiteral("completed")) &&
+                 !hasLabelContaining(*first, QStringLiteral("running")),
+             "a stale active replay cannot reactivate a terminal Agent row");
+
+  nodegraph::GraphChange ignoredCollaboration;
+  {
+    auto write = graph.write();
+    const nodegraph::NodeRef unrelatedChild =
+        write.upsert({nodegraph::NodeKind::Thread, "not-spawned-child"});
+    nodegraph::NodeState state;
+    state.status = nodegraph::NodeStatus::Completed;
+    state.fields = {
+        {"type", nodegraph::Value("collabAgentToolCall")},
+        {"tool", nodegraph::Value("send_message")},
+        {"status", nodegraph::Value("completed")},
+        {"prompt", nodegraph::Value("Must not become an Agent")},
+        {"receiverThreadIds", nodegraph::Value(nodegraph::Value::Array{
+                                  nodegraph::Value("not-spawned-child")})}};
+    const nodegraph::NodeRef item =
+        write.upsert({nodegraph::NodeKind::Item, "non-spawn-collaboration"},
+                     std::move(state));
+    write.setParent(turn, item);
+    write.relate(item, nodegraph::RelationKind::AgentChildThread,
+                 unrelatedChild);
+    ignoredCollaboration = write.finish();
+  }
+  pane.graphChanged(notification(std::move(ignoredCollaboration)));
+  spin(40);
+  result &=
+      expect(pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"))
+                         .size() == 1 &&
+                 !agentFrame(pane, QStringLiteral("not-spawned-child")),
+             "a non-spawn collaboration call does not create an Agent row");
+
+  nodegraph::GraphChange interruptedAndSpawned;
+  {
+    auto write = graph.write();
+    const nodegraph::NodeRef childTwo =
+        write.upsert({nodegraph::NodeKind::Thread, "child-two"},
+                     {nodegraph::NodeStatus::Running, {}});
+    for (const auto &[itemId, kind] :
+         std::array<std::pair<std::string_view, std::string_view>, 2>{
+             std::pair{"child-two-start", "started"},
+             std::pair{"child-two-interrupt", "interrupted"}}) {
+      nodegraph::NodeState state;
+      state.status = nodegraph::NodeStatus::Running;
+      state.fields = {{"type", nodegraph::Value("subAgentActivity")},
+                      {"kind", nodegraph::Value(kind)},
+                      {"status", nodegraph::Value("inProgress")},
+                      {"agentThreadId", nodegraph::Value("child-two")}};
+      const nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item, std::string(itemId)}, std::move(state));
+      write.setParent(turn, item);
+      write.relate(item, nodegraph::RelationKind::AgentChildThread, childTwo);
+    }
+
+    const nodegraph::NodeRef childThree =
+        write.upsert({nodegraph::NodeKind::Thread, "child-three"},
+                     {nodegraph::NodeStatus::Running, {}});
+    const nodegraph::NodeRef childFour =
+        write.upsert({nodegraph::NodeKind::Thread, "child-four"},
+                     {nodegraph::NodeStatus::Running, {}});
+    nodegraph::NodeState spawn;
+    spawn.status = nodegraph::NodeStatus::Running;
+    spawn.fields = {
+        {"type", nodegraph::Value("collabAgentToolCall")},
+        {"tool", nodegraph::Value("spawn_agents_on_csv")},
+        {"status", nodegraph::Value("inProgress")},
+        {"prompt", nodegraph::Value("Original batch prompt")},
+        {"receiverThreadIds",
+         nodegraph::Value(nodegraph::Value::Array{
+             nodegraph::Value("child-three"), nodegraph::Value("child-four"),
+             nodegraph::Value("child-three")})}};
+    const nodegraph::NodeRef spawnItem = write.upsert(
+        {nodegraph::NodeKind::Item, "multi-child-spawn"}, std::move(spawn));
+    write.setParent(turn, spawnItem);
+    write.relate(spawnItem, nodegraph::RelationKind::AgentChildThread,
+                 childThree);
+    write.relate(spawnItem, nodegraph::RelationKind::AgentChildThread,
+                 childFour);
+    interruptedAndSpawned = write.finish();
+  }
+  pane.graphChanged(notification(std::move(interruptedAndSpawned)));
+  spin(50);
+  const std::vector<QString> firstOrder = agentIdsInVisualOrder(pane);
+  QFrame *second = agentFrame(pane, QStringLiteral("child-two"));
+  result &= expect(
+      firstOrder == std::vector<QString>{QStringLiteral("child-one"),
+                                         QStringLiteral("child-two"),
+                                         QStringLiteral("child-three"),
+                                         QStringLiteral("child-four")} &&
+          second && hasLabelContaining(*second, QStringLiteral("interrupted")),
+      "interruption updates its spawned child and a duplicate multi-spawn "
+      "receiver list creates one row per distinct child");
+
+  nodegraph::GraphChange stateUpdate;
+  {
+    auto write = graph.write();
+    nodegraph::Value::Object agentStates;
+    agentStates.emplace(
+        "child-three",
+        nodegraph::Value(nodegraph::Value::Object{
+            {"status", nodegraph::Value("completed")},
+            {"message", nodegraph::Value("Batch child finished")}}));
+    agentStates.emplace(
+        "never-spawned",
+        nodegraph::Value(nodegraph::Value::Object{
+            {"status", nodegraph::Value("completed")},
+            {"message", nodegraph::Value("Must not create a row")}}));
+    nodegraph::NodeState wait;
+    wait.status = nodegraph::NodeStatus::Completed;
+    wait.fields = {{"type", nodegraph::Value("collabAgentToolCall")},
+                   {"tool", nodegraph::Value("wait_agent")},
+                   {"status", nodegraph::Value("completed")},
+                   {"prompt", nodegraph::Value("Must not replace prompt")},
+                   {"agentsStates", nodegraph::Value(std::move(agentStates))}};
+    const nodegraph::NodeRef waitItem = write.upsert(
+        {nodegraph::NodeKind::Item, "multi-child-wait"}, std::move(wait));
+    write.setParent(turn, waitItem);
+    stateUpdate = write.finish();
+  }
+  pane.graphChanged(notification(std::move(stateUpdate)));
+  spin(50);
+  QFrame *third = agentFrame(pane, QStringLiteral("child-three"));
+  result &= expect(
+      agentIdsInVisualOrder(pane) == firstOrder && third &&
+          hasLabelContaining(*third, QStringLiteral("completed")) &&
+          hasLabelContaining(*third, QStringLiteral("Batch child finished")) &&
+          hasLabelContaining(*third, QStringLiteral("Original batch prompt")) &&
+          !hasLabelContaining(pane, QStringLiteral("never-spawned")) &&
+          !hasLabelContaining(pane, QStringLiteral("Must not replace prompt")),
+      "non-spawn agentsStates updates the matching row without creating, "
+      "reordering, or replacing spawn details");
+
+  nodegraph::NodeRef firstDuplicateSource;
+  nodegraph::NodeRef secondDuplicateSource;
+  nodegraph::GraphChange fallback;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState state;
+    state.status = nodegraph::NodeStatus::Running;
+    state.fields = {{"type", nodegraph::Value("subAgentActivity")},
+                    {"kind", nodegraph::Value("started")},
+                    {"agentPath", nodegraph::Value("/root/source_fallback")}};
+    const nodegraph::NodeRef item = write.upsert(
+        {nodegraph::NodeKind::Item, "child-three"}, std::move(state));
+    write.setParent(turn, item);
+
+    const nodegraph::NodeRef secondTurn =
+        write.upsert({nodegraph::NodeKind::Turn, "agents-second-turn"});
+    write.setParent(owner, secondTurn);
+    for (const auto &[canonical, parent] :
+         std::array<std::pair<std::string_view, nodegraph::NodeRef>, 2>{
+             std::pair{"agents-turn/duplicate-source", turn},
+             std::pair{"agents-second-turn/duplicate-source", secondTurn}}) {
+      nodegraph::NodeState duplicate;
+      duplicate.status = nodegraph::NodeStatus::Running;
+      duplicate.fields = {{"type", nodegraph::Value("subAgentActivity")},
+                          {"kind", nodegraph::Value("started")},
+                          {"protocolId", nodegraph::Value("duplicate-source")}};
+      nodegraph::NodeRef source =
+          write.upsert({nodegraph::NodeKind::Item, std::string(canonical)},
+                       std::move(duplicate));
+      write.setParent(parent, source);
+      if (!firstDuplicateSource)
+        firstDuplicateSource = std::move(source);
+      else
+        secondDuplicateSource = std::move(source);
+    }
+    fallback = write.finish();
+  }
+  pane.graphChanged(notification(std::move(fallback)));
+  spin(50);
+  const std::vector<QString> fallbackOrder = agentIdsInVisualOrder(pane);
+  result &= expect(
+      fallbackOrder.size() == 7 &&
+          std::ranges::count(fallbackOrder, QStringLiteral("child-three")) ==
+              2 &&
+          std::ranges::count(fallbackOrder,
+                             QStringLiteral("duplicate-source")) == 2 &&
+          fallbackOrder.front() == QStringLiteral("child-one") &&
+          fallbackOrder.back() == QStringLiteral("duplicate-source"),
+      "a source-item fallback is used only without a child ID and cannot "
+      "collide with an equal canonical child or turn-scoped source ID");
+  if (auto read = graph.tryRead()) {
+    result &= expect(
+        read->find(firstDuplicateSource->id()) == firstDuplicateSource &&
+            read->find(secondDuplicateSource->id()) == secondDuplicateSource,
+        "Agents projection deduplication retains every canonical "
+        "protocol Item in NodeGraph");
+  } else {
+    result &= expect(false, "the canonical protocol Items remain readable");
+  }
+  return result;
+}
+
 bool boundedProtocolHistoryAndGraphScanStayResponsive() {
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef thread;
@@ -903,6 +1274,7 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   const bool passed =
       codexui::codex::middle::directGraphRenderingIsLazyAndCurrent() &&
+      codexui::codex::middle::agentsProjectionTracksLogicalChildren() &&
       codexui::codex::middle::
           boundedProtocolHistoryAndGraphScanStayResponsive();
   if (passed)
