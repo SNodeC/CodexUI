@@ -946,6 +946,35 @@ void runtimeRefreshActionsHaveExactRequestCardinality(UnixBridge &bridge,
   runtime.drainNotifications();
 }
 
+void failedWakeUsesBoundedWorkerRecovery(UnixBridge &bridge,
+                                         RunningRuntime &runtime) {
+  RuntimeAction refresh{RuntimeActionKind::RefreshThreads};
+  refresh.payload = {{"limit", Value(std::uint64_t{9})}};
+  runtime.channels().failNextQtToWorkerWakeForTest();
+  const ChannelSendStatus status =
+      runtime.channels().sendRuntimeAction(refresh);
+  expect(status == ChannelSendStatus::AcceptedWakeFailed &&
+             deliveryGuaranteed(status) && wakeFailed(status) &&
+             runtime.channels().drainQtToWorkerWake().status ==
+                 EventFd::DrainStatus::Empty,
+         "a failed Qt wake leaves one non-retryable action for timeout "
+         "delivery");
+
+  std::optional<nlohmann::json> request = bridge.receiveAppServer(1500ms);
+  expect(request && request->value("method", std::string{}) == "thread/list" &&
+             request->at("params").value("limit", 0) == 9,
+         "the existing worker thread consumes an unwoken action within its "
+         "bounded recovery interval");
+  if (request)
+    expect(bridge.reply(*request,
+                        {{"data", nlohmann::json::array({listedThread()})},
+                         {"nextCursor", nullptr}}),
+           "the timeout-delivered action completes normally");
+  expect(!bridge.receiveAppServer(150ms),
+         "wake recovery never retries the non-idempotent queue payload");
+  runtime.drainNotifications();
+}
+
 void reverseInteractionsRespondOnceWithAuthoredData(UnixBridge &bridge,
                                                     RunningRuntime &runtime) {
   expect(bridge.appServerRequest("approval-runtime",
@@ -1540,6 +1569,7 @@ int main(int argc, char **argv) {
     codexui::codex::directNodeActionsUseOneCorrelatedRequest(bridge, runtime);
     codexui::codex::runtimeRefreshActionsHaveExactRequestCardinality(bridge,
                                                                      runtime);
+    codexui::codex::failedWakeUsesBoundedWorkerRecovery(bridge, runtime);
     codexui::codex::reverseInteractionsRespondOnceWithAuthoredData(bridge,
                                                                    runtime);
     codexui::codex::remainingReverseRequestFamiliesRoundTripExactlyOnce(
@@ -1549,7 +1579,13 @@ int main(int argc, char **argv) {
     codexui::codex::workerRevalidatesCurrentAuthorityAndRetainsResponses(
         bridge, runtime);
   }
+  runtime.channels().failNextQtToWorkerWakeForTest();
+  const auto shutdownStarted = std::chrono::steady_clock::now();
   runtime.stop();
+  codexui::codex::expect(
+      std::chrono::steady_clock::now() - shutdownStarted <
+          std::chrono::seconds(2),
+      "an unwoken ShutdownRequest is consumed without hanging worker join");
 
   if (codexui::codex::failures != 0) {
     std::cerr << codexui::codex::failures

@@ -21,6 +21,7 @@ namespace {
 
 using codexui::nodegraph::Attachment;
 using codexui::nodegraph::ChannelSendStatus;
+using codexui::nodegraph::deliveryGuaranteed;
 using codexui::nodegraph::EventFd;
 using codexui::nodegraph::GraphChange;
 using codexui::nodegraph::GraphChanged;
@@ -531,7 +532,7 @@ bool testWakeFailureAfterAdmission() {
   NodeGraph graph;
   const NodeRef target =
       insertNode(graph, id(NodeKind::Thread, "thread/closed-wake"));
-  channels.close();
+  channels.failNextQtToWorkerWakeForTest();
 
   NodeAction action = richPromptAction(target);
   const NodeAction expected = action;
@@ -539,13 +540,15 @@ bool testWakeFailureAfterAdmission() {
 
   bool passed = true;
   passed &= expect(status == ChannelSendStatus::AcceptedWakeFailed &&
-                       messageAdmitted(status) && wakeFailed(status) &&
+                       messageAdmitted(status) && deliveryGuaranteed(status) &&
+                       wakeFailed(status) &&
                        channels.qtToWorkerSizeApprox() == 1 && !action.target &&
                        action.promptText.empty() && action.attachments.empty(),
-                   "closed wake reports admitted payload as non-retryable");
+                   "failed wake reports one admitted payload for bounded "
+                   "fallback delivery");
   passed &= expect(channels.drainQtToWorkerWake().status ==
-                       EventFd::DrainStatus::Closed,
-                   "closed channel wake cannot be drained");
+                       EventFd::DrainStatus::Empty,
+                   "injected wake failure leaves the eventfd unsignaled");
 
   QtToWorkerMessage message;
   passed &=
@@ -554,6 +557,46 @@ bool testWakeFailureAfterAdmission() {
                  std::get<NodeAction>(message) == expected &&
                  !channels.tryReceiveForWorker(message),
              "wake failure leaves exactly one admitted command in the mailbox");
+
+  ThreadChannels shutdownChannels;
+  shutdownChannels.failNextQtToWorkerWakeForTest();
+  ShutdownRequest shutdown;
+  const ChannelSendStatus shutdownStatus =
+      shutdownChannels.sendShutdown(shutdown);
+  QtToWorkerMessage shutdownMessage;
+  passed &= expect(
+      shutdownStatus == ChannelSendStatus::AcceptedWakeFailed &&
+          deliveryGuaranteed(shutdownStatus) &&
+          shutdownChannels.drainQtToWorkerWake().status ==
+              EventFd::DrainStatus::Empty &&
+          shutdownChannels.tryReceiveForWorker(shutdownMessage) &&
+          std::holds_alternative<ShutdownRequest>(shutdownMessage),
+      "an unwoken shutdown remains available to the worker timeout drain");
+
+  ThreadChannels workerChannels;
+  workerChannels.failNextWorkerToQtWakeForTest();
+  UiEffect effect{UiEffectKind::ShowNotice, {}, "fallback notice", {}};
+  const ChannelSendStatus workerStatus = workerChannels.sendUiEffect(effect);
+  WorkerToQtMessage workerMessage;
+  passed &=
+      expect(workerStatus == ChannelSendStatus::AcceptedWakeFailed &&
+                 deliveryGuaranteed(workerStatus) && wakeFailed(workerStatus) &&
+                 workerChannels.drainWorkerToQtWake().status ==
+                     EventFd::DrainStatus::Empty &&
+                 workerChannels.tryReceiveForQt(workerMessage) &&
+                 std::holds_alternative<UiEffect>(workerMessage),
+             "Qt can recover one admitted worker message after a failed wake");
+
+  ThreadChannels closedChannels;
+  closedChannels.close();
+  NodeAction rejected = richPromptAction(target);
+  const NodeAction retained = rejected;
+  passed &= expect(
+      closedChannels.sendNodeAction(rejected) == ChannelSendStatus::QueueFull &&
+          !messageAdmitted(ChannelSendStatus::QueueFull) &&
+          !deliveryGuaranteed(ChannelSendStatus::QueueFull) &&
+          rejected == retained && closedChannels.qtToWorkerSizeApprox() == 0,
+      "a closed channel rejects without consuming user-owned payload");
   return passed;
 }
 

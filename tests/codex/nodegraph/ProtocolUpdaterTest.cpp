@@ -4,6 +4,7 @@
 #include "codex/nodegraph/ProtocolCatalog.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -384,6 +385,84 @@ void streamedTextIsBoundedAndReportsOmission() {
             "authoritative completion replaces the stream tail and clears its "
             "obsolete truncation notice");
   }
+}
+
+void longStreamingDeltasStayBoundedInStateAndCost() {
+  constexpr std::size_t MaximumRetainedBytes = 256 * 1024;
+  constexpr std::size_t WarmupDeltas = 4097;
+  constexpr std::size_t FirstMeasuredDeltas = 1024;
+  constexpr std::size_t SecondMeasuredDeltas = 2048;
+  const std::string chunk(64, 's');
+
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{
+           {"thread",
+            Value(Value::Object{
+                {"id", Value("long-stream-thread")},
+                {"turns",
+                 Value(Value::Array{Value(Value::Object{
+                     {"id", Value("long-stream-turn")},
+                     {"items",
+                      Value(Value::Array{Value(Value::Object{
+                          {"id", Value("long-stream-item")},
+                          {"type", Value("agentMessage")}})})}})})}})}}}));
+  const std::uint64_t initialRevision = graph.publishedRevision();
+
+  const auto append = [&](std::size_t count) {
+    const auto started = std::chrono::steady_clock::now();
+    for (std::size_t index = 0; index < count; ++index)
+      static_cast<void>(updater.apply(
+          {DecodedMessageKind::ServerNotification, "item/agentMessage/delta",
+           std::nullopt,
+           Value::Object{{"threadId", Value("long-stream-thread")},
+                         {"turnId", Value("long-stream-turn")},
+                         {"itemId", Value("long-stream-item")},
+                         {"delta", Value(chunk)}}}));
+    return std::chrono::steady_clock::now() - started;
+  };
+
+  static_cast<void>(append(WarmupDeltas));
+  const auto firstElapsed = append(FirstMeasuredDeltas);
+  const auto secondElapsed = append(SecondMeasuredDeltas);
+  const auto allowance = firstElapsed * 3 + std::chrono::milliseconds(25);
+
+  auto read = graph.tryRead();
+  const NodeRef item = read ? findItem(*read, "long-stream-thread",
+                                       "long-stream-turn", "long-stream-item")
+                            : NodeRef{};
+  const auto state = item ? read->state(item) : nullptr;
+  const Value *textValue = field(state, "text");
+  const std::string *text = textValue ? textValue->asString() : nullptr;
+  const Value *retentionValue = field(state, "textRetention");
+  const Value *entry = objectField(
+      retentionValue ? retentionValue->asObject() : nullptr, "text");
+  const Value *discarded =
+      objectField(entry ? entry->asObject() : nullptr, "discardedBytes");
+  const std::uint64_t totalBytes =
+      static_cast<std::uint64_t>(WarmupDeltas + FirstMeasuredDeltas +
+                                 SecondMeasuredDeltas) *
+      chunk.size();
+  require(
+      text && text->size() <= MaximumRetainedBytes && discarded &&
+          discarded->asUInt64() &&
+          *discarded->asUInt64() + text->size() == totalBytes &&
+          graph.publishedRevision() == initialRevision + WarmupDeltas +
+                                           FirstMeasuredDeltas +
+                                           SecondMeasuredDeltas &&
+          secondElapsed <= allowance,
+      "long streaming publishes once per input with bounded retained text and "
+      "approximately linear steady-state cost");
+  std::cout
+      << "long-stream steady-state ns: "
+      << std::chrono::duration_cast<std::chrono::nanoseconds>(firstElapsed)
+             .count()
+      << " / "
+      << std::chrono::duration_cast<std::chrono::nanoseconds>(secondElapsed)
+             .count()
+      << '\n';
 }
 
 void scopedProviderIdentityCannotCrossParents() {
@@ -3061,6 +3140,57 @@ void deletionUnlinksWholeGraph() {
   }
 }
 
+void largeThreadDeletionIsNearLinear() {
+  const auto measure = [](std::size_t itemCount) {
+    NodeGraph graph;
+    ProtocolUpdater updater(graph);
+    {
+      auto write = graph.write();
+      NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
+      NodeRef thread = write.upsert({NodeKind::Thread, "bulk-delete-thread"});
+      NodeRef turn = write.upsert(
+          scopedTurnNodeId("bulk-delete-thread", "bulk-delete-turn"));
+      write.setParent(thread, turn);
+      write.relate(runtime, RelationKind::RootThread, thread);
+      for (std::size_t index = 0; index < itemCount; ++index) {
+        NodeState state;
+        state.fields = {{"type", Value("agentMessage")},
+                        {"protocolId", Value(std::to_string(index))}};
+        NodeRef item =
+            write.upsert(scopedItemNodeId(turn->id(), std::to_string(index)),
+                         std::move(state));
+        write.setParent(turn, item);
+      }
+      static_cast<void>(write.finish());
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    const ApplyResult result = updater.apply(
+        {DecodedMessageKind::ServerNotification, "thread/deleted", std::nullopt,
+         Value::Object{{"threadId", Value("bulk-delete-thread")}}});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    auto read = graph.tryRead();
+    const bool valid = result.change.removed.size() == itemCount + 2 && read &&
+                       !read->find({NodeKind::Thread, "bulk-delete-thread"}) &&
+                       read->retiredCount() == itemCount + 2;
+    return std::pair{valid, elapsed};
+  };
+
+  const auto [smallValid, smallElapsed] = measure(1500);
+  const auto [largeValid, largeElapsed] = measure(3000);
+  require(smallValid && largeValid &&
+              largeElapsed <= smallElapsed * 3 + std::chrono::milliseconds(25),
+          "large canonical thread deletion scales approximately linearly");
+  std::cout
+      << "thread-delete ns (1500 / 3000 items): "
+      << std::chrono::duration_cast<std::chrono::nanoseconds>(smallElapsed)
+             .count()
+      << " / "
+      << std::chrono::duration_cast<std::chrono::nanoseconds>(largeElapsed)
+             .count()
+      << '\n';
+}
+
 void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -3431,6 +3561,7 @@ int main() {
   everyKnownMethodDispatches();
   nestedEntitiesAndStreamsStayCurrent();
   streamedTextIsBoundedAndReportsOmission();
+  longStreamingDeltasStayBoundedInStateAndCost();
   activeTurnRelationTracksLifecycle();
   effectiveThreadSettingsConvergeAcrossWireShapes();
   threadItemPagesMaintainScopedContainmentAndOrder();
@@ -3457,6 +3588,7 @@ int main() {
   unknownAndNeutralAreIsolated();
   lifecycleFactsAndRemovalPreserveThreadHierarchy();
   deletionUnlinksWholeGraph();
+  largeThreadDeletionIsNearLinear();
   correlatedThreadReadsPreserveOnlyInterveningLiveState();
   authoritativeReplacementRetiresItemsAndPreservesLocalTail();
   rollbackAndRevertReplaceAuthoritativeHistory();

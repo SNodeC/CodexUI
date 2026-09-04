@@ -30,6 +30,17 @@ FrontendSession::FrontendSession(Configuration &configuration)
       channels.workerToQtEventFd(), QSocketNotifier::Read);
   QObject::connect(workerNotifier.get(), &QSocketNotifier::activated,
                    workerNotifier.get(), [this] { drainWorkerMessages(); });
+  workerWakeRecoveryTimer = std::make_unique<QTimer>();
+  workerWakeRecoveryTimer->setInterval(100);
+  QObject::connect(workerWakeRecoveryTimer.get(), &QTimer::timeout,
+                   workerWakeRecoveryTimer.get(), [this] {
+                     if (!stopping &&
+                         (channels.workerToQtSizeApprox() != 0 ||
+                          channels.rescanPending() ||
+                          workerFinished.load(std::memory_order_acquire)))
+                       drainWorkerMessages();
+                   });
+  workerWakeRecoveryTimer->start();
 }
 
 FrontendSession::~FrontendSession() { shutdown(); }
@@ -57,13 +68,15 @@ void FrontendSession::shutdown() {
 
   if (workerNotifier)
     workerNotifier->setEnabled(false);
+  if (workerWakeRecoveryTimer)
+    workerWakeRecoveryTimer->stop();
 
   if (started && !workerFinished.load(std::memory_order_acquire)) {
     nodegraph::ShutdownRequest request;
     while (!workerFinished.load(std::memory_order_acquire)) {
       const nodegraph::ChannelSendStatus status =
           channels.sendShutdown(request);
-      if (nodegraph::messageAdmitted(status))
+      if (nodegraph::deliveryGuaranteed(status))
         break;
       // The bounded queue preserves FIFO ordering. The worker is its sole
       // consumer, so yielding until it admits shutdown cannot duplicate or
@@ -74,6 +87,7 @@ void FrontendSession::shutdown() {
 
   wait();
   workerNotifier.reset();
+  workerWakeRecoveryTimer.reset();
   channels.close();
 }
 
@@ -299,7 +313,7 @@ void FrontendSession::flushDetachAcknowledgements() {
     action.target = pendingDetachAcknowledgements.back();
     action.kind = nodegraph::NodeActionKind::UiDetached;
     const nodegraph::ChannelSendStatus status = channels.sendNodeAction(action);
-    if (!nodegraph::messageAdmitted(status))
+    if (!nodegraph::deliveryGuaranteed(status))
       return;
     pendingDetachAcknowledgements.pop_back();
     pendingDetachAcknowledgementIndex.erase(target);

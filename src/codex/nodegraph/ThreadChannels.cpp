@@ -11,13 +11,18 @@ bool messageAdmitted(ChannelSendStatus status) noexcept {
   return status != ChannelSendStatus::QueueFull;
 }
 
+bool deliveryGuaranteed(ChannelSendStatus status) noexcept {
+  return messageAdmitted(status);
+}
+
 bool wakeFailed(ChannelSendStatus status) noexcept {
   return status == ChannelSendStatus::AcceptedWakeFailed ||
          status == ChannelSendStatus::CoalescedRescanWakeFailed;
 }
 
 bool ThreadChannels::valid() const noexcept {
-  return workerToQtWake_.valid() && qtToWorkerWake_.valid();
+  return !closed_.load(std::memory_order_acquire) && workerToQtWake_.valid() &&
+         qtToWorkerWake_.valid();
 }
 
 int ThreadChannels::workerToQtEventFd() const noexcept {
@@ -37,6 +42,8 @@ int ThreadChannels::qtToWorkerCreationError() const noexcept {
 }
 
 ChannelSendStatus ThreadChannels::sendGraphChanged(GraphChange change) {
+  if (closed_.load(std::memory_order_acquire))
+    return ChannelSendStatus::QueueFull;
   if (change.empty())
     return ChannelSendStatus::Accepted;
   const std::uint64_t revision = change.revision;
@@ -62,6 +69,8 @@ ChannelSendStatus ThreadChannels::sendGraphChanged(GraphChange change) {
 }
 
 ChannelSendStatus ThreadChannels::sendUiEffect(UiEffect &effect) {
+  if (closed_.load(std::memory_order_acquire))
+    return ChannelSendStatus::QueueFull;
   const std::size_t limit = effect.kind == UiEffectKind::SelectThread
                                 ? WorkerToQtCapacity - 1
                                 : WorkerToQtCapacity - WorkerToQtReservedSlots;
@@ -73,6 +82,8 @@ ChannelSendStatus ThreadChannels::sendUiEffect(UiEffect &effect) {
 }
 
 ChannelSendStatus ThreadChannels::sendWorkerStopped(WorkerStopped &stopped) {
+  if (closed_.load(std::memory_order_acquire))
+    return ChannelSendStatus::QueueFull;
   if (!workerToQt_.tryEmplace(std::in_place_type<WorkerStopped>,
                               std::move(stopped)))
     return ChannelSendStatus::QueueFull;
@@ -100,6 +111,8 @@ bool ThreadChannels::tryReceiveForQt(WorkerToQtMessage &message) {
 }
 
 ChannelSendStatus ThreadChannels::sendNodeAction(NodeAction &action) {
+  if (closed_.load(std::memory_order_acquire))
+    return ChannelSendStatus::QueueFull;
   if (qtToWorker_.sizeApprox() >= QtToWorkerCapacity - 1)
     return ChannelSendStatus::QueueFull;
   if (!qtToWorker_.tryEmplace(std::in_place_type<NodeAction>,
@@ -109,6 +122,8 @@ ChannelSendStatus ThreadChannels::sendNodeAction(NodeAction &action) {
 }
 
 ChannelSendStatus ThreadChannels::sendRuntimeAction(RuntimeAction &action) {
+  if (closed_.load(std::memory_order_acquire))
+    return ChannelSendStatus::QueueFull;
   if (qtToWorker_.sizeApprox() >= QtToWorkerCapacity - 1)
     return ChannelSendStatus::QueueFull;
   if (!qtToWorker_.tryEmplace(std::in_place_type<RuntimeAction>,
@@ -118,6 +133,8 @@ ChannelSendStatus ThreadChannels::sendRuntimeAction(RuntimeAction &action) {
 }
 
 ChannelSendStatus ThreadChannels::sendShutdown(ShutdownRequest &request) {
+  if (closed_.load(std::memory_order_acquire))
+    return ChannelSendStatus::QueueFull;
   if (!qtToWorker_.tryEmplace(std::in_place_type<ShutdownRequest>,
                               std::move(request)))
     return ChannelSendStatus::QueueFull;
@@ -144,13 +161,25 @@ bool ThreadChannels::rescanPending() const noexcept {
   return rescanRevision_.load(std::memory_order_acquire) != 0;
 }
 
+void ThreadChannels::failNextWorkerToQtWakeForTest() noexcept {
+  failNextWorkerToQtWake_.store(true, std::memory_order_release);
+}
+
+void ThreadChannels::failNextQtToWorkerWakeForTest() noexcept {
+  failNextQtToWorkerWake_.store(true, std::memory_order_release);
+}
+
 void ThreadChannels::close() noexcept {
+  closed_.store(true, std::memory_order_release);
   workerToQtWake_.close();
   qtToWorkerWake_.close();
 }
 
 ChannelSendStatus
 ThreadChannels::wakeWorkerToQt(bool coalesced) const noexcept {
+  if (failNextWorkerToQtWake_.exchange(false, std::memory_order_acq_rel))
+    return coalesced ? ChannelSendStatus::CoalescedRescanWakeFailed
+                     : ChannelSendStatus::AcceptedWakeFailed;
   const EventFd::NotifyResult wake = workerToQtWake_.notify();
   if (wake.accepted())
     return coalesced ? ChannelSendStatus::CoalescedRescan
@@ -160,6 +189,8 @@ ThreadChannels::wakeWorkerToQt(bool coalesced) const noexcept {
 }
 
 ChannelSendStatus ThreadChannels::wakeQtToWorker() const noexcept {
+  if (failNextQtToWorkerWake_.exchange(false, std::memory_order_acq_rel))
+    return ChannelSendStatus::AcceptedWakeFailed;
   return qtToWorkerWake_.notify().accepted()
              ? ChannelSendStatus::Accepted
              : ChannelSendStatus::AcceptedWakeFailed;

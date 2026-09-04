@@ -39,8 +39,8 @@ WorkerMailboxReceiver::create(nodegraph::ThreadChannels &channels,
 WorkerMailboxReceiver::WorkerMailboxReceiver(
     nodegraph::ThreadChannels &channels, MessageHandler onMessage,
     FailureHandler onFailure)
-    : core::eventreceiver::ReadEventReceiver("CodexUI worker mailbox",
-                                             makeLogScope(), TIMEOUT::DISABLE),
+    : core::eventreceiver::ReadEventReceiver(
+          "CodexUI worker mailbox", makeLogScope(), utils::Timeval(0.1)),
       channels_(channels), onMessage_(std::move(onMessage)),
       onFailure_(std::move(onFailure)),
       deferredReceiver_(std::make_shared<WorkerMailboxReceiver *>(this)) {}
@@ -56,7 +56,15 @@ void WorkerMailboxReceiver::close() {
     ReadEventReceiver::disable();
 }
 
-void WorkerMailboxReceiver::readEvent() { consumeWakeAndMessages(); }
+void WorkerMailboxReceiver::readEvent() { consumeWakeAndMessages(true); }
+
+void WorkerMailboxReceiver::readTimeout() {
+  // The eventfd is the normal notification path. This bounded timeout is only
+  // a recovery path for a payload admitted immediately before a failed wake,
+  // including ShutdownRequest, so the worker cannot sleep indefinitely.
+  if (channels_.qtToWorkerSizeApprox() != 0)
+    consumeWakeAndMessages(false);
+}
 
 void WorkerMailboxReceiver::unobservedEvent() {
   invalidateScheduledDrain();
@@ -71,14 +79,17 @@ void WorkerMailboxReceiver::shutdownEvent(
   close();
 }
 
-void WorkerMailboxReceiver::consumeWakeAndMessages() {
+void WorkerMailboxReceiver::consumeWakeAndMessages(bool drainWake) {
   if (closing_)
     return;
 
-  const nodegraph::EventFd::DrainResult wake = channels_.drainQtToWorkerWake();
-  if (!wake.accepted()) {
-    fail("Qt-to-worker eventfd failed while draining");
-    return;
+  if (drainWake) {
+    const nodegraph::EventFd::DrainResult wake =
+        channels_.drainQtToWorkerWake();
+    if (!wake.accepted()) {
+      fail("Qt-to-worker eventfd failed while draining");
+      return;
+    }
   }
 
   std::size_t consumed = 0;
@@ -114,7 +125,7 @@ void WorkerMailboxReceiver::scheduleNextDrain() {
       if (!receiver || *receiver == nullptr)
         return;
       (*receiver)->drainScheduled_ = false;
-      (*receiver)->consumeWakeAndMessages();
+      (*receiver)->consumeWakeAndMessages(false);
     });
   } catch (...) {
     drainScheduled_ = false;

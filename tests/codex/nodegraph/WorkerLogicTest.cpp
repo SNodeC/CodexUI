@@ -1985,15 +1985,11 @@ void workerStoppedDeliveryIsExplicit() {
   closedChannels.close();
   const ChannelSendStatus failedWake =
       closedLogic.sendWorkerStopped("wake already closed");
-  WorkerToQtMessage admittedMessage;
   require(
-      failedWake == ChannelSendStatus::AcceptedWakeFailed &&
-          messageAdmitted(failedWake) && wakeFailed(failedWake) &&
-          closedChannels.tryReceiveForQt(admittedMessage) &&
-          std::holds_alternative<WorkerStopped>(admittedMessage) &&
-          std::get<WorkerStopped>(admittedMessage).reason ==
-              "wake already closed",
-      "WorkerStopped reports an admitted-but-failed wake without hiding it");
+      failedWake == ChannelSendStatus::QueueFull &&
+          !messageAdmitted(failedWake) && !wakeFailed(failedWake) &&
+          closedChannels.workerToQtSizeApprox() == 0,
+      "WorkerStopped rejects cleanly once both channel directions are closed");
 }
 
 } // namespace

@@ -248,7 +248,7 @@ WorkerApplyResult WorkerLogic::applyDetailed(DecodedMessage message) {
   if (noticeEffect)
     effectStatus = channels_.sendUiEffect(*noticeEffect);
   ChannelSendStatus graphStatus = publish(std::move(change));
-  if (wakeFailed(graphStatus) && !wakeFailed(effectStatus) &&
+  if (noticeEffect && wakeFailed(graphStatus) && !wakeFailed(effectStatus) &&
       effectStatus != ChannelSendStatus::QueueFull)
     graphStatus = effectStatus;
   return {graphStatus, std::move(primary)};
@@ -1348,10 +1348,12 @@ void WorkerLogic::resetProviderDerived(NodeGraph::WriteAccess &write,
   // Every provider-derived node, including the former canonical owners of a
   // recovery prompt, is retired. Reused provider ids therefore allocate fresh
   // NodeRefs and cannot inherit local recovery fields.
-  for (const NodeRef &node : nodes) {
+  std::vector<NodeRef> removed;
+  removed.reserve(nodes.size());
+  for (const NodeRef &node : nodes)
     if (!retained.contains(node.get()))
-      write.remove(node);
-  }
+      removed.emplace_back(node);
+  write.removeMany(removed);
   write.replaceRelated(runtime, RelationKind::RootThread, recoveryThreads);
   promptQueues_.clear();
   promptInFlight_.clear();

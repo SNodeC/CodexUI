@@ -302,9 +302,9 @@ void appendBoundedStringField(NodeGraph::WriteAccess &write,
                               std::string_view suffix) {
   NodeState next = *write.state(node);
   Value &stored = next.fields[field];
-  std::string existing;
-  if (const std::string *current = stored.asString())
-    existing = *current;
+  if (!stored.isString())
+    stored = std::string{};
+  std::string &existing = *stored.asString();
 
   std::size_t discarded = 0;
   if (suffix.size() > MaximumRetainedStreamBytes) {
@@ -318,8 +318,7 @@ void appendBoundedStringField(NodeGraph::WriteAccess &write,
       existing.erase(0, discarded);
     }
   }
-  stored = Value(std::move(existing));
-  const std::size_t retained = stored.asString()->size();
+  const std::size_t retained = existing.size();
   if (discarded != 0 || hasTextRetention(next, field))
     updateTextRetention(next, field, retained, discarded);
   write.replaceState(node, std::move(next));
@@ -354,10 +353,25 @@ NodeRef ensureTurn(NodeGraph::WriteAccess &write, const NodeRef &thread,
                    std::string_view rawTurnId) {
   if (!thread || thread->id().kind != NodeKind::Thread || rawTurnId.empty())
     return {};
-  NodeRef turn =
-      write.upsert(scopedTurnNodeId(thread->id().canonical, rawTurnId));
-  write.setField(turn, "protocolId", Value(rawTurnId));
-  write.setField(turn, "protocolThreadId", Value(thread->id().canonical));
+  NodeId id = scopedTurnNodeId(thread->id().canonical, rawTurnId);
+  NodeRef turn = write.find(id);
+  if (turn) {
+    const std::shared_ptr<const NodeState> current = write.state(turn);
+    if (canonicalValue(member(current->fields, "protocolId")) != rawTurnId ||
+        canonicalValue(member(current->fields, "protocolThreadId")) !=
+            thread->id().canonical) {
+      NodeState next = *current;
+      next.fields.insert_or_assign("protocolId", Value(rawTurnId));
+      next.fields.insert_or_assign("protocolThreadId",
+                                   Value(thread->id().canonical));
+      write.replaceState(turn, std::move(next));
+    }
+  } else {
+    NodeState next;
+    next.fields = {{"protocolId", Value(rawTurnId)},
+                   {"protocolThreadId", Value(thread->id().canonical)}};
+    turn = write.upsert(std::move(id), std::move(next));
+  }
   write.setParent(thread, turn);
   return turn;
 }
@@ -441,12 +455,35 @@ NodeRef ensureItem(NodeGraph::WriteAccess &write, const NodeRef &turn,
                    std::string_view rawItemId) {
   if (!turn || turn->id().kind != NodeKind::Turn || rawItemId.empty())
     return {};
-  NodeRef item = write.upsert(scopedItemNodeId(turn->id(), rawItemId));
-  write.setField(item, "protocolId", Value(rawItemId));
-  write.setField(item, "protocolTurnId",
-                 Value(retainedProtocolId(write, turn)));
-  if (NodeRef thread = write.parent(turn))
-    write.setField(item, "protocolThreadId", Value(thread->id().canonical));
+  NodeId id = scopedItemNodeId(turn->id(), rawItemId);
+  NodeRef item = write.find(id);
+  const std::string turnId = retainedProtocolId(write, turn);
+  const NodeRef thread = write.parent(turn);
+  const std::string threadId = thread ? thread->id().canonical : std::string{};
+  if (item) {
+    const std::shared_ptr<const NodeState> current = write.state(item);
+    const bool protocolChanged =
+        canonicalValue(member(current->fields, "protocolId")) != rawItemId ||
+        canonicalValue(member(current->fields, "protocolTurnId")) != turnId ||
+        (!threadId.empty() &&
+         canonicalValue(member(current->fields, "protocolThreadId")) !=
+             threadId);
+    if (protocolChanged) {
+      NodeState next = *current;
+      next.fields.insert_or_assign("protocolId", Value(rawItemId));
+      next.fields.insert_or_assign("protocolTurnId", Value(turnId));
+      if (!threadId.empty())
+        next.fields.insert_or_assign("protocolThreadId", Value(threadId));
+      write.replaceState(item, std::move(next));
+    }
+  } else {
+    NodeState next;
+    next.fields = {{"protocolId", Value(rawItemId)},
+                   {"protocolTurnId", Value(turnId)}};
+    if (!threadId.empty())
+      next.fields.emplace("protocolThreadId", Value(threadId));
+    item = write.upsert(std::move(id), std::move(next));
+  }
   write.setParent(turn, item);
   return item;
 }
@@ -526,11 +563,9 @@ void appendIndexedField(NodeGraph::WriteAccess &write, const NodeRef &node,
   Value::Array &parts = *stored.asArray();
   if (parts.size() <= index)
     parts.resize(index + 1);
-  std::string combined;
-  if (const std::string *existing = parts[index].asString())
-    combined = *existing;
-  combined.append(suffix);
-  parts[index] = Value(std::move(combined));
+  if (!parts[index].isString())
+    parts[index] = std::string{};
+  parts[index].asString()->append(suffix);
   boundIndexedText(next, field);
   write.replaceState(node, std::move(next));
 }
@@ -1103,21 +1138,28 @@ NodeId realtimeItemNodeId(const NodeRef &session, std::string_view itemId) {
 }
 
 void removeContained(NodeGraph::WriteAccess &write, const NodeRef &node) {
-  std::vector<NodeRef> owned = write.children(node);
   std::unordered_set<const Node *> seen;
-  seen.reserve(owned.size() + 1);
-  for (const NodeRef &child : owned)
-    if (child)
-      seen.insert(child.get());
-  for (const NodeRef &root : write.related(node, RelationKind::TurnRootItem)) {
-    if (root && seen.insert(root.get()).second)
-      owned.emplace_back(root);
+  seen.insert(node.get());
+  std::vector<NodeRef> pending = write.children(node);
+  for (const NodeRef &root : write.related(node, RelationKind::TurnRootItem))
+    pending.emplace_back(root);
+
+  std::vector<NodeRef> owned;
+  while (!pending.empty()) {
+    NodeRef current = std::move(pending.back());
+    pending.pop_back();
+    if (!current || !seen.insert(current.get()).second ||
+        write.find(current->id()) != current)
+      continue;
+    owned.emplace_back(current);
+    for (const NodeRef &child : write.children(current))
+      pending.emplace_back(child);
+    for (const NodeRef &root :
+         write.related(current, RelationKind::TurnRootItem))
+      pending.emplace_back(root);
   }
-  for (const NodeRef &child : owned) {
-    removeContained(write, child);
-    if (write.find(child->id()) == child)
-      write.remove(child);
-  }
+  std::ranges::reverse(owned);
+  write.removeMany(owned);
 }
 
 NodeRef ensureRealtimeSession(NodeGraph::WriteAccess &write,
@@ -3077,10 +3119,12 @@ void ProtocolUpdater::removeThread(NodeGraph::WriteAccess &write,
     }
   }
 
-  for (const NodeRef &descendant : descendants) {
+  std::vector<NodeRef> removedDescendants;
+  removedDescendants.reserve(descendants.size());
+  for (const NodeRef &descendant : descendants)
     if (!isLocalPrompt(write, descendant))
-      write.remove(descendant);
-  }
+      removedDescendants.emplace_back(descendant);
+  write.removeMany(removedDescendants);
   write.remove(thread);
 
   std::size_t next = std::min(insertion, roots.size());

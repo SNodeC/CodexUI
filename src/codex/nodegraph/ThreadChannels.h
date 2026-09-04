@@ -22,6 +22,10 @@ enum class ChannelSendStatus : std::uint8_t {
 };
 
 [[nodiscard]] bool messageAdmitted(ChannelSendStatus status) noexcept;
+// Normal eventfd delivery and the bounded fallback drains both guarantee that
+// an admitted payload is consumed exactly once. Wake failure remains visible
+// so callers can report degraded delivery without retrying a mutation.
+[[nodiscard]] bool deliveryGuaranteed(ChannelSendStatus status) noexcept;
 [[nodiscard]] bool wakeFailed(ChannelSendStatus status) noexcept;
 
 // The application owns exactly one instance. It contains exactly one bounded
@@ -72,6 +76,11 @@ public:
   [[nodiscard]] std::size_t qtToWorkerSizeApprox() const noexcept;
   [[nodiscard]] bool rescanPending() const noexcept;
 
+  // Deterministic syscall-failure seams used by the headless recovery tests.
+  // They suppress one wake only; payload admission and FIFO storage are real.
+  void failNextWorkerToQtWakeForTest() noexcept;
+  void failNextQtToWorkerWakeForTest() noexcept;
+
   // Call only after both event-loop observers are disabled and the worker is
   // joined.
   void close() noexcept;
@@ -86,6 +95,9 @@ private:
   EventFd workerToQtWake_;
   EventFd qtToWorkerWake_;
   std::atomic<std::uint64_t> rescanRevision_{0};
+  std::atomic_bool closed_{false};
+  mutable std::atomic_bool failNextWorkerToQtWake_{false};
+  mutable std::atomic_bool failNextQtToWorkerWake_{false};
   bool queuedTurnAfterRescan_ = false;
 };
 

@@ -261,6 +261,7 @@ public:
     void replaceRelated(const NodeRef &source, RelationKind kind,
                         std::span<const NodeRef> targets);
     void remove(const NodeRef &node);
+    void removeMany(std::span<const NodeRef> nodes);
 
     // Removed nodes remain reachable only for UI-detachment recovery when a
     // graph notification saturates. The sole writer releases them after Qt has
@@ -283,11 +284,8 @@ public:
                 std::unique_lock<std::shared_mutex> lock) noexcept;
 
     void requireLive(const NodeRef &node) const;
-    void noteStateChanges(const NodeRef &node, const NodeState &before,
-                          const NodeState &after);
-    void noteStructureChange(const NodeRef &node);
-    void markAffected(const NodeRef &node);
-    void unlinkNode(const NodeRef &node);
+    void prepareChanges(std::span<const NodeRef> affected,
+                        std::span<const NodeRef> structureChanged);
     [[nodiscard]] GraphChange publish();
 
     NodeGraph *graph_;

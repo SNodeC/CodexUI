@@ -841,6 +841,26 @@ void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
           "selecting the graph-backed row binds the existing conversation");
   static_cast<void>(takeQtMessages(channels)); // Hydrate is tested elsewhere.
 
+  channels.failNextWorkerToQtWakeForTest();
+  const ChannelSendStatus wakeFailure = worker.apply(
+      {DecodedMessageKind::ServerNotification, "thread/name/updated",
+       std::nullopt,
+       Value::Object{{"threadId", Value("shell-thread")},
+                     {"threadName", Value("Wake-recovered thread")}}});
+  const bool wakeRecovered = spinUntil([&] {
+    QListWidgetItem *item = threadItem(list, "shell-thread");
+    QWidget *row = item ? list->itemWidget(item) : nullptr;
+    QLabel *title =
+        row ? row->findChild<QLabel *>(QStringLiteral("threadTitle")) : nullptr;
+    return channels.workerToQtSizeApprox() == 0 && title &&
+           title->text() == QStringLiteral("Wake-recovered thread");
+  });
+  require(wakeFailure == ChannelSendStatus::AcceptedWakeFailed &&
+              deliveryGuaranteed(wakeFailure) && wakeFailed(wakeFailure) &&
+              wakeRecovered,
+          "Qt's bounded recovery drain renders a graph update after a failed "
+          "worker wake");
+
   auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
       QStringLiteral("upcomingPromptEditor"));
   const QString exact = QStringLiteral("  graph prompt stays exact  ");

@@ -16,6 +16,7 @@
 #include <vector>
 
 class QSocketNotifier;
+class QTimer;
 
 namespace codexui::codex {
 
@@ -70,6 +71,7 @@ private:
   nodegraph::NodeGraph graph;
   nodegraph::ThreadChannels channels;
   std::unique_ptr<QSocketNotifier> workerNotifier;
+  std::unique_ptr<QTimer> workerWakeRecoveryTimer;
   std::thread clientThread;
   RuntimeStoppedHandler runtimeStoppedHandler;
   GraphChangedHandler graphChangedHandler;

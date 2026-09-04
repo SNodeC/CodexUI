@@ -1555,30 +1555,30 @@ void ShellWidget::Impl::scheduleDraftSelection(bool replenishRetry) {
 bool ShellWidget::Impl::sendNodeAction(nodegraph::NodeAction action,
                                        QString rejection) {
   const nodegraph::ChannelSendStatus status = session.sendNodeAction(action);
-  if (!nodegraph::messageAdmitted(status)) {
+  if (!nodegraph::deliveryGuaranteed(status)) {
     if (!rejection.isEmpty())
       showNotice(std::move(rejection));
     return false;
   }
   if (nodegraph::wakeFailed(status))
     showNotice(QStringLiteral(
-        "The action was admitted, but the worker wake-up failed; it will not "
-        "be sent again automatically."));
+        "The action was admitted after a worker wake-up failure; bounded "
+        "fallback delivery is active."));
   return true;
 }
 
 bool ShellWidget::Impl::sendRuntimeAction(nodegraph::RuntimeAction action,
                                           QString rejection) {
   const nodegraph::ChannelSendStatus status = session.sendRuntimeAction(action);
-  if (!nodegraph::messageAdmitted(status)) {
+  if (!nodegraph::deliveryGuaranteed(status)) {
     if (!rejection.isEmpty())
       showNotice(std::move(rejection));
     return false;
   }
   if (nodegraph::wakeFailed(status))
     showNotice(QStringLiteral(
-        "The action was admitted, but the worker wake-up failed; it will not "
-        "be sent again automatically."));
+        "The action was admitted after a worker wake-up failure; bounded "
+        "fallback delivery is active."));
   return true;
 }
 
@@ -2010,7 +2010,7 @@ void ShellWidget::Impl::renameThreadDialog(const nodegraph::NodeRef &thread) {
   nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Rename};
   action.payload.emplace("name", utf8(name));
   const nodegraph::ChannelSendStatus status = session.sendNodeAction(action);
-  if (!nodegraph::messageAdmitted(status)) {
+  if (!nodegraph::deliveryGuaranteed(status)) {
     retainedRenames.insert_or_assign(thread.get(), std::pair{thread, name});
     showNotice(QStringLiteral(
         "Rename request was not admitted. Reopen Rename to recover the "
@@ -2020,8 +2020,8 @@ void ShellWidget::Impl::renameThreadDialog(const nodegraph::NodeRef &thread) {
   retainedRenames.erase(thread.get());
   if (nodegraph::wakeFailed(status))
     showNotice(QStringLiteral(
-        "The rename was admitted, but the worker wake-up failed; it will not "
-        "be sent again automatically."));
+        "The rename was admitted after a worker wake-up failure; bounded "
+        "fallback delivery is active."));
 }
 
 void ShellWidget::Impl::confirmDeleteThread(const nodegraph::NodeRef &thread) {
@@ -2280,7 +2280,7 @@ void ShellWidget::Impl::reviewPending(const std::string &requestKey) {
                                nodegraph::NodeActionKind::ResolveInteraction};
   action.payload = authoredResponsePayload(request->kind, *response);
   const nodegraph::ChannelSendStatus status = session.sendNodeAction(action);
-  if (!nodegraph::messageAdmitted(status)) {
+  if (!nodegraph::deliveryGuaranteed(status)) {
     retainedInteractionResponses.insert_or_assign(request->id, *response);
     showNotice(QStringLiteral(
         "Your response was not admitted. Reopen Review to recover the input "
@@ -2290,8 +2290,8 @@ void ShellWidget::Impl::reviewPending(const std::string &requestKey) {
   retainedInteractionResponses.erase(request->id);
   if (nodegraph::wakeFailed(status))
     showNotice(QStringLiteral(
-        "The response was admitted, but the worker wake-up failed; it will "
-        "not be sent again automatically."));
+        "The response was admitted after a worker wake-up failure; bounded "
+        "fallback delivery is active."));
 }
 
 void ShellWidget::Impl::acceptPending(const std::string &requestKey) {

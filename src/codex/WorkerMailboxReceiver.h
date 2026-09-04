@@ -45,11 +45,12 @@ private:
   ~WorkerMailboxReceiver() override;
 
   void readEvent() override;
+  void readTimeout() override;
   void unobservedEvent() override;
   void destruct() override;
   void shutdownEvent(const core::ShutdownContext &context) override;
 
-  void consumeWakeAndMessages();
+  void consumeWakeAndMessages(bool drainWake);
   void scheduleNextDrain();
   void invalidateScheduledDrain() noexcept;
   void fail(std::string reason) noexcept;

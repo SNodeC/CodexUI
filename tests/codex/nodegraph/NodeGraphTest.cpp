@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <initializer_list>
 #include <iostream>
@@ -735,6 +736,95 @@ bool testMisuseRejection() {
   return passed;
 }
 
+bool testBatchRemovalIsAtomicAndApproximatelyLinear() {
+  const auto measure = [](std::size_t count) {
+    NodeGraph graph;
+    NodeRef survivor;
+    std::vector<NodeRef> removed;
+    removed.reserve(count);
+    {
+      auto write = graph.write();
+      survivor = write.upsert(id(NodeKind::Runtime, "batch-survivor"));
+      for (std::size_t index = 0; index < count; ++index) {
+        NodeRef node = write.upsert(
+            id(NodeKind::Item, "batch-item-" + std::to_string(index)));
+        write.relate(node, RelationKind::OperationTarget, survivor);
+        removed.emplace_back(std::move(node));
+      }
+      write.relate(survivor, RelationKind::PendingPrompt, removed.front());
+      write.relate(survivor, RelationKind::PendingPrompt, removed[count / 2]);
+      write.relate(survivor, RelationKind::PendingPrompt, removed.back());
+      static_cast<void>(write.finish());
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    GraphChange change;
+    {
+      auto write = graph.write();
+      write.removeMany(removed);
+      change = write.finish();
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    bool valid = change.revision == 2 && change.removed.size() == count;
+    auto read = graph.tryRead();
+    valid = valid && read && read->orderedNodes().size() == 1 &&
+            read->orderedNodes().front() == survivor &&
+            read->related(survivor, RelationKind::PendingPrompt).empty() &&
+            read->retiredCount() == count && read->removed(removed.front()) &&
+            read->removed(removed.back());
+    return std::pair{valid, elapsed};
+  };
+
+  const auto [smallValid, smallElapsed] = measure(3000);
+  const auto [largeValid, largeElapsed] = measure(6000);
+  const auto allowance = smallElapsed * 3 + std::chrono::milliseconds(20);
+  bool passed = expect(
+      smallValid && largeValid && largeElapsed <= allowance,
+      "batch removal preserves order, relations, lifetime, and near-linear "
+      "scaling");
+  std::cout
+      << "batch-removal ns (3000 / 6000): "
+      << std::chrono::duration_cast<std::chrono::nanoseconds>(smallElapsed)
+             .count()
+      << " / "
+      << std::chrono::duration_cast<std::chrono::nanoseconds>(largeElapsed)
+             .count()
+      << '\n';
+
+  NodeGraph graph;
+  NodeGraph foreignGraph;
+  NodeRef local;
+  NodeRef foreign;
+  {
+    auto write = graph.write();
+    local = write.upsert(id(NodeKind::Item, "atomic-local"));
+    static_cast<void>(write.finish());
+  }
+  {
+    auto write = foreignGraph.write();
+    foreign = write.upsert(id(NodeKind::Item, "atomic-foreign"));
+    static_cast<void>(write.finish());
+  }
+  {
+    auto write = graph.write();
+    const std::array invalid{local, foreign};
+    passed &= expect(
+        throws<std::invalid_argument>([&] { write.removeMany(invalid); }),
+        "batch removal validates every NodeRef before mutation");
+    const GraphChange unchanged = write.finish();
+    passed &= expect(unchanged.revision == 1 && unchanged.empty(),
+                     "failed batch validation leaves the graph unchanged");
+  }
+  {
+    auto read = graph.tryRead();
+    passed &= expect(read && read->find(local->id()) == local &&
+                         !read->removed(local),
+                     "failed batch validation preserves lookup and lifetime");
+  }
+  return passed;
+}
+
 } // namespace
 
 int main() {
@@ -746,5 +836,6 @@ int main() {
   passed &= testAuthoritativeOrderingReplacement();
   passed &= testRemovalLifetimeAndAttachment();
   passed &= testMisuseRejection();
+  passed &= testBatchRemovalIsAtomicAndApproximatelyLinear();
   return passed ? 0 : 1;
 }

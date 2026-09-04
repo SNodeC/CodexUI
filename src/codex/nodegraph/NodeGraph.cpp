@@ -23,6 +23,18 @@ void eraseValue(Range &range, const ValueType &value) {
 
 NodeRef pin(Node *node) { return node ? node->shared_from_this() : NodeRef{}; }
 
+template <typename T>
+void ensureAppendCapacity(std::vector<T> &values, std::size_t additional) {
+  if (additional <= values.capacity() - values.size())
+    return;
+  const std::size_t required = values.size() + additional;
+  const std::size_t grown =
+      values.capacity() <= values.max_size() / 2
+          ? std::max<std::size_t>(1, values.capacity() * 2)
+          : values.max_size();
+  values.reserve(std::max(required, grown));
+}
+
 } // namespace
 
 std::size_t NodeIdHash::operator()(const NodeId &id) const noexcept {
@@ -322,17 +334,47 @@ bool NodeGraph::WriteAccess::hasPendingChanges() const noexcept {
 NodeRef NodeGraph::WriteAccess::upsert(NodeId id, NodeState initial) {
   if (NodeRef existing = find(id))
     return existing;
-  NodeRef node(new Node(std::move(id), std::move(initial),
-                        graph_->nextInsertionOrder_++));
-  graph_->nodes_.emplace(node->id_, node);
-  graph_->orderedNodes_.emplace_back(node);
-  PendingStateRevision &pending = pendingStateRevisions_[node.get()];
+  NodeRef node(
+      new Node(std::move(id), std::move(initial), graph_->nextInsertionOrder_));
+  PendingStateRevision pending;
   pending.status = node->state_->status != NodeStatus::Unknown;
   for (const auto &[field, value] : node->state_->fields) {
     static_cast<void>(value);
     pending.fields.insert(field);
+    node->fieldChangedRevisions_.emplace(field, 0);
   }
-  markAffected(node);
+
+  // Allocate every auxiliary slot first. If canonical insertion then fails,
+  // roll these transaction-local entries back before propagating the error.
+  graph_->nodes_.reserve(graph_->nodes_.size() + 1);
+  ensureAppendCapacity(graph_->orderedNodes_, 1);
+  pendingStateRevisions_.reserve(pendingStateRevisions_.size() + 1);
+  affectedIndex_.reserve(affectedIndex_.size() + 1);
+  ensureAppendCapacity(affected_, 1);
+  pendingStateRevisions_.emplace(node.get(), std::move(pending));
+  try {
+    affectedIndex_.insert(node.get());
+    try {
+      affected_.emplace_back(node);
+    } catch (...) {
+      affectedIndex_.erase(node.get());
+      throw;
+    }
+    try {
+      graph_->nodes_.emplace(node->id_, node);
+    } catch (...) {
+      affected_.pop_back();
+      affectedIndex_.erase(node.get());
+      pendingStateRevisions_.erase(node.get());
+      throw;
+    }
+  } catch (...) {
+    pendingStateRevisions_.erase(node.get());
+    throw;
+  }
+  graph_->orderedNodes_.emplace_back(node);
+  ++graph_->nextInsertionOrder_;
+  dirty_ = true;
   return node;
 }
 
@@ -375,15 +417,15 @@ void NodeGraph::WriteAccess::replaceState(const NodeRef &node,
   requireLive(node);
   if (*node->state_ == state)
     return;
-  noteStateChanges(node, *node->state_, state);
-  node->state_ = std::make_shared<const NodeState>(std::move(state));
-  markAffected(node);
-}
+  const NodeState &before = *node->state_;
+  std::shared_ptr<const NodeState> storage =
+      std::make_shared<const NodeState>(std::move(state));
+  const NodeState &after = *storage;
 
-void NodeGraph::WriteAccess::noteStateChanges(const NodeRef &node,
-                                              const NodeState &before,
-                                              const NodeState &after) {
-  PendingStateRevision &pending = pendingStateRevisions_[node.get()];
+  const auto pendingPosition = pendingStateRevisions_.find(node.get());
+  const bool hadPending = pendingPosition != pendingStateRevisions_.end();
+  PendingStateRevision pending =
+      hadPending ? pendingPosition->second : PendingStateRevision{};
   pending.status = pending.status || before.status != after.status;
   for (const auto &[field, value] : before.fields) {
     const auto found = after.fields.find(field);
@@ -395,15 +437,36 @@ void NodeGraph::WriteAccess::noteStateChanges(const NodeRef &node,
     if (found == before.fields.end() || found->second != value)
       pending.fields.insert(field);
   }
+  auto fieldRevisions = node->fieldChangedRevisions_;
+  for (const std::string &field : pending.fields)
+    fieldRevisions.try_emplace(field, 0);
+
+  if (hadPending) {
+    std::swap(pendingPosition->second, pending);
+  } else {
+    pendingStateRevisions_.emplace(node.get(), std::move(pending));
+  }
+  const std::array affected{node};
+  try {
+    prepareChanges(affected, {});
+  } catch (...) {
+    if (hadPending)
+      std::swap(pendingPosition->second, pending);
+    else
+      pendingStateRevisions_.erase(node.get());
+    throw;
+  }
+  node->fieldChangedRevisions_.swap(fieldRevisions);
+  node->state_ = std::move(storage);
 }
 
 void NodeGraph::WriteAccess::setField(const NodeRef &node, std::string key,
                                       Value value) {
   requireLive(node);
-  NodeState next = *node->state_;
-  const auto found = next.fields.find(key);
-  if (found != next.fields.end() && found->second == value)
+  const auto found = node->state_->fields.find(key);
+  if (found != node->state_->fields.end() && found->second == value)
     return;
+  NodeState next = *node->state_;
   next.fields.insert_or_assign(std::move(key), std::move(value));
   replaceState(node, std::move(next));
 }
@@ -411,9 +474,10 @@ void NodeGraph::WriteAccess::setField(const NodeRef &node, std::string key,
 void NodeGraph::WriteAccess::eraseField(const NodeRef &node,
                                         std::string_view key) {
   requireLive(node);
-  NodeState next = *node->state_;
-  if (next.fields.erase(std::string(key)) == 0)
+  if (!node->state_->fields.contains(key))
     return;
+  NodeState next = *node->state_;
+  next.fields.erase(std::string(key));
   replaceState(node, std::move(next));
 }
 
@@ -428,9 +492,17 @@ void NodeGraph::WriteAccess::setStatus(const NodeRef &node, NodeStatus status) {
 
 void NodeGraph::WriteAccess::touchRevision(const NodeRef &node) {
   requireLive(node);
-  if (!affectedIndex_.contains(node.get()) &&
-      revisionTouchIndex_.insert(node.get()).second)
+  if (affectedIndex_.contains(node.get()))
+    return;
+  const auto [position, inserted] = revisionTouchIndex_.insert(node.get());
+  if (!inserted)
+    return;
+  try {
     revisionTouches_.emplace_back(node);
+  } catch (...) {
+    revisionTouchIndex_.erase(position);
+    throw;
+  }
 }
 
 void NodeGraph::WriteAccess::setParent(const NodeRef &parent,
@@ -445,13 +517,14 @@ void NodeGraph::WriteAccess::setParent(const NodeRef &parent,
   }
   if (child->parent_ == parent.get())
     return;
-  clearParent(child);
+  parent->children_.reserve(parent->children_.size() + 1);
+  NodeRef previousParent = pin(child->parent_);
+  const std::array changed{parent, child, previousParent};
+  prepareChanges(changed, changed);
+  if (previousParent)
+    eraseValue(previousParent->children_, child.get());
   child->parent_ = parent.get();
   parent->children_.emplace_back(child.get());
-  noteStructureChange(parent);
-  noteStructureChange(child);
-  markAffected(parent);
-  markAffected(child);
 }
 
 void NodeGraph::WriteAccess::clearParent(const NodeRef &child) {
@@ -459,12 +532,10 @@ void NodeGraph::WriteAccess::clearParent(const NodeRef &child) {
   if (!child->parent_)
     return;
   NodeRef parent = pin(child->parent_);
+  const std::array changed{parent, child};
+  prepareChanges(changed, changed);
   eraseValue(parent->children_, child.get());
   child->parent_ = nullptr;
-  noteStructureChange(parent);
-  noteStructureChange(child);
-  markAffected(parent);
-  markAffected(child);
 }
 
 void NodeGraph::WriteAccess::replaceChildren(
@@ -501,12 +572,15 @@ void NodeGraph::WriteAccess::replaceChildren(
     return;
 
   const std::vector<Node *> previous = parent->children_;
+  std::vector<NodeRef> affected{parent};
+  std::vector<NodeRef> structureChanged{parent};
+  affected.reserve(1 + previous.size() + next.size() * 2);
+  structureChanged.reserve(1 + previous.size() + next.size() * 2);
   for (Node *oldChildPointer : previous) {
     if (!seen.contains(oldChildPointer)) {
       NodeRef oldChild = pin(oldChildPointer);
-      oldChild->parent_ = nullptr;
-      noteStructureChange(oldChild);
-      markAffected(oldChild);
+      affected.emplace_back(oldChild);
+      structureChanged.emplace_back(std::move(oldChild));
     }
   }
 
@@ -514,34 +588,43 @@ void NodeGraph::WriteAccess::replaceChildren(
     const bool parentChanged = child->parent_ != parent.get();
     if (child->parent_ && child->parent_ != parent.get()) {
       NodeRef previousParent = pin(child->parent_);
-      eraseValue(previousParent->children_, child.get());
-      noteStructureChange(previousParent);
-      markAffected(previousParent);
+      affected.emplace_back(previousParent);
+      structureChanged.emplace_back(std::move(previousParent));
     }
-    child->parent_ = parent.get();
+    affected.emplace_back(child);
     if (parentChanged)
-      noteStructureChange(child);
-    markAffected(child);
+      structureChanged.emplace_back(child);
+  }
+
+  parent->children_.reserve(next.size());
+  prepareChanges(affected, structureChanged);
+  for (Node *oldChildPointer : previous)
+    if (!seen.contains(oldChildPointer))
+      oldChildPointer->parent_ = nullptr;
+  for (const NodeRef &child : next) {
+    if (child->parent_ && child->parent_ != parent.get())
+      eraseValue(child->parent_->children_, child.get());
+    child->parent_ = parent.get();
   }
   parent->children_.clear();
-  parent->children_.reserve(next.size());
   for (const NodeRef &child : next)
     parent->children_.emplace_back(child.get());
-  noteStructureChange(parent);
-  markAffected(parent);
 }
 
 void NodeGraph::WriteAccess::relate(const NodeRef &source, RelationKind kind,
                                     const NodeRef &target) {
   requireLive(source);
   requireLive(target);
-  auto &targets = source->relations_[kind];
-  if (contains(targets, target.get()))
+  const auto current = source->relations_.find(kind);
+  if (current != source->relations_.end() &&
+      contains(current->second, target.get()))
     return;
-  targets.emplace_back(target.get());
-  noteStructureChange(source);
-  markAffected(source);
-  markAffected(target);
+  auto nextRelations = source->relations_;
+  nextRelations[kind].emplace_back(target.get());
+  const std::array affected{source, target};
+  const std::array structureChanged{source};
+  prepareChanges(affected, structureChanged);
+  source->relations_.swap(nextRelations);
 }
 
 void NodeGraph::WriteAccess::unrelate(const NodeRef &source, RelationKind kind,
@@ -552,12 +635,15 @@ void NodeGraph::WriteAccess::unrelate(const NodeRef &source, RelationKind kind,
   if (found == source->relations_.end() ||
       !contains(found->second, target.get()))
     return;
-  eraseValue(found->second, target.get());
-  if (found->second.empty())
-    source->relations_.erase(found);
-  noteStructureChange(source);
-  markAffected(source);
-  markAffected(target);
+  auto nextRelations = source->relations_;
+  auto next = nextRelations.find(kind);
+  eraseValue(next->second, target.get());
+  if (next->second.empty())
+    nextRelations.erase(next);
+  const std::array affected{source, target};
+  const std::array structureChanged{source};
+  prepareChanges(affected, structureChanged);
+  source->relations_.swap(nextRelations);
 }
 
 void NodeGraph::WriteAccess::replaceRelated(const NodeRef &source,
@@ -589,78 +675,163 @@ void NodeGraph::WriteAccess::replaceRelated(const NodeRef &source,
   if (unchanged)
     return;
 
-  if (next.empty()) {
-    source->relations_.erase(kind);
-  } else {
+  auto nextRelations = source->relations_;
+  if (next.empty())
+    nextRelations.erase(kind);
+  else {
     std::vector<Node *> ordered;
     ordered.reserve(next.size());
     for (const NodeRef &target : next)
       ordered.emplace_back(target.get());
-    source->relations_.insert_or_assign(kind, std::move(ordered));
+    nextRelations.insert_or_assign(kind, std::move(ordered));
   }
-  noteStructureChange(source);
-  markAffected(source);
+  std::vector<NodeRef> affected;
+  affected.reserve(1 + previous.size() + next.size());
+  affected.emplace_back(source);
   for (Node *target : previous)
-    markAffected(pin(target));
+    affected.emplace_back(pin(target));
   for (const NodeRef &target : next)
-    markAffected(target);
+    affected.emplace_back(target);
+  const std::array structureChanged{source};
+  prepareChanges(affected, structureChanged);
+  source->relations_.swap(nextRelations);
 }
 
-void NodeGraph::WriteAccess::unlinkNode(const NodeRef &node) {
-  if (node->parent_) {
-    NodeRef parent = pin(node->parent_);
-    eraseValue(parent->children_, node.get());
-    node->parent_ = nullptr;
-    noteStructureChange(parent);
-    noteStructureChange(node);
-    markAffected(parent);
+void NodeGraph::WriteAccess::remove(const NodeRef &node) {
+  const std::array nodes{node};
+  removeMany(nodes);
+}
+
+void NodeGraph::WriteAccess::removeMany(std::span<const NodeRef> nodes) {
+  if (nodes.empty())
+    return;
+
+  // Validate and allocate every replacement container before changing a node.
+  // Once topology mutation starts, the remainder of this function consists
+  // only of erases, pointer assignments, and noexcept container swaps.
+  std::vector<NodeRef> removalOrder;
+  removalOrder.reserve(nodes.size());
+  std::unordered_set<Node *> removalSet;
+  removalSet.reserve(nodes.size());
+  for (const NodeRef &node : nodes) {
+    requireLive(node);
+    if (removalSet.insert(node.get()).second)
+      removalOrder.emplace_back(node);
   }
-  if (!node->children_.empty())
-    noteStructureChange(node);
-  for (Node *childPointer : node->children_) {
-    NodeRef child = pin(childPointer);
-    child->parent_ = nullptr;
-    noteStructureChange(child);
-    markAffected(child);
-  }
-  node->children_.clear();
+  if (removalOrder.empty())
+    return;
+
+  std::vector<NodeRef> survivingOrder;
+  survivingOrder.reserve(graph_->orderedNodes_.size() - removalOrder.size());
+  std::vector<NodeRef> topologyChanged;
+  topologyChanged.reserve(graph_->orderedNodes_.size());
+  std::unordered_set<Node *> topologyChangedSet;
+  topologyChangedSet.reserve(graph_->orderedNodes_.size());
+  std::unordered_set<Node *> removedStructureSet;
+  removedStructureSet.reserve(removalOrder.size());
 
   for (const NodeRef &candidate : graph_->orderedNodes_) {
-    if (candidate == node)
+    const bool removing = removalSet.contains(candidate.get());
+    if (!removing)
+      survivingOrder.emplace_back(candidate);
+
+    bool structureChanged =
+        candidate->parent_ && removalSet.contains(candidate->parent_);
+    structureChanged =
+        structureChanged ||
+        std::ranges::any_of(candidate->children_, [&removalSet](Node *child) {
+          return removalSet.contains(child);
+        });
+    structureChanged =
+        structureChanged ||
+        std::ranges::any_of(candidate->relations_, [&removalSet](
+                                                       const auto &entry) {
+          return std::ranges::any_of(entry.second, [&removalSet](Node *target) {
+            return removalSet.contains(target);
+          });
+        });
+    if (removing) {
+      if (candidate->parent_ || !candidate->children_.empty() ||
+          !candidate->relations_.empty())
+        removedStructureSet.insert(candidate.get());
+    } else if (structureChanged &&
+               topologyChangedSet.insert(candidate.get()).second) {
+      topologyChanged.emplace_back(candidate);
+    }
+  }
+
+  auto nextNodes = graph_->nodes_;
+  for (const NodeRef &node : removalOrder)
+    nextNodes.erase(node->id_);
+
+  auto nextRetiredNodes = graph_->retiredNodes_;
+  auto nextRetiredIndex = graph_->retiredIndex_;
+  nextRetiredNodes.reserve(nextRetiredNodes.size() + removalOrder.size());
+  nextRetiredIndex.reserve(nextRetiredIndex.size() + removalOrder.size());
+  for (const NodeRef &node : removalOrder) {
+    nextRetiredIndex.emplace(node.get(), nextRetiredNodes.size());
+    nextRetiredNodes.emplace_back(node);
+  }
+
+  auto nextAffected = affected_;
+  auto nextAffectedIndex = affectedIndex_;
+  nextAffected.reserve(nextAffected.size() + topologyChanged.size());
+  nextAffectedIndex.reserve(nextAffectedIndex.size() + topologyChanged.size());
+  for (const NodeRef &node : topologyChanged)
+    if (nextAffectedIndex.insert(node.get()).second)
+      nextAffected.emplace_back(node);
+
+  auto nextStructureRevisions = pendingStructureRevisions_;
+  nextStructureRevisions.reserve(nextStructureRevisions.size() +
+                                 topologyChanged.size() +
+                                 removedStructureSet.size());
+  for (const NodeRef &node : topologyChanged)
+    nextStructureRevisions.insert(node.get());
+  for (Node *node : removedStructureSet)
+    nextStructureRevisions.insert(node);
+
+  auto nextRemoved = removed_;
+  auto nextRemovedIndex = removedIndex_;
+  nextRemoved.reserve(nextRemoved.size() + removalOrder.size());
+  nextRemovedIndex.reserve(nextRemovedIndex.size() + removalOrder.size());
+  for (const NodeRef &node : removalOrder)
+    if (nextRemovedIndex.insert(node.get()).second)
+      nextRemoved.emplace_back(node);
+
+  for (const NodeRef &candidate : graph_->orderedNodes_) {
+    if (removalSet.contains(candidate.get())) {
+      candidate->parent_ = nullptr;
+      candidate->children_.clear();
+      candidate->relations_.clear();
+      candidate->removed_ = true;
       continue;
-    bool changed = false;
+    }
+    if (candidate->parent_ && removalSet.contains(candidate->parent_))
+      candidate->parent_ = nullptr;
+    std::erase_if(candidate->children_, [&removalSet](Node *child) {
+      return removalSet.contains(child);
+    });
     for (auto relation = candidate->relations_.begin();
          relation != candidate->relations_.end();) {
-      const std::size_t before = relation->second.size();
-      eraseValue(relation->second, node.get());
-      changed = changed || relation->second.size() != before;
+      std::erase_if(relation->second, [&removalSet](Node *target) {
+        return removalSet.contains(target);
+      });
       if (relation->second.empty())
         relation = candidate->relations_.erase(relation);
       else
         ++relation;
     }
-    if (changed) {
-      noteStructureChange(candidate);
-      markAffected(candidate);
-    }
   }
-  if (!node->relations_.empty())
-    noteStructureChange(node);
-  node->relations_.clear();
-}
 
-void NodeGraph::WriteAccess::remove(const NodeRef &node) {
-  requireLive(node);
-  unlinkNode(node);
-  graph_->nodes_.erase(node->id_);
-  eraseValue(graph_->orderedNodes_, node);
-  node->removed_ = true;
-  if (!graph_->retiredIndex_.contains(node.get())) {
-    graph_->retiredIndex_.emplace(node.get(), graph_->retiredNodes_.size());
-    graph_->retiredNodes_.emplace_back(node);
-  }
-  if (removedIndex_.insert(node.get()).second)
-    removed_.emplace_back(node);
+  graph_->nodes_.swap(nextNodes);
+  graph_->orderedNodes_.swap(survivingOrder);
+  graph_->retiredNodes_.swap(nextRetiredNodes);
+  graph_->retiredIndex_.swap(nextRetiredIndex);
+  affected_.swap(nextAffected);
+  affectedIndex_.swap(nextAffectedIndex);
+  pendingStructureRevisions_.swap(nextStructureRevisions);
+  removed_.swap(nextRemoved);
+  removedIndex_.swap(nextRemovedIndex);
   dirty_ = true;
 }
 
@@ -702,15 +873,50 @@ void NodeGraph::WriteAccess::requireLive(const NodeRef &node) const {
     throw std::invalid_argument("node does not belong to this graph");
 }
 
-void NodeGraph::WriteAccess::markAffected(const NodeRef &node) {
-  if (node && affectedIndex_.insert(node.get()).second)
-    affected_.emplace_back(node);
-  dirty_ = true;
-}
+void NodeGraph::WriteAccess::prepareChanges(
+    std::span<const NodeRef> affected,
+    std::span<const NodeRef> structureChanged) {
+  const bool wasDirty = dirty_;
+  const std::size_t affectedSize = affected_.size();
+  std::vector<Node *> addedAffected;
+  std::vector<Node *> addedStructure;
+  addedAffected.reserve(affected.size());
+  addedStructure.reserve(structureChanged.size());
+  ensureAppendCapacity(affected_, affected.size());
+  affectedIndex_.reserve(affectedIndex_.size() + affected.size());
+  pendingStructureRevisions_.reserve(pendingStructureRevisions_.size() +
+                                     structureChanged.size());
 
-void NodeGraph::WriteAccess::noteStructureChange(const NodeRef &node) {
-  if (node)
-    pendingStructureRevisions_.insert(node.get());
+  try {
+    for (const NodeRef &node : affected) {
+      if (!node)
+        continue;
+      const auto [position, inserted] = affectedIndex_.insert(node.get());
+      static_cast<void>(position);
+      if (!inserted)
+        continue;
+      try {
+        affected_.emplace_back(node);
+      } catch (...) {
+        affectedIndex_.erase(node.get());
+        throw;
+      }
+      addedAffected.emplace_back(node.get());
+    }
+    for (const NodeRef &node : structureChanged) {
+      if (node && pendingStructureRevisions_.insert(node.get()).second)
+        addedStructure.emplace_back(node.get());
+    }
+  } catch (...) {
+    affected_.resize(affectedSize);
+    for (Node *node : addedAffected)
+      affectedIndex_.erase(node);
+    for (Node *node : addedStructure)
+      pendingStructureRevisions_.erase(node);
+    dirty_ = wasDirty;
+    throw;
+  }
+  dirty_ = true;
 }
 
 GraphChange NodeGraph::WriteAccess::publish() {
