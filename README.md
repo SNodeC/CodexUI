@@ -5,35 +5,34 @@ CodexUI 1.0 is a native Qt 6 Widgets and browser frontend for the AISuite
 without introducing another backend, semantic cache, snapshot store, or
 persistence authority.
 
-The canonical process has two threads:
+The native app-server/UI data path has two threads:
 
 ```text
 Qt GUI thread
-    <-> bounded nonblocking Unix socketpair
+    <-> typed bounded SPSC queues + one eventfd per direction
 SNode.C client thread
     <-> codex-bridge
     <-> Codex app-server
 ```
 
-The Qt thread owns widgets plus a toolkit-neutral `UiSession`, which owns the
-`PresentationModel` and UI/UX state machine. Widgets exchange only semantic
-intents and value snapshots with that boundary. `FrontendSession` adapts its
-generic presentation client to the unchanged socketpair. The SNode.C thread
-owns the event loop, selected transport, `AISuite::OpenAICodex` frontend proxy
-SDK, native protocol normalization, and connection/controller telemetry. The
-threads exchange only bounded `codexui.presentation` JSONL commands and events.
+Both threads share one current `NodeGraph`. The SNode.C worker owns
+CodexBridge, native app-server decode/encode, protocol-to-graph updates, and
+all graph writes. Qt owns every widget and local interaction mechanic, reads
+the graph only through non-blocking access, renders visible nodes in bounded
+slices, and sends closed typed actions back to the worker. No app-server JSON,
+serialized internal state, mirror model, or socketpair crosses this boundary.
 
 ## Applications
 
-`codex-ui` is the canonical visual application. Its production shell renders
-the neutral `UiSessionView` API and sends semantic intents; it does not consume
-`PresentationModel` directly. There is no parallel legacy UI or alternate
-application target.
+`codex-ui` is the canonical visual application. Its production shell binds the
+existing widgets directly to shared nodes and sends typed node/runtime actions.
+There is no parallel legacy UI or alternate application target.
 
 `CodexWebUI` is the browser presentation. It uses the framework-neutral
 `@snodec/codex-frontend` SDK from AISuite, connects directly to the bridge over
-WebSocket, and follows the same controller, prompt, thread, turn, projection,
-and reconnect rules as the native application. Browser-only limitations are
+WebSocket, and implements the same visible controller, prompt, thread, turn,
+and reconnect behavior in its own TypeScript state path. It does not share the
+native in-process graph or its widget binding. Browser-only limitations are
 listed in the [1.0 contract](docs/web-1.0-contract.md).
 
 ## Build
@@ -87,10 +86,12 @@ are in [`web/README.md`](web/README.md).
 
 ## Architecture
 
-The complete thread model, presentation protocol, authority rules, normalized
-event vocabulary, public APIs, shell behavior, implementation report, and test
-boundaries are documented in
-[`docs/codex-architecture.md`](docs/codex-architecture.md).
+The implemented native thread model, node/state authority rules, typed
+mailboxes, protocol coverage, widget binding, and qualification boundaries are
+documented in
+[`docs/two-thread-shared-node-graph.md`](docs/two-thread-shared-node-graph.md).
+[`docs/codex-architecture.md`](docs/codex-architecture.md) is a concise product
+overview linking the native and browser-specific contracts.
 
 Current message routing, pending-prompt acknowledgment, scrolling, composer
 geometry, shell-output, Inspector, and desktop-integration decisions are

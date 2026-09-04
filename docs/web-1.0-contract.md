@@ -107,11 +107,11 @@ thread read or user-message event can materialize a local prompt alias.
 Inspector diagnostics likewise project full retained item state only while
 the State tab is selected.
 
-## Presentation boundary
+## Browser presentation boundary
 
-The semantic vocabulary and authority rules of `codexui.presentation` version
-1 remain the shared native/web contract. In the browser they form an internal
-TypeScript boundary rather than an additional network hop:
+`codexui.presentation` version 1 remains an internal TypeScript boundary in
+the browser implementation. It is not a network hop, native runtime contract,
+or data structure shared with the native application:
 
 ```text
 bridge/app-server input
@@ -122,10 +122,12 @@ bridge/app-server input
     -> React
 ```
 
-The TypeScript implementation must match the existing rules for stable IDs,
-merge/replace/remove authority, generation retirement, unknown events,
-incomplete reconstruction, child-thread ownership, and ordered items. Shared
-JSON fixtures verify equivalent C++ and TypeScript normalization/reduction.
+The TypeScript implementation must preserve the browser's existing rules for
+stable IDs, merge/replace/remove authority, generation retirement, unknown
+events, incomplete reconstruction, child-thread ownership, and ordered items.
+Browser tests exercise that pipeline. Native tests independently exercise the
+native application's single shared `NodeGraph`; parity is measured at
+observable behavior rather than a shared normalizer or presentation frame.
 
 Equality is judged by observable behavior and state transitions, not source
 structure or pixel identity. For the same ordered inputs, native and web must

@@ -11,26 +11,34 @@ blue-tinted checked actions, muted disabled actions, and inset separators.
 
 ## Conversation source and structure
 
-`UiSession` owns the sole retained `PresentationModel` for normalized UI state
-and projects toolkit-neutral snapshots. The concrete message view consumes its
-selected-thread snapshot plus client-local prompt admissions; cards and
-inspectors do not access the model or maintain a second domain store. Qt keeps
-only renderer mechanics such as scroll anchors, folding, expansion, focus,
-geometry, and the editable composer form.
+One shared `NodeGraph` is the sole current native representation of app-server
+state. The SNode.C worker writes it and Qt performs short non-blocking reads of
+the selected thread's nodes. Cards and inspectors pin only current immutable
+node storage needed for a render pass; they do not retain another domain or
+view model. Qt keeps only renderer mechanics such as scroll anchors, folding,
+expansion, focus, geometry, and the editable composer form.
+
+Conversation cards are materialized lazily for the viewport and its bounded
+overscan, with measured placeholders preserving height outside that window.
+Thread rows use a two-row overscan. A materialized widget is associated through
+its node's single opaque, non-owning Qt attachment; there is no permanent
+parallel NodeId-to-widget registry. Graph reads, visibility scans, and widget
+changes are sliced across event-loop passes, and every graph read ends before a
+QWidget is called.
 
 The conversation has one semantic grouping level: an app-server turn contains
 its items in server order. When a turn has a prompt, its first You card is the
 visible turn container and owns all later cards from that turn. Steering You
 cards are nested with the activity they steer rather than starting a second
 visual turn. For every turn represented in the retained activity window, the
-projection identifies that opening prompt from the complete authoritative turn
+graph-backed renderer identifies that opening prompt from the complete turn
 and pins it outside the activity budget. History paging therefore never
 promotes a later steering You card to turn ownership; loading earlier activity
 retains the same root identity without duplication. Authoritative cards are
 keyed by stable thread, turn, and item IDs; local prompt cards are keyed by
 their submission IDs. The same keyed reconcile path handles initial display
 and updates, mutating a card in place when its visible data changes. An
-identical visible projection does not rebuild widgets or change geometry.
+identical visible node state does not rebuild widgets or change geometry.
 The complete prompt content, including attachments, adds the canonical 8 px
 structural section gap before its first nested turn card. This spacing is
 layout geometry and never becomes part of authored Markdown.
@@ -47,14 +55,15 @@ bottom or is owned by the user.
 
 - The selected thread is identified by its stable app-server thread ID.
 - The Conversation heading reports `Last activity` from one monotonic
-  presentation timestamp. After hydration it starts at the greater of the
+  effective activity timestamp. After hydration it starts at the greater of the
   app-server's `updatedAt` and optional `recencyAt`. During the live session,
   meaningful thread-scoped protocol traffic in either direction advances it
   immediately. Selection-driven `thread/read` and `thread/resume` hydration,
   global connection traffic, and catalog traffic do not count as activity.
   Live traffic does not alter thread ordering. Only local prompt admission
-  advances the presentation model's effective `updatedAt` and `recencyAt`;
-  these local values are not persisted by CodexUI.
+  advances the thread node's local effective activity fields used by the
+  `Recent` and `Last changed` comparators; these values are not persisted by
+  CodexUI.
 - The visible sidebar order contains confirmed root threads only. Minimal
   thread placeholders created by scoped protocol traffic remain retained but
   invisible until an explicit list, read, resume, create, or fork admits them
@@ -104,7 +113,7 @@ bottom or is owned by the user.
   preserved while the draft's queued prompts continue independently.
 - Selecting a thread hydrates it once per bridge connection even when the
   discovery result already contains an active turn. The full read is merged
-  into the retained per-thread presentation, so live Plan and Agents state
+  into the thread's current graph nodes, so live Plan and Agents state
   cannot be erased by an incomplete reconstruction. Reload remains the
   explicit forced fresh-read action.
 
@@ -118,9 +127,9 @@ events and Enter used to confirm an active input-method composition never
 submit a prompt. Auto-repeat is consumed instead of inserting an accidental
 newline. Send and Steer are enabled only when admission is available and the
 draft contains non-whitespace text. Focus uses the canonical blue composer
-border without changing its geometry. Whitespace is used only for admission
-validation: the exact authored text, including intentional leading and trailing
-space and blank lines, is passed to the submission path unchanged.
+border without changing its geometry. The legacy submission contract trims
+leading and trailing whitespace once; whitespace and blank lines inside the
+trimmed prompt remain unchanged.
 
 Submitting a prompt creates a client-local pending prompt card at the bottom of
 the destination thread immediately. The card begins with the calm blue
@@ -141,14 +150,14 @@ whether pending feedback is visible; it never acknowledges or promotes the
 prompt. If the authoritative app-server item arrives before or after the
 result, it inherits the pending card's stable visual anchor and replaces it as
 soon as both correlation and acknowledgment are complete. Only the correlated
-`turn.start` or `turn.steer` completion callback acknowledges a prompt;
+`turn/start` or `turn/steer` completion callback acknowledges a prompt;
 conversation events never infer acknowledgment. Each operation carries a
 unique `clientUserMessageId`, which binds the authoritative user item without
 confusing identical prompt text. A failed submission remains visible with an
 explicit error state.
 
 A prompt that starts a turn is the outer soft-blue turn card. A prompt admitted
-through `turn.steer` appears immediately inside the active turn as a calm teal
+through `turn/steer` appears immediately inside the active turn as a calm teal
 `You` card with a right-aligned `steering` specialization. It uses the same
 one-second delayed-feedback rule as the outer card. After
 acknowledgment, the same widget becomes a soft-teal inset steering card with
@@ -159,7 +168,7 @@ it without changing existing nested card identity.
 At acknowledgment, the retained outer You card immediately uses the stronger
 static blue running border. That border belongs to the card across its local-
 prompt-to-authoritative-message morph while pending feedback stops; it
-has no animation, glow, shading, or geometry change. A successful `turn.start`
+has no animation, glow, shading, or geometry change. A successful `turn/start`
 result retains active ownership until the separate authoritative lifecycle
 catches up, so the optimistic-to-running handoff has no neutral-border frame.
 Completion restores the canonical border in place.
@@ -172,12 +181,16 @@ visibly selected at that moment. Explicit new-thread creation still starts with
 a deliberately cleared composer.
 
 Accepting New Thread immediately inserts one selected orange animated row in
-the thread list. It is a presentation-only draft, not a synthetic app-server
+the thread list. It represents a client-local draft row, not an app-server
 thread. Sending the first prompt promotes the same row to the ID returned by
 `thread/start`; animation continues until that prompt's `turn/start` callback
 succeeds, then the same row adopts canonical styling. Creation or first-prompt
 failure stops animation and leaves the row visibly failed. No duplicate row or
 replacement transition is permitted.
+Selecting an existing provider thread abandons an empty, unsubmitted local
+draft and removes its optimistic row. After the first prompt has been admitted,
+New Thread is visibly refused until that exact creation resolves; the existing
+row, correlation, and authored input are never replaced by a second creation.
 CodexUI queues submissions per thread and dispatches them in order: only one
 unacknowledged prompt operation is in flight for a thread. After each result,
 the next queued prompt is sent using the app-server state produced by the
@@ -185,17 +198,25 @@ preceding acknowledgment. Different threads remain independent.
 
 Submission waits until the destination thread has completed its connection-
 generation hydration. A provider-marked `notLoaded` thread is resumed before
-the turn operation. If a submission still receives a transient thread-not-found
-result, CodexUI performs one bounded resume-and-retry; a repeated failure is
-shown on the pending card rather than retried indefinitely. If hydration has
-failed, submission is rejected without clearing the composer draft; Reload
-must succeed before that prompt can be admitted. A disconnect after admission
-leaves the pending card in place; a dispatched prompt is returned to its queue,
-and bridge-open re-drives queued work only after fresh thread hydration. Real
-app-server operation failures remain terminal. An active resume prevents a
-concurrent hydration read or turn operation for the same thread.
+the turn operation. If hydration fails before admission, submission is rejected
+without clearing the composer draft; Reload must succeed before that prompt can
+be admitted.
 
-For an explicit new-thread draft, prompts entered while `thread.create` is in
+An admitted prompt is never submitted again automatically. In particular, a
+thread-not-found result, disconnect, thread deletion, or provider-generation
+reset cannot trigger a resume-and-resend path for `turn/start` or `turn/steer`.
+If deletion or a provider reset invalidates the destination while work is
+queued or in flight, the local prompt is detached from the invalid thread and
+retained in explicit recovery state with its exact admitted text and attachment
+links. The recovery card distinguishes definite failure from an outcome that
+may already have reached the provider. Reconnection and hydration do not send
+it; recovery requires a deliberate user action. Restoring a recovery card
+never overwrites non-empty composer text or attachments: the current draft
+remains intact until the user sends or clears it. Other app-server operation
+failures remain terminal. An active resume prevents a concurrent hydration
+read or turn operation for the same thread.
+
+For an explicit new-thread draft, prompts entered while `thread/start` is in
 flight remain attached to that draft. When creation succeeds, all pending
 prompts move to the returned stable thread ID and are dispatched in order.
 
@@ -256,7 +277,7 @@ retained source as both plain clipboard text and `text/markdown`, never
 reconstructed rendered text. Structured cards copy a deterministic plain-text
 representation of their primary content. After a successful write, only the
 copy glyph quickly morphs into the canonical green check, remains a check for
-1.5 seconds, and morphs back without moving the header. A rounded,
+0.5 seconds, and morphs back without moving the header. A rounded,
 non-layout-shifting `Copied` overlay appears at the action. Web clipboard
 failure keeps the copy glyph and uses the same local overlay with canonical
 error styling; reduced-motion mode makes the icon transitions immediate
@@ -269,12 +290,16 @@ title remains at the left; no separator glyph is rendered.
 Pending-request dialogs validate required answers and structured MCP content
 before accepting the modal. Invalid input keeps the dialog and all entered
 content open for correction.
+If controller or provider state changes after a response enters the typed
+mailbox but before the worker can send it, no automatic retry occurs. The
+interaction node retains the authored response and its error so reopening
+Review restores the entered decision, answers, or structured content.
 
 The native and web Conversation headers expose persistent, matching icon-only
 controls for Reasoning visibility, interim Codex-update visibility, and the
 initial folding state of newly appearing Command execution and Image cards. Final Codex
 answers are never filtered. Visibility is a presentation choice only: filtered
-cards remain in the retained projection, continue accepting updates, and reappear
+cards remain as retained graph nodes, continue accepting updates, and reappear
 with their latest content and user-owned folding state. Changing the Command
 preference never refolds an existing card.
 Browser persistence is an optional convenience: unavailable or denied local
@@ -308,8 +333,8 @@ sender, and receivers are shown only when app-server supplied them.
 Textual `plan` items remain conversation content. Structured
 `turn/plan/updated` state is shown only in the Inspector Plan tab, avoiding a
 duplicate representation in the conversation. Its typed conversation key,
-conversion, placement, and renderer remain implemented behind a disabled
-projection switch so this policy can be reactivated narrowly if required.
+conversion and renderer remain available to textual plan items; structured
+turn state is deliberately not materialized as a conversation card.
 
 ## Conversation scrolling
 
@@ -335,7 +360,7 @@ offset. Appends below the viewport keep the scrollbar value unchanged; card
 reflow or reconstruction restores that visual anchor after Qt completes layout.
 Incoming data therefore cannot move the user's reading position merely because
 content above or below it changed size. Protocol updates that do not change a
-card's visible projection do not rebuild that card. Multiple visible card
+card's visible node state do not rebuild that card. Multiple visible card
 changes from one refresh are applied as one paint-suppressed layout transaction
 with one anchor restoration, including streaming Command execution updates.
 Incoming deltas are coalesced to at most one reconcile per display interval;
@@ -345,6 +370,9 @@ New authoritative cards are inserted at their server-ordered position without
 reconstructing retained cards. While following is paused, the effective history
 window expands with incoming cards so its visible anchor is not evicted; the
 requested bound is restored after following resumes.
+Load more expands the retained in-memory window first. It requests an older
+provider page exactly once only when that click reaches the retained-history
+boundary, so revealing already loaded cards never creates duplicate wire work.
 
 User scrolling to the current bottom re-enables following. A generic Qt range
 clamp caused by card reflow does not count as user intent and cannot silently
@@ -422,13 +450,17 @@ as the complete command output, response, reasoning, or plan text.
 ## Inspector and Info presentation
 
 The State and Protocol viewers use the common CodexUI scrollbar styling and
-show vertical scrollbars only when needed. The Protocol log occupies the
-expanding area of its tab; protocol statistics are displayed below the log.
-Protocol and State data are diagnostic presentation only and do not create
-domain authority. Plan, Agents, and Requests use retained per-thread
-presentation snapshots. Agent cards start collapsed and expose status, copy,
-and fold actions in that order; folding changes presentation only and never
-discards agent content. Changes instead resolves local Git repositories upward
+show vertical scrollbars only when needed. State summarizes the current shared
+graph. Protocol lists bounded current operation and unknown-protocol nodes;
+revision, node, operation, pending, and unknown counts remain below it. These
+diagnostics are current graph views, not a raw frame log or a domain authority.
+Plan, Agents, and Requests read the selected thread's current nodes in bounded
+passes. Each uses at most 48 materialized rows plus a two-row overscan and
+fixed-height leading/trailing spacers; moving its viewport schedules a fresh
+non-blocking graph scan for the newly visible window. Agent cards start
+collapsed and expose status, copy, and fold actions in that order; folding
+changes presentation only and never discards agent content. Changes instead
+resolves local Git repositories upward
 from the selected thread's retained command working directories and refreshes
 them asynchronously through libgit2. When several repositories match, All
 repositories is the default and a selector can narrow the view. Resolution

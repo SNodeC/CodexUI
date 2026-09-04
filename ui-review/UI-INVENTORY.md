@@ -23,14 +23,15 @@
 - Thread title, workspace, and status context.
 - One transparent section per app-server turn, containing server-ordered user,
   Codex, plan, reasoning, Command execution, file-change, and collaboration
-  cards projected from `PresentationModel`.
+  cards rendered from the shared `NodeGraph`.
 - Stable keyed in-place reconciliation for authoritative cards and local prompt
-  cards; visually identical projections perform no widget or geometry update.
-- Per-thread pending prompt cards with muted blue content and a brighter blue
-  highlight sweeping left and right until the correlated operation callback,
-  followed by a 500-millisecond accepted transition.
-- Windowed materialization of long conversations with an explicit Load More
-  control.
+  cards; visually identical node state performs no widget or geometry update.
+- Per-thread pending prompt cards with muted blue content; after one second of
+  pending work, a brighter blue highlight sweeps left and right until the
+  correlated operation callback ends pending feedback immediately.
+- Lazy materialization for the viewport plus one viewport of overscan, with
+  measured placeholders farther away, at most eight card operations per event
+  pass, and an explicit Load More control.
 - Short, interruptible smooth bottom-follow only while the user remains at the
   bottom; paused reading uses a stable visible-card/pixel-offset anchor.
 - Wheel and touchpad forwarding from surrounding center chrome and splitter
@@ -73,8 +74,10 @@
   addition/deletion counts, live filesystem refresh, copy, and
   expanded viewing.
 - **Requests:** typed approval and input requests with explicit resolution.
-- **Info / State:** retained normalized presentation domains.
-- **Info / Protocol:** bounded frame log with the statistics summary below it.
+- **Info / State:** bounded current shared-graph summary with selected-thread
+  detail.
+- **Info / Protocol:** bounded current operation and unknown-protocol node
+  diagnostic with revision and node statistics below it.
 
 State and Protocol use the common styled, as-needed vertical scrollbars.
 Plan, Agents, Changes, and Requests retain their visible per-thread state across
@@ -88,8 +91,11 @@ thread and tab navigation.
 
 ## Local presentation state
 
-CodexUI locally owns visible selection, drafts, pending prompt cards, per-thread
-submission queues, scroll-follow state, nested-output scroll state, splitter
-sizes, tab selection, and focus. `PresentationModel` is the sole retained store
-for normalized presentation domains; these local interaction values do not
-replace AISuite or app-server domain authority.
+Qt locally owns visible selection, drafts, scroll-follow state, nested-output
+scroll state, splitter sizes, tab selection, focus, and other widget mechanics.
+Pending prompts are graph nodes and per-thread operation ordering belongs to
+worker logic, not to a second Qt model. The shared `NodeGraph` is the sole
+current native store for protocol-derived domains; local interaction values do
+not replace AISuite or app-server domain authority. Materialized rows and cards
+associate through each node's optional opaque Qt attachment rather than a
+permanent NodeId-to-widget registry.
