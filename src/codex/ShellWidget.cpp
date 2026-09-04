@@ -16,6 +16,7 @@
 #include "codex/middle/ThreadPane.h"
 #include "codex/ui/BrandMark.h"
 #include "codex/ui/ExpandingPromptEditor.h"
+#include "codex/ui/NodeGraphUiAdapter.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QAction>
@@ -786,7 +787,8 @@ QFrame *statusDot() {
 
 struct ShellWidget::Impl final {
   Impl(ShellWidget *owner, FrontendSession &session)
-      : owner(owner), session(session), alive(std::make_shared<bool>(true)) {
+      : owner(owner), session(session), uiAdapter(session.nodeGraph()),
+        alive(std::make_shared<bool>(true)) {
     buildUi();
     connectUi();
     const auto token = alive;
@@ -856,6 +858,7 @@ struct ShellWidget::Impl final {
 
   ShellWidget *owner = nullptr;
   FrontendSession &session;
+  ui::NodeGraphUiAdapter uiAdapter;
   std::shared_ptr<bool> alive;
   std::optional<NewThreadDraft> newThreadDraft;
   std::string creationDraftCorrelation;
@@ -1161,15 +1164,6 @@ void ShellWidget::Impl::connectUi() {
         std::move(action),
         QStringLiteral("History request was not admitted; try again.")));
   });
-  middleRegion->conversation().setPromptMaterializedAction(
-      [this](nodegraph::NodeRef localPrompt) {
-        nodegraph::NodeAction action{
-            std::move(localPrompt),
-            nodegraph::NodeActionKind::PromptMaterialized};
-        return sendNodeAction(std::move(action), {});
-      });
-  middleRegion->conversation().setPromptRecoveryAction(
-      [this](nodegraph::NodeRef prompt) { recoverPrompt(prompt); });
   middleRegion->inspector().setRequestActions(
       [this](const std::string &id) { reviewPending(id); },
       [this](const std::string &id) { acceptPending(id); },
@@ -1280,7 +1274,17 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
   graphPanesBound = true;
   const nodegraph::NodeGraph &graph = session.nodeGraph();
   middleRegion->threads().refresh(graph, boundGraphThread);
-  middleRegion->conversation().bindGraph(graph, boundGraphThread);
+  if (boundGraphThread) {
+    if (auto snapshot = uiAdapter.conversation(
+            boundGraphThread, std::numeric_limits<std::size_t>::max(),
+            {middleRegion->conversation().presentationOptions().showReasoning,
+             middleRegion->conversation()
+                 .presentationOptions()
+                 .showCodexUpdates}))
+      static_cast<void>(middleRegion->conversation().reconcile(*snapshot));
+  } else {
+    static_cast<void>(middleRegion->conversation().reconcile({}));
+  }
   middleRegion->inspector().refresh(graph, boundGraphThread);
 }
 
@@ -1319,10 +1323,17 @@ void ShellWidget::Impl::handleGraphChanged(
     ++conversationRoutes;
     owner->setProperty("conversationRoutes",
                        static_cast<qulonglong>(conversationRoutes));
-    middleRegion->conversation().graphChangedDeferred(change.affected,
-                                                      change.removed);
-  } else {
-    middleRegion->conversation().detachRemovedNodes(change.removed);
+    if (boundGraphThread) {
+      if (auto snapshot = uiAdapter.conversation(
+              boundGraphThread, std::numeric_limits<std::size_t>::max(),
+              {middleRegion->conversation()
+                   .presentationOptions()
+                   .showReasoning,
+               middleRegion->conversation()
+                   .presentationOptions()
+                   .showCodexUpdates}))
+        static_cast<void>(middleRegion->conversation().reconcile(*snapshot));
+    }
   }
   if (middleRegion->inspector().graphChangeAffectsVisibleTab(change)) {
     ++inspectorRoutes;

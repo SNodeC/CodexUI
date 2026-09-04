@@ -4,17 +4,13 @@
 #define CODEXUI_CODEX_MIDDLE_CONVERSATIONVIEW_H
 
 #include "codex/middle/ConversationCards.h"
-#include "codex/nodegraph/NodeGraph.h"
 
 #include <QAbstractScrollArea>
 
 #include <functional>
 #include <memory>
-#include <optional>
-#include <span>
 #include <string>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 class QLabel;
@@ -45,28 +41,17 @@ public:
   };
 
   explicit ConversationView(QWidget *parent = nullptr);
-  ~ConversationView() override;
 
   void setLoadMoreAction(std::function<void()> action);
-  void
-  setPromptMaterializedAction(std::function<bool(nodegraph::NodeRef)> action);
-  void setPromptRecoveryAction(std::function<void(nodegraph::NodeRef)> action);
   void setEmptyMessage(QString message);
   void setPresentationOptions(PresentationOptions options);
   [[nodiscard]] PresentationOptions presentationOptions() const noexcept {
     return presentationOptions_;
   }
 
-  // The view retains only the selected thread's loaded history window and its
-  // structural NodeRefs. Cards in that bounded window materialize once;
-  // subsequent protocol-derived projection reads remain visible-card-only.
-  void bindGraph(const nodegraph::NodeGraph &graph,
-                 nodegraph::NodeRef selectedThread);
-  void graphChanged(std::span<const nodegraph::NodeRef> removed = {});
-  void graphChangedDeferred(std::span<const nodegraph::NodeRef> removed = {});
-  void graphChangedDeferred(std::span<const nodegraph::NodeRef> affected,
-                            std::span<const nodegraph::NodeRef> removed);
-  void detachRemovedNodes(std::span<const nodegraph::NodeRef> removed);
+  // Returns false for a typed projection no-op.  Existing cards are mutated by
+  // key; first render and later updates use this same reconciliation path.
+  bool reconcile(const ConversationSnapshot &snapshot);
 
   // Extra composer height is represented after the final card, while the
   // viewport itself keeps its canonical geometry.
@@ -102,21 +87,17 @@ private:
     int absoluteValue = 0;
   };
 
-  enum class AtomicCover { None, Loading, FrozenFrame };
-
   struct ThreadScrollState {
     Mode mode = Mode::Following;
     Anchor anchor;
     bool pausedByComposerGrowth = false;
-    std::size_t graphRequestedHistoryLimit = AuthoritativeHistoryPageSize;
-    std::size_t graphHistoryLimit = AuthoritativeHistoryPageSize;
-    std::size_t graphKnownItemCount = 0;
-    std::string graphNewestItemKey;
   };
 
-  class GraphViewportGeometry;
   class TurnSectionWidget;
 
+  bool reconcile(const ConversationSnapshot &snapshot, bool force,
+                 bool settleFollowImmediately);
+  [[nodiscard]] bool cardVisible(const VisibleCardData &card) const noexcept;
   void setThread(const std::string &threadId);
   void setCardCollapsed(const std::string &key, ConversationCard *card,
                         bool collapsed);
@@ -125,74 +106,31 @@ private:
   void storeCurrentThreadState();
   void setScrollValue(int value);
   void stopFollowingAnimation();
-  void restoreRequestedGraphHistoryLimit();
   void animateToBottom(int previousValue);
-  void recomputeGeometry(
-      const std::vector<TurnSectionWidget *> *affectedSections = nullptr);
-  void arrangeSection(TurnSectionWidget *section);
-  void clearGraph(bool preserveAtomicTransition = false);
-  void scheduleGraphRefresh();
-  void scheduleGraphContentionRetry();
-  void scheduleVisibilityContentionRetry();
-  void scheduleRetiredGeometryCleanup();
-  void publishRetiredGeometryCleanupMetrics();
-  void runGraphRefresh();
-  [[nodiscard]] bool reconcileGraphViewport();
-  void detachGraphWidgets(std::span<const nodegraph::NodeRef> removed = {});
-  void updateGraphChrome();
-  void scheduleVisibilityPass();
-  void resetGraphVisibilityScan();
-  [[nodiscard]] bool runVisibilityPass();
-  [[nodiscard]] bool runGraphVisibilityPass();
-  void beginAtomicMaterialization(
-      bool fullCommit, AtomicCover cover = AtomicCover::None);
-  void finishBulkMaterializationIfReady();
+  void recomputeGeometry();
   void positionContent();
   void handleUserScrollValue(int value);
   [[nodiscard]] bool applyWheel(QWheelEvent *event);
   [[nodiscard]] ConversationCard *
   cardForStableKey(const std::string &stableKey) const;
-  [[nodiscard]] QWidget *itemForStableKey(const std::string &stableKey) const;
 
   QWidget *content_ = nullptr;
-  QLabel *atomicTransitionOverlay_ = nullptr;
   QVBoxLayout *contentLayout_ = nullptr;
   QPushButton *loadMore_ = nullptr;
-  QWidget *graphLeadingPlaceholder_ = nullptr;
-  QWidget *graphTrailingPlaceholder_ = nullptr;
+  QSpacerItem *trailingSpace_ = nullptr;
   QLabel *empty_ = nullptr;
   QVariantAnimation *followAnimation_ = nullptr;
   std::function<void()> loadMoreAction_;
-  std::function<bool(nodegraph::NodeRef)> promptMaterializedAction_;
-  std::function<void(nodegraph::NodeRef)> promptRecoveryAction_;
 
-  const nodegraph::NodeGraph *graph_ = nullptr;
-  nodegraph::NodeRef graphThread_;
-  std::unique_ptr<GraphViewportGeometry> graphGeometry_;
-  std::vector<TurnSectionWidget *> graphSections_;
-  std::size_t graphRequestedHistoryLimit_ = AuthoritativeHistoryPageSize;
-  std::size_t graphHistoryLimit_ = AuthoritativeHistoryPageSize;
-  std::size_t graphKnownItemCount_ = 0;
-  std::string graphNewestItemKey_;
-  std::size_t graphHiddenItemCount_ = 0;
-  std::size_t graphWindowItemCount_ = 0;
-  bool graphProviderHasMore_ = false;
-  std::size_t visibilitySectionCursor_ = 0;
-  std::size_t visibilitySlotCursor_ = 0;
-  std::size_t visibilitySlotsRemaining_ = 0;
-  int visibilityScanScrollTop_ = -1;
-  int visibilityScanViewportHeight_ = -1;
-  int visibilityScanViewportWidth_ = -1;
-  int visibilityScanContentHeight_ = -1;
-  std::optional<std::pair<std::size_t, std::size_t>>
-      immediateVisibilityStart_;
-  std::vector<nodegraph::NodeRef> immediateMaterializationNodes_;
   std::string threadId_;
+  std::unordered_map<std::string, TurnSectionWidget *> sections_;
+  std::unordered_map<std::string, ConversationCard *> cards_;
+  std::vector<std::string> displayedSectionKeys_;
+  std::vector<std::string> displayedCardKeys_;
   std::unordered_map<std::string, ThreadScrollState> threadStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>
       commandOutputStates_;
   std::unordered_map<std::string, bool> cardCollapsedStates_;
-  std::optional<Anchor> pendingGraphAnchorRestore_;
   PresentationOptions presentationOptions_;
 
   Mode mode_ = Mode::Following;
@@ -206,21 +144,6 @@ private:
   bool userActionPending_ = false;
   bool pausedByComposerGrowth_ = false;
   bool dispatchingNativeWheel_ = false;
-  bool graphRefreshScheduled_ = false;
-  bool visibilityPassScheduled_ = false;
-  bool retiredGeometryCleanupScheduled_ = false;
-  bool bulkMaterializationUpdatesSuppressed_ = false;
-  bool atomicMaterializationFullCommit_ = false;
-  bool graphHydrationSettled_ = true;
-  bool graphViewportReconciliationPending_ = false;
-  std::optional<Anchor> atomicMaterializationAnchor_;
-  std::vector<TurnSectionWidget *> atomicMaterializationSections_;
-  std::size_t graphPassCardOperations_ = 0;
-  std::uint64_t graphBindingEpoch_ = 0;
-  std::uint64_t graphRefreshPasses_ = 0;
-  std::uint64_t geometryPasses_ = 0;
-  std::uint64_t fullGeometryPasses_ = 0;
-  int geometryWidthCorrectionDepth_ = 0;
 };
 
 } // namespace codexui::codex::middle

@@ -99,6 +99,8 @@ set(
     src/codex/middle/MiddleTypes.h
     src/codex/middle/ThreadPane.cpp
     src/codex/middle/ThreadPane.h
+    src/codex/ui/NodeGraphUiAdapter.cpp
+    src/codex/ui/NodeGraphUiAdapter.h
 )
 
 qt_add_executable(
@@ -156,6 +158,64 @@ if(TARGET snodec::http-client AND TARGET snodec::websocket-client)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(
+        codexui-nodegraph-ui-adapter-test
+        tests/codex/NodeGraphUiAdapterTest.cpp
+        src/codex/ui/NodeGraphUiAdapter.cpp
+        src/codex/ui/NodeGraphUiAdapter.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+    )
+    target_compile_features(
+        codexui-nodegraph-ui-adapter-test PRIVATE cxx_std_20
+    )
+    target_include_directories(
+        codexui-nodegraph-ui-adapter-test PRIVATE src
+    )
+    target_link_libraries(
+        codexui-nodegraph-ui-adapter-test PRIVATE codexui-nodegraph
+    )
+    add_test(
+        NAME codexui-nodegraph-ui-adapter
+        COMMAND codexui-nodegraph-ui-adapter-test
+    )
+    set_tests_properties(
+        codexui-nodegraph-ui-adapter PROPERTIES TIMEOUT 10
+    )
+
+    qt_add_executable(
+        codexui-nodegraph-conversation-ui-test
+        tests/codex/NodeGraphConversationUiTest.cpp
+        src/codex/ui/NodeGraphUiAdapter.cpp
+        src/codex/ui/NodeGraphUiAdapter.h
+        src/codex/middle/ConversationCards.cpp
+        src/codex/middle/ConversationCards.h
+        src/codex/middle/ConversationView.cpp
+        src/codex/middle/ConversationView.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
+    )
+    target_compile_features(
+        codexui-nodegraph-conversation-ui-test PRIVATE cxx_std_20
+    )
+    target_include_directories(
+        codexui-nodegraph-conversation-ui-test PRIVATE src
+    )
+    target_link_libraries(
+        codexui-nodegraph-conversation-ui-test
+        PRIVATE codexui-nodegraph Qt6::Widgets
+    )
+    add_test(
+        NAME codexui-nodegraph-conversation-ui
+        COMMAND codexui-nodegraph-conversation-ui-test
+    )
+    set_tests_properties(
+        codexui-nodegraph-conversation-ui
+        PROPERTIES TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+
     add_executable(
         codexui-nodegraph-json-test
         tests/codex/nodegraph/NodeGraphJsonTest.cpp

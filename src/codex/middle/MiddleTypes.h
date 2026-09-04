@@ -154,8 +154,6 @@ struct GenericActivityData {
   std::string type;
   nlohmann::json raw = nlohmann::json::object();
   std::string status;
-  // Graph-backed rendering supplies a bounded, human-readable description
-  // directly from NodeState. Direct standalone cards may still use raw.
   std::string displayDetail;
 
   bool operator==(const GenericActivityData &) const = default;
@@ -168,9 +166,6 @@ struct LocalPromptData {
   bool showPendingAnimation = false;
   std::string error;
   std::vector<std::string> imagePaths;
-  // Absolute admission time retained by the shared node.  The Qt card uses
-  // this only to derive its visual-feedback deadline; it never advances
-  // domain state or asks the worker to schedule a timer.
   std::optional<std::int64_t> admittedAtMs;
   bool requiresExplicitRecovery = false;
 
@@ -189,12 +184,37 @@ struct VisibleCardData {
   std::string turnId;
   std::string itemId;
   CardPayload payload = GenericActivityData{};
-  // Graph-backed cards receive the current canonical node lifecycle here.
-  // Direct standalone cards may leave it unset and derive presentation from
-  // their typed payload status as before.
   std::optional<bool> activeWork;
 
   bool operator==(const VisibleCardData &) const = default;
+};
+
+// A section is a structural, visually transparent turn container. It contains
+// only data that can affect the conversation presentation; turn lifecycle
+// metadata belongs to the authoritative model and inspector.
+struct TurnSection {
+  std::string key;
+  std::string turnId;
+  std::vector<VisibleCardData> cards;
+  // The projection, which sees the complete authoritative turn, identifies
+  // its actual opening prompt. Rendering must never infer ownership from the
+  // first user message that happens to survive history paging.
+  std::optional<CardKey> rootCardKey;
+
+  bool operator==(const TurnSection &) const = default;
+};
+
+struct ConversationSnapshot {
+  std::string threadId;
+  std::vector<TurnSection> sections;
+  std::size_t hiddenAuthoritativeItemCount = 0;
+  bool hasMore = false;
+  std::optional<std::string> activeTurnId;
+
+  [[nodiscard]] std::vector<CardKey> cardKeys() const;
+  [[nodiscard]] const VisibleCardData *find(const CardKey &key) const noexcept;
+
+  bool operator==(const ConversationSnapshot &) const = default;
 };
 
 } // namespace codexui::codex::middle
