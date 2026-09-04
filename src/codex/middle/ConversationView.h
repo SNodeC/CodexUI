@@ -10,6 +10,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -62,6 +63,8 @@ public:
                  nodegraph::NodeRef selectedThread);
   void graphChanged(std::span<const nodegraph::NodeRef> removed = {});
   void graphChangedDeferred(std::span<const nodegraph::NodeRef> removed = {});
+  void graphChangedDeferred(std::span<const nodegraph::NodeRef> affected,
+                            std::span<const nodegraph::NodeRef> removed);
   void detachRemovedNodes(std::span<const nodegraph::NodeRef> removed);
 
   // Extra composer height is represented after the final card, while the
@@ -108,6 +111,7 @@ private:
     std::string graphNewestItemKey;
   };
 
+  class GraphViewportGeometry;
   class TurnSectionWidget;
 
   void setThread(const std::string &threadId);
@@ -124,7 +128,12 @@ private:
   void arrangeSection(TurnSectionWidget *section);
   void clearGraph();
   void scheduleGraphRefresh();
+  void scheduleGraphContentionRetry();
+  void scheduleVisibilityContentionRetry();
+  void scheduleRetiredGeometryCleanup();
+  void publishRetiredGeometryCleanupMetrics();
   void runGraphRefresh();
+  [[nodiscard]] bool reconcileGraphViewport();
   void detachGraphWidgets(std::span<const nodegraph::NodeRef> removed = {});
   void updateGraphChrome();
   void scheduleVisibilityPass();
@@ -142,7 +151,7 @@ private:
   QVBoxLayout *contentLayout_ = nullptr;
   QPushButton *loadMore_ = nullptr;
   QWidget *graphLeadingPlaceholder_ = nullptr;
-  QSpacerItem *trailingSpace_ = nullptr;
+  QWidget *graphTrailingPlaceholder_ = nullptr;
   QLabel *empty_ = nullptr;
   QVariantAnimation *followAnimation_ = nullptr;
   std::function<void()> loadMoreAction_;
@@ -151,6 +160,7 @@ private:
 
   const nodegraph::NodeGraph *graph_ = nullptr;
   nodegraph::NodeRef graphThread_;
+  std::unique_ptr<GraphViewportGeometry> graphGeometry_;
   std::vector<TurnSectionWidget *> graphSections_;
   std::size_t graphRequestedHistoryLimit_ = AuthoritativeHistoryPageSize;
   std::size_t graphHistoryLimit_ = AuthoritativeHistoryPageSize;
@@ -171,6 +181,7 @@ private:
   std::unordered_map<std::string, CommandOutputView::ScrollState>
       commandOutputStates_;
   std::unordered_map<std::string, bool> cardCollapsedStates_;
+  std::optional<Anchor> pendingGraphAnchorRestore_;
   PresentationOptions presentationOptions_;
 
   Mode mode_ = Mode::Following;
@@ -186,6 +197,9 @@ private:
   bool dispatchingNativeWheel_ = false;
   bool graphRefreshScheduled_ = false;
   bool visibilityPassScheduled_ = false;
+  bool retiredGeometryCleanupScheduled_ = false;
+  std::size_t graphPassCardOperations_ = 0;
+  std::uint64_t graphBindingEpoch_ = 0;
 };
 
 } // namespace codexui::codex::middle

@@ -1228,7 +1228,8 @@ void ShellWidget::Impl::handleGraphChanged(
   if (updateThreads)
     middleRegion->threads().graphChanged(change);
   if (conversationAffected(change, session.nodeGraph(), boundGraphThread))
-    middleRegion->conversation().graphChangedDeferred(change.removed);
+    middleRegion->conversation().graphChangedDeferred(change.affected,
+                                                      change.removed);
   else
     middleRegion->conversation().detachRemovedNodes(change.removed);
   if (inspectorAffected(change,

@@ -1625,6 +1625,10 @@ bool ConversationCard::setAuthoritativeTurnActive(bool active) {
   return impl_->setAuthoritativeTurnActive(active);
 }
 
+void ConversationCard::setNestedPresentation(bool nested) {
+  impl_->setNestedConversationCard(nested);
+}
+
 void ConversationCard::setNestedCards(
     const std::vector<ConversationCard *> &cards) {
   impl_->setNestedCards(cards);

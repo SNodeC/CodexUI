@@ -92,6 +92,9 @@ public:
   [[nodiscard]] bool isCollapsed() const noexcept;
   void setCollapsed(bool collapsed);
   bool setAuthoritativeTurnActive(bool active);
+  // Preserve the existing steering-card presentation when a visible child is
+  // rendered without its far-offscreen turn-root widget.
+  void setNestedPresentation(bool nested);
   void setNestedCards(const std::vector<ConversationCard *> &cards);
   // ConversationView uses lightweight measured placeholders for nested cards
   // that are outside the viewport.  They share the existing nested layout so

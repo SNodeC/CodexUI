@@ -95,6 +95,34 @@ void spin(int milliseconds = 0) {
   } while (timer.elapsed() < milliseconds);
 }
 
+template <typename Predicate>
+bool spinUntil(Predicate &&predicate, int maximumPasses = 64) {
+  for (int pass = 0; pass < maximumPasses; ++pass) {
+    if (predicate())
+      return true;
+    // Zero-delay continuations normally drain in one event dispatch, while
+    // contention recovery deliberately uses a small nonzero timer. Give both
+    // paths a real event-loop tick without assuming synchronous completion.
+    spin(1);
+  }
+  return predicate();
+}
+
+template <typename Predicate>
+bool dispatchUntil(Predicate &&predicate, int maximumPasses = 512) {
+  for (int pass = 0; pass < maximumPasses; ++pass) {
+    if (predicate())
+      return true;
+    QCoreApplication::processEvents(QEventLoop::AllEvents);
+  }
+  return predicate();
+}
+
+void dispatchPasses(int count) {
+  for (int pass = 0; pass < count; ++pass)
+    QCoreApplication::processEvents(QEventLoop::AllEvents);
+}
+
 VisibleCardData agentCard(const std::string &threadId,
                           const std::string &turnId, int index,
                           QString text = {}) {
@@ -737,6 +765,66 @@ bool hasConversationItem(ConversationView &view, const std::string &key) {
       });
 }
 
+struct LiveConversationWidgetCounts final {
+  int cards = 0;
+  int itemPlaceholders = 0;
+  int turnSections = 0;
+
+  [[nodiscard]] int itemRepresentations() const noexcept {
+    return cards + itemPlaceholders;
+  }
+};
+
+LiveConversationWidgetCounts
+liveConversationWidgetCounts(ConversationView &view) {
+  LiveConversationWidgetCounts result;
+  for (QWidget *widget : view.findChildren<QWidget *>()) {
+    if (dynamic_cast<ConversationCard *>(widget))
+      ++result.cards;
+    if (widget->objectName() == QStringLiteral("conversationCardPlaceholder"))
+      ++result.itemPlaceholders;
+    if (widget->property("turnSectionKey").isValid())
+      ++result.turnSections;
+  }
+  return result;
+}
+
+bool graphPassBudgetsWereRespected(const ConversationView &view) {
+  const QVariant structure = view.property("graphMaxStructureReadsPerPass");
+  const QVariant geometry = view.property("graphMaxGeometryRecordsPerPass");
+  const QVariant cards = view.property("graphMaxCardOperationsPerPass");
+  return structure.isValid() && geometry.isValid() && cards.isValid() &&
+         structure.toULongLong() > 0 && structure.toULongLong() <= 64 &&
+         geometry.toULongLong() > 0 && geometry.toULongLong() <= 32 &&
+         cards.toULongLong() > 0 && cards.toULongLong() <= 8;
+}
+
+bool graphRefreshWasConstantBounded(const ConversationView &view) {
+  const QVariant reads = view.property("graphLastRefreshStructureReads");
+  return reads.isValid() && reads.toULongLong() <= 64;
+}
+
+std::size_t graphLiveRecordBound(const ConversationView &view) {
+  constexpr int EstimatedItemExtent = 66;
+  const std::size_t viewportItems = static_cast<std::size_t>(
+      std::max(1, view.viewport()->height()) / EstimatedItemExtent + 1);
+  // The visible viewport plus one bounded viewport of overscan on each side.
+  // A co-visible explicit root is part of this same record budget.
+  return std::max<std::size_t>(8, viewportItems * 3);
+}
+
+bool graphViewportWidgetsAreBounded(ConversationView &view) {
+  const LiveConversationWidgetCounts widgets =
+      liveConversationWidgetCounts(view);
+  const QVariant live = view.property("graphLiveRecordCount");
+  const QVariant sections = view.property("graphLiveSectionCount");
+  const std::size_t bound = graphLiveRecordBound(view);
+  return live.isValid() && sections.isValid() && live.toULongLong() <= bound &&
+         sections.toULongLong() <= bound &&
+         static_cast<std::size_t>(widgets.itemRepresentations()) <= bound &&
+         static_cast<std::size_t>(widgets.turnSections) <= bound;
+}
+
 QToolButton *disclosure(ConversationCard *card) {
   return card ? card->findChild<QToolButton *>(
                     QStringLiteral("cardDisclosureButton"))
@@ -775,12 +863,13 @@ bool setFolded(ConversationCard *card, bool collapsed) {
     return false;
   if (card->isCollapsed() == collapsed)
     return true;
+  QPointer<ConversationCard> guard(card);
   QToolButton *button = disclosure(card);
   if (!button)
     return false;
   button->click();
   spin();
-  return card->isCollapsed() == collapsed;
+  return guard && guard->isCollapsed() == collapsed;
 }
 
 std::pair<std::string, int> firstVisible(ConversationView &view) {
@@ -835,7 +924,7 @@ protected:
 
 private:
   ConversationView &view_;
-  QWidget *tracked_ = nullptr;
+  QPointer<QWidget> tracked_;
 };
 
 void wheel(ConversationView &view, int pixelDelta) {
@@ -1105,14 +1194,15 @@ bool testPausedExpandedCommandStaysPainted() {
   bool result = expect(applyConversation(view, snapshot),
                        "expanded-command audit renders its conversation");
   spin();
-  ConversationCard *const commandCard =
+  QPointer<ConversationCard> commandCard =
       card(view, stableKey(completedCommand.key));
   result &= expect(setFolded(commandCard, false),
                    "completed command is expanded before incoming cards");
-  auto *outputView = commandCard ? dynamic_cast<CommandOutputView *>(
-                                       commandCard->findChild<QTextEdit *>(
-                                           QStringLiteral("commandOutputView")))
-                                 : nullptr;
+  QPointer<CommandOutputView> outputView =
+      commandCard ? dynamic_cast<CommandOutputView *>(
+                        commandCard->findChild<QTextEdit *>(
+                            QStringLiteral("commandOutputView")))
+                  : nullptr;
   if (outputView && outputView->verticalScrollBar()->maximum() > 0) {
     outputView->verticalScrollBar()->setValue(
         outputView->verticalScrollBar()->maximum() / 2);
@@ -1134,7 +1224,13 @@ bool testPausedExpandedCommandStaysPainted() {
     return candidate.first == reference.first &&
            std::abs(candidate.second - reference.second) <= 1;
   };
+  bool observedOffscreenWithoutWidget = false;
   for (std::size_t index = 0; index < incomingKinds.size(); ++index) {
+    if (!commandCard) {
+      result &= expect(false, "incoming activity retains the visible expanded "
+                              "command QWidget");
+      break;
+    }
     const auto anchorBefore = firstVisible(view);
     const QRect commandBefore(commandCard->mapTo(view.viewport(), QPoint{}),
                               commandCard->size());
@@ -1151,8 +1247,15 @@ bool testPausedExpandedCommandStaysPainted() {
     QPointer<ConversationCard> incomingCard = card(view, incomingKey);
     const int immediateIncomingHeight =
         incomingCard ? incomingCard->height() : -1;
+    if (!incomingCard)
+      observedOffscreenWithoutWidget = true;
     spin(80);
     paintProbe.active = false;
+    if (!commandCard) {
+      result &= expect(false, "incoming activity retains the visible expanded "
+                              "command QWidget through settlement");
+      break;
+    }
     const auto settledAnchor = firstVisible(view);
     const QRect settledCommand(commandCard->mapTo(view.viewport(), QPoint{}),
                                commandCard->size());
@@ -1166,20 +1269,41 @@ bool testPausedExpandedCommandStaysPainted() {
         paintProbe.trackedGeometries, [&commandBefore](const QRect &geometry) {
           return geometry == commandBefore;
         });
+    bool canonicalItemCurrent = false;
+    if (snapshot.storage) {
+      auto read = snapshot.storage->graph.tryRead();
+      if (read) {
+        const VisibleCardData &incoming = snapshot.sections.back().cards.back();
+        nodegraph::NodeRef item =
+            read->find({nodegraph::NodeKind::Item, fixtureNodeId(incoming)});
+        const std::shared_ptr<const nodegraph::NodeState> state =
+            item ? read->state(item) : nullptr;
+        canonicalItemCurrent =
+            item && state && *state == fixtureNodeState(incoming) &&
+            read->parent(item) &&
+            read->parent(item)->id().canonical == incoming.turnId;
+      }
+    }
+    const bool incomingWidgetStable =
+        immediateIncomingHeight < 0
+            ? !incomingCard
+            : incomingCard && immediateIncomingHeight == settledIncomingHeight;
     const bool auditPass =
         changed && card(view, stableKey(completedCommand.key)) == commandCard &&
         view.mode() == ConversationView::Mode::Paused &&
         stableAgainst(anchorBefore, immediateAnchor) &&
         stableAgainst(anchorBefore, settledAnchor) &&
         immediateCommand == commandBefore && settledCommand == commandBefore &&
-        paintedAnchorStable && paintedStable &&
-        hasConversationItem(view, incomingKey) &&
-        (!incomingCard || immediateIncomingHeight == settledIncomingHeight) &&
+        paintedAnchorStable && paintedStable && canonicalItemCurrent &&
+        incomingWidgetStable &&
         commandCard->commandOutputScrollState() == outputStateBefore;
     result &= expect(
         auditPass,
         "incoming card preserves a visible expanded command in every paint");
   }
+  result &= expect(observedOffscreenWithoutWidget,
+                   "late paused appends remain canonical without creating an "
+                   "offscreen QWidget");
 
   qApp->setStyleSheet(originalStyleSheet);
   spin();
@@ -1521,7 +1645,21 @@ bool testMutableCardsAndCommandOutput() {
   view.resize(650, 520);
   view.show();
   applyConversation(view, snapshot);
-  spin();
+  const bool allCoVisibleCardsReady = spinUntil([&] {
+    return std::ranges::all_of(
+        snapshot.sections.front().cards, [&view](const VisibleCardData &value) {
+          return card(view, stableKey(value.key)) != nullptr;
+        });
+  });
+
+  bool result =
+      expect(allCoVisibleCardsReady,
+             "bounded render continuations materialize every co-visible card");
+  if (!allCoVisibleCardsReady) {
+    qApp->setStyleSheet(originalStyleSheet);
+    spin();
+    return false;
+  }
 
   std::unordered_map<std::string, ConversationCard *> identities;
   for (const auto &value : snapshot.sections.front().cards)
@@ -1550,7 +1688,7 @@ bool testMutableCardsAndCommandOutput() {
       commandCard->findChild<QLabel *>(QStringLiteral("commandStatus"));
   auto *commandMeta =
       commandCard->findChild<QLabel *>(QStringLiteral("commandMetadata"));
-  bool result = expect(
+  result &= expect(
       output && output->isHidden() && commandStatus && commandMeta &&
           commandMeta->isHidden() &&
           commandStatus->property("tone").toString() ==
@@ -1884,7 +2022,21 @@ bool testCardFoldingGeometryAndRetention() {
                    "an initial turn prompt reserves no nested-card gap");
   result &= expect(applyConversation(view, snapshot),
                    "first nested activity extends the folding fixture");
-  spin(40);
+  const bool foldingCardsReady = spinUntil([&] {
+    return std::ranges::all_of(
+        snapshot.sections.front().cards, [&view](const VisibleCardData &value) {
+          return card(view, stableKey(value.key)) != nullptr;
+        });
+  });
+  result &= expect(
+      foldingCardsReady,
+      "bounded render continuations materialize every co-visible folding "
+      "card");
+  if (!foldingCardsReady) {
+    qApp->setStyleSheet(originalStyleSheet);
+    spin();
+    return false;
+  }
 
   QPointer<ConversationCard> userCard = card(view, stableKey(user.key));
   QPointer<ConversationCard> agentCardWidget = card(view, stableKey(agent.key));
@@ -2318,17 +2470,19 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
                            {},
                            {}}});
     followingResult &= applyConversation(followingView, followingSnapshot);
+    followingResult &= spinUntil(
+        [&] { return card(followingView, stableKey(incomingKey)) != nullptr; });
     ConversationCard *incoming = card(followingView, stableKey(incomingKey));
-    const int immediateTop =
+    const int materializedTop =
         incoming ? incoming->mapTo(followingView.viewport(), QPoint{}).y() : -1;
-    const bool immediatelyAtBottom = followingView.isAtBottom();
+    const bool materializedAtBottom = followingView.isAtBottom();
     spin(320);
     const int settledTop =
         incoming ? incoming->mapTo(followingView.viewport(), QPoint{}).y() : -1;
-    if (!expect(followingResult && incoming && immediatelyAtBottom &&
-                    immediateTop == settledTop,
-                "new nested cards paint directly at their final followed "
-                "position"))
+    if (!expect(followingResult && incoming && materializedAtBottom &&
+                    materializedTop == settledTop,
+                "a new nested card reaches its final followed position in "
+                "the bounded materialization continuation"))
       return false;
 
     followingView.setPresentationOptions({true, true, true, true});
@@ -2380,12 +2534,18 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
   view.show();
   bool result = expect(applyConversation(view, snapshot),
                        "presentation-options fixture renders");
-  spin();
-  ConversationCard *update = card(view, stableKey(updateKey));
-  ConversationCard *final = card(view, stableKey(finalKey));
-  ConversationCard *reasoning = card(view, stableKey(reasoningKey));
-  ConversationCard *firstCommand = card(view, stableKey(firstCommandKey));
-  ConversationCard *firstImage = card(view, stableKey(firstImageKey));
+  result &= spinUntil([&] {
+    return card(view, stableKey(updateKey)) &&
+           card(view, stableKey(finalKey)) &&
+           card(view, stableKey(firstCommandKey)) &&
+           card(view, stableKey(firstImageKey));
+  });
+  QPointer<ConversationCard> update = card(view, stableKey(updateKey));
+  QPointer<ConversationCard> final = card(view, stableKey(finalKey));
+  QPointer<ConversationCard> reasoning = card(view, stableKey(reasoningKey));
+  QPointer<ConversationCard> firstCommand =
+      card(view, stableKey(firstCommandKey));
+  QPointer<ConversationCard> firstImage = card(view, stableKey(firstImageKey));
   result &=
       expect(update && final && !reasoning && firstCommand && firstImage &&
                  !update->isHidden() && !final->isHidden() &&
@@ -2398,8 +2558,9 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
   view.setPresentationOptions({false, false, false, false});
   spin();
   result &= expect(!card(view, stableKey(updateKey)) &&
-                       !card(view, stableKey(reasoningKey)) &&
-                       !final->isHidden() && !firstCommand->isCollapsed(),
+                       !card(view, stableKey(reasoningKey)) && final &&
+                       !final->isHidden() && firstCommand &&
+                       !firstCommand->isCollapsed(),
                    "filters release reasoning and update widgets without "
                    "changing final answers or existing folds");
 
@@ -2419,9 +2580,14 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
                            "Second image"}});
   result &= expect(applyConversation(view, snapshot),
                    "hidden cards and a new command accept updates");
-  spin();
-  ConversationCard *secondCommand = card(view, stableKey(secondCommandKey));
-  ConversationCard *secondImage = card(view, stableKey(secondImageKey));
+  result &= spinUntil([&] {
+    return card(view, stableKey(secondCommandKey)) &&
+           card(view, stableKey(secondImageKey));
+  });
+  QPointer<ConversationCard> secondCommand =
+      card(view, stableKey(secondCommandKey));
+  QPointer<ConversationCard> secondImage =
+      card(view, stableKey(secondImageKey));
   result &= expect(!card(view, stableKey(updateKey)) &&
                        !card(view, stableKey(reasoningKey)) && secondCommand &&
                        secondCommand->isCollapsed() && secondImage &&
@@ -2432,7 +2598,10 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
   result &= expect(setFolded(firstCommand, true),
                    "an existing command records a user-owned collapsed state");
   view.setPresentationOptions({true, true, true, true});
-  spin(40);
+  result &= spinUntil([&] {
+    return card(view, stableKey(updateKey)) &&
+           card(view, stableKey(reasoningKey));
+  });
   update = card(view, stableKey(updateKey));
   reasoning = card(view, stableKey(reasoningKey));
   result &= expect(
@@ -2440,9 +2609,10 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
           containsText(update, QStringLiteral("Updated while hidden")) &&
           containsText(reasoning,
                        QStringLiteral("Reasoning updated while hidden")) &&
-          firstCommand->isCollapsed() && secondCommand &&
-          secondCommand->isCollapsed() && !firstImage->isCollapsed() &&
-          secondImage && secondImage->isCollapsed(),
+          firstCommand && firstCommand->isCollapsed() && secondCommand &&
+          secondCommand->isCollapsed() && firstImage &&
+          !firstImage->isCollapsed() && secondImage &&
+          secondImage->isCollapsed(),
       "restoring visibility reveals latest content and preserves existing "
       "folds");
 
@@ -2452,11 +2622,14 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
        CommandExecutionData{"printf third", {}, "completed", {}, 0}});
   result &= expect(applyConversation(view, snapshot),
                    "a command arrives after restoring expanded-by-default");
-  spin();
-  ConversationCard *thirdCommand = card(view, stableKey(thirdCommandKey));
+  result &= spinUntil(
+      [&] { return card(view, stableKey(thirdCommandKey)) != nullptr; });
+  QPointer<ConversationCard> thirdCommand =
+      card(view, stableKey(thirdCommandKey));
   result &=
-      expect(thirdCommand && !thirdCommand->isCollapsed() &&
-                 firstCommand->isCollapsed() && secondCommand->isCollapsed(),
+      expect(thirdCommand && !thirdCommand->isCollapsed() && firstCommand &&
+                 firstCommand->isCollapsed() && secondCommand &&
+                 secondCommand->isCollapsed(),
              "only newly appearing commands use the changed initial folding "
              "preference");
   return result;
@@ -2821,59 +2994,47 @@ bool testViewportLazyMaterialization() {
 
   bool result = expect(applyConversation(view, snapshot),
                        "a large conversation creates its lazy geometry");
-  const auto materializedCount = [&view] {
-    return static_cast<int>(std::ranges::count_if(
-        view.findChildren<QWidget *>(), [](QWidget *widget) {
-          return dynamic_cast<ConversationCard *>(widget) != nullptr;
-        }));
-  };
-  const auto placeholderCount = [&view] {
-    return static_cast<int>(std::ranges::count_if(
-        view.findChildren<QWidget *>(), [](QWidget *widget) {
-          return widget->objectName() ==
-                 QStringLiteral("conversationCardPlaceholder");
-        }));
-  };
-
-  const int immediateCards = materializedCount();
+  const int immediateCards = liveConversationWidgetCounts(view).cards;
   result &= expect(
       immediateCards <= 8 &&
           card(view, stableKey(snapshot.sections.back().cards.back().key)),
       "the initial pass materializes at most eight bottom-visible "
       "cards");
   QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-  const int afterOneContinuation = materializedCount();
-  result &= expect(afterOneContinuation < 40 && placeholderCount() > 50 &&
-                       view.isAtBottom() && historyButton(view)->isVisible(),
-                   "event-loop continuations keep materialization bounded and "
-                   "represent older graph history lazily");
+  const LiveConversationWidgetCounts settled =
+      liveConversationWidgetCounts(view);
+  result &= expect(
+      settled.cards < static_cast<int>(graphLiveRecordBound(view)) &&
+          settled.turnSections <= 2 && graphViewportWidgetsAreBounded(view) &&
+          view.isAtBottom() && historyButton(view)->isVisible(),
+      "event-loop continuations retain only viewport-plus-overscan widgets "
+      "while aggregate spacers represent older graph history");
 
   const std::string firstKey =
       stableKey(snapshot.sections.back().cards[40].key);
   const std::string lastKey =
       stableKey(snapshot.sections.back().cards.back().key);
+  const QVariant firstRetainedScroll =
+      view.property("graphFirstRetainedScrollValue");
   view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
-  const auto placeholders = view.findChildren<QWidget *>(
-      QStringLiteral("conversationCardPlaceholder"));
-  const auto firstPlaceholder =
-      std::ranges::find_if(placeholders, [&firstKey](QWidget *widget) {
-        return widget->property("conversationAnchorKey").toString() ==
-               QString::fromStdString(firstKey);
-      });
-  if (firstPlaceholder != placeholders.end())
-    view.verticalScrollBar()->setValue(
-        (*firstPlaceholder)->mapTo(view.viewport(), QPoint{}).y() +
-        view.verticalScrollBar()->value());
+  if (firstRetainedScroll.isValid())
+    view.verticalScrollBar()->setValue(firstRetainedScroll.toInt());
   spin(100);
   result &= expect(view.mode() == ConversationView::Mode::Paused,
                    "scrolling a large conversation pauses following");
-  result &=
-      expect(firstPlaceholder != placeholders.end() && card(view, firstKey),
-             "scrolling materializes the retained graph viewport");
+  result &= expect(card(view, firstKey),
+                   "scrolling materializes the retained graph viewport");
   result &=
       expect(!card(view, lastKey), "scrolling releases the distant viewport");
-  result &= expect(materializedCount() < 40 && placeholderCount() > 50,
-                   "viewport movement keeps materialized card work bounded");
+  const LiveConversationWidgetCounts scrolled =
+      liveConversationWidgetCounts(view);
+  result &= expect(
+      firstRetainedScroll.isValid() &&
+          scrolled.cards < static_cast<int>(graphLiveRecordBound(view)) &&
+          scrolled.turnSections <= 2 && graphViewportWidgetsAreBounded(view) &&
+          graphPassBudgetsWereRespected(view),
+      "viewport movement keeps widget, geometry, structure, and "
+      "card-operation work within their fixed pass budgets");
   return result;
 }
 
@@ -2980,19 +3141,23 @@ bool testGraphBackedLazyRenderingAndLifetime() {
 
   const std::uint64_t renderedBeforeContention =
       offscreenAttachment ? offscreenAttachment->renderedRevision : 0;
+  const qulonglong retriesBeforeContention =
+      view.property("graphContentionRetryCount").toULongLong();
   auto contendedWrite = fixture.graph.write();
   contendedWrite.setField(offscreen, "text", "Rendered after lock retry");
   view.graphChanged();
-  QElapsedTimer contentionTimer;
-  contentionTimer.start();
   QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
   result &= expect(
-      contentionTimer.elapsed() < 100 && graphAttachment(offscreen) &&
+      view.property("graphContentionRetryDelayMs").toInt() > 0 &&
+          view.property("graphContentionRetryDelayMs").toInt() <= 16 &&
+          view.property("graphContentionRetryCount").toULongLong() >
+              retriesBeforeContention &&
+          graphAttachment(offscreen) &&
           graphAttachment(offscreen)->renderedRevision ==
               renderedBeforeContention,
-      "a contended graph read returns to Qt and leaves a zero-delay retry");
+      "a contended graph read returns to Qt and schedules a nonzero bounded "
+      "retry without rendering stale state");
   const nodegraph::GraphChange contentionChange = contendedWrite.finish();
-  view.graphChanged(contentionChange.removed);
   spin(60);
   offscreenAttachment = graphAttachment(offscreen);
   offscreenCard =
@@ -3008,7 +3173,8 @@ bool testGraphBackedLazyRenderingAndLifetime() {
           offscreenAttachment->renderedRevision == contentionChange.revision &&
           offscreenMessage &&
           offscreenMessage->text == "Rendered after lock retry",
-      "the scheduled retry renders the current revision after contention");
+      "the already-scheduled retry renders the current revision after "
+      "contention clears without another notification");
 
   QPointer<QWidget> removedWidget =
       offscreenAttachment ? offscreenAttachment->widget : nullptr;
@@ -3022,6 +3188,622 @@ bool testGraphBackedLazyRenderingAndLifetime() {
              "deletes its widget");
   spin(20);
   return result;
+}
+
+bool testGraphStructureScanSurvivesUnrelatedRevisionChurn() {
+  constexpr std::size_t ItemCount = 400;
+  constexpr std::size_t AdditionalPages = 3;
+  constexpr std::size_t ExpectedScanTarget =
+      (AdditionalPages + 1) * AuthoritativeHistoryPageSize;
+  constexpr int ChurnRevisions = 96;
+  constexpr int EventDispatchLimit = 512;
+
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef unrelated;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", ItemCount);
+    thread = write.upsert({nodegraph::NodeKind::Thread, "scan-thread"},
+                          std::move(threadState));
+    nodegraph::NodeRef turn =
+        write.upsert({nodegraph::NodeKind::Turn, "scan-turn"});
+    write.setParent(thread, turn);
+    for (std::size_t index = 0; index < ItemCount; ++index) {
+      nodegraph::NodeState state = graphMessageState(
+          "agentMessage", "Scanned history " + std::to_string(index));
+      state.fields.emplace("phase", "final_answer");
+      nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item, "scan-item-" + std::to_string(index)},
+          std::move(state));
+      write.setParent(turn, item);
+    }
+
+    nodegraph::NodeRef unrelatedThread =
+        write.upsert({nodegraph::NodeKind::Thread, "unrelated-scan-thread"});
+    nodegraph::NodeRef unrelatedTurn =
+        write.upsert({nodegraph::NodeKind::Turn, "unrelated-scan-turn"});
+    unrelated =
+        write.upsert({nodegraph::NodeKind::Item, "unrelated-scan-item"},
+                     graphMessageState("agentMessage", "Unrelated activity"));
+    write.setParent(unrelatedThread, unrelatedTurn);
+    write.setParent(unrelatedTurn, unrelated);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 360);
+  view.show();
+  view.bindGraph(graph, thread);
+
+  QPushButton *loadMore = historyButton(view);
+  const qulonglong retainedAtFirstYield =
+      view.property("graphRetainedGeometryRecordCount").toULongLong();
+  bool result = expect(
+      loadMore && retainedAtFirstYield > 32 &&
+          retainedAtFirstYield < AuthoritativeHistoryPageSize &&
+          !view.property("graphStructureScanComplete").toBool(),
+      "the fixture yields during an actually incomplete selected-history "
+      "structure scan after more than thirty-two records");
+  if (!loadMore)
+    return false;
+  for (std::size_t page = 0; page < AdditionalPages; ++page)
+    loadMore->click();
+
+  int churnCount = 0;
+  int completedAtChurn = -1;
+  std::function<void()> churn;
+  churn = [&] {
+    if (completedAtChurn < 0 &&
+        view.property("graphStructureScanComplete").toBool() &&
+        view.property("graphStructureScanTarget").toULongLong() >=
+            ExpectedScanTarget)
+      completedAtChurn = churnCount;
+    if (churnCount >= ChurnRevisions)
+      return;
+
+    nodegraph::GraphChange change;
+    {
+      auto write = graph.write();
+      write.setField(unrelated, "unrelatedRevision",
+                     static_cast<std::uint64_t>(churnCount + 1));
+      change = write.finish();
+    }
+    ++churnCount;
+    view.graphChangedDeferred(change.affected, change.removed);
+    if (churnCount < ChurnRevisions)
+      QTimer::singleShot(0, &view, churn);
+  };
+  QTimer::singleShot(0, &view, churn);
+
+  int dispatches = 0;
+  while (churnCount < ChurnRevisions && dispatches < EventDispatchLimit) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+    ++dispatches;
+  }
+
+  result &= expect(
+      churnCount == ChurnRevisions && completedAtChurn >= 0 &&
+          completedAtChurn < ChurnRevisions &&
+          view.property("graphStructureScanComplete").toBool() &&
+          view.property("graphStructureScanTarget").toULongLong() >=
+              ExpectedScanTarget &&
+          view.property("graphRetainedGeometryRecordCount").toULongLong() >=
+              ExpectedScanTarget &&
+          graphViewportWidgetsAreBounded(view) &&
+          graphPassBudgetsWereRespected(view),
+      "continuous unrelated Item field revisions cannot restart or starve the "
+      "bounded selected-history structure scan");
+  return result;
+}
+
+bool testGraphGeometryScanSurvivesVisibleHeightChurn() {
+  constexpr int FilteredItems = 78;
+  constexpr int ChurnRevisions = 48;
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  nodegraph::NodeRef streaming;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", FilteredItems + 2);
+    thread =
+        write.upsert({nodegraph::NodeKind::Thread, "geometry-churn-thread"},
+                     std::move(threadState));
+    turn = write.upsert({nodegraph::NodeKind::Turn, "geometry-churn-turn"});
+    write.setParent(thread, turn);
+
+    nodegraph::NodeState sentinel =
+        graphMessageState("agentMessage", "Visible sentinel");
+    sentinel.fields.emplace("phase", "final_answer");
+    nodegraph::NodeRef sentinelNode =
+        write.upsert({nodegraph::NodeKind::Item, "geometry-churn-sentinel"},
+                     std::move(sentinel));
+    write.setParent(turn, sentinelNode);
+    for (int index = 0; index < FilteredItems; ++index) {
+      nodegraph::NodeState hidden;
+      hidden.status = nodegraph::NodeStatus::Completed;
+      hidden.fields.emplace("type", "reasoning");
+      hidden.fields.emplace("summary",
+                            "Filtered geometry " + std::to_string(index));
+      nodegraph::NodeRef item =
+          write.upsert({nodegraph::NodeKind::Item,
+                        "geometry-churn-hidden-" + std::to_string(index)},
+                       std::move(hidden));
+      write.setParent(turn, item);
+    }
+    nodegraph::NodeState initial =
+        graphMessageState("agentMessage", "Initial visible stream");
+    initial.fields.emplace("phase", "final_answer");
+    streaming =
+        write.upsert({nodegraph::NodeKind::Item, "geometry-churn-stream"},
+                     std::move(initial));
+    write.setParent(turn, streaming);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 360);
+  ConversationView::PresentationOptions options = view.presentationOptions();
+  options.showReasoning = false;
+  view.setPresentationOptions(options);
+  view.show();
+  view.bindGraph(graph, thread);
+  const bool initiallyVisible = dispatchUntil([&] {
+    ui::QtNodeAttachment *attachment = graphAttachment(streaming);
+    return attachment && attachment->widget && attachment->viewportVisible &&
+           view.property("graphStructureScanComplete").toBool();
+  });
+
+  std::uint64_t latestRevision = 0;
+  std::string latestText;
+  int churnCount = 0;
+  int renderedDuringChurn = -1;
+  view.resize(430, 360);
+  std::function<void()> churn;
+  churn = [&] {
+    if (latestRevision != 0) {
+      ui::QtNodeAttachment *attachment = graphAttachment(streaming);
+      if (attachment && attachment->renderedRevision >= latestRevision &&
+          renderedDuringChurn < 0)
+        renderedDuringChurn = churnCount;
+    }
+    if (churnCount >= ChurnRevisions)
+      return;
+
+    ++churnCount;
+    latestText = "Visible stream revision " + std::to_string(churnCount);
+    const int lines = churnCount % 2 == 0 ? 14 : 2;
+    for (int line = 0; line < lines; ++line)
+      latestText += "\nheight-changing selected text " + std::to_string(line);
+    nodegraph::GraphChange change;
+    {
+      auto write = graph.write();
+      write.setField(streaming, "text", latestText);
+      change = write.finish();
+    }
+    latestRevision = change.revision;
+    view.graphChangedDeferred(change.affected, change.removed);
+    if (churnCount < ChurnRevisions)
+      QTimer::singleShot(0, &view, churn);
+  };
+  churn();
+
+  const bool churnCompleted = dispatchUntil(
+      [&] { return churnCount == ChurnRevisions; }, ChurnRevisions * 8);
+  const bool finalRevisionRendered = dispatchUntil([&] {
+    ui::QtNodeAttachment *attachment = graphAttachment(streaming);
+    auto *widget =
+        attachment ? qobject_cast<ConversationCard *>(attachment->widget.data())
+                   : nullptr;
+    const auto *message =
+        widget ? std::get_if<AgentMessageData>(&widget->data().payload)
+               : nullptr;
+    return attachment && attachment->renderedRevision >= latestRevision &&
+           message && message->text == latestText;
+  });
+
+  return expect(
+      initiallyVisible && churnCompleted && renderedDuringChurn >= 0 &&
+          renderedDuringChurn < ChurnRevisions && finalRevisionRendered &&
+          view.property("graphMaxGeometryRecordsPerPass").toULongLong() > 0 &&
+          view.property("graphMaxGeometryRecordsPerPass").toULongLong() <= 32 &&
+          view.property("graphMaxCardOperationsPerPass").toULongLong() <= 8,
+      "continuous visible height revisions cannot restart and starve the "
+      "bounded geometry frontier");
+}
+
+bool testFocusedGraphCardSurvivesViewportReconciliation() {
+  constexpr int HistoryItems = 240;
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  nodegraph::NodeRef command;
+  std::vector<nodegraph::NodeRef> messages;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", HistoryItems + 1);
+    thread = write.upsert({nodegraph::NodeKind::Thread, "focused-card-thread"},
+                          std::move(threadState));
+    turn = write.upsert({nodegraph::NodeKind::Turn, "focused-card-turn"});
+    write.setParent(thread, turn);
+    messages.reserve(HistoryItems);
+    for (int index = 0; index < HistoryItems; ++index) {
+      nodegraph::NodeState state = graphMessageState(
+          "agentMessage", "Focus history " + std::to_string(index));
+      state.fields.emplace("phase", "final_answer");
+      nodegraph::NodeRef item =
+          write.upsert({nodegraph::NodeKind::Item,
+                        "focused-card-item-" + std::to_string(index)},
+                       std::move(state));
+      write.setParent(turn, item);
+      messages.push_back(std::move(item));
+    }
+    nodegraph::NodeState commandState;
+    commandState.status = nodegraph::NodeStatus::Completed;
+    commandState.fields.emplace("type", "commandExecution");
+    commandState.fields.emplace("command", "retain focused output");
+    std::string output;
+    for (int line = 0; line < 60; ++line)
+      output += "focused output " + std::to_string(line) + "\n";
+    commandState.fields.emplace("output", std::move(output));
+    commandState.fields.emplace("status", "completed");
+    command = write.upsert({nodegraph::NodeKind::Item, "focused-card-command"},
+                           std::move(commandState));
+    write.setParent(turn, command);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 360);
+  view.show();
+  view.bindGraph(graph, thread);
+  const bool commandReady = dispatchUntil([&] {
+    ui::QtNodeAttachment *attachment = graphAttachment(command);
+    return attachment && attachment->widget && attachment->viewportVisible;
+  });
+  QPointer<ConversationCard> commandCard;
+  if (ui::QtNodeAttachment *attachment = graphAttachment(command))
+    commandCard = qobject_cast<ConversationCard *>(attachment->widget.data());
+  bool result = expect(commandReady && setFolded(commandCard, false),
+                       "the focus-pinning fixture exposes its command output");
+  QPointer<CommandOutputView> output =
+      commandCard ? dynamic_cast<CommandOutputView *>(
+                        commandCard->findChild<QTextEdit *>(
+                            QStringLiteral("commandOutputView")))
+                  : nullptr;
+  if (!commandCard || !output)
+    return false;
+  output->setFocus(Qt::OtherFocusReason);
+  dispatchPasses(2);
+  const bool focusEstablished =
+      QApplication::focusWidget() == output ||
+      commandCard->isAncestorOf(QApplication::focusWidget());
+
+  const std::size_t retainedStart =
+      messages.size() - (AuthoritativeHistoryPageSize - 1);
+  nodegraph::NodeRef earliestRetained = messages[retainedStart];
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  view.verticalScrollBar()->setValue(
+      view.property("graphFirstRetainedScrollValue").toInt());
+  const bool distantViewportReady = dispatchUntil(
+      [&] { return graphAttachment(earliestRetained) != nullptr; });
+  ui::QtNodeAttachment *pinnedAttachment = graphAttachment(command);
+  const bool retainedWhileFocused =
+      commandCard && pinnedAttachment &&
+      pinnedAttachment->widget == commandCard &&
+      (QApplication::focusWidget() == output ||
+       commandCard->isAncestorOf(QApplication::focusWidget()));
+  result &= expect(
+      focusEstablished && distantViewportReady && retainedWhileFocused,
+      "viewport reconciliation pins a focused card while materializing a "
+      "distant viewport");
+
+  output->clearFocus();
+  view.graphChangedDeferred();
+  const bool releasedAfterFocus =
+      dispatchUntil([&] { return graphAttachment(command) == nullptr; });
+  result &= expect(releasedAfterFocus,
+                   "the distant card becomes evictable after focus leaves");
+  return result;
+}
+
+bool testGraphRootFoldSuppressesAndRestoresChildExtent() {
+  const std::string thread = "root-fold-extent";
+  TurnGraphSpec preceding{"turn:root-fold-preceding", "preceding", {}};
+  for (int index = 0; index < 12; ++index)
+    preceding.cards.push_back(agentCard(thread, "preceding", index));
+
+  const VisibleCardData root{
+      AuthoritativeItemKey{thread, "fold-turn", "root"},
+      CardKind::UserMessage,
+      thread,
+      "fold-turn",
+      "root",
+      UserMessageData{"Fold this complete turn without losing child state.",
+                      {}}};
+  TurnGraphSpec folded{"turn:root-fold-target", "fold-turn", {root}, root.key};
+  for (int index = 0; index < 5; ++index)
+    folded.cards.push_back(agentCard(thread, "fold-turn", 100 + index));
+  QString outputText;
+  for (int line = 0; line < 70; ++line)
+    outputText += QStringLiteral("retained child output %1\n").arg(line);
+  const VisibleCardData command{
+      AuthoritativeItemKey{thread, "fold-turn", "command"},
+      CardKind::CommandExecution,
+      thread,
+      "fold-turn",
+      "command",
+      CommandExecutionData{"preserve child interaction", utf8(outputText),
+                           "completed", "/workspace", 0}};
+  folded.cards.push_back(command);
+  ConversationGraphSpec snapshot{
+      thread, {std::move(preceding), std::move(folded)}, 0, false};
+
+  ConversationView view;
+  view.resize(650, 520);
+  view.show();
+  const bool applied = applyConversation(view, snapshot);
+  const bool cardsReady = dispatchUntil([&] {
+    ui::QtNodeAttachment *commandAttachment = nullptr;
+    if (snapshot.storage) {
+      auto read = snapshot.storage->graph.tryRead();
+      if (read) {
+        nodegraph::NodeRef commandNode =
+            read->find({nodegraph::NodeKind::Item, fixtureNodeId(command)});
+        commandAttachment = graphAttachment(commandNode);
+      }
+    }
+    return card(view, stableKey(root.key)) &&
+           card(view, stableKey(command.key)) && commandAttachment &&
+           commandAttachment->viewportVisible;
+  });
+  // Measure both ends of the retained window before comparing the fold
+  // round-trip. Otherwise previously unseen cards in the preceding turn can
+  // legitimately replace their estimated heights while the target turn is
+  // folded, obscuring the target turn's exact effective-extent invariant.
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  const bool precedingMeasured = dispatchUntil([&] {
+    return card(view, stableKey(snapshot.sections.front().cards.front().key));
+  });
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMaximum);
+  const bool targetRestored = dispatchUntil([&] {
+    return card(view, stableKey(root.key)) &&
+           card(view, stableKey(command.key));
+  });
+  QPointer<ConversationCard> rootCard = card(view, stableKey(root.key));
+  QPointer<ConversationCard> commandCard = card(view, stableKey(command.key));
+  QPointer<QToolButton> commandDisclosure = disclosure(commandCard);
+  if (commandDisclosure) {
+    commandDisclosure->setFocus(Qt::OtherFocusReason);
+    dispatchPasses(1);
+  }
+  bool result =
+      expect(applied && cardsReady && precedingMeasured && targetRestored &&
+                 rootCard && commandCard && setFolded(commandCard, false),
+             "the root-fold fixture materializes an expanded child");
+  QPointer<CommandOutputView> output =
+      commandCard ? dynamic_cast<CommandOutputView *>(
+                        commandCard->findChild<QTextEdit *>(
+                            QStringLiteral("commandOutputView")))
+                  : nullptr;
+  if (!rootCard || !commandCard || !output)
+    return false;
+  if (commandDisclosure)
+    commandDisclosure->clearFocus();
+  if (output->verticalScrollBar()->maximum() > 0)
+    output->verticalScrollBar()->setValue(
+        output->verticalScrollBar()->maximum() / 2);
+  dispatchPasses(64);
+  const auto childStateBefore = commandCard->commandOutputScrollState();
+  const int expandedExtent = view.verticalScrollBar()->maximum();
+  result &= expect(setFolded(rootCard, true),
+                   "the authoritative root folds its child activity");
+  dispatchPasses(64);
+  const int foldedExtent = view.verticalScrollBar()->maximum();
+  const bool childSuppressed =
+      !commandCard || !commandCard->isVisibleTo(view.viewport());
+  result &= expect(
+      foldedExtent < expandedExtent && childSuppressed,
+      "a folded root removes child geometry from the effective scroll extent");
+
+  result &= expect(setFolded(rootCard, false),
+                   "the authoritative root expands after suppression");
+  const bool childRestored = dispatchUntil([&] {
+    return card(view, stableKey(command.key)) != nullptr &&
+           view.verticalScrollBar()->maximum() == expandedExtent;
+  });
+  commandCard = card(view, stableKey(command.key));
+  output = commandCard ? dynamic_cast<CommandOutputView *>(
+                             commandCard->findChild<QTextEdit *>(
+                                 QStringLiteral("commandOutputView")))
+                       : nullptr;
+  const auto childStateAfter =
+      commandCard ? commandCard->commandOutputScrollState() : std::nullopt;
+  result &= expect(
+      childRestored && commandCard && output && !commandCard->isCollapsed() &&
+          childStateBefore && childStateAfter &&
+          childStateAfter->value == childStateBefore->value &&
+          childStateAfter->followsLatest == childStateBefore->followsLatest &&
+          view.verticalScrollBar()->maximum() == expandedExtent,
+      "expanding a root restores the exact extent and child interaction state");
+  return result;
+}
+
+bool testLargeGraphResetUsesBoundedRetiredCleanup() {
+  constexpr std::size_t ItemCount = 640;
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", ItemCount);
+    thread =
+        write.upsert({nodegraph::NodeKind::Thread, "retired-cleanup-thread"},
+                     std::move(threadState));
+    nodegraph::NodeRef turn =
+        write.upsert({nodegraph::NodeKind::Turn, "retired-cleanup-turn"});
+    write.setParent(thread, turn);
+    for (std::size_t index = 0; index < ItemCount; ++index) {
+      nodegraph::NodeState state = graphMessageState(
+          "agentMessage", "Retired geometry " + std::to_string(index));
+      state.fields.emplace("phase", "final_answer");
+      nodegraph::NodeRef item =
+          write.upsert({nodegraph::NodeKind::Item,
+                        "retired-cleanup-item-" + std::to_string(index)},
+                       std::move(state));
+      write.setParent(turn, item);
+    }
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 360);
+  view.show();
+  view.bindGraph(graph, thread);
+  QPushButton *loadMore = historyButton(view);
+  bool result = expect(loadMore && loadMore->isVisible(),
+                       "the cleanup fixture exposes retained history paging");
+  if (!loadMore)
+    return false;
+  for (std::size_t page = AuthoritativeHistoryPageSize; page < ItemCount;
+       page += AuthoritativeHistoryPageSize)
+    loadMore->click();
+  const bool retained = dispatchUntil([&] {
+    return view.property("graphStructureScanComplete").toBool() &&
+           view.property("graphRetainedGeometryRecordCount").toULongLong() >=
+               ItemCount;
+  });
+  result &= expect(retained, "the cleanup fixture retains its large geometry");
+
+  nodegraph::GraphChange removal;
+  {
+    auto write = graph.write();
+    write.remove(thread);
+    removal = write.finish();
+  }
+  view.graphChanged(removal.removed);
+  const QVariant retiredCount =
+      view.property("graphRetiredGeometryRecordCount");
+  const QVariant lastCleanup =
+      view.property("graphLastRetiredCleanupOperations");
+  const QVariant maxCleanup = view.property("graphMaxRetiredCleanupOperations");
+  result &= expect(
+      retiredCount.isValid() && lastCleanup.isValid() && maxCleanup.isValid() &&
+          retiredCount.toULongLong() >= ItemCount &&
+          lastCleanup.toULongLong() <= 64 && maxCleanup.toULongLong() <= 64 &&
+          view.property("graphRetainedGeometryRecordCount").toULongLong() == 0,
+      "large selected-thread removal retires geometry immediately without an "
+      "unbounded cleanup pass");
+
+  const bool cleanupFinished = dispatchUntil(
+      [&] {
+        return view.property("graphRetiredGeometryRecordCount").toULongLong() ==
+               0;
+      },
+      128);
+  result &= expect(
+      cleanupFinished &&
+          view.property("graphLastRetiredCleanupOperations").toULongLong() <=
+              64 &&
+          view.property("graphMaxRetiredCleanupOperations").toULongLong() <= 64,
+      "retired geometry drains completely in fixed-size Qt cleanup slices");
+  return result;
+}
+
+bool testAffectedNodeRequeuedAfterCursorConsumption() {
+  constexpr int ItemCount = 64;
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  nodegraph::NodeRef target;
+  std::vector<nodegraph::NodeRef> fillers;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", ItemCount);
+    thread =
+        write.upsert({nodegraph::NodeKind::Thread, "affected-cursor-thread"},
+                     std::move(threadState));
+    turn = write.upsert({nodegraph::NodeKind::Turn, "affected-cursor-turn"});
+    write.setParent(thread, turn);
+    fillers.reserve(ItemCount - 1);
+    for (int index = 0; index < ItemCount - 1; ++index) {
+      nodegraph::NodeState state = graphMessageState(
+          "agentMessage", "Affected filler " + std::to_string(index));
+      state.fields.emplace("phase", "final_answer");
+      nodegraph::NodeRef item =
+          write.upsert({nodegraph::NodeKind::Item,
+                        "affected-cursor-filler-" + std::to_string(index)},
+                       std::move(state));
+      write.setParent(turn, item);
+      fillers.push_back(std::move(item));
+    }
+    nodegraph::NodeState hidden;
+    hidden.status = nodegraph::NodeStatus::Completed;
+    hidden.fields.emplace("type", "reasoning");
+    hidden.fields.emplace("summary", "Initially filtered target");
+    target = write.upsert({nodegraph::NodeKind::Item, "affected-cursor-target"},
+                          std::move(hidden));
+    write.setParent(turn, target);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 360);
+  ConversationView::PresentationOptions options = view.presentationOptions();
+  options.showReasoning = false;
+  view.setPresentationOptions(options);
+  view.show();
+  view.bindGraph(graph, thread);
+  const bool initialScanComplete = dispatchUntil([&] {
+    return view.property("graphStructureScanComplete").toBool() &&
+           view.property("graphRetainedGeometryRecordCount").toULongLong() >=
+               ItemCount;
+  });
+
+  std::vector<nodegraph::NodeRef> affected;
+  affected.reserve(ItemCount);
+  affected.push_back(target);
+  affected.insert(affected.end(), fillers.begin(), fillers.end());
+  view.graphChangedDeferred(affected, {});
+  bool lateChangeSent = false;
+  std::uint64_t lateRevision = 0;
+  QTimer::singleShot(0, &view, [&] {
+    nodegraph::GraphChange change;
+    {
+      auto write = graph.write();
+      write.setField(target, "type", "agentMessage");
+      write.setField(target, "phase", "final_answer");
+      write.setField(target, "text", "Late change after cursor consumption");
+      change = write.finish();
+    }
+    lateRevision = change.revision;
+    lateChangeSent = true;
+    view.graphChangedDeferred(change.affected, change.removed);
+  });
+
+  const bool lateProjectionRendered = dispatchUntil([&] {
+    if (!lateChangeSent)
+      return false;
+    ui::QtNodeAttachment *attachment = graphAttachment(target);
+    auto *widget =
+        attachment ? qobject_cast<ConversationCard *>(attachment->widget.data())
+                   : nullptr;
+    const auto *message =
+        widget ? std::get_if<AgentMessageData>(&widget->data().payload)
+               : nullptr;
+    return attachment && attachment->renderedRevision >= lateRevision &&
+           message && message->text == "Late change after cursor consumption";
+  });
+  return expect(
+      initialScanComplete && graphAttachment(target) && lateChangeSent &&
+          lateProjectionRendered && graphPassBudgetsWereRespected(view),
+      "an affected node changed after cursor consumption is requeued and "
+      "rendered exactly from its latest graph state");
 }
 
 bool testGraphStreamTruncationNotices() {
@@ -3138,11 +3920,17 @@ bool testGraphStreamTruncationNotices() {
 
 bool testGraphBoundedHistoryAndExplicitRoot() {
   constexpr std::size_t ItemCount = 5000;
+  constexpr std::size_t RevealedPages = 24;
+  constexpr std::size_t FirstRevealedIndex =
+      ItemCount - (RevealedPages + 1) * AuthoritativeHistoryPageSize;
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef thread;
   nodegraph::NodeRef turn;
   nodegraph::NodeRef root;
+  nodegraph::NodeRef firstRevealed;
+  nodegraph::NodeRef distant;
   nodegraph::NodeRef steering;
+  nodegraph::NodeRef tail;
   {
     auto write = graph.write();
     nodegraph::NodeState threadState;
@@ -3169,8 +3957,14 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
       write.setParent(turn, item);
       if (isRoot)
         root = item;
+      if (index == FirstRevealedIndex)
+        firstRevealed = item;
+      if (index == 3100)
+        distant = item;
       if (isSteering)
         steering = item;
+      if (index + 1 == ItemCount)
+        tail = item;
     }
     write.relate(turn, nodegraph::RelationKind::TurnRootItem, root);
     // History suffix replacement may unparent the original prompt while its
@@ -3203,15 +3997,19 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
     return count;
   };
   QPushButton *loadMore = historyButton(view);
+  const QVariant retainedGeometry =
+      view.property("graphRetainedGeometryRecordCount");
   bool result = expect(
-      representationCount() <=
-              static_cast<int>(AuthoritativeHistoryPageSize + 1) &&
+      representationCount() <= static_cast<int>(graphLiveRecordBound(view)) &&
+          graphViewportWidgetsAreBounded(view) && retainedGeometry.isValid() &&
+          retainedGeometry.toULongLong() >
+              view.property("graphLiveRecordCount").toULongLong() &&
           view.findChildren<QWidget *>().size() < 256 && loadMore &&
           loadMore->isVisible() &&
           loadMore->text() == QStringLiteral("Load 80 more activities") &&
           hiddenItemCount() == ItemCount - AuthoritativeHistoryPageSize - 1,
-      "five thousand graph items create only the bounded visible history "
-      "window and one pinned root");
+      "five thousand graph items retain compact geometry separately while "
+      "creating only viewport-plus-overscan QWidgets");
 
   int heartbeatCount = 0;
   qint64 longestHeartbeatGap = 0;
@@ -3239,37 +4037,176 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
              "a loaded steering message is never inferred to be the turn root");
 
   const qulonglong hiddenBeforePaging = hiddenItemCount();
-  loadMore->click();
+  for (std::size_t page = 0; page < RevealedPages; ++page) {
+    loadMore->click();
+    spin(20);
+  }
+  const QVariant retainedAfterPaging =
+      view.property("graphRetainedGeometryRecordCount");
   result &= expect(
-      providerPageRequests == 0,
-      "graph Load More reveals retained history before paging the provider");
-  spin(80);
-  result &= expect(
-      hiddenItemCount() + AuthoritativeHistoryPageSize == hiddenBeforePaging &&
-          representationCount() <=
-              static_cast<int>(2 * AuthoritativeHistoryPageSize + 1),
-      "graph Load More expands the local window by one bounded page");
+      providerPageRequests == 0 &&
+          hiddenItemCount() + RevealedPages * AuthoritativeHistoryPageSize ==
+              hiddenBeforePaging &&
+          retainedAfterPaging.isValid() &&
+          retainedAfterPaging.toULongLong() >=
+              RevealedPages * AuthoritativeHistoryPageSize &&
+          retainedAfterPaging.toULongLong() >
+              view.property("graphLiveRecordCount").toULongLong() &&
+          graphViewportWidgetsAreBounded(view) &&
+          graphPassBudgetsWereRespected(view),
+      "repeated Load More retains thousands of compact geometry records but "
+      "keeps live QWidgets and every event-loop pass viewport bounded");
 
-  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
-  spin(120);
-  ui::QtNodeAttachment *rootAttachment = graphAttachment(root);
-  auto *rootCard =
-      rootAttachment
-          ? qobject_cast<ConversationCard *>(rootAttachment->widget.data())
+  ui::QtNodeAttachment *tailAttachment = graphAttachment(tail);
+  QPointer<QWidget> tailIdentity =
+      tailAttachment ? tailAttachment->widget : nullptr;
+  const LiveConversationWidgetCounts beforeVisibleDelta =
+      liveConversationWidgetCounts(view);
+  nodegraph::GraphChange visibleDelta;
+  {
+    auto write = graph.write();
+    write.setField(tail, "text", "Targeted visible revision after many pages");
+    visibleDelta = write.finish();
+  }
+  view.graphChangedDeferred(visibleDelta.affected, visibleDelta.removed);
+  spin(80);
+  tailAttachment = graphAttachment(tail);
+  auto *tailCard =
+      tailAttachment
+          ? qobject_cast<ConversationCard *>(tailAttachment->widget.data())
           : nullptr;
+  const auto *tailMessage =
+      tailCard ? std::get_if<AgentMessageData>(&tailCard->data().payload)
+               : nullptr;
+  result &= expect(
+      tailIdentity && tailAttachment &&
+          tailAttachment->widget == tailIdentity &&
+          tailAttachment->renderedRevision == visibleDelta.revision &&
+          tailMessage &&
+          tailMessage->text == "Targeted visible revision after many pages" &&
+          liveConversationWidgetCounts(view).itemRepresentations() ==
+              beforeVisibleDelta.itemRepresentations() &&
+          graphViewportWidgetsAreBounded(view) &&
+          graphRefreshWasConstantBounded(view) &&
+          graphPassBudgetsWereRespected(view),
+      "a visible targeted delta after many revealed pages updates the stable "
+      "card with constant bounded graph and QWidget work");
+
+  const LiveConversationWidgetCounts beforeOffscreenDelta =
+      liveConversationWidgetCounts(view);
+  result &= expect(graphAttachment(distant) == nullptr,
+                   "a distant revealed graph item has no QWidget attachment");
+  nodegraph::GraphChange offscreenDelta;
+  {
+    auto write = graph.write();
+    write.setField(distant, "text", "Off-screen revision stays in NodeGraph");
+    offscreenDelta = write.finish();
+  }
+  view.graphChangedDeferred(offscreenDelta.affected, offscreenDelta.removed);
+  spin(80);
+  const LiveConversationWidgetCounts afterOffscreenDelta =
+      liveConversationWidgetCounts(view);
+  result &= expect(
+      graphAttachment(distant) == nullptr &&
+          afterOffscreenDelta.cards == beforeOffscreenDelta.cards &&
+          afterOffscreenDelta.itemPlaceholders ==
+              beforeOffscreenDelta.itemPlaceholders &&
+          afterOffscreenDelta.turnSections ==
+              beforeOffscreenDelta.turnSections &&
+          graphViewportWidgetsAreBounded(view) &&
+          graphRefreshWasConstantBounded(view) &&
+          graphPassBudgetsWereRespected(view),
+      "an off-screen delta after many revealed pages creates no QWidget and "
+      "keeps all work bounded");
+
+  const QVariant firstRetainedScroll =
+      view.property("graphFirstRetainedScrollValue");
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  if (firstRetainedScroll.isValid())
+    view.verticalScrollBar()->setValue(firstRetainedScroll.toInt());
+  spin(160);
+  ui::QtNodeAttachment *firstAttachment = graphAttachment(firstRevealed);
+  auto *firstCard =
+      firstAttachment
+          ? qobject_cast<ConversationCard *>(firstAttachment->widget.data())
+          : nullptr;
+  result &= expect(
+      firstRetainedScroll.isValid() && graphAttachment(root) == nullptr &&
+          firstCard && firstCard->property("nestedConversationCard").toBool(),
+      "the exact leading extent materializes the first retained child with "
+      "nested presentation but no far-offscreen root QWidget");
+
+  std::string tallText;
+  for (int line = 0; line < 18; ++line)
+    tallText += "Measured retained line " + std::to_string(line) + "\n";
+  nodegraph::GraphChange tallChange;
+  {
+    auto write = graph.write();
+    write.setField(firstRevealed, "text", tallText);
+    tallChange = write.finish();
+  }
+  view.graphChangedDeferred(tallChange.affected, tallChange.removed);
+  spin(100);
+  firstAttachment = graphAttachment(firstRevealed);
+  firstCard =
+      firstAttachment
+          ? qobject_cast<ConversationCard *>(firstAttachment->widget.data())
+          : nullptr;
+  QPointer<QWidget> evictedFirst = firstCard;
+  const int retainedHeight = firstCard ? firstCard->height() : 0;
+  const int retainedViewportTop =
+      firstCard ? firstCard->mapTo(view.viewport(), QPoint{}).y() : 0;
+  const int nestedViewportX =
+      firstCard ? firstCard->mapTo(view.viewport(), QPoint{}).x() : -1;
+  const int maximumWithMeasuredHeight = view.verticalScrollBar()->maximum();
+  result &= expect(
+      firstCard && retainedHeight > 66 &&
+          firstAttachment->renderedRevision == tallChange.revision,
+      "a visible tall record publishes and retains its measured final height");
+
   view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMaximum);
   spin(160);
+  result &= expect(
+      graphAttachment(root) == nullptr &&
+          graphAttachment(firstRevealed) == nullptr && evictedFirst.isNull() &&
+          std::abs(view.verticalScrollBar()->maximum() -
+                   maximumWithMeasuredHeight) <= 2,
+      "scroll eviction releases the distant root and child QWidgets while "
+      "their measured geometry keeps the scroll extent stable");
   steeringAttachment = graphAttachment(steering);
   steeringCard =
       steeringAttachment
           ? qobject_cast<ConversationCard *>(steeringAttachment->widget.data())
           : nullptr;
-  result &=
-      expect(rootCard && steeringCard && rootCard->isAncestorOf(steeringCard) &&
-                 rootCard->property("turnContainer").toBool() &&
-                 steeringCard->property("nestedConversationCard").toBool(),
-             "the explicit parentless root remains the container for a paged "
-             "steering message");
+  result &= expect(
+      steeringCard &&
+          steeringCard->property("nestedConversationCard").toBool() &&
+          steeringCard->mapTo(view.viewport(), QPoint{}).x() ==
+              nestedViewportX &&
+          graphViewportWidgetsAreBounded(view),
+      "a child remains visually nested and identically indented while its "
+      "far-offscreen root has no QWidget");
+
+  const QVariant restoredFirstScroll =
+      view.property("graphFirstRetainedScrollValue");
+  if (restoredFirstScroll.isValid())
+    view.verticalScrollBar()->setValue(restoredFirstScroll.toInt());
+  spin(160);
+  firstAttachment = graphAttachment(firstRevealed);
+  firstCard =
+      firstAttachment
+          ? qobject_cast<ConversationCard *>(firstAttachment->widget.data())
+          : nullptr;
+  result &= expect(
+      restoredFirstScroll.isValid() && graphAttachment(root) == nullptr &&
+          firstCard && firstCard->property("nestedConversationCard").toBool() &&
+          firstCard->height() == retainedHeight &&
+          std::abs(firstCard->mapTo(view.viewport(), QPoint{}).y() -
+                   retainedViewportTop) <= 2 &&
+          graphViewportWidgetsAreBounded(view) &&
+          graphPassBudgetsWereRespected(view),
+      "returning to an evicted child restores nested presentation, measured "
+      "height, and the exact scroll anchor without a root QWidget");
   return result;
 }
 
@@ -3598,11 +4535,20 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
   view.resize(620, 360);
   view.show();
   std::vector<nodegraph::NodeRef> acknowledgements;
-  view.setPromptMaterializedAction(
-      [&acknowledgements](nodegraph::NodeRef prompt) {
-        acknowledgements.emplace_back(std::move(prompt));
-        return true;
-      });
+  bool callbackGraphWriteCompleted = false;
+  view.setPromptMaterializedAction([&acknowledgements,
+                                    &callbackGraphWriteCompleted, &graph,
+                                    &thread](nodegraph::NodeRef prompt) {
+    // This deliberately takes the exclusive graph lock synchronously. If
+    // ConversationView crosses the callback boundary with a read guard,
+    // this test deadlocks instead of masking the lock-order defect.
+    auto callbackWrite = graph.write();
+    callbackWrite.setField(thread, "materializationCallbackObserved", true);
+    static_cast<void>(callbackWrite.finish());
+    callbackGraphWriteCompleted = true;
+    acknowledgements.emplace_back(std::move(prompt));
+    return true;
+  });
   view.bindGraph(graph, thread);
   spin(60);
 
@@ -3686,9 +4632,10 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
               "Exact authored prompt" &&
           authoritativeCard->property("conversationAnchorKey").toString() ==
               QStringLiteral("prompt:42") &&
+          callbackGraphWriteCompleted &&
           acknowledgements == std::vector<nodegraph::NodeRef>{localPrompt},
-      "correlation plus exact result acknowledgement transfers and morphs the "
-      "same card before cleanup");
+      "correlation plus exact result acknowledgement runs after releasing "
+      "the graph read guard, then transfers and morphs the same card");
 
   nodegraph::GraphChange removed;
   {
@@ -4291,6 +5238,12 @@ int main(int argc, char **argv) {
   result &= testCommandOutputStateAcrossNavigation();
   result &= testViewportLazyMaterialization();
   result &= testGraphBackedLazyRenderingAndLifetime();
+  result &= testGraphStructureScanSurvivesUnrelatedRevisionChurn();
+  result &= testGraphGeometryScanSurvivesVisibleHeightChurn();
+  result &= testFocusedGraphCardSurvivesViewportReconciliation();
+  result &= testGraphRootFoldSuppressesAndRestoresChildExtent();
+  result &= testLargeGraphResetUsesBoundedRetiredCleanup();
+  result &= testAffectedNodeRequeuedAfterCursorConsumption();
   result &= testGraphStreamTruncationNotices();
   result &= testGraphBoundedHistoryAndExplicitRoot();
   result &= testGraphHistoryPagingAndPausedTailGrowth();

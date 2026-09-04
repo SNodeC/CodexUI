@@ -17,7 +17,6 @@
 #include <QScopedValueRollback>
 #include <QScrollBar>
 #include <QSignalBlocker>
-#include <QSpacerItem>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVariantAnimation>
@@ -26,7 +25,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <deque>
 #include <limits>
+#include <map>
 #include <unordered_set>
 #include <utility>
 
@@ -36,8 +37,13 @@ namespace {
 constexpr int CardSpacing = 8;
 constexpr int NativeScrollLineStep = 20;
 constexpr int MaxCardOperationsPerPass = 8;
+constexpr std::size_t MaxStructureRecordsPerPass = 64;
+constexpr std::size_t MaxGeometryRecordsPerPass = 32;
+constexpr std::size_t MaxGeometryEvictionsPerPass = 64;
+constexpr std::size_t MaxPendingAffectedNodes = 64;
 constexpr std::size_t MaxVisibilitySlotChecksPerPass = 64;
 constexpr std::size_t MaxVisibilitySectionChecksPerPass = 64;
+constexpr int GraphContentionRetryMilliseconds = 4;
 constexpr int EstimatedGraphHistoryItemExtent = 66;
 
 class GraphHistoryPlaceholder final : public QWidget {
@@ -52,14 +58,17 @@ public:
   }
 
   void setItemCount(std::size_t count) {
+    Q_ASSERT(count == 0);
+    setPixelExtent(0, 0);
+  }
+
+  void setPixelExtent(std::size_t historyCount, std::int64_t pixelExtent) {
     setProperty("hiddenItemCount", QVariant::fromValue<qulonglong>(
-                                       static_cast<qulonglong>(count)));
-    const std::size_t maximum = static_cast<std::size_t>(
-        std::numeric_limits<int>::max() / EstimatedGraphHistoryItemExtent);
-    const int height = static_cast<int>(std::min(count, maximum)) *
-                       EstimatedGraphHistoryItemExtent;
+                                       static_cast<qulonglong>(historyCount)));
+    const int height = static_cast<int>(std::clamp<std::int64_t>(
+        pixelExtent, 0, std::numeric_limits<int>::max()));
     setFixedHeight(height);
-    setVisible(count != 0);
+    setVisible(height != 0);
   }
 };
 
@@ -87,9 +96,10 @@ private:
 int initialCardHeight(CardKind kind) {
   switch (kind) {
   case CardKind::UserMessage:
-  case CardKind::AgentMessage:
   case CardKind::LocalPrompt:
-    return 88;
+    return 72;
+  case CardKind::AgentMessage:
+    return 58;
   case CardKind::CommandExecution:
   case CardKind::AgentActivity:
   case CardKind::Reasoning:
@@ -97,9 +107,24 @@ int initialCardHeight(CardKind kind) {
   case CardKind::ImageGeneration:
   case CardKind::Plan:
   case CardKind::GenericActivity:
-    return 58;
+    return 48;
   }
-  return 72;
+  return 48;
+}
+
+int intrinsicGraphCardHeight(ConversationCard *card) {
+  if (!card)
+    return 1;
+  int height = std::max(1, card->height());
+  if (!card->property("turnContainer").toBool())
+    return height;
+  QWidget *nested = card->findChild<QWidget *>(
+      QStringLiteral("conversationNestedCards"), Qt::FindDirectChildrenOnly);
+  if (!nested || nested->isHidden())
+    return height;
+  const int spacing =
+      card->layout() ? std::max(0, card->layout()->spacing()) : 0;
+  return std::max(1, height - nested->height() - spacing);
 }
 
 const nodegraph::Value *graphField(const nodegraph::NodeState &state,
@@ -719,9 +744,11 @@ public:
     std::optional<std::uint64_t> promptVisualId;
     int measuredHeight = 0;
     bool projectionVisible = true;
+    bool cardGeometryDirty = true;
   };
 
   explicit TurnSectionWidget(QWidget *parent = nullptr) : QWidget(parent) {
+    setObjectName(QStringLiteral("conversationTurnSection"));
     setAttribute(Qt::WA_StyledBackground, false);
     setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     cards = new QVBoxLayout(this);
@@ -732,16 +759,292 @@ public:
   QVBoxLayout *cards = nullptr;
   std::vector<CardSlot> cardSlots;
   QPointer<GraphHistoryPlaceholder> historyPlaceholder;
-  std::size_t hiddenItemCount = 0;
   std::string rootKey;
+  std::string authoritativeRootKey;
   std::string protocolId;
   nodegraph::NodeRef graphNode;
   bool graphActive = false;
+  bool hasAuthoritativeRoot = false;
+  bool layoutDirty = true;
+  bool geometryDirty = true;
+};
+
+class ConversationView::GraphViewportGeometry final {
+public:
+  struct TurnGeometry;
+
+  struct ItemGeometry final {
+    nodegraph::NodeRef node;
+    nodegraph::NodeRef materializedPrompt;
+    TurnGeometry *turn = nullptr;
+    std::string key;
+    std::optional<std::uint64_t> promptVisualId;
+    int measuredHeight = 0;
+    bool projectionVisible = true;
+    bool countedOutsideHistory = false;
+  };
+
+  struct TurnGeometry final {
+    nodegraph::NodeRef node;
+    nodegraph::NodeRef root;
+    std::string protocolId;
+    std::unique_ptr<ItemGeometry> rootItem;
+    std::deque<std::unique_ptr<ItemGeometry>> items;
+    std::deque<std::unique_ptr<ItemGeometry>> appendedItems;
+    std::size_t hiddenBeforeItems = 0;
+    std::size_t knownChildCount = 0;
+    nodegraph::NodeRef newestChild;
+    std::int64_t pixelExtent = 0;
+    std::int64_t rootPixelExtent = 0;
+    std::uint64_t structureRevision = 0;
+    bool active = false;
+    bool rootIsChild = false;
+    bool rootCollapsed = false;
+  };
+
+  struct ScanFrontier final {
+    std::size_t nextTurnIndex = 0;
+    TurnGeometry *turn = nullptr;
+    std::size_t nextItemIndex = 0;
+    std::size_t selectedInTurn = 0;
+    std::size_t directItemsInTurn = 0;
+    bool rootConsumed = false;
+    bool initialized = false;
+    bool complete = false;
+  };
+
+  struct DesiredGeometry final {
+    ItemGeometry *record = nullptr;
+    std::int64_t top = 0;
+    std::int64_t bottom = 0;
+  };
+
+  struct GeometryFrontier final {
+    bool active = false;
+    bool valid = false;
+    bool reverse = false;
+    std::uint64_t generation = 0;
+    std::int64_t targetTop = 0;
+    std::int64_t targetBottom = 0;
+    std::int64_t position = 0;
+    std::size_t turnIndex = 0;
+    std::size_t itemIndex = 0;
+    std::uint8_t phase = 0;
+    std::vector<DesiredGeometry> found;
+  };
+
+  // Reset storage is retired in O(1) after releasing NodeGraph::ReadAccess,
+  // then destroyed in small Qt-event-loop slices. It is cleanup state only;
+  // no rendering or lookup ever consults it.
+  struct RetiredStorage final {
+    std::deque<std::unique_ptr<TurnGeometry>> turns;
+    std::map<const nodegraph::Node *, ItemGeometry *> itemIndex;
+    std::map<const nodegraph::Node *, TurnGeometry *> turnIndex;
+  };
+
+  std::deque<std::unique_ptr<TurnGeometry>> turns;
+  std::map<const nodegraph::Node *, ItemGeometry *> itemIndex;
+  std::map<const nodegraph::Node *, TurnGeometry *> turnIndex;
+  std::vector<nodegraph::NodeRef> affected;
+  std::size_t affectedCursor = 0;
+  ScanFrontier scan;
+  GeometryFrontier geometryScan;
+  std::deque<RetiredStorage> retiredStorage;
+  std::uint64_t geometryGeneration = 1;
+  std::uint64_t threadStructureRevision = 0;
+  std::size_t threadChildCount = 0;
+  nodegraph::NodeRef newestTurn;
+  std::size_t retainedHistoryItems = 0;
+  std::size_t retainedGeometryRecords = 0;
+  std::size_t extraPinnedRoots = 0;
+  std::size_t targetHistoryItems = 0;
+  std::size_t totalItems = 0;
+  std::int64_t totalPixelExtent = 0;
+  std::int64_t leadingPixelExtent = 0;
+  std::int64_t trailingPixelExtent = 0;
+  std::size_t lastStructureReadsPerPass = 0;
+  std::size_t lastGeometryRecordsPerPass = 0;
+  std::size_t lastCardOperationsPerPass = 0;
+  std::size_t maxStructureReadsPerPass = 0;
+  std::size_t maxGeometryRecordsPerPass = 0;
+  std::size_t maxCardOperationsPerPass = 0;
+  std::size_t contentionRetryCount = 0;
+  std::size_t retiredRecordCount = 0;
+  std::size_t lastRetiredCleanupOperations = 0;
+  std::size_t maxRetiredCleanupOperations = 0;
+  std::size_t refreshStructureReads = 0;
+  bool targetDirty = true;
+  bool forceStructureCheck = false;
+  bool forceSelectedReset = false;
+  std::size_t structureValidationCursor = 0;
+  std::size_t evictionTurnCursor = 0;
+  std::uint64_t structureRequestGeneration = 0;
+  std::uint64_t validationGeneration = 0;
+  bool projectionRefreshPending = false;
+  const nodegraph::Node *projectionCursor = nullptr;
+  bool geometryRerunRequired = false;
+
+  [[nodiscard]] static std::int64_t
+  rawItemExtent(const ItemGeometry &record) noexcept {
+    return record.projectionVisible
+               ? std::max(1, record.measuredHeight) + CardSpacing
+               : 0;
+  }
+
+  [[nodiscard]] static bool
+  suppressesChildren(const TurnGeometry &turn) noexcept {
+    return turn.rootCollapsed && turn.rootItem && turn.rootItem->node &&
+           turn.rootItem->projectionVisible;
+  }
+
+  [[nodiscard]] static std::int64_t
+  effectiveTurnExtent(const TurnGeometry &turn) noexcept {
+    return suppressesChildren(turn) ? turn.rootPixelExtent : turn.pixelExtent;
+  }
+
+  void addRecordExtent(ItemGeometry &record) {
+    TurnGeometry &turn = *record.turn;
+    const std::int64_t before = effectiveTurnExtent(turn);
+    const std::int64_t extent = rawItemExtent(record);
+    turn.pixelExtent += extent;
+    if (turn.rootItem.get() == &record)
+      turn.rootPixelExtent += extent;
+    totalPixelExtent += effectiveTurnExtent(turn) - before;
+    ++geometryGeneration;
+  }
+
+  void setRecordProjectionVisible(ItemGeometry &record, bool visible) {
+    if (record.projectionVisible == visible)
+      return;
+    TurnGeometry &turn = *record.turn;
+    const std::int64_t before = effectiveTurnExtent(turn);
+    const std::int64_t oldExtent = rawItemExtent(record);
+    record.projectionVisible = visible;
+    const std::int64_t delta = rawItemExtent(record) - oldExtent;
+    turn.pixelExtent += delta;
+    if (turn.rootItem.get() == &record)
+      turn.rootPixelExtent += delta;
+    totalPixelExtent += effectiveTurnExtent(turn) - before;
+    ++geometryGeneration;
+  }
+
+  void setRecordMeasuredHeight(ItemGeometry &record, int height) {
+    height = std::max(1, height);
+    if (record.measuredHeight == height)
+      return;
+    TurnGeometry &turn = *record.turn;
+    const std::int64_t before = effectiveTurnExtent(turn);
+    const std::int64_t oldExtent = rawItemExtent(record);
+    record.measuredHeight = height;
+    const std::int64_t delta = rawItemExtent(record) - oldExtent;
+    turn.pixelExtent += delta;
+    if (turn.rootItem.get() == &record)
+      turn.rootPixelExtent += delta;
+    totalPixelExtent += effectiveTurnExtent(turn) - before;
+    ++geometryGeneration;
+  }
+
+  void removeRecordExtent(ItemGeometry &record) {
+    setRecordProjectionVisible(record, false);
+  }
+
+  void setHiddenBeforeItems(TurnGeometry &turn, std::size_t count) {
+    if (turn.hiddenBeforeItems == count)
+      return;
+    const std::int64_t before = effectiveTurnExtent(turn);
+    turn.pixelExtent += (static_cast<std::int64_t>(count) -
+                         static_cast<std::int64_t>(turn.hiddenBeforeItems)) *
+                        EstimatedGraphHistoryItemExtent;
+    turn.hiddenBeforeItems = count;
+    totalPixelExtent += effectiveTurnExtent(turn) - before;
+    ++geometryGeneration;
+  }
+
+  void setRootCollapsed(TurnGeometry &turn, bool collapsed) {
+    if (turn.rootCollapsed == collapsed)
+      return;
+    const std::int64_t before = effectiveTurnExtent(turn);
+    turn.rootCollapsed = collapsed;
+    totalPixelExtent += effectiveTurnExtent(turn) - before;
+    ++geometryGeneration;
+  }
+
+  void retireCurrentStorage() {
+    if (!turns.empty() || !itemIndex.empty() || !turnIndex.empty()) {
+      retiredRecordCount += retainedGeometryRecords;
+      retiredStorage.emplace_back();
+      turns.swap(retiredStorage.back().turns);
+      itemIndex.swap(retiredStorage.back().itemIndex);
+      turnIndex.swap(retiredStorage.back().turnIndex);
+    }
+    scan = {};
+    geometryScan = {};
+    geometryRerunRequired = false;
+    threadStructureRevision = 0;
+    threadChildCount = 0;
+    newestTurn.reset();
+    retainedHistoryItems = 0;
+    retainedGeometryRecords = 0;
+    extraPinnedRoots = 0;
+    totalPixelExtent = 0;
+    leadingPixelExtent = 0;
+    trailingPixelExtent = 0;
+    structureValidationCursor = 0;
+    evictionTurnCursor = 0;
+    validationGeneration = structureRequestGeneration;
+    projectionCursor = nullptr;
+    ++geometryGeneration;
+  }
+
+  [[nodiscard]] bool drainRetiredStorage(std::size_t budget) {
+    const std::size_t originalBudget = budget;
+    while (budget != 0 && !retiredStorage.empty()) {
+      RetiredStorage &storage = retiredStorage.front();
+      if (!storage.itemIndex.empty()) {
+        storage.itemIndex.erase(storage.itemIndex.begin());
+        --budget;
+        continue;
+      }
+      if (!storage.turnIndex.empty()) {
+        storage.turnIndex.erase(storage.turnIndex.begin());
+        --budget;
+        continue;
+      }
+      if (storage.turns.empty()) {
+        retiredStorage.pop_front();
+        --budget;
+        continue;
+      }
+      TurnGeometry &turn = *storage.turns.front();
+      if (turn.rootItem) {
+        turn.rootItem.reset();
+        retiredRecordCount -= std::min<std::size_t>(1, retiredRecordCount);
+      } else if (!turn.items.empty()) {
+        turn.items.pop_front();
+        retiredRecordCount -= std::min<std::size_t>(1, retiredRecordCount);
+      } else if (!turn.appendedItems.empty()) {
+        turn.appendedItems.pop_front();
+        retiredRecordCount -= std::min<std::size_t>(1, retiredRecordCount);
+      } else {
+        storage.turns.pop_front();
+      }
+      --budget;
+    }
+    lastRetiredCleanupOperations = originalBudget - budget;
+    maxRetiredCleanupOperations =
+        std::max(maxRetiredCleanupOperations, lastRetiredCleanupOperations);
+    return !retiredStorage.empty();
+  }
 };
 
 ConversationView::ConversationView(QWidget *parent)
-    : QAbstractScrollArea(parent) {
+    : QAbstractScrollArea(parent),
+      graphGeometry_(std::make_unique<GraphViewportGeometry>()) {
   setObjectName(QStringLiteral("conversationScroll"));
+  setProperty("graphContentionRetryDelayMs", GraphContentionRetryMilliseconds);
+  setProperty("graphRetiredGeometryRecordCount", 0);
+  setProperty("graphLastRetiredCleanupOperations", 0);
+  setProperty("graphMaxRetiredCleanupOperations", 0);
   setFrameShape(QFrame::NoFrame);
   setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
@@ -791,14 +1094,13 @@ ConversationView::ConversationView(QWidget *parent)
   graphLeadingPlaceholder_ = new GraphHistoryPlaceholder(content_);
   contentLayout_->addWidget(graphLeadingPlaceholder_);
 
+  graphTrailingPlaceholder_ = new GraphHistoryPlaceholder(content_);
+  contentLayout_->addWidget(graphTrailingPlaceholder_);
+
   empty_ = makeEmptyLabel();
   emptyMessage_ = empty_->text();
   empty_->setParent(content_);
   contentLayout_->addWidget(empty_);
-  trailingSpace_ =
-      new QSpacerItem(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
-  contentLayout_->addItem(trailingSpace_);
-
   followAnimation_ = new QVariantAnimation(this);
   followAnimation_->setEasingCurve(QEasingCurve::OutCubic);
   connect(followAnimation_, &QVariantAnimation::valueChanged, this,
@@ -843,9 +1145,7 @@ ConversationView::ConversationView(QWidget *parent)
             scheduleVisibilityPass();
             if (programmaticScroll_ || applying_)
               return;
-            if (sliderDown_ || userActionPending_) {
-              handleUserScrollValue(value);
-            }
+            handleUserScrollValue(value);
             userActionPending_ = false;
           });
 
@@ -875,6 +1175,10 @@ void ConversationView::bindGraph(const nodegraph::NodeGraph &graph,
 
   graph_ = &graph;
   graphThread_ = std::move(selectedThread);
+  pendingGraphAnchorRestore_.reset();
+  if (restored && restored->mode == Mode::Paused &&
+      !restored->anchor.stableKey.empty())
+    pendingGraphAnchorRestore_ = restored->anchor;
   graphHiddenItemCount_ = 0;
   graphWindowItemCount_ = 0;
   graphProviderHasMore_ = false;
@@ -892,14 +1196,71 @@ void ConversationView::graphChanged(
   if (!graph_)
     return;
   detachRemovedNodes(removed);
+  graphGeometry_->affected.clear();
+  graphGeometry_->affectedCursor = 0;
+  graphGeometry_->refreshStructureReads = 0;
+  graphGeometry_->forceStructureCheck = true;
+  ++graphGeometry_->structureRequestGeneration;
   runGraphRefresh();
 }
 
 void ConversationView::graphChangedDeferred(
     std::span<const nodegraph::NodeRef> removed) {
+  graphChangedDeferred({}, removed);
+}
+
+void ConversationView::graphChangedDeferred(
+    std::span<const nodegraph::NodeRef> affected,
+    std::span<const nodegraph::NodeRef> removed) {
   if (!graph_)
     return;
   detachRemovedNodes(removed);
+  graphGeometry_->refreshStructureReads = 0;
+  bool structureCheckRequested = affected.empty() || !removed.empty();
+  if (graphGeometry_->affectedCursor != 0) {
+    graphGeometry_->affected.erase(
+        graphGeometry_->affected.begin(),
+        graphGeometry_->affected.begin() +
+            static_cast<std::ptrdiff_t>(graphGeometry_->affectedCursor));
+    graphGeometry_->affectedCursor = 0;
+  }
+  std::unordered_set<const nodegraph::Node *> pending;
+  pending.reserve(graphGeometry_->affected.size());
+  for (const nodegraph::NodeRef &node : graphGeometry_->affected)
+    if (node)
+      pending.insert(node.get());
+  bool affectedOverflow = false;
+  std::size_t inspectedAffected = 0;
+  for (const nodegraph::NodeRef &node : affected) {
+    if (inspectedAffected++ >= MaxPendingAffectedNodes) {
+      affectedOverflow = true;
+      break;
+    }
+    if (!node || pending.contains(node.get()))
+      continue;
+    if (graphGeometry_->affected.size() >= MaxPendingAffectedNodes) {
+      affectedOverflow = true;
+      break;
+    }
+    pending.insert(node.get());
+    graphGeometry_->affected.push_back(node);
+    if (node == graphThread_ || node->id().kind == nodegraph::NodeKind::Turn ||
+        (node->id().kind == nodegraph::NodeKind::Item &&
+         !graphGeometry_->itemIndex.contains(node.get())))
+      structureCheckRequested = true;
+  }
+  if (affectedOverflow) {
+    graphGeometry_->affected.clear();
+    graphGeometry_->affectedCursor = 0;
+    structureCheckRequested = true;
+    graphGeometry_->forceSelectedReset = true;
+    graphGeometry_->projectionRefreshPending = true;
+    graphGeometry_->projectionCursor = nullptr;
+  }
+  if (structureCheckRequested) {
+    graphGeometry_->forceStructureCheck = true;
+    ++graphGeometry_->structureRequestGeneration;
+  }
   // A single eventfd drain may carry hundreds of streaming revisions. Keep
   // removal detachment synchronous for node lifetime, but coalesce ordinary
   // structural/render reconciliation into one later Qt event-loop pass.
@@ -908,13 +1269,30 @@ void ConversationView::graphChangedDeferred(
 
 void ConversationView::detachRemovedNodes(
     std::span<const nodegraph::NodeRef> removed) {
-  if (graph_ && !removed.empty())
-    detachGraphWidgets(removed);
+  if (!graph_ || removed.empty())
+    return;
+
+  // A recursive graph retirement can contain thousands of descendants. Qt
+  // only needs to detach its bounded live window; the next graph read detects
+  // a selected-thread retirement directly. Small notifications can still be
+  // handled immediately without turning removal delivery into an unbounded
+  // main-thread pass.
+  if (removed.size() > MaxPendingAffectedNodes)
+    return;
+  if (graphThread_ &&
+      std::ranges::find(removed, graphThread_) != removed.end()) {
+    std::array<nodegraph::NodeRef, 1> selected{graphThread_};
+    detachGraphWidgets(selected);
+    return;
+  }
+  detachGraphWidgets(removed);
 }
 
 void ConversationView::clearGraph() {
-  if (!graph_ && graphSections_.empty())
+  if (!graph_ && graphSections_.empty() && graphGeometry_->turns.empty())
     return;
+  ++graphBindingEpoch_;
+  pendingGraphAnchorRestore_.reset();
   for (TurnSectionWidget *section : graphSections_) {
     for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
       auto *card =
@@ -938,6 +1316,39 @@ void ConversationView::clearGraph() {
   graphSections_.clear();
   static_cast<GraphHistoryPlaceholder *>(graphLeadingPlaceholder_)
       ->setItemCount(0);
+  static_cast<GraphHistoryPlaceholder *>(graphTrailingPlaceholder_)
+      ->setItemCount(0);
+  graphGeometry_->retireCurrentStorage();
+  graphGeometry_->affected.clear();
+  graphGeometry_->affectedCursor = 0;
+  graphGeometry_->geometryGeneration = 1;
+  graphGeometry_->threadStructureRevision = 0;
+  graphGeometry_->threadChildCount = 0;
+  graphGeometry_->retainedHistoryItems = 0;
+  graphGeometry_->retainedGeometryRecords = 0;
+  graphGeometry_->extraPinnedRoots = 0;
+  graphGeometry_->targetHistoryItems = 0;
+  graphGeometry_->totalItems = 0;
+  graphGeometry_->totalPixelExtent = 0;
+  graphGeometry_->leadingPixelExtent = 0;
+  graphGeometry_->trailingPixelExtent = 0;
+  graphGeometry_->lastStructureReadsPerPass = 0;
+  graphGeometry_->lastGeometryRecordsPerPass = 0;
+  graphGeometry_->lastCardOperationsPerPass = 0;
+  graphGeometry_->maxStructureReadsPerPass = 0;
+  graphGeometry_->maxGeometryRecordsPerPass = 0;
+  graphGeometry_->maxCardOperationsPerPass = 0;
+  graphGeometry_->contentionRetryCount = 0;
+  graphGeometry_->refreshStructureReads = 0;
+  graphGeometry_->targetDirty = true;
+  graphGeometry_->forceStructureCheck = false;
+  graphGeometry_->forceSelectedReset = false;
+  graphGeometry_->structureValidationCursor = 0;
+  graphGeometry_->projectionRefreshPending = false;
+  graphGeometry_->projectionCursor = nullptr;
+  graphGeometry_->structureRequestGeneration = 0;
+  graphGeometry_->validationGeneration = 0;
+  graphGeometry_->geometryRerunRequired = false;
   graphThread_.reset();
   graph_ = nullptr;
   graphHiddenItemCount_ = 0;
@@ -952,489 +1363,1444 @@ void ConversationView::clearGraph() {
   visibilityScanContentHeight_ = -1;
   graphRefreshScheduled_ = false;
   visibilityPassScheduled_ = false;
+  graphPassCardOperations_ = 0;
+  setProperty("graphLiveRecordCount", 0);
+  setProperty("graphLiveSectionCount", 0);
+  setProperty("graphRetainedGeometryRecordCount", 0);
+  setProperty("graphLastStructureReadsPerPass", 0);
+  setProperty("graphLastGeometryRecordsPerPass", 0);
+  setProperty("graphLastCardOperationsPerPass", 0);
+  setProperty("graphLastRefreshStructureReads", 0);
+  setProperty("graphMaxStructureReadsPerPass", 0);
+  setProperty("graphMaxGeometryRecordsPerPass", 0);
+  setProperty("graphMaxCardOperationsPerPass", 0);
+  setProperty("graphLeadingPixelExtent", 0);
+  setProperty("graphFirstRetainedScrollValue", 0);
+  setProperty("graphTrailingPixelExtent", 0);
+  setProperty("graphStructureScanComplete", false);
+  setProperty("graphStructureScanTarget", 0);
+  setProperty("graphContentionRetryDelayMs", GraphContentionRetryMilliseconds);
+  setProperty("graphContentionRetryCount", 0);
+  publishRetiredGeometryCleanupMetrics();
+  scheduleRetiredGeometryCleanup();
 }
 
 void ConversationView::scheduleGraphRefresh() {
   if (!graph_ || graphRefreshScheduled_)
     return;
   graphRefreshScheduled_ = true;
-  QTimer::singleShot(0, this, [this] {
+  const std::uint64_t epoch = graphBindingEpoch_;
+  QTimer::singleShot(0, this, [this, epoch] {
+    if (epoch != graphBindingEpoch_)
+      return;
     graphRefreshScheduled_ = false;
     runGraphRefresh();
   });
 }
 
-void ConversationView::runGraphRefresh() {
-  if (!graph_)
+void ConversationView::scheduleGraphContentionRetry() {
+  if (!graph_ || graphRefreshScheduled_)
     return;
-
-  struct ItemPin final {
-    nodegraph::NodeRef node;
-    std::shared_ptr<const nodegraph::NodeState> state;
-    nodegraph::NodeRef materializedPrompt;
-    std::shared_ptr<const nodegraph::NodeState> materializedPromptState;
-    bool suppressedByLocalPrompt = false;
-  };
-  struct TurnPin final {
-    nodegraph::NodeRef node;
-    std::shared_ptr<const nodegraph::NodeState> state;
-    nodegraph::NodeRef root;
-    std::vector<ItemPin> items;
-    std::size_t hiddenBeforeItems = 0;
-  };
-  struct Structure final {
-    bool threadRemoved = false;
-    bool providerHasMore = false;
-    std::size_t totalItems = 0;
-    std::size_t leadingHiddenItems = 0;
-    std::size_t hiddenItems = 0;
-    std::string newestItemKey;
-    std::vector<TurnPin> turns;
-  } structure;
-
-  {
-    std::optional<nodegraph::NodeGraph::ReadAccess> read = graph_->tryRead();
-    if (!read) {
-      scheduleGraphRefresh();
+  graphRefreshScheduled_ = true;
+  ++graphGeometry_->contentionRetryCount;
+  setProperty("graphContentionRetryCount",
+              static_cast<qulonglong>(graphGeometry_->contentionRetryCount));
+  const std::uint64_t epoch = graphBindingEpoch_;
+  QTimer::singleShot(GraphContentionRetryMilliseconds, this, [this, epoch] {
+    if (epoch != graphBindingEpoch_)
       return;
+    graphRefreshScheduled_ = false;
+    runGraphRefresh();
+  });
+}
+
+void ConversationView::scheduleVisibilityContentionRetry() {
+  if (!graph_ || visibilityPassScheduled_)
+    return;
+  visibilityPassScheduled_ = true;
+  ++graphGeometry_->contentionRetryCount;
+  setProperty("graphContentionRetryCount",
+              static_cast<qulonglong>(graphGeometry_->contentionRetryCount));
+  const std::uint64_t epoch = graphBindingEpoch_;
+  QTimer::singleShot(GraphContentionRetryMilliseconds, this, [this, epoch] {
+    if (epoch != graphBindingEpoch_)
+      return;
+    visibilityPassScheduled_ = false;
+    scheduleVisibilityPass();
+  });
+}
+
+void ConversationView::scheduleRetiredGeometryCleanup() {
+  if (retiredGeometryCleanupScheduled_ ||
+      graphGeometry_->retiredStorage.empty())
+    return;
+  retiredGeometryCleanupScheduled_ = true;
+  QTimer::singleShot(0, this, [this] {
+    retiredGeometryCleanupScheduled_ = false;
+    const bool cleanupRemaining =
+        graphGeometry_->drainRetiredStorage(MaxStructureRecordsPerPass);
+    publishRetiredGeometryCleanupMetrics();
+    if (cleanupRemaining)
+      scheduleRetiredGeometryCleanup();
+  });
+}
+
+void ConversationView::publishRetiredGeometryCleanupMetrics() {
+  setProperty("graphRetiredGeometryRecordCount",
+              static_cast<qulonglong>(graphGeometry_->retiredRecordCount));
+  setProperty(
+      "graphLastRetiredCleanupOperations",
+      static_cast<qulonglong>(graphGeometry_->lastRetiredCleanupOperations));
+  setProperty(
+      "graphMaxRetiredCleanupOperations",
+      static_cast<qulonglong>(graphGeometry_->maxRetiredCleanupOperations));
+}
+
+void ConversationView::runGraphRefresh() {
+  if (!graph_ || !graphThread_)
+    return;
+  const bool cleanupRemaining =
+      graphGeometry_->drainRetiredStorage(MaxStructureRecordsPerPass);
+  publishRetiredGeometryCleanupMetrics();
+  if (cleanupRemaining)
+    scheduleRetiredGeometryCleanup();
+  graphPassCardOperations_ = 0;
+
+  std::size_t structureReads = 0;
+  bool threadRemoved = false;
+  bool scanHasMore = false;
+  bool resetRequested = false;
+  bool evictionRemaining = false;
+  std::vector<nodegraph::NodeRef> materializedPrompts;
+  std::vector<std::pair<nodegraph::NodeRef, nodegraph::NodeRef>>
+      promptTransfers;
+  std::vector<std::pair<nodegraph::NodeRef, bool>> turnActivityChanges;
+  const std::uint64_t epoch = graphBindingEpoch_;
+
+  std::optional<nodegraph::NodeGraph::ReadAccess> read = graph_->tryRead();
+  if (!read) {
+    scheduleGraphContentionRetry();
+    return;
+  }
+
+  if (read->removed(graphThread_)) {
+    threadRemoved = true;
+  } else {
+    const std::shared_ptr<const nodegraph::NodeState> threadState =
+        read->state(graphThread_);
+    const std::optional<std::size_t> loadedItemCount =
+        threadState
+            ? graphSize(graphField(*threadState, "historyLoadedItemCount"))
+            : std::nullopt;
+    graphProviderHasMore_ =
+        threadState && graphProviderHasMoreHistory(*threadState);
+
+    const std::size_t childCount = read->childCount(graphThread_);
+    const std::uint64_t threadStructure =
+        read->structureChangedRevision(graphThread_);
+    const bool requestedStructureCheck = graphGeometry_->forceStructureCheck;
+    const auto resetRetainedGeometry = [&resetRequested] {
+      resetRequested = true;
+    };
+    if (graphGeometry_->forceSelectedReset)
+      resetRetainedGeometry();
+    graphGeometry_->forceSelectedReset = false;
+
+    if (!resetRequested && graphGeometry_->forceStructureCheck &&
+        graphGeometry_->scan.initialized) {
+      if (graphGeometry_->structureValidationCursor == 0)
+        graphGeometry_->validationGeneration =
+            graphGeometry_->structureRequestGeneration;
+      while (graphGeometry_->structureValidationCursor <
+                 graphGeometry_->turns.size() &&
+             structureReads < MaxStructureRecordsPerPass) {
+        GraphViewportGeometry::TurnGeometry *turn =
+            graphGeometry_->turns[graphGeometry_->structureValidationCursor++]
+                .get();
+        ++structureReads;
+        if (!turn->node || read->removed(turn->node)) {
+          resetRetainedGeometry();
+          break;
+        }
+        const std::shared_ptr<const nodegraph::NodeState> turnState =
+            read->state(turn->node);
+        const bool active =
+            turnState && turnState->status == nodegraph::NodeStatus::Running;
+        if (turn->active != active) {
+          turn->active = active;
+          turnActivityChanges.emplace_back(turn->node, active);
+        }
+        const std::uint64_t revision =
+            read->structureChangedRevision(turn->node);
+        if (revision == turn->structureRevision)
+          continue;
+        const std::size_t currentCount = read->childCount(turn->node);
+        if (currentCount > turn->knownChildCount) {
+          if (structureReads >= MaxStructureRecordsPerPass) {
+            --graphGeometry_->structureValidationCursor;
+            break;
+          }
+          nodegraph::NodeRef currentNewest =
+              read->childAt(turn->node, currentCount - 1);
+          ++structureReads;
+          // A tail append leaves the previous tail in place and is admitted
+          // through the affected/newest-node path below. If the current tail
+          // did not change, the added records were prepended (provider history)
+          // and the backward frontier has shifted, so rebuild it incrementally.
+          if (currentCount > turn->knownChildCount + 1 ||
+              (turn->newestChild && currentNewest == turn->newestChild)) {
+            resetRetainedGeometry();
+            break;
+          }
+          turn->knownChildCount = currentCount;
+          turn->newestChild = std::move(currentNewest);
+          turn->structureRevision = revision;
+          continue;
+        }
+        resetRetainedGeometry();
+        break;
+      }
+      if (graphGeometry_->structureValidationCursor >=
+          graphGeometry_->turns.size()) {
+        graphGeometry_->structureValidationCursor = 0;
+        if (graphGeometry_->validationGeneration ==
+            graphGeometry_->structureRequestGeneration)
+          graphGeometry_->forceStructureCheck = false;
+      }
     }
-    if (!graphThread_ || read->removed(graphThread_)) {
-      structure.threadRemoved = true;
-    } else {
-      const std::shared_ptr<const nodegraph::NodeState> threadState =
-          read->state(graphThread_);
-      std::optional<std::size_t> loadedItemCount;
-      if (threadState) {
-        structure.providerHasMore = graphProviderHasMoreHistory(*threadState);
-        loadedItemCount =
-            graphSize(graphField(*threadState, "historyLoadedItemCount"));
+    if (!resetRequested) {
+      nodegraph::NodeRef newestTurn;
+      nodegraph::NodeRef newestItem;
+      for (std::size_t index = childCount;
+           index > 0 && structureReads < MaxStructureRecordsPerPass;) {
+        nodegraph::NodeRef turn = read->childAt(graphThread_, --index);
+        ++structureReads;
+        if (!turn || turn->id().kind != nodegraph::NodeKind::Turn ||
+            read->removed(turn))
+          continue;
+        newestTurn = turn;
+        for (std::size_t itemIndex = read->childCount(turn);
+             itemIndex > 0 && structureReads < MaxStructureRecordsPerPass;) {
+          nodegraph::NodeRef item = read->childAt(turn, --itemIndex);
+          ++structureReads;
+          if (item && item->id().kind == nodegraph::NodeKind::Item &&
+              !read->removed(item)) {
+            newestItem = std::move(item);
+            break;
+          }
+        }
+        if (newestItem)
+          break;
+      }
+
+      const std::string newestKey =
+          newestItem ? newestItem->id().canonical : std::string{};
+      if (mode_ == Mode::Paused && loadedItemCount &&
+          graphKnownItemCount_ != 0 &&
+          *loadedItemCount > graphKnownItemCount_ &&
+          !graphNewestItemKey_.empty() && !newestKey.empty() &&
+          newestKey != graphNewestItemKey_) {
+        const std::size_t appended = *loadedItemCount - graphKnownItemCount_;
+        graphHistoryLimit_ +=
+            std::min(appended, std::numeric_limits<std::size_t>::max() -
+                                   graphHistoryLimit_);
+      }
+
+      graphGeometry_->totalItems = loadedItemCount.value_or(std::max(
+          graphGeometry_->totalItems, graphGeometry_->retainedHistoryItems));
+      graphGeometry_->targetHistoryItems =
+          loadedItemCount ? std::min(graphHistoryLimit_, *loadedItemCount)
+                          : graphHistoryLimit_;
+      if (newestItem && !graphGeometry_->itemIndex.contains(newestItem.get()))
+        graphGeometry_->targetHistoryItems =
+            std::max(graphGeometry_->targetHistoryItems,
+                     graphGeometry_->retainedHistoryItems + 1);
+
+      if (!graphGeometry_->scan.initialized) {
+        graphGeometry_->scan.initialized = true;
+        graphGeometry_->scan.nextTurnIndex = childCount;
+        graphGeometry_->threadChildCount = childCount;
+        graphGeometry_->threadStructureRevision = threadStructure;
+        graphGeometry_->newestTurn = newestTurn;
+      } else if (threadStructure != graphGeometry_->threadStructureRevision) {
+        // Older provider pages are prepended. Their insertion shifts the
+        // retained backward frontier but does not invalidate the already-read
+        // suffix. Appended turns stay after the frontier and are picked up by
+        // the bounded newest-item probe above.
+        if (childCount >= graphGeometry_->threadChildCount &&
+            newestTurn == graphGeometry_->newestTurn) {
+          graphGeometry_->scan.nextTurnIndex +=
+              childCount - graphGeometry_->threadChildCount;
+        } else if (childCount > graphGeometry_->threadChildCount &&
+                   newestTurn != graphGeometry_->newestTurn) {
+          // A newly appended turn sits beyond a completed backward frontier.
+          // Reopen that frontier at the new tail; existing records are
+          // identity-deduplicated below, so no retained count is duplicated.
+          graphGeometry_->scan.nextTurnIndex = childCount;
+          graphGeometry_->scan.complete = false;
+        }
+        if (requestedStructureCheck &&
+            childCount == graphGeometry_->threadChildCount)
+          graphGeometry_->forceSelectedReset = true;
+        graphGeometry_->threadChildCount = childCount;
+        graphGeometry_->threadStructureRevision = threadStructure;
+        graphGeometry_->newestTurn = newestTurn;
       }
 
       const auto turnRoot = [&read](const nodegraph::NodeRef &turn) {
-        for (const nodegraph::NodeRef &candidate :
-             read->related(turn, nodegraph::RelationKind::TurnRootItem))
+        const std::size_t count =
+            read->relatedCount(turn, nodegraph::RelationKind::TurnRootItem);
+        for (std::size_t index = 0; index < count; ++index) {
+          nodegraph::NodeRef candidate = read->relatedAt(
+              turn, nodegraph::RelationKind::TurnRootItem, index);
           if (candidate && candidate->id().kind == nodegraph::NodeKind::Item &&
               !read->removed(candidate))
             return candidate;
+        }
         return nodegraph::NodeRef{};
       };
-      const auto newestItem = [&read, &turnRoot, this]() -> nodegraph::NodeRef {
-        for (std::size_t turnIndex = read->childCount(graphThread_);
-             turnIndex > 0;) {
-          nodegraph::NodeRef turn = read->childAt(graphThread_, --turnIndex);
-          if (!turn || turn->id().kind != nodegraph::NodeKind::Turn ||
-              read->removed(turn))
-            continue;
-          for (std::size_t itemIndex = read->childCount(turn); itemIndex > 0;) {
-            nodegraph::NodeRef item = read->childAt(turn, --itemIndex);
-            if (item && item->id().kind == nodegraph::NodeKind::Item &&
-                !read->removed(item))
-              return item;
-          }
-          if (nodegraph::NodeRef root = turnRoot(turn))
-            return root;
-        }
-        return {};
-      }();
-      if (newestItem)
-        structure.newestItemKey = newestItem->id().canonical;
-      if (mode_ == Mode::Paused && graphKnownItemCount_ != 0 &&
-          loadedItemCount && *loadedItemCount > graphKnownItemCount_ &&
-          !graphNewestItemKey_.empty() && !structure.newestItemKey.empty() &&
-          structure.newestItemKey != graphNewestItemKey_) {
-        // A paused view grows its retained tail only for genuinely new
-        // activity. Older provider pages increase the loaded count while the
-        // newest item stays identical and must remain hidden above the anchor.
-        const std::size_t appended = *loadedItemCount - graphKnownItemCount_;
-        const std::size_t available =
-            std::numeric_limits<std::size_t>::max() - graphHistoryLimit_;
-        graphHistoryLimit_ += std::min(appended, available);
-      }
-      const auto pinItem = [&read](const nodegraph::NodeRef &item) {
+
+      const auto makeRecord =
+          [this, &read, &materializedPrompts,
+           &promptTransfers](const nodegraph::NodeRef &item,
+                             GraphViewportGeometry::TurnGeometry *turn)
+          -> std::unique_ptr<GraphViewportGeometry::ItemGeometry> {
+        if (!item || !turn || read->removed(item))
+          return {};
+        const std::shared_ptr<const nodegraph::NodeState> state =
+            read->state(item);
+        if (!state)
+          return {};
+
         nodegraph::NodeRef localPrompt;
         std::shared_ptr<const nodegraph::NodeState> localPromptState;
         bool suppressedByLocalPrompt = false;
-        for (const nodegraph::NodeRef &candidate : read->related(
-                 item, nodegraph::RelationKind::PromptMaterialization)) {
+        const std::size_t relationCount = read->relatedCount(
+            item, nodegraph::RelationKind::PromptMaterialization);
+        for (std::size_t index = 0; index < relationCount; ++index) {
+          nodegraph::NodeRef candidate = read->relatedAt(
+              item, nodegraph::RelationKind::PromptMaterialization, index);
           if (!candidate || candidate->id().kind != nodegraph::NodeKind::Item ||
               read->removed(candidate))
             continue;
-          const auto state = read->state(candidate);
-          if (graphString(graphField(*state, "type")) != "localPrompt")
+          const std::shared_ptr<const nodegraph::NodeState> candidateState =
+              read->state(candidate);
+          if (!candidateState ||
+              graphString(graphField(*candidateState, "type")) != "localPrompt")
             continue;
-          if (graphString(graphField(*state, "dispatchState")) ==
+          if (graphString(graphField(*candidateState, "dispatchState")) ==
               "awaitingMaterialization") {
             localPrompt = candidate;
-            localPromptState = state;
+            localPromptState = candidateState;
           } else {
-            // Correlation is not delivery acknowledgement, but it does prove
-            // both nodes represent the same authored message. Keep the local
-            // card visible until the exact request result permits handoff.
             suppressedByLocalPrompt = true;
           }
           break;
         }
-        return ItemPin{item, read->state(item), std::move(localPrompt),
-                       std::move(localPromptState), suppressedByLocalPrompt};
+        if (suppressedByLocalPrompt)
+          return {};
+        if (graphGeometry_->itemIndex.contains(item.get()))
+          return {};
+        if (localPrompt) {
+          const auto retained =
+              graphGeometry_->itemIndex.find(localPrompt.get());
+          if (retained != graphGeometry_->itemIndex.end()) {
+            GraphViewportGeometry::ItemGeometry *record = retained->second;
+            graphGeometry_->itemIndex.erase(record->node.get());
+            record->node = item;
+            record->materializedPrompt = localPrompt;
+            const std::int64_t rawId =
+                graphInteger(graphField(*localPromptState, "submissionId"))
+                    .value_or(0);
+            record->promptVisualId =
+                rawId < 0 ? 0 : static_cast<std::uint64_t>(rawId);
+            record->key = stableKey(LocalPromptKey{*record->promptVisualId});
+            graphGeometry_->itemIndex[item.get()] = record;
+            graphGeometry_->itemIndex[localPrompt.get()] = record;
+            materializedPrompts.push_back(localPrompt);
+            promptTransfers.emplace_back(localPrompt, item);
+            return {};
+          }
+        }
+
+        auto record = std::make_unique<GraphViewportGeometry::ItemGeometry>();
+        record->node = item;
+        record->materializedPrompt = localPrompt;
+        record->turn = turn;
+        if (localPromptState) {
+          const std::int64_t rawId =
+              graphInteger(graphField(*localPromptState, "submissionId"))
+                  .value_or(0);
+          record->promptVisualId =
+              rawId < 0 ? 0 : static_cast<std::uint64_t>(rawId);
+          record->key = stableKey(LocalPromptKey{*record->promptVisualId});
+          materializedPrompts.push_back(localPrompt);
+        } else if (graphCardKind(*state) == CardKind::LocalPrompt) {
+          const std::int64_t rawId =
+              graphInteger(graphField(*state, "submissionId")).value_or(0);
+          record->promptVisualId =
+              rawId < 0 ? 0 : static_cast<std::uint64_t>(rawId);
+          record->key = stableKey(LocalPromptKey{*record->promptVisualId});
+        } else {
+          record->key = stableKey(AuthoritativeItemKey{
+              graphThread_->id().canonical, turn->protocolId,
+              nodegraph::protocolCanonicalId(*state, item)});
+        }
+        record->measuredHeight = initialCardHeight(graphCardKind(*state));
+        for (TurnSectionWidget *section : graphSections_) {
+          const auto retained = std::ranges::find_if(
+              section->cardSlots,
+              [&item, &localPrompt](const TurnSectionWidget::CardSlot &slot) {
+                return slot.graphNode == item ||
+                       (localPrompt && slot.graphNode == localPrompt);
+              });
+          if (retained != section->cardSlots.end()) {
+            record->measuredHeight = retained->measuredHeight;
+            break;
+          }
+        }
+        record->projectionVisible =
+            graphCardVisible(*state, presentationOptions_);
+        return record;
       };
 
-      if (loadedItemCount) {
-        // App-server ingestion maintains this exact count. Walk backward only
-        // through the turns and items needed by the current UI history window;
-        // older storage is represented by fixed-geometry spacers.
-        structure.totalItems = *loadedItemCount;
-        std::size_t remaining =
-            std::min(graphHistoryLimit_, structure.totalItems);
-        std::size_t representedItems = 0;
-        for (std::size_t turnIndex = read->childCount(graphThread_);
-             turnIndex > 0 && remaining > 0;) {
-          nodegraph::NodeRef turn = read->childAt(graphThread_, --turnIndex);
-          if (!turn || turn->id().kind != nodegraph::NodeKind::Turn ||
-              read->removed(turn))
+      const auto indexRecord =
+          [this](GraphViewportGeometry::ItemGeometry *record) {
+            if (!record)
+              return;
+            graphGeometry_->itemIndex[record->node.get()] = record;
+            if (record->materializedPrompt)
+              graphGeometry_->itemIndex[record->materializedPrompt.get()] =
+                  record;
+            ++graphGeometry_->retainedGeometryRecords;
+            graphGeometry_->addRecordExtent(*record);
+          };
+
+      if (graphGeometry_->projectionRefreshPending) {
+        auto projection = graphGeometry_->projectionCursor
+                              ? graphGeometry_->itemIndex.upper_bound(
+                                    graphGeometry_->projectionCursor)
+                              : graphGeometry_->itemIndex.begin();
+        while (projection != graphGeometry_->itemIndex.end() &&
+               structureReads < MaxStructureRecordsPerPass) {
+          const nodegraph::Node *indexKey = projection->first;
+          GraphViewportGeometry::ItemGeometry *record = projection->second;
+          ++projection;
+          graphGeometry_->projectionCursor = indexKey;
+          if (!record || record->node.get() != indexKey)
             continue;
-
-          const std::size_t directItemCount = read->childCount(turn);
-          nodegraph::NodeRef root = turnRoot(turn);
-          const bool rootOutsideChildren = root && read->parent(root) != turn;
-          const std::size_t logicalItemCount =
-              directItemCount + (rootOutsideChildren ? 1U : 0U);
-
-          std::vector<nodegraph::NodeRef> selected;
-          selected.reserve(std::min(directItemCount, remaining));
-          for (std::size_t itemIndex = directItemCount;
-               itemIndex > 0 && remaining > 0;) {
-            nodegraph::NodeRef item = read->childAt(turn, --itemIndex);
-            if (!item || item->id().kind != nodegraph::NodeKind::Item ||
-                read->removed(item))
-              continue;
-            selected.push_back(std::move(item));
-            --remaining;
-          }
-          std::ranges::reverse(selected);
-
-          const bool selectedDirectItem = !selected.empty();
-          bool selectedOutsideRoot = false;
-          if (rootOutsideChildren && remaining > 0) {
-            --remaining;
-            selectedOutsideRoot = true;
-          }
-          if (!selectedDirectItem && !selectedOutsideRoot)
+          ++structureReads;
+          const std::shared_ptr<const nodegraph::NodeState> state =
+              read->state(record->node);
+          if (!state)
             continue;
-
-          TurnPin pinned{turn, read->state(turn), root, {}, 0};
-          const bool selectedRoot =
-              root && std::ranges::find(selected, root) != selected.end();
-          if (root && !selectedRoot)
-            pinned.items.push_back(pinItem(root));
-          for (nodegraph::NodeRef &item : selected)
-            pinned.items.push_back(pinItem(item));
-          pinned.hiddenBeforeItems =
-              logicalItemCount > pinned.items.size()
-                  ? logicalItemCount - pinned.items.size()
-                  : 0;
-          structure.hiddenItems += pinned.hiddenBeforeItems;
-          representedItems += logicalItemCount;
-          structure.turns.push_back(std::move(pinned));
+          const bool visible = graphCardVisible(*state, presentationOptions_);
+          if (visible == record->projectionVisible)
+            continue;
+          graphGeometry_->setRecordProjectionVisible(*record, visible);
+          for (TurnSectionWidget *section : graphSections_)
+            for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
+              if (slot.graphNode == record->node) {
+                slot.projectionVisible = visible;
+                section->geometryDirty = true;
+              }
         }
-        std::ranges::reverse(structure.turns);
-        structure.leadingHiddenItems =
-            structure.totalItems > representedItems
-                ? structure.totalItems - representedItems
-                : 0;
-        structure.hiddenItems += structure.leadingHiddenItems;
-      } else {
-        // Compatibility fallback for manually constructed graphs that predate
-        // the worker-maintained history count.
-        struct TurnCount final {
-          nodegraph::NodeRef node;
-          std::size_t items = 0;
-        };
-        std::vector<TurnCount> counts;
-        for (nodegraph::NodeRef turn : read->children(graphThread_)) {
-          if (!turn || turn->id().kind != nodegraph::NodeKind::Turn ||
-              read->removed(turn))
-            continue;
-          const std::vector<nodegraph::NodeRef> children = read->children(turn);
-          const std::size_t itemCount = static_cast<std::size_t>(
-              std::ranges::count_if(children, [&read](const auto &item) {
-                return item && item->id().kind == nodegraph::NodeKind::Item &&
-                       !read->removed(item);
-              }));
-          counts.push_back({std::move(turn), itemCount});
-          structure.totalItems += itemCount;
+        if (projection == graphGeometry_->itemIndex.end()) {
+          graphGeometry_->projectionRefreshPending = false;
+          graphGeometry_->projectionCursor = nullptr;
         }
+      }
 
-        const std::size_t firstRetained =
-            structure.totalItems > graphHistoryLimit_
-                ? structure.totalItems - graphHistoryLimit_
-                : 0;
-        std::size_t offset = 0;
-        for (const TurnCount &count : counts) {
-          const std::size_t turnEnd = offset + count.items;
-          if (turnEnd <= firstRetained) {
-            structure.leadingHiddenItems += count.items;
-            offset = turnEnd;
+      while (graphGeometry_->affectedCursor < graphGeometry_->affected.size() &&
+             structureReads < MaxStructureRecordsPerPass) {
+        nodegraph::NodeRef affected =
+            graphGeometry_->affected[graphGeometry_->affectedCursor++];
+        ++structureReads;
+        if (!affected || read->removed(affected) ||
+            affected->id().kind != nodegraph::NodeKind::Item)
+          continue;
+        nodegraph::NodeRef turnNode = read->parent(affected);
+        if (const auto existing =
+                graphGeometry_->itemIndex.find(affected.get());
+            existing != graphGeometry_->itemIndex.end()) {
+          GraphViewportGeometry::ItemGeometry *record = existing->second;
+          if (turnNode && turnNode != record->turn->node) {
+            graphGeometry_->forceSelectedReset = true;
             continue;
           }
+          const std::shared_ptr<const nodegraph::NodeState> currentState =
+              read->state(record->node);
+          if (!currentState)
+            continue;
+          const bool visible =
+              graphCardVisible(*currentState, presentationOptions_);
+          if (visible != record->projectionVisible) {
+            graphGeometry_->setRecordProjectionVisible(*record, visible);
+            for (TurnSectionWidget *section : graphSections_)
+              for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
+                if (slot.graphNode == record->node ||
+                    slot.graphNode == affected) {
+                  slot.projectionVisible = visible;
+                  section->geometryDirty = true;
+                }
+          }
+          continue;
+        }
+        if (!turnNode || turnNode->id().kind != nodegraph::NodeKind::Turn ||
+            read->removed(turnNode) || read->parent(turnNode) != graphThread_)
+          continue;
 
-          std::vector<nodegraph::NodeRef> items = read->children(count.node);
-          std::erase_if(items, [&read](const nodegraph::NodeRef &item) {
-            return !item || item->id().kind != nodegraph::NodeKind::Item ||
-                   read->removed(item);
-          });
-          const std::size_t selectedStart =
-              firstRetained > offset ? firstRetained - offset : 0;
-          TurnPin pinned{count.node,
-                         read->state(count.node),
-                         turnRoot(count.node),
-                         {},
-                         selectedStart};
+        GraphViewportGeometry::TurnGeometry *turn = nullptr;
+        if (const auto retained =
+                graphGeometry_->turnIndex.find(turnNode.get());
+            retained != graphGeometry_->turnIndex.end()) {
+          turn = retained->second;
+        } else {
+          // A targeted state change to an item outside the retained suffix must
+          // not manufacture geometry. New turns are discovered by the bounded
+          // thread frontier below.
+          continue;
+        }
+        const std::size_t currentCount = read->childCount(turnNode);
+        if (currentCount < turn->knownChildCount ||
+            currentCount > turn->knownChildCount + 1) {
+          graphGeometry_->forceSelectedReset = true;
+          continue;
+        }
+        if (currentCount == turn->knownChildCount) {
+          // This is a state-only delta for an off-screen node. A replacement of
+          // the explicit root changes the turn structure and is rebuilt by the
+          // validation frontier rather than appended out of order here.
+          continue;
+        }
+        if (structureReads >= MaxStructureRecordsPerPass) {
+          --graphGeometry_->affectedCursor;
+          break;
+        }
+        nodegraph::NodeRef currentNewest =
+            read->childAt(turnNode, currentCount - 1);
+        ++structureReads;
+        if (currentNewest != affected) {
+          graphGeometry_->forceSelectedReset = true;
+          continue;
+        }
+        turn->knownChildCount = currentCount;
+        turn->newestChild = currentNewest;
+        turn->structureRevision = read->structureChangedRevision(turnNode);
+        if (affected == turn->root && !turn->rootItem) {
+          if (auto record = makeRecord(affected, turn)) {
+            GraphViewportGeometry::ItemGeometry *raw = record.get();
+            turn->rootItem = std::move(record);
+            indexRecord(raw);
+            const auto collapsed = cardCollapsedStates_.find(raw->key);
+            graphGeometry_->setRootCollapsed(
+                *turn,
+                collapsed != cardCollapsedStates_.end() && collapsed->second);
+          }
+        } else if (auto record = makeRecord(affected, turn)) {
+          GraphViewportGeometry::ItemGeometry *raw = record.get();
+          turn->appendedItems.push_back(std::move(record));
+          indexRecord(raw);
+        }
+        ++graphGeometry_->retainedHistoryItems;
+        graphGeometry_->targetDirty = true;
+      }
+      if (graphGeometry_->affectedCursor == graphGeometry_->affected.size()) {
+        graphGeometry_->affected.clear();
+        graphGeometry_->affectedCursor = 0;
+      }
 
-          const auto root =
-              pinned.root ? std::ranges::find(items, pinned.root) : items.end();
-          if (pinned.root && root == items.end()) {
-            pinned.items.push_back(pinItem(pinned.root));
-          } else if (root != items.end()) {
-            const std::size_t rootIndex =
-                static_cast<std::size_t>(std::distance(items.begin(), root));
-            if (rootIndex < selectedStart) {
-              pinned.items.push_back(pinItem(pinned.root));
-              --pinned.hiddenBeforeItems;
+      // A normal stream update appends to the current turn. Admit the newest
+      // node directly without rebuilding the retained history window.
+      if (newestItem && !graphGeometry_->turns.empty() &&
+          !graphGeometry_->itemIndex.contains(newestItem.get())) {
+        auto turn = graphGeometry_->turnIndex.find(newestTurn.get());
+        if (turn != graphGeometry_->turnIndex.end()) {
+          if (auto record = makeRecord(newestItem, turn->second)) {
+            GraphViewportGeometry::ItemGeometry *raw = record.get();
+            turn->second->appendedItems.push_back(std::move(record));
+            indexRecord(raw);
+            ++graphGeometry_->retainedHistoryItems;
+            graphGeometry_->targetDirty = true;
+          }
+        }
+      }
+      if (!newestKey.empty())
+        graphNewestItemKey_ = newestKey;
+
+      auto &scan = graphGeometry_->scan;
+      while (!threadRemoved &&
+             graphGeometry_->retainedHistoryItems <
+                 graphGeometry_->targetHistoryItems &&
+             structureReads < MaxStructureRecordsPerPass) {
+        if (!scan.turn) {
+          if (scan.nextTurnIndex == 0) {
+            scan.complete = true;
+            break;
+          }
+          nodegraph::NodeRef turnNode =
+              read->childAt(graphThread_, --scan.nextTurnIndex);
+          ++structureReads;
+          if (!turnNode || turnNode->id().kind != nodegraph::NodeKind::Turn ||
+              read->removed(turnNode))
+            continue;
+
+          GraphViewportGeometry::TurnGeometry *turn = nullptr;
+          if (const auto retained =
+                  graphGeometry_->turnIndex.find(turnNode.get());
+              retained != graphGeometry_->turnIndex.end()) {
+            turn = retained->second;
+          } else {
+            auto inserted =
+                std::make_unique<GraphViewportGeometry::TurnGeometry>();
+            inserted->node = turnNode;
+            const std::shared_ptr<const nodegraph::NodeState> turnState =
+                read->state(turnNode);
+            inserted->protocolId =
+                turnState ? nodegraph::protocolCanonicalId(*turnState, turnNode)
+                          : turnNode->id().canonical;
+            inserted->active = turnState && turnState->status ==
+                                                nodegraph::NodeStatus::Running;
+            inserted->structureRevision =
+                read->structureChangedRevision(turnNode);
+            inserted->knownChildCount = read->childCount(turnNode);
+            inserted->root = turnRoot(turnNode);
+            inserted->rootIsChild =
+                inserted->root && read->parent(inserted->root) == turnNode;
+            turn = inserted.get();
+            graphGeometry_->turns.push_front(std::move(inserted));
+            graphGeometry_->turnIndex.emplace(turnNode.get(), turn);
+          }
+
+          scan.turn = turn;
+          scan.nextItemIndex = read->childCount(turnNode);
+          turn->knownChildCount = scan.nextItemIndex;
+          scan.directItemsInTurn = scan.nextItemIndex;
+          scan.selectedInTurn = turn->items.size() + turn->appendedItems.size();
+          scan.rootConsumed = false;
+          turn->structureRevision = read->structureChangedRevision(turnNode);
+
+          if (turn->root && !turn->rootItem &&
+              structureReads < MaxStructureRecordsPerPass) {
+            ++structureReads;
+            if (auto rootRecord = makeRecord(turn->root, turn)) {
+              GraphViewportGeometry::ItemGeometry *raw = rootRecord.get();
+              raw->countedOutsideHistory = true;
+              turn->rootItem = std::move(rootRecord);
+              indexRecord(raw);
+              const auto collapsed = cardCollapsedStates_.find(raw->key);
+              graphGeometry_->setRootCollapsed(
+                  *turn,
+                  collapsed != cardCollapsedStates_.end() && collapsed->second);
+              ++graphGeometry_->extraPinnedRoots;
             }
           }
-
-          for (std::size_t index = selectedStart; index < items.size(); ++index)
-            pinned.items.push_back(pinItem(items[index]));
-          structure.hiddenItems += pinned.hiddenBeforeItems;
-          structure.turns.push_back(std::move(pinned));
-          offset = turnEnd;
         }
-        structure.hiddenItems += structure.leadingHiddenItems;
+
+        GraphViewportGeometry::TurnGeometry *turn = scan.turn;
+        const std::uint64_t currentStructure =
+            read->structureChangedRevision(turn->node);
+        if (currentStructure != turn->structureRevision) {
+          const std::size_t currentCount = read->childCount(turn->node);
+          // Appending children does not move the older backward frontier.
+          if (currentCount < scan.nextItemIndex) {
+            scan.nextItemIndex = currentCount;
+            scan.selectedInTurn = 0;
+          }
+          scan.directItemsInTurn = currentCount;
+          turn->structureRevision = currentStructure;
+        }
+
+        if (scan.nextItemIndex == 0) {
+          graphGeometry_->setHiddenBeforeItems(*turn, 0);
+          scan.turn = nullptr;
+          continue;
+        }
+
+        nodegraph::NodeRef item =
+            read->childAt(turn->node, --scan.nextItemIndex);
+        ++structureReads;
+        if (!item || item->id().kind != nodegraph::NodeKind::Item ||
+            read->removed(item))
+          continue;
+        if (scan.nextItemIndex + 1 == scan.directItemsInTurn)
+          turn->newestChild = item;
+
+        const bool alreadyRetained =
+            graphGeometry_->itemIndex.contains(item.get());
+        if (!alreadyRetained) {
+          ++scan.selectedInTurn;
+          ++graphGeometry_->retainedHistoryItems;
+        }
+        if (item == turn->root) {
+          scan.rootConsumed = true;
+          if (turn->rootItem && turn->rootItem->countedOutsideHistory) {
+            turn->rootItem->countedOutsideHistory = false;
+            --graphGeometry_->extraPinnedRoots;
+          }
+        } else if (!alreadyRetained) {
+          if (auto record = makeRecord(item, turn)) {
+            GraphViewportGeometry::ItemGeometry *raw = record.get();
+            turn->items.push_front(std::move(record));
+            indexRecord(raw);
+          }
+        }
+        std::size_t hidden = scan.nextItemIndex;
+        if (turn->rootIsChild && turn->rootItem && !scan.rootConsumed &&
+            hidden != 0)
+          --hidden;
+        graphGeometry_->setHiddenBeforeItems(*turn, hidden);
       }
 
-      std::unordered_set<const nodegraph::Node *> materializedLocals;
-      for (const TurnPin &turn : structure.turns)
-        for (const ItemPin &item : turn.items)
-          if (item.materializedPrompt)
-            materializedLocals.insert(item.materializedPrompt.get());
-      std::size_t hiddenDuplicates = 0;
-      for (TurnPin &turn : structure.turns) {
-        const std::size_t before = turn.items.size();
-        std::erase_if(turn.items, [&materializedLocals](const ItemPin &item) {
-          return item.suppressedByLocalPrompt ||
-                 materializedLocals.contains(item.node.get());
-        });
-        hiddenDuplicates += before - turn.items.size();
-      }
-      std::erase_if(structure.turns, [](const TurnPin &turn) {
-        return turn.items.empty() && turn.hiddenBeforeItems == 0;
-      });
-      structure.totalItems -= std::min(structure.totalItems, hiddenDuplicates);
+      scanHasMore = graphGeometry_->retainedHistoryItems <
+                        graphGeometry_->targetHistoryItems &&
+                    !graphGeometry_->scan.complete;
+      if (!loadedItemCount && graphGeometry_->scan.complete)
+        graphGeometry_->totalItems = graphGeometry_->retainedHistoryItems;
+      graphKnownItemCount_ = graphGeometry_->totalItems;
     }
   }
 
-  if (structure.threadRemoved) {
+  read.reset();
+
+  if (resetRequested) {
+    graphGeometry_->retireCurrentStorage();
+    publishRetiredGeometryCleanupMetrics();
+    graphGeometry_->affected.clear();
+    graphGeometry_->affectedCursor = 0;
+    graphGeometry_->forceSelectedReset = false;
+    graphGeometry_->forceStructureCheck = true;
+    graphGeometry_->projectionRefreshPending = true;
+    graphGeometry_->projectionCursor = nullptr;
+    scheduleRetiredGeometryCleanup();
+    scheduleGraphRefresh();
+    return;
+  }
+
+  for (const auto &[turn, active] : turnActivityChanges)
+    for (TurnSectionWidget *section : graphSections_)
+      if (section->graphNode == turn) {
+        section->graphActive = active;
+        section->layoutDirty = true;
+      }
+
+  for (const auto &[localPrompt, authoritative] : promptTransfers) {
+    for (TurnSectionWidget *section : graphSections_) {
+      for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
+        if (slot.graphNode != localPrompt)
+          continue;
+        if (slot.attachment &&
+            localPrompt->uiAttachment() == slot.attachment.get())
+          localPrompt->setUiAttachment(nullptr);
+        slot.graphNode = authoritative;
+        if (slot.attachment) {
+          slot.attachment->renderedRevision = 0;
+          authoritative->setUiAttachment(slot.attachment.get());
+        }
+      }
+    }
+  }
+
+  std::size_t evictionWork = 0;
+  while (mode_ == Mode::Following &&
+         graphGeometry_->retainedHistoryItems >
+             graphGeometry_->targetHistoryItems &&
+         evictionWork < MaxGeometryEvictionsPerPass) {
+    while (graphGeometry_->evictionTurnCursor < graphGeometry_->turns.size() &&
+           graphGeometry_->turns[graphGeometry_->evictionTurnCursor]
+               ->items.empty() &&
+           graphGeometry_->turns[graphGeometry_->evictionTurnCursor]
+               ->appendedItems.empty() &&
+           evictionWork < MaxGeometryEvictionsPerPass) {
+      ++graphGeometry_->evictionTurnCursor;
+      ++evictionWork;
+    }
+    if (graphGeometry_->evictionTurnCursor >= graphGeometry_->turns.size() ||
+        evictionWork >= MaxGeometryEvictionsPerPass)
+      break;
+    GraphViewportGeometry::TurnGeometry *oldestTurn =
+        graphGeometry_->turns[graphGeometry_->evictionTurnCursor].get();
+    std::unique_ptr<GraphViewportGeometry::ItemGeometry> evicted;
+    if (!oldestTurn->items.empty()) {
+      evicted = std::move(oldestTurn->items.front());
+      oldestTurn->items.pop_front();
+    } else if (!oldestTurn->appendedItems.empty()) {
+      evicted = std::move(oldestTurn->appendedItems.front());
+      oldestTurn->appendedItems.pop_front();
+    }
+    if (!evicted)
+      break;
+    ++evictionWork;
+    // GeometryFrontier contains raw pointers into retained records. Cancel it
+    // before the bounded eviction destroys one of those records.
+    graphGeometry_->geometryScan = {};
+    graphGeometry_->geometryRerunRequired = false;
+    graphGeometry_->projectionCursor = nullptr;
+    graphGeometry_->removeRecordExtent(*evicted);
+    graphGeometry_->itemIndex.erase(evicted->node.get());
+    if (evicted->materializedPrompt)
+      graphGeometry_->itemIndex.erase(evicted->materializedPrompt.get());
+    --graphGeometry_->retainedGeometryRecords;
+    --graphGeometry_->retainedHistoryItems;
+    if (graphGeometry_->scan.turn == oldestTurn)
+      ++graphGeometry_->scan.nextItemIndex;
+  }
+  const bool hasEvictionCandidate =
+      graphGeometry_->evictionTurnCursor < graphGeometry_->turns.size() &&
+      (!graphGeometry_->turns[graphGeometry_->evictionTurnCursor]
+            ->items.empty() ||
+       !graphGeometry_->turns[graphGeometry_->evictionTurnCursor]
+            ->appendedItems.empty());
+  evictionRemaining =
+      mode_ == Mode::Following &&
+      (hasEvictionCandidate || evictionWork >= MaxGeometryEvictionsPerPass) &&
+      graphGeometry_->retainedHistoryItems > graphGeometry_->targetHistoryItems;
+  if (!evictionRemaining)
+    graphGeometry_->evictionTurnCursor = 0;
+
+  graphGeometry_->lastStructureReadsPerPass = structureReads;
+  graphGeometry_->maxStructureReadsPerPass =
+      std::max(graphGeometry_->maxStructureReadsPerPass, structureReads);
+  graphGeometry_->refreshStructureReads += structureReads;
+  setProperty("graphLastStructureReadsPerPass",
+              static_cast<qulonglong>(structureReads));
+  setProperty(
+      "graphMaxStructureReadsPerPass",
+      static_cast<qulonglong>(graphGeometry_->maxStructureReadsPerPass));
+  setProperty("graphLastRefreshStructureReads",
+              static_cast<qulonglong>(graphGeometry_->refreshStructureReads));
+  setProperty("graphRetainedGeometryRecordCount",
+              static_cast<qulonglong>(graphGeometry_->retainedGeometryRecords));
+  setProperty("graphStructureScanComplete",
+              graphGeometry_->scan.complete || !scanHasMore);
+  setProperty("graphStructureScanTarget",
+              static_cast<qulonglong>(graphGeometry_->targetHistoryItems));
+
+  if (threadRemoved) {
     std::array<nodegraph::NodeRef, 1> removed{graphThread_};
     detachGraphWidgets(removed);
     return;
   }
 
-  std::vector<const nodegraph::Node *> previousOrder;
-  for (TurnSectionWidget *section : graphSections_)
-    for (const TurnSectionWidget::CardSlot &slot : section->cardSlots)
-      previousOrder.push_back(slot.graphNode.get());
-  std::vector<const nodegraph::Node *> nextOrder;
-  for (const TurnPin &turn : structure.turns)
-    for (const ItemPin &item : turn.items)
-      nextOrder.push_back(item.node.get());
-  const bool appended =
-      structure.totalItems > graphKnownItemCount_ && !nextOrder.empty() &&
-      (previousOrder.empty() || previousOrder.back() != nextOrder.back());
+  const std::size_t represented = std::max(graphGeometry_->retainedHistoryItems,
+                                           graphGeometry_->targetHistoryItems) +
+                                  graphGeometry_->extraPinnedRoots;
+  graphHiddenItemCount_ = graphGeometry_->totalItems > represented
+                              ? graphGeometry_->totalItems - represented
+                              : 0;
+  graphGeometry_->targetDirty = true;
+  updateGraphChrome();
+  const bool reconciliationRemaining = reconcileGraphViewport();
+  resetGraphVisibilityScan();
+  if (runGraphVisibilityPass())
+    scheduleVisibilityPass();
+  if (reconciliationRemaining)
+    scheduleGraphRefresh();
+  storeCurrentThreadState();
+
+  if (promptMaterializedAction_) {
+    for (nodegraph::NodeRef &prompt : materializedPrompts) {
+      if (!promptMaterializedAction_(prompt)) {
+        const std::uint64_t retryEpoch = epoch;
+        QTimer::singleShot(16, this, [this, retryEpoch] {
+          if (retryEpoch == graphBindingEpoch_)
+            scheduleGraphRefresh();
+        });
+        break;
+      }
+    }
+  }
+  if (scanHasMore || evictionRemaining || !graphGeometry_->affected.empty() ||
+      graphGeometry_->forceStructureCheck ||
+      graphGeometry_->forceSelectedReset ||
+      graphGeometry_->projectionRefreshPending)
+    scheduleGraphRefresh();
+}
+
+bool ConversationView::reconcileGraphViewport() {
+  if (!graph_ || !content_ || !viewport())
+    return false;
+  const std::int64_t viewportHeight = std::max(1, viewport()->height());
+  const std::int64_t scrollTop =
+      mode_ == Mode::Following
+          ? std::max<std::int64_t>(0, graphGeometry_->totalPixelExtent -
+                                          viewportHeight)
+      : pendingGraphAnchorRestore_ ? pendingGraphAnchorRestore_->absoluteValue
+                                   : verticalScrollBar()->value();
+  const std::int64_t targetTop =
+      std::max<std::int64_t>(0, scrollTop - viewportHeight);
+  const std::int64_t targetBottom = std::min(graphGeometry_->totalPixelExtent,
+                                             scrollTop + 2 * viewportHeight);
+  const bool reverse =
+      targetTop > graphGeometry_->totalPixelExtent - targetBottom;
+  auto &geometryScan = graphGeometry_->geometryScan;
+  const bool sameViewportTarget = geometryScan.targetTop == targetTop &&
+                                  geometryScan.targetBottom == targetBottom &&
+                                  geometryScan.reverse == reverse;
+  if (geometryScan.active && sameViewportTarget &&
+      geometryScan.generation != graphGeometry_->geometryGeneration) {
+    // Appends, visibility changes, and measured-height corrections preserve
+    // record addresses. Let the bounded frontier finish so visible widgets
+    // make progress, then run one fresh geometry pass.
+    geometryScan.generation = graphGeometry_->geometryGeneration;
+    graphGeometry_->geometryRerunRequired = true;
+  }
+  const bool sameTarget =
+      geometryScan.generation == graphGeometry_->geometryGeneration &&
+      sameViewportTarget;
+  if (!sameTarget || (!geometryScan.active && !geometryScan.valid)) {
+    geometryScan = {};
+    geometryScan.active = true;
+    geometryScan.reverse = reverse;
+    geometryScan.generation = graphGeometry_->geometryGeneration;
+    geometryScan.targetTop = targetTop;
+    geometryScan.targetBottom = targetBottom;
+    geometryScan.position = reverse ? graphGeometry_->totalPixelExtent : 0;
+    geometryScan.turnIndex = reverse ? graphGeometry_->turns.size() : 0;
+  }
+
+  const auto recordExtent =
+      [](const GraphViewportGeometry::ItemGeometry *record) -> std::int64_t {
+    if (!record || !record->projectionVisible)
+      return 0;
+    if (record->turn &&
+        GraphViewportGeometry::suppressesChildren(*record->turn) &&
+        record->turn->rootItem.get() != record)
+      return 0;
+    return GraphViewportGeometry::rawItemExtent(*record);
+  };
+  const auto appendIfWanted = [&geometryScan](
+                                  GraphViewportGeometry::ItemGeometry *record,
+                                  std::int64_t top, std::int64_t bottom) {
+    if (record && record->node && record->projectionVisible && bottom > top &&
+        bottom > geometryScan.targetTop && top < geometryScan.targetBottom)
+      geometryScan.found.push_back({record, top, bottom});
+  };
+
+  std::size_t geometryReads = 0;
+  while (geometryScan.active && geometryReads < MaxGeometryRecordsPerPass) {
+    if (!geometryScan.reverse) {
+      if (geometryScan.turnIndex >= graphGeometry_->turns.size() ||
+          geometryScan.position >= geometryScan.targetBottom) {
+        geometryScan.active = false;
+        geometryScan.valid = true;
+        break;
+      }
+      auto *turn = graphGeometry_->turns[geometryScan.turnIndex].get();
+      if (geometryScan.phase == 0) {
+        ++geometryReads;
+        const std::int64_t turnExtent =
+            GraphViewportGeometry::effectiveTurnExtent(*turn);
+        if (geometryScan.position + turnExtent <= geometryScan.targetTop) {
+          geometryScan.position += turnExtent;
+          ++geometryScan.turnIndex;
+          continue;
+        }
+        geometryScan.phase = 1;
+      } else if (geometryScan.phase == 1) {
+        ++geometryReads;
+        const std::int64_t extent = recordExtent(turn->rootItem.get());
+        appendIfWanted(turn->rootItem.get(), geometryScan.position,
+                       geometryScan.position + extent);
+        geometryScan.position += extent;
+        if (GraphViewportGeometry::suppressesChildren(*turn)) {
+          geometryScan.phase = 0;
+          geometryScan.itemIndex = 0;
+          ++geometryScan.turnIndex;
+        } else {
+          geometryScan.phase = 2;
+        }
+      } else if (geometryScan.phase == 2) {
+        ++geometryReads;
+        if (!GraphViewportGeometry::suppressesChildren(*turn))
+          geometryScan.position +=
+              static_cast<std::int64_t>(turn->hiddenBeforeItems) *
+              EstimatedGraphHistoryItemExtent;
+        geometryScan.phase = 3;
+        geometryScan.itemIndex = 0;
+      } else if (geometryScan.phase == 3) {
+        if (geometryScan.itemIndex >= turn->items.size()) {
+          geometryScan.phase = 4;
+          geometryScan.itemIndex = 0;
+          continue;
+        }
+        ++geometryReads;
+        auto *record = turn->items[geometryScan.itemIndex++].get();
+        const std::int64_t extent = recordExtent(record);
+        appendIfWanted(record, geometryScan.position,
+                       geometryScan.position + extent);
+        geometryScan.position += extent;
+      } else {
+        if (geometryScan.itemIndex >= turn->appendedItems.size()) {
+          geometryScan.phase = 0;
+          geometryScan.itemIndex = 0;
+          ++geometryScan.turnIndex;
+          continue;
+        }
+        ++geometryReads;
+        auto *record = turn->appendedItems[geometryScan.itemIndex++].get();
+        const std::int64_t extent = recordExtent(record);
+        appendIfWanted(record, geometryScan.position,
+                       geometryScan.position + extent);
+        geometryScan.position += extent;
+      }
+      continue;
+    }
+
+    if (geometryScan.turnIndex == 0 ||
+        geometryScan.position <= geometryScan.targetTop) {
+      geometryScan.active = false;
+      geometryScan.valid = true;
+      std::ranges::reverse(geometryScan.found);
+      break;
+    }
+    auto *turn = graphGeometry_->turns[geometryScan.turnIndex - 1].get();
+    if (geometryScan.phase == 0) {
+      ++geometryReads;
+      const std::int64_t turnExtent =
+          GraphViewportGeometry::effectiveTurnExtent(*turn);
+      if (geometryScan.position - turnExtent >= geometryScan.targetBottom) {
+        geometryScan.position -= turnExtent;
+        --geometryScan.turnIndex;
+        continue;
+      }
+      if (GraphViewportGeometry::suppressesChildren(*turn)) {
+        geometryScan.phase = 4;
+        geometryScan.itemIndex = 0;
+      } else {
+        geometryScan.phase = 1;
+        geometryScan.itemIndex = turn->appendedItems.size();
+      }
+    } else if (geometryScan.phase == 1) {
+      if (geometryScan.itemIndex == 0) {
+        geometryScan.phase = 2;
+        geometryScan.itemIndex = turn->items.size();
+        continue;
+      }
+      ++geometryReads;
+      auto *record = turn->appendedItems[--geometryScan.itemIndex].get();
+      const std::int64_t extent = recordExtent(record);
+      appendIfWanted(record, geometryScan.position - extent,
+                     geometryScan.position);
+      geometryScan.position -= extent;
+    } else if (geometryScan.phase == 2) {
+      if (geometryScan.itemIndex == 0) {
+        geometryScan.phase = 3;
+        continue;
+      }
+      ++geometryReads;
+      auto *record = turn->items[--geometryScan.itemIndex].get();
+      const std::int64_t extent = recordExtent(record);
+      appendIfWanted(record, geometryScan.position - extent,
+                     geometryScan.position);
+      geometryScan.position -= extent;
+    } else if (geometryScan.phase == 3) {
+      ++geometryReads;
+      if (!GraphViewportGeometry::suppressesChildren(*turn))
+        geometryScan.position -=
+            static_cast<std::int64_t>(turn->hiddenBeforeItems) *
+            EstimatedGraphHistoryItemExtent;
+      geometryScan.phase = 4;
+    } else {
+      ++geometryReads;
+      const std::int64_t extent = recordExtent(turn->rootItem.get());
+      appendIfWanted(turn->rootItem.get(), geometryScan.position - extent,
+                     geometryScan.position);
+      geometryScan.position -= extent;
+      geometryScan.phase = 0;
+      --geometryScan.turnIndex;
+    }
+  }
+  if (geometryScan.active && geometryReads >= MaxGeometryRecordsPerPass) {
+    graphGeometry_->lastGeometryRecordsPerPass = geometryReads;
+    graphGeometry_->maxGeometryRecordsPerPass =
+        std::max(graphGeometry_->maxGeometryRecordsPerPass, geometryReads);
+    setProperty("graphLastGeometryRecordsPerPass",
+                static_cast<qulonglong>(geometryReads));
+    setProperty(
+        "graphMaxGeometryRecordsPerPass",
+        static_cast<qulonglong>(graphGeometry_->maxGeometryRecordsPerPass));
+    return true;
+  }
+
+  const std::vector<GraphViewportGeometry::DesiredGeometry> &positioned =
+      geometryScan.found;
+  graphGeometry_->lastGeometryRecordsPerPass = geometryReads;
+  graphGeometry_->maxGeometryRecordsPerPass =
+      std::max(graphGeometry_->maxGeometryRecordsPerPass, geometryReads);
+  setProperty("graphLastGeometryRecordsPerPass",
+              static_cast<qulonglong>(geometryReads));
+  setProperty(
+      "graphMaxGeometryRecordsPerPass",
+      static_cast<qulonglong>(graphGeometry_->maxGeometryRecordsPerPass));
+
+  std::unordered_set<const nodegraph::Node *> wanted;
+  wanted.reserve(positioned.size());
+  for (const auto &entry : positioned)
+    wanted.insert(entry.record->node.get());
 
   const Anchor anchor = captureAnchor();
   const bool follow = mode_ == Mode::Following;
+  std::size_t operations = graphPassCardOperations_;
+  bool widgetRemaining = false;
+  std::vector<TurnSectionWidget *> changedSections;
+  std::unordered_set<const nodegraph::Node *> focusPinned;
+  QWidget *focusedWidget = QApplication::focusWidget();
+
   applying_ = true;
   viewport()->setUpdatesEnabled(false);
   content_->setUpdatesEnabled(false);
   const QSignalBlocker scrollSignals(verticalScrollBar());
 
-  std::unordered_map<const nodegraph::Node *, TurnSectionWidget *>
-      retainedSections;
-  std::unordered_map<const nodegraph::Node *, TurnSectionWidget::CardSlot>
-      retainedSlots;
   for (TurnSectionWidget *section : graphSections_) {
-    if (ConversationCard *root = cardForStableKey(section->rootKey))
-      root->setNestedItems({});
-    retainedSections.emplace(section->graphNode.get(), section);
-    for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
-      retainedSlots.emplace(slot.graphNode.get(), std::move(slot));
-    section->cardSlots.clear();
+    for (auto slot = section->cardSlots.begin();
+         slot != section->cardSlots.end();) {
+      if (wanted.contains(slot->graphNode.get())) {
+        ++slot;
+        continue;
+      }
+      QWidget *item = slot->itemGuard.data();
+      if (focusedWidget && item &&
+          (focusedWidget == item || item->isAncestorOf(focusedWidget))) {
+        focusPinned.insert(slot->graphNode.get());
+        ++slot;
+        continue;
+      }
+      if (operations >= MaxCardOperationsPerPass) {
+        widgetRemaining = true;
+        break;
+      }
+      if (auto *card = slot->attachment ? qobject_cast<ConversationCard *>(
+                                              slot->attachment->widget.data())
+                                        : nullptr) {
+        const auto outputState = card->commandOutputScrollState();
+        if (outputState && !outputState->followsLatest)
+          commandOutputStates_[slot->key] = *outputState;
+        else
+          commandOutputStates_.erase(slot->key);
+        slot->measuredHeight = intrinsicGraphCardHeight(card);
+        if (slot->key == section->rootKey)
+          card->setNestedItems({});
+      }
+      if (const auto geometry =
+              graphGeometry_->itemIndex.find(slot->graphNode.get());
+          geometry != graphGeometry_->itemIndex.end()) {
+        auto *record = geometry->second;
+        graphGeometry_->setRecordMeasuredHeight(*record, slot->measuredHeight);
+      }
+      if (slot->graphNode && slot->attachment &&
+          slot->graphNode->uiAttachment() == slot->attachment.get())
+        slot->graphNode->setUiAttachment(nullptr);
+      slot->attachment.reset();
+      delete slot->item;
+      slot = section->cardSlots.erase(slot);
+      ++operations;
+      if (std::ranges::find(changedSections, section) == changedSections.end())
+        changedSections.push_back(section);
+      section->geometryDirty = true;
+    }
+    if (widgetRemaining)
+      break;
   }
 
-  std::vector<TurnSectionWidget *> nextSections;
-  nextSections.reserve(structure.turns.size());
-  std::vector<nodegraph::NodeRef> materializedPrompts;
-
-  for (const TurnPin &turn : structure.turns) {
-    TurnSectionWidget *section = nullptr;
-    if (auto retained = retainedSections.find(turn.node.get());
-        retained != retainedSections.end()) {
-      section = retained->second;
-      retainedSections.erase(retained);
-    } else {
-      section = new TurnSectionWidget(content_);
-      section->setProperty("turnSectionKey",
-                           QString::fromStdString(turn.node->id().canonical));
+  for (auto section = graphSections_.begin();
+       section != graphSections_.end();) {
+    if (!(*section)->cardSlots.empty()) {
+      ++section;
+      continue;
     }
-    section->graphNode = turn.node;
-    section->protocolId =
-        turn.state ? nodegraph::protocolCanonicalId(*turn.state, turn.node)
-                   : turn.node->id().canonical;
-    section->setProperty("turnSectionKey",
-                         QString::fromStdString(section->protocolId));
-    section->setProperty("turnId", QString::fromStdString(section->protocolId));
-    section->graphActive =
-        turn.state && turn.state->status == nodegraph::NodeStatus::Running;
-    section->rootKey.clear();
-    section->hiddenItemCount = turn.hiddenBeforeItems;
-    if (!section->historyPlaceholder)
-      section->historyPlaceholder = new GraphHistoryPlaceholder(section);
-    section->historyPlaceholder->setItemCount(turn.hiddenBeforeItems);
-    section->cardSlots.reserve(turn.items.size());
+    const std::size_t cost = (*section)->historyPlaceholder ? 2U : 1U;
+    if (operations + cost > MaxCardOperationsPerPass) {
+      widgetRemaining = true;
+      ++section;
+      continue;
+    }
+    contentLayout_->removeWidget(*section);
+    delete *section;
+    section = graphSections_.erase(section);
+    operations += cost;
+  }
 
-    for (const ItemPin &item : turn.items) {
+  if (!widgetRemaining) {
+    std::vector<const GraphViewportGeometry::DesiredGeometry *> insertionOrder;
+    insertionOrder.reserve(positioned.size());
+    for (const auto &entry : positioned)
+      insertionOrder.push_back(&entry);
+    const std::int64_t viewportBottom = scrollTop + viewportHeight;
+    const auto viewportDistance = [scrollTop,
+                                   viewportBottom](const auto *entry) {
+      if (entry->bottom <= scrollTop)
+        return scrollTop - entry->bottom;
+      if (entry->top >= viewportBottom)
+        return entry->top - viewportBottom;
+      return std::int64_t{0};
+    };
+    std::ranges::stable_sort(
+        insertionOrder,
+        [follow, &viewportDistance](const auto *left, const auto *right) {
+          const std::int64_t leftDistance = viewportDistance(left);
+          const std::int64_t rightDistance = viewportDistance(right);
+          if (leftDistance != rightDistance)
+            return leftDistance < rightDistance;
+          const bool leftRoot = left->record->turn->root == left->record->node;
+          const bool rightRoot =
+              right->record->turn->root == right->record->node;
+          if (leftDistance == 0 && leftRoot != rightRoot)
+            return leftRoot;
+          // On initial following paint, give the newest bottom-visible record
+          // the first materialization opportunity. Final visual order is
+          // restored by desiredOrder below.
+          if (follow && leftDistance == 0 && left->top != right->top)
+            return left->top > right->top;
+          return false;
+        });
+    for (const auto *positionedEntry : insertionOrder) {
+      const auto &entry = *positionedEntry;
+      auto existing = std::ranges::find_if(
+          graphSections_, [&entry](TurnSectionWidget *section) {
+            return std::ranges::any_of(
+                section->cardSlots,
+                [&entry](const TurnSectionWidget::CardSlot &slot) {
+                  return slot.graphNode == entry.record->node;
+                });
+          });
+      if (existing != graphSections_.end())
+        continue;
+
+      TurnSectionWidget *section = nullptr;
+      const auto retained = std::ranges::find_if(
+          graphSections_, [&entry](TurnSectionWidget *candidate) {
+            return candidate->graphNode == entry.record->turn->node;
+          });
+      if (retained != graphSections_.end()) {
+        section = *retained;
+      } else {
+        if (operations + 1 > MaxCardOperationsPerPass) {
+          widgetRemaining = true;
+          break;
+        }
+        section = new TurnSectionWidget(content_);
+        section->graphNode = entry.record->turn->node;
+        section->protocolId = entry.record->turn->protocolId;
+        section->graphActive = entry.record->turn->active;
+        section->hasAuthoritativeRoot =
+            static_cast<bool>(entry.record->turn->root);
+        section->authoritativeRootKey = entry.record->turn->rootItem
+                                            ? entry.record->turn->rootItem->key
+                                            : std::string{};
+        section->setProperty("turnSectionKey",
+                             QString::fromStdString(section->protocolId));
+        section->setProperty("turnId",
+                             QString::fromStdString(section->protocolId));
+        graphSections_.push_back(section);
+        ++operations;
+      }
+
+      // Preserve enough of the one shared pass budget to arrange/insert the
+      // section and replace one viewport placeholder with its real card.
+      constexpr std::size_t VisibilityOperationReserve = 4;
+      if (operations + 1 + VisibilityOperationReserve >
+          MaxCardOperationsPerPass) {
+        widgetRemaining = true;
+        break;
+      }
       TurnSectionWidget::CardSlot slot;
-      auto retained = item.materializedPrompt
-                          ? retainedSlots.find(item.materializedPrompt.get())
-                          : retainedSlots.end();
-      const bool transferringPrompt = retained != retainedSlots.end();
-      if (!transferringPrompt)
-        retained = retainedSlots.find(item.node.get());
-      if (retained != retainedSlots.end()) {
-        slot = std::move(retained->second);
-        retainedSlots.erase(retained);
-        if (transferringPrompt) {
-          // The provider item may already have been independently visible
-          // before the exact request result acknowledged the local prompt.
-          // Prefer the authored card's stable identity and retire that
-          // short-lived duplicate before moving the local attachment.
-          if (auto duplicate = retainedSlots.find(item.node.get());
-              duplicate != retainedSlots.end()) {
-            TurnSectionWidget::CardSlot &displaced = duplicate->second;
-            if (displaced.attachment &&
-                item.node->uiAttachment() == displaced.attachment.get())
-              item.node->setUiAttachment(nullptr);
-            displaced.attachment.reset();
-            delete displaced.item;
-            retainedSlots.erase(duplicate);
-          }
-          if (slot.attachment &&
-              item.materializedPrompt->uiAttachment() == slot.attachment.get())
-            item.materializedPrompt->setUiAttachment(nullptr);
-          if (slot.attachment) {
-            slot.attachment->renderedRevision = 0;
-            Q_ASSERT(item.node->uiAttachment() == nullptr);
-            item.node->setUiAttachment(slot.attachment.get());
-          }
-        }
-      } else {
-        slot.graphNode = item.node;
-        if (item.materializedPromptState) {
-          const std::int64_t rawId =
-              graphInteger(
-                  graphField(*item.materializedPromptState, "submissionId"))
-                  .value_or(0);
-          slot.promptVisualId =
-              rawId < 0 ? 0 : static_cast<std::uint64_t>(rawId);
-          slot.key = stableKey(LocalPromptKey{*slot.promptVisualId});
-        } else if (item.node->id().kind == nodegraph::NodeKind::Turn) {
-          slot.key = stableKey(
-              TurnPlanKey{graphThread_->id().canonical, section->protocolId});
-        } else if (graphCardKind(*item.state) == CardKind::LocalPrompt) {
-          const std::int64_t rawId =
-              graphInteger(graphField(*item.state, "submissionId")).value_or(0);
-          slot.promptVisualId =
-              rawId < 0 ? 0 : static_cast<std::uint64_t>(rawId);
-          slot.key = stableKey(LocalPromptKey{*slot.promptVisualId});
-        } else {
-          slot.key = stableKey(AuthoritativeItemKey{
-              graphThread_->id().canonical, section->protocolId,
-              nodegraph::protocolCanonicalId(*item.state, item.node)});
-        }
-        slot.measuredHeight = initialCardHeight(graphCardKind(*item.state));
-        slot.item =
-            new MeasuredCardPlaceholder(slot.key, slot.measuredHeight, section);
-        slot.itemGuard = slot.item;
-      }
-      if (item.materializedPrompt &&
-          std::find(materializedPrompts.begin(), materializedPrompts.end(),
-                    item.materializedPrompt) == materializedPrompts.end())
-        materializedPrompts.emplace_back(item.materializedPrompt);
-      slot.graphNode = item.node;
-      if (!slot.itemGuard) {
-        if (slot.attachment &&
-            slot.graphNode->uiAttachment() == slot.attachment.get())
-          slot.graphNode->setUiAttachment(nullptr);
-        slot.attachment.reset();
-        slot.item =
-            new MeasuredCardPlaceholder(slot.key, slot.measuredHeight, section);
-        slot.itemGuard = slot.item;
-      } else {
-        slot.item = slot.itemGuard.data();
-      }
-      slot.projectionVisible =
-          graphCardVisible(*item.state, presentationOptions_);
-      if (item.node == turn.root)
+      slot.graphNode = entry.record->node;
+      slot.key = entry.record->key;
+      slot.promptVisualId = entry.record->promptVisualId;
+      slot.measuredHeight = entry.record->measuredHeight;
+      slot.projectionVisible = entry.record->projectionVisible;
+      slot.item = new MeasuredCardPlaceholder(
+          slot.key, slot.projectionVisible ? slot.measuredHeight : 0, section);
+      slot.itemGuard = slot.item;
+      slot.item->setVisible(slot.projectionVisible);
+      if (entry.record->node == entry.record->turn->root)
         section->rootKey = slot.key;
-      if (auto *placeholder =
-              dynamic_cast<MeasuredCardPlaceholder *>(slot.item))
-        placeholder->setMeasuredHeight(
-            slot.projectionVisible ? slot.measuredHeight : 0);
-      if (slot.item->isHidden() == slot.projectionVisible)
-        slot.item->setVisible(slot.projectionVisible);
       section->cardSlots.push_back(std::move(slot));
+      section->geometryDirty = true;
+      ++operations;
+      if (std::ranges::find(changedSections, section) == changedSections.end())
+        changedSections.push_back(section);
+    }
+  }
+
+  std::unordered_map<const nodegraph::Node *, std::size_t> desiredOrder;
+  desiredOrder.reserve(positioned.size());
+  for (std::size_t index = 0; index < positioned.size(); ++index)
+    desiredOrder.emplace(positioned[index].record->node.get(), index);
+  for (TurnSectionWidget *section : graphSections_) {
+    const bool pinnedSection = std::ranges::any_of(
+        section->cardSlots, [&focusPinned](const auto &slot) {
+          return focusPinned.contains(slot.graphNode.get());
+        });
+    if (pinnedSection)
+      continue;
+    std::vector<const nodegraph::Node *> previousOrder;
+    previousOrder.reserve(section->cardSlots.size());
+    for (const TurnSectionWidget::CardSlot &slot : section->cardSlots)
+      previousOrder.push_back(slot.graphNode.get());
+    std::ranges::stable_sort(
+        section->cardSlots,
+        [&desiredOrder](const TurnSectionWidget::CardSlot &left,
+                        const TurnSectionWidget::CardSlot &right) {
+          const auto order = [&desiredOrder](const nodegraph::Node *node) {
+            const auto found = desiredOrder.find(node);
+            return found == desiredOrder.end()
+                       ? std::numeric_limits<std::size_t>::max()
+                       : found->second;
+          };
+          return order(left.graphNode.get()) < order(right.graphNode.get());
+        });
+    if (!std::ranges::equal(previousOrder, section->cardSlots,
+                            std::ranges::equal_to{}, std::identity{},
+                            [](const TurnSectionWidget::CardSlot &slot) {
+                              return slot.graphNode.get();
+                            }))
+      section->layoutDirty = true;
+    section->rootKey.clear();
+    for (const TurnSectionWidget::CardSlot &slot : section->cardSlots)
+      if (const auto record =
+              graphGeometry_->itemIndex.find(slot.graphNode.get());
+          record != graphGeometry_->itemIndex.end() &&
+          record->second->turn->root == slot.graphNode)
+        section->rootKey = slot.key;
+  }
+  if (focusPinned.empty())
+    std::ranges::stable_sort(
+        graphSections_,
+        [&desiredOrder](TurnSectionWidget *left, TurnSectionWidget *right) {
+          const auto firstOrder = [&desiredOrder](TurnSectionWidget *section) {
+            std::size_t result = std::numeric_limits<std::size_t>::max();
+            for (const TurnSectionWidget::CardSlot &slot : section->cardSlots)
+              if (const auto found = desiredOrder.find(slot.graphNode.get());
+                  found != desiredOrder.end())
+                result = std::min(result, found->second);
+            return result;
+          };
+          return firstOrder(left) < firstOrder(right);
+        });
+
+  for (TurnSectionWidget *section : changedSections)
+    if (std::ranges::find(graphSections_, section) != graphSections_.end())
+      section->layoutDirty = true;
+  for (TurnSectionWidget *section : graphSections_) {
+    if (!section->layoutDirty)
+      continue;
+    if (operations >= MaxCardOperationsPerPass) {
+      widgetRemaining = true;
+      break;
     }
     arrangeSection(section);
-    section->setVisible(
-        turn.hiddenBeforeItems != 0 ||
-        std::ranges::any_of(section->cardSlots,
-                            [](const TurnSectionWidget::CardSlot &slot) {
-                              return slot.projectionVisible;
-                            }));
-    nextSections.push_back(section);
+    section->setVisible(!section->cardSlots.empty());
+    section->layoutDirty = false;
+    section->geometryDirty = true;
+    ++operations;
+  }
+  for (std::size_t index = 0; index < graphSections_.size(); ++index) {
+    if (!focusPinned.empty())
+      break;
+    const int wantedIndex = 2 + static_cast<int>(index);
+    if (contentLayout_->indexOf(graphSections_[index]) == wantedIndex)
+      continue;
+    if (operations >= MaxCardOperationsPerPass) {
+      widgetRemaining = true;
+      break;
+    }
+    contentLayout_->insertWidget(wantedIndex, graphSections_[index]);
+    ++operations;
   }
 
-  for (auto &[node, slot] : retainedSlots) {
-    static_cast<void>(node);
-    if (slot.graphNode && slot.attachment &&
-        slot.graphNode->uiAttachment() == slot.attachment.get())
-      slot.graphNode->setUiAttachment(nullptr);
-    slot.attachment.reset();
-    delete slot.item;
-  }
-  for (auto &[node, section] : retainedSections) {
-    static_cast<void>(node);
-    contentLayout_->removeWidget(section);
-    delete section;
-  }
-
+  std::size_t liveRecordCount = 0;
+  std::size_t firstCommitted = positioned.size();
+  std::size_t lastCommitted = 0;
+  bool committedSubset = true;
   for (TurnSectionWidget *section : graphSections_)
-    contentLayout_->removeWidget(section);
-  graphSections_ = std::move(nextSections);
+    for (const TurnSectionWidget::CardSlot &slot : section->cardSlots) {
+      if (focusPinned.contains(slot.graphNode.get()))
+        continue;
+      ++liveRecordCount;
+      const auto order = desiredOrder.find(slot.graphNode.get());
+      if (order == desiredOrder.end()) {
+        committedSubset = false;
+        continue;
+      }
+      firstCommitted = std::min(firstCommitted, order->second);
+      lastCommitted = std::max(lastCommitted, order->second);
+    }
+  const bool contiguousCommittedWindow =
+      committedSubset && liveRecordCount != 0 &&
+      firstCommitted < positioned.size() &&
+      lastCommitted - firstCommitted + 1 == liveRecordCount;
+  if (contiguousCommittedWindow) {
+    graphGeometry_->leadingPixelExtent =
+        std::max<std::int64_t>(0, positioned[firstCommitted].top);
+    graphGeometry_->trailingPixelExtent = std::max<std::int64_t>(
+        0, graphGeometry_->totalPixelExtent - positioned[lastCommitted].bottom);
+  } else if (wanted.empty() && liveRecordCount == 0) {
+    std::int64_t leading = graphGeometry_->totalPixelExtent;
+    graphGeometry_->leadingPixelExtent = std::max<std::int64_t>(0, leading);
+    graphGeometry_->trailingPixelExtent = 0;
+  }
+  const auto placeholderExtent = [](std::int64_t extent) {
+    return extent == 0 ? std::int64_t{0}
+                       : std::max<std::int64_t>(0, extent - CardSpacing);
+  };
   static_cast<GraphHistoryPlaceholder *>(graphLeadingPlaceholder_)
-      ->setItemCount(structure.leadingHiddenItems);
-  for (std::size_t index = 0; index < graphSections_.size(); ++index)
-    contentLayout_->insertWidget(2 + static_cast<int>(index),
-                                 graphSections_[index]);
-  graphKnownItemCount_ = structure.totalItems;
-  graphNewestItemKey_ = std::move(structure.newestItemKey);
-  graphHiddenItemCount_ = structure.hiddenItems;
-  graphWindowItemCount_ = nextOrder.size();
-  graphProviderHasMore_ = structure.providerHasMore;
-  updateGraphChrome();
+      ->setPixelExtent(graphHiddenItemCount_,
+                       placeholderExtent(graphGeometry_->leadingPixelExtent));
+  static_cast<GraphHistoryPlaceholder *>(graphTrailingPlaceholder_)
+      ->setPixelExtent(0,
+                       placeholderExtent(graphGeometry_->trailingPixelExtent));
+  setProperty("graphLeadingPixelExtent",
+              static_cast<qlonglong>(graphGeometry_->leadingPixelExtent));
+  std::int64_t firstRetained = 0;
+  if (!graphGeometry_->turns.empty()) {
+    const auto *firstTurn = graphGeometry_->turns.front().get();
+    if (firstTurn->rootItem && firstTurn->rootItem->projectionVisible)
+      firstRetained +=
+          std::max(1, firstTurn->rootItem->measuredHeight) + CardSpacing;
+    if (!GraphViewportGeometry::suppressesChildren(*firstTurn) &&
+        (!firstTurn->items.empty() || !firstTurn->appendedItems.empty()))
+      firstRetained += static_cast<std::int64_t>(firstTurn->hiddenBeforeItems) *
+                       EstimatedGraphHistoryItemExtent;
+  }
+  if (loadMore_->isVisible())
+    firstRetained += loadMore_->height() + CardSpacing;
+  setProperty("graphFirstRetainedScrollValue",
+              static_cast<qlonglong>(std::clamp<std::int64_t>(
+                  firstRetained, 0, std::numeric_limits<int>::max())));
+  setProperty("graphTrailingPixelExtent",
+              static_cast<qlonglong>(graphGeometry_->trailingPixelExtent));
 
+  graphWindowItemCount_ = 0;
+  for (TurnSectionWidget *section : graphSections_)
+    graphWindowItemCount_ += section->cardSlots.size();
+  graphGeometry_->lastCardOperationsPerPass = operations;
+  graphGeometry_->maxCardOperationsPerPass =
+      std::max(graphGeometry_->maxCardOperationsPerPass, operations);
+  setProperty("graphLastCardOperationsPerPass",
+              static_cast<qulonglong>(operations));
+  setProperty(
+      "graphMaxCardOperationsPerPass",
+      static_cast<qulonglong>(graphGeometry_->maxCardOperationsPerPass));
+  setProperty("graphLiveRecordCount",
+              static_cast<qulonglong>(graphWindowItemCount_));
+  setProperty("graphLiveSectionCount",
+              static_cast<qulonglong>(graphSections_.size()));
+  graphPassCardOperations_ = operations;
+
+  if (geometryScan.generation != graphGeometry_->geometryGeneration)
+    graphGeometry_->geometryRerunRequired = true;
+  const bool rerunGeometry = graphGeometry_->geometryRerunRequired;
+  if (rerunGeometry) {
+    geometryScan.active = false;
+    geometryScan.valid = false;
+    graphGeometry_->geometryRerunRequired = false;
+  }
+
+  updateGraphChrome();
   recomputeGeometry();
-  if (follow && (previousOrder.empty() || appended))
+  if (follow)
     setScrollValue(verticalScrollBar()->maximum());
   else
     restoreAnchor(anchor);
@@ -1442,18 +2808,9 @@ void ConversationView::runGraphRefresh() {
   content_->setUpdatesEnabled(true);
   viewport()->setUpdatesEnabled(true);
   viewport()->update();
-  visibilitySlotsRemaining_ = 0;
-  if (runGraphVisibilityPass())
-    scheduleVisibilityPass();
-  storeCurrentThreadState();
-  if (promptMaterializedAction_) {
-    for (nodegraph::NodeRef &prompt : materializedPrompts) {
-      if (!promptMaterializedAction_(prompt)) {
-        QTimer::singleShot(16, this, [this] { scheduleGraphRefresh(); });
-        break;
-      }
-    }
-  }
+  resetGraphVisibilityScan();
+
+  return widgetRemaining || liveRecordCount != wanted.size() || rerunGeometry;
 }
 
 void ConversationView::detachGraphWidgets(
@@ -1468,6 +2825,37 @@ void ConversationView::detachGraphWidgets(
   };
   const Anchor anchor = captureAnchor();
   const bool follow = mode_ == Mode::Following;
+  graphGeometry_->geometryScan = {};
+  graphGeometry_->geometryRerunRequired = false;
+  graphGeometry_->projectionCursor = nullptr;
+
+  for (const nodegraph::NodeRef &node : removed) {
+    if (!node)
+      continue;
+    const auto found = graphGeometry_->itemIndex.find(node.get());
+    if (found == graphGeometry_->itemIndex.end())
+      continue;
+    GraphViewportGeometry::ItemGeometry *record = found->second;
+    if (record->node != node && record->materializedPrompt == node) {
+      graphGeometry_->itemIndex.erase(found);
+      record->materializedPrompt.reset();
+      continue;
+    }
+    graphGeometry_->removeRecordExtent(*record);
+    graphGeometry_->itemIndex.erase(record->node.get());
+    if (record->materializedPrompt)
+      graphGeometry_->itemIndex.erase(record->materializedPrompt.get());
+    record->node.reset();
+    record->materializedPrompt.reset();
+    if (record->countedOutsideHistory) {
+      record->countedOutsideHistory = false;
+      --graphGeometry_->extraPinnedRoots;
+    }
+    --graphGeometry_->retainedGeometryRecords;
+    graphGeometry_->retainedHistoryItems -=
+        std::min<std::size_t>(1, graphGeometry_->retainedHistoryItems);
+  }
+  graphGeometry_->targetDirty = true;
   applying_ = true;
   viewport()->setUpdatesEnabled(false);
   content_->setUpdatesEnabled(false);
@@ -1525,8 +2913,37 @@ void ConversationView::detachGraphWidgets(
     graphHiddenItemCount_ = 0;
     graphWindowItemCount_ = 0;
     graphProviderHasMore_ = false;
+    graphGeometry_->retireCurrentStorage();
+    publishRetiredGeometryCleanupMetrics();
+    graphGeometry_->affected.clear();
+    graphGeometry_->affectedCursor = 0;
+    graphGeometry_->newestTurn.reset();
+    graphGeometry_->threadStructureRevision = 0;
+    graphGeometry_->threadChildCount = 0;
+    graphGeometry_->totalItems = 0;
+    graphGeometry_->targetHistoryItems = 0;
+    graphGeometry_->forceStructureCheck = false;
+    graphGeometry_->forceSelectedReset = false;
+    graphGeometry_->structureValidationCursor = 0;
+    graphGeometry_->structureRequestGeneration = 0;
+    graphGeometry_->validationGeneration = 0;
+    graphGeometry_->projectionRefreshPending = false;
+    graphGeometry_->projectionCursor = nullptr;
+    graphGeometry_->leadingPixelExtent = 0;
+    graphGeometry_->trailingPixelExtent = 0;
+    pendingGraphAnchorRestore_.reset();
     static_cast<GraphHistoryPlaceholder *>(graphLeadingPlaceholder_)
         ->setItemCount(0);
+    static_cast<GraphHistoryPlaceholder *>(graphTrailingPlaceholder_)
+        ->setItemCount(0);
+    visibilitySectionCursor_ = 0;
+    visibilitySlotCursor_ = 0;
+    visibilitySlotsRemaining_ = 0;
+    visibilityScanScrollTop_ = -1;
+    visibilityScanViewportHeight_ = -1;
+    visibilityScanViewportWidth_ = -1;
+    visibilityScanContentHeight_ = -1;
+    scheduleRetiredGeometryCleanup();
   } else {
     graphKnownItemCount_ -= std::min(graphKnownItemCount_, removedWindowItems);
     graphWindowItemCount_ -=
@@ -1535,6 +2952,8 @@ void ConversationView::detachGraphWidgets(
       graphHiddenItemCount_ = 0;
   }
   visibilitySlotsRemaining_ = 0;
+  setProperty("graphRetainedGeometryRecordCount",
+              static_cast<qulonglong>(graphGeometry_->retainedGeometryRecords));
   updateGraphChrome();
   recomputeGeometry();
   if (follow)
@@ -1613,8 +3032,11 @@ void ConversationView::setPresentationOptions(PresentationOptions options) {
   if (presentationOptions_ == options)
     return;
   presentationOptions_ = options;
-  if (graph_)
+  if (graph_) {
+    graphGeometry_->projectionRefreshPending = true;
+    graphGeometry_->projectionCursor = nullptr;
     scheduleGraphRefresh();
+  }
 }
 
 void ConversationView::storeCurrentThreadState() {
@@ -1655,6 +3077,7 @@ void ConversationView::setThread(const std::string &threadId) {
 void ConversationView::arrangeSection(TurnSectionWidget *section) {
   if (!section)
     return;
+  section->geometryDirty = true;
   const auto slotCard = [this](TurnSectionWidget::CardSlot &slot) {
     if (graph_ && slot.attachment)
       return qobject_cast<ConversationCard *>(slot.attachment->widget.data());
@@ -1671,6 +3094,14 @@ void ConversationView::arrangeSection(TurnSectionWidget *section) {
       rootSlot = &*root;
   }
   auto *prompt = rootSlot ? slotCard(*rootSlot) : nullptr;
+  if (rootSlot)
+    rootSlot->cardGeometryDirty = true;
+  const std::string &authoritativeRootKey =
+      section->authoritativeRootKey.empty() ? section->rootKey
+                                            : section->authoritativeRootKey;
+  const auto savedRootFold = cardCollapsedStates_.find(authoritativeRootKey);
+  const bool authoritativeRootCollapsed =
+      savedRootFold != cardCollapsedStates_.end() && savedRootFold->second;
 
   std::unordered_set<ConversationCard *> obsoleteOwners;
   if (section->historyPlaceholder) {
@@ -1713,11 +3144,20 @@ void ConversationView::arrangeSection(TurnSectionWidget *section) {
   if (prompt) {
     std::vector<QWidget *> nestedItems;
     nestedItems.reserve(section->cardSlots.size());
-    if (section->historyPlaceholder)
+    if (section->historyPlaceholder) {
+      section->historyPlaceholder->setVisible(
+          section->historyPlaceholder->height() != 0);
       nestedItems.push_back(section->historyPlaceholder);
+    }
     for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
-      if (&slot != rootSlot)
+      if (&slot != rootSlot) {
+        slot.item->setVisible(slot.projectionVisible);
+        if (auto *nestedCard = slotCard(slot);
+            nestedCard &&
+            !nestedCard->property("nestedConversationCard").toBool())
+          slot.cardGeometryDirty = true;
         nestedItems.push_back(slot.item);
+      }
     prompt->setProperty("nestedConversationCard", false);
     prompt->setProperty("turnContainer", true);
     prompt->setNestedItems(nestedItems);
@@ -1735,23 +3175,35 @@ void ConversationView::arrangeSection(TurnSectionWidget *section) {
   ordered.reserve(section->cardSlots.size() + 1);
   if (rootSlot)
     ordered.push_back({rootSlot->item, rootSlot});
-  if (section->historyPlaceholder)
+  if (section->historyPlaceholder) {
+    section->historyPlaceholder->setVisible(
+        !authoritativeRootCollapsed &&
+        section->historyPlaceholder->height() != 0);
     ordered.push_back({section->historyPlaceholder, nullptr});
+  }
   for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
     if (&slot != rootSlot)
       ordered.push_back({slot.item, &slot});
   for (std::size_t position = 0; position < ordered.size(); ++position) {
     QWidget *item = ordered[position].widget;
     if (ordered[position].slot) {
+      const bool isRoot = ordered[position].slot == rootSlot;
+      item->setVisible(ordered[position].slot->projectionVisible &&
+                       (isRoot || !authoritativeRootCollapsed));
       auto *card = slotCard(*ordered[position].slot);
       if (card) {
         if (card->property("turnContainer").toBool())
           card->setNestedItems({});
-        card->setProperty("nestedConversationCard", false);
+        const bool detachedNested = !rootSlot && section->hasAuthoritativeRoot;
+        if (card->property("nestedConversationCard").toBool() != detachedNested)
+          ordered[position].slot->cardGeometryDirty = true;
+        card->setNestedPresentation(detachedNested);
         card->setProperty("turnContainer", false);
         card->setAuthoritativeTurnActive(false);
         card->setMinimumHeight(0);
       }
+      item->setProperty("nestedConversationCard",
+                        !rootSlot && section->hasAuthoritativeRoot);
     }
     if (section->cards->indexOf(item) != static_cast<int>(position))
       section->cards->insertWidget(static_cast<int>(position), item);
@@ -1762,7 +3214,10 @@ void ConversationView::scheduleVisibilityPass() {
   if (applying_ || visibilityPassScheduled_ || !graph_)
     return;
   visibilityPassScheduled_ = true;
-  QTimer::singleShot(0, this, [this] {
+  const std::uint64_t epoch = graphBindingEpoch_;
+  QTimer::singleShot(0, this, [this, epoch] {
+    if (epoch != graphBindingEpoch_)
+      return;
     visibilityPassScheduled_ = false;
     if (runVisibilityPass())
       scheduleVisibilityPass();
@@ -1812,11 +3267,27 @@ void ConversationView::resetGraphVisibilityScan() {
   visibilitySlotCursor_ = estimated > LookBehind ? estimated - LookBehind : 0;
 }
 
-bool ConversationView::runVisibilityPass() { return runGraphVisibilityPass(); }
+bool ConversationView::runVisibilityPass() {
+  graphPassCardOperations_ = 0;
+  if (reconcileGraphViewport())
+    return true;
+  return runGraphVisibilityPass();
+}
 
 bool ConversationView::runGraphVisibilityPass() {
   if (applying_ || !graph_ || !content_ || !viewport())
     return false;
+
+  const auto finishPendingAnchorRestore = [this](bool settled) {
+    if (!settled || mode_ != Mode::Paused || !pendingGraphAnchorRestore_ ||
+        pendingGraphAnchorRestore_->stableKey.empty() ||
+        !cardForStableKey(pendingGraphAnchorRestore_->stableKey))
+      return;
+    const Anchor anchor = *pendingGraphAnchorRestore_;
+    pendingGraphAnchorRestore_.reset();
+    restoreAnchor(anchor);
+    storeCurrentThreadState();
+  };
 
   enum class Operation { Materialize, Render, Release };
   struct ScannedSlot final {
@@ -1836,6 +3307,7 @@ bool ConversationView::runGraphVisibilityPass() {
 
   const int scrollTop = verticalScrollBar()->value();
   const int viewportHeight = std::max(1, viewport()->height());
+  const bool follow = mode_ == Mode::Following;
   if (visibilitySlotsRemaining_ == 0 || visibilityScanScrollTop_ != scrollTop ||
       visibilityScanViewportHeight_ != viewport()->height() ||
       visibilityScanViewportWidth_ != viewport()->width() ||
@@ -1881,23 +3353,23 @@ bool ConversationView::runGraphVisibilityPass() {
   }
 
   std::vector<TurnSectionWidget *> recoveredSections;
+  std::size_t recoveryOperations = 0;
+  bool recoveryRemaining = false;
   const auto rememberSection = [](std::vector<TurnSectionWidget *> &sections,
                                   TurnSectionWidget *section) {
     if (section && std::ranges::find(sections, section) == sections.end())
       sections.push_back(section);
   };
-  for (TurnSectionWidget *section : scannedSections) {
-    if (section->historyPlaceholder)
-      continue;
-    section->historyPlaceholder = new GraphHistoryPlaceholder(section);
-    section->historyPlaceholder->setItemCount(section->hiddenItemCount);
-    rememberSection(recoveredSections, section);
-  }
   for (const ScannedSlot &entry : scanned) {
     TurnSectionWidget *section = entry.section;
     TurnSectionWidget::CardSlot &slot = *entry.slot;
     if (slot.itemGuard) {
       slot.item = slot.itemGuard.data();
+      continue;
+    }
+    if (graphPassCardOperations_ + recoveryOperations >=
+        MaxCardOperationsPerPass) {
+      recoveryRemaining = true;
       continue;
     }
     if (slot.graphNode && slot.attachment &&
@@ -1909,6 +3381,7 @@ bool ConversationView::runGraphVisibilityPass() {
     slot.itemGuard = slot.item;
     slot.item->setVisible(slot.projectionVisible);
     rememberSection(recoveredSections, section);
+    ++recoveryOperations;
   }
   if (!recoveredSections.empty()) {
     for (TurnSectionWidget *section : recoveredSections)
@@ -1921,8 +3394,7 @@ bool ConversationView::runGraphVisibilityPass() {
   const QRect materializationRect(0, std::max(0, scrollTop - viewportHeight),
                                   std::max(1, content_->width()),
                                   viewportHeight * 3);
-  const QRect retentionRect(0, std::max(0, scrollTop - 2 * viewportHeight),
-                            std::max(1, content_->width()), viewportHeight * 5);
+  const QRect retentionRect = materializationRect;
   std::vector<Candidate> candidates;
   candidates.reserve(scanned.size());
   QWidget *focus = QApplication::focusWidget();
@@ -1982,10 +3454,12 @@ bool ConversationView::runGraphVisibilityPass() {
   if (needsGraphRead) {
     std::optional<nodegraph::NodeGraph::ReadAccess> read = graph_->tryRead();
     if (!read) {
+      graphPassCardOperations_ += recoveryOperations;
       visibilitySectionCursor_ = batchStartSection;
       visibilitySlotCursor_ = batchStartSlot;
       visibilitySlotsRemaining_ = batchStartRemaining;
-      return true;
+      scheduleVisibilityContentionRetry();
+      return false;
     }
     for (Candidate &candidate : candidates) {
       if (candidate.operation == Operation::Release ||
@@ -2001,48 +3475,57 @@ bool ConversationView::runGraphVisibilityPass() {
         continue;
       candidate.state = read->state(candidate.slot->graphNode);
     }
+    read.reset();
   }
   std::erase_if(candidates, [](const Candidate &candidate) {
     return candidate.operation == Operation::Render && !candidate.state;
   });
 
-  std::ranges::stable_sort(
-      candidates, [](const Candidate &left, const Candidate &right) {
-        if (left.inViewport != right.inViewport)
-          return left.inViewport > right.inViewport;
-        const auto urgency = [](Operation operation) {
-          return operation == Operation::Release ? 1 : 0;
-        };
-        if (urgency(left.operation) != urgency(right.operation))
-          return urgency(left.operation) < urgency(right.operation);
-        return left.distance < right.distance;
-      });
-  if (candidates.empty())
-    return !recoveredSections.empty() || visibilitySlotsRemaining_ != 0;
-
-  Anchor anchor;
-  anchor.absoluteValue = verticalScrollBar()->value();
-  TurnSectionWidget::CardSlot *anchorSlot = nullptr;
-  int anchorContentTop = std::numeric_limits<int>::max();
-  for (const ScannedSlot &entry : scanned) {
-    TurnSectionWidget::CardSlot &slot = *entry.slot;
-    QWidget *item = slot.itemGuard.data();
-    if (!item || !slot.projectionVisible || !item->isVisibleTo(content_))
-      continue;
-    const int viewportTop = item->mapTo(viewport(), QPoint{}).y();
-    if (viewportTop + item->height() < 0)
-      continue;
-    const int contentTop = item->mapTo(content_, QPoint{}).y();
-    if (contentTop >= anchorContentTop)
-      continue;
-    anchorContentTop = contentTop;
-    anchorSlot = &slot;
-    anchor.stableKey = slot.key;
-    anchor.pixelOffset = viewportTop;
+  std::ranges::stable_sort(candidates, [this, follow](const Candidate &left,
+                                                      const Candidate &right) {
+    if (left.inViewport != right.inViewport)
+      return left.inViewport > right.inViewport;
+    const auto urgency = [](Operation operation) {
+      return operation == Operation::Release ? 1 : 0;
+    };
+    if (urgency(left.operation) != urgency(right.operation))
+      return urgency(left.operation) < urgency(right.operation);
+    if (left.distance != right.distance)
+      return left.distance < right.distance;
+    const bool leftRoot =
+        left.section && left.slot && left.slot->key == left.section->rootKey;
+    const bool rightRoot = right.section && right.slot &&
+                           right.slot->key == right.section->rootKey;
+    if (left.inViewport && leftRoot != rightRoot)
+      return leftRoot;
+    if (follow && left.inViewport && left.slot && right.slot &&
+        left.slot->itemGuard && right.slot->itemGuard)
+      return left.slot->itemGuard->mapTo(content_, QPoint{}).y() >
+             right.slot->itemGuard->mapTo(content_, QPoint{}).y();
+    return false;
+  });
+  if (candidates.empty()) {
+    graphPassCardOperations_ += recoveryOperations;
+    graphGeometry_->lastCardOperationsPerPass = graphPassCardOperations_;
+    graphGeometry_->maxCardOperationsPerPass = std::max(
+        graphGeometry_->maxCardOperationsPerPass, graphPassCardOperations_);
+    setProperty("graphLastCardOperationsPerPass",
+                static_cast<qulonglong>(graphPassCardOperations_));
+    setProperty(
+        "graphMaxCardOperationsPerPass",
+        static_cast<qulonglong>(graphGeometry_->maxCardOperationsPerPass));
+    const bool remaining = recoveryRemaining || !recoveredSections.empty() ||
+                           visibilitySlotsRemaining_ != 0 ||
+                           graphGeometry_->geometryScan.active ||
+                           !graphGeometry_->geometryScan.valid;
+    finishPendingAnchorRestore(!remaining);
+    return remaining;
   }
 
-  const bool follow = mode_ == Mode::Following;
-  const bool followedBottom = follow && isAtBottom();
+  const Anchor anchor = captureAnchor();
+
+  const bool followedBottom = follow && verticalScrollBar()->value() >=
+                                            verticalScrollBar()->maximum() - 1;
   const int previousValue = verticalScrollBar()->value();
   stopFollowingAnimation();
   applying_ = true;
@@ -2075,8 +3558,10 @@ bool ConversationView::runGraphVisibilityPass() {
           commandOutputStates_.erase(saved);
         }
       };
-  int operations = 0;
+  int operations =
+      static_cast<int>(graphPassCardOperations_ + recoveryOperations);
   bool workRemaining = false;
+  bool geometryChanged = false;
   std::vector<TurnSectionWidget *> changedSections;
 
   for (Candidate &candidate : candidates) {
@@ -2104,6 +3589,7 @@ bool ConversationView::runGraphVisibilityPass() {
       card->setVisible(slot.projectionVisible);
       slot.item = card;
       slot.itemGuard = card;
+      slot.cardGeometryDirty = true;
       slot.attachment = std::make_unique<ui::QtNodeAttachment>();
       slot.attachment->widget = card;
       slot.attachment->renderedRevision = candidate.nodeRevision;
@@ -2160,6 +3646,7 @@ bool ConversationView::runGraphVisibilityPass() {
         ++operations;
       }
       card->setVisible(slot.projectionVisible);
+      slot.cardGeometryDirty = true;
       slot.attachment->renderedRevision = candidate.nodeRevision;
       setAttachmentViewportVisibility(*slot.attachment, candidate.inViewport);
       rememberSection(changedSections, candidate.section);
@@ -2173,6 +3660,7 @@ bool ConversationView::runGraphVisibilityPass() {
       commandOutputStates_[slot.key] = *outputState;
     else
       commandOutputStates_.erase(slot.key);
+    slot.measuredHeight = intrinsicGraphCardHeight(card);
     if (slot.key == candidate.section->rootKey) {
       card->setNestedItems({});
       card->setMinimumHeight(0);
@@ -2180,10 +3668,6 @@ bool ConversationView::runGraphVisibilityPass() {
         card->layout()->invalidate();
         card->layout()->activate();
       }
-      slot.measuredHeight =
-          std::max(slot.measuredHeight, card->minimumSizeHint().height());
-    } else {
-      slot.measuredHeight = std::max(1, card->height());
     }
     auto *placeholder = new MeasuredCardPlaceholder(
         slot.key, slot.projectionVisible ? slot.measuredHeight : 0,
@@ -2207,19 +3691,35 @@ bool ConversationView::runGraphVisibilityPass() {
   for (TurnSectionWidget *section : changedSections)
     arrangeSection(section);
   recomputeGeometry();
+  for (TurnSectionWidget *section : changedSections) {
+    for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
+      auto *card =
+          slot.attachment
+              ? qobject_cast<ConversationCard *>(slot.attachment->widget.data())
+              : nullptr;
+      if (!card)
+        continue;
+      const int measured = intrinsicGraphCardHeight(card);
+      if (measured == slot.measuredHeight)
+        continue;
+      const auto geometry =
+          graphGeometry_->itemIndex.find(slot.graphNode.get());
+      if (geometry != graphGeometry_->itemIndex.end()) {
+        GraphViewportGeometry::ItemGeometry *record = geometry->second;
+        if (record->measuredHeight != measured) {
+          graphGeometry_->setRecordMeasuredHeight(*record, measured);
+          geometryChanged = true;
+        }
+      }
+      slot.measuredHeight = measured;
+    }
+  }
   for (const auto &[card, state] : outputRestorations)
     card->restoreCommandOutputScrollState(state);
   if (followedBottom)
     setScrollValue(verticalScrollBar()->maximum());
-  else {
-    int value = anchor.absoluteValue;
-    if (anchorSlot && !anchor.stableKey.empty()) {
-      if (QWidget *item = anchorSlot->itemGuard.data())
-        value = item->mapTo(content_, QPoint{}).y() - anchor.pixelOffset;
-    }
-    setScrollValue(std::clamp(value, verticalScrollBar()->minimum(),
-                              verticalScrollBar()->maximum()));
-  }
+  else
+    restoreAnchor(anchor);
   applying_ = false;
   content_->setUpdatesEnabled(true);
   viewport()->setUpdatesEnabled(true);
@@ -2232,7 +3732,19 @@ bool ConversationView::runGraphVisibilityPass() {
     if (verticalScrollBar()->maximum() > stableValue + 3)
       animateToBottom(std::min(previousValue, stableValue));
   }
-  return workRemaining || visibilitySlotsRemaining_ != 0 || operations > 0;
+  graphGeometry_->lastCardOperationsPerPass = operations;
+  graphGeometry_->maxCardOperationsPerPass =
+      std::max(graphGeometry_->maxCardOperationsPerPass,
+               static_cast<std::size_t>(operations));
+  setProperty("graphLastCardOperationsPerPass", operations);
+  setProperty(
+      "graphMaxCardOperationsPerPass",
+      static_cast<qulonglong>(graphGeometry_->maxCardOperationsPerPass));
+  graphPassCardOperations_ = static_cast<std::size_t>(operations);
+  if (geometryChanged)
+    scheduleGraphRefresh();
+  return workRemaining || recoveryRemaining || visibilitySlotsRemaining_ != 0 ||
+         operations > 0;
 }
 
 void ConversationView::setCardCollapsed(const std::string &key,
@@ -2249,6 +3761,7 @@ void ConversationView::setCardCollapsed(const std::string &key,
   const QSignalBlocker scrollSignals(verticalScrollBar());
 
   mode_ = Mode::Paused;
+  pendingGraphAnchorRestore_.reset();
   pausedByComposerGrowth_ = false;
   cardCollapsedStates_[key] = collapsed;
   ConversationCard *turnContainer =
@@ -2261,15 +3774,36 @@ void ConversationView::setCardCollapsed(const std::string &key,
   if (turnContainer)
     turnContainer->setMinimumHeight(0);
   card->setCollapsed(collapsed);
+  for (TurnSectionWidget *section : graphSections_) {
+    bool changed = false;
+    for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
+      if (slot.key == key ||
+          (!section->rootKey.empty() && slot.key == section->rootKey)) {
+        slot.cardGeometryDirty = true;
+        changed = true;
+      }
+    }
+    section->geometryDirty = section->geometryDirty || changed;
+  }
   recomputeGeometry();
-  const auto updateMeasuredHeight = [&key, card](TurnSectionWidget *section) {
+  const auto updateMeasuredHeight = [this, &key, card,
+                                     collapsed](TurnSectionWidget *section) {
     const auto slot = std::ranges::find_if(
         section->cardSlots,
         [&key](const TurnSectionWidget::CardSlot &candidate) {
           return candidate.key == key;
         });
-    if (slot != section->cardSlots.end() && key != section->rootKey)
-      slot->measuredHeight = std::max(1, card->height());
+    if (slot == section->cardSlots.end())
+      return;
+    const int measured = intrinsicGraphCardHeight(card);
+    slot->measuredHeight = measured;
+    const auto geometry = graphGeometry_->itemIndex.find(slot->graphNode.get());
+    if (geometry == graphGeometry_->itemIndex.end())
+      return;
+    GraphViewportGeometry::ItemGeometry *record = geometry->second;
+    graphGeometry_->setRecordMeasuredHeight(*record, measured);
+    if (key == section->rootKey)
+      graphGeometry_->setRootCollapsed(*record->turn, collapsed);
   };
   for (TurnSectionWidget *section : graphSections_)
     updateMeasuredHeight(section);
@@ -2377,6 +3911,11 @@ bool ConversationView::eventFilter(QObject *watched, QEvent *event) {
     applying_ = true;
     viewport()->setUpdatesEnabled(false);
     const QSignalBlocker scrollSignals(verticalScrollBar());
+    for (TurnSectionWidget *section : graphSections_) {
+      section->geometryDirty = true;
+      for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
+        slot.cardGeometryDirty = true;
+    }
     recomputeGeometry();
     restoreAnchor(anchor);
     applying_ = false;
@@ -2402,6 +3941,11 @@ void ConversationView::resizeEvent(QResizeEvent *event) {
   viewport()->setUpdatesEnabled(false);
   const QSignalBlocker scrollSignals(verticalScrollBar());
   QAbstractScrollArea::resizeEvent(event);
+  for (TurnSectionWidget *section : graphSections_) {
+    section->geometryDirty = true;
+    for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
+      slot.cardGeometryDirty = true;
+  }
   recomputeGeometry();
   if (follow)
     setScrollValue(verticalScrollBar()->maximum());
@@ -2420,6 +3964,8 @@ void ConversationView::wheelEvent(QWheelEvent *event) {
 }
 
 ConversationView::Anchor ConversationView::captureAnchor() const {
+  if (pendingGraphAnchorRestore_)
+    return *pendingGraphAnchorRestore_;
   Anchor anchor;
   anchor.absoluteValue = verticalScrollBar()->value();
   const auto capture = [this, &anchor](const std::string &key) {
@@ -2427,7 +3973,7 @@ ConversationView::Anchor ConversationView::captureAnchor() const {
     if (!item || !item->isVisible())
       return false;
     const int viewportTop = item->mapTo(viewport(), QPoint(0, 0)).y();
-    if (viewportTop + item->height() < 0)
+    if (viewportTop + item->height() < 0 || viewportTop >= viewport()->height())
       return false;
     anchor.stableKey = key;
     // The contract is visual stability. Capture the actual painted offset
@@ -2513,7 +4059,6 @@ void ConversationView::recomputeGeometry() {
                 slot.attachment->widget.data()))
           layoutCards.push_back(card);
   const int width = std::max(0, viewport()->width());
-  trailingSpace_->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
   contentLayout_->invalidate();
   for (TurnSectionWidget *section : layoutSections)
     section->setMinimumHeight(0);
@@ -2579,7 +4124,6 @@ void ConversationView::recomputeGeometry() {
   for (ConversationCard *card : layoutCards) {
     if (!card->property("turnContainer").toBool())
       continue;
-    card->setMinimumHeight(0);
     QWidget *nested = card->findChild<QWidget *>(
         QStringLiteral("conversationNestedCards"), Qt::FindDirectChildrenOnly);
     if (!nested || !nested->layout())
@@ -2587,6 +4131,7 @@ void ConversationView::recomputeGeometry() {
     const int cardWidth = card->parentWidget()
                               ? card->parentWidget()->contentsRect().width()
                               : card->width();
+    card->setMinimumHeight(0);
     card->resize(cardWidth, card->height());
     if (card->layout()) {
       card->layout()->invalidate();
@@ -2630,9 +4175,6 @@ void ConversationView::recomputeGeometry() {
                    : contentLayout_->sizeHint().height();
   wanted = std::max(wanted, contentLayout_->minimumSize().height());
   naturalContentHeight_ = wanted;
-  trailingSpace_->changeSize(0, trailingSpaceHeight_, QSizePolicy::Minimum,
-                             QSizePolicy::Fixed);
-  contentLayout_->invalidate();
   wanted += trailingSpaceHeight_;
   contentHeight_ = std::max(viewport()->height(), wanted);
   content_->resize(width, contentHeight_);
@@ -2651,7 +4193,7 @@ void ConversationView::recomputeGeometry() {
             QStringLiteral("conversationNestedCards"),
             Qt::FindDirectChildrenOnly))
       QCoreApplication::sendPostedEvents(nested, QEvent::LayoutRequest);
-    QCoreApplication::sendPostedEvents(card, QEvent::LayoutRequest);
+    QCoreApplication::removePostedEvents(card, QEvent::LayoutRequest);
   }
   for (TurnSectionWidget *section : layoutSections)
     QCoreApplication::sendPostedEvents(section, QEvent::LayoutRequest);
@@ -2664,6 +4206,7 @@ void ConversationView::positionContent() {
 }
 
 void ConversationView::handleUserScrollValue(int value) {
+  pendingGraphAnchorRestore_.reset();
   stopFollowingAnimation();
   pausedByComposerGrowth_ = false;
   mode_ = value >= verticalScrollBar()->maximum() - 1 ? Mode::Following
@@ -2681,6 +4224,7 @@ bool ConversationView::applyWheel(QWheelEvent *event) {
   if (intent == 0)
     return false;
 
+  pendingGraphAnchorRestore_.reset();
   pausedByComposerGrowth_ = false;
   const int oldValue = verticalScrollBar()->value();
   if (intent > 0) {
