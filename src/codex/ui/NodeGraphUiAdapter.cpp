@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -625,6 +626,7 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
   case CardKind::LocalPrompt:
     break;
   }
+  result.target = item;
   return result;
 }
 
@@ -745,6 +747,20 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
     section.key = input.id;
     section.turnId = input.id;
     bool rootAdded = false;
+    std::unordered_set<const nodegraph::Node *> readyPrompts;
+    for (const nodegraph::NodeRef &candidate : input.items) {
+      for (const nodegraph::NodeRef &prompt : read->related(
+               candidate, nodegraph::RelationKind::PromptMaterialization)) {
+        if (!prompt || !read->contains(prompt) || read->removed(prompt))
+          continue;
+        const auto promptState = read->state(prompt);
+        if (promptState &&
+            graphString(graphField(*promptState, "type")) == "localPrompt" &&
+            graphString(graphField(*promptState, "dispatchState")) ==
+                "awaitingMaterialization")
+          readyPrompts.insert(prompt.get());
+      }
+    }
 
     const auto append = [&](const nodegraph::NodeRef &item, bool root) {
       if (!item || !read->contains(item) || read->removed(item))
@@ -752,8 +768,12 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
       auto state = read->state(item);
       if (!state)
         return;
+      if (graphString(graphField(*state, "type")) == "localPrompt" &&
+          readyPrompts.contains(item.get()))
+        return;
 
       nodegraph::NodeRef projectedNode = item;
+      nodegraph::NodeRef actionTarget = item;
       std::shared_ptr<const nodegraph::NodeState> projectedState = state;
       std::optional<std::uint64_t> promptVisualId;
       const auto promptRelations =
@@ -770,11 +790,10 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
             graphInteger(graphField(*promptState, "submissionId")).value_or(0);
         promptVisualId =
             rawId < 0 ? 0 : static_cast<std::uint64_t>(rawId);
+        actionTarget = prompt;
         if (graphString(graphField(*promptState, "dispatchState")) !=
-            "awaitingMaterialization") {
-          projectedNode = prompt;
-          projectedState = promptState;
-        }
+            "awaitingMaterialization")
+          return;
         break;
       }
 
@@ -782,6 +801,7 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
                                            input.id, *projectedState);
       if (promptVisualId)
         card.key = LocalPromptKey{*promptVisualId};
+      card.target = std::move(actionTarget);
       if (root) {
         section.rootCardKey = card.key;
         rootAdded = true;

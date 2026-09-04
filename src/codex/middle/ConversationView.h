@@ -43,6 +43,9 @@ public:
   explicit ConversationView(QWidget *parent = nullptr);
 
   void setLoadMoreAction(std::function<void()> action);
+  void
+  setPromptMaterializedAction(std::function<bool(nodegraph::NodeRef)> action);
+  void setPromptRecoveryAction(std::function<void(nodegraph::NodeRef)> action);
   void setEmptyMessage(QString message);
   void setPresentationOptions(PresentationOptions options);
   [[nodiscard]] PresentationOptions presentationOptions() const noexcept {
@@ -121,6 +124,8 @@ private:
   QLabel *empty_ = nullptr;
   QVariantAnimation *followAnimation_ = nullptr;
   std::function<void()> loadMoreAction_;
+  std::function<bool(nodegraph::NodeRef)> promptMaterializedAction_;
+  std::function<void(nodegraph::NodeRef)> promptRecoveryAction_;
 
   std::string threadId_;
   std::unordered_map<std::string, TurnSectionWidget *> sections_;

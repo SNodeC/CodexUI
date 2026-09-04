@@ -1164,6 +1164,15 @@ void ShellWidget::Impl::connectUi() {
         std::move(action),
         QStringLiteral("History request was not admitted; try again.")));
   });
+  middleRegion->conversation().setPromptMaterializedAction(
+      [this](nodegraph::NodeRef localPrompt) {
+        nodegraph::NodeAction action{
+            std::move(localPrompt),
+            nodegraph::NodeActionKind::PromptMaterialized};
+        return sendNodeAction(std::move(action), {});
+      });
+  middleRegion->conversation().setPromptRecoveryAction(
+      [this](nodegraph::NodeRef prompt) { recoverPrompt(prompt); });
   middleRegion->inspector().setRequestActions(
       [this](const std::string &id) { reviewPending(id); },
       [this](const std::string &id) { acceptPending(id); },

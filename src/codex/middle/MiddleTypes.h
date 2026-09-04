@@ -3,6 +3,8 @@
 #ifndef CODEXUI_CODEX_MIDDLE_MIDDLETYPES_H
 #define CODEXUI_CODEX_MIDDLE_MIDDLETYPES_H
 
+#include "codex/nodegraph/NodeGraph.h"
+
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
@@ -185,6 +187,9 @@ struct VisibleCardData {
   std::string itemId;
   CardPayload payload = GenericActivityData{};
   std::optional<bool> activeWork;
+  // Stable action/lifetime identity supplied by the adapter. Widgets retain
+  // it but never inspect graph state through it.
+  nodegraph::NodeRef target;
 
   bool operator==(const VisibleCardData &) const = default;
 };

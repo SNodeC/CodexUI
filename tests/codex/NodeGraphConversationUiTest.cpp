@@ -178,6 +178,81 @@ bool pausedViewportKeepsItsPaintedAnchor() {
   return require(false, "paused incoming tail replaced the anchor widget");
 }
 
+bool promptMorphPreservesExactTargetAndWidget() {
+  nodegraph::NodeGraph graph;
+  NodeRef thread;
+  NodeRef turn;
+  NodeRef prompt;
+  {
+    auto write = graph.write();
+    thread = write.upsert({NodeKind::Thread, "thread-prompt"},
+                          state("thread-prompt"));
+    turn = write.upsert({NodeKind::Turn, "turn-prompt"},
+                        state("turn-prompt"));
+    NodeState promptState = state("local-prompt", "localPrompt", "hello");
+    promptState.fields.emplace("submissionId", std::uint64_t{41});
+    promptState.fields.emplace("dispatchState", "inFlight");
+    prompt = write.upsert({NodeKind::Item, "local-prompt"},
+                          std::move(promptState));
+    write.setParent(thread, turn);
+    write.setParent(turn, prompt);
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, prompt);
+    static_cast<void>(write.finish());
+  }
+
+  ui::NodeGraphUiAdapter adapter(graph);
+  middle::ConversationView view;
+  view.resize(700, 480);
+  view.show();
+  int acknowledgements = 0;
+  NodeRef acknowledged;
+  view.setPromptMaterializedAction(
+      [&](NodeRef target) {
+        ++acknowledgements;
+        acknowledged = std::move(target);
+        return true;
+      });
+  auto snapshot = adapter.conversation(thread, 80, {true, true});
+  if (!snapshot || !view.reconcile(*snapshot))
+    return false;
+  QApplication::processEvents();
+  const auto before = view.findChildren<middle::ConversationCard *>();
+  if (!require(before.size() == 1, "local prompt did not render once") ||
+      !require(acknowledgements == 0,
+               "local prompt acknowledged before authoritative identity"))
+    return false;
+  middle::ConversationCard *stable = before.front();
+
+  {
+    auto write = graph.write();
+    write.setField(prompt, "dispatchState", "awaitingMaterialization");
+    NodeRef authoritative = write.upsert(
+        {NodeKind::Item, "authoritative-prompt"},
+        state("authoritative-prompt", "userMessage", "hello"));
+    write.setParent(turn, authoritative);
+    write.relate(authoritative,
+                 nodegraph::RelationKind::PromptMaterialization, prompt);
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, authoritative);
+    static_cast<void>(write.finish());
+  }
+  snapshot = adapter.conversation(thread, 80, {true, true});
+  if (!snapshot || !view.reconcile(*snapshot))
+    return false;
+  QApplication::processEvents();
+  const auto after = view.findChildren<middle::ConversationCard *>();
+  if (!require(after.size() == 1, "prompt morph created a duplicate card") ||
+      !require(after.front() == stable, "prompt morph replaced its widget") ||
+      !require(acknowledgements == 1,
+               "prompt morph did not acknowledge exactly once") ||
+      !require(acknowledged == prompt,
+               "prompt morph discarded its exact NodeRef target"))
+    return false;
+
+  static_cast<void>(view.reconcile(*snapshot));
+  return require(acknowledgements == 1,
+                 "unchanged prompt projection acknowledged twice");
+}
+
 } // namespace
 } // namespace codexui::codex
 
@@ -185,7 +260,8 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   using namespace codexui::codex;
   if (!oldUiConsumesAdapterSnapshotsAtomically() ||
-      !pausedViewportKeepsItsPaintedAnchor())
+      !pausedViewportKeepsItsPaintedAnchor() ||
+      !promptMorphPreservesExactTargetAndWidget())
     return EXIT_FAILURE;
   std::cout << "NodeGraph conversation UI tests passed\n";
   return EXIT_SUCCESS;

@@ -151,6 +151,16 @@ void ConversationView::setLoadMoreAction(std::function<void()> action) {
   loadMoreAction_ = std::move(action);
 }
 
+void ConversationView::setPromptMaterializedAction(
+    std::function<bool(nodegraph::NodeRef)> action) {
+  promptMaterializedAction_ = std::move(action);
+}
+
+void ConversationView::setPromptRecoveryAction(
+    std::function<void(nodegraph::NodeRef)> action) {
+  promptRecoveryAction_ = std::move(action);
+}
+
 void ConversationView::setEmptyMessage(QString message) {
   if (message == emptyMessage_)
     return;
@@ -313,6 +323,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
   std::vector<std::string> displayedKeys;
   std::vector<std::pair<ConversationCard *, CommandOutputView::ScrollState>>
       commandOutputRestorations;
+  std::vector<nodegraph::NodeRef> materializedPrompts;
   const auto retainCommandOutputState = [this](const std::string &key,
                                                ConversationCard *card) {
     const auto state = card ? card->commandOutputScrollState() : std::nullopt;
@@ -426,6 +437,9 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
       const auto existingCard = cards_.find(key);
       if (existingCard != cards_.end()) {
         card = existingCard->second;
+        if (card->data().kind == CardKind::LocalPrompt &&
+            cardData.kind == CardKind::UserMessage && cardData.target)
+          materializedPrompts.push_back(cardData.target);
         visualChange = card->apply(cardData) || visualChange;
       } else {
         card = createConversationCard(
@@ -441,6 +455,17 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
                   if (retained != cards_.end() && retained->second == card)
                     setCardCollapsed(key, card, collapsed);
                 });
+        connect(card, &ConversationCard::recoveryRequested, this,
+                [this, key, card] {
+                  const auto retained = cards_.find(key);
+                  if (retained == cards_.end() || retained->second != card ||
+                      !promptRecoveryAction_ || !card->data().target)
+                    return;
+                  promptRecoveryAction_(card->data().target);
+                });
+        if (std::holds_alternative<LocalPromptKey>(cardData.key) &&
+            cardData.kind == CardKind::UserMessage && cardData.target)
+          materializedPrompts.push_back(cardData.target);
         if (const auto saved = commandOutputStates_.find(key);
             saved != commandOutputStates_.end()) {
           commandOutputRestorations.emplace_back(card, saved->second);
@@ -567,6 +592,10 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
       setScrollValue(verticalScrollBar()->maximum());
   }
   storeCurrentThreadState();
+  if (promptMaterializedAction_)
+    for (nodegraph::NodeRef &prompt : materializedPrompts)
+      if (!promptMaterializedAction_(std::move(prompt)))
+        break;
   return visualChange;
 }
 
