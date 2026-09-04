@@ -1096,6 +1096,65 @@ bool agentsProjectionTracksLogicalChildren() {
   return result;
 }
 
+bool historicalAgentStartRequiresCurrentLifecycleToAppearRunning() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef owner;
+  nodegraph::NodeRef child;
+  {
+    auto write = graph.write();
+    owner = write.upsert({nodegraph::NodeKind::Thread, "historical-owner"});
+    nodegraph::NodeState turnState;
+    turnState.status = nodegraph::NodeStatus::Completed;
+    turnState.fields = {{"status", nodegraph::Value("completed")}};
+    const nodegraph::NodeRef turn = write.upsert(
+        {nodegraph::NodeKind::Turn, "historical-turn"}, std::move(turnState));
+    write.setParent(owner, turn);
+
+    child = write.upsert({nodegraph::NodeKind::Thread, "historical-child"});
+    nodegraph::NodeState activity;
+    activity.status = nodegraph::NodeStatus::Running;
+    activity.fields = {
+        {"type", nodegraph::Value("subAgentActivity")},
+        {"kind", nodegraph::Value("started")},
+        {"agentThreadId", nodegraph::Value("historical-child")}};
+    const nodegraph::NodeRef item = write.upsert(
+        {nodegraph::NodeKind::Item, "historical-child-start"},
+        std::move(activity));
+    write.setParent(turn, item);
+    write.relate(item, nodegraph::RelationKind::AgentChildThread, child);
+    static_cast<void>(write.finish());
+  }
+
+  InspectorPane pane;
+  pane.resize(440, 700);
+  pane.show();
+  pane.refresh(graph, owner);
+  pane.tabs()->setCurrentIndex(1);
+  spin(40);
+
+  QFrame *frame = agentFrame(pane, QStringLiteral("historical-child"));
+  bool result = expect(
+      frame && hasLabelContaining(*frame, QStringLiteral("not loaded")) &&
+          !hasLabelContaining(*frame, QStringLiteral("running")),
+      "a historical start in a completed owner turn does not claim that an "
+      "unavailable child is still running");
+
+  nodegraph::GraphChange running;
+  {
+    auto write = graph.write();
+    write.setStatus(child, nodegraph::NodeStatus::Running);
+    write.setField(child, "status", "running");
+    running = write.finish();
+  }
+  pane.graphChanged(notification(std::move(running)));
+  spin(40);
+  frame = agentFrame(pane, QStringLiteral("historical-child"));
+  result &= expect(
+      frame && hasLabelContaining(*frame, QStringLiteral("running")),
+      "a current canonical child lifecycle overrides the historical fallback");
+  return result;
+}
+
 bool boundedProtocolHistoryAndGraphScanStayResponsive() {
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef thread;
@@ -1362,6 +1421,8 @@ int main(int argc, char **argv) {
   const bool passed =
       codexui::codex::middle::directGraphRenderingIsLazyAndCurrent() &&
       codexui::codex::middle::agentsProjectionTracksLogicalChildren() &&
+      codexui::codex::middle::
+          historicalAgentStartRequiresCurrentLifecycleToAppearRunning() &&
       codexui::codex::middle::
           boundedProtocolHistoryAndGraphScanStayResponsive();
   if (passed)

@@ -4718,6 +4718,12 @@ bool testDelayedInitialHistoryMaterializesAtomically() {
            view.property("bulkMaterializationBlocker").toString() ==
                QStringLiteral("hydration");
   });
+  auto *loadingCover = view.findChild<QLabel *>(
+      QStringLiteral("conversationAtomicTransitionOverlay"));
+  const bool loadingCoverVisible =
+      loadingCover && loadingCover->isVisible() &&
+      loadingCover->pixmap().isNull() &&
+      loadingCover->text() == QStringLiteral("Loading conversation…");
 
   std::vector<nodegraph::NodeRef> items;
   nodegraph::GraphChange hydrated;
@@ -4755,7 +4761,8 @@ bool testDelayedInitialHistoryMaterializesAtomically() {
                    }) &&
                view.viewport()->updatesEnabled() &&
                !view.property("bulkMaterializationUpdatesSuppressed")
-                    .toBool();
+                    .toBool() &&
+               loadingCover && !loadingCover->isVisible();
       },
       1024);
   paints.active = false;
@@ -4790,8 +4797,8 @@ bool testDelayedInitialHistoryMaterializesAtomically() {
           geometryPasses;
 
   return expect(
-      emptyBindingHeld && hydratedWindowReady && noPartialHistoryFrame &&
-          finalLayoutStable,
+      emptyBindingHeld && loadingCoverVisible && hydratedWindowReady &&
+          noPartialHistoryFrame && finalLayoutStable,
       "history arriving after an empty selection remains invisible until all "
       "retained cards have their stable final old-UI layout");
 }
@@ -4905,7 +4912,7 @@ bool testPartialLiveTailWaitsForAuthoritativeInitialHistory() {
       "the first exposed frame has the complete canonically owned window");
 }
 
-bool testThreadSwitchKeepsPreviousFrameUntilAtomicCommit() {
+bool testThreadSwitchCoversOldFrameUntilAtomicCommit() {
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef sourceThread;
   nodegraph::NodeRef sourceItem;
@@ -4945,8 +4952,6 @@ bool testThreadSwitchKeepsPreviousFrameUntilAtomicCommit() {
     const auto *attachment = graphAttachment(sourceItem);
     return attachment && attachment->widget && view.viewport()->updatesEnabled();
   });
-  const QImage previousFrame = view.viewport()->grab().toImage();
-
   view.bindGraph(graph, targetThread);
   const bool targetHeld = spinUntil([&] {
     return !view.viewport()->updatesEnabled() &&
@@ -4955,9 +4960,10 @@ bool testThreadSwitchKeepsPreviousFrameUntilAtomicCommit() {
   });
   auto *overlay = view.findChild<QLabel *>(
       QStringLiteral("conversationAtomicTransitionOverlay"));
-  const bool previousFrameStillVisible =
-      overlay && overlay->isVisible() && !overlay->pixmap().isNull() &&
-      overlay->pixmap().toImage() == previousFrame;
+  const bool oldFrameCovered =
+      overlay && overlay->isVisible() && overlay->pixmap().isNull() &&
+      overlay->text() == QStringLiteral("Loading conversation…") &&
+      graphAttachment(sourceItem) == nullptr;
 
   nodegraph::NodeRef targetItem;
   nodegraph::GraphChange hydrated;
@@ -4983,10 +4989,9 @@ bool testThreadSwitchKeepsPreviousFrameUntilAtomicCommit() {
            overlay && !overlay->isVisible();
   });
 
-  return expect(sourceReady && targetHeld && previousFrameStillVisible &&
-                    targetReady,
-                "thread switching retains the previous painted viewport until "
-                "the incoming history can be exposed in one atomic commit");
+  return expect(sourceReady && targetHeld && oldFrameCovered && targetReady,
+                "thread switching covers the outgoing conversation until the "
+                "incoming history can be exposed in one atomic commit");
 }
 
 bool testPausedIncomingCardMaterializesWithoutAnchorJump() {
@@ -6836,7 +6841,7 @@ int main(int argc, char **argv) {
   if (qEnvironmentVariableIsSet("CODEXUI_ATOMIC_MATERIALIZATION_TESTS")) {
     bool focused = testDelayedInitialHistoryMaterializesAtomically();
     focused &= testPartialLiveTailWaitsForAuthoritativeInitialHistory();
-    focused &= testThreadSwitchKeepsPreviousFrameUntilAtomicCommit();
+    focused &= testThreadSwitchCoversOldFrameUntilAtomicCommit();
     focused &= testPausedIncomingCardMaterializesWithoutAnchorJump();
     focused &= testPausedMixedCardBurstKeepsLeafAnchorAndParents();
     focused &= testPausedNormalPromptTurnMaterializesWithoutAnchorJump();
@@ -6851,7 +6856,7 @@ int main(int argc, char **argv) {
     focused &= testLoadedCardsMaterializeOnceWithoutScrollChurn();
     focused &= testDelayedInitialHistoryMaterializesAtomically();
     focused &= testPartialLiveTailWaitsForAuthoritativeInitialHistory();
-    focused &= testThreadSwitchKeepsPreviousFrameUntilAtomicCommit();
+    focused &= testThreadSwitchCoversOldFrameUntilAtomicCommit();
     if (focused)
       std::cout << "Long conversation materialization tests passed\n";
     return focused ? 0 : 1;
@@ -6886,7 +6891,7 @@ int main(int argc, char **argv) {
   result &= testLoadedCardsMaterializeOnceWithoutScrollChurn();
   result &= testDelayedInitialHistoryMaterializesAtomically();
   result &= testPartialLiveTailWaitsForAuthoritativeInitialHistory();
-  result &= testThreadSwitchKeepsPreviousFrameUntilAtomicCommit();
+  result &= testThreadSwitchCoversOldFrameUntilAtomicCommit();
   result &= testPausedIncomingCardMaterializesWithoutAnchorJump();
   result &= testPausedMixedCardBurstKeepsLeafAnchorAndParents();
   result &= testPausedNormalPromptTurnMaterializesWithoutAnchorJump();

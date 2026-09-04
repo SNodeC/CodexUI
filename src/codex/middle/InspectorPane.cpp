@@ -932,10 +932,12 @@ struct InspectorPane::AgentsGraphScan final {
   std::size_t turnCursor = 0;
   std::size_t turnCount = 0;
   nodegraph::NodeRef currentTurn;
+  std::shared_ptr<const nodegraph::NodeState> currentTurnState;
   std::size_t itemCursor = 0;
   std::size_t itemCount = 0;
   nodegraph::NodeRef sourceItem;
   std::shared_ptr<const nodegraph::NodeState> sourceState;
+  std::string sourceTurnStatus;
   bool sourceCanCreate = false;
   std::vector<SourceChild> sourceChildren;
   std::unordered_map<std::string, std::size_t> sourceChildIndexes;
@@ -2317,6 +2319,7 @@ void InspectorPane::runAgentsGraphScan() {
   const auto clearSource = [&scan] {
     scan.sourceItem.reset();
     scan.sourceState.reset();
+    scan.sourceTurnStatus.clear();
     scan.sourceCanCreate = false;
     scan.sourceChildren.clear();
     scan.sourceChildIndexes.clear();
@@ -2377,8 +2380,17 @@ void InspectorPane::runAgentsGraphScan() {
 
     AgentsGraphScan::LogicalAgent &logical = found->second;
     const std::string type = graphString(graphField(*scan.sourceState, "type"));
-    if (type == "subAgentActivity" || scan.sourceCanCreate)
-      updateAgentStatus(logical.status, agentActivityStatus(*scan.sourceState));
+    if (type == "subAgentActivity" || scan.sourceCanCreate) {
+      std::string activityStatus = agentActivityStatus(*scan.sourceState);
+      // A historical start/progress inside an already-finished owner turn is
+      // not evidence that an unavailable child is still running.  The child
+      // lifecycle or an explicit agentsStates update remains authoritative.
+      if (child.hasCanonicalThreadId && terminalStatus(scan.sourceTurnStatus) &&
+          isActiveStatus(activityStatus) && child.status.empty() &&
+          facts.status.empty())
+        activityStatus = "notLoaded";
+      updateAgentStatus(logical.status, std::move(activityStatus));
+    }
     updateAgentStatus(logical.status, child.status);
     updateAgentStatus(logical.status, facts.status);
     if (!logical.renderIndex)
@@ -2446,6 +2458,8 @@ void InspectorPane::runAgentsGraphScan() {
       if (!turn || turn->id().kind != nodegraph::NodeKind::Turn)
         break;
       scan.currentTurn = turn;
+      scan.currentTurnState = read->state(turn);
+      scan.dependencies.insert(turn.get());
       scan.itemCursor = 0;
       scan.itemCount = read->childCount(turn);
       scan.phase = AgentsGraphScan::Phase::MainItems;
@@ -2469,6 +2483,9 @@ void InspectorPane::runAgentsGraphScan() {
         break;
       scan.sourceItem = item;
       scan.sourceState = state;
+      scan.sourceTurnStatus = scan.currentTurnState
+                                  ? graphStatus(*scan.currentTurnState)
+                                  : std::string{};
       scan.dependencies.insert(item.get());
       scan.sourceCanCreate =
           type == "subAgentActivity"

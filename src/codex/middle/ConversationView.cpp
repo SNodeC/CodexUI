@@ -1099,6 +1099,9 @@ ConversationView::ConversationView(QWidget *parent)
       QStringLiteral("conversationAtomicTransitionOverlay"));
   atomicTransitionOverlay_->setAttribute(Qt::WA_TransparentForMouseEvents);
   atomicTransitionOverlay_->setScaledContents(true);
+  atomicTransitionOverlay_->setAlignment(Qt::AlignCenter);
+  atomicTransitionOverlay_->setStyleSheet(QStringLiteral(
+      "background-color: palette(base); color: palette(text);"));
   atomicTransitionOverlay_->hide();
 
   contentLayout_ = new QVBoxLayout(content_);
@@ -1112,7 +1115,7 @@ ConversationView::ConversationView(QWidget *parent)
   loadMore_->hide();
   connect(loadMore_, &QPushButton::clicked, this, [this] {
     if (graph_) {
-      beginAtomicMaterialization(true);
+      beginAtomicMaterialization(true, AtomicCover::FrozenFrame);
       const bool requestProviderPage =
           graphProviderHasMore_ &&
           graphHiddenItemCount_ <= AuthoritativeHistoryPageSize;
@@ -1218,11 +1221,13 @@ void ConversationView::bindGraph(const nodegraph::NodeGraph &graph,
     graphChanged();
     return;
   }
-  // Freeze the outgoing painted viewport before setThread/clearGraph detach
-  // it. Materialization of the incoming thread then remains invisible until
-  // its final geometry and every retained card are ready.
-  if (graph_)
-    beginAtomicMaterialization(true, true);
+  // Cover the outgoing viewport before setThread/clearGraph detaches it.
+  // Showing an old conversation under the newly selected thread heading is
+  // misleading; the incoming widgets remain invisible until their complete
+  // geometry can be committed in one frame.
+  const bool selectingThread = static_cast<bool>(selectedThread);
+  if (graph_ && selectingThread)
+    beginAtomicMaterialization(true, AtomicCover::Loading);
 
   // Capture the outgoing graph's painted anchor before detaching its widgets.
   // setThread also restores the incoming thread's independent follow mode.
@@ -1235,13 +1240,13 @@ void ConversationView::bindGraph(const nodegraph::NodeGraph &graph,
           ? std::nullopt
           : std::optional<ThreadScrollState>{saved->second};
   if (graph_)
-    clearGraph(true);
+    clearGraph(selectingThread);
 
   graph_ = &graph;
   graphThread_ = std::move(selectedThread);
   graphHydrationSettled_ = !graphThread_;
   if (graphThread_ && !bulkMaterializationUpdatesSuppressed_)
-    beginAtomicMaterialization(true);
+    beginAtomicMaterialization(true, AtomicCover::Loading);
   pendingGraphAnchorRestore_.reset();
   if (restored && restored->mode == Mode::Paused &&
       !restored->anchor.stableKey.empty())
@@ -2366,9 +2371,11 @@ void ConversationView::runGraphRefresh() {
   // inserted selected-thread item freezes the current backing-store image
   // until its final QWidget and canonical owner are ready.
   if (freezeFullMaterialization)
-    beginAtomicMaterialization(true);
+    beginAtomicMaterialization(true, AtomicCover::FrozenFrame);
   else if (freezeIncomingMaterialization)
-    beginAtomicMaterialization(false);
+    beginAtomicMaterialization(
+        false, mode_ == Mode::Following ? AtomicCover::FrozenFrame
+                                        : AtomicCover::None);
 
   if (resetRequested) {
     graphGeometry_->retireCurrentStorage();
@@ -3671,15 +3678,22 @@ bool ConversationView::runVisibilityPass() {
 }
 
 void ConversationView::beginAtomicMaterialization(bool fullCommit,
-                                                  bool preservePaintedFrame) {
+                                                  AtomicCover cover) {
   atomicMaterializationFullCommit_ =
       atomicMaterializationFullCommit_ || fullCommit;
   if (bulkMaterializationUpdatesSuppressed_ || !viewport())
     return;
   atomicMaterializationAnchor_ = captureAnchor();
-  if (preservePaintedFrame && viewport()->isVisible()) {
+  if (cover != AtomicCover::None && viewport()->isVisible()) {
     atomicTransitionOverlay_->setGeometry(viewport()->geometry());
-    atomicTransitionOverlay_->setPixmap(viewport()->grab());
+    if (cover == AtomicCover::FrozenFrame) {
+      atomicTransitionOverlay_->setText({});
+      atomicTransitionOverlay_->setPixmap(viewport()->grab());
+    } else {
+      atomicTransitionOverlay_->setPixmap(QPixmap{});
+      atomicTransitionOverlay_->setText(
+          QStringLiteral("Loading conversation…"));
+    }
     atomicTransitionOverlay_->show();
     atomicTransitionOverlay_->raise();
     atomicTransitionOverlay_->repaint();

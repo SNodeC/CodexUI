@@ -102,6 +102,8 @@ private:
     int absoluteValue = 0;
   };
 
+  enum class AtomicCover { None, Loading, FrozenFrame };
+
   struct ThreadScrollState {
     Mode mode = Mode::Following;
     Anchor anchor;
@@ -142,8 +144,8 @@ private:
   void resetGraphVisibilityScan();
   [[nodiscard]] bool runVisibilityPass();
   [[nodiscard]] bool runGraphVisibilityPass();
-  void beginAtomicMaterialization(bool fullCommit,
-                                  bool preservePaintedFrame = false);
+  void beginAtomicMaterialization(
+      bool fullCommit, AtomicCover cover = AtomicCover::None);
   void finishBulkMaterializationIfReady();
   void positionContent();
   void handleUserScrollValue(int value);
