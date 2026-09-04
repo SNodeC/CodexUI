@@ -897,6 +897,13 @@ void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
           "the visible existing card renders directly from the prompt node");
   middle::ConversationCard *card =
       localPromptCard(shell, trimmed.toStdString());
+  QTimer *pendingAnimation =
+      card ? card->findChild<QTimer *>(QStringLiteral("pendingAnimationTimer"))
+           : nullptr;
+  require(card && card->property("pendingFeedbackVisible").toBool() &&
+              pendingAnimation && pendingAnimation->isActive(),
+          "the optimistically inserted Turn/You card starts its pending "
+          "animation immediately");
 
   editor->setPlainText(QStringLiteral("unsent editor draft"));
   static_cast<void>(worker.apply({DecodedMessageKind::ClientResult,
@@ -946,6 +953,28 @@ void inactiveThreadNeverReactivatesAStaleTurn(Configuration &configuration) {
   require(stopButton && spinUntil([&] { return stopButton->isVisible(); }),
           "the maintained active-turn relation exposes the existing Stop "
           "control");
+
+  NodeRef selectedThread;
+  {
+    auto read = FrontendSessionTestPeer::graph(session).tryRead();
+    selectedThread =
+        read ? read->find({NodeKind::Thread, "inactive-thread"}) : NodeRef{};
+  }
+  static_cast<void>(worker.threadHydration(selectedThread, "loading"));
+  auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
+      QStringLiteral("upcomingPromptEditor"));
+  auto *send =
+      shell.findChild<QPushButton *>(QStringLiteral("composerSendButton"));
+  if (editor)
+    editor->setPlainText(QStringLiteral("steer while history is loading"));
+  require(spinUntil([&] {
+            return send && send->text() == QStringLiteral("Steer") &&
+                   send->isEnabled();
+          }),
+          "a controller can steer a known active turn with non-empty text "
+          "while unrelated history hydration is still loading");
+  if (editor)
+    editor->clear();
 
   static_cast<void>(worker.apply(
       {DecodedMessageKind::ServerNotification,
@@ -1368,10 +1397,19 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
   static_cast<void>(
       worker.completePrompt(localPrompt, true, {}, "created-turn"));
   spin(60);
+  middle::ConversationCard *acceptedCard =
+      localPromptCard(shell, promptText.toStdString());
+  QTimer *acceptedAnimation = acceptedCard
+                                  ? acceptedCard->findChild<QTimer *>(
+                                        QStringLiteral("pendingAnimationTimer"))
+                                  : nullptr;
   require(threadItem(list, "created-thread") == stableDraft && threadPane &&
-              !threadPane->isOptimisticThread("created-thread"),
+              !threadPane->isOptimisticThread("created-thread") &&
+              acceptedCard &&
+              !acceptedCard->property("pendingFeedbackVisible").toBool() &&
+              acceptedAnimation && !acceptedAnimation->isActive(),
           "the exact prompt result confirms the canonical row without "
-          "replacing its widget item");
+          "replacing its widget item and stops optimistic feedback");
 }
 
 void emptyOptimisticDraftIsAbandonedOnThreadSelection(

@@ -28,6 +28,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QShowEvent>
+#include <QSignalBlocker>
 #include <QStyle>
 #include <QTextCursor>
 #include <QTextDocument>
@@ -758,13 +759,38 @@ ContentSizedTextView::ContentSizedTextView(int maximumContentHeight,
   setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
   setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   document()->setDocumentMargin(CommandTextPadding);
+  connect(verticalScrollBar(), &QScrollBar::sliderPressed, this,
+          [this] { pinScrollToStart_ = false; });
+  connect(verticalScrollBar(), &QScrollBar::actionTriggered, this,
+          [this] { pinScrollToStart_ = false; });
+  connect(verticalScrollBar(), &QScrollBar::valueChanged, this,
+          [this](int value) {
+            QScrollBar *bar = verticalScrollBar();
+            if (!pinScrollToStart_ || value == bar->minimum())
+              return;
+            const QSignalBlocker blocker(bar);
+            bar->setValue(bar->minimum());
+          });
 }
 
 bool ContentSizedTextView::setContent(const QString &content) {
   if (toPlainText() == content)
     return false;
+  QScrollBar *bar = verticalScrollBar();
+  const bool hadUserScrollRange = bar->maximum() > bar->minimum();
+  const int previousScrollValue = bar->value();
+  pinScrollToStart_ = !hadUserScrollRange;
   setPlainText(content);
+  if (hadUserScrollRange)
+    bar->setValue(previousScrollValue);
+  else {
+    QTextCursor cursor(document());
+    cursor.movePosition(QTextCursor::Start);
+    setTextCursor(cursor);
+  }
   measureAtCurrentWidth(true);
+  if (!hadUserScrollRange)
+    bar->setValue(bar->minimum());
   return true;
 }
 
@@ -819,6 +845,7 @@ QSize ContentSizedTextView::minimumSizeHint() const {
 }
 
 void ContentSizedTextView::wheelEvent(QWheelEvent *event) {
+  pinScrollToStart_ = false;
   QScrollBar *bar = verticalScrollBar();
   const int delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
                                                   : event->angleDelta().y();
@@ -1123,6 +1150,8 @@ public:
   }
 
   void setNestedConversationCard(bool nested) {
+    if (owner->property("nestedConversationCard").toBool() == nested)
+      return;
     owner->setProperty("nestedConversationCard", nested);
     if (current.kind == CardKind::UserMessage ||
         current.kind == CardKind::LocalPrompt) {
@@ -1153,6 +1182,43 @@ public:
   }
 
   void setNestedItems(const std::vector<QWidget *> &items) {
+    std::vector<QWidget *> currentItems;
+    currentItems.reserve(static_cast<std::size_t>(nestedLayout->count()));
+    for (int index = 0; index < nestedLayout->count(); ++index)
+      if (QWidget *item = nestedLayout->itemAt(index)->widget())
+        currentItems.push_back(item);
+
+    const bool unchanged = currentItems == items;
+    const bool appendOnly =
+        currentItems.size() <= items.size() &&
+        std::equal(currentItems.begin(), currentItems.end(), items.begin());
+    if (unchanged) {
+      const bool visible = std::ranges::any_of(
+          items, [](const QWidget *item) { return item && !item->isHidden(); });
+      if (hasVisibleNestedCards != visible) {
+        hasVisibleNestedCards = visible;
+        refreshFoldPresentation();
+      }
+      return;
+    }
+    if (appendOnly) {
+      for (std::size_t index = currentItems.size(); index < items.size();
+           ++index) {
+        QWidget *item = items[index];
+        if (!item)
+          continue;
+        const bool explicitlyHidden = item->isHidden();
+        nestedLayout->addWidget(item);
+        item->setVisible(!explicitlyHidden);
+        if (auto *card = dynamic_cast<ConversationCard *>(item))
+          card->impl_->setNestedConversationCard(true);
+      }
+      hasVisibleNestedCards = std::ranges::any_of(
+          items, [](const QWidget *item) { return item && !item->isHidden(); });
+      refreshFoldPresentation();
+      return;
+    }
+
     const std::unordered_set<QWidget *> retained(items.begin(), items.end());
     for (int index = nestedLayout->count() - 1; index >= 0; --index) {
       QWidget *item = nestedLayout->itemAt(index)->widget();

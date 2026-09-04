@@ -2069,9 +2069,9 @@ void ShellWidget::Impl::renderStatus(const ShellChromeValues &status) {
     workspaceBreadcrumb->setText(displayedWorkspace);
 
   middleRegion->composer().setActiveTurn(status.activeTurn);
-  middleRegion->composer().setCanSubmit(status.canControl &&
-                                        status.threadAdmissionReady &&
-                                        (boundGraphThread || newThreadDraft));
+  middleRegion->composer().setCanSubmit(
+      status.canControl && (boundGraphThread || newThreadDraft) &&
+      (status.activeTurn || status.threadAdmissionReady));
   middleRegion->composer().setSettingsEnabled(
       status.canControl && status.threadAdmissionReady &&
       (boundGraphThread || newThreadDraft) && !status.activeTurn);

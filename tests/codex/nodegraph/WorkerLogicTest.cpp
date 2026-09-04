@@ -49,6 +49,13 @@ bool unsignedFieldEquals(const std::shared_ptr<const NodeState> &state,
   return number && *number == expected;
 }
 
+bool boolFieldEquals(const std::shared_ptr<const NodeState> &state,
+                     std::string_view key, bool expected) {
+  const Value *value = field(state, key);
+  const bool *boolean = value ? value->asBool() : nullptr;
+  return boolean && *boolean == expected;
+}
+
 bool objectStringFieldEquals(const std::shared_ptr<const NodeState> &state,
                              std::string_view key, std::string_view member,
                              std::string_view expected) {
@@ -817,6 +824,7 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
                                         "(file:///tmp/report%20%23%3F.txt)") &&
             dispatch && dispatch->asString() &&
             *dispatch->asString() == "dispatching" &&
+            boolFieldEquals(state, "showPendingAnimation", true) &&
             read->related(runtime, RelationKind::PendingPrompt) ==
                 std::vector<NodeRef>{firstPrompt} &&
             read->related(thread, RelationKind::PendingPrompt) ==
@@ -895,7 +903,9 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
                 std::vector<NodeRef>{authoritative} &&
             read->state(firstPrompt)->status == NodeStatus::Running &&
             stringFieldEquals(read->state(firstPrompt), "dispatchState",
-                              "awaitingMaterialization"),
+                              "awaitingMaterialization") &&
+            boolFieldEquals(read->state(firstPrompt),
+                            "showPendingAnimation", false),
         "matching authoritative clientId directly relates the user item "
         "to its acknowledged local visual identity and transfers canonical "
         "turn-root ownership without replacing the exact request-result "

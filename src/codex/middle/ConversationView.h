@@ -182,7 +182,7 @@ private:
   int visibilityScanContentHeight_ = -1;
   std::optional<std::pair<std::size_t, std::size_t>>
       immediateVisibilityStart_;
-  nodegraph::NodeRef immediateMaterializationNode_;
+  std::vector<nodegraph::NodeRef> immediateMaterializationNodes_;
   std::string threadId_;
   std::unordered_map<std::string, ThreadScrollState> threadStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>
@@ -207,6 +207,8 @@ private:
   bool retiredGeometryCleanupScheduled_ = false;
   bool bulkMaterializationUpdatesSuppressed_ = false;
   bool atomicMaterializationFullCommit_ = false;
+  bool graphViewportReconciliationPending_ = false;
+  std::optional<Anchor> atomicMaterializationAnchor_;
   std::vector<TurnSectionWidget *> atomicMaterializationSections_;
   std::size_t graphPassCardOperations_ = 0;
   std::uint64_t graphBindingEpoch_ = 0;

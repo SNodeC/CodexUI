@@ -2669,7 +2669,13 @@ bool testNestedCommandScrollOwnership() {
     static_cast<void>(write.finish());
   }
   region.conversation().bindGraph(graph, thread);
-  spin(30);
+  for (int pass = 0;
+       pass < 256 &&
+       region.conversation()
+           .property("bulkMaterializationUpdatesSuppressed")
+           .toBool();
+       ++pass)
+    spin(1);
 
   CommandOutputView *commandOutput = nullptr;
   ContentSizedTextView *commandText = nullptr;
@@ -2693,6 +2699,9 @@ bool testNestedCommandScrollOwnership() {
     QScrollBar *inner = view->verticalScrollBar();
     QScrollBar *outer = region.conversation().verticalScrollBar();
 
+    // Model the first actual user gesture. A newly scrollable command starts
+    // pinned to its beginning until an explicit scrollbar action owns it.
+    inner->triggerAction(QAbstractSlider::SliderSingleStepAdd);
     inner->setValue(inner->maximum() / 2);
     outer->setValue(outer->maximum());
     spin();

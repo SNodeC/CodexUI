@@ -40,6 +40,7 @@ protected:
 
 private:
   int preferredHeight_ = 0;
+  bool pinScrollToStart_ = false;
   bool wheelGestureActive_ = false;
   bool wheelGestureDecided_ = false;
   bool wheelGestureOwned_ = false;

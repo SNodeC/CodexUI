@@ -731,6 +731,7 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
                                                pending.attachments))},
           {"attachments", attachmentSummaries(pending.attachments)},
           {"dispatchState", Value(invalidTarget ? "failed" : "queued")},
+          {"showPendingAnimation", Value(!invalidTarget)},
           {"startsTurn", Value(startsTurn)},
           {"createsThread", Value(pending.createsThread)},
           {"threadId", Value(pending.thread->id().canonical)}};
@@ -1115,6 +1116,7 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
   } else if (accepted) {
     write.setField(localPrompt, "dispatchState",
                    Value("awaitingMaterialization"));
+    write.setField(localPrompt, "showPendingAnimation", Value(false));
     write.eraseField(localPrompt, "error");
     write.eraseField(localPrompt, "requiresExplicitRecovery");
     write.setStatus(localPrompt, NodeStatus::Running);
@@ -1183,6 +1185,7 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
     const std::string failure =
         error.empty() ? "Prompt submission failed" : std::move(error);
     write.setField(localPrompt, "dispatchState", Value("failed"));
+    write.setField(localPrompt, "showPendingAnimation", Value(false));
     write.setField(localPrompt, "error", Value(failure));
     write.setField(localPrompt, "requiresExplicitRecovery", Value(true));
     write.setStatus(localPrompt, NodeStatus::Failed);
