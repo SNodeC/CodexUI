@@ -1282,7 +1282,8 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
   boundGraphThread = std::move(selectedThread);
   graphPanesBound = true;
   const nodegraph::NodeGraph &graph = session.nodeGraph();
-  middleRegion->threads().refresh(graph, boundGraphThread);
+  if (auto threads = uiAdapter.threads(boundGraphThread))
+    middleRegion->threads().refresh(*threads);
   if (boundGraphThread) {
     if (auto snapshot = uiAdapter.conversation(
             boundGraphThread, std::numeric_limits<std::size_t>::max(),
@@ -1326,7 +1327,12 @@ void ShellWidget::Impl::handleGraphChanged(
     ++threadPaneRoutes;
     owner->setProperty("threadPaneRoutes",
                        static_cast<qulonglong>(threadPaneRoutes));
-    middleRegion->threads().graphChanged(change);
+    if (auto threads = uiAdapter.threads(boundGraphThread))
+      middleRegion->threads().refresh(*threads);
+    else
+      middleRegion->threads().detachRemovedNodes(change.removed);
+  } else {
+    middleRegion->threads().detachRemovedNodes(change.removed);
   }
   if (conversationAffected(change, session.nodeGraph(), boundGraphThread)) {
     ++conversationRoutes;

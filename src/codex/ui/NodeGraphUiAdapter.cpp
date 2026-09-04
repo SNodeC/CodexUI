@@ -640,6 +640,126 @@ NodeGraphUiAdapter::NodeGraphUiAdapter(
     const nodegraph::NodeGraph &graph) noexcept
     : graph_(&graph) {}
 
+std::optional<ThreadListSnapshot>
+NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread) const {
+  if (!graph_)
+    return std::nullopt;
+  auto read = graph_->tryRead();
+  if (!read)
+    return std::nullopt;
+
+  ThreadListSnapshot result;
+  if (selectedThread && read->contains(selectedThread) &&
+      !read->removed(selectedThread))
+    result.selectedThreadId = selectedThread->id().canonical;
+
+  const nodegraph::NodeRef connection =
+      read->find({nodegraph::NodeKind::Connection, "connection"});
+  if (connection) {
+    const auto state = read->state(connection);
+    if (state) {
+      const std::string provider =
+          graphString(graphField(*state, "providerState"));
+      result.providerReady = state->status == nodegraph::NodeStatus::Connected ||
+                             provider == "ready" || provider == "connected";
+      result.canControl =
+          graphString(graphField(*state, "role")) == "controller";
+    }
+  }
+
+  std::vector<nodegraph::NodeRef> allThreads;
+  std::unordered_set<const nodegraph::Node *> childThreads;
+  for (const nodegraph::NodeRef &node : read->orderedNodes()) {
+    if (!node || node->id().kind != nodegraph::NodeKind::Thread ||
+        read->removed(node))
+      continue;
+    allThreads.push_back(node);
+    for (const nodegraph::RelationKind kind :
+         {nodegraph::RelationKind::StructuralChildThread,
+          nodegraph::RelationKind::AgentChildThread,
+          nodegraph::RelationKind::ForkChildThread})
+      for (const nodegraph::NodeRef &child : read->related(node, kind))
+        if (child && read->contains(child) && !read->removed(child) &&
+            child->id().kind == nodegraph::NodeKind::Thread)
+          childThreads.insert(child.get());
+  }
+
+  const auto timestamp = [](const nodegraph::NodeState &state,
+                            std::string_view field) {
+    return graphInteger(graphField(state, field));
+  };
+  std::unordered_set<const nodegraph::Node *> emitted;
+  const auto buildRow = [&](const auto &self,
+                            const nodegraph::NodeRef &node) -> ThreadListRow {
+    ThreadListRow row;
+    if (!node || !read->contains(node) || read->removed(node) ||
+        !emitted.insert(node.get()).second)
+      return row;
+    const auto state = read->state(node);
+    if (!state)
+      return row;
+    row.id = node->id().canonical;
+    row.target = node;
+    row.title = graphString(graphField(*state, "name"));
+    if (row.title.empty())
+      row.title = graphString(graphField(*state, "preview"));
+    if (row.title.empty())
+      row.title = row.id.substr(0, std::min<std::size_t>(12, row.id.size()));
+    row.cwd = graphString(graphField(*state, "cwd"));
+    row.status = graphStatus(*state);
+    row.createdAt = timestamp(*state, "createdAt");
+    row.updatedAt = timestamp(*state, "updatedAt");
+    row.recencyAt = timestamp(*state, "recencyAt");
+    row.lastActivityAt = timestamp(*state, "localPromptActivityAt");
+    if (!row.lastActivityAt)
+      row.lastActivityAt = row.updatedAt;
+    row.pending = graphSize(graphField(*state, "pendingInteractionCount"))
+                      .value_or(0);
+    row.archived = graphBool(graphField(*state, "archived"));
+    std::unordered_set<const nodegraph::Node *> localChildren;
+    for (const nodegraph::RelationKind kind :
+         {nodegraph::RelationKind::StructuralChildThread,
+          nodegraph::RelationKind::AgentChildThread,
+          nodegraph::RelationKind::ForkChildThread}) {
+      for (const nodegraph::NodeRef &child : read->related(node, kind)) {
+        if (!child || child->id().kind != nodegraph::NodeKind::Thread ||
+            !localChildren.insert(child.get()).second)
+          continue;
+        ThreadListRow projected = self(self, child);
+        if (!projected.id.empty())
+          row.children.push_back(std::move(projected));
+      }
+    }
+    return row;
+  };
+
+  std::vector<nodegraph::NodeRef> roots;
+  const nodegraph::NodeRef runtime =
+      read->find({nodegraph::NodeKind::Runtime, "runtime"});
+  if (runtime)
+    roots = read->related(runtime, nodegraph::RelationKind::RootThread);
+  for (const nodegraph::NodeRef &thread : allThreads)
+    if (!childThreads.contains(thread.get()) &&
+        std::ranges::find(roots, thread) == roots.end())
+      roots.push_back(thread);
+  for (const nodegraph::NodeRef &root : roots) {
+    ThreadListRow row = buildRow(buildRow, root);
+    if (!row.id.empty())
+      result.roots.push_back(std::move(row));
+  }
+  // Malformed or partially paged ownership must not make a canonical thread
+  // disappear. Keep any still-unreachable thread as a root until its owner is
+  // available.
+  for (const nodegraph::NodeRef &thread : allThreads) {
+    if (emitted.contains(thread.get()))
+      continue;
+    ThreadListRow row = buildRow(buildRow, thread);
+    if (!row.id.empty())
+      result.roots.push_back(std::move(row));
+  }
+  return result;
+}
+
 std::optional<VisibleCardData>
 NodeGraphUiAdapter::card(const nodegraph::NodeRef &thread,
                          const nodegraph::NodeRef &item,

@@ -146,13 +146,55 @@ bool limitsHistoryButPinsTheOwningPrompt() {
                  "pinned root does not own the turn");
 }
 
+bool preservesThreadRootsAndExactChildTargets() {
+  nodegraph::NodeGraph graph;
+  NodeRef runtime;
+  NodeRef root;
+  NodeRef child;
+  NodeRef orphan;
+  {
+    auto write = graph.write();
+    runtime = write.upsert({NodeKind::Runtime, "runtime"});
+    NodeState rootState;
+    rootState.fields.emplace("name", "Root thread");
+    root = write.upsert({NodeKind::Thread, "root"}, std::move(rootState));
+    NodeState childState;
+    childState.fields.emplace("name", "Child agent");
+    child = write.upsert({NodeKind::Thread, "child"}, std::move(childState));
+    NodeState orphanState;
+    orphanState.fields.emplace("name", "Paged orphan");
+    orphan =
+        write.upsert({NodeKind::Thread, "orphan"}, std::move(orphanState));
+    write.relate(runtime, nodegraph::RelationKind::RootThread, root);
+    write.relate(root, nodegraph::RelationKind::AgentChildThread, child);
+    static_cast<void>(write.finish());
+  }
+
+  NodeGraphUiAdapter adapter(graph);
+  const auto result = adapter.threads(child);
+  return require(result.has_value(), "thread projection unavailable") &&
+         require(result->selectedThreadId == "child",
+                 "selected child identity was lost") &&
+         require(result->roots.size() == 2,
+                 "root or unreachable paged thread disappeared") &&
+         require(result->roots[0].target == root,
+                 "canonical root NodeRef changed") &&
+         require(result->roots[0].children.size() == 1,
+                 "child hierarchy was flattened") &&
+         require(result->roots[0].children[0].target == child,
+                 "child action target was reconstructed") &&
+         require(result->roots[1].target == orphan,
+                 "unreachable canonical thread was hidden");
+}
+
 } // namespace
 } // namespace codexui::codex::ui
 
 int main() {
   using namespace codexui::codex::ui;
   if (!projectsCanonicalTurnStructureAndRoot() ||
-      !limitsHistoryButPinsTheOwningPrompt())
+      !limitsHistoryButPinsTheOwningPrompt() ||
+      !preservesThreadRootsAndExactChildTargets())
     return EXIT_FAILURE;
   std::cout << "NodeGraph UI adapter tests passed\n";
   return EXIT_SUCCESS;

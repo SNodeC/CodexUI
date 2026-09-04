@@ -5,6 +5,7 @@
 
 #include "codex/middle/MiddleTypes.h"
 #include "codex/nodegraph/NodeGraph.h"
+#include "codex/ui/UiViewState.h"
 
 #include <cstddef>
 #include <optional>
@@ -31,6 +32,9 @@ public:
   [[nodiscard]] std::optional<middle::VisibleCardData>
   card(const nodegraph::NodeRef &thread, const nodegraph::NodeRef &item,
        ConversationOptions options) const;
+
+  [[nodiscard]] std::optional<ThreadListSnapshot>
+  threads(const nodegraph::NodeRef &selectedThread) const;
 
 private:
   const nodegraph::NodeGraph *graph_;

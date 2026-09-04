@@ -101,6 +101,7 @@ set(
     src/codex/middle/ThreadPane.h
     src/codex/ui/NodeGraphUiAdapter.cpp
     src/codex/ui/NodeGraphUiAdapter.h
+    src/codex/ui/UiViewState.h
 )
 
 qt_add_executable(
@@ -214,6 +215,38 @@ if(BUILD_TESTING)
     set_tests_properties(
         codexui-nodegraph-conversation-ui
         PROPERTIES TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+
+    qt_add_executable(
+        codexui-nodegraph-thread-pane-ui-test
+        tests/codex/NodeGraphThreadPaneUiTest.cpp
+        src/codex/ui/NodeGraphUiAdapter.cpp
+        src/codex/ui/NodeGraphUiAdapter.h
+        src/codex/ui/UiViewState.h
+        src/codex/middle/ThreadPane.cpp
+        src/codex/middle/ThreadPane.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
+    )
+    target_compile_features(
+        codexui-nodegraph-thread-pane-ui-test PRIVATE cxx_std_20
+    )
+    target_include_directories(
+        codexui-nodegraph-thread-pane-ui-test PRIVATE src
+    )
+    target_link_libraries(
+        codexui-nodegraph-thread-pane-ui-test
+        PRIVATE codexui-nodegraph Qt6::Widgets
+    )
+    add_test(
+        NAME codexui-nodegraph-thread-pane-ui
+        COMMAND codexui-nodegraph-thread-pane-ui-test
+    )
+    set_tests_properties(
+        codexui-nodegraph-thread-pane-ui
+        PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 
     add_executable(

@@ -3,7 +3,6 @@
 #include "codex/middle/ThreadPane.h"
 
 #include "codex/UiStatus.h"
-#include "codex/ui/QtNodeAttachment.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QAbstractItemView>
@@ -21,21 +20,13 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
-#include <QResizeEvent>
-#include <QShowEvent>
 #include <QStyledItemDelegate>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
-#include <array>
-#include <deque>
-#include <limits>
-#include <map>
-#include <memory>
-#include <set>
-#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace codexui::codex::middle {
@@ -51,17 +42,11 @@ constexpr int OptimisticFailedRole = Qt::UserRole + 7;
 constexpr int ChildIndent = 16;
 constexpr int DisclosureWidth = 16;
 constexpr int DisclosureExtent = 24;
-constexpr unsigned MaximumReadRetryExponent = 4;
-
-int readRetryDelay(unsigned attempt) {
-  return 1 << std::min(attempt, MaximumReadRetryExponent);
-}
 
 class ThreadListWidget final : public QListWidget {
 public:
-  std::function<void(QListWidgetItem *)> toggleExpansion;
+  std::function<void(const std::string &)> toggleExpansion;
   std::function<void(int)> navigateHierarchy;
-  std::function<void()> viewportChanged;
 
 protected:
   QItemSelectionModel::SelectionFlags
@@ -92,7 +77,7 @@ protected:
               : QRect{};
       if (indicatorRect.contains(event->position().toPoint())) {
         if (toggleExpansion)
-          toggleExpansion(item);
+          toggleExpansion(item->data(Qt::UserRole).toString().toStdString());
         event->accept();
         return;
       }
@@ -108,24 +93,6 @@ protected:
       return;
     }
     QListWidget::keyPressEvent(event);
-  }
-
-  void resizeEvent(QResizeEvent *event) override {
-    QListWidget::resizeEvent(event);
-    if (viewportChanged)
-      viewportChanged();
-  }
-
-  void showEvent(QShowEvent *event) override {
-    QListWidget::showEvent(event);
-    if (viewportChanged)
-      viewportChanged();
-  }
-
-  void scrollContentsBy(int dx, int dy) override {
-    QListWidget::scrollContentsBy(dx, dy);
-    if (viewportChanged)
-      viewportChanged();
   }
 };
 
@@ -308,268 +275,49 @@ QString activityText(const std::optional<std::int64_t> &timestamp) {
              : activity.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
 }
 
-const nodegraph::Value *graphField(const nodegraph::NodeState &state,
-                                   std::string_view name) {
-  const auto found = state.fields.find(name);
-  return found == state.fields.end() ? nullptr : &found->second;
+std::optional<std::int64_t> timestampFor(const ui::ThreadListRow &thread,
+                                         ThreadPane::SortCriterion criterion) {
+  if (criterion == ThreadPane::SortCriterion::Created)
+    return thread.createdAt;
+  if (criterion == ThreadPane::SortCriterion::LastChanged)
+    return thread.updatedAt;
+  return thread.recencyAt;
 }
 
-std::string graphString(const nodegraph::Value *value) {
-  if (!value)
-    return {};
-  if (const std::string *string = value->asString())
-    return *string;
-  if (const auto *object = value->asObject()) {
-    const auto type = object->find("type");
-    if (type != object->end())
-      return graphString(&type->second);
+const ui::ThreadListRow *findThread(const ui::ThreadListRow &row,
+                                    std::string_view id) {
+  if (row.id == id)
+    return &row;
+  for (const ui::ThreadListRow &child : row.children) {
+    if (const ui::ThreadListRow *found = findThread(child, id))
+      return found;
   }
-  return {};
+  return nullptr;
 }
 
-std::optional<std::int64_t> graphTimestamp(const nodegraph::Value *value) {
-  if (!value)
-    return std::nullopt;
-  if (const std::int64_t *number = value->asInt64())
-    return *number;
-  if (const std::uint64_t *number = value->asUInt64()) {
-    if (*number <=
-        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
-      return static_cast<std::int64_t>(*number);
+const ui::ThreadListRow *findThread(
+    const std::vector<ui::ThreadListRow> &roots, std::string_view id) {
+  for (const ui::ThreadListRow &root : roots) {
+    if (const ui::ThreadListRow *found = findThread(root, id))
+      return found;
   }
-  if (const double *number = value->asDouble())
-    return static_cast<std::int64_t>(*number);
-  return std::nullopt;
+  return nullptr;
 }
 
-std::optional<std::size_t> graphCount(const nodegraph::Value *value) {
-  if (!value)
-    return std::nullopt;
-  if (const std::uint64_t *number = value->asUInt64()) {
-    return *number > std::numeric_limits<std::size_t>::max()
-               ? std::numeric_limits<std::size_t>::max()
-               : static_cast<std::size_t>(*number);
+bool expandAncestors(const ui::ThreadListRow &row, std::string_view id,
+                     std::unordered_set<std::string> &expanded) {
+  if (row.id == id)
+    return true;
+  for (const ui::ThreadListRow &child : row.children) {
+    if (expandAncestors(child, id, expanded)) {
+      expanded.insert(row.id);
+      return true;
+    }
   }
-  if (const std::int64_t *number = value->asInt64(); number && *number >= 0)
-    return static_cast<std::size_t>(*number);
-  return std::nullopt;
-}
-
-bool graphBool(const nodegraph::Value *value) {
-  const bool *boolean = value ? value->asBool() : nullptr;
-  return boolean && *boolean;
-}
-
-std::string graphStatus(const nodegraph::NodeState &state) {
-  if (std::string status = graphString(graphField(state, "status"));
-      !status.empty())
-    return status;
-  switch (state.status) {
-  case nodegraph::NodeStatus::Pending:
-    return "pending";
-  case nodegraph::NodeStatus::Running:
-    return "running";
-  case nodegraph::NodeStatus::Completed:
-    return "completed";
-  case nodegraph::NodeStatus::Failed:
-    return "failed";
-  case nodegraph::NodeStatus::Interrupted:
-    return "interrupted";
-  case nodegraph::NodeStatus::NotLoaded:
-    return "notLoaded";
-  case nodegraph::NodeStatus::Connected:
-    return "connected";
-  case nodegraph::NodeStatus::Disconnected:
-    return "disconnected";
-  case nodegraph::NodeStatus::Unknown:
-    return {};
-  }
-  return {};
+  return false;
 }
 
 } // namespace
-
-struct ThreadPane::GraphRowRender final {
-  std::uint64_t revision = 0;
-  std::string id;
-  std::string title;
-  std::string cwd;
-  std::string status;
-  std::optional<std::int64_t> lastActivityAt;
-  std::string parentTitle;
-  std::size_t pending = 0;
-
-  [[nodiscard]] bool samePresentation(const GraphRowRender &other) const {
-    return id == other.id && title == other.title && cwd == other.cwd &&
-           status == other.status && lastActivityAt == other.lastActivityAt &&
-           parentTitle == other.parentTitle && pending == other.pending;
-  }
-};
-
-struct ThreadPane::GraphThreadItem final : public QListWidgetItem {
-  ~GraphThreadItem() override { detachNode(); }
-
-  void setNode(nodegraph::NodeRef next) {
-    if (node == next)
-      return;
-    detachNode();
-    node = std::move(next);
-    if (!node)
-      return;
-    attachment = std::make_unique<ui::QtNodeAttachment>();
-    attachment->binding = this;
-    void *attached = node->uiAttachment();
-    Q_ASSERT(attached == nullptr);
-    if (!attached)
-      node->setUiAttachment(attachment.get());
-    else
-      attachment.reset();
-  }
-
-  void detachNode() {
-    if (node && attachment && node->uiAttachment() == attachment.get())
-      node->setUiAttachment(nullptr);
-    attachment.reset();
-    node.reset();
-    parent.reset();
-  }
-
-  nodegraph::NodeRef node;
-  nodegraph::NodeRef parent;
-  std::unique_ptr<ui::QtNodeAttachment> attachment;
-  std::string localId;
-  std::string localTitle;
-  std::string localCwd;
-  std::size_t depth = 0;
-  std::uint64_t renderedRevision = 0;
-  std::size_t renderedPending = 0;
-  std::optional<GraphRowRender> renderedPresentation;
-  bool hasChildren = false;
-  bool expanded = false;
-  bool optimistic = false;
-  bool optimisticFailed = false;
-};
-
-struct ThreadPane::GraphTopology final {
-  struct Row final {
-    nodegraph::NodeRef node;
-    nodegraph::NodeRef parent;
-    std::string localId;
-    std::string localTitle;
-    std::string localCwd;
-    std::size_t depth = 0;
-    bool hasChildren = false;
-    bool expanded = false;
-    bool optimistic = false;
-    bool optimisticFailed = false;
-    std::string previousLocalId;
-  };
-
-  struct Relation final {
-    nodegraph::NodeRef source;
-    nodegraph::RelationKind kind = nodegraph::RelationKind::RootThread;
-    std::uint64_t expectedStructureRevision = 0;
-    std::deque<nodegraph::NodeRef> expected;
-    std::size_t cursor = 0;
-    bool countChecked = false;
-  };
-
-  std::deque<Row> rows;
-  std::deque<Relation> relations;
-  std::string selectedId;
-  GraphThreadItem *selectedItem = nullptr;
-  std::uint64_t inputEpoch = 0;
-  std::uint64_t runtimeStructureRevision = 0;
-  std::uint64_t threadStructureRevision = 0;
-  std::size_t relationValidationCursor = 0;
-  std::size_t rowValidationCursor = 0;
-  std::size_t validatedCount = 0;
-  bool relationsMatch = true;
-  bool validated = false;
-};
-
-struct ThreadPane::GraphScan final {
-  struct ReadThread final {
-    nodegraph::NodeRef node;
-    nodegraph::NodeRef parent;
-    bool root = false;
-    std::deque<nodegraph::NodeRef> children;
-    std::string title;
-    std::optional<std::int64_t> createdAt;
-    std::optional<std::int64_t> updatedAt;
-    std::optional<std::int64_t> recencyAt;
-    std::optional<std::int64_t> localPromptActivityAt;
-  };
-
-  struct Visit final {
-    nodegraph::NodeRef node;
-    nodegraph::NodeRef parent;
-    bool root = false;
-  };
-
-  struct PendingThread final {
-    std::size_t position = 0;
-    std::size_t structuralCursor = 0;
-    std::size_t structuralCount = 0;
-    std::size_t agentCursor = 0;
-    std::size_t agentCount = 0;
-    std::size_t structuralValidation = 0;
-    std::size_t agentValidation = 0;
-    std::set<const nodegraph::Node *> children;
-  };
-
-  struct MergeHead final {
-    std::size_t current = 0;
-    std::size_t end = 0;
-  };
-
-  struct AppendFrame final {
-    nodegraph::NodeRef node;
-    nodegraph::NodeRef parent;
-    std::size_t depth = 0;
-    std::size_t childCursor = 0;
-    bool emitted = false;
-    bool expanded = false;
-  };
-
-  enum class Phase {
-    Roots,
-    Threads,
-    PruneExpanded,
-    ExpandSelection,
-    SortChunks,
-    MergeInitialize,
-    Merge,
-    OptimisticRows,
-    Rows,
-  };
-
-  std::uint64_t revision = 0;
-  nodegraph::NodeRef runtime;
-  std::size_t rootCount = 0;
-  std::size_t rootCursor = 0;
-  std::deque<nodegraph::NodeRef> roots;
-  std::deque<Visit> visits;
-  std::size_t visitCursor = 0;
-  std::optional<PendingThread> pendingThread;
-  std::deque<ReadThread> threads;
-  std::map<const nodegraph::Node *, std::size_t> positions;
-  std::map<std::string, std::size_t> idPositions;
-  std::set<const nodegraph::Node *>::iterator expandedCursor;
-  bool expandedCursorInitialized = false;
-  nodegraph::NodeRef selectedAncestor;
-  bool selectedIsPresent = false;
-  std::size_t sortCursor = 0;
-  std::size_t mergeInitCursor = 0;
-  std::deque<MergeHead> mergeHeap;
-  std::deque<nodegraph::NodeRef> sortedRoots;
-  std::size_t optimisticCursor = 0;
-  std::size_t appendRootCursor = 0;
-  std::deque<AppendFrame> appendStack;
-  std::set<const nodegraph::Node *> appended;
-  GraphTopology topology;
-  Phase phase = Phase::Roots;
-};
 
 ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   setObjectName(QStringLiteral("sidebar"));
@@ -662,15 +410,10 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
 
   list = new ThreadListWidget;
   auto *threadList = static_cast<ThreadListWidget *>(list);
-  threadList->toggleExpansion = [this](QListWidgetItem *item) {
-    if (GraphThreadItem *thread = graphItem(item))
-      toggleExpanded(*thread);
+  threadList->toggleExpansion = [this](const std::string &id) {
+    toggleExpanded(id);
   };
   threadList->navigateHierarchy = [this](int key) { navigateHierarchy(key); };
-  threadList->viewportChanged = [this] {
-    if (graph)
-      scheduleVisibilityPass();
-  };
   list->setObjectName(QStringLiteral("threadList"));
   list->setItemDelegate(new ThreadItemDelegate(list));
   optimisticAnimation = new QTimer(list);
@@ -697,24 +440,42 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
       "QListWidget#threadList::item:selected{background:#e5eeff;"
       "border-color:#bfd3f9;color:#1d2633;font-weight:600;}"));
   connect(list, &QListWidget::itemSelectionChanged, this, [this] {
-    const std::string id = visiblySelectedThreadId();
-    if (id.empty())
-      return;
-    if (nodegraph::NodeRef node = visiblySelectedThread();
-        node && nodeActions.select)
-      nodeActions.select(node);
+    if (nodeActions.select)
+      if (nodegraph::NodeRef target = visiblySelectedThread())
+        nodeActions.select(target);
   });
   connect(list, &QListWidget::customContextMenuRequested, this,
           [this](const QPoint &position) { showContextMenu(position); });
   layout->addWidget(list);
 }
 
-ThreadPane::~ThreadPane() { leaveGraph(); }
-
 void ThreadPane::setControls(Controls next) { controls = std::move(next); }
 
 void ThreadPane::setNodeActions(NodeActions next) {
   nodeActions = std::move(next);
+}
+
+void ThreadPane::detachRemovedNodes(
+    std::span<const nodegraph::NodeRef> removed) {
+  if (!currentSnapshot || removed.empty())
+    return;
+  const auto isRemoved = [&removed](const ui::ThreadListRow &row) {
+    return row.target &&
+           std::ranges::find(removed, row.target) != removed.end();
+  };
+  const auto prune = [&](const auto &self,
+                         std::vector<ui::ThreadListRow> &rows) -> void {
+    for (ui::ThreadListRow &row : rows)
+      self(self, row.children);
+    std::erase_if(rows, isRemoved);
+  };
+  ui::ThreadListSnapshot next = *currentSnapshot;
+  prune(prune, next.roots);
+  if (std::ranges::any_of(removed, [&next](const nodegraph::NodeRef &node) {
+        return node && node->id().canonical == next.selectedThreadId;
+      }))
+    next.selectedThreadId.clear();
+  refresh(next);
 }
 
 void ThreadPane::beginOptimisticThread(std::string id, std::string title,
@@ -725,10 +486,8 @@ void ThreadPane::beginOptimisticThread(std::string id, std::string title,
   optimisticThreads.insert(
       optimisticThreads.begin(),
       OptimisticThread{std::move(id), std::move(title), std::move(cwd), false});
-  selectedOptimisticThreadId = optimisticThreads.front().id;
   optimisticAnimation->start();
-  if (graph)
-    scheduleGraphRefresh();
+  visibleSnapshot.reset();
 }
 
 void ThreadPane::promoteOptimisticThread(const std::string &draftId,
@@ -738,12 +497,13 @@ void ThreadPane::promoteOptimisticThread(const std::string &draftId,
   if (optimistic == optimisticThreads.end() || authoritativeId.empty() ||
       draftId == authoritativeId)
     return;
-  optimistic->previousId = draftId;
+  if (auto node = rows.extract(draftId); !node.empty()) {
+    node.key() = authoritativeId;
+    node.mapped()->setData(Qt::UserRole, text(authoritativeId));
+    rows.insert(std::move(node));
+  }
   optimistic->id = authoritativeId;
-  if (selectedOptimisticThreadId == draftId)
-    selectedOptimisticThreadId = authoritativeId;
-  if (graph)
-    scheduleGraphRefresh();
+  visibleSnapshot.reset();
 }
 
 void ThreadPane::confirmOptimisticThread(const std::string &threadId) {
@@ -756,8 +516,7 @@ void ThreadPane::confirmOptimisticThread(const std::string &threadId) {
           optimisticThreads,
           [](const OptimisticThread &thread) { return !thread.failed; }))
     optimisticAnimation->stop();
-  if (graph)
-    scheduleGraphRefresh();
+  visibleSnapshot.reset();
 }
 
 void ThreadPane::failOptimisticThread(const std::string &threadId) {
@@ -770,8 +529,7 @@ void ThreadPane::failOptimisticThread(const std::string &threadId) {
           optimisticThreads,
           [](const OptimisticThread &thread) { return !thread.failed; }))
     optimisticAnimation->stop();
-  if (graph)
-    scheduleGraphRefresh();
+  visibleSnapshot.reset();
 }
 
 bool ThreadPane::isOptimisticThread(const std::string &threadId) const {
@@ -786,8 +544,9 @@ void ThreadPane::setSortCriterion(SortCriterion criterion) {
     return;
   sortCriterion = criterion;
   updateSortButton();
-  if (graph)
-    scheduleGraphRefresh();
+  visibleSnapshot.reset();
+  if (currentSnapshot)
+    refresh(*currentSnapshot);
 }
 
 ThreadPane::SortCriterion ThreadPane::currentSortCriterion() const noexcept {
@@ -824,15 +583,69 @@ void ThreadPane::updateSortButton() {
                             : QStringLiteral("Recent")));
 }
 
-void ThreadPane::toggleExpanded(GraphThreadItem &thread) {
-  if (!thread.node)
+void ThreadPane::sortRootThreads(std::vector<ui::ThreadListRow> &rows) const {
+  QCollator collator(QLocale::system().language() == QLocale::C
+                         ? QLocale(QLocale::English)
+                         : QLocale::system());
+  collator.setCaseSensitivity(Qt::CaseInsensitive);
+  collator.setIgnorePunctuation(true);
+  collator.setNumericMode(true);
+  std::sort(rows.begin(), rows.end(),
+            [&](const ui::ThreadListRow &left,
+                const ui::ThreadListRow &right) {
+              if (sortCriterion == SortCriterion::Alphanumeric) {
+                const QString leftTitle = text(left.title).trimmed();
+                const QString rightTitle = text(right.title).trimmed();
+                const bool leftStartsWithNumber =
+                    !leftTitle.isEmpty() && leftTitle.front().isDigit();
+                const bool rightStartsWithNumber =
+                    !rightTitle.isEmpty() && rightTitle.front().isDigit();
+                if (leftStartsWithNumber != rightStartsWithNumber)
+                  return leftStartsWithNumber;
+                const int comparison = collator.compare(leftTitle, rightTitle);
+                if (comparison != 0)
+                  return comparison < 0;
+              } else {
+                const auto leftTimestamp = timestampFor(left, sortCriterion);
+                const auto rightTimestamp = timestampFor(right, sortCriterion);
+                if (leftTimestamp != rightTimestamp) {
+                  if (!leftTimestamp)
+                    return false;
+                  if (!rightTimestamp)
+                    return true;
+                  return *leftTimestamp > *rightTimestamp;
+                }
+              }
+              return left.id < right.id;
+            });
+}
+
+void ThreadPane::appendVisibleThread(
+    RenderedThreadList &snapshot, const ui::ThreadListRow &thread,
+    const std::string &parentId, std::size_t depth,
+    std::unordered_set<std::string> &visited) const {
+  if (!visited.insert(thread.id).second)
     return;
-  const nodegraph::Node *node = thread.node.get();
-  if (graphExpandedThreads.contains(node))
-    graphExpandedThreads.erase(node);
+  const bool hasChildren = !thread.children.empty();
+  const bool expanded = hasChildren && expandedThreads.contains(thread.id);
+  snapshot.rows.push_back(
+      {thread.id, thread.target, thread.title, thread.cwd, thread.status,
+       thread.lastActivityAt, parentId,
+       thread.pending, depth, hasChildren, expanded});
+  if (!expanded)
+    return;
+  for (const ui::ThreadListRow &child : thread.children)
+    appendVisibleThread(snapshot, child, thread.id, depth + 1, visited);
+}
+
+void ThreadPane::toggleExpanded(const std::string &threadId) {
+  if (expandedThreads.contains(threadId))
+    expandedThreads.erase(threadId);
   else
-    graphExpandedThreads.insert(node);
-  scheduleGraphRefresh();
+    expandedThreads.insert(threadId);
+  visibleSnapshot.reset();
+  if (currentSnapshot)
+    refresh(*currentSnapshot);
 }
 
 void ThreadPane::navigateHierarchy(int key) {
@@ -844,8 +657,7 @@ void ThreadPane::navigateHierarchy(int key) {
   const bool expanded = current->data(ExpandedRole).toBool();
   if (key == Qt::Key_Right && hasChildren) {
     if (!expanded) {
-      if (GraphThreadItem *binding = graphItem(current))
-        toggleExpanded(*binding);
+      toggleExpanded(id);
       return;
     }
     const int nextRow = list->row(current) + 1;
@@ -857,1309 +669,183 @@ void ThreadPane::navigateHierarchy(int key) {
   if (key != Qt::Key_Left)
     return;
   if (hasChildren && expanded) {
-    if (GraphThreadItem *binding = graphItem(current))
-      toggleExpanded(*binding);
+    toggleExpanded(id);
     return;
   }
   const QString parentId = current->data(ParentIdRole).toString();
   if (parentId.isEmpty())
     return;
-  GraphThreadItem *binding = graphItem(current);
-  if (binding && binding->parent) {
-    if (GraphThreadItem *parent = attachedGraphItem(binding->parent))
-      list->setCurrentItem(parent);
-  }
+  const auto parent = rows.find(parentId.toStdString());
+  if (parent != rows.end())
+    list->setCurrentItem(parent->second);
 }
 
-void ThreadPane::refresh(const nodegraph::NodeGraph &nextGraph,
-                         nodegraph::NodeRef selectedThread) {
-  if (graph != &nextGraph) {
-    leaveGraph();
-    list->clear();
-    graph = &nextGraph;
-  }
-  if (selectedGraphThread != selectedThread)
-    revealSelectedGraphThread = true;
-  selectedGraphThread = std::move(selectedThread);
-  if (selectedGraphThread)
-    selectedOptimisticThreadId.clear();
-  scheduleGraphRefresh();
-}
-
-void ThreadPane::graphChanged() {
-  if (graph)
-    scheduleGraphRefresh();
-}
-
-void ThreadPane::graphChanged(const nodegraph::GraphChanged &change) {
-  if (!graph)
+void ThreadPane::setContextHighlight(const std::string &threadId,
+                                     bool highlighted) {
+  const auto found = rows.find(threadId);
+  if (found == rows.end())
     return;
-  detachRemoved(change);
-  // All removal work above is complete before the FrontendSession handler can
-  // enqueue UiDetached. A reverse-interaction transaction only changes the
-  // pending relation/revision of its addressed thread, so visible badges can
-  // update without rebuilding the thread topology.
-  const auto hasKind = [&change](nodegraph::NodeKind kind,
-                                 bool removedOnly = false) {
-    const auto matches = [kind](const nodegraph::NodeRef &node) {
-      return node && node->id().kind == kind;
-    };
-    return (!removedOnly && std::ranges::any_of(change.affected, matches)) ||
-           std::ranges::any_of(change.removed, matches);
-  };
-  const bool interactionChanged = hasKind(nodegraph::NodeKind::Interaction);
-  const bool mustInvalidate = change.rescanRequired ||
-                              hasKind(nodegraph::NodeKind::Runtime, true) ||
-                              hasKind(nodegraph::NodeKind::Thread, true);
-  bool topologyInputChanged = mustInvalidate;
-  bool rowPresentationChanged = interactionChanged;
-  if (!topologyInputChanged) {
-    auto read = graph->tryRead();
-    if (read) {
-      const auto fieldChanged = [&read, &change](const nodegraph::NodeRef &node,
-                                                 std::string_view field) {
-        return read->fieldChangedRevision(node, field) == change.revision;
-      };
-      const auto activeSortFieldChanged = [this, &fieldChanged](
-                                              const nodegraph::NodeRef &node) {
-        if (sortCriterion == SortCriterion::Alphanumeric)
-          return fieldChanged(node, "name") || fieldChanged(node, "title");
-        if (sortCriterion == SortCriterion::Created)
-          return fieldChanged(node, "createdAt");
-        if (sortCriterion == SortCriterion::LastChanged)
-          return fieldChanged(node, "updatedAt") ||
-                 fieldChanged(node, "localPromptActivityAt");
-        return fieldChanged(node, "recencyAt") ||
-               fieldChanged(node, "localPromptActivityAt");
-      };
-      constexpr std::array<std::string_view, 11> RowFields{
-          "name",          "title",       "cwd",
-          "workspace",     "status",      "lastActivityAt",
-          "recencyAt",     "updatedAt",   "localActivityAt",
-          "localPromptActivityAt", "pendingInteractionCount"};
-      for (const nodegraph::NodeRef &node : change.affected) {
-        if (!node || (node->id().kind != nodegraph::NodeKind::Runtime &&
-                      node->id().kind != nodegraph::NodeKind::Thread))
-          continue;
-        if (!read->contains(node))
-          continue;
-        if (read->structureChangedRevision(node) == change.revision) {
-          topologyInputChanged = true;
-        }
-        if (node->id().kind == nodegraph::NodeKind::Thread) {
-          topologyInputChanged =
-              topologyInputChanged || activeSortFieldChanged(node);
-          rowPresentationChanged =
-              rowPresentationChanged ||
-              read->statusChangedRevision(node) == change.revision ||
-              std::ranges::any_of(RowFields, [&](std::string_view field) {
-                return fieldChanged(node, field);
-              });
-        }
-      }
-      read.reset();
-    }
-    // On contention, per-kind published structure stamps still reject an
-    // obsolete hierarchy without taking the lock. Unknown field-only changes
-    // merely request the coalesced follow-up below, so a busy writer cannot
-    // repeatedly invalidate an otherwise progressing scan.
-  }
-  if (topologyInputChanged)
-    ++topologyInputEpoch;
-  const bool topologyChanged = topologyInputChanged;
-  if (mustInvalidate) {
-    // Removed NodeRefs must never be attached again after this handler returns,
-    // and a coalesced rescan deliberately carries no precise invalidation set.
-    pendingGraphScan.reset();
-    pendingGraphTopology.reset();
-    topologyCursor = 0;
-    topologySearchCursor = -1;
-    graphRefreshAfterCurrent = false;
-    scheduleGraphRefresh();
-  } else if (topologyChanged) {
-    // Field and relation notifications may arrive continuously while a large
-    // hierarchy is being scanned or reconciled. Finish that bounded pass, then
-    // perform one coalesced refresh. This guarantees forward progress without
-    // treating a stale projection as canonical graph state.
-    if (pendingGraphScan || pendingGraphTopology || topologyPassScheduled)
-      graphRefreshAfterCurrent = true;
-    else
-      scheduleGraphRefresh();
-  } else if (rowPresentationChanged) {
-    scheduleVisibilityPass();
-  }
+  found->second->setData(ContextMenuRole, highlighted);
 }
 
-void ThreadPane::detachRemoved(const nodegraph::GraphChanged &change) {
-  if (change.removed.empty())
-    return;
-  std::vector<GraphThreadItem *> removedItems;
-  removedItems.reserve(change.removed.size());
-  for (const nodegraph::NodeRef &node : change.removed) {
-    if (!node || node->id().kind != nodegraph::NodeKind::Thread)
-      continue;
-    graphExpandedThreads.erase(node.get());
-    if (selectedGraphThread == node) {
-      selectedGraphThread.reset();
-      revealSelectedGraphThread = false;
-    }
-    if (GraphThreadItem *item = attachedGraphItem(node))
-      removedItems.emplace_back(item);
-  }
-
-  const bool signalsWereBlocked = list->blockSignals(true);
-  const bool updatesWereEnabled = list->updatesEnabled();
-  list->setUpdatesEnabled(false);
-  for (GraphThreadItem *item : removedItems) {
-    const int index = list->row(item);
-    if (index < 0)
-      continue;
-    if (contextThreadId == item->localId && contextMenu)
-      contextMenu->close();
-    const bool retainForPromotion =
-        item->optimistic &&
-        std::ranges::any_of(optimisticThreads, [item](const auto &optimistic) {
-          return optimistic.id == item->localId;
-        });
-    dematerialize(*item, false);
-    if (retainForPromotion) {
-      // thread/start atomically retires the local draft and publishes the
-      // canonical thread. Keep this Qt-owned row as a node-free optimistic
-      // placeholder until the scheduled topology pass rebinds it by the exact
-      // previous local id.
-      item->setNode({});
-      item->parent.reset();
-      continue;
-    }
-    static_cast<void>(list->takeItem(index));
-    delete item;
-  }
-  list->setUpdatesEnabled(updatesWereEnabled);
-  list->blockSignals(signalsWereBlocked);
-}
-
-void ThreadPane::leaveGraph() {
-  ++graphBindingEpoch;
-  ++contextMenuRetryToken;
-  graphRefreshScheduled = false;
-  graphRefreshAfterCurrent = false;
-  graphReadRetryAttempt = 0;
-  topologyReadRetryAttempt = 0;
-  visibilityReadRetryAttempt = 0;
-  pendingGraphScan.reset();
-  pendingGraphTopology.reset();
-  topologyCursor = 0;
-  topologySearchCursor = -1;
-  topologyPassScheduled = false;
-  visibilityPassScheduled = false;
-  visibilityFirst = -1;
-  visibilityLast = -1;
-  visibilityCursor = -1;
-  if (topologyCommitUpdatesSuppressed) {
-    topologyCommitUpdatesSuppressed = false;
-    list->setUpdatesEnabled(true);
-  }
-  if (contextMenu) {
-    QMenu *menu = std::exchange(contextMenu, nullptr);
-    menu->close();
-    menu->deleteLater();
-  }
-  contextThreadId.clear();
-  if (!graph)
-    return;
-
-  list->blockSignals(true);
-  materializedItems.clear();
-  list->clear();
-  graphExpandedThreads.clear();
-  selectedGraphThread.reset();
-  selectedOptimisticThreadId.clear();
-  revealSelectedGraphThread = false;
-  graph = nullptr;
-  list->blockSignals(false);
-}
-
-void ThreadPane::scheduleGraphRefresh() {
-  if (!graph)
-    return;
-  graphRefreshAfterCurrent = false;
-  pendingGraphScan.reset();
-  pendingGraphTopology.reset();
-  topologyCursor = 0;
-  topologySearchCursor = -1;
-  ++topologyScansStarted;
-  setProperty("graphTopologyScansStarted",
-              static_cast<qulonglong>(topologyScansStarted));
-  scheduleGraphScanPass();
-}
-
-void ThreadPane::scheduleGraphScanPass(bool lockContended) {
-  if (!graph || graphRefreshScheduled)
-    return;
-  const int delay = lockContended ? readRetryDelay(graphReadRetryAttempt) : 0;
-  if (lockContended) {
-    graphReadRetryAttempt =
-        std::min(graphReadRetryAttempt + 1, MaximumReadRetryExponent);
-    ++graphReadRetries;
-  }
-  graphRefreshScheduled = true;
-  const std::uint64_t bindingEpoch = graphBindingEpoch;
-  QTimer::singleShot(delay, this, [this, bindingEpoch] {
-    if (bindingEpoch != graphBindingEpoch)
-      return;
-    graphRefreshScheduled = false;
-    runGraphRefresh();
-  });
-}
-
-void ThreadPane::runGraphRefresh() {
-  if (!graph)
-    return;
-  constexpr std::size_t MaximumGraphWorkPerPass = 64;
-  constexpr std::size_t SortChunkSize = 64;
-
-  if (pendingGraphScan &&
-      (graph->publishedStructureRevision(nodegraph::NodeKind::Runtime) !=
-           pendingGraphScan->topology.runtimeStructureRevision ||
-       graph->publishedStructureRevision(nodegraph::NodeKind::Thread) !=
-           pendingGraphScan->topology.threadStructureRevision)) {
-    pendingGraphScan.reset();
-    graphRefreshAfterCurrent = false;
-    scheduleGraphScanPass();
-    return;
-  }
-
-  const bool needsRead = !pendingGraphScan ||
-                         pendingGraphScan->phase == GraphScan::Phase::Roots ||
-                         pendingGraphScan->phase == GraphScan::Phase::Threads;
-  std::optional<nodegraph::NodeGraph::ReadAccess> read;
-  if (needsRead) {
-    read = graph->tryRead();
-    if (!read) {
-      scheduleGraphScanPass(true);
-      return;
-    }
-    graphReadRetryAttempt = 0;
-  }
-
-  if (!pendingGraphScan) {
-    pendingGraphScan = std::make_unique<GraphScan>();
-    pendingGraphScan->revision = read->revision();
-    pendingGraphScan->topology.inputEpoch = topologyInputEpoch;
-    pendingGraphScan->topology.runtimeStructureRevision =
-        read->structureRevision(nodegraph::NodeKind::Runtime);
-    pendingGraphScan->topology.threadStructureRevision =
-        read->structureRevision(nodegraph::NodeKind::Thread);
-    pendingGraphScan->runtime =
-        read->find({nodegraph::NodeKind::Runtime, "runtime"});
-    if (pendingGraphScan->runtime) {
-      pendingGraphScan->rootCount = read->relatedCount(
-          pendingGraphScan->runtime, nodegraph::RelationKind::RootThread);
-      pendingGraphScan->topology.relations.push_back(
-          {pendingGraphScan->runtime, nodegraph::RelationKind::RootThread});
-      pendingGraphScan->topology.relations.back().expectedStructureRevision =
-          read->structureChangedRevision(pendingGraphScan->runtime);
-    }
-  }
-
-  GraphScan &scan = *pendingGraphScan;
-  const auto timestamp = [this](const GraphScan::ReadThread &thread) {
-    if (sortCriterion == SortCriterion::Created)
-      return thread.createdAt;
-    std::optional<std::int64_t> result =
-        sortCriterion == SortCriterion::LastChanged ? thread.updatedAt
-                                                    : thread.recencyAt;
-    if (thread.localPromptActivityAt &&
-        (!result || *thread.localPromptActivityAt > *result))
-      result = thread.localPromptActivityAt;
-    return result;
-  };
-  QCollator collator(QLocale::system().language() == QLocale::C
-                         ? QLocale(QLocale::English)
-                         : QLocale::system());
-  collator.setCaseSensitivity(Qt::CaseInsensitive);
-  collator.setIgnorePunctuation(true);
-  collator.setNumericMode(true);
-  const auto rootLess = [&](const nodegraph::NodeRef &left,
-                            const nodegraph::NodeRef &right) {
-    const auto leftPosition = scan.positions.find(left.get());
-    const auto rightPosition = scan.positions.find(right.get());
-    if (leftPosition == scan.positions.end() ||
-        rightPosition == scan.positions.end())
-      return left->id().canonical < right->id().canonical;
-    const GraphScan::ReadThread &leftThread =
-        scan.threads[leftPosition->second];
-    const GraphScan::ReadThread &rightThread =
-        scan.threads[rightPosition->second];
-    if (sortCriterion == SortCriterion::Alphanumeric) {
-      const QString leftTitle = text(leftThread.title).trimmed();
-      const QString rightTitle = text(rightThread.title).trimmed();
-      const bool leftStartsWithNumber =
-          !leftTitle.isEmpty() && leftTitle.front().isDigit();
-      const bool rightStartsWithNumber =
-          !rightTitle.isEmpty() && rightTitle.front().isDigit();
-      if (leftStartsWithNumber != rightStartsWithNumber)
-        return leftStartsWithNumber;
-      const int comparison = collator.compare(leftTitle, rightTitle);
-      if (comparison != 0)
-        return comparison < 0;
-    } else {
-      const auto leftTimestamp = timestamp(leftThread);
-      const auto rightTimestamp = timestamp(rightThread);
-      if (leftTimestamp != rightTimestamp) {
-        if (!leftTimestamp)
-          return false;
-        if (!rightTimestamp)
-          return true;
-        return *leftTimestamp > *rightTimestamp;
-      }
-    }
-    return left->id().canonical < right->id().canonical;
-  };
-  const auto heapLater = [&](const GraphScan::MergeHead &left,
-                             const GraphScan::MergeHead &right) {
-    return rootLess(scan.roots[right.current], scan.roots[left.current]);
-  };
-
-  std::size_t work = 0;
-  const auto recordWork = [this, &work] {
-    maximumGraphScanWork = std::max(maximumGraphScanWork, work);
-  };
-  while (work < MaximumGraphWorkPerPass) {
-    switch (scan.phase) {
-    case GraphScan::Phase::Roots:
-      while (scan.rootCursor < scan.rootCount &&
-             work < MaximumGraphWorkPerPass) {
-        nodegraph::NodeRef root =
-            read->relatedAt(scan.runtime, nodegraph::RelationKind::RootThread,
-                            scan.rootCursor++);
-        ++work;
-        scan.topology.relations.front().expected.emplace_back(root);
-        if (!root || root->id().kind != nodegraph::NodeKind::Thread ||
-            read->find(root->id()) != root)
-          continue;
-        scan.roots.emplace_back(root);
-        scan.visits.push_back({std::move(root), {}, true});
-      }
-      if (scan.rootCursor == scan.rootCount) {
-        scan.phase = GraphScan::Phase::Threads;
-        continue;
-      }
-      read.reset();
-      recordWork();
-      scheduleGraphScanPass();
-      return;
-
-    case GraphScan::Phase::Threads:
-      while (work < MaximumGraphWorkPerPass) {
-        if (!scan.pendingThread) {
-          if (scan.visitCursor == scan.visits.size()) {
-            scan.phase = GraphScan::Phase::PruneExpanded;
-            break;
-          }
-          GraphScan::Visit visit = std::move(scan.visits[scan.visitCursor++]);
-          ++work;
-          if (!visit.node ||
-              visit.node->id().kind != nodegraph::NodeKind::Thread ||
-              scan.positions.contains(visit.node.get()) ||
-              read->find(visit.node->id()) != visit.node)
-            continue;
-
-          const std::size_t position = scan.threads.size();
-          scan.positions.emplace(visit.node.get(), position);
-          scan.idPositions.emplace(visit.node->id().canonical, position);
-          scan.threads.push_back(GraphScan::ReadThread{
-              visit.node, std::move(visit.parent), visit.root});
-          GraphScan::ReadThread &thread = scan.threads.back();
-          if (thread.root) {
-            const std::shared_ptr<const nodegraph::NodeState> state =
-                read->state(thread.node);
-            thread.title = graphString(graphField(*state, "name"));
-            if (thread.title.empty())
-              thread.title = graphString(graphField(*state, "title"));
-            thread.createdAt = graphTimestamp(graphField(*state, "createdAt"));
-            thread.updatedAt = graphTimestamp(graphField(*state, "updatedAt"));
-            thread.recencyAt = graphTimestamp(graphField(*state, "recencyAt"));
-            thread.localPromptActivityAt =
-                graphTimestamp(graphField(*state, "localPromptActivityAt"));
-          }
-          GraphScan::PendingThread pending;
-          pending.position = position;
-          pending.structuralCount = read->relatedCount(
-              thread.node, nodegraph::RelationKind::StructuralChildThread);
-          pending.agentCount = read->relatedCount(
-              thread.node, nodegraph::RelationKind::AgentChildThread);
-          pending.structuralValidation = scan.topology.relations.size();
-          scan.topology.relations.push_back(
-              {thread.node, nodegraph::RelationKind::StructuralChildThread});
-          scan.topology.relations.back().expectedStructureRevision =
-              read->structureChangedRevision(thread.node);
-          pending.agentValidation = scan.topology.relations.size();
-          scan.topology.relations.push_back(
-              {thread.node, nodegraph::RelationKind::AgentChildThread});
-          scan.topology.relations.back().expectedStructureRevision =
-              read->structureChangedRevision(thread.node);
-          scan.pendingThread = std::move(pending);
-        }
-
-        GraphScan::PendingThread &pending = *scan.pendingThread;
-        GraphScan::ReadThread &thread = scan.threads[pending.position];
-        nodegraph::NodeRef child;
-        std::size_t relationValidation = pending.structuralValidation;
-        if (pending.structuralCursor < pending.structuralCount) {
-          child = read->relatedAt(
-              thread.node, nodegraph::RelationKind::StructuralChildThread,
-              pending.structuralCursor++);
-        } else if (pending.agentCursor < pending.agentCount) {
-          relationValidation = pending.agentValidation;
-          child = read->relatedAt(thread.node,
-                                  nodegraph::RelationKind::AgentChildThread,
-                                  pending.agentCursor++);
-        } else {
-          scan.pendingThread.reset();
-          continue;
-        }
-        ++work;
-        scan.topology.relations[relationValidation].expected.emplace_back(
-            child);
-        if (child && child->id().kind == nodegraph::NodeKind::Thread &&
-            pending.children.insert(child.get()).second) {
-          thread.children.emplace_back(child);
-          scan.visits.push_back({std::move(child), thread.node, false});
-        }
-      }
-      if (scan.phase == GraphScan::Phase::Threads) {
-        read.reset();
-        recordWork();
-        scheduleGraphScanPass();
-        return;
-      }
-      read.reset();
-      continue;
-
-    case GraphScan::Phase::PruneExpanded:
-      if (!scan.expandedCursorInitialized) {
-        scan.expandedCursor = graphExpandedThreads.begin();
-        scan.expandedCursorInitialized = true;
-      }
-      while (scan.expandedCursor != graphExpandedThreads.end() &&
-             work < MaximumGraphWorkPerPass) {
-        if (!scan.positions.contains(*scan.expandedCursor))
-          scan.expandedCursor = graphExpandedThreads.erase(scan.expandedCursor);
-        else
-          ++scan.expandedCursor;
-        ++work;
-      }
-      if (scan.expandedCursor == graphExpandedThreads.end()) {
-        scan.selectedIsPresent =
-            selectedGraphThread &&
-            scan.positions.contains(selectedGraphThread.get());
-        if (scan.selectedIsPresent && revealSelectedGraphThread)
-          scan.selectedAncestor = selectedGraphThread;
-        scan.phase = GraphScan::Phase::ExpandSelection;
-        continue;
-      }
-      recordWork();
-      scheduleGraphScanPass();
-      return;
-
-    case GraphScan::Phase::ExpandSelection:
-      while (scan.selectedAncestor && work < MaximumGraphWorkPerPass) {
-        const auto selected = scan.positions.find(scan.selectedAncestor.get());
-        if (selected == scan.positions.end()) {
-          scan.selectedAncestor.reset();
-          break;
-        }
-        const nodegraph::NodeRef parent = scan.threads[selected->second].parent;
-        if (!parent) {
-          scan.selectedAncestor.reset();
-          break;
-        }
-        graphExpandedThreads.insert(parent.get());
-        scan.selectedAncestor = parent;
-        ++work;
-      }
-      if (!scan.selectedAncestor) {
-        if (scan.selectedIsPresent)
-          scan.topology.selectedId = selectedGraphThread->id().canonical;
-        else
-          scan.topology.selectedId = selectedOptimisticThreadId;
-        revealSelectedGraphThread = false;
-        scan.phase = GraphScan::Phase::SortChunks;
-        continue;
-      }
-      recordWork();
-      scheduleGraphScanPass();
-      return;
-
-    case GraphScan::Phase::SortChunks: {
-      // MergeInitialize relies on fixed SortChunkSize boundaries. A small
-      // final/root-only chunk may use this pass's remainder; a full chunk
-      // starts on a fresh pass so it remains both bounded and mergeable.
-      if (work != 0 && scan.roots.size() - scan.sortCursor >
-                           MaximumGraphWorkPerPass - work) {
-        recordWork();
-        scheduleGraphScanPass();
-        return;
-      }
-      if (scan.sortCursor < scan.roots.size()) {
-        const std::size_t end =
-            std::min(scan.roots.size(), scan.sortCursor + SortChunkSize);
-        std::sort(
-            scan.roots.begin() + static_cast<std::ptrdiff_t>(scan.sortCursor),
-            scan.roots.begin() + static_cast<std::ptrdiff_t>(end), rootLess);
-        work += end - scan.sortCursor;
-        scan.sortCursor = end;
-      }
-      if (scan.sortCursor == scan.roots.size()) {
-        scan.phase = GraphScan::Phase::MergeInitialize;
-        continue;
-      }
-      recordWork();
-      scheduleGraphScanPass();
-      return;
-    }
-
-    case GraphScan::Phase::MergeInitialize:
-      while (scan.mergeInitCursor < scan.roots.size() &&
-             work < MaximumGraphWorkPerPass) {
-        const std::size_t end =
-            std::min(scan.roots.size(), scan.mergeInitCursor + SortChunkSize);
-        scan.mergeHeap.push_back({scan.mergeInitCursor, end});
-        std::push_heap(scan.mergeHeap.begin(), scan.mergeHeap.end(), heapLater);
-        scan.mergeInitCursor = end;
-        ++work;
-      }
-      if (scan.mergeInitCursor == scan.roots.size()) {
-        scan.phase = GraphScan::Phase::Merge;
-        continue;
-      }
-      recordWork();
-      scheduleGraphScanPass();
-      return;
-
-    case GraphScan::Phase::Merge:
-      while (!scan.mergeHeap.empty() && work < MaximumGraphWorkPerPass) {
-        std::pop_heap(scan.mergeHeap.begin(), scan.mergeHeap.end(), heapLater);
-        GraphScan::MergeHead head = scan.mergeHeap.back();
-        scan.mergeHeap.pop_back();
-        scan.sortedRoots.emplace_back(scan.roots[head.current++]);
-        if (head.current < head.end) {
-          scan.mergeHeap.emplace_back(head);
-          std::push_heap(scan.mergeHeap.begin(), scan.mergeHeap.end(),
-                         heapLater);
-        }
-        ++work;
-      }
-      if (scan.mergeHeap.empty()) {
-        scan.phase = GraphScan::Phase::OptimisticRows;
-        continue;
-      }
-      recordWork();
-      scheduleGraphScanPass();
-      return;
-
-    case GraphScan::Phase::OptimisticRows:
-      while (scan.optimisticCursor < optimisticThreads.size() &&
-             work < MaximumGraphWorkPerPass) {
-        const OptimisticThread &optimistic =
-            optimisticThreads[scan.optimisticCursor++];
-        const auto position = scan.idPositions.find(optimistic.id);
-        if (position != scan.idPositions.end()) {
-          const nodegraph::NodeRef &node = scan.threads[position->second].node;
-          scan.appended.insert(node.get());
-          scan.topology.rows.push_back({node,
-                                        {},
-                                        optimistic.id,
-                                        {},
-                                        {},
-                                        0,
-                                        false,
-                                        false,
-                                        true,
-                                        optimistic.failed,
-                                        optimistic.previousId});
-        } else {
-          scan.topology.rows.push_back({{},
-                                        {},
-                                        optimistic.id,
-                                        optimistic.title,
-                                        optimistic.cwd,
-                                        0,
-                                        false,
-                                        false,
-                                        true,
-                                        optimistic.failed,
-                                        optimistic.previousId});
-        }
-        ++work;
-      }
-      if (scan.optimisticCursor == optimisticThreads.size()) {
-        scan.phase = GraphScan::Phase::Rows;
-        continue;
-      }
-      recordWork();
-      scheduleGraphScanPass();
-      return;
-
-    case GraphScan::Phase::Rows:
-      while (work < MaximumGraphWorkPerPass) {
-        if (scan.appendStack.empty()) {
-          if (scan.appendRootCursor == scan.sortedRoots.size())
-            break;
-          scan.appendStack.push_back(
-              {scan.sortedRoots[scan.appendRootCursor++], {}, 0});
-        }
-
-        GraphScan::AppendFrame &frame = scan.appendStack.back();
-        if (!frame.emitted) {
-          const auto position = scan.positions.find(frame.node.get());
-          if (position == scan.positions.end() ||
-              !scan.appended.insert(frame.node.get()).second) {
-            scan.appendStack.pop_back();
-            ++work;
-            continue;
-          }
-          const GraphScan::ReadThread &thread = scan.threads[position->second];
-          const bool hasChildren = !thread.children.empty();
-          frame.expanded =
-              hasChildren && graphExpandedThreads.contains(frame.node.get());
-          scan.topology.rows.push_back({frame.node,
-                                        frame.parent,
-                                        frame.node->id().canonical,
-                                        {},
-                                        {},
-                                        frame.depth,
-                                        hasChildren,
-                                        frame.expanded});
-          frame.emitted = true;
-          ++work;
-          if (!frame.expanded)
-            scan.appendStack.pop_back();
-          continue;
-        }
-
-        const auto position = scan.positions.find(frame.node.get());
-        const GraphScan::ReadThread &thread = scan.threads[position->second];
-        if (frame.childCursor == thread.children.size()) {
-          scan.appendStack.pop_back();
-          continue;
-        }
-        const nodegraph::NodeRef child = thread.children[frame.childCursor++];
-        scan.appendStack.push_back({child, frame.node, frame.depth + 1});
-        ++work;
-      }
-      if (scan.appendRootCursor != scan.sortedRoots.size() ||
-          !scan.appendStack.empty()) {
-        recordWork();
-        scheduleGraphScanPass();
-        return;
-      }
-      GraphTopology topology = std::move(scan.topology);
-      pendingGraphScan.reset();
-      recordWork();
-      applyGraphTopology(std::move(topology));
-      return;
-    }
-  }
-  recordWork();
-  scheduleGraphScanPass();
-}
-
-void ThreadPane::applyGraphTopology(GraphTopology topology) {
-  pendingGraphTopology = std::make_unique<GraphTopology>(std::move(topology));
-  topologyCursor = 0;
-  topologySearchCursor = -1;
-  visibilityFirst = -1;
-  visibilityLast = -1;
-  visibilityCursor = -1;
-  scheduleTopologyPass();
-}
-
-void ThreadPane::scheduleTopologyPass(bool lockContended) {
-  if (!graph || !pendingGraphTopology || topologyPassScheduled)
-    return;
-  const int delay =
-      lockContended ? readRetryDelay(topologyReadRetryAttempt) : 0;
-  if (lockContended) {
-    topologyReadRetryAttempt =
-        std::min(topologyReadRetryAttempt + 1, MaximumReadRetryExponent);
-    ++graphReadRetries;
-  }
-  topologyPassScheduled = true;
-  const std::uint64_t bindingEpoch = graphBindingEpoch;
-  QTimer::singleShot(delay, this, [this, bindingEpoch] {
-    if (bindingEpoch != graphBindingEpoch)
-      return;
-    topologyPassScheduled = false;
-    runTopologyPass();
-  });
-}
-
-void ThreadPane::runTopologyPass() {
-  if (!graph || !pendingGraphTopology)
-    return;
-
-  constexpr std::size_t MaximumItemsPerPass = 32;
-  GraphTopology &topology = *pendingGraphTopology;
-  const auto candidateInputsAreCurrent = [this, &topology] {
-    return topology.inputEpoch == topologyInputEpoch &&
-           graph->publishedStructureRevision(nodegraph::NodeKind::Runtime) ==
-               topology.runtimeStructureRevision &&
-           graph->publishedStructureRevision(nodegraph::NodeKind::Thread) ==
-               topology.threadStructureRevision;
-  };
-  std::size_t work = 0;
-  if (!topology.validated) {
-    ++topologyValidationPasses;
-    if (topologyCursor == 0 && !candidateInputsAreCurrent()) {
-      ++discardedTopologies;
-      pendingGraphTopology.reset();
-      topologyCursor = 0;
-      topologySearchCursor = -1;
-      graphRefreshAfterCurrent = false;
-      scheduleGraphRefresh();
-      return;
-    }
-    auto read = graph->tryRead();
-    if (!read) {
-      scheduleTopologyPass(true);
-      return;
-    }
-    topologyReadRetryAttempt = 0;
-    while (topology.relationValidationCursor < topology.relations.size() &&
-           topology.relationsMatch && work < MaximumItemsPerPass) {
-      GraphTopology::Relation &relation =
-          topology.relations[topology.relationValidationCursor];
-      if (!relation.countChecked) {
-        relation.countChecked = true;
-        topology.relationsMatch =
-            relation.source &&
-            read->find(relation.source->id()) == relation.source &&
-            read->structureChangedRevision(relation.source) ==
-                relation.expectedStructureRevision &&
-            read->relatedCount(relation.source, relation.kind) ==
-                relation.expected.size();
-        ++work;
-        if (!topology.relationsMatch || work == MaximumItemsPerPass)
-          break;
-      }
-      while (relation.cursor < relation.expected.size() &&
-             work < MaximumItemsPerPass) {
-        topology.relationsMatch =
-            read->relatedAt(relation.source, relation.kind, relation.cursor) ==
-            relation.expected[relation.cursor];
-        ++relation.cursor;
-        ++work;
-        if (!topology.relationsMatch)
-          break;
-      }
-      if (topology.relationsMatch &&
-          relation.cursor == relation.expected.size())
-        ++topology.relationValidationCursor;
-    }
-    while (topology.relationsMatch &&
-           topology.relationValidationCursor == topology.relations.size() &&
-           topology.rowValidationCursor < topology.rows.size() &&
-           work < MaximumItemsPerPass) {
-      GraphTopology::Row &row = topology.rows[topology.rowValidationCursor++];
-      bool live = !row.node || read->find(row.node->id()) == row.node;
-      if (live && row.parent)
-        live = read->find(row.parent->id()) == row.parent;
-      if (live) {
-        if (topology.validatedCount != topology.rowValidationCursor - 1)
-          topology.rows[topology.validatedCount] = std::move(row);
-        ++topology.validatedCount;
-      }
-      ++work;
-    }
-    read.reset();
-    maximumTopologyWork = std::max(maximumTopologyWork, work);
-    if (!candidateInputsAreCurrent()) {
-      ++discardedTopologies;
-      pendingGraphTopology.reset();
-      topologyCursor = 0;
-      topologySearchCursor = -1;
-      graphRefreshAfterCurrent = false;
-      scheduleGraphRefresh();
-      return;
-    }
-    if (!topology.relationsMatch) {
-      ++discardedTopologies;
-      pendingGraphTopology.reset();
-      topologyCursor = 0;
-      topologySearchCursor = -1;
-      graphRefreshAfterCurrent = false;
-      scheduleGraphRefresh();
-      return;
-    }
-    if (topology.relationValidationCursor != topology.relations.size() ||
-        topology.rowValidationCursor != topology.rows.size()) {
-      scheduleTopologyPass();
-      return;
-    }
-    topology.rows.resize(topology.validatedCount);
-    topology.validated = true;
-    if (work == MaximumItemsPerPass) {
-      scheduleTopologyPass();
-      return;
-    }
-  }
-
-  const bool signalsWereBlocked = list->blockSignals(true);
-  if (!topologyCommitUpdatesSuppressed) {
-    topologyCommitUpdatesSuppressed = list->updatesEnabled();
-    if (topologyCommitUpdatesSuppressed) {
-      list->setUpdatesEnabled(false);
-      ++wholePaneUpdateSuppressions;
-      setProperty("wholePaneUpdateSuppressions",
-                  static_cast<qulonglong>(wholePaneUpdateSuppressions));
-    }
-  }
-
-  const auto matches = [](const GraphThreadItem &item,
-                          const GraphTopology::Row &row) {
-    if (row.node && item.node == row.node)
-      return true;
-    if (!row.node && !item.node && item.localId == row.localId)
-      return true;
-    return row.node && !item.node &&
-           (item.localId == row.localId ||
-            (!row.previousLocalId.empty() &&
-             item.localId == row.previousLocalId));
-  };
-
-  while (topologyCursor < topology.rows.size() && work < MaximumItemsPerPass) {
-    const int destination = static_cast<int>(topologyCursor);
-    GraphTopology::Row &row = topology.rows[topologyCursor];
-    GraphThreadItem *item = destination < list->count()
-                                ? graphItem(list->item(destination))
-                                : nullptr;
-    if (!item || !matches(*item, row)) {
-      int existingIndex = -1;
-      if (topologySearchCursor < destination + 1)
-        topologySearchCursor = destination + 1;
-      while (topologySearchCursor < list->count() &&
-             work + 1 < MaximumItemsPerPass) {
-        const int candidateIndex = topologySearchCursor++;
-        GraphThreadItem *candidate = graphItem(list->item(candidateIndex));
-        ++work;
-        if (candidate && matches(*candidate, row)) {
-          existingIndex = candidateIndex;
-          item = candidate;
-          break;
-        }
-      }
-      if (existingIndex < 0 && topologySearchCursor < list->count())
+void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
+  currentSnapshot = input;
+  const ui::ThreadListSnapshot &view = *currentSnapshot;
+  const std::string &selectedThreadId = view.selectedThreadId;
+  const bool selectionChanged = selectedThreadId != projectedSelectedThreadId;
+  projectedSelectedThreadId = selectedThreadId;
+  if (selectionChanged) {
+    for (const ui::ThreadListRow &root : view.roots)
+      if (expandAncestors(root, selectedThreadId, expandedThreads))
         break;
-      if (existingIndex >= 0) {
-        // QListWidget owns the materialized row widget separately from its
-        // item. Release it before moving the item so deferred deletion cannot
-        // later invalidate a newly attached row at the destination.
-        dematerialize(*item, false);
-        static_cast<void>(list->takeItem(existingIndex));
-        list->insertItem(destination, item);
-        // Charge the shifted placeholder span against this pass. Large lists
-        // therefore perform one model move, while tiny lists can still finish
-        // their reconciliation within the established three Qt turns.
-        work = std::min(MaximumItemsPerPass - 1,
-                        work + static_cast<std::size_t>(list->count()));
-      } else {
-        item = new GraphThreadItem;
-        item->setSizeHint(QSize(0, 40));
-        list->insertItem(destination, item);
-      }
-      topologySearchCursor = -1;
+  }
+  std::erase_if(expandedThreads, [&view](const std::string &id) {
+    const ui::ThreadListRow *thread = findThread(view.roots, id);
+    return !thread || thread->children.empty();
+  });
+  std::vector<ui::ThreadListRow> rootRows = view.roots;
+  sortRootThreads(rootRows);
+
+  RenderedThreadList next{selectedThreadId, sortCriterion, {}};
+  std::unordered_set<std::string> visited;
+  visited.reserve(rootRows.size());
+  for (const OptimisticThread &optimisticThread : optimisticThreads) {
+    if (const ui::ThreadListRow *thread =
+            findThread(view.roots, optimisticThread.id)) {
+      next.rows.push_back({thread->id,
+                           thread->target,
+                           thread->title,
+                           thread->cwd,
+                           thread->status,
+                           thread->lastActivityAt,
+                           {},
+                           0,
+                           0,
+                           false,
+                           false,
+                           true,
+                           optimisticThread.failed});
+    } else {
+      next.rows.push_back({optimisticThread.id,
+                           {},
+                           optimisticThread.title,
+                           optimisticThread.cwd,
+                           {},
+                           {},
+                           {},
+                           0,
+                           0,
+                           false,
+                           false,
+                           true,
+                           optimisticThread.failed});
     }
-
-    item->setNode(std::move(row.node));
-    item->parent = std::move(row.parent);
-    item->localId = std::move(row.localId);
-    item->localTitle = std::move(row.localTitle);
-    item->localCwd = std::move(row.localCwd);
-    item->depth = row.depth;
-    item->hasChildren = row.hasChildren;
-    item->expanded = row.expanded;
-    item->optimistic = row.optimistic;
-    item->optimisticFailed = row.optimisticFailed;
-    item->renderedRevision = 0;
-    item->renderedPresentation.reset();
-    if (item->attachment)
-      item->attachment->renderedRevision = 0;
-    item->setData(Qt::UserRole, text(item->localId));
-    item->setData(Qt::DisplayRole, {});
-    item->setData(DepthRole, static_cast<qulonglong>(item->depth));
-    item->setData(HasChildrenRole, item->hasChildren);
-    item->setData(ExpandedRole, item->expanded);
-    item->setData(ParentIdRole, item->parent
-                                    ? text(item->parent->id().canonical)
-                                    : QString{});
-    item->setData(OptimisticRole, item->optimistic);
-    item->setData(OptimisticFailedRole, item->optimisticFailed);
-    item->setData(ContextMenuRole,
-                  !contextThreadId.empty() && item->localId == contextThreadId);
-    if (!topology.selectedId.empty() && item->localId == topology.selectedId)
-      topology.selectedItem = item;
-    ++topologyCursor;
-    ++work;
+    visited.insert(optimisticThread.id);
   }
-
-  while (topologyCursor == topology.rows.size() &&
-         list->count() > static_cast<int>(topology.rows.size()) &&
-         work < MaximumItemsPerPass) {
-    const int index = static_cast<int>(topology.rows.size());
-    GraphThreadItem *obsolete = graphItem(list->item(index));
-    if (obsolete)
-      dematerialize(*obsolete, false);
-    static_cast<void>(list->takeItem(index));
-    delete obsolete;
-    ++work;
-  }
-
-  list->blockSignals(signalsWereBlocked);
-  maximumTopologyWork = std::max(maximumTopologyWork, work);
-  if (topologyCursor != topology.rows.size() ||
-      list->count() > static_cast<int>(topology.rows.size())) {
-    scheduleTopologyPass();
+  for (const ui::ThreadListRow &row : rootRows)
+    appendVisibleThread(next, row, {}, 0, visited);
+  if (visibleSnapshot && *visibleSnapshot == next)
     return;
-  }
-
-  const std::string selectedId = std::move(topology.selectedId);
-  GraphThreadItem *selectedItem = topology.selectedItem;
-  pendingGraphTopology.reset();
-  topologyCursor = 0;
-  topologySearchCursor = -1;
-  const bool finalSignalsWereBlocked = list->blockSignals(true);
+  visibleSnapshot = std::move(next);
+  const RenderedThreadList &snapshot = *visibleSnapshot;
+  list->blockSignals(true);
+  list->setUpdatesEnabled(false);
+  // Selection is a projection of selectedThreadId, never retained widget
+  // state. This also makes an explicit New Thread draft visibly select no
+  // existing row.
   list->clearSelection();
   list->setCurrentRow(-1);
-  if (!selectedId.empty() && selectedItem)
-    list->setCurrentItem(selectedItem);
-  list->blockSignals(finalSignalsWereBlocked);
-  if (topologyCommitUpdatesSuppressed) {
-    topologyCommitUpdatesSuppressed = false;
-    list->setUpdatesEnabled(true);
-  }
-  ++completedTopologies;
-  if (graphRefreshAfterCurrent) {
-    graphRefreshAfterCurrent = false;
-    scheduleGraphRefresh();
-    return;
-  }
-  scheduleVisibilityPass();
-}
 
-void ThreadPane::scheduleVisibilityPass(bool lockContended) {
-  if (!graph || visibilityPassScheduled)
-    return;
-  const int delay =
-      lockContended ? readRetryDelay(visibilityReadRetryAttempt) : 0;
-  if (lockContended) {
-    visibilityReadRetryAttempt =
-        std::min(visibilityReadRetryAttempt + 1, MaximumReadRetryExponent);
-    ++graphReadRetries;
-  }
-  visibilityPassScheduled = true;
-  const std::uint64_t bindingEpoch = graphBindingEpoch;
-  QTimer::singleShot(delay, this, [this, bindingEpoch] {
-    if (bindingEpoch != graphBindingEpoch)
-      return;
-    visibilityPassScheduled = false;
-    runVisibilityPass();
-  });
-}
-
-void ThreadPane::runVisibilityPass() {
-  // Topology runs first after every graph notification. This prevents a stale
-  // child item from reading a parent that was just removed and acknowledged.
-  if (graphRefreshScheduled || pendingGraphScan || topologyPassScheduled ||
-      pendingGraphTopology || !graph || list->count() == 0)
-    return;
-
-  constexpr int OverscanRows = 2;
-  constexpr std::size_t MaxWidgetWork = 12;
-  int firstVisible = -1;
-  int lastVisible = -1;
-  if (list->viewport()->isVisible() && list->count() != 0) {
-    QModelIndex first = list->indexAt(QPoint(1, 1));
-    if (!first.isValid())
-      first = list->model()->index(0, 0);
-    QModelIndex last =
-        list->indexAt(QPoint(1, std::max(0, list->viewport()->height() - 1)));
-    if (!last.isValid())
-      last = list->model()->index(list->count() - 1, 0);
-    firstVisible = first.row();
-    lastVisible = last.row();
-  }
-  const int first =
-      firstVisible < 0 ? -1 : std::max(0, firstVisible - OverscanRows);
-  const int last =
-      lastVisible < 0 ? -1
-                      : std::min(list->count() - 1, lastVisible + OverscanRows);
-  const bool rangeChanged = first != visibilityFirst || last != visibilityLast;
-  if (rangeChanged) {
-    visibilityFirst = first;
-    visibilityLast = last;
-    visibilityCursor = first;
+  std::unordered_set<std::string> wanted;
+  wanted.reserve(snapshot.rows.size());
+  for (const RenderedThreadRow &row : snapshot.rows)
+    wanted.insert(row.id);
+  for (int index = list->count() - 1; index >= 0; --index) {
+    QListWidgetItem *item = list->item(index);
+    const std::string id = item->data(Qt::UserRole).toString().toStdString();
+    if (wanted.contains(id))
+      continue;
+    rows.erase(id);
+    delete list->takeItem(index);
   }
 
-  std::size_t work = 0;
-  const auto recordWork = [this, &work] {
-    maximumVisibilityWork = std::max(maximumVisibilityWork, work);
-  };
-  std::unordered_map<GraphThreadItem *, int> desiredRows;
-  if (first >= 0) {
-    desiredRows.reserve(static_cast<std::size_t>(last - first + 1));
-    for (int index = first; index <= last; ++index) {
-      GraphThreadItem *item = graphItem(list->item(index));
-      Q_ASSERT(item);
-      desiredRows.emplace(item, index);
+  std::unordered_map<std::string, int> existingPositions;
+  existingPositions.reserve(rows.size());
+  int existingIndex = 0;
+  for (const RenderedThreadRow &row : snapshot.rows) {
+    if (rows.contains(row.id))
+      existingPositions.emplace(row.id, existingIndex++);
+  }
+
+  std::unordered_set<std::string> moved;
+  moved.reserve(rows.size());
+  for (int index = list->count() - 1; index >= 0; --index) {
+    QListWidgetItem *item = list->item(index);
+    const std::string id = item->data(Qt::UserRole).toString().toStdString();
+    if (existingPositions.at(id) == index)
+      continue;
+    // Removing an index widget transfers it into Qt's deferred-deletion path.
+    // A changed row receives a fresh widget when its item is reinserted.
+    list->removeItemWidget(item);
+    list->takeItem(index);
+    moved.insert(id);
+  }
+  int wantedIndex = 0;
+  for (const RenderedThreadRow &row : snapshot.rows) {
+    auto found = rows.find(row.id);
+    if (found == rows.end()) {
+      auto *item = new QListWidgetItem;
+      item->setSizeHint(QSize(0, 40));
+      item->setData(Qt::UserRole, text(row.id));
+      list->insertItem(wantedIndex, item);
+      list->setItemWidget(item, createRow());
+      found = rows.emplace(row.id, item).first;
+    } else if (moved.contains(row.id)) {
+      list->insertItem(wantedIndex, found->second);
+      list->setItemWidget(found->second, createRow());
     }
-  }
-
-  std::vector<GraphThreadItem *> staleMaterializations;
-  staleMaterializations.reserve(materializedItems.size());
-  for (GraphThreadItem *item : materializedItems) {
-    if (!desiredRows.contains(item))
-      staleMaterializations.emplace_back(item);
-  }
-  for (GraphThreadItem *item : staleMaterializations) {
-    if (work == MaxWidgetWork) {
-      recordWork();
-      scheduleVisibilityPass();
-      return;
+    QListWidgetItem *item = found->second;
+    const QString title = text(row.title);
+    const QString status = text(displayStatus(row.status));
+    QStringList accessibleParts{title, status,
+                                QStringLiteral("level %1").arg(row.depth + 1)};
+    if (row.hasChildren)
+      accessibleParts.push_back(row.expanded ? QStringLiteral("expanded")
+                                             : QStringLiteral("collapsed"));
+    item->setData(Qt::DisplayRole, {});
+    item->setData(Qt::AccessibleTextRole, accessibleParts.join(", "));
+    QStringList details{title,
+                        QStringLiteral("Workspace: %1").arg(
+                            row.cwd.empty() ? QStringLiteral("Unknown")
+                                            : text(row.cwd)),
+                        QStringLiteral("Status: %1").arg(status),
+                        QStringLiteral("Last activity: %1").arg(
+                            activityText(row.lastActivityAt))};
+    if (!row.parentId.empty()) {
+      const ui::ThreadListRow *parent =
+          findThread(currentSnapshot->roots, row.parentId);
+      details.push_back(QStringLiteral("Parent: %1").arg(
+          parent && !parent->title.empty() ? text(parent->title)
+                                           : text(row.parentId)));
     }
-    dematerialize(*item);
-    ++work;
+    item->setToolTip(details.join(QLatin1Char('\n')));
+    item->setData(DepthRole, static_cast<qulonglong>(row.depth));
+    item->setData(HasChildrenRole, row.hasChildren);
+    item->setData(ExpandedRole, row.expanded);
+    item->setData(ParentIdRole, text(row.parentId));
+    item->setData(OptimisticRole, row.optimistic);
+    item->setData(OptimisticFailedRole, row.optimisticFailed);
+    updateRow(list->itemWidget(item), row.id, row.title, row.status,
+              row.pending, row.depth, row.hasChildren, row.expanded,
+              row.optimistic, row.optimisticFailed);
+    if (row.id == contextThreadId)
+      setContextHighlight(row.id, true);
+    if (row.id == snapshot.selectedThreadId)
+      list->setCurrentItem(item);
+    ++wantedIndex;
   }
-
-  for (const auto &[item, index] : desiredRows) {
-    if (item->attachment) {
-      item->attachment->viewportVisible =
-          index >= firstVisible && index <= lastVisible;
-      item->attachment->materialization =
-          item->attachment->viewportVisible
-              ? ui::NodeMaterialization::ViewportVisible
-              : ui::NodeMaterialization::Overscan;
-    }
-  }
-  if (first < 0) {
-    recordWork();
-    return;
-  }
-
-  struct Candidate final {
-    GraphThreadItem *item = nullptr;
-    bool hasWidget = false;
-  };
-  std::vector<Candidate> candidates;
-  const int start = visibilityCursor < first || visibilityCursor > last
-                        ? first
-                        : visibilityCursor;
-  const int end =
-      std::min(last, start + static_cast<int>(MaxWidgetWork - work) - 1);
-  for (int index = start; index <= end; ++index) {
-    GraphThreadItem *item = graphItem(list->item(index));
-    candidates.push_back({item, list->itemWidget(item) != nullptr});
-  }
-
-  const bool needsGraphRead =
-      std::ranges::any_of(candidates, [](const Candidate &candidate) {
-        return candidate.item && candidate.item->node;
-      });
-  std::optional<nodegraph::NodeGraph::ReadAccess> read;
-  if (needsGraphRead) {
-    read = graph->tryRead();
-    if (!read) {
-      recordWork();
-      scheduleVisibilityPass(true);
-      return;
-    }
-    visibilityReadRetryAttempt = 0;
-  }
-
-  std::vector<std::pair<GraphThreadItem *, GraphRowRender>> renders;
-  for (Candidate &candidate : candidates) {
-    GraphThreadItem &item = *candidate.item;
-    ++work;
-
-    GraphRowRender render;
-    if (!item.node) {
-      const std::uint64_t revision = item.optimisticFailed ? 2 : 1;
-      if (candidate.hasWidget && item.renderedRevision == revision)
-        continue;
-      render.revision = revision;
-      render.id = item.localId;
-      render.title = item.localTitle;
-      render.cwd = item.localCwd;
-    } else {
-      if (!item.attachment)
-        continue;
-      std::uint64_t revision = read->changedRevision(item.node);
-      if (item.parent)
-        revision = std::max(revision, read->changedRevision(item.parent));
-      const std::shared_ptr<const nodegraph::NodeState> state =
-          read->state(item.node);
-      std::optional<std::size_t> indexedPending =
-          graphCount(graphField(*state, "pendingInteractionCount"));
-      std::size_t pending = indexedPending.value_or(0);
-      if (!indexedPending) {
-        // Compatibility for small hand-built test graphs. Production worker
-        // updates maintain the exact derived count on the thread node.
-        constexpr std::size_t MaximumFallbackInteractions = 64;
-        const std::size_t count = std::min(
-            read->relatedCount(item.node,
-                               nodegraph::RelationKind::PendingInteraction),
-            MaximumFallbackInteractions);
-        for (std::size_t index = 0; index < count; ++index) {
-          const nodegraph::NodeRef interaction = read->relatedAt(
-              item.node, nodegraph::RelationKind::PendingInteraction, index);
-          if (!interaction ||
-              interaction->id().kind != nodegraph::NodeKind::Interaction)
-            continue;
-          const std::shared_ptr<const nodegraph::NodeState> interactionState =
-              read->state(interaction);
-          if (interactionState->status != nodegraph::NodeStatus::Pending &&
-              interactionState->status != nodegraph::NodeStatus::Failed)
-            continue;
-          ++pending;
-          revision = std::max(revision, read->changedRevision(interaction));
-        }
-      }
-      if (candidate.hasWidget &&
-          item.attachment->renderedRevision == revision &&
-          item.renderedPending == pending)
-        continue;
-      render.revision = revision;
-      render.id = item.node->id().canonical;
-      render.title = graphString(graphField(*state, "name"));
-      if (render.title.empty())
-        render.title = graphString(graphField(*state, "title"));
-      render.cwd = graphString(graphField(*state, "cwd"));
-      render.status = graphStatus(*state);
-      render.lastActivityAt =
-          graphTimestamp(graphField(*state, "lastActivityAt"));
-      for (const std::string_view field :
-           {std::string_view("recencyAt"), std::string_view("updatedAt"),
-            std::string_view("localActivityAt"),
-            std::string_view("localPromptActivityAt")}) {
-        const auto timestamp = graphTimestamp(graphField(*state, field));
-        if (timestamp &&
-            (!render.lastActivityAt || *timestamp > *render.lastActivityAt))
-          render.lastActivityAt = timestamp;
-      }
-      render.pending = pending;
-      if (item.parent) {
-        const std::shared_ptr<const nodegraph::NodeState> parentState =
-            read->state(item.parent);
-        render.parentTitle = graphString(graphField(*parentState, "name"));
-        if (render.parentTitle.empty())
-          render.parentTitle = graphString(graphField(*parentState, "title"));
-      }
-    }
-    renders.emplace_back(&item, std::move(render));
-  }
-  read.reset();
-
-  for (auto &[item, render] : renders)
-    renderGraphRow(*item, render);
-  recordWork();
-  visibilityCursor = end >= last ? first : end + 1;
-  if (end < last)
-    scheduleVisibilityPass();
-}
-
-void ThreadPane::dematerialize(GraphThreadItem &item, bool deferred) {
-  std::erase(materializedItems, &item);
-  QWidget *widget = list->itemWidget(&item);
-  if (widget) {
-    list->removeItemWidget(&item);
-    if (deferred)
-      widget->deleteLater();
-    else
-      delete widget;
-  }
-  item.renderedRevision = 0;
-  item.renderedPending = 0;
-  item.renderedPresentation.reset();
-  if (item.attachment) {
-    item.attachment->widget.clear();
-    item.attachment->renderedRevision = 0;
-    item.attachment->viewportVisible = false;
-    item.attachment->materialization = ui::NodeMaterialization::Placeholder;
-  }
-}
-
-void ThreadPane::renderGraphRow(GraphThreadItem &item,
-                                const GraphRowRender &render) {
-  QWidget *row = list->itemWidget(&item);
-  if (row && item.renderedPresentation &&
-      item.renderedPresentation->samePresentation(render)) {
-    item.renderedRevision = render.revision;
-    if (item.attachment)
-      item.attachment->renderedRevision = render.revision;
-    return;
-  }
-  if (!row) {
-    row = createRow();
-    list->setItemWidget(&item, row);
-    if (std::find(materializedItems.begin(), materializedItems.end(), &item) ==
-        materializedItems.end())
-      materializedItems.emplace_back(&item);
-  }
-
-  const QString title = text(render.title);
-  const QString status = text(displayStatus(render.status));
-  QStringList accessibleParts{title, status,
-                              QStringLiteral("level %1").arg(item.depth + 1)};
-  if (item.hasChildren)
-    accessibleParts.push_back(item.expanded ? QStringLiteral("expanded")
-                                            : QStringLiteral("collapsed"));
-  item.setData(Qt::AccessibleTextRole,
-               accessibleParts.join(QStringLiteral(", ")));
-  QStringList details{title,
-                      QStringLiteral("Workspace: %1")
-                          .arg(render.cwd.empty() ? QStringLiteral("Unknown")
-                                                  : text(render.cwd)),
-                      QStringLiteral("Status: %1").arg(status),
-                      QStringLiteral("Last activity: %1")
-                          .arg(activityText(render.lastActivityAt))};
-  if (item.parent) {
-    details.push_back(QStringLiteral("Parent: %1")
-                          .arg(render.parentTitle.empty()
-                                   ? text(item.parent->id().canonical)
-                                   : text(render.parentTitle)));
-  }
-  item.setToolTip(details.join(QLatin1Char('\n')));
-  updateRow(row, render.id, render.title, render.status, render.pending,
-            item.depth, item.hasChildren, item.expanded, item.optimistic,
-            item.optimisticFailed);
-  item.renderedPresentation = render;
-  item.renderedRevision = render.revision;
-  item.renderedPending = render.pending;
-  if (item.attachment) {
-    item.attachment->widget = row;
-    item.attachment->renderedRevision = render.revision;
-  }
-  ++rowPresentationUpdates;
-  setProperty("rowPresentationUpdates",
-              static_cast<qulonglong>(rowPresentationUpdates));
-  list->viewport()->update(list->visualItemRect(&item));
-}
-
-ThreadPane::GraphThreadItem *
-ThreadPane::graphItem(const QListWidgetItem *item) const {
-  return dynamic_cast<GraphThreadItem *>(const_cast<QListWidgetItem *>(item));
-}
-
-ThreadPane::GraphThreadItem *
-ThreadPane::attachedGraphItem(const nodegraph::NodeRef &node) const {
-  if (!node)
-    return nullptr;
-  const auto *attachment =
-      static_cast<const ui::QtNodeAttachment *>(node->uiAttachment());
-  auto *item = attachment ? static_cast<GraphThreadItem *>(attachment->binding)
-                          : nullptr;
-  return item && item->node == node ? item : nullptr;
+  list->setUpdatesEnabled(true);
+  list->blockSignals(false);
 }
 
 std::string ThreadPane::visiblySelectedThreadId() const {
@@ -2170,158 +856,76 @@ std::string ThreadPane::visiblySelectedThreadId() const {
 }
 
 nodegraph::NodeRef ThreadPane::visiblySelectedThread() const {
-  const QList<QListWidgetItem *> selected = list->selectedItems();
-  if (selected.size() != 1 || !selected.front())
+  if (!currentSnapshot)
     return {};
-  GraphThreadItem *item = graphItem(selected.front());
-  return item ? item->node : nodegraph::NodeRef{};
-}
-
-std::size_t ThreadPane::maximumGraphScanWorkObserved() const noexcept {
-  return maximumGraphScanWork;
-}
-
-std::size_t ThreadPane::maximumTopologyWorkObserved() const noexcept {
-  return maximumTopologyWork;
-}
-
-std::size_t ThreadPane::maximumVisibilityWorkObserved() const noexcept {
-  return maximumVisibilityWork;
-}
-
-std::size_t ThreadPane::materializedRowCount() const noexcept {
-  return materializedItems.size();
-}
-
-std::uint64_t ThreadPane::completedTopologyCount() const noexcept {
-  return completedTopologies;
-}
-
-std::uint64_t ThreadPane::topologyValidationPassCount() const noexcept {
-  return topologyValidationPasses;
-}
-
-std::uint64_t ThreadPane::discardedTopologyCount() const noexcept {
-  return discardedTopologies;
-}
-
-std::uint64_t ThreadPane::graphReadRetryCount() const noexcept {
-  return graphReadRetries;
-}
-
-std::uint64_t ThreadPane::contextMenuReadRetryCount() const noexcept {
-  return contextMenuReadRetries;
+  const std::string id = visiblySelectedThreadId();
+  const ui::ThreadListRow *thread = findThread(currentSnapshot->roots, id);
+  return thread ? thread->target : nodegraph::NodeRef{};
 }
 
 void ThreadPane::showContextMenu(const QPoint &position) {
-  if (!graph)
+  QListWidgetItem *item = list->itemAt(position);
+  if (!item || !currentSnapshot)
     return;
-  QListWidgetItem *listItem = list->itemAt(position);
-  GraphThreadItem *item = graphItem(listItem);
-  if (!item || !item->node)
+  const std::string id = item->data(Qt::UserRole).toString().toStdString();
+  const ui::ThreadListRow *thread = findThread(currentSnapshot->roots, id);
+  if (!thread)
     return;
-  const std::uint64_t retryToken = ++contextMenuRetryToken;
-  showContextMenu(item->node, position, retryToken, 0);
-}
-
-void ThreadPane::showContextMenu(const nodegraph::NodeRef &node,
-                                 std::optional<QPoint> requestedPosition,
-                                 std::uint64_t retryToken,
-                                 unsigned retryAttempt) {
-  if (!graph || !node || retryToken != contextMenuRetryToken)
-    return;
-  GraphThreadItem *item = attachedGraphItem(node);
-  if (!item)
-    return;
-  const std::string id = node->id().canonical;
-
-  auto read = graph->tryRead();
-  if (!read) {
-    const int delay = readRetryDelay(retryAttempt);
-    const unsigned nextRetryAttempt =
-        std::min(retryAttempt + 1, MaximumReadRetryExponent);
-    ++contextMenuReadRetries;
-    QTimer::singleShot(
-        delay, this,
-        [this, node, requestedPosition, retryToken, nextRetryAttempt] {
-          showContextMenu(node, requestedPosition, retryToken,
-                          nextRetryAttempt);
-        });
-    return;
-  }
-  if (read->find(node->id()) != node)
-    return;
-  const std::shared_ptr<const nodegraph::NodeState> threadState =
-      read->state(node);
-  const bool archived = graphBool(graphField(*threadState, "archived"));
-  const bool recoveryOnly = graphBool(graphField(*threadState, "recoveryOnly"));
-  bool providerReady = false;
-  bool canControl = false;
-  if (nodegraph::NodeRef connection =
-          read->find({nodegraph::NodeKind::Connection, "connection"})) {
-    const std::shared_ptr<const nodegraph::NodeState> connectionState =
-        read->state(connection);
-    providerReady =
-        connectionState->status == nodegraph::NodeStatus::Connected &&
-        graphString(graphField(*connectionState, "providerState")) == "ready";
-    canControl =
-        providerReady &&
-        graphString(graphField(*connectionState, "role")) == "controller";
-  }
-  read.reset();
-
+  const nodegraph::NodeRef target = thread->target;
+  const bool archived = thread->archived;
   if (contextMenu)
     contextMenu->close();
   contextThreadId = id;
-  item->setData(ContextMenuRole, true);
+  setContextHighlight(contextThreadId, true);
   auto *menu = new QMenu(list);
   contextMenu = menu;
-  connect(menu, &QMenu::aboutToHide, this, [this, menu, node] {
+  connect(menu, &QMenu::aboutToHide, this, [this, menu] {
     if (contextMenu == menu) {
-      if (GraphThreadItem *bound = attachedGraphItem(node))
-        bound->setData(ContextMenuRole, false);
+      setContextHighlight(contextThreadId, false);
       contextThreadId.clear();
       contextMenu = nullptr;
     }
     menu->deleteLater();
   });
-  QAction *reload =
-      menu->addAction(QStringLiteral("Reload"), this, [this, node] {
-        if (nodeActions.reload)
-          nodeActions.reload(node);
-      });
-  QAction *rename =
-      menu->addAction(QStringLiteral("Rename"), this, [this, node] {
-        if (nodeActions.rename)
-          nodeActions.rename(node);
-      });
-  QAction *fork = menu->addAction(QStringLiteral("Fork"), this, [this, node] {
-    if (nodeActions.fork)
-      nodeActions.fork(node);
+  QAction *reload = menu->addAction(QStringLiteral("Reload"), this,
+                                    [this, target] {
+    if (nodeActions.reload)
+      nodeActions.reload(target);
   });
-  QAction *archive = menu->addAction(
-      archived ? QStringLiteral("Unarchive") : QStringLiteral("Archive"), this,
-      [this, node, archived] {
-        if (archived && nodeActions.unarchive)
-          nodeActions.unarchive(node);
-        else if (!archived && nodeActions.archive)
-          nodeActions.archive(node);
-      });
+  const bool providerReady = currentSnapshot->providerReady;
+  const bool canControl = currentSnapshot->canControl;
+  QAction *rename = menu->addAction(QStringLiteral("Rename"), this,
+                                    [this, target] {
+    if (nodeActions.rename)
+      nodeActions.rename(target);
+  });
+  QAction *fork = menu->addAction(QStringLiteral("Fork"), this,
+                                  [this, target] {
+    if (nodeActions.fork)
+      nodeActions.fork(target);
+  });
+  QAction *archive =
+      menu->addAction(archived ? QStringLiteral("Unarchive")
+                               : QStringLiteral("Archive"),
+                      this, [this, target, archived] {
+                        if (archived) {
+                          if (nodeActions.unarchive)
+                            nodeActions.unarchive(target);
+                        } else if (nodeActions.archive) {
+                          nodeActions.archive(target);
+                        }
+                      });
   menu->addSeparator();
-  QAction *remove =
-      menu->addAction(QStringLiteral("Delete"), this, [this, node] {
-        if (nodeActions.remove)
-          nodeActions.remove(node);
-      });
-  reload->setEnabled(providerReady && !recoveryOnly);
-  rename->setEnabled(canControl && !recoveryOnly);
-  fork->setEnabled(canControl && !recoveryOnly);
-  archive->setEnabled(canControl && !recoveryOnly);
-  remove->setEnabled(canControl && !recoveryOnly);
-  QPoint position =
-      requestedPosition.value_or(list->visualItemRect(item).center());
-  if (list->itemAt(position) != item)
-    position = list->visualItemRect(item).center();
+  QAction *remove = menu->addAction(QStringLiteral("Delete"), this,
+                                    [this, target] {
+    if (nodeActions.remove)
+      nodeActions.remove(target);
+  });
+  reload->setEnabled(providerReady);
+  rename->setEnabled(canControl);
+  fork->setEnabled(canControl);
+  archive->setEnabled(canControl);
+  remove->setEnabled(canControl);
   menu->popup(list->viewport()->mapToGlobal(position));
 }
 
