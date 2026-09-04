@@ -215,6 +215,7 @@ private:
   std::uint64_t graphRefreshPasses_ = 0;
   std::uint64_t geometryPasses_ = 0;
   std::uint64_t fullGeometryPasses_ = 0;
+  int geometryWidthCorrectionDepth_ = 0;
 };
 
 } // namespace codexui::codex::middle

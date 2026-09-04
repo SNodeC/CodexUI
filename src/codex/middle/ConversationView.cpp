@@ -1523,6 +1523,7 @@ void ConversationView::runGraphRefresh() {
       promptTransfers;
   std::vector<std::pair<nodegraph::NodeRef, bool>> turnActivityChanges;
   bool freezeIncomingMaterialization = false;
+  bool freezeFullMaterialization = false;
   const std::uint64_t epoch = graphBindingEpoch_;
 
   std::optional<nodegraph::NodeGraph::ReadAccess> read = graph_->tryRead();
@@ -1546,6 +1547,15 @@ void ConversationView::runGraphRefresh() {
     const std::size_t childCount = read->childCount(graphThread_);
     const std::uint64_t threadStructure =
         read->structureChangedRevision(graphThread_);
+    // Selection may initially bind the lightweight thread-list node before
+    // thread/read supplies its retained turns. That empty transaction can
+    // legitimately finish, but the first real history must then use the same
+    // full atomic gate as selection itself instead of appearing in eight-card
+    // construction slices.
+    freezeFullMaterialization =
+        !bulkMaterializationUpdatesSuppressed_ && graphSections_.empty() &&
+        graphGeometry_->retainedHistoryItems == 0 && childCount != 0 &&
+        loadedItemCount.value_or(0) != 0;
     const auto turnRoot = [&read](const nodegraph::NodeRef &turn) {
       const std::size_t count =
           read->relatedCount(turn, nodegraph::RelationKind::TurnRootItem);
@@ -2288,7 +2298,9 @@ void ConversationView::runGraphRefresh() {
   // card. Existing-card streaming never enters this path; only a newly
   // inserted selected-thread item freezes the current backing-store image
   // until its final QWidget and canonical owner are ready.
-  if (freezeIncomingMaterialization)
+  if (freezeFullMaterialization)
+    beginAtomicMaterialization(true);
+  else if (freezeIncomingMaterialization)
     beginAtomicMaterialization(false);
 
   if (resetRequested) {
@@ -4705,16 +4717,59 @@ void ConversationView::recomputeGeometry(
       0, std::max(0, contentHeight_ - viewport()->height()));
   positionContent();
 
+  // The old projection deliberately completed Qt's scrollbar-width
+  // negotiation before its first visible frame. Setting a non-zero range can
+  // make the vertical scrollbar appear and narrow the viewport after all
+  // wrapping was measured. Settle that changed width inside this same
+  // suppressed transaction instead of dropping the resulting LayoutRequest
+  // and exposing stale card heights. Two corrections bound pathological
+  // style-dependent scrollbar oscillation.
+  if (viewport()->width() != width && geometryWidthCorrectionDepth_ < 2) {
+    const QScopedValueRollback depth(geometryWidthCorrectionDepth_,
+                                     geometryWidthCorrectionDepth_ + 1);
+    recomputeGeometry(affectedSections);
+    return;
+  }
+
   for (ConversationCard *card : layoutCards) {
     if (QWidget *nested = card->findChild<QWidget *>(
             QStringLiteral("conversationNestedCards"),
             Qt::FindDirectChildrenOnly))
       QCoreApplication::sendPostedEvents(nested, QEvent::LayoutRequest);
-    QCoreApplication::removePostedEvents(card, QEvent::LayoutRequest);
+    if (!affectedSections && card->property("turnContainer").toBool()) {
+      // Match the proven pre-graph initialization transaction: nested
+      // children negotiate first, then only their owning Turn/You card
+      // consumes the resulting LayoutRequest while painting is suppressed.
+      // Leaf cards were already measured explicitly above; delivering their
+      // equivalent posted requests adds no information and can leak a wave of
+      // delayed relayouts after reveal.
+      QCoreApplication::sendPostedEvents(card, QEvent::LayoutRequest);
+    } else {
+      // Incremental updates already settled the explicitly dirty card and its
+      // owner above. Do not let their posted request widen that local boundary.
+      QCoreApplication::removePostedEvents(card, QEvent::LayoutRequest);
+    }
   }
   for (TurnSectionWidget *section : layoutSections)
     QCoreApplication::sendPostedEvents(section, QEvent::LayoutRequest);
   QCoreApplication::sendPostedEvents(content_, QEvent::LayoutRequest);
+  if (!affectedSections) {
+    // The initialization transaction has now consumed the useful nested-to-
+    // owner negotiation in dependency order. Qt can post equivalent requests
+    // again while those requests propagate upward; letting that duplicate
+    // work escape the suppressed transaction makes a completed history look
+    // as though it is still assembling after its first paint.
+    for (ConversationCard *card : layoutCards) {
+      if (QWidget *nested = card->findChild<QWidget *>(
+              QStringLiteral("conversationNestedCards"),
+              Qt::FindDirectChildrenOnly))
+        QCoreApplication::removePostedEvents(nested, QEvent::LayoutRequest);
+      QCoreApplication::removePostedEvents(card, QEvent::LayoutRequest);
+    }
+    for (TurnSectionWidget *section : layoutSections)
+      QCoreApplication::removePostedEvents(section, QEvent::LayoutRequest);
+    QCoreApplication::removePostedEvents(content_, QEvent::LayoutRequest);
+  }
   for (TurnSectionWidget *section : layoutSections) {
     section->geometryDirty = false;
     for (TurnSectionWidget::CardSlot &slot : section->cardSlots)

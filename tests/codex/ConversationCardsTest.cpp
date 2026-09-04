@@ -4658,6 +4658,109 @@ bool testLoadedCardsMaterializeOnceWithoutScrollChurn() {
       "scrolling");
 }
 
+bool testDelayedInitialHistoryMaterializesAtomically() {
+  constexpr std::size_t LoadedCount = AuthoritativeHistoryPageSize;
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{0});
+    threadState.fields.emplace("hydrationState", "loading");
+    thread = write.upsert(
+        {nodegraph::NodeKind::Thread, "delayed-initial-history"},
+        std::move(threadState));
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 420);
+  view.show();
+  view.bindGraph(graph, thread);
+  const bool emptyBindingSettled = spinUntil([&] {
+    return view.viewport()->updatesEnabled() &&
+           !view.property("bulkMaterializationUpdatesSuppressed").toBool();
+  });
+
+  PaintAnchorProbe paints(view);
+  paints.start();
+  std::vector<nodegraph::NodeRef> items;
+  nodegraph::GraphChange hydrated;
+  {
+    auto write = graph.write();
+    const nodegraph::NodeRef turn =
+        write.upsert({nodegraph::NodeKind::Turn, "delayed-initial-turn"});
+    write.setParent(thread, turn);
+    items.reserve(LoadedCount);
+    for (std::size_t index = 0; index < LoadedCount; ++index) {
+      nodegraph::NodeState state = graphMessageState(
+          index == 0 ? "userMessage" : "agentMessage",
+          "Hydrated retained card " + std::to_string(index));
+      if (index != 0)
+        state.fields.emplace("phase", "final_answer");
+      nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item,
+           "delayed-initial-item-" + std::to_string(index)},
+          std::move(state));
+      write.setParent(turn, item);
+      items.push_back(item);
+    }
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, items.front());
+    write.setField(thread, "historyLoadedItemCount", LoadedCount);
+    write.setField(thread, "hydrationState", "ready");
+    hydrated = write.finish();
+  }
+  view.graphChangedDeferred(hydrated.affected, hydrated.removed);
+  const bool hydratedWindowReady = spinUntil(
+      [&] {
+        return std::ranges::all_of(
+                   items, [](const nodegraph::NodeRef &item) {
+                     const auto *attachment = graphAttachment(item);
+                     return attachment && attachment->widget;
+                   }) &&
+               view.viewport()->updatesEnabled() &&
+               !view.property("bulkMaterializationUpdatesSuppressed")
+                    .toBool();
+      },
+      1024);
+  paints.active = false;
+  const bool noPartialHistoryFrame =
+      std::ranges::all_of(paints.representationCounts, [](int count) {
+        return count == 0 || count == static_cast<int>(LoadedCount);
+      }) &&
+      std::ranges::find(paints.representationCounts,
+                        static_cast<int>(LoadedCount)) !=
+          paints.representationCounts.end();
+
+  auto *rootCard = items.empty() || !graphAttachment(items.front())
+                       ? nullptr
+                       : qobject_cast<ConversationCard *>(
+                             graphAttachment(items.front())->widget.data());
+  QWidget *nested = rootCard
+                        ? rootCard->findChild<QWidget *>(
+                              QStringLiteral("conversationNestedCards"),
+                              Qt::FindDirectChildrenOnly)
+                        : nullptr;
+  const int rootHeight = rootCard ? rootCard->height() : -1;
+  const int nestedHeight = nested ? nested->height() : -1;
+  const int scrollMaximum = view.verticalScrollBar()->maximum();
+  const qulonglong geometryPasses =
+      view.property("conversationGeometryPasses").toULongLong();
+  spin(80);
+  const bool finalLayoutStable =
+      rootCard && nested && rootCard->property("turnContainer").toBool() &&
+      rootCard->height() == rootHeight && nested->height() == nestedHeight &&
+      view.verticalScrollBar()->maximum() == scrollMaximum &&
+      view.property("conversationGeometryPasses").toULongLong() ==
+          geometryPasses;
+
+  return expect(
+      emptyBindingSettled && hydratedWindowReady && noPartialHistoryFrame &&
+          finalLayoutStable,
+      "history arriving after an empty selection remains invisible until all "
+      "retained cards have their stable final old-UI layout");
+}
+
 bool testPausedIncomingCardMaterializesWithoutAnchorJump() {
   constexpr std::size_t InitialCount = 40;
   nodegraph::NodeGraph graph;
@@ -6385,6 +6488,8 @@ int main(int argc, char **argv) {
   using namespace codexui::codex::middle;
   if (qEnvironmentVariableIsSet("CODEXUI_MUTABLE_CARD_TESTS"))
     return testMutableCardsAndCommandOutput() ? 0 : 1;
+  if (qEnvironmentVariableIsSet("CODEXUI_FOLLOW_TESTS"))
+    return testFollowPauseAndStableAnchor() ? 0 : 1;
   if (qEnvironmentVariableIsSet("CODEXUI_SETTLEMENT_TESTS")) {
     bool focused = testRetainedNestedFinalAnswerGeometrySettlement();
     focused &= testBottomAnchoredCommandOutputGrowth();
@@ -6406,6 +6511,7 @@ int main(int argc, char **argv) {
   if (qEnvironmentVariableIsSet("CODEXUI_LONG_CONVERSATION_TESTS")) {
     bool focused = testGraphBoundedHistoryAndExplicitRoot();
     focused &= testLoadedCardsMaterializeOnceWithoutScrollChurn();
+    focused &= testDelayedInitialHistoryMaterializesAtomically();
     if (focused)
       std::cout << "Long conversation materialization tests passed\n";
     return focused ? 0 : 1;
@@ -6438,6 +6544,7 @@ int main(int argc, char **argv) {
   result &= testGraphStreamTruncationNotices();
   result &= testGraphBoundedHistoryAndExplicitRoot();
   result &= testLoadedCardsMaterializeOnceWithoutScrollChurn();
+  result &= testDelayedInitialHistoryMaterializesAtomically();
   result &= testPausedIncomingCardMaterializesWithoutAnchorJump();
   result &= testPausedMixedCardBurstKeepsLeafAnchorAndParents();
   result &= testPausedNormalPromptTurnMaterializesWithoutAnchorJump();
