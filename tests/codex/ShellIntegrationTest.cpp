@@ -973,8 +973,21 @@ void inactiveThreadNeverReactivatesAStaleTurn(Configuration &configuration) {
           }),
           "a controller can steer a known active turn with non-empty text "
           "while unrelated history hydration is still loading");
-  if (editor)
-    editor->clear();
+  if (send)
+    send->click();
+  const auto steeringActions = takeQtMessages(channels);
+  const auto steering = std::ranges::find_if(
+      steeringActions, [](const QtToWorkerMessage &entry) {
+        const auto *action = std::get_if<NodeAction>(&entry);
+        return action && action->kind == NodeActionKind::SubmitPrompt;
+      });
+  require(steering != steeringActions.end() &&
+              std::get<NodeAction>(*steering).target == selectedThread &&
+              std::get<NodeAction>(*steering).promptText ==
+                  "steer while history is loading" &&
+              editor && editor->toPlainText().isEmpty(),
+          "clicking the enabled Steer control admits exactly one targeted "
+          "prompt while hydration is loading");
 
   static_cast<void>(worker.apply(
       {DecodedMessageKind::ServerNotification,

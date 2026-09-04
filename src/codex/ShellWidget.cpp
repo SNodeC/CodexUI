@@ -2194,9 +2194,15 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
         const auto state = read->state(target);
         const std::string hydration =
             graphString(graphField(*state, "hydrationState"));
-        if (hydration == "loading" || hydration == "failed" ||
+        const nodegraph::NodeRef turn = read->relatedAt(
+            target, nodegraph::RelationKind::ActiveTurn, 0);
+        const bool steeringKnownActiveTurn =
+            turn && turn->id().kind == nodegraph::NodeKind::Turn &&
+            activeStatus(*read->state(turn));
+        if (!steeringKnownActiveTurn &&
+            (hydration == "loading" || hydration == "failed" ||
             (state->status == nodegraph::NodeStatus::NotLoaded &&
-             hydration != "ready")) {
+             hydration != "ready"))) {
           const std::string detail =
               graphString(graphField(*state, "hydrationError"));
           graphRejection = text(
