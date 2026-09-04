@@ -86,6 +86,7 @@ private:
   bool rescanRetirementPending = false;
   bool retirementScanGenerationKnown = false;
   bool retirementRetryNeeded = false;
+  std::uint64_t nextUiActionCorrelation = 1;
   Configuration &configuration;
 };
 

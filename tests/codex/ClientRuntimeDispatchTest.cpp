@@ -24,6 +24,7 @@
 #include <iostream>
 #include <optional>
 #include <poll.h>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
@@ -32,6 +33,7 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace codexui::codex {
 namespace {
@@ -190,6 +192,19 @@ public:
                    {"result", std::move(result)}}}});
   }
 
+  bool replyError(const nlohmann::json &request, int code,
+                  std::string message) {
+    return send(
+        {{"kind", "appserver"},
+         {"connectionId", "runtime-test"},
+         {"role", "controller"},
+         {"seq", nextSequence_++},
+         {"payload",
+          {{"jsonrpc", "2.0"},
+           {"id", request.at("id")},
+           {"error", {{"code", code}, {"message", std::move(message)}}}}}});
+  }
+
   bool appServerRequest(std::string id, std::string method,
                         nlohmann::json parameters,
                         std::string role = "controller") {
@@ -279,6 +294,19 @@ public:
     WorkerToQtMessage message;
     while (channels_.tryReceiveForQt(message))
       message = WorkerStopped{};
+  }
+
+  std::vector<UiEffect> takeProtocolDiagnostics() {
+    std::vector<UiEffect> diagnostics;
+    static_cast<void>(channels_.drainWorkerToQtWake());
+    WorkerToQtMessage message;
+    while (channels_.tryReceiveForQt(message)) {
+      if (UiEffect *effect = std::get_if<UiEffect>(&message);
+          effect && effect->kind == UiEffectKind::ProtocolDiagnostic)
+        diagnostics.emplace_back(std::move(*effect));
+      message = WorkerStopped{};
+    }
+    return diagnostics;
   }
 
 private:
@@ -453,6 +481,309 @@ bool establishProvider(UnixBridge &bridge, RunningRuntime &runtime) {
              findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"}));
 }
 
+std::string diagnosticField(const UiEffect &effect, std::string_view key) {
+  const auto found = effect.details.find(key);
+  if (found == effect.details.end() || !found->second.asString())
+    return {};
+  return *found->second.asString();
+}
+
+void protocolDiagnosticsPreserveMetadataWithoutPayloads(
+    UnixBridge &bridge, RunningRuntime &runtime) {
+  const std::vector<UiEffect> initialDiagnostics =
+      runtime.takeProtocolDiagnostics();
+  expect(std::ranges::any_of(initialDiagnostics,
+                             [](const UiEffect &effect) {
+                               return diagnosticField(effect, "subject") ==
+                                      "connection.lifecycle";
+                             }) &&
+             std::ranges::any_of(initialDiagnostics,
+                                 [](const UiEffect &effect) {
+                                   return diagnosticField(effect, "subject") ==
+                                              "connection.provider" &&
+                                          diagnosticField(
+                                              effect, "authority") == "replace";
+                                 }),
+         "transport lifecycle and bridge provider diagnostics remain visible");
+  const NodeRef thread =
+      findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"});
+  if (!thread)
+    return;
+
+  NodeAction rename{thread, NodeActionKind::Rename};
+  rename.payload = {{"name", Value("authored-name-must-not-appear")}};
+  expect(sendAction(runtime.channels(), std::move(rename)),
+         "diagnostic rename enters the typed mailbox");
+  const std::optional<nlohmann::json> request = bridge.receiveAppServer();
+  expect(request &&
+             request->value("method", std::string{}) == "thread/name/set",
+         "diagnostic fixture receives the direct request");
+  if (!request)
+    return;
+  expect(bridge.replyError(*request, -32041, "rename rejected safely"),
+         "diagnostic fixture receives a benign JSON-RPC error");
+
+  std::vector<UiEffect> diagnostics;
+  expect(waitUntil([&] {
+           std::vector<UiEffect> batch = runtime.takeProtocolDiagnostics();
+           diagnostics.insert(diagnostics.end(),
+                              std::make_move_iterator(batch.begin()),
+                              std::make_move_iterator(batch.end()));
+           return std::ranges::any_of(diagnostics, [](const UiEffect &effect) {
+             return diagnosticField(effect, "direction") == "client error" &&
+                    diagnosticField(effect, "subject") == "thread/name/set";
+           });
+         }),
+         "request and response diagnostics cross the typed worker queue");
+
+  const UiEffect *sent = nullptr;
+  const UiEffect *failed = nullptr;
+  for (const UiEffect &effect : diagnostics) {
+    if (diagnosticField(effect, "subject") != "thread/name/set")
+      continue;
+    if (diagnosticField(effect, "direction") == "client request")
+      sent = &effect;
+    if (diagnosticField(effect, "direction") == "client error")
+      failed = &effect;
+  }
+  expect(sent && failed && diagnosticField(*sent, "source") == "CodexUI" &&
+             diagnosticField(*sent, "authority") == "none" &&
+             diagnosticField(*sent, "threadId") == "runtime-thread" &&
+             diagnosticField(*failed, "source") == "app-server" &&
+             diagnosticField(*failed, "authority") == "none" &&
+             diagnosticField(*failed, "threadId") == "runtime-thread" &&
+             diagnosticField(*failed, "outcome") == "ERROR" &&
+             diagnosticField(*failed, "errorCategory") == "json-rpc" &&
+             diagnosticField(*failed, "errorCode") == "-32041" &&
+             diagnosticField(*failed, "error") == "rename rejected safely" &&
+             diagnosticField(*sent, "correlation") ==
+                 diagnosticField(*failed, "correlation"),
+         "diagnostics preserve direction, source, semantic authority, scope, "
+         "correlation, and safe errors");
+
+  for (const UiEffect &effect : diagnostics) {
+    const std::string rendered = diagnosticField(effect, "subject") +
+                                 diagnosticField(effect, "error") +
+                                 diagnosticField(effect, "threadId");
+    expect(rendered.find("authored-name-must-not-appear") == std::string::npos,
+           "diagnostics never copy an authored request payload");
+  }
+
+  RuntimeAction refresh{RuntimeActionKind::RefreshThreads};
+  expect(sendAction(runtime.channels(), std::move(refresh)),
+         "secret-error fixture enters the typed mailbox");
+  const std::optional<nlohmann::json> secretRequest = bridge.receiveAppServer();
+  expect(secretRequest &&
+             secretRequest->value("method", std::string{}) == "thread/list",
+         "secret-error fixture receives the direct request");
+  if (secretRequest) {
+    expect(bridge.replyError(*secretRequest, -32042,
+                             "Bearer sk-runtime-secret eyJabc.def.ghi"),
+           "secret-shaped error reaches the runtime");
+    std::vector<UiEffect> secretDiagnostics;
+    expect(waitUntil([&] {
+             std::vector<UiEffect> batch = runtime.takeProtocolDiagnostics();
+             secretDiagnostics.insert(secretDiagnostics.end(),
+                                      std::make_move_iterator(batch.begin()),
+                                      std::make_move_iterator(batch.end()));
+             return std::ranges::any_of(
+                 secretDiagnostics, [](const UiEffect &effect) {
+                   return diagnosticField(effect, "direction") ==
+                              "client error" &&
+                          diagnosticField(effect, "subject") == "thread/list";
+                 });
+           }),
+           "secret-shaped error produces bounded metadata");
+    bool redactedSecretError = false;
+    for (const UiEffect &effect : secretDiagnostics) {
+      if (diagnosticField(effect, "subject") != "thread/list" ||
+          diagnosticField(effect, "direction") != "client error")
+        continue;
+      redactedSecretError =
+          diagnosticField(effect, "error") == "[redacted error detail]";
+    }
+    expect(redactedSecretError,
+           "credential-shaped protocol error detail is redacted");
+  }
+
+  const auto readAuthority = [&](bool insertInterveningFrame) {
+    runtime.drainNotifications();
+    NodeAction reload{thread, NodeActionKind::Reload};
+    expect(sendAction(runtime.channels(), std::move(reload)),
+           "thread/read diagnostic reload enters the typed mailbox");
+    const std::optional<nlohmann::json> readRequest = bridge.receiveAppServer();
+    expect(readRequest &&
+               readRequest->value("method", std::string{}) == "thread/read",
+           "diagnostic reload emits thread/read");
+    if (!readRequest)
+      return std::string{};
+    if (insertInterveningFrame) {
+      expect(bridge.appServerNotification(
+                 "thread/name/updated",
+                 {{"threadId", "runtime-thread"},
+                  {"name", "Changed while thread/read was pending"}}),
+             "intervening provider delta is delivered before thread/read");
+    }
+    expect(bridge.reply(*readRequest, {{"thread", listedThread()}}),
+           "thread/read diagnostic response is delivered");
+
+    // Interactive hydration preserves the existing settings-refresh behavior.
+    // Complete that follow-up so this authority check leaves no wire request
+    // behind for the rest of the runtime integration test.
+    const std::optional<nlohmann::json> resumeRequest =
+        bridge.receiveAppServer();
+    expect(resumeRequest &&
+               resumeRequest->value("method", std::string{}) == "thread/resume",
+           "interactive thread/read is followed by one settings refresh");
+    if (resumeRequest)
+      expect(bridge.reply(*resumeRequest, nlohmann::json::object()),
+             "settings refresh response is delivered");
+
+    std::string authority;
+    expect(waitUntil([&] {
+             for (UiEffect &effect : runtime.takeProtocolDiagnostics()) {
+               if (diagnosticField(effect, "direction") == "client result" &&
+                   diagnosticField(effect, "subject") == "thread/read")
+                 authority = diagnosticField(effect, "authority");
+             }
+             return !authority.empty();
+           }),
+           "thread/read result retains its diagnostic authority");
+    return authority;
+  };
+  expect(readAuthority(true) == "merge",
+         "an intervening provider frame makes stale thread/read diagnostics "
+         "field-aware merge authority");
+  expect(readAuthority(false) == "replace",
+         "an immediately correlated thread/read retains replacement "
+         "authority");
+
+  runtime.drainNotifications();
+  expect(
+      bridge.appServerNotification("skills/changed", nlohmann::json::object()),
+      "state-neutral catalog invalidation is delivered");
+  expect(bridge.appServerNotification("thread/goal/cleared",
+                                      {{"threadId", "runtime-thread"}}),
+         "authoritative removal notification is delivered");
+  std::vector<UiEffect> notificationDiagnostics;
+  expect(waitUntil([&] {
+           std::vector<UiEffect> batch = runtime.takeProtocolDiagnostics();
+           notificationDiagnostics.insert(
+               notificationDiagnostics.end(),
+               std::make_move_iterator(batch.begin()),
+               std::make_move_iterator(batch.end()));
+           return std::ranges::any_of(notificationDiagnostics,
+                                      [](const UiEffect &effect) {
+                                        return diagnosticField(effect,
+                                                               "subject") ==
+                                               "skills/changed";
+                                      }) &&
+                  std::ranges::any_of(
+                      notificationDiagnostics, [](const UiEffect &effect) {
+                        return diagnosticField(effect, "subject") ==
+                               "thread/goal/cleared";
+                      });
+         }),
+         "notification diagnostics preserve semantic authority");
+  const auto authorityFor = [&](std::string_view subject) {
+    const auto found = std::ranges::find_if(
+        notificationDiagnostics, [subject](const UiEffect &effect) {
+          return diagnosticField(effect, "subject") == subject;
+        });
+    return found == notificationDiagnostics.end()
+               ? std::string{}
+               : diagnosticField(*found, "authority");
+  };
+  expect(authorityFor("skills/changed") == "none" &&
+             authorityFor("thread/goal/cleared") == "remove",
+         "state-neutral and removal notifications remain distinguishable");
+
+  runtime.drainNotifications();
+  expect(bridge.appServerRequest("diagnostic-clock", "currentTime/read",
+                                 {{"threadId", "runtime-thread"}}),
+         "reverse-request diagnostic fixture is delivered");
+  const std::optional<nlohmann::json> automaticClockResponse =
+      bridge.receiveAppServer();
+  expect(automaticClockResponse &&
+             !automaticClockResponse->contains("method") &&
+             automaticClockResponse->value("id", std::string{}) ==
+                 "diagnostic-clock",
+         "reverse-request diagnostic fixture consumes its automatic response");
+  std::vector<UiEffect> reverseDiagnostics;
+  expect(waitUntil([&] {
+           std::vector<UiEffect> batch = runtime.takeProtocolDiagnostics();
+           reverseDiagnostics.insert(reverseDiagnostics.end(),
+                                     std::make_move_iterator(batch.begin()),
+                                     std::make_move_iterator(batch.end()));
+           return std::ranges::any_of(
+               reverseDiagnostics, [](const UiEffect &effect) {
+                 return diagnosticField(effect, "direction") ==
+                            "server result" &&
+                        diagnosticField(effect, "correlation") ==
+                            "diagnostic-clock";
+               });
+         }),
+         "reverse request and automatic response are both diagnosed");
+  const UiEffect *reverseRequest = nullptr;
+  const UiEffect *reverseResult = nullptr;
+  for (const UiEffect &effect : reverseDiagnostics) {
+    if (diagnosticField(effect, "correlation") != "diagnostic-clock")
+      continue;
+    if (diagnosticField(effect, "direction") == "server request")
+      reverseRequest = &effect;
+    if (diagnosticField(effect, "direction") == "server result")
+      reverseResult = &effect;
+  }
+  expect(reverseRequest && reverseResult &&
+             diagnosticField(*reverseRequest, "authority") == "merge" &&
+             diagnosticField(*reverseResult, "authority") == "remove" &&
+             diagnosticField(*reverseRequest, "threadId") == "runtime-thread" &&
+             diagnosticField(*reverseRequest, "correlation") ==
+                 diagnosticField(*reverseResult, "correlation"),
+         "reverse interaction diagnostics preserve scope and correlation");
+
+  runtime.drainNotifications();
+  constexpr std::string_view SensitiveRequestId =
+      "failed:sk-sensitive-correlation";
+  expect(bridge.appServerRequest(std::string(SensitiveRequestId),
+                                 "currentTime/read",
+                                 {{"threadId", "runtime-thread"}}),
+         "sensitive request-id diagnostic fixture is delivered");
+  const std::optional<nlohmann::json> sensitiveClockResponse =
+      bridge.receiveAppServer();
+  expect(sensitiveClockResponse &&
+             !sensitiveClockResponse->contains("method") &&
+             sensitiveClockResponse->value("id", std::string{}) ==
+                 SensitiveRequestId,
+         "sensitive request-id fixture consumes its automatic response");
+  std::vector<UiEffect> sensitiveIdDiagnostics;
+  expect(waitUntil([&] {
+           std::vector<UiEffect> batch = runtime.takeProtocolDiagnostics();
+           sensitiveIdDiagnostics.insert(sensitiveIdDiagnostics.end(),
+                                         std::make_move_iterator(batch.begin()),
+                                         std::make_move_iterator(batch.end()));
+           return std::ranges::any_of(
+               sensitiveIdDiagnostics, [](const UiEffect &effect) {
+                 return diagnosticField(effect, "direction") ==
+                            "server result" &&
+                        diagnosticField(effect, "correlation") ==
+                            "<oversized-or-sensitive-id>";
+               });
+         }),
+         "sensitive request ids remain visible only as redacted chronology");
+  for (const UiEffect &effect : sensitiveIdDiagnostics) {
+    std::string visibleMetadata;
+    for (const auto &[key, value] : effect.details) {
+      visibleMetadata += key;
+      if (value.asString())
+        visibleMetadata += *value.asString();
+    }
+    expect(visibleMetadata.find(SensitiveRequestId) == std::string::npos,
+           "sensitive request ids are neither retained nor correlated");
+  }
+  runtime.drainNotifications();
+}
+
 void directNodeActionsUseOneCorrelatedRequest(UnixBridge &bridge,
                                               RunningRuntime &runtime) {
   const NodeRef thread =
@@ -462,6 +793,7 @@ void directNodeActionsUseOneCorrelatedRequest(UnixBridge &bridge,
     return;
 
   NodeAction missingName{thread, NodeActionKind::Rename};
+  missingName.correlation = "missing-name-action";
   expect(sendAction(runtime.channels(), std::move(missingName)),
          "a missing-name rename can enter the typed mailbox");
   expect(!bridge.receiveAppServer(100ms),
@@ -469,10 +801,46 @@ void directNodeActionsUseOneCorrelatedRequest(UnixBridge &bridge,
 
   NodeAction emptyName{thread, NodeActionKind::Rename};
   emptyName.payload = {{"name", Value(" \t\n")}};
+  emptyName.correlation = "blank-name-action";
   expect(sendAction(runtime.channels(), std::move(emptyName)),
          "a blank-name rename can enter the typed mailbox");
   expect(!bridge.receiveAppServer(100ms),
          "worker validation blocks an empty rename name");
+  std::vector<UiEffect> localRejections;
+  expect(waitUntil([&] {
+           std::vector<UiEffect> batch = runtime.takeProtocolDiagnostics();
+           localRejections.insert(localRejections.end(),
+                                  std::make_move_iterator(batch.begin()),
+                                  std::make_move_iterator(batch.end()));
+           return std::ranges::count_if(
+                      localRejections, [](const UiEffect &effect) {
+                        return diagnosticField(effect, "direction") ==
+                                   "local result" &&
+                               diagnosticField(effect, "subject") ==
+                                   "thread/name/set";
+                      }) >= 2;
+         }),
+         "local validation failures reach the bounded Protocol chronology");
+  const auto localRenameRejection = [&localRejections](
+                                        std::string_view correlation) {
+    return std::ranges::any_of(localRejections, [correlation](
+                                                    const UiEffect &effect) {
+      return diagnosticField(effect, "direction") == "local result" &&
+             diagnosticField(effect, "subject") == "thread/name/set" &&
+             diagnosticField(effect, "authority") == "none" &&
+             diagnosticField(effect, "outcome") == "ERROR" &&
+             diagnosticField(effect, "errorCategory") == "local-validation" &&
+             diagnosticField(effect, "correlation") == correlation &&
+             diagnosticField(effect, "threadId") == "runtime-thread" &&
+             diagnosticField(effect, "targetId") == "runtime-thread" &&
+             diagnosticField(effect, "error") ==
+                 "A non-empty thread name is required";
+    });
+  };
+  expect(localRenameRejection("missing-name-action") &&
+             localRenameRejection("blank-name-action"),
+         "local rejection diagnostics preserve action correlation and safe "
+         "error metadata without sending a wire operation");
 
   NodeAction rename{thread, NodeActionKind::Rename};
   rename.payload = {{"name", Value("Renamed once")},
@@ -1167,6 +1535,8 @@ int main(int argc, char **argv) {
   codexui::codex::expect(
       ready, "runtime connects and performs one initial provider hydration");
   if (ready) {
+    codexui::codex::protocolDiagnosticsPreserveMetadataWithoutPayloads(bridge,
+                                                                       runtime);
     codexui::codex::directNodeActionsUseOneCorrelatedRequest(bridge, runtime);
     codexui::codex::runtimeRefreshActionsHaveExactRequestCardinality(bridge,
                                                                      runtime);

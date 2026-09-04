@@ -598,6 +598,23 @@ void typedActionsAreExactOnceAndBounded(Configuration &configuration) {
               !channels.tryReceiveForWorker(received),
           "one Qt action produces one FIFO payload and one wake");
 
+  RuntimeAction naturallyAuthored{RuntimeActionKind::ConfigureConnection};
+  naturallyAuthored.payload = {{"transport", Value("invalid-for-fixture")}};
+  require(session.sendRuntimeAction(naturallyAuthored) ==
+              ChannelSendStatus::Accepted,
+          "the frontend admits a naturally authored action without requiring "
+          "widgets to manufacture protocol correlation");
+  const EventFd::DrainResult correlatedWake = channels.drainQtToWorkerWake();
+  const bool gotCorrelated = channels.tryReceiveForWorker(received);
+  const RuntimeAction *correlatedAction =
+      gotCorrelated ? std::get_if<RuntimeAction>(&received) : nullptr;
+  require(correlatedWake.status == EventFd::DrainStatus::Drained &&
+              correlatedWake.count == 1 && correlatedAction &&
+              correlatedAction->correlation.starts_with("ui-action-") &&
+              !channels.tryReceiveForWorker(received),
+          "FrontendSession assigns one bounded correlation before enqueueing "
+          "a real UI action");
+
   std::size_t admissions = 0;
   for (;;) {
     RuntimeAction filler;

@@ -1508,6 +1508,9 @@ void ShellWidget::Impl::handleUiEffect(const nodegraph::UiEffect &effect) {
       selectGraphThread(*effect.target);
     break;
   }
+  case nodegraph::UiEffectKind::ProtocolDiagnostic:
+    middleRegion->inspector().appendProtocolDiagnostic(effect);
+    return;
   }
   scheduleRender();
 }

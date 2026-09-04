@@ -118,7 +118,7 @@ public:
 private:
   friend class NodeGraph;
 
-  explicit Node(NodeId id, NodeState state);
+  explicit Node(NodeId id, NodeState state, std::uint64_t insertionOrder);
 
   NodeId id_;
   std::shared_ptr<const NodeState> state_;
@@ -128,6 +128,10 @@ private:
   std::unordered_map<std::string, std::uint64_t> fieldChangedRevisions_;
   std::uint64_t statusChangedRevision_ = 0;
   std::uint64_t changedRevision_ = 0;
+  // Immutable position in the graph's append-only insertion order. Qt uses
+  // this only to resume bounded scans after unrelated removals shift the
+  // ordered-node vector.
+  std::uint64_t insertionOrder_ = 0;
   bool removed_ = false;
   std::atomic<void *> uiAttachment_{nullptr};
 };
@@ -165,6 +169,7 @@ public:
     [[nodiscard]] std::uint64_t revision() const noexcept;
     [[nodiscard]] NodeRef find(const NodeId &id) const;
     [[nodiscard]] const std::vector<NodeRef> &orderedNodes() const noexcept;
+    [[nodiscard]] std::uint64_t insertionOrder(const NodeRef &node) const;
     [[nodiscard]] const std::vector<NodeRef> &retiredNodes() const noexcept;
     [[nodiscard]] std::size_t retiredCount() const noexcept;
     [[nodiscard]] NodeRef retiredAt(std::size_t index) const;
@@ -292,6 +297,7 @@ private:
   std::vector<NodeRef> retiredNodes_;
   std::unordered_map<Node *, std::size_t> retiredIndex_;
   std::uint64_t retiredOrderGeneration_ = 0;
+  std::uint64_t nextInsertionOrder_ = 1;
   std::uint64_t revision_ = 0;
   std::atomic<std::uint64_t> publishedRevision_{0};
 };

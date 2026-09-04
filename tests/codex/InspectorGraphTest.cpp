@@ -69,6 +69,22 @@ nodegraph::GraphChanged notification(nodegraph::GraphChange change) {
           std::move(change.removed), false};
 }
 
+nodegraph::UiEffect protocolDiagnostic(std::uint64_t sequence,
+                                       std::string direction,
+                                       std::string subject,
+                                       std::string authority) {
+  return {nodegraph::UiEffectKind::ProtocolDiagnostic,
+          std::nullopt,
+          {},
+          {{"sequence", nodegraph::Value(sequence)},
+           {"connectionGeneration", nodegraph::Value(std::uint64_t{3})},
+           {"providerGeneration", nodegraph::Value(std::uint64_t{7})},
+           {"direction", nodegraph::Value(std::move(direction))},
+           {"subject", nodegraph::Value(std::move(subject))},
+           {"source", nodegraph::Value("app-server")},
+           {"authority", nodegraph::Value(std::move(authority))}}};
+}
+
 bool directGraphRenderingIsLazyAndCurrent() {
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef thread;
@@ -76,6 +92,7 @@ bool directGraphRenderingIsLazyAndCurrent() {
   nodegraph::NodeRef agentItem;
   nodegraph::NodeRef fileChangeItem;
   nodegraph::NodeRef interaction;
+  nodegraph::NodeRef pendingStatisticInteraction;
   {
     auto write = graph.write();
     nodegraph::NodeState threadState;
@@ -140,6 +157,20 @@ bool directGraphRenderingIsLazyAndCurrent() {
         write.upsert({nodegraph::NodeKind::Connection, "connection"},
                      std::move(connectionState)));
 
+    nodegraph::NodeState configurationState;
+    configurationState.fields = {
+        {"safeMode", nodegraph::Value("workspace-write")},
+        {"apiToken", nodegraph::Value("sk-state-secret")},
+        {"failed:sk-secret-object-key", nodegraph::Value("safe value")},
+        {"environment",
+         nodegraph::Value(
+             nodegraph::Value::Array{nodegraph::Value(nodegraph::Value::Object{
+                 {"name", nodegraph::Value("OPENAI_API_KEY")},
+                 {"value", nodegraph::Value("sk-nested-secret")}})})}};
+    static_cast<void>(
+        write.upsert({nodegraph::NodeKind::Configuration, "config"},
+                     std::move(configurationState)));
+
     nodegraph::NodeState interactionState;
     interactionState.status = nodegraph::NodeStatus::Pending;
     interactionState.fields = {
@@ -182,12 +213,18 @@ bool directGraphRenderingIsLazyAndCurrent() {
            nodegraph::Value("bulk-request-" + std::to_string(index))},
           {"payload",
            nodegraph::Value(nodegraph::Value::Object{
-               {"message", nodegraph::Value("Deferred request " +
-                                            std::to_string(index))}})}};
+               {"message",
+                nodegraph::Value("Deferred request " + std::to_string(index))},
+               {"threadId",
+                nodegraph::Value(index == 0 ? "failed:sk-thread-secret"
+                                            : "thread-graph")}})}};
       const nodegraph::NodeRef extraInteraction =
           write.upsert({nodegraph::NodeKind::Interaction,
-                        "zz-request-" + std::to_string(index)},
+                        index == 0 ? "string:failed:sk-state-request-secret"
+                                   : "zz-request-" + std::to_string(index)},
                        std::move(extraInteractionState));
+      if (index == 0)
+        pendingStatisticInteraction = extraInteraction;
       write.relate(extraInteraction, nodegraph::RelationKind::InteractionTarget,
                    thread);
       write.relate(runtime, nodegraph::RelationKind::PendingInteraction,
@@ -484,28 +521,99 @@ bool directGraphRenderingIsLazyAndCurrent() {
       state &&
           state->toPlainText().contains(QStringLiteral("Shared NodeGraph")) &&
           state->toPlainText().contains(QStringLiteral("thread-graph")) &&
-          state->toPlainText().contains(QStringLiteral("Graph thread")),
-      "State renders bounded current-node diagnostics without a JSON model");
+          state->toPlainText().contains(QStringLiteral("Graph thread")) &&
+          state->toPlainText().contains(QStringLiteral("workspace-write")) &&
+          state->toPlainText().contains(
+              QStringLiteral("Pending interactions (metadata only)")) &&
+          !state->toPlainText().contains(QStringLiteral("sk-state-secret")) &&
+          !state->toPlainText().contains(QStringLiteral("sk-nested-secret")) &&
+          !state->toPlainText().contains(
+              QStringLiteral("sk-state-request-secret")) &&
+          !state->toPlainText().contains(QStringLiteral("sk-thread-secret")) &&
+          !state->toPlainText().contains(
+              QStringLiteral("sk-secret-object-key")) &&
+          state->toPlainText().contains(
+              QStringLiteral("<redacted identifier>")),
+      "State preserves useful current graph inspection while recursively "
+      "redacting secrets");
 
   auto *stack = pane.findChild<QStackedWidget *>(QStringLiteral("infoStack"));
   if (stack)
     stack->setCurrentIndex(0);
   auto *protocolChoice =
       pane.findChild<QPushButton *>(QStringLiteral("protocolInfoChoice"));
+  nodegraph::UiEffect request =
+      protocolDiagnostic(1, "client request", "thread/read", "none");
+  request.details.emplace("threadId", nodegraph::Value("thread-graph"));
+  request.details.emplace("correlation", nodegraph::Value("request-17"));
+  pane.appendProtocolDiagnostic(request);
+  nodegraph::UiEffect response =
+      protocolDiagnostic(2, "client result", "thread/read", "replace");
+  response.details.emplace("threadId", nodegraph::Value("thread-graph"));
+  response.details.emplace("correlation", nodegraph::Value("request-17"));
+  response.details.emplace("outcome", nodegraph::Value("ok"));
+  pane.appendProtocolDiagnostic(response);
+  nodegraph::UiEffect failure =
+      protocolDiagnostic(4, "client error", "thread/name/set", "none");
+  failure.details.emplace("outcome", nodegraph::Value("ERROR"));
+  failure.details.emplace("errorCategory", nodegraph::Value("json-rpc"));
+  failure.details.emplace("errorCode", nodegraph::Value("-32001"));
+  failure.details.emplace("error", nodegraph::Value("rename rejected"));
+  pane.appendProtocolDiagnostic(failure);
+  for (std::uint64_t sequence = 5; sequence != 90; ++sequence)
+    pane.appendProtocolDiagnostic(protocolDiagnostic(
+        sequence, "server notification", "turn/outputText/delta", "merge"));
+  pane.appendProtocolDiagnostic(
+      protocolDiagnostic(90, "server notification", "skills/changed", "none"));
   if (protocolChoice)
     protocolChoice->click();
   spin(20);
   auto *protocol =
       pane.findChild<QPlainTextEdit *>(QStringLiteral("protocolInfoLog"));
+  auto *protocolStats =
+      pane.findChild<QLabel *>(QStringLiteral("protocolInfoStats"));
   const QString protocolText = protocol ? protocol->toPlainText() : QString{};
   result &= expect(
-      protocolText.contains(QStringLiteral("thread/read")) &&
-          protocolText.contains(QStringLiteral("future/method")) &&
+      protocolText.indexOf(QStringLiteral("client request")) <
+              protocolText.indexOf(QStringLiteral("client result")) &&
+          protocolText.contains(QStringLiteral("#1")) &&
+          protocolText.contains(QStringLiteral("g3")) &&
+          protocolText.contains(QStringLiteral("p7")) &&
+          protocolText.contains(QStringLiteral("authority=replace")) &&
+          protocolText.contains(QStringLiteral("threadId=thread-graph")) &&
+          protocolText.contains(QStringLiteral("correlation=request-17")) &&
+          protocolText.contains(QStringLiteral("SEQUENCE GAP")) &&
+          protocolText.contains(QStringLiteral("error=rename rejected")) &&
+          protocolText.contains(QStringLiteral("error-code=-32001")) &&
           !protocolText.contains(QStringLiteral("legacy.raw.frame")) &&
           !protocolText.contains(QStringLiteral("payload-must-not-render")) &&
           !protocolText.contains(QStringLiteral("unknown-payload")),
-      "Protocol replaces raw history with current operation/unknown "
-      "diagnostics");
+      "Protocol preserves bounded chronological metadata, semantic scope, "
+      "correlation, gaps, and errors without raw payloads");
+  result &= expect(
+      protocolStats && protocolStats->text().contains(QStringLiteral(
+                           "threads 3  |  models 0  |  turns 1  |  items "
+                           "32  |  pending 96  |  telemetry 1")),
+      "Protocol statistics preserve global threads/models and selected-thread "
+      "turn/item plus reverse-request counts");
+  nodegraph::GraphChange resolvedStatistic;
+  {
+    auto write = graph.write();
+    write.setStatus(pendingStatisticInteraction,
+                    nodegraph::NodeStatus::Completed);
+    resolvedStatistic = write.finish();
+  }
+  pane.graphChanged(notification(std::move(resolvedStatistic)));
+  spin(40);
+  result &= expect(protocolStats && protocolStats->text().contains(
+                                        QStringLiteral("pending 95")),
+                   "Protocol pending statistics refresh when a reverse "
+                   "interaction resolves");
+  auto *authority =
+      pane.findChild<QLabel *>(QStringLiteral("protocolInfoAuthority"));
+  result &= expect(authority && authority->text().contains(
+                                    QStringLiteral("Non-authoritative")),
+                   "Protocol identifies its history as non-authoritative");
   result &= expect(protocol && protocol->verticalScrollBar()->maximum() > 0 &&
                        protocol->verticalScrollBar()->value() ==
                            protocol->verticalScrollBar()->maximum(),
@@ -530,13 +638,51 @@ bool directGraphRenderingIsLazyAndCurrent() {
   return result;
 }
 
-bool boundedProtocolScanYieldsRestartsAndSleepsWhileHidden() {
+bool boundedProtocolHistoryAndGraphScanStayResponsive() {
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef thread;
   nodegraph::NodeRef revisedOperation;
+  nodegraph::NodeRef firstUnknown;
+  nodegraph::NodeRef churnNode;
+  nodegraph::NodeRef movedSelectedItem;
+  nodegraph::NodeRef selectedTurn;
+  nodegraph::NodeRef unrelatedTurn;
   {
     auto write = graph.write();
     thread = write.upsert({nodegraph::NodeKind::Thread, "bounded-thread"});
+    const nodegraph::NodeRef unrelatedThread =
+        write.upsert({nodegraph::NodeKind::Thread, "bounded-unrelated"});
+    const nodegraph::NodeRef firstTurn =
+        write.upsert({nodegraph::NodeKind::Turn, "bounded-turn-1"});
+    selectedTurn = write.upsert({nodegraph::NodeKind::Turn, "bounded-turn-2"});
+    unrelatedTurn =
+        write.upsert({nodegraph::NodeKind::Turn, "bounded-other-turn"});
+    write.setParent(thread, firstTurn);
+    write.setParent(thread, selectedTurn);
+    write.setParent(unrelatedThread, unrelatedTurn);
+    for (int index = 0; index < 80; ++index) {
+      nodegraph::NodeState itemState;
+      itemState.fields = {
+          {"protocolThreadId", nodegraph::Value("bounded-thread")}};
+      const nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item, "bounded-item:" + std::to_string(index)},
+          std::move(itemState));
+      write.setParent(index % 2 == 0 ? firstTurn : selectedTurn, item);
+      if (index == 0)
+        movedSelectedItem = item;
+    }
+    for (int index = 0; index < 16; ++index) {
+      nodegraph::NodeState unknownState;
+      unknownState.fields = {
+          {"method",
+           nodegraph::Value("unknown/stress/" + std::to_string(index))}};
+      const nodegraph::NodeRef unknown =
+          write.upsert({nodegraph::NodeKind::UnknownProtocol,
+                        "unknown-stress:" + std::to_string(index)},
+                       std::move(unknownState));
+      if (index == 0)
+        firstUnknown = unknown;
+    }
     for (int index = 0; index < 4096; ++index) {
       nodegraph::NodeState state;
       state.status = nodegraph::NodeStatus::Pending;
@@ -565,58 +711,188 @@ bool boundedProtocolScanYieldsRestartsAndSleepsWhileHidden() {
     protocolChoice->click();
   auto *protocol =
       pane.findChild<QPlainTextEdit *>(QStringLiteral("protocolInfoLog"));
+  auto *statistics =
+      pane.findChild<QLabel *>(QStringLiteral("protocolInfoStats"));
+  auto *authority =
+      pane.findChild<QLabel *>(QStringLiteral("protocolInfoAuthority"));
 
   runOneQueuedPass();
-  bool result = expect(protocol && protocol->toPlainText().isEmpty(),
+  bool result = expect(protocol && statistics && statistics->text().isEmpty(),
                        "a large Protocol scan is bounded to more than one "
                        "Qt event-loop pass");
 
-  int heartbeats = 0;
-  QTimer heartbeat;
-  heartbeat.setInterval(0);
-  QObject::connect(&heartbeat, &QTimer::timeout,
-                   [&heartbeats] { ++heartbeats; });
-  heartbeat.start();
-
-  nodegraph::GraphChange revised;
+  nodegraph::GraphChange reparented;
   {
     auto write = graph.write();
-    write.setField(revisedOperation, "method",
-                   nodegraph::Value("protocol/revision-current"));
-    revised = write.finish();
+    write.setParent(unrelatedTurn, movedSelectedItem);
+    write.setField(movedSelectedItem, "protocolThreadId",
+                   nodegraph::Value("bounded-unrelated"));
+    reparented = write.finish();
   }
-  pane.graphChanged(notification(std::move(revised)));
-  spin(120);
-  heartbeat.stop();
-  const QString currentText = protocol ? protocol->toPlainText() : QString{};
-  result &= expect(heartbeats > 2,
-                   "bounded Protocol extraction yields to the Qt heartbeat");
+  pane.graphChanged(notification(std::move(reparented)));
+
+  nodegraph::GraphChange shiftedOrder;
+  {
+    auto write = graph.write();
+    write.remove(firstUnknown);
+    nodegraph::NodeState replacementState;
+    replacementState.fields = {
+        {"method", nodegraph::Value("unknown/stress/replacement")}};
+    static_cast<void>(write.upsert(
+        {nodegraph::NodeKind::UnknownProtocol, "unknown-stress:replacement"},
+        std::move(replacementState)));
+    nodegraph::NodeState churnState;
+    churnState.fields = {{"method", nodegraph::Value("unrelated/churn")}};
+    churnNode =
+        write.upsert({nodegraph::NodeKind::Operation, "structural-churn"},
+                     std::move(churnState));
+    shiftedOrder = write.finish();
+  }
+  pane.graphChanged(notification(std::move(shiftedOrder)));
+
+  bool completedDuringRevisions = false;
+  for (int revision = 0; revision != 100 && !completedDuringRevisions;
+       ++revision) {
+    nodegraph::GraphChange changed;
+    {
+      auto write = graph.write();
+      write.remove(churnNode);
+      nodegraph::NodeState churnState;
+      churnState.fields = {
+          {"method", nodegraph::Value("unknown/stress/churn/" +
+                                      std::to_string(revision))}};
+      churnNode = write.upsert({nodegraph::NodeKind::Operation,
+                                "structural-churn:" + std::to_string(revision)},
+                               std::move(churnState));
+      write.setField(revisedOperation, "scanPulse",
+                     nodegraph::Value(std::uint64_t(revision)));
+      changed = write.finish();
+    }
+    pane.graphChanged(notification(std::move(changed)));
+    runOneQueuedPass();
+    completedDuringRevisions = statistics && !statistics->text().isEmpty();
+  }
+  result &= expect(completedDuringRevisions,
+                   "continuous unrelated structural and field revisions do "
+                   "not starve a bounded Protocol statistics scan");
   result &= expect(
-      currentText.contains(QStringLiteral("protocol/revision-current")) &&
-          !currentText.contains(QStringLiteral("protocol/stale-partial")),
-      "a revision change discards partial Protocol scan state before render");
+      statistics &&
+          statistics->text().contains(QStringLiteral("turns 2  |  items 79")) &&
+          statistics->text().contains(QStringLiteral("unknown 16")),
+      "an immutable insertion frontier neither skips nor duplicates surviving "
+      "nodes, and selected relation changes restart before publishing mixed "
+      "counts");
+  spin(120);
+  const qulonglong completedScans =
+      pane.property("protocolScanCompletions").toULongLong();
+  for (int revision = 100; revision != 200; ++revision) {
+    nodegraph::GraphChange changed;
+    {
+      auto write = graph.write();
+      write.setField(revisedOperation, "scanPulse",
+                     nodegraph::Value(std::uint64_t(revision)));
+      changed = write.finish();
+    }
+    pane.graphChanged(notification(std::move(changed)));
+    runOneQueuedPass();
+  }
+  spin(30);
+  result &= expect(
+      pane.property("protocolScanCompletions").toULongLong() == completedScans,
+      "unrelated field streaming stops after the productive bounded scan "
+      "instead of sustaining a zero-delay rescan loop");
+
+  for (std::uint64_t sequence = 1; sequence <= 2050; ++sequence) {
+    nodegraph::UiEffect effect = protocolDiagnostic(
+        sequence, "server notification",
+        "protocol/bounded/" + std::to_string(sequence), "merge");
+    if (sequence == 2049)
+      effect.details.emplace("droppedBefore",
+                             nodegraph::Value(std::uint64_t{3}));
+    pane.appendProtocolDiagnostic(effect);
+  }
+  spin(20);
+  const QString boundedText = protocol ? protocol->toPlainText() : QString{};
+  result &= expect(
+      protocol && protocol->document()->blockCount() <= 2000 &&
+          !boundedText.contains(QStringLiteral("protocol/bounded/1  ")) &&
+          boundedText.contains(QStringLiteral("protocol/bounded/2050")) &&
+          boundedText.contains(QStringLiteral("DROPPED 3 DIAGNOSTICS")) &&
+          authority &&
+          authority->text().contains(QStringLiteral("metadata-only")),
+      "Protocol retains only its newest 2000 metadata lines and keeps the "
+      "non-authoritative header outside that bound");
+
+  auto *stateChoice =
+      pane.findChild<QPushButton *>(QStringLiteral("stateInfoChoice"));
+  if (stateChoice)
+    stateChoice->click();
+  const qulonglong initialStateCompletions =
+      pane.property("stateScanCompletions").toULongLong();
+  runOneQueuedPass();
+  nodegraph::GraphChange stateReparented;
+  {
+    auto write = graph.write();
+    write.setParent(selectedTurn, movedSelectedItem);
+    write.setField(movedSelectedItem, "protocolThreadId",
+                   nodegraph::Value("bounded-thread"));
+    stateReparented = write.finish();
+  }
+  pane.graphChanged(notification(std::move(stateReparented)));
+  bool stateCompletedDuringStructuralChurn = false;
+  for (int revision = 200;
+       revision != 300 && !stateCompletedDuringStructuralChurn; ++revision) {
+    nodegraph::GraphChange changed;
+    {
+      auto write = graph.write();
+      write.remove(churnNode);
+      nodegraph::NodeState churnState;
+      churnState.fields = {
+          {"method", nodegraph::Value("unknown/state-churn/" +
+                                      std::to_string(revision))}};
+      churnNode =
+          write.upsert({nodegraph::NodeKind::Operation,
+                        "structural-state-churn:" + std::to_string(revision)},
+                       std::move(churnState));
+      changed = write.finish();
+    }
+    pane.graphChanged(notification(std::move(changed)));
+    runOneQueuedPass();
+    stateCompletedDuringStructuralChurn =
+        pane.property("stateScanCompletions").toULongLong() >
+        initialStateCompletions;
+  }
+  result &= expect(stateCompletedDuringStructuralChurn,
+                   "continuous unrelated insert/remove activity cannot "
+                   "starve the bounded State scan");
+  auto *state =
+      pane.findChild<QPlainTextEdit *>(QStringLiteral("stateInfoView"));
+  result &=
+      expect(state && state->toPlainText().contains(
+                          QStringLiteral("turns: 2\n  items: 80")),
+             "State restarts a selected hierarchy scan before publishing mixed "
+             "item totals");
+  if (protocolChoice)
+    protocolChoice->click();
+  spin(20);
+
+  const QString currentText = protocol ? protocol->toPlainText() : QString{};
 
   pane.hide();
-  nodegraph::GraphChange hiddenChange;
-  {
-    auto write = graph.write();
-    write.setField(revisedOperation, "method",
-                   nodegraph::Value("protocol/updated-while-hidden"));
-    hiddenChange = write.finish();
-  }
-  pane.graphChanged(notification(std::move(hiddenChange)));
+  pane.appendProtocolDiagnostic(protocolDiagnostic(
+      2051, "server notification", "protocol/updated-while-hidden", "none"));
   spin(30);
   result &= expect(protocol && protocol->toPlainText() == currentText,
-                   "a hidden Inspector retains only dirty state and performs "
-                   "no Protocol projection");
+                   "a hidden Inspector records diagnostics without QWidget "
+                   "projection");
 
   pane.show();
   spin(120);
   const QString shownText = protocol ? protocol->toPlainText() : QString{};
   result &= expect(
       shownText.contains(QStringLiteral("protocol/updated-while-hidden")) &&
-          !shownText.contains(QStringLiteral("protocol/revision-current")),
-      "showing a dirty Inspector renders exactly the newest graph revision");
+          !shownText.contains(QStringLiteral("protocol/bounded/1  ")),
+      "showing Protocol resynchronizes the bounded chronological tail");
   return result;
 }
 
@@ -628,7 +904,7 @@ int main(int argc, char **argv) {
   const bool passed =
       codexui::codex::middle::directGraphRenderingIsLazyAndCurrent() &&
       codexui::codex::middle::
-          boundedProtocolScanYieldsRestartsAndSleepsWhileHidden();
+          boundedProtocolHistoryAndGraphScanStayResponsive();
   if (passed)
     std::cout << "Inspector graph tests passed\n";
   return passed ? 0 : 1;

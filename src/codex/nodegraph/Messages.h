@@ -25,6 +25,10 @@ struct GraphChanged final {
 enum class UiEffectKind : std::uint8_t {
   ShowNotice,
   SelectThread,
+  // Bounded, metadata-only protocol diagnostics for the existing Inspector.
+  // This is explicitly non-authoritative UI history; current state remains in
+  // NodeGraph and raw protocol payloads never cross the worker/Qt boundary.
+  ProtocolDiagnostic,
 };
 
 struct UiEffect final {

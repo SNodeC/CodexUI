@@ -38,13 +38,16 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -141,6 +144,611 @@ requestIdMember(const nlohmann::json &object, std::string_view key) {
     return std::nullopt;
   }
 }
+
+std::string boundedProtocolMetadata(std::string result,
+                                    std::size_t maximumBytes = 160) {
+  for (char &character : result) {
+    const unsigned char byte = static_cast<unsigned char>(character);
+    if (byte < 0x20U || byte == 0x7fU)
+      character = ' ';
+  }
+  if (result.size() > maximumBytes) {
+    result.resize(maximumBytes);
+    result += "...";
+  }
+  return result;
+}
+
+std::string boundedProtocolMetadata(const nlohmann::json &value,
+                                    std::size_t maximumBytes = 160) {
+  if (value.is_string())
+    return boundedProtocolMetadata(value.get<std::string>(), maximumBytes);
+  if (value.is_number_unsigned())
+    return boundedProtocolMetadata(std::to_string(value.get<std::uint64_t>()),
+                                   maximumBytes);
+  if (value.is_number_integer())
+    return boundedProtocolMetadata(std::to_string(value.get<std::int64_t>()),
+                                   maximumBytes);
+  return {};
+}
+
+bool credentialShapedProtocolText(std::string_view value) {
+  std::string lowered;
+  lowered.reserve(value.size());
+  for (const unsigned char character : value)
+    lowered.push_back(static_cast<char>(std::tolower(character)));
+  constexpr std::array markers{
+      std::string_view("authorization"), std::string_view("bearer "),
+      std::string_view("password"),      std::string_view("secret"),
+      std::string_view("token="),        std::string_view("token:"),
+      std::string_view("cookie"),        std::string_view("credential"),
+      std::string_view("api_key"),       std::string_view("apikey"),
+      std::string_view("-----begin"),    std::string_view("github_pat_"),
+      std::string_view("ghp_"),          std::string_view("xoxb-"),
+      std::string_view("xoxp-"),         std::string_view("xoxa-")};
+  if (std::ranges::any_of(markers, [&lowered](std::string_view marker) {
+        return lowered.find(marker) != std::string::npos;
+      }))
+    return true;
+  if (lowered.find("sk-") != std::string::npos)
+    return true;
+  const std::size_t jwt = value.find("eyJ");
+  if (jwt != std::string_view::npos) {
+    const std::size_t firstDot = value.find('.', jwt);
+    if (firstDot != std::string_view::npos &&
+        value.find('.', firstDot + 1) != std::string_view::npos)
+      return true;
+  }
+  return false;
+}
+
+std::string protocolIdentifierMetadata(const nlohmann::json &value) {
+  std::string result = boundedProtocolMetadata(value);
+  return credentialShapedProtocolText(result) ? "<redacted-id>"
+                                              : std::move(result);
+}
+
+std::string safeProtocolErrorText(std::string_view raw) {
+  if (credentialShapedProtocolText(raw) || raw.find('/') != std::string::npos ||
+      raw.find('\\') != std::string::npos ||
+      raw.find('`') != std::string::npos || raw.find('$') != std::string::npos)
+    return "[redacted error detail]";
+  return boundedProtocolMetadata(std::string(raw), 240);
+}
+
+std::string safeProtocolError(const nlohmann::json &message) {
+  const auto error = message.find("error");
+  if (error == message.end() || !error->is_object())
+    return {};
+  const auto detail = error->find("message");
+  if (detail == error->end() || !detail->is_string())
+    return {};
+  return safeProtocolErrorText(detail->get_ref<const std::string &>());
+}
+
+struct DiagnosticRequestId final {
+  std::string key;
+  std::string display;
+};
+
+std::optional<DiagnosticRequestId>
+diagnosticRequestId(const nlohmann::json &message) {
+  if (!message.is_object())
+    return std::nullopt;
+  const auto found = message.find("id");
+  if (found == message.end() || found->is_null())
+    return std::nullopt;
+  if (found->is_string()) {
+    const std::string &value = found->get_ref<const std::string &>();
+    if (value.size() <= 160 && !credentialShapedProtocolText(value))
+      return DiagnosticRequestId{"string:" + value, value};
+    // Keep the chronology visible without retaining a secret or allowing a
+    // lossy digest collision to associate a response with the wrong request.
+    return DiagnosticRequestId{{}, "<oversized-or-sensitive-id>"};
+  }
+  if (found->is_number_unsigned()) {
+    const std::string value = std::to_string(found->get<std::uint64_t>());
+    return DiagnosticRequestId{"unsigned:" + value, value};
+  }
+  if (found->is_number_integer()) {
+    const std::string value = std::to_string(found->get<std::int64_t>());
+    return DiagnosticRequestId{"signed:" + value, value};
+  }
+  return std::nullopt;
+}
+
+std::string protocolErrorCode(const nlohmann::json &message) {
+  const auto error = message.find("error");
+  if (error == message.end() || !error->is_object())
+    return {};
+  const auto code = error->find("code");
+  return code == error->end() ? std::string{}
+                              : boundedProtocolMetadata(*code, 48);
+}
+
+std::string_view nodeActionDiagnosticSubject(nodegraph::NodeActionKind kind) {
+  using enum nodegraph::NodeActionKind;
+  switch (kind) {
+  case Hydrate:
+  case Reload:
+    return "thread/read";
+  case LoadHistory:
+    return "thread/turns/list";
+  case Rename:
+    return "thread/name/set";
+  case Fork:
+    return "thread/fork";
+  case Archive:
+    return "thread/archive";
+  case Unarchive:
+    return "thread/unarchive";
+  case Delete:
+    return "thread/delete";
+  case SubmitPrompt:
+    return "turn/start";
+  case InterruptTurn:
+    return "turn/interrupt";
+  case ResolveInteraction:
+    return "serverRequest/respond";
+  case PromptMaterialized:
+    return "local/prompt/materialized";
+  case UiDetached:
+    return "local/ui/detached";
+  }
+  return "local/node-action";
+}
+
+std::string_view
+runtimeActionDiagnosticSubject(nodegraph::RuntimeActionKind kind) {
+  using enum nodegraph::RuntimeActionKind;
+  switch (kind) {
+  case RefreshThreads:
+    return "thread/list";
+  case CreateThread:
+    return "thread/start";
+  case Connect:
+    return "connection/connect";
+  case Disconnect:
+    return "connection/disconnect";
+  case Reconnect:
+    return "connection/reconnect";
+  case ConfigureConnection:
+    return "connection/configure";
+  case ClaimController:
+    return "connection/controller/claim";
+  case ReleaseController:
+    return "connection/controller/release";
+  case RefreshCatalogs:
+    return "catalog/refresh";
+  }
+  return "local/runtime-action";
+}
+
+std::string protocolMutationAuthority(std::string_view method,
+                                      bool fromAppServer, bool request,
+                                      bool notification, bool response,
+                                      bool success,
+                                      bool responseObservedInterveningFrame) {
+  if (!fromAppServer) {
+    // An outbound response resolves one retained reverse interaction. Outbound
+    // requests and initialized do not themselves publish provider facts.
+    return response ? "remove" : "none";
+  }
+  if (request)
+    return "merge";
+  if (!success)
+    return "none";
+  if (notification) {
+    constexpr std::array removedNotifications{
+        std::string_view("thread/deleted"),
+        std::string_view("serverRequest/resolved"),
+        std::string_view("thread/goal/cleared")};
+    if (std::ranges::find(removedNotifications, method) !=
+        removedNotifications.end())
+      return "remove";
+    const auto descriptor = nodegraph::findProtocolMethod(
+        nodegraph::ProtocolDirection::ServerNotification, method);
+    if (!descriptor || descriptor->get().disposition !=
+                           nodegraph::MessageDisposition::GraphUpdate)
+      return "none";
+    // These messages invalidate or report transient provider facilities, but
+    // do not themselves author current graph facts.
+    if (method == "skills/changed" ||
+        method == "mcpServer/event/stream/notification")
+      return "none";
+    if (method == "thread/name/updated" || method == "thread/goal/updated" ||
+        method == "thread/queue/changed" ||
+        method == "thread/project/updated" ||
+        method == "thread/tokenUsage/updated" ||
+        method == "turn/diff/updated" || method == "turn/plan/updated" ||
+        method == "item/fileChange/patchUpdated" ||
+        method == "account/updated" || method == "account/rateLimits/updated" ||
+        method == "app/list/updated" ||
+        method == "remoteControl/status/changed" ||
+        method == "turn/moderationMetadata" ||
+        method == "model/safetyBuffering/updated" ||
+        method == "thread/realtime/sdp")
+      return "replace";
+    return "merge";
+  }
+  if (!response)
+    return "none";
+  if (method == "thread/read")
+    return responseObservedInterveningFrame ? "merge" : "replace";
+  constexpr std::array mergedResults{
+      std::string_view("thread/list"), std::string_view("thread/start"),
+      std::string_view("thread/resume"), std::string_view("thread/fork"),
+      std::string_view("turn/start")};
+  if (std::ranges::find(mergedResults, method) != mergedResults.end())
+    return "merge";
+  constexpr std::array replacedResults{
+      std::string_view("thread/turns/list"),
+      std::string_view("thread/items/list"),
+      std::string_view("thread/queue/list"),
+      std::string_view("thread/backgroundTerminals/list"),
+      std::string_view("thread/timeline/list"),
+      std::string_view("thread/realtime/listVoices"),
+      std::string_view("project/list"),
+      std::string_view("project/read"),
+      std::string_view("threadSection/list"),
+      std::string_view("skills/list"),
+      std::string_view("hooks/list"),
+      std::string_view("plugin/list"),
+      std::string_view("plugin/read"),
+      std::string_view("plugin/installed"),
+      std::string_view("app/read"),
+      std::string_view("app/list"),
+      std::string_view("app/installed"),
+      std::string_view("model/list"),
+      std::string_view("modelProvider/capabilities/read"),
+      std::string_view("experimentalFeature/list"),
+      std::string_view("permissionProfile/list"),
+      std::string_view("collaborationMode/list"),
+      std::string_view("mcpServerStatus/list"),
+      std::string_view("config/read"),
+      std::string_view("configRequirements/read"),
+      std::string_view("account/read"),
+      std::string_view("account/rateLimits/read"),
+      std::string_view("account/usage/read"),
+      std::string_view("account/workspaceMessages/read"),
+      std::string_view("windowsSandbox/readiness")};
+  if (std::ranges::find(replacedResults, method) != replacedResults.end())
+    return "replace";
+  // The current protocol contains additional read/list/get families which do
+  // not need bespoke UI handling. Their successful results still replace the
+  // addressed current catalog or domain value, matching the original
+  // Inspector contract.
+  if (method.ends_with("/list") || method.ends_with("/read") ||
+      method.ends_with("/get"))
+    return "replace";
+  return "none";
+}
+
+class ProtocolDiagnosticEmitter final {
+public:
+  void setGenerations(nodegraph::WorkerGenerations generations) {
+    if (generationsKnown_ && generations != generations_) {
+      clientRequests_.clear();
+      serverRequests_.clear();
+      clientRequestOrder_.clear();
+      serverRequestOrder_.clear();
+    }
+    generations_ = generations;
+    generationsKnown_ = true;
+  }
+
+  void observeLifecycle(std::string_view state, std::string_view detail,
+                        nodegraph::ThreadChannels &channels) {
+    nodegraph::Value::Object fields{
+        {"direction", nodegraph::Value("transport event")},
+        {"source", nodegraph::Value("CodexBridge")},
+        {"authority", nodegraph::Value("none")},
+        {"subject", nodegraph::Value("connection.lifecycle")},
+        {"state",
+         nodegraph::Value(boundedProtocolMetadata(std::string(state)))}};
+    if (state == "failure" || state == "disconnected") {
+      fields.emplace("outcome", nodegraph::Value("ERROR"));
+      if (!detail.empty())
+        fields.emplace("error",
+                       nodegraph::Value(safeProtocolErrorText(detail)));
+    }
+    deliver(std::move(fields), channels);
+  }
+
+  void observeBridge(const nlohmann::json &message,
+                     nodegraph::ThreadChannels &channels) {
+    const std::string kind = jsonString(message, "kind");
+    std::string subject = "bridge.unknown";
+    std::string authority = "none";
+    if (kind == "bridge.connection")
+      subject = "connection.bridge";
+    else if (kind == "bridge.controller") {
+      subject = "connection.controller";
+      authority = "replace";
+    } else if (kind == "bridge.provider") {
+      subject = "connection.provider";
+      authority = "replace";
+    } else if (kind == "bridge.diagnostic") {
+      subject = "bridge.diagnostic";
+    }
+    nodegraph::Value::Object fields{
+        {"direction", nodegraph::Value("bridge event")},
+        {"source", nodegraph::Value("CodexBridge")},
+        {"authority", nodegraph::Value(std::move(authority))},
+        {"subject", nodegraph::Value(std::move(subject))}};
+    for (std::string_view key : {"connectionId", "role", "state", "event"}) {
+      const auto found = message.find(std::string(key));
+      if (found == message.end())
+        continue;
+      std::string value = protocolIdentifierMetadata(*found);
+      if (!value.empty())
+        fields.emplace(std::string(key), nodegraph::Value(std::move(value)));
+    }
+    if (kind == "bridge.diagnostic") {
+      fields.emplace("outcome", nodegraph::Value("ERROR"));
+      fields.emplace("errorCategory", nodegraph::Value("bridge"));
+      const std::string code =
+          protocolIdentifierMetadata(message.value("code", nlohmann::json{}));
+      if (!code.empty())
+        fields.emplace("errorCode", nodegraph::Value(code));
+      const std::string raw = jsonString(message, "message");
+      if (!raw.empty())
+        fields.emplace("error", nodegraph::Value(safeProtocolErrorText(raw)));
+    }
+    deliver(std::move(fields), channels);
+  }
+
+  void observeLocalRejection(std::string_view subject,
+                             std::string_view correlation,
+                             const nodegraph::NodeRef &target,
+                             std::string_view error,
+                             nodegraph::ThreadChannels &channels) {
+    nodegraph::Value::Object fields{
+        {"direction", nodegraph::Value("local result")},
+        {"source", nodegraph::Value("CodexUI")},
+        {"authority", nodegraph::Value("none")},
+        {"subject",
+         nodegraph::Value(boundedProtocolMetadata(std::string(subject), 192))},
+        {"outcome", nodegraph::Value("ERROR")},
+        {"errorCategory", nodegraph::Value("local-validation")},
+        {"error", nodegraph::Value(safeProtocolErrorText(error))}};
+    std::string displayedCorrelation = boundedProtocolMetadata(std::string(
+        correlation.empty() && target ? std::string_view(target->id().canonical)
+                                      : correlation));
+    if (credentialShapedProtocolText(displayedCorrelation))
+      displayedCorrelation = "<redacted-id>";
+    if (!displayedCorrelation.empty())
+      fields.emplace("correlation",
+                     nodegraph::Value(std::move(displayedCorrelation)));
+    if (target) {
+      std::string targetId = boundedProtocolMetadata(target->id().canonical);
+      if (credentialShapedProtocolText(targetId))
+        targetId = "<redacted-id>";
+      const std::string scope = targetId;
+      fields.emplace("targetId", nodegraph::Value(std::move(targetId)));
+      std::string_view scopeKey;
+      switch (target->id().kind) {
+      case nodegraph::NodeKind::Thread:
+        scopeKey = "threadId";
+        break;
+      case nodegraph::NodeKind::Turn:
+        scopeKey = "turnId";
+        break;
+      case nodegraph::NodeKind::Item:
+        scopeKey = "itemId";
+        break;
+      case nodegraph::NodeKind::Interaction:
+        scopeKey = "requestId";
+        break;
+      default:
+        break;
+      }
+      if (!scopeKey.empty())
+        fields.emplace(std::string(scopeKey), nodegraph::Value(scope));
+    }
+    deliver(std::move(fields), channels);
+  }
+
+  void observe(codex::protocol::AppServerDirection direction,
+               const nlohmann::json &message,
+               nodegraph::ThreadChannels &channels) {
+    const nodegraph::WorkerGenerations generations = generations_;
+    const bool fromAppServer =
+        direction == codex::protocol::AppServerDirection::FromAppServer;
+    const std::optional<std::string> wireMethod =
+        codex::protocol::jsonRpcMethod(message);
+    const std::optional<DiagnosticRequestId> requestId =
+        diagnosticRequestId(message);
+    const bool request = wireMethod && requestId;
+    const bool notification = wireMethod && !requestId;
+    const bool response = !wireMethod && requestId;
+    const bool success = message.find("error") == message.end();
+
+    nodegraph::Value::Object scopeDetails;
+    const nlohmann::json *scope = nullptr;
+    if (wireMethod) {
+      const auto parameters = message.find("params");
+      if (parameters != message.end() && parameters->is_object())
+        scope = &*parameters;
+    } else {
+      const auto result = message.find("result");
+      if (result != message.end() && result->is_object())
+        scope = &*result;
+    }
+    if (scope)
+      addScope(scopeDetails, *scope);
+
+    std::string method =
+        boundedProtocolMetadata(wireMethod.value_or(std::string{}), 192);
+    const std::string correlationKey =
+        requestId ? requestId->key : std::string{};
+    const std::string correlation =
+        requestId ? requestId->display : std::string{};
+    bool responseObservedInterveningFrame = false;
+    if (request && !correlationKey.empty()) {
+      auto &requests = fromAppServer ? serverRequests_ : clientRequests_;
+      auto &order = fromAppServer ? serverRequestOrder_ : clientRequestOrder_;
+      remember(
+          requests, order, correlationKey,
+          PendingCorrelation{method, scopeDetails, generations, sequence_ + 1});
+    } else if (response && !correlationKey.empty()) {
+      auto &requests = fromAppServer ? clientRequests_ : serverRequests_;
+      const auto correlated = requests.find(correlationKey);
+      if (correlated != requests.end()) {
+        method = correlated->second.method;
+        responseObservedInterveningFrame =
+            sequence_ != correlated->second.observedSequence;
+        if (correlated->second.generations == generations) {
+          for (const auto &[key, value] : correlated->second.scope)
+            scopeDetails.try_emplace(key, value);
+        }
+        requests.erase(correlated);
+      }
+    }
+    if (method.empty())
+      method = "<uncorrelated response>";
+
+    std::string directionName;
+    if (request)
+      directionName = fromAppServer ? "server request" : "client request";
+    else if (notification)
+      directionName =
+          fromAppServer ? "server notification" : "client notification";
+    else if (response)
+      directionName = fromAppServer
+                          ? (success ? "client result" : "client error")
+                          : (success ? "server result" : "server error");
+    else
+      directionName = fromAppServer ? "server frame" : "client frame";
+
+    nodegraph::Value::Object details{
+        {"direction", nodegraph::Value(std::move(directionName))},
+        {"source", nodegraph::Value(fromAppServer ? "app-server" : "CodexUI")},
+        {"authority",
+         nodegraph::Value(protocolMutationAuthority(
+             method, fromAppServer, request, notification, response, success,
+             responseObservedInterveningFrame))},
+        {"subject", nodegraph::Value(method)}};
+    if (!correlation.empty())
+      details.emplace("correlation", nodegraph::Value(correlation));
+    if (response)
+      details.emplace("outcome", nodegraph::Value(success ? "ok" : "ERROR"));
+    if (!success) {
+      details.emplace("errorCategory", nodegraph::Value("json-rpc"));
+      std::string code = protocolErrorCode(message);
+      if (!code.empty())
+        details.emplace("errorCode", nodegraph::Value(std::move(code)));
+      std::string error = safeProtocolError(message);
+      if (!error.empty())
+        details.emplace("error", nodegraph::Value(std::move(error)));
+    }
+    for (auto &[key, value] : scopeDetails)
+      details.try_emplace(std::move(key), std::move(value));
+    deliver(std::move(details), channels);
+  }
+
+private:
+  struct PendingCorrelation final {
+    std::string method;
+    nodegraph::Value::Object scope;
+    nodegraph::WorkerGenerations generations;
+    std::uint64_t observedSequence = 0;
+    std::uint64_t order = 0;
+  };
+
+  using CorrelationMap = std::map<std::string, PendingCorrelation, std::less<>>;
+  using CorrelationOrder = std::deque<std::pair<std::string, std::uint64_t>>;
+
+  void deliver(nodegraph::Value::Object details,
+               nodegraph::ThreadChannels &channels) {
+    details.emplace("sequence", nodegraph::Value(++sequence_));
+    details.emplace("connectionGeneration",
+                    nodegraph::Value(generations_.connection));
+    details.emplace("providerGeneration",
+                    nodegraph::Value(generations_.provider));
+    if (dropped_ != 0)
+      details.emplace("droppedBefore", nodegraph::Value(dropped_));
+    nodegraph::UiEffect effect{nodegraph::UiEffectKind::ProtocolDiagnostic,
+                               std::nullopt,
+                               {},
+                               std::move(details)};
+    const nodegraph::ChannelSendStatus status = channels.sendUiEffect(effect);
+    if (status == nodegraph::ChannelSendStatus::QueueFull) {
+      ++dropped_;
+      return;
+    }
+    dropped_ = 0;
+  }
+
+  void remember(CorrelationMap &requests, CorrelationOrder &order,
+                const std::string &key, PendingCorrelation correlation) {
+    if (order.size() >= MaximumPendingCorrelations * 2U) {
+      CorrelationOrder compacted;
+      for (const auto &[orderedKey, serial] : order) {
+        const auto current = requests.find(orderedKey);
+        if (current != requests.end() && current->second.order == serial)
+          compacted.emplace_back(orderedKey, serial);
+      }
+      order = std::move(compacted);
+    }
+    while (requests.size() >= MaximumPendingCorrelations &&
+           !requests.contains(key) && !order.empty()) {
+      const auto [oldestKey, serial] = std::move(order.front());
+      order.pop_front();
+      const auto oldest = requests.find(oldestKey);
+      if (oldest != requests.end() && oldest->second.order == serial)
+        requests.erase(oldest);
+    }
+    correlation.order = ++correlationOrder_;
+    order.emplace_back(key, correlation.order);
+    requests.insert_or_assign(key, std::move(correlation));
+  }
+
+  void addScope(nodegraph::Value::Object &details,
+                const nlohmann::json &scope) const {
+    constexpr std::array keys{
+        std::string_view("threadId"), std::string_view("turnId"),
+        std::string_view("itemId"), std::string_view("requestId"),
+        std::string_view("processId")};
+    for (std::string_view key : keys) {
+      const auto found = scope.find(std::string(key));
+      if (found == scope.end())
+        continue;
+      std::string value = protocolIdentifierMetadata(*found);
+      if (!value.empty())
+        details.emplace(std::string(key), nodegraph::Value(std::move(value)));
+    }
+    constexpr std::array nested{
+        std::pair{std::string_view("thread"), std::string_view("threadId")},
+        std::pair{std::string_view("turn"), std::string_view("turnId")},
+        std::pair{std::string_view("item"), std::string_view("itemId")}};
+    for (const auto &[objectName, idName] : nested) {
+      if (details.contains(idName))
+        continue;
+      const auto object = scope.find(std::string(objectName));
+      if (object == scope.end() || !object->is_object())
+        continue;
+      const auto id = object->find("id");
+      if (id == object->end())
+        continue;
+      std::string value = protocolIdentifierMetadata(*id);
+      if (!value.empty())
+        details.emplace(std::string(idName),
+                        nodegraph::Value(std::move(value)));
+    }
+  }
+
+  static constexpr std::size_t MaximumPendingCorrelations = 4096;
+  CorrelationMap clientRequests_;
+  CorrelationMap serverRequests_;
+  CorrelationOrder clientRequestOrder_;
+  CorrelationOrder serverRequestOrder_;
+  nodegraph::WorkerGenerations generations_;
+  std::uint64_t correlationOrder_ = 0;
+  std::uint64_t sequence_ = 0;
+  std::uint64_t dropped_ = 0;
+  bool generationsKnown_ = false;
+};
 
 nlohmann::json
 promptInput(const std::string &prompt,
@@ -391,6 +999,25 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   };
 
   codex::frontend::CodexBridge sdk({});
+  ProtocolDiagnosticEmitter protocolDiagnostics;
+  const auto rejectNodeAction =
+      [&channels, &protocolDiagnostics, &showNotice,
+       &workerLogic](const nodegraph::NodeAction &action, std::string message) {
+        protocolDiagnostics.setGenerations(workerLogic.generations());
+        protocolDiagnostics.observeLocalRejection(
+            nodeActionDiagnosticSubject(action.kind), action.correlation,
+            action.target, message, channels);
+        showNotice(std::move(message));
+      };
+  const auto rejectRuntimeAction =
+      [&channels, &protocolDiagnostics, &showNotice, &workerLogic](
+          const nodegraph::RuntimeAction &action, std::string message) {
+        protocolDiagnostics.setGenerations(workerLogic.generations());
+        protocolDiagnostics.observeLocalRejection(
+            runtimeActionDiagnosticSubject(action.kind), action.correlation, {},
+            message, channels);
+        showNotice(std::move(message));
+      };
 
   std::function<void()> requestReconnect;
   std::function<void()> requestShutdown;
@@ -403,28 +1030,43 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
       sdk,
       client::ClientConnectionCallbacks{
           .onConnected =
-              [&clearTransientState, &workerLogic] {
+              [&channels, &clearTransientState, &protocolDiagnostics,
+               &workerLogic] {
                 clearTransientState();
                 static_cast<void>(workerLogic.transportEvent("connected"));
+                protocolDiagnostics.setGenerations(workerLogic.generations());
+                protocolDiagnostics.observeLifecycle("connected", {}, channels);
               },
           .onDisconnected =
-              [&clearTransientState, &expectedDisconnectReason,
-               &desiredConnected, &workerLogic] {
+              [&channels, &clearTransientState, &expectedDisconnectReason,
+               &desiredConnected, &protocolDiagnostics, &workerLogic] {
                 clearTransientState();
                 std::string reason =
                     std::exchange(expectedDisconnectReason, {});
-                static_cast<void>(workerLogic.transportEvent(
-                    desiredConnected ? "retrying" : "disconnected", reason));
+                const std::string state =
+                    desiredConnected ? "retrying" : "disconnected";
+                static_cast<void>(workerLogic.transportEvent(state, reason));
+                protocolDiagnostics.setGenerations(workerLogic.generations());
+                protocolDiagnostics.observeLifecycle(state, reason, channels);
               },
           .onFailure =
-              [&clearTransientState, &workerLogic](std::string reason) {
+              [&channels, &clearTransientState, &protocolDiagnostics,
+               &workerLogic](std::string reason) {
                 clearTransientState();
+                const std::string diagnosticReason = reason;
                 static_cast<void>(
                     workerLogic.transportEvent("failure", std::move(reason)));
+                protocolDiagnostics.setGenerations(workerLogic.generations());
+                protocolDiagnostics.observeLifecycle(
+                    "failure", diagnosticReason, channels);
               }});
 
-  sdk.onRawJson([&workerLogic](codex::protocol::AppServerDirection direction,
+  sdk.onRawJson([&channels, &protocolDiagnostics,
+                 &workerLogic](codex::protocol::AppServerDirection direction,
                                const nlohmann::json &message) {
+    // Observe the already-decoded envelope once and immediately reduce it to
+    // bounded metadata. No raw payload crosses to Qt or survives this call.
+    protocolDiagnostics.observe(direction, message, channels);
     const std::optional<std::string> method =
         codex::protocol::jsonRpcMethod(message);
     if (!method)
@@ -464,12 +1106,15 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     static_cast<void>(workerLogic.applyDetailed(nodegraph::DecodedMessage{
         kind, *method, requestId, decodedObject(payload), {}}));
   });
-  sdk.onBridgeEvent([&clearTransientState, &hydrateProvider, &workerLogic,
+  sdk.onBridgeEvent([&channels, &clearTransientState, &hydrateProvider,
+                     &protocolDiagnostics, &workerLogic,
                      &sdk](const nlohmann::json &message) {
     const std::uint64_t before = workerLogic.generations().provider;
     const std::string kind = jsonString(message, "kind");
     applyBridgeState(workerLogic, sdk, message);
     const auto after = workerLogic.generations();
+    protocolDiagnostics.setGenerations(after);
+    protocolDiagnostics.observeBridge(message, channels);
     if (after.provider != before)
       clearTransientState();
     if (kind == "bridge.provider" && sdk.providerReady() && hydrateProvider)
@@ -627,13 +1272,19 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   CODEXUI_REGISTER_CURRENT_NOTIFICATION(ThreadRealtimeItemCompleted)
 #undef CODEXUI_REGISTER_CURRENT_NOTIFICATION
 
-  const auto publishTransportEvent = [&clearTransientState,
+  const auto publishTransportEvent = [&channels, &clearTransientState,
+                                      &protocolDiagnostics,
                                       &workerLogic](std::string state,
                                                     std::string detail = {}) {
     if (state == "retrying" || state == "disconnected" || state == "failure")
       clearTransientState();
+    const std::string diagnosticState = state;
+    const std::string diagnosticDetail = detail;
     static_cast<void>(
         workerLogic.transportEvent(std::move(state), std::move(detail)));
+    protocolDiagnostics.setGenerations(workerLogic.generations());
+    protocolDiagnostics.observeLifecycle(diagnosticState, diagnosticDetail,
+                                         channels);
   };
 
   net::un::stream::legacy::SocketClient<StreamFactory,
@@ -1316,7 +1967,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
   const auto loadHistory = [&](nodegraph::NodeAction action) {
     const std::optional<std::string> threadId = currentThreadId(action.target);
     if (!threadId) {
-      showNotice("The selected thread is no longer available");
+      rejectNodeAction(action, "The selected thread is no longer available");
       return;
     }
     if (!pendingHistoryLoads.insert(action.target).second)
@@ -1351,7 +2002,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     auto reject = [&](std::string message) {
       static_cast<void>(workerLogic.rejectInteractionResponse(
           action.target, std::move(action.payload), message));
-      showNotice(std::move(message));
+      rejectNodeAction(action, std::move(message));
     };
     auto found = pendingServerRequests.find(action.target);
     if (found == pendingServerRequests.end() ||
@@ -1509,7 +2160,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
       static_cast<void>(workerLogic.rejectInteractionResponse(
           action.target, std::move(action.payload),
           "CodexBridge rejected the server-request response"));
-      showNotice("The pending response could not be sent");
+      rejectNodeAction(action, "The pending response could not be sent");
     }
   };
 
@@ -1531,12 +2182,13 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     case Unarchive:
     case Delete: {
       if (!sdk.providerReady() || !sdk.isController()) {
-        showNotice("Controller access is unavailable for this thread action");
+        rejectNodeAction(
+            action, "Controller access is unavailable for this thread action");
         return;
       }
       if (!action.target ||
           action.target->id().kind != nodegraph::NodeKind::Thread) {
-        showNotice("The selected thread is no longer available");
+        rejectNodeAction(action, "The selected thread is no longer available");
         return;
       }
       const std::shared_ptr<const nodegraph::NodeState> threadState =
@@ -1548,19 +2200,19 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
         return value && value->asBool() && *value->asBool();
       };
       if (!threadState || stateFlag("local") || stateFlag("recoveryOnly")) {
-        showNotice("The selected thread is no longer available");
+        rejectNodeAction(action, "The selected thread is no longer available");
         return;
       }
       const bool archived = stateFlag("archived");
       if ((action.kind == Archive && archived) ||
           (action.kind == Unarchive && !archived)) {
-        showNotice("The thread action is no longer applicable");
+        rejectNodeAction(action, "The thread action is no longer applicable");
         return;
       }
       const std::string threadId =
           nodegraph::protocolCanonicalId(*threadState, action.target);
       if (threadId.empty()) {
-        showNotice("The selected thread is no longer available");
+        rejectNodeAction(action, "The selected thread is no longer available");
         return;
       }
       if (action.kind == Rename) {
@@ -1568,7 +2220,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
         const std::string *name = nameValue ? nameValue->asString() : nullptr;
         if (!name ||
             name->find_first_not_of(" \t\r\n\f\v") == std::string::npos) {
-          showNotice("A non-empty thread name is required");
+          rejectNodeAction(action, "A non-empty thread name is required");
           return;
         }
       }
@@ -1628,7 +2280,8 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
     case InterruptTurn: {
       if (!sdk.providerReady() || !sdk.isController() || !action.target ||
           action.target->id().kind != nodegraph::NodeKind::Turn) {
-        showNotice("No controlled active turn is available to stop");
+        rejectNodeAction(action,
+                         "No controlled active turn is available to stop");
         return;
       }
       std::optional<std::pair<std::string, std::string>> currentActiveTurn;
@@ -1673,7 +2326,8 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
       }
       if (!currentActiveTurn || currentActiveTurn->first.empty() ||
           currentActiveTurn->second.empty()) {
-        showNotice("No controlled active turn is available to stop");
+        rejectNodeAction(action,
+                         "No controlled active turn is available to stop");
         return;
       }
       nlohmann::json parameters = jsonObject(std::move(action.payload));
@@ -1704,7 +2358,8 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
 
   const auto configureConnection = [&](nodegraph::RuntimeAction action) {
     if (transitionPending) {
-      showNotice("A connection transition is already in progress");
+      rejectRuntimeAction(action,
+                          "A connection transition is already in progress");
       return;
     }
     const nlohmann::json parameters = jsonObject(std::move(action.payload));
@@ -1838,7 +2493,7 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
 #endif
     }
     if (!selection) {
-      showNotice("Invalid connection settings");
+      rejectRuntimeAction(action, "Invalid connection settings");
       return;
     }
     beginTransition(true, std::move(selection), "local-transport-switch");
@@ -1878,11 +2533,11 @@ int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
       return;
     case ClaimController:
       if (!sdk.claimController())
-        showNotice("Controller claim was rejected");
+        rejectRuntimeAction(action, "Controller claim was rejected");
       return;
     case ReleaseController:
       if (!sdk.releaseController())
-        showNotice("Controller release was rejected");
+        rejectRuntimeAction(action, "Controller release was rejected");
       return;
     case RefreshCatalogs: {
       nlohmann::json parameters = jsonObject(std::move(action.payload));

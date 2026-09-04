@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -129,6 +130,7 @@ public:
   void refresh(const nodegraph::NodeGraph &graph,
                nodegraph::NodeRef selectedThread = {});
   void graphChanged(const nodegraph::GraphChanged &change);
+  void appendProtocolDiagnostic(const nodegraph::UiEffect &effect);
 
   [[nodiscard]] QTabWidget *tabs() const noexcept { return inspectorTabs; }
 
@@ -143,7 +145,9 @@ private:
   void refreshCurrentTab();
   [[nodiscard]] bool
   graphChangeAffectsCurrentTab(const nodegraph::GraphChanged &change);
-  void scheduleGraphRefresh();
+  [[nodiscard]] bool protocolSelectedStructureAffected(
+      const nodegraph::GraphChanged &change) const;
+  void scheduleGraphRefresh(bool lockRetry = false);
   void runGraphRefresh();
   void cancelGraphScans();
   void runPlanGraphScan();
@@ -167,7 +171,9 @@ private:
   void runGraphRequestsRender();
   void renderChanges(const InspectorChangesData &snapshot);
   void renderGraphState(QString value);
-  void renderGraphProtocol(QString log, QString statistics);
+  void showProtocolTail();
+  void restoreProtocolScroll(bool followsTail, int pausedValue);
+  void refreshProtocolStatistics();
 
   struct PlanGraphScan;
   struct AgentsGraphScan;
@@ -213,6 +219,18 @@ private:
   std::unordered_set<const nodegraph::Node *> activeGraphDependencies;
   QByteArray stateSnapshot;
   QByteArray protocolStatsSnapshot;
+  std::deque<QString> protocolLines;
+  std::uint64_t observedProtocolSequence = 0;
+  std::uint64_t receivedProtocolDiagnostics = 0;
+  std::uint64_t protocolScrollRevision = 0;
+  std::uint64_t stateInsertionFrontier = 0;
+  std::size_t protocolTelemetryCount = 0;
+  std::size_t protocolThreadCount = 0;
+  std::size_t protocolModelCount = 0;
+  std::size_t protocolTurnCount = 0;
+  std::size_t protocolItemCount = 0;
+  std::size_t protocolPendingCount = 0;
+  std::size_t protocolUnknownCount = 0;
   bool graphRefreshScheduled = false;
   bool graphRefreshDirty = false;
   bool graphRefreshSuspended = false;
@@ -240,12 +258,16 @@ private:
   bool planRowsMaterialized = false;
   bool agentsRowsMaterialized = false;
   bool requestsRowsMaterialized = false;
+  bool protocolFollowsTail = true;
+  bool mutatingProtocolLog = false;
+  bool protocolLogSynchronized = true;
   std::size_t planKnownRows = 1;
   std::size_t agentsKnownRows = 0;
   std::size_t requestsKnownRows = 0;
   int planScrollValue = 0;
   int agentsScrollValue = 0;
   int requestsScrollValue = 0;
+  int protocolPausedScrollValue = 0;
   bool planScrollFollowsTail = false;
   bool agentsScrollFollowsTail = false;
   bool requestsScrollFollowsTail = false;

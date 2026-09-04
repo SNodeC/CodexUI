@@ -31,9 +31,10 @@ std::size_t NodeIdHash::operator()(const NodeId &id) const noexcept {
   return value ^ (kind + 0x9e3779b9U + (value << 6U) + (value >> 2U));
 }
 
-Node::Node(NodeId id, NodeState state)
+Node::Node(NodeId id, NodeState state, std::uint64_t insertionOrder)
     : id_(std::move(id)),
-      state_(std::make_shared<const NodeState>(std::move(state))) {}
+      state_(std::make_shared<const NodeState>(std::move(state))),
+      insertionOrder_(insertionOrder) {}
 
 const NodeId &Node::id() const noexcept { return id_; }
 
@@ -80,6 +81,13 @@ NodeRef NodeGraph::ReadAccess::find(const NodeId &id) const {
 const std::vector<NodeRef> &
 NodeGraph::ReadAccess::orderedNodes() const noexcept {
   return graph_->orderedNodes_;
+}
+
+std::uint64_t NodeGraph::ReadAccess::insertionOrder(const NodeRef &node) const {
+  if (!node)
+    return 0;
+  requireMember(node);
+  return node->insertionOrder_;
 }
 
 const std::vector<NodeRef> &
@@ -283,7 +291,8 @@ bool NodeGraph::WriteAccess::hasPendingChanges() const noexcept {
 NodeRef NodeGraph::WriteAccess::upsert(NodeId id, NodeState initial) {
   if (NodeRef existing = find(id))
     return existing;
-  NodeRef node(new Node(std::move(id), std::move(initial)));
+  NodeRef node(new Node(std::move(id), std::move(initial),
+                        graph_->nextInsertionOrder_++));
   graph_->nodes_.emplace(node->id_, node);
   graph_->orderedNodes_.emplace_back(node);
   PendingStateRevision &pending = pendingStateRevisions_[node.get()];

@@ -156,7 +156,10 @@ bool testInsertionLookupAndOrder() {
     if (!read)
       return false;
     passed &= expect(
-        read->revision() == 1 && read->find(runtimeId) == runtime &&
+        read->revision() == 1 && read->insertionOrder(runtime) == 1 &&
+            read->insertionOrder(thread) == 2 &&
+            read->insertionOrder(turn) == 3 &&
+            read->find(runtimeId) == runtime &&
             read->find(threadId) == thread && read->find(turnId) == turn &&
             !read->find(id(NodeKind::Item, "missing")),
         "canonical kind and id lookup returns stable NodeRefs");

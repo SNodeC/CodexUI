@@ -133,6 +133,22 @@ void refresh(InspectorPane &pane, const nodegraph::NodeGraph &graph,
     QCoreApplication::processEvents(QEventLoop::AllEvents);
 }
 
+nodegraph::UiEffect protocolDiagnostic(std::uint64_t sequence,
+                                       std::string direction,
+                                       std::string subject,
+                                       std::string authority = "merge") {
+  return {nodegraph::UiEffectKind::ProtocolDiagnostic,
+          std::nullopt,
+          {},
+          {{"sequence", nodegraph::Value(sequence)},
+           {"connectionGeneration", nodegraph::Value(std::uint64_t{2})},
+           {"providerGeneration", nodegraph::Value(std::uint64_t{5})},
+           {"direction", nodegraph::Value(std::move(direction))},
+           {"subject", nodegraph::Value(std::move(subject))},
+           {"source", nodegraph::Value("app-server")},
+           {"authority", nodegraph::Value(std::move(authority))}}};
+}
+
 nodegraph::NodeRef addThread(nodegraph::NodeGraph::WriteAccess &write,
                              std::string id, std::string name = {},
                              std::string status = {},
@@ -2460,7 +2476,6 @@ bool testNestedCommandScrollOwnership() {
 
 bool testInfoViewerLayout() {
   nodegraph::NodeGraph graph;
-  nodegraph::NodeRef firstOperation;
   {
     auto write = graph.write();
     static_cast<void>(write.upsert({nodegraph::NodeKind::Runtime, "runtime"}));
@@ -2473,12 +2488,10 @@ bool testInfoViewerLayout() {
            nodegraph::Value("protocol/test/" + std::to_string(index))},
           {"payload", nodegraph::Value(nodegraph::Value::Object{
                           {"private", nodegraph::Value("must-not-render")}})}};
-      const nodegraph::NodeRef operation =
+      static_cast<void>(
           write.upsert({nodegraph::NodeKind::Operation,
                         "fixture-operation:" + std::to_string(index)},
-                       std::move(state));
-      if (index == 0)
-        firstOperation = operation;
+                       std::move(state)));
     }
     nodegraph::NodeState unknownState;
     unknownState.fields = {
@@ -2530,6 +2543,10 @@ bool testInfoViewerLayout() {
               }),
       "Plan, Agents, and Requests inherit the canonical application "
       "scrollbar");
+  for (std::uint64_t sequence = 1; sequence <= 90; ++sequence)
+    inspector.appendProtocolDiagnostic(
+        protocolDiagnostic(sequence, "server notification",
+                           "protocol/test/" + std::to_string(sequence)));
   protocolChoice->click();
   spin(20);
   result &=
@@ -2543,11 +2560,12 @@ bool testInfoViewerLayout() {
           state->verticalScrollBar()->styleSheet().isEmpty(),
       "both Info viewer scrollbars inherit the shared visual style");
   result &= expect(
-      protocol->toPlainText().contains(QStringLiteral("protocol/test/0")) &&
+      protocol->toPlainText().contains(QStringLiteral("protocol/test/1")) &&
+          protocol->toPlainText().contains(QStringLiteral("#90")) &&
           protocol->toPlainText().contains(
-              QStringLiteral("future/protocol/method")) &&
+              QStringLiteral("server notification")) &&
           !protocol->toPlainText().contains(QStringLiteral("must-not-render")),
-      "Protocol shows current classifications without retaining payloads");
+      "Protocol shows chronological metadata without retaining payloads");
   QScrollBar *protocolScroll = protocol->verticalScrollBar();
   result &= expect(protocolScroll->maximum() > 0 &&
                        protocolScroll->value() == protocolScroll->maximum(),
@@ -2555,47 +2573,28 @@ bool testInfoViewerLayout() {
   protocolScroll->setValue(protocolScroll->maximum() / 3);
   spin();
   const int pausedValue = protocolScroll->value();
-  nodegraph::GraphChange visibleChange;
-  {
-    auto write = graph.write();
-    write.setField(firstOperation, "method",
-                   nodegraph::Value("protocol/test/visible-update"));
-    visibleChange = write.finish();
-  }
-  inspector.graphChanged({visibleChange.revision,
-                          std::move(visibleChange.affected),
-                          std::move(visibleChange.removed), false});
+  inspector.appendProtocolDiagnostic(protocolDiagnostic(
+      91, "server notification", "protocol/test/visible-update"));
   spin(20);
   result &=
       expect(protocolScroll->value() == pausedValue,
              "a visible Protocol update preserves a user-paused position");
   infoStack->setCurrentIndex(0);
-  nodegraph::GraphChange hiddenChange;
-  {
-    auto write = graph.write();
-    write.setField(firstOperation, "method",
-                   nodegraph::Value("protocol/test/hidden-update"));
-    hiddenChange = write.finish();
-  }
-  inspector.graphChanged({hiddenChange.revision,
-                          std::move(hiddenChange.affected),
-                          std::move(hiddenChange.removed), false});
+  inspector.appendProtocolDiagnostic(protocolDiagnostic(
+      92, "server notification", "protocol/test/hidden-update"));
   protocolChoice->click();
   spin(20);
   result &=
-      expect(protocolScroll->value() == pausedValue,
+      expect(protocolScroll->value() == pausedValue &&
+                 protocol->toPlainText().contains(
+                     QStringLiteral("protocol/test/hidden-update")),
              "Protocol refresh preserves its paused position across tabs");
+  // Drive an explicit user-like move to the tail even when a transient page
+  // relayout has clamped the preserved paused value to its current maximum.
+  protocolScroll->setValue(protocolScroll->minimum());
   protocolScroll->setValue(protocolScroll->maximum());
-  nodegraph::GraphChange followingChange;
-  {
-    auto write = graph.write();
-    write.setField(firstOperation, "method",
-                   nodegraph::Value("protocol/test/following-update"));
-    followingChange = write.finish();
-  }
-  inspector.graphChanged({followingChange.revision,
-                          std::move(followingChange.affected),
-                          std::move(followingChange.removed), false});
+  inspector.appendProtocolDiagnostic(protocolDiagnostic(
+      93, "server notification", "protocol/test/following-update"));
   spin(20);
   result &=
       expect(protocolScroll->value() == protocolScroll->maximum(),
