@@ -78,6 +78,14 @@ live on the nodes; no render commit or second domain model is introduced.
 Unknown methods and tagged-union alternatives are retained in unknown
 nodes/current fields without changing known state.
 
+Catalog responses remain current `Catalog` envelopes for response-level paging
+and invalidation facts. Their addressable entities are also ordered child nodes
+of the natural declared kind: `CatalogEntry`, `PermissionProfile`, `Skill`,
+`Hook`, `Plugin`, `App`, or `McpServer`. Authoritative refreshes preserve the
+`NodeRef` of retained entities, apply provider order, and retire omitted
+entities. The remaining declared kinds likewise have concrete protocol
+lifecycles; none exists only as an opaque catalog blob.
+
 Nodes are held by `std::shared_ptr<Node>`. The graph, queued notifications,
 materialized widgets, and active reads therefore pin lifetime. Relations may
 be non-owning while protected by graph synchronization. Removal unlinks a node
@@ -114,6 +122,14 @@ while a graph or queue lock is held.
 This gives Qt either the state before a decoded message or the complete state
 after it, never an intermediate graph.
 
+Mutations validate membership and cycles and reserve or construct replacement
+containers before changing topology. State storage and relation maps are
+published with no-throw swaps after transaction bookkeeping is prepared. Batch
+removal validates every `NodeRef` and builds all replacement maps, order,
+retirement, and affected-node collections before unlinking anything. Rejected
+validation is tested to leave lookup, order, relations, lifetime, and revision
+unchanged.
+
 ## Protocol contract
 
 The implementation's checked, closed inventory is `ProtocolCatalog.cpp`. Its
@@ -146,15 +162,22 @@ two deliberate no-ops are `rawResponseItem/completed` and
 `rawResponse/completed`; their presence is recognized without creating a
 second raw-response authority.
 
-Tests assert direction and disposition counts, uniqueness, lookup, and
-handling of every entry. The installed AISuite generated macros contribute
-95 client requests, 10 server requests, 76 server notifications, and the one
+Tests assert direction and disposition counts, uniqueness, lookup, and semantic
+handling of every entry. Every one of the 157 requests retains its input fields
+in one pending operation and consumes the exact response correlation. Every one
+of the 11 server requests retains its fields and target relation and resolves
+through its exact interaction `NodeRef`. Every server notification either
+publishes concrete current state or is one of the two named neutral messages.
+Focused tests additionally verify natural catalog entities, review targets,
+reasoning-summary parts, environment state, compaction, provider-auth recovery,
+and operation relations. The installed AISuite generated macros contribute 95
+client requests, 10 server requests, 76 server notifications, and the one
 client notification. The verified newer set contributes 62 more client
 requests (one supplied through a local typed compatibility adapter); local
 typed adapters also supply one server request and seven server notifications.
 Those named unions equal 157/11/83/1 without double-counting the adapted client
-request. A changed generated binding set must be reconciled explicitly with
-the verified catalog.
+request. A changed generated binding set must be reconciled explicitly with the
+verified catalog.
 
 CodexBridge performs native app-server JSON decode and encode. Its typed
 frontend callbacks provide a decoded message containing method, direction,
@@ -178,10 +201,15 @@ messages still pass through the exhaustive dispatcher and are tested. Unknown
 messages are retained separately and cannot mutate an addressed known node.
 Targeted operations also retain the expected stable `NodeRef` and connection
 and provider generations. Late or mismatched results cannot update a
-replacement node. `thread/read` additionally records the target revision at
-dispatch: a stale result may add previously unseen historical nodes, but it
-cannot overwrite newer thread fields or newer state on already-known turns and
-items.
+replacement node. `thread/read` records per-node and per-field revision stamps
+at dispatch. A stale result merges field by field: independently changed facts
+win, while absent or untouched authoritative identity/type fields are filled.
+Hydration becomes ready only after usable identity/type data exists. An
+authoritative replacement retires omitted provider-owned turns/items and stale
+lookup IDs, while preserving only explicitly protected local optimistic tails.
+Derived agent-child ownership is reference-counted across source items, and
+fork changes remove the old source-to-child relation before assigning the new
+one.
 
 ## Typed mailboxes and wake-up
 
@@ -251,6 +279,16 @@ Stable keyed identity, preserved heights, and scroll anchoring keep the main
 loop responsive. Focus, animation, folding, filters, drafts, editor mechanics,
 and scroll-following remain genuinely local QWidget state.
 
+The Inspector keeps its useful State view and a bounded chronological Protocol
+view. Protocol diagnostics retain direction, sequence/time, semantic
+authority, scope, correlation, and safe errors as metadata only; credentials
+and sensitive IDs are redacted, raw request/response payloads are not retained,
+and only the newest 2,000 lines remain. This diagnostic tail is explicitly
+non-authoritative. The Agents projection groups current protocol items by
+canonical child thread ID (falling back to the spawn item only when necessary),
+so replay, progress, completion, and interruption update one logical row in
+stable first-spawn order without removing canonical items from `NodeGraph`.
+
 The complete visible behavior in `docs/ui-behavior.md` remains required,
 including:
 
@@ -314,6 +352,23 @@ payloads, worker ownership, scoped identity collisions, realtime append/final
 semantics, and bounded visible-only rendering. It also includes a Qt heartbeat
 while 4,096 distinct inbound items plus 4,096 streaming deltas saturate and
 drain the notification queue.
+
+The direct CodexBridge integration test exercises every supported UI wire
+family rather than only counting method names: hydrate/reload, history paging,
+rename, fork, archive/unarchive/delete, new-thread creation, turn start and
+steering, interruption, thread/catalog refresh, and all 11 reverse-request
+families. It verifies encoded addressing and authored fields, exact operation
+targets and correlations, decoded success/error results, and absence of a
+second wire send.
+
+Focused performance qualification on the final Debug build measured the
+1,024/2,048-delta long stream at 41.1/82.2 ms, 1,500/3,000-item thread deletion
+at 4.4/8.9 ms, and 3,000/6,000-node graph batch removal at 7.2/8.9 ms. The
+large-render test keeps 5,000 loaded items in graph/compact geometry while live
+QWidgets remain viewport bounded; instrumentation verifies no pass exceeds 64
+structure reads, 32 geometry records, or eight card operations. Continuous
+unrelated graph revisions complete rather than restart State, Protocol, thread,
+and conversation scans, and contention retries use a bounded nonzero delay.
 
 The final clean qualification ran the independently configured nodegraph-only
 suite in Debug, AddressSanitizer, and ThreadSanitizer builds (5/5 tests in each,
