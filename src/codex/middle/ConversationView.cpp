@@ -777,6 +777,7 @@ public:
   struct ItemGeometry final {
     nodegraph::NodeRef node;
     nodegraph::NodeRef materializedPrompt;
+    nodegraph::NodeRef pendingAuthoritative;
     TurnGeometry *turn = nullptr;
     std::string key;
     std::optional<std::uint64_t> promptVisualId;
@@ -1045,6 +1046,9 @@ ConversationView::ConversationView(QWidget *parent)
   setObjectName(QStringLiteral("conversationScroll"));
   setProperty("graphContentionRetryDelayMs", GraphContentionRetryMilliseconds);
   setProperty("graphRetiredGeometryRecordCount", 0);
+  setProperty("bulkMaterializationUpdatesSuppressed", false);
+  setProperty("bulkMaterializationCommitAttempts", 0);
+  setProperty("bulkMaterializationBlocker", QString{});
   setProperty("graphLastRetiredCleanupOperations", 0);
   setProperty("graphMaxRetiredCleanupOperations", 0);
   setFrameShape(QFrame::NoFrame);
@@ -1071,6 +1075,7 @@ ConversationView::ConversationView(QWidget *parent)
   loadMore_->hide();
   connect(loadMore_, &QPushButton::clicked, this, [this] {
     if (graph_) {
+      beginAtomicMaterialization(true);
       const bool requestProviderPage =
           graphProviderHasMore_ &&
           graphHiddenItemCount_ <= AuthoritativeHistoryPageSize;
@@ -1177,6 +1182,8 @@ void ConversationView::bindGraph(const nodegraph::NodeGraph &graph,
 
   graph_ = &graph;
   graphThread_ = std::move(selectedThread);
+  if (graphThread_)
+    beginAtomicMaterialization(true);
   pendingGraphAnchorRestore_.reset();
   if (restored && restored->mode == Mode::Paused &&
       !restored->anchor.stableKey.empty())
@@ -1291,8 +1298,16 @@ void ConversationView::detachRemovedNodes(
 }
 
 void ConversationView::clearGraph() {
-  if (!graph_ && graphSections_.empty() && graphGeometry_->turns.empty())
+  if (!graph_ && graphSections_.empty() && graphGeometry_->turns.empty()) {
+    if (bulkMaterializationUpdatesSuppressed_) {
+      bulkMaterializationUpdatesSuppressed_ = false;
+      atomicMaterializationFullCommit_ = false;
+      atomicMaterializationSections_.clear();
+      setProperty("bulkMaterializationUpdatesSuppressed", false);
+      viewport()->setUpdatesEnabled(true);
+    }
     return;
+  }
   ++graphBindingEpoch_;
   pendingGraphAnchorRestore_.reset();
   for (TurnSectionWidget *section : graphSections_) {
@@ -1366,6 +1381,8 @@ void ConversationView::clearGraph() {
   visibilityScanContentHeight_ = -1;
   immediateVisibilityStart_.reset();
   immediateMaterializationNode_.reset();
+  atomicMaterializationSections_.clear();
+  atomicMaterializationFullCommit_ = false;
   graphRefreshScheduled_ = false;
   visibilityPassScheduled_ = false;
   graphPassCardOperations_ = 0;
@@ -1388,6 +1405,11 @@ void ConversationView::clearGraph() {
   setProperty("graphContentionRetryCount", 0);
   publishRetiredGeometryCleanupMetrics();
   scheduleRetiredGeometryCleanup();
+  if (bulkMaterializationUpdatesSuppressed_) {
+    bulkMaterializationUpdatesSuppressed_ = false;
+    setProperty("bulkMaterializationUpdatesSuppressed", false);
+    viewport()->setUpdatesEnabled(true);
+  }
 }
 
 void ConversationView::scheduleGraphRefresh() {
@@ -1483,6 +1505,7 @@ void ConversationView::runGraphRefresh() {
   std::vector<std::pair<nodegraph::NodeRef, nodegraph::NodeRef>>
       promptTransfers;
   std::vector<std::pair<nodegraph::NodeRef, bool>> turnActivityChanges;
+  bool freezeIncomingMaterialization = false;
   const std::uint64_t epoch = graphBindingEpoch_;
 
   std::optional<nodegraph::NodeGraph::ReadAccess> read = graph_->tryRead();
@@ -1519,6 +1542,58 @@ void ConversationView::runGraphRefresh() {
       }
       return nodegraph::NodeRef{};
     };
+    enum class PromptRootTransfer { Unrelated, WaitingForResult, Complete };
+    const auto transferMaterializedPromptRoot =
+        [this, &read, &materializedPrompts, &freezeIncomingMaterialization,
+         &promptTransfers](GraphViewportGeometry::TurnGeometry *turn,
+                           const nodegraph::NodeRef &authoritative) {
+          if (!turn || !turn->rootItem || !authoritative ||
+              turn->rootItem->node == authoritative)
+            return PromptRootTransfer::Unrelated;
+          const nodegraph::NodeRef localPrompt = turn->rootItem->node;
+          const std::shared_ptr<const nodegraph::NodeState> promptState =
+              read->state(localPrompt);
+          if (!promptState ||
+              graphString(graphField(*promptState, "type")) != "localPrompt")
+            return PromptRootTransfer::Unrelated;
+          bool correlated = false;
+          const std::size_t relationCount = read->relatedCount(
+              authoritative, nodegraph::RelationKind::PromptMaterialization);
+          for (std::size_t index = 0; index < relationCount; ++index)
+            if (read->relatedAt(authoritative,
+                                nodegraph::RelationKind::PromptMaterialization,
+                                index) == localPrompt) {
+              correlated = true;
+              break;
+            }
+          if (!correlated)
+            return PromptRootTransfer::Unrelated;
+
+          // The provider user item can precede the exact turn/start result.
+          // Keep rendering the local root until WorkerLogic marks it ready;
+          // this is an expected identity handoff, never a reason to rebuild
+          // the retained conversation geometry.
+          if (graphString(graphField(*promptState, "dispatchState")) !=
+              "awaitingMaterialization")
+            return PromptRootTransfer::WaitingForResult;
+
+          freezeIncomingMaterialization = true;
+          GraphViewportGeometry::ItemGeometry *record =
+              turn->rootItem.get();
+          graphGeometry_->itemIndex.erase(localPrompt.get());
+          record->node = authoritative;
+          record->materializedPrompt = localPrompt;
+          record->pendingAuthoritative.reset();
+          graphGeometry_->itemIndex[authoritative.get()] = record;
+          graphGeometry_->itemIndex[localPrompt.get()] = record;
+          turn->root = authoritative;
+          turn->rootIsChild = read->parent(authoritative) == turn->node;
+          materializedPrompts.push_back(localPrompt);
+          promptTransfers.emplace_back(localPrompt, authoritative);
+          if (immediateMaterializationNode_ == authoritative)
+            immediateMaterializationNode_.reset();
+          return PromptRootTransfer::Complete;
+        };
     const bool requestedStructureCheck = graphGeometry_->forceStructureCheck;
     const auto resetRetainedGeometry = [&resetRequested] {
       resetRequested = true;
@@ -1555,12 +1630,20 @@ void ConversationView::runGraphRefresh() {
             read->structureChangedRevision(turn->node);
         if (revision == turn->structureRevision)
           continue;
-        if (turnRoot(turn->node) != turn->root) {
+        const nodegraph::NodeRef currentRoot = turnRoot(turn->node);
+        if (currentRoot != turn->root) {
           // TurnRootItem is the canonical QWidget ownership boundary. A local
-          // prompt materializing as its provider user item must rebuild that
-          // one retained turn before any nested card is exposed parentless.
-          resetRetainedGeometry();
-          break;
+          // prompt materializing as its correlated provider user item keeps
+          // the same owning card and geometry. Other root replacement remains
+          // structural and takes the conservative rebuild path.
+          const PromptRootTransfer transfer =
+              transferMaterializedPromptRoot(turn, currentRoot);
+          if (transfer == PromptRootTransfer::Unrelated) {
+            resetRetainedGeometry();
+            break;
+          }
+          if (transfer == PromptRootTransfer::WaitingForResult)
+            continue;
         }
         const std::size_t currentCount = read->childCount(turn->node);
         if (currentCount > turn->knownChildCount) {
@@ -1691,7 +1774,7 @@ void ConversationView::runGraphRefresh() {
 
         nodegraph::NodeRef localPrompt;
         std::shared_ptr<const nodegraph::NodeState> localPromptState;
-        bool suppressedByLocalPrompt = false;
+        bool promptReadyForTransfer = false;
         const std::size_t relationCount = read->relatedCount(
             item, nodegraph::RelationKind::PromptMaterialization);
         for (std::size_t index = 0; index < relationCount; ++index) {
@@ -1706,17 +1789,13 @@ void ConversationView::runGraphRefresh() {
           if (!candidateState ||
               graphString(graphField(*candidateState, "type")) != "localPrompt")
             continue;
-          if (graphString(graphField(*candidateState, "dispatchState")) ==
-              "awaitingMaterialization") {
-            localPrompt = candidate;
-            localPromptState = candidateState;
-          } else {
-            suppressedByLocalPrompt = true;
-          }
+          localPrompt = candidate;
+          localPromptState = candidateState;
+          promptReadyForTransfer =
+              graphString(graphField(*candidateState, "dispatchState")) ==
+              "awaitingMaterialization";
           break;
         }
-        if (suppressedByLocalPrompt)
-          return {};
         if (graphGeometry_->itemIndex.contains(item.get()))
           return {};
         if (localPrompt) {
@@ -1724,9 +1803,14 @@ void ConversationView::runGraphRefresh() {
               graphGeometry_->itemIndex.find(localPrompt.get());
           if (retained != graphGeometry_->itemIndex.end()) {
             GraphViewportGeometry::ItemGeometry *record = retained->second;
+            if (!promptReadyForTransfer) {
+              record->pendingAuthoritative = item;
+              return {};
+            }
             graphGeometry_->itemIndex.erase(record->node.get());
             record->node = item;
             record->materializedPrompt = localPrompt;
+            record->pendingAuthoritative.reset();
             const std::int64_t rawId =
                 graphInteger(graphField(*localPromptState, "submissionId"))
                     .value_or(0);
@@ -1739,6 +1823,8 @@ void ConversationView::runGraphRefresh() {
             promptTransfers.emplace_back(localPrompt, item);
             return {};
           }
+          if (!promptReadyForTransfer)
+            return {};
         }
 
         auto record = std::make_unique<GraphViewportGeometry::ItemGeometry>();
@@ -1845,6 +1931,35 @@ void ConversationView::runGraphRefresh() {
           if (turnNode && turnNode != record->turn->node) {
             graphGeometry_->forceSelectedReset = true;
             continue;
+          }
+          const std::shared_ptr<const nodegraph::NodeState> affectedState =
+              read->state(affected);
+          if (record->node == affected && record->pendingAuthoritative &&
+              affectedState &&
+              graphString(graphField(*affectedState, "type")) ==
+                  "localPrompt" &&
+              graphString(graphField(*affectedState, "dispatchState")) ==
+                  "awaitingMaterialization" &&
+              read->contains(record->pendingAuthoritative) &&
+              !read->removed(record->pendingAuthoritative)) {
+            const nodegraph::NodeRef authoritative =
+                record->pendingAuthoritative;
+            graphGeometry_->itemIndex.erase(affected.get());
+            record->node = authoritative;
+            record->materializedPrompt = affected;
+            record->pendingAuthoritative.reset();
+            graphGeometry_->itemIndex[authoritative.get()] = record;
+            graphGeometry_->itemIndex[affected.get()] = record;
+            if (record->turn->root == affected) {
+              record->turn->root = authoritative;
+              record->turn->rootIsChild =
+                  read->parent(authoritative) == record->turn->node;
+            }
+            materializedPrompts.push_back(affected);
+            promptTransfers.emplace_back(affected, authoritative);
+            if (immediateMaterializationNode_ == authoritative)
+              immediateMaterializationNode_.reset();
+            freezeIncomingMaterialization = true;
           }
           const std::shared_ptr<const nodegraph::NodeState> currentState =
               read->state(record->node);
@@ -1964,8 +2079,9 @@ void ConversationView::runGraphRefresh() {
             scan.complete = true;
             break;
           }
+          const std::size_t turnChildIndex = --scan.nextTurnIndex;
           nodegraph::NodeRef turnNode =
-              read->childAt(graphThread_, --scan.nextTurnIndex);
+              read->childAt(graphThread_, turnChildIndex);
           ++structureReads;
           if (!turnNode || !read->contains(turnNode) ||
               turnNode->id().kind != nodegraph::NodeKind::Turn ||
@@ -1995,7 +2111,28 @@ void ConversationView::runGraphRefresh() {
             inserted->rootIsChild =
                 inserted->root && read->parent(inserted->root) == turnNode;
             turn = inserted.get();
-            graphGeometry_->turns.push_front(std::move(inserted));
+            // The backward scan discovers the newest Turn first. Initial and
+            // prepended history therefore inserts before its already-retained
+            // immediate successor, while a genuine new tail Turn appends.
+            // Never put a normal newly submitted Turn at the front: doing so
+            // shifts all retained geometry and forces anchor compensation by
+            // exactly the new card height.
+            auto insertion = graphGeometry_->turns.end();
+            if (turnNode != newestTurn && turnChildIndex + 1 < childCount &&
+                structureReads < MaxStructureRecordsPerPass) {
+              nodegraph::NodeRef successor =
+                  read->childAt(graphThread_, turnChildIndex + 1);
+              ++structureReads;
+              const auto successorIndex =
+                  graphGeometry_->turnIndex.find(successor.get());
+              if (successorIndex != graphGeometry_->turnIndex.end())
+                insertion = std::ranges::find_if(
+                    graphGeometry_->turns,
+                    [&successorIndex](const auto &candidate) {
+                      return candidate.get() == successorIndex->second;
+                    });
+            }
+            graphGeometry_->turns.insert(insertion, std::move(inserted));
             graphGeometry_->turnIndex.emplace(turnNode.get(), turn);
           }
 
@@ -2087,9 +2224,20 @@ void ConversationView::runGraphRefresh() {
         graphGeometry_->totalItems = graphGeometry_->retainedHistoryItems;
       graphKnownItemCount_ = graphGeometry_->totalItems;
     }
+    if (immediateMaterializationNode_ &&
+        graphGeometry_->itemIndex.contains(
+            immediateMaterializationNode_.get()))
+      freezeIncomingMaterialization = true;
   }
 
   read.reset();
+
+  // Do not expose a placeholder, partially arranged Turn, or half-created
+  // card. Existing-card streaming never enters this path; only a newly
+  // inserted selected-thread item freezes the current backing-store image
+  // until its final QWidget and canonical owner are ready.
+  if (freezeIncomingMaterialization)
+    beginAtomicMaterialization(false);
 
   if (resetRequested) {
     graphGeometry_->retireCurrentStorage();
@@ -2221,7 +2369,9 @@ void ConversationView::runGraphRefresh() {
   updateGraphChrome();
   const bool reconciliationRemaining = reconcileGraphViewport();
   resetGraphVisibilityScan();
-  if (runGraphVisibilityPass())
+  const bool visibilityRemaining = runGraphVisibilityPass();
+  finishBulkMaterializationIfReady();
+  if (visibilityRemaining)
     scheduleVisibilityPass();
   if (reconciliationRemaining)
     scheduleGraphRefresh();
@@ -3018,6 +3168,14 @@ void ConversationView::detachGraphWidgets(
     visibilityScanViewportWidth_ = -1;
     visibilityScanContentHeight_ = -1;
     scheduleRetiredGeometryCleanup();
+    if (bulkMaterializationUpdatesSuppressed_) {
+      bulkMaterializationUpdatesSuppressed_ = false;
+      atomicMaterializationFullCommit_ = false;
+      atomicMaterializationSections_.clear();
+      setProperty("bulkMaterializationUpdatesSuppressed", false);
+      viewport()->setUpdatesEnabled(true);
+      viewport()->update();
+    }
   } else {
     graphKnownItemCount_ -= std::min(graphKnownItemCount_, removedWindowItems);
     graphWindowItemCount_ -=
@@ -3349,9 +3507,65 @@ void ConversationView::resetGraphVisibilityScan() {
 
 bool ConversationView::runVisibilityPass() {
   graphPassCardOperations_ = 0;
-  if (reconcileGraphViewport())
+  if (reconcileGraphViewport()) {
+    finishBulkMaterializationIfReady();
     return true;
-  return runGraphVisibilityPass();
+  }
+  const bool remaining = runGraphVisibilityPass();
+  finishBulkMaterializationIfReady();
+  return remaining;
+}
+
+void ConversationView::beginAtomicMaterialization(bool fullCommit) {
+  atomicMaterializationFullCommit_ =
+      atomicMaterializationFullCommit_ || fullCommit;
+  if (bulkMaterializationUpdatesSuppressed_ || !viewport())
+    return;
+  bulkMaterializationUpdatesSuppressed_ = true;
+  viewport()->setUpdatesEnabled(false);
+  setProperty("bulkMaterializationUpdatesSuppressed", true);
+}
+
+void ConversationView::finishBulkMaterializationIfReady() {
+  if (!bulkMaterializationUpdatesSuppressed_)
+    return;
+  setProperty("bulkMaterializationCommitAttempts",
+              property("bulkMaterializationCommitAttempts").toULongLong() + 1);
+  if (atomicMaterializationFullCommit_ && !graphGeometry_->scan.complete &&
+      graphGeometry_->retainedHistoryItems + graphGeometry_->extraPinnedRoots <
+          graphGeometry_->targetHistoryItems) {
+    setProperty("bulkMaterializationBlocker", QStringLiteral("history"));
+    return;
+  }
+  for (TurnSectionWidget *section : graphSections_)
+    for (const TurnSectionWidget::CardSlot &slot : section->cardSlots)
+      if (slot.projectionVisible &&
+          (!slot.attachment || !slot.attachment->widget)) {
+        setProperty("bulkMaterializationBlocker",
+                    QStringLiteral("card:%1")
+                        .arg(QString::fromStdString(slot.key)));
+        return;
+      }
+  const Anchor anchor = captureAnchor();
+  const bool follow = mode_ == Mode::Following;
+  applying_ = true;
+  const QSignalBlocker scrollSignals(verticalScrollBar());
+  if (atomicMaterializationFullCommit_)
+    recomputeGeometry();
+  else if (!atomicMaterializationSections_.empty())
+    recomputeGeometry(&atomicMaterializationSections_);
+  if (follow)
+    setScrollValue(verticalScrollBar()->maximum());
+  else
+    restoreAnchor(anchor);
+  applying_ = false;
+  bulkMaterializationUpdatesSuppressed_ = false;
+  atomicMaterializationFullCommit_ = false;
+  atomicMaterializationSections_.clear();
+  setProperty("bulkMaterializationUpdatesSuppressed", false);
+  setProperty("bulkMaterializationBlocker", QString{});
+  viewport()->setUpdatesEnabled(true);
+  viewport()->update();
 }
 
 bool ConversationView::runGraphVisibilityPass() {
@@ -3873,6 +4087,13 @@ bool ConversationView::runGraphVisibilityPass() {
   }
   for (TurnSectionWidget *section : changedSections)
     arrangeSection(section);
+  if (bulkMaterializationUpdatesSuppressed_ &&
+      !atomicMaterializationFullCommit_)
+    for (TurnSectionWidget *section : changedSections)
+      if (section &&
+          std::ranges::find(atomicMaterializationSections_, section) ==
+              atomicMaterializationSections_.end())
+        atomicMaterializationSections_.push_back(section);
   const bool loadedWindowMaterializationPending =
       workRemaining || recoveryRemaining || visibilitySlotsRemaining_ != 0;
   if (!changedSections.empty() && !structuralWidgetChange)
@@ -3925,7 +4146,9 @@ bool ConversationView::runGraphVisibilityPass() {
       "graphMaxCardOperationsPerPass",
       static_cast<qulonglong>(graphGeometry_->maxCardOperationsPerPass));
   graphPassCardOperations_ = static_cast<std::size_t>(operations);
-  if (geometryChanged)
+  if (geometryChanged &&
+      !(bulkMaterializationUpdatesSuppressed_ &&
+        atomicMaterializationFullCommit_))
     scheduleGraphRefresh();
   return workRemaining || recoveryRemaining || visibilitySlotsRemaining_ != 0 ||
          operations > 0;

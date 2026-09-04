@@ -142,6 +142,8 @@ private:
   void resetGraphVisibilityScan();
   [[nodiscard]] bool runVisibilityPass();
   [[nodiscard]] bool runGraphVisibilityPass();
+  void beginAtomicMaterialization(bool fullCommit);
+  void finishBulkMaterializationIfReady();
   void positionContent();
   void handleUserScrollValue(int value);
   [[nodiscard]] bool applyWheel(QWheelEvent *event);
@@ -203,6 +205,9 @@ private:
   bool graphRefreshScheduled_ = false;
   bool visibilityPassScheduled_ = false;
   bool retiredGeometryCleanupScheduled_ = false;
+  bool bulkMaterializationUpdatesSuppressed_ = false;
+  bool atomicMaterializationFullCommit_ = false;
+  std::vector<TurnSectionWidget *> atomicMaterializationSections_;
   std::size_t graphPassCardOperations_ = 0;
   std::uint64_t graphBindingEpoch_ = 0;
   std::uint64_t graphRefreshPasses_ = 0;

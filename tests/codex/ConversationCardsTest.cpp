@@ -914,8 +914,15 @@ public:
     active = true;
   }
 
+  void trackOwnership(QWidget *owner, QWidget *child) {
+    owner_ = owner;
+    child_ = child;
+    ownership.clear();
+  }
+
   std::vector<std::pair<std::string, int>> anchors;
   std::vector<QRect> trackedGeometries;
+  std::vector<bool> ownership;
   bool active = false;
 
 protected:
@@ -926,6 +933,9 @@ protected:
       if (tracked_)
         trackedGeometries.emplace_back(
             tracked_->mapTo(view_.viewport(), QPoint{}), tracked_->size());
+      if (owner_ && child_)
+        ownership.push_back(owner_->property("turnContainer").toBool() &&
+                            owner_->isAncestorOf(child_));
     }
     return false;
   }
@@ -933,6 +943,8 @@ protected:
 private:
   ConversationView &view_;
   QPointer<QWidget> tracked_;
+  QPointer<QWidget> owner_;
+  QPointer<QWidget> child_;
 };
 
 void wheel(ConversationView &view, int pixelDelta) {
@@ -4077,6 +4089,9 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
   view.resize(620, 420);
   view.show();
   view.bindGraph(graph, thread);
+  const bool selectionMaterializationFrozen =
+      view.property("bulkMaterializationUpdatesSuppressed").toBool() &&
+      !view.viewport()->updatesEnabled();
   const bool initialLoadedWindowReady = spinUntil([&] {
     const LiveConversationWidgetCounts widgets =
         liveConversationWidgetCounts(view);
@@ -4086,7 +4101,8 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
                static_cast<int>(AuthoritativeHistoryPageSize + 1) &&
            widgets.itemPlaceholders == 0 &&
            graphAttachment(root) && graphAttachment(steering) &&
-           graphAttachment(tail);
+           graphAttachment(tail) && view.viewport()->updatesEnabled() &&
+           !view.property("bulkMaterializationUpdatesSuppressed").toBool();
   }, 2048);
 
   const auto representationCount = [&view] {
@@ -4109,7 +4125,9 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
   const QVariant retainedGeometry =
       view.property("graphRetainedGeometryRecordCount");
   bool result = expect(
-      initialLoadedWindowReady &&
+      initialLoadedWindowReady && selectionMaterializationFrozen &&
+          view.viewport()->updatesEnabled() &&
+          !view.property("bulkMaterializationUpdatesSuppressed").toBool() &&
           representationCount() ==
               static_cast<int>(AuthoritativeHistoryPageSize + 1) &&
           retainedGeometry.isValid() && loadMore &&
@@ -4149,8 +4167,13 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
              "Turn/You card and is never inferred to be the root");
 
   const qulonglong hiddenBeforePaging = hiddenItemCount();
+  bool everyPageMaterializedAtomically = true;
   for (std::size_t page = 0; page < RevealedPages; ++page) {
     loadMore->click();
+    everyPageMaterializedAtomically =
+        everyPageMaterializedAtomically &&
+        view.property("bulkMaterializationUpdatesSuppressed").toBool() &&
+        !view.viewport()->updatesEnabled();
     spinUntil([&] {
       const std::size_t expected =
           (page + 2) * AuthoritativeHistoryPageSize + 1;
@@ -4158,13 +4181,18 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
           liveConversationWidgetCounts(view);
       return view.property("graphLiveRecordCount").toULongLong() == expected &&
              widgets.cards == static_cast<int>(expected) &&
-             widgets.itemPlaceholders == 0;
+             widgets.itemPlaceholders == 0 &&
+             view.viewport()->updatesEnabled() &&
+             !view.property("bulkMaterializationUpdatesSuppressed").toBool();
     }, 2048);
+    everyPageMaterializedAtomically =
+        everyPageMaterializedAtomically && view.viewport()->updatesEnabled() &&
+        !view.property("bulkMaterializationUpdatesSuppressed").toBool();
   }
   const QVariant retainedAfterPaging =
       view.property("graphRetainedGeometryRecordCount");
   result &= expect(
-      providerPageRequests == 0 &&
+      providerPageRequests == 0 && everyPageMaterializedAtomically &&
           hiddenItemCount() + RevealedPages * AuthoritativeHistoryPageSize ==
               hiddenBeforePaging &&
           retainedAfterPaging.isValid() &&
@@ -4474,7 +4502,8 @@ bool testPausedIncomingCardMaterializesWithoutAnchorJump() {
     return std::ranges::all_of(initial, [](const nodegraph::NodeRef &item) {
       ui::QtNodeAttachment *attachment = graphAttachment(item);
       return attachment && attachment->widget;
-    });
+    }) && view.viewport()->updatesEnabled() &&
+           !view.property("bulkMaterializationUpdatesSuppressed").toBool();
   }, 512);
   view.verticalScrollBar()->setValue(0);
   spin(40);
@@ -4489,6 +4518,8 @@ bool testPausedIncomingCardMaterializesWithoutAnchorJump() {
 
   nodegraph::NodeRef incoming;
   nodegraph::GraphChange change;
+  const qulonglong atomicAttemptsBefore =
+      view.property("bulkMaterializationCommitAttempts").toULongLong();
   {
     auto write = graph.write();
     nodegraph::NodeState state =
@@ -4504,7 +4535,9 @@ bool testPausedIncomingCardMaterializesWithoutAnchorJump() {
   view.graphChangedDeferred(change.affected, change.removed);
   const bool incomingReady = spinUntil([&] {
     ui::QtNodeAttachment *attachment = graphAttachment(incoming);
-    return attachment && attachment->widget;
+    return attachment && attachment->widget &&
+           view.viewport()->updatesEnabled() &&
+           !view.property("bulkMaterializationUpdatesSuppressed").toBool();
   }, 32);
   const auto anchorAfter = firstVisible(view);
   ui::QtNodeAttachment *rootAttachment = graphAttachment(root);
@@ -4523,6 +4556,10 @@ bool testPausedIncomingCardMaterializesWithoutAnchorJump() {
 
   return expect(
       initialReady && !anchorBefore.first.empty() && incomingReady &&
+          view.property("bulkMaterializationCommitAttempts").toULongLong() >
+              atomicAttemptsBefore &&
+          view.viewport()->updatesEnabled() &&
+          !view.property("bulkMaterializationUpdatesSuppressed").toBool() &&
           view.mode() == ConversationView::Mode::Paused &&
           view.verticalScrollBar()->value() == scrollBefore &&
           anchorAfter.first == anchorBefore.first &&
@@ -4534,6 +4571,161 @@ bool testPausedIncomingCardMaterializesWithoutAnchorJump() {
           graphPassBudgetsWereRespected(view),
       "a selected thread materializes one new offscreen card promptly while "
       "a paused viewport retains its exact anchor and existing card identity");
+}
+
+bool testPausedNormalPromptTurnMaterializesWithoutAnchorJump() {
+  constexpr std::size_t InitialCount = 40;
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef oldTurn;
+  std::vector<nodegraph::NodeRef> initial;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", InitialCount);
+    thread = write.upsert(
+        {nodegraph::NodeKind::Thread, "paused-new-prompt-thread"},
+        std::move(threadState));
+    oldTurn =
+        write.upsert({nodegraph::NodeKind::Turn, "paused-new-prompt-old-turn"});
+    write.setParent(thread, oldTurn);
+    for (std::size_t index = 0; index < InitialCount; ++index) {
+      nodegraph::NodeState state = graphMessageState(
+          index == 0 ? "userMessage" : "agentMessage",
+          "Retained history " + std::to_string(index));
+      if (index != 0)
+        state.fields.emplace("phase", "final_answer");
+      nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item,
+           "paused-new-prompt-item-" + std::to_string(index)},
+          std::move(state));
+      write.setParent(oldTurn, item);
+      initial.push_back(item);
+    }
+    write.relate(oldTurn, nodegraph::RelationKind::TurnRootItem,
+                 initial.front());
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 420);
+  view.show();
+  view.bindGraph(graph, thread);
+  const bool initialReady = spinUntil([&] {
+    return std::ranges::all_of(initial, [](const nodegraph::NodeRef &item) {
+      const ui::QtNodeAttachment *attachment = graphAttachment(item);
+      return attachment && attachment->widget;
+    }) && view.viewport()->updatesEnabled() &&
+           !view.property("bulkMaterializationUpdatesSuppressed").toBool();
+  }, 512);
+  view.verticalScrollBar()->setValue(
+      std::min(600, view.verticalScrollBar()->maximum() / 2));
+  spin(40);
+  const auto anchorBefore = firstVisible(view);
+  const int verticalBefore = view.verticalScrollBar()->value();
+  const int horizontalBefore = view.horizontalScrollBar()->value();
+  std::vector<QPointer<QWidget>> identities;
+  identities.reserve(initial.size());
+  for (const nodegraph::NodeRef &item : initial)
+    identities.push_back(graphAttachment(item)->widget);
+  PaintAnchorProbe paints(view);
+  paints.start();
+  const qulonglong atomicAttemptsBefore =
+      view.property("bulkMaterializationCommitAttempts").toULongLong();
+
+  nodegraph::NodeRef prompt;
+  nodegraph::GraphChange appended;
+  {
+    auto write = graph.write();
+    nodegraph::NodeRef turn = write.upsert(
+        {nodegraph::NodeKind::Turn, "paused-new-prompt-current-turn"});
+    nodegraph::NodeState promptState;
+    promptState.status = nodegraph::NodeStatus::Pending;
+    promptState.fields.emplace("type", "localPrompt");
+    promptState.fields.emplace("submissionId", std::uint64_t{9001});
+    promptState.fields.emplace("text", "A normal new prompt");
+    promptState.fields.emplace("dispatchState", "inFlight");
+    promptState.fields.emplace("startsTurn", true);
+    prompt = write.upsert(
+        {nodegraph::NodeKind::Item, "paused-new-prompt-local"},
+        std::move(promptState));
+    write.setParent(thread, turn);
+    write.setParent(turn, prompt);
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, prompt);
+    write.setField(thread, "historyLoadedItemCount", InitialCount + 1);
+    appended = write.finish();
+  }
+  view.graphChangedDeferred(appended.affected, appended.removed);
+  const bool promptReady = spinUntil([&] {
+    const ui::QtNodeAttachment *attachment = graphAttachment(prompt);
+    return attachment && attachment->widget &&
+           view.viewport()->updatesEnabled() &&
+           !view.property("bulkMaterializationUpdatesSuppressed").toBool();
+  }, 64);
+  spin(40);
+  paints.active = false;
+  const auto anchorAfter = firstVisible(view);
+  const bool paintedStable = std::ranges::all_of(
+      paints.anchors, [&anchorBefore](const auto &anchor) {
+        return anchor.first.empty() ||
+               (anchor.first == anchorBefore.first &&
+                std::abs(anchor.second - anchorBefore.second) <= 1);
+      });
+  bool retained = true;
+  for (std::size_t index = 0; index < initial.size(); ++index)
+    retained = retained && graphAttachment(initial[index]) &&
+               graphAttachment(initial[index])->widget == identities[index];
+
+  if (!(initialReady && !anchorBefore.first.empty() && promptReady &&
+        retained &&
+        view.mode() == ConversationView::Mode::Paused &&
+        view.verticalScrollBar()->value() == verticalBefore &&
+        view.horizontalScrollBar()->value() == horizontalBefore &&
+        anchorAfter.first == anchorBefore.first &&
+        std::abs(anchorAfter.second - anchorBefore.second) <= 1 &&
+        paintedStable && graphPassBudgetsWereRespected(view)))
+    std::cerr << "normal prompt anchor: before=" << anchorBefore.first << ':'
+              << anchorBefore.second << " after=" << anchorAfter.first << ':'
+              << anchorAfter.second << " scroll=" << verticalBefore << "->"
+              << view.verticalScrollBar()->value() << " horizontal="
+              << horizontalBefore << "->"
+              << view.horizontalScrollBar()->value() << " mode="
+              << static_cast<int>(view.mode()) << " ready=" << promptReady
+              << " retained=" << retained << " paints=" << paints.anchors.size()
+              << " stable=" << paintedStable << " frozen="
+              << view.property("bulkMaterializationUpdatesSuppressed").toBool()
+              << " updates=" << view.viewport()->updatesEnabled()
+              << " retainedGeometry="
+              << view.property("graphRetainedGeometryRecordCount").toULongLong()
+              << " target="
+              << view.property("graphStructureScanTarget").toULongLong()
+              << " live="
+              << view.property("graphLiveRecordCount").toULongLong()
+              << " cards=" << liveConversationWidgetCounts(view).cards
+              << " placeholders="
+              << liveConversationWidgetCounts(view).itemPlaceholders
+              << " attempts="
+              << view.property("bulkMaterializationCommitAttempts").toULongLong()
+              << " blocker="
+              << view.property("bulkMaterializationBlocker")
+                     .toString()
+                     .toStdString()
+              << '\n';
+
+  return expect(
+      initialReady && !anchorBefore.first.empty() && promptReady && retained &&
+          view.property("bulkMaterializationCommitAttempts").toULongLong() >
+              atomicAttemptsBefore &&
+          paints.anchors.size() <= 1 && view.viewport()->updatesEnabled() &&
+          !view.property("bulkMaterializationUpdatesSuppressed").toBool() &&
+          view.mode() == ConversationView::Mode::Paused &&
+          view.verticalScrollBar()->value() == verticalBefore &&
+          view.horizontalScrollBar()->value() == horizontalBefore &&
+          anchorAfter.first == anchorBefore.first &&
+          std::abs(anchorAfter.second - anchorBefore.second) <= 1 &&
+          paintedStable && graphPassBudgetsWereRespected(view),
+      "a normal prompt appends and immediately materializes its new Turn/You "
+      "card without moving or repaint-jumping a paused history viewport");
 }
 
 bool testGraphHistoryPagingAndPausedTailGrowth() {
@@ -4905,6 +5097,11 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
               std::vector<std::string>{"/tmp/prompt.png"},
       "a starting graph prompt is the owning You card for its nested turn "
       "activity while rendering exact authored content");
+  const qulonglong retiredBefore =
+      view.property("graphRetiredGeometryRecordCount").toULongLong();
+  PaintAnchorProbe ownershipProbe(view);
+  ownershipProbe.start(localCard);
+  ownershipProbe.trackOwnership(localCard, activityCard);
 
   nodegraph::NodeRef authoritative;
   nodegraph::GraphChange materialized;
@@ -4921,7 +5118,7 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
     write.setField(thread, "historyLoadedItemCount", std::uint64_t{3});
     materialized = write.finish();
   }
-  view.graphChanged(materialized.removed);
+  view.graphChangedDeferred(materialized.affected, materialized.removed);
   spin(80);
 
   result &= expect(
@@ -4940,7 +5137,7 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
     write.setStatus(localPrompt, nodegraph::NodeStatus::Failed);
     failed = write.finish();
   }
-  view.graphChanged(failed.removed);
+  view.graphChangedDeferred(failed.affected, failed.removed);
   spin(40);
   result &=
       expect(stableCard && graphAttachment(authoritative) == nullptr &&
@@ -4957,8 +5154,9 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
     write.setStatus(localPrompt, nodegraph::NodeStatus::Running);
     acknowledged = write.finish();
   }
-  view.graphChanged(acknowledged.removed);
+  view.graphChangedDeferred(acknowledged.affected, acknowledged.removed);
   spin(80);
+  ownershipProbe.active = false;
 
   ui::QtNodeAttachment *authoritativeAttachment =
       graphAttachment(authoritative);
@@ -4984,6 +5182,14 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
           activityCard && authoritativeCard->isAncestorOf(activityCard),
       "authoritative root transfer keeps nested activity owned by the same "
       "morphed You card");
+  result &= expect(
+      view.property("graphRetiredGeometryRecordCount").toULongLong() ==
+              retiredBefore &&
+          graphAttachment(activity) == activityAttachment && activityCard &&
+          !ownershipProbe.ownership.empty() &&
+          std::ranges::all_of(ownershipProbe.ownership, std::identity{}),
+      "normal prompt root promotion retains existing history geometry and "
+      "widgets, and no painted frame exposes a parentless nested card");
 
   nodegraph::GraphChange removed;
   {
@@ -4992,13 +5198,135 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
     write.setField(thread, "historyLoadedItemCount", std::uint64_t{2});
     removed = write.finish();
   }
-  view.graphChanged(removed.removed);
+  view.graphChangedDeferred(removed.affected, removed.removed);
   spin(30);
   result &= expect(stableCard && graphAttachment(authoritative) &&
                        graphAttachment(authoritative)->widget == stableCard,
                    "retiring the acknowledged local node preserves the "
                    "authoritative card attachment");
   return result;
+}
+
+bool testGraphSteeringPromptAcknowledgementKeepsCanonicalParent() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  nodegraph::NodeRef root;
+  nodegraph::NodeRef steering;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{2});
+    thread = write.upsert({nodegraph::NodeKind::Thread, "steering-ack-thread"},
+                          std::move(threadState));
+    turn = write.upsert({nodegraph::NodeKind::Turn, "steering-ack-turn"});
+    root = write.upsert({nodegraph::NodeKind::Item, "steering-ack-root"},
+                        graphMessageState("userMessage", "Opening prompt"));
+    nodegraph::NodeState steeringState;
+    steeringState.status = nodegraph::NodeStatus::Running;
+    steeringState.fields.emplace("type", "localPrompt");
+    steeringState.fields.emplace("submissionId", std::uint64_t{77});
+    steeringState.fields.emplace("text", "A steering prompt");
+    steeringState.fields.emplace("dispatchState", "inFlight");
+    steeringState.fields.emplace("startsTurn", false);
+    steering = write.upsert(
+        {nodegraph::NodeKind::Item, "steering-ack-local"},
+        std::move(steeringState));
+    write.setParent(thread, turn);
+    write.setParent(turn, root);
+    write.setParent(turn, steering);
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, root);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 420);
+  view.show();
+  std::vector<nodegraph::NodeRef> acknowledgements;
+  view.setPromptMaterializedAction(
+      [&acknowledgements](nodegraph::NodeRef prompt) {
+        acknowledgements.push_back(std::move(prompt));
+        return true;
+      });
+  view.bindGraph(graph, thread);
+  const bool initialReady = spinUntil([&] {
+    const auto *rootAttachment = graphAttachment(root);
+    const auto *steeringAttachment = graphAttachment(steering);
+    return rootAttachment && rootAttachment->widget && steeringAttachment &&
+           steeringAttachment->widget && view.viewport()->updatesEnabled();
+  }, 128);
+  auto *rootCard = graphAttachment(root)
+                       ? qobject_cast<ConversationCard *>(
+                             graphAttachment(root)->widget.data())
+                       : nullptr;
+  auto *steeringCard = graphAttachment(steering)
+                           ? qobject_cast<ConversationCard *>(
+                                 graphAttachment(steering)->widget.data())
+                           : nullptr;
+  QPointer<ConversationCard> stableSteering(steeringCard);
+  PaintAnchorProbe ownership(view);
+  ownership.start(steeringCard);
+  ownership.trackOwnership(rootCard, steeringCard);
+
+  nodegraph::NodeRef authoritative;
+  nodegraph::GraphChange arrived;
+  {
+    auto write = graph.write();
+    authoritative = write.upsert(
+        {nodegraph::NodeKind::Item, "steering-ack-authoritative"},
+        graphMessageState("userMessage", "A steering prompt"));
+    write.setParent(turn, authoritative);
+    write.relate(authoritative,
+                 nodegraph::RelationKind::PromptMaterialization, steering);
+    write.setField(thread, "historyLoadedItemCount", std::uint64_t{3});
+    arrived = write.finish();
+  }
+  view.graphChangedDeferred(arrived.affected, arrived.removed);
+  spin(32);
+  const bool retainedBeforeResult =
+      stableSteering && graphAttachment(steering) &&
+      graphAttachment(steering)->widget == stableSteering &&
+      graphAttachment(authoritative) == nullptr && rootCard &&
+      rootCard->isAncestorOf(stableSteering);
+
+  const qulonglong commitAttemptsBefore =
+      view.property("bulkMaterializationCommitAttempts").toULongLong();
+  nodegraph::GraphChange acknowledged;
+  {
+    auto write = graph.write();
+    write.setField(steering, "dispatchState", "awaitingMaterialization");
+    acknowledged = write.finish();
+  }
+  view.graphChangedDeferred(acknowledged.affected, acknowledged.removed);
+  const bool transferred = spinUntil([&] {
+    const auto *attachment = graphAttachment(authoritative);
+    return attachment && attachment->widget == stableSteering &&
+           view.viewport()->updatesEnabled() &&
+           !view.property("bulkMaterializationUpdatesSuppressed").toBool();
+  }, 128);
+  spin(16);
+  ownership.active = false;
+  const auto *authoritativeAttachment = graphAttachment(authoritative);
+  auto *authoritativeCard =
+      authoritativeAttachment
+          ? qobject_cast<ConversationCard *>(
+                authoritativeAttachment->widget.data())
+          : nullptr;
+
+  return expect(
+      initialReady && retainedBeforeResult && transferred && stableSteering &&
+          authoritativeCard == stableSteering && rootCard &&
+          rootCard->property("turnContainer").toBool() &&
+          rootCard->isAncestorOf(stableSteering) &&
+          stableSteering->property("nestedConversationCard").toBool() &&
+          steering->uiAttachment() == nullptr &&
+          acknowledgements == std::vector<nodegraph::NodeRef>{steering} &&
+          view.property("bulkMaterializationCommitAttempts").toULongLong() >
+              commitAttemptsBefore &&
+          !ownership.ownership.empty() &&
+          std::ranges::all_of(ownership.ownership, std::identity{}),
+      "steering acknowledgement transfers one stable nested card atomically "
+      "without any painted parentless frame");
 }
 
 bool testStructuredTurnPlanRemainsInspectorOnly() {
@@ -5568,6 +5896,22 @@ bool testGeneratedImagePresentationAndGenericBound() {
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
   using namespace codexui::codex::middle;
+  if (qEnvironmentVariableIsSet("CODEXUI_ATOMIC_MATERIALIZATION_TESTS")) {
+    bool focused = testPausedIncomingCardMaterializesWithoutAnchorJump();
+    focused &= testPausedNormalPromptTurnMaterializesWithoutAnchorJump();
+    focused &= testGraphLocalPromptMorphsWithoutReplacingItsWidget();
+    focused &= testGraphSteeringPromptAcknowledgementKeepsCanonicalParent();
+    if (focused)
+      std::cout << "Atomic conversation materialization tests passed\n";
+    return focused ? 0 : 1;
+  }
+  if (qEnvironmentVariableIsSet("CODEXUI_LONG_CONVERSATION_TESTS")) {
+    bool focused = testGraphBoundedHistoryAndExplicitRoot();
+    focused &= testLoadedCardsMaterializeOnceWithoutScrollChurn();
+    if (focused)
+      std::cout << "Long conversation materialization tests passed\n";
+    return focused ? 0 : 1;
+  }
   bool result = testMessageIdentityPalette();
   result &= testActiveWorkBordersFollowStatus();
   result &= testStructuralOrderAndIdentity();
@@ -5597,10 +5941,12 @@ int main(int argc, char **argv) {
   result &= testGraphBoundedHistoryAndExplicitRoot();
   result &= testLoadedCardsMaterializeOnceWithoutScrollChurn();
   result &= testPausedIncomingCardMaterializesWithoutAnchorJump();
+  result &= testPausedNormalPromptTurnMaterializesWithoutAnchorJump();
   result &= testGraphHistoryPagingAndPausedTailGrowth();
   result &= testGraphRootReplacementAndAttachmentRecovery();
   result &= testGraphLastItemRemovalUpdatesChromeSynchronously();
   result &= testGraphLocalPromptMorphsWithoutReplacingItsWidget();
+  result &= testGraphSteeringPromptAcknowledgementKeepsCanonicalParent();
   result &= testStructuredTurnPlanRemainsInspectorOnly();
   result &= testOverduePromptStartsOnlyWhenVisible();
   result &= testPendingPromptAnimation();
