@@ -4433,6 +4433,109 @@ bool testLoadedCardsMaterializeOnceWithoutScrollChurn() {
       "scrolling");
 }
 
+bool testPausedIncomingCardMaterializesWithoutAnchorJump() {
+  constexpr std::size_t InitialCount = 40;
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  nodegraph::NodeRef root;
+  std::vector<nodegraph::NodeRef> initial;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", InitialCount);
+    thread = write.upsert({nodegraph::NodeKind::Thread, "paused-append-thread"},
+                          std::move(threadState));
+    turn = write.upsert({nodegraph::NodeKind::Turn, "paused-append-turn"});
+    write.setParent(thread, turn);
+    for (std::size_t index = 0; index < InitialCount; ++index) {
+      nodegraph::NodeState state = graphMessageState(
+          index == 0 ? "userMessage" : "agentMessage",
+          "Initial retained card " + std::to_string(index));
+      if (index != 0)
+        state.fields.emplace("phase", "final_answer");
+      nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item,
+           "paused-append-item-" + std::to_string(index)},
+          std::move(state));
+      write.setParent(turn, item);
+      initial.push_back(item);
+    }
+    root = initial.front();
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, root);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 420);
+  view.show();
+  view.bindGraph(graph, thread);
+  const bool initialReady = spinUntil([&] {
+    return std::ranges::all_of(initial, [](const nodegraph::NodeRef &item) {
+      ui::QtNodeAttachment *attachment = graphAttachment(item);
+      return attachment && attachment->widget;
+    });
+  }, 512);
+  view.verticalScrollBar()->setValue(0);
+  spin(40);
+  const auto anchorBefore = firstVisible(view);
+  const int scrollBefore = view.verticalScrollBar()->value();
+  std::vector<QPointer<QWidget>> identities;
+  identities.reserve(initial.size());
+  for (const nodegraph::NodeRef &item : initial) {
+    ui::QtNodeAttachment *attachment = graphAttachment(item);
+    identities.push_back(attachment ? attachment->widget : nullptr);
+  }
+
+  nodegraph::NodeRef incoming;
+  nodegraph::GraphChange change;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState state =
+        graphMessageState("agentMessage", "Incoming while reading above");
+    state.fields.emplace("phase", "update");
+    incoming = write.upsert(
+        {nodegraph::NodeKind::Item, "paused-append-incoming"},
+        std::move(state));
+    write.setParent(turn, incoming);
+    write.setField(thread, "historyLoadedItemCount", InitialCount + 1);
+    change = write.finish();
+  }
+  view.graphChangedDeferred(change.affected, change.removed);
+  const bool incomingReady = spinUntil([&] {
+    ui::QtNodeAttachment *attachment = graphAttachment(incoming);
+    return attachment && attachment->widget;
+  }, 32);
+  const auto anchorAfter = firstVisible(view);
+  ui::QtNodeAttachment *rootAttachment = graphAttachment(root);
+  ui::QtNodeAttachment *incomingAttachment = graphAttachment(incoming);
+  auto *rootCard = rootAttachment
+                       ? qobject_cast<ConversationCard *>(
+                             rootAttachment->widget.data())
+                       : nullptr;
+  QWidget *incomingCard =
+      incomingAttachment ? incomingAttachment->widget.data() : nullptr;
+  bool oldIdentitiesRetained = true;
+  for (std::size_t index = 0; index < initial.size(); ++index)
+    oldIdentitiesRetained =
+        oldIdentitiesRetained && graphAttachment(initial[index]) &&
+        graphAttachment(initial[index])->widget == identities[index];
+
+  return expect(
+      initialReady && !anchorBefore.first.empty() && incomingReady &&
+          view.mode() == ConversationView::Mode::Paused &&
+          view.verticalScrollBar()->value() == scrollBefore &&
+          anchorAfter.first == anchorBefore.first &&
+          std::abs(anchorAfter.second - anchorBefore.second) <= 1 &&
+          oldIdentitiesRetained && rootCard && incomingCard &&
+          rootCard->isAncestorOf(incomingCard) &&
+          incomingCard->mapTo(view.viewport(), QPoint{}).y() >=
+              view.viewport()->height() &&
+          graphPassBudgetsWereRespected(view),
+      "a selected thread materializes one new offscreen card promptly while "
+      "a paused viewport retains its exact anchor and existing card identity");
+}
+
 bool testGraphHistoryPagingAndPausedTailGrowth() {
   constexpr std::size_t InitialItemCount = 100;
   constexpr std::size_t PrependedItemCount = 5;
@@ -5493,6 +5596,7 @@ int main(int argc, char **argv) {
   result &= testGraphStreamTruncationNotices();
   result &= testGraphBoundedHistoryAndExplicitRoot();
   result &= testLoadedCardsMaterializeOnceWithoutScrollChurn();
+  result &= testPausedIncomingCardMaterializesWithoutAnchorJump();
   result &= testGraphHistoryPagingAndPausedTailGrowth();
   result &= testGraphRootReplacementAndAttachmentRecovery();
   result &= testGraphLastItemRemovalUpdatesChromeSynchronously();

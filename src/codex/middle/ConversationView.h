@@ -14,6 +14,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 class QLabel;
@@ -56,9 +57,9 @@ public:
     return presentationOptions_;
   }
 
-  // The view retains only the selected thread and its structural NodeRefs.
-  // Protocol-derived card state is read non-blockingly only when a card reaches
-  // the viewport or its overscan window.
+  // The view retains only the selected thread's loaded history window and its
+  // structural NodeRefs. Cards in that bounded window materialize once;
+  // subsequent protocol-derived projection reads remain visible-card-only.
   void bindGraph(const nodegraph::NodeGraph &graph,
                  nodegraph::NodeRef selectedThread);
   void graphChanged(std::span<const nodegraph::NodeRef> removed = {});
@@ -177,6 +178,9 @@ private:
   int visibilityScanViewportHeight_ = -1;
   int visibilityScanViewportWidth_ = -1;
   int visibilityScanContentHeight_ = -1;
+  std::optional<std::pair<std::size_t, std::size_t>>
+      immediateVisibilityStart_;
+  nodegraph::NodeRef immediateMaterializationNode_;
   std::string threadId_;
   std::unordered_map<std::string, ThreadScrollState> threadStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>

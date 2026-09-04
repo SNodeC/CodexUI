@@ -745,6 +745,7 @@ public:
     int measuredHeight = 0;
     bool projectionVisible = true;
     bool cardGeometryDirty = true;
+    bool immediateMaterialization = false;
   };
 
   explicit TurnSectionWidget(QWidget *parent = nullptr) : QWidget(parent) {
@@ -1363,6 +1364,8 @@ void ConversationView::clearGraph() {
   visibilityScanViewportHeight_ = -1;
   visibilityScanViewportWidth_ = -1;
   visibilityScanContentHeight_ = -1;
+  immediateVisibilityStart_.reset();
+  immediateMaterializationNode_.reset();
   graphRefreshScheduled_ = false;
   visibilityPassScheduled_ = false;
   graphPassCardOperations_ = 0;
@@ -1865,6 +1868,13 @@ void ConversationView::runGraphRefresh() {
             turnNode->id().kind != nodegraph::NodeKind::Turn ||
             read->removed(turnNode) || read->parent(turnNode) != graphThread_)
           continue;
+
+        // A newly addressed item in the selected thread must not wait for a
+        // viewport-centered scan after the user has scrolled upward. If it is
+        // part of the loaded suffix, its slot will consume this one transient
+        // priority when reconciliation inserts it.
+        if (affected == newestItem)
+          immediateMaterializationNode_ = affected;
 
         GraphViewportGeometry::TurnGeometry *turn = nullptr;
         if (const auto retained =
@@ -2655,6 +2665,10 @@ bool ConversationView::reconcileGraphViewport() {
       slot.promptVisualId = entry.record->promptVisualId;
       slot.measuredHeight = entry.record->measuredHeight;
       slot.projectionVisible = entry.record->projectionVisible;
+      slot.immediateMaterialization =
+          immediateMaterializationNode_ == entry.record->node;
+      if (slot.immediateMaterialization)
+        immediateMaterializationNode_.reset();
       slot.item = new MeasuredCardPlaceholder(
           slot.key, slot.projectionVisible ? slot.measuredHeight : 0, section);
       slot.itemGuard = slot.item;
@@ -2827,8 +2841,16 @@ bool ConversationView::reconcileGraphViewport() {
               static_cast<qlonglong>(graphGeometry_->trailingPixelExtent));
 
   graphWindowItemCount_ = 0;
-  for (TurnSectionWidget *section : graphSections_)
+  immediateVisibilityStart_.reset();
+  for (std::size_t sectionIndex = 0; sectionIndex < graphSections_.size();
+       ++sectionIndex) {
+    TurnSectionWidget *section = graphSections_[sectionIndex];
     graphWindowItemCount_ += section->cardSlots.size();
+    for (std::size_t slotIndex = 0; slotIndex < section->cardSlots.size();
+         ++slotIndex)
+      if (section->cardSlots[slotIndex].immediateMaterialization)
+        immediateVisibilityStart_ = {sectionIndex, slotIndex};
+  }
   graphGeometry_->lastCardOperationsPerPass = operations;
   graphGeometry_->maxCardOperationsPerPass =
       std::max(graphGeometry_->maxCardOperationsPerPass, operations);
@@ -3314,6 +3336,15 @@ void ConversationView::resetGraphVisibilityScan() {
                    relative * static_cast<double>(section->cardSlots.size())));
   constexpr std::size_t LookBehind = MaxVisibilitySlotChecksPerPass / 4;
   visibilitySlotCursor_ = estimated > LookBehind ? estimated - LookBehind : 0;
+  if (immediateVisibilityStart_) {
+    const auto [sectionIndex, slotIndex] = *immediateVisibilityStart_;
+    if (sectionIndex < graphSections_.size() &&
+        slotIndex < graphSections_[sectionIndex]->cardSlots.size()) {
+      visibilitySectionCursor_ = sectionIndex;
+      visibilitySlotCursor_ = slotIndex;
+    }
+    immediateVisibilityStart_.reset();
+  }
 }
 
 bool ConversationView::runVisibilityPass() {
@@ -3352,6 +3383,7 @@ bool ConversationView::runGraphVisibilityPass() {
     std::uint64_t renderedRevision = 0;
     std::uint64_t nodeRevision = 0;
     std::shared_ptr<const nodegraph::NodeState> state;
+    bool immediate = false;
   };
 
   const int scrollTop = verticalScrollBar()->value();
@@ -3483,11 +3515,13 @@ bool ConversationView::runGraphVisibilityPass() {
       if (inViewport || ownsFocus) {
         candidates.push_back({entry.section, &slot, Operation::Render,
                               inViewport, distance,
-                              slot.attachment->renderedRevision});
+                              slot.attachment->renderedRevision, 0, {},
+                              slot.immediateMaterialization});
       }
     } else if (wanted) {
-      candidates.push_back(
-          {entry.section, &slot, Operation::Materialize, inViewport, distance});
+      candidates.push_back({entry.section, &slot, Operation::Materialize,
+                            inViewport, distance, 0, 0, {},
+                            slot.immediateMaterialization});
     }
     updateAttachmentVisibility(entry);
   }
@@ -3551,7 +3585,8 @@ bool ConversationView::runGraphVisibilityPass() {
                             distance,
                             root->attachment
                                 ? root->attachment->renderedRevision
-                                : std::uint64_t{0}});
+                                : std::uint64_t{0},
+                            0, {}, root->immediateMaterialization});
     } else {
       rootCandidate->operation = operation;
       rootCandidate->inViewport = childInViewport;
@@ -3559,6 +3594,7 @@ bool ConversationView::runGraphVisibilityPass() {
       rootCandidate->renderedRevision =
           root->attachment ? root->attachment->renderedRevision
                            : std::uint64_t{0};
+      rootCandidate->immediate = root->immediateMaterialization;
     }
   }
 
@@ -3599,6 +3635,14 @@ bool ConversationView::runGraphVisibilityPass() {
 
   std::ranges::stable_sort(candidates, [this, follow](const Candidate &left,
                                                       const Candidate &right) {
+    if (left.immediate != right.immediate)
+      return left.immediate;
+    const bool leftRoot =
+        left.section && left.slot && left.slot->key == left.section->rootKey;
+    const bool rightRoot = right.section && right.slot &&
+                           right.slot->key == right.section->rootKey;
+    if (left.immediate && leftRoot != rightRoot)
+      return leftRoot;
     if (left.inViewport != right.inViewport)
       return left.inViewport > right.inViewport;
     const auto urgency = [](Operation operation) {
@@ -3608,10 +3652,6 @@ bool ConversationView::runGraphVisibilityPass() {
       return urgency(left.operation) < urgency(right.operation);
     if (left.distance != right.distance)
       return left.distance < right.distance;
-    const bool leftRoot =
-        left.section && left.slot && left.slot->key == left.section->rootKey;
-    const bool rightRoot = right.section && right.slot &&
-                           right.slot->key == right.section->rootKey;
     if (left.inViewport && leftRoot != rightRoot)
       return leftRoot;
     if (follow && left.inViewport && left.slot && right.slot &&
@@ -3728,6 +3768,7 @@ bool ConversationView::runGraphVisibilityPass() {
       setAttachmentViewportVisibility(*slot.attachment, candidate.inViewport);
       Q_ASSERT(slot.graphNode->uiAttachment() == nullptr);
       slot.graphNode->setUiAttachment(slot.attachment.get());
+      slot.immediateMaterialization = false;
       delete placeholder;
       rememberSection(changedSections, candidate.section);
       structuralWidgetChange = true;
