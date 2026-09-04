@@ -54,6 +54,10 @@ struct DecodedMessage final {
   // wire id without replacing a retained recovery interaction.
   std::optional<std::uint64_t> connectionGeneration;
   std::optional<std::uint64_t> providerGeneration;
+  // Client requests originating from a NodeAction carry the exact graph node
+  // selected by Qt. Reduction validates this stable reference and never
+  // reconstructs a different operation target from payload identifiers.
+  NodeRef requestTarget;
 };
 
 struct ApplyResult final {
@@ -136,6 +140,8 @@ private:
   ingestItem(NodeGraph::WriteAccess &write, const Value::Object &object,
              const NodeRef &turn, std::string_view fallbackId = {},
              std::optional<std::uint64_t> preserveChangesAfter = {});
+  void reconcileAgentChildRelations(NodeGraph::WriteAccess &write,
+                                    const NodeRef &thread);
   void admitRootThread(NodeGraph::WriteAccess &write, const NodeRef &thread,
                        bool prepend);
   void replaceThreadList(NodeGraph::WriteAccess &write,

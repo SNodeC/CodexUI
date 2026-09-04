@@ -338,6 +338,17 @@ bool operationPending(NodeGraph &graph, const nlohmann::json &requestId) {
   return operation && read->state(operation)->status == NodeStatus::Pending;
 }
 
+bool operationTargets(NodeGraph &graph, const nlohmann::json &requestId,
+                      const NodeRef &target) {
+  const ProtocolRequestId id = requestIdFromJson(requestId);
+  std::optional<NodeGraph::ReadAccess> read = graph.tryRead();
+  if (!read)
+    return false;
+  const NodeRef operation = read->find({NodeKind::Operation, id.canonical()});
+  return operation && read->related(operation, RelationKind::OperationTarget) ==
+                          std::vector<NodeRef>{target};
+}
+
 bool operationRetired(NodeGraph &graph, const nlohmann::json &requestId) {
   const ProtocolRequestId id = requestIdFromJson(requestId);
   std::optional<NodeGraph::ReadAccess> read = graph.tryRead();
@@ -464,7 +475,9 @@ void directNodeActionsUseOneCorrelatedRequest(UnixBridge &bridge,
          "worker validation blocks an empty rename name");
 
   NodeAction rename{thread, NodeActionKind::Rename};
-  rename.payload = {{"name", Value("Renamed once")}};
+  rename.payload = {{"name", Value("Renamed once")},
+                    {"turnId", Value("payload-decoy-turn")},
+                    {"itemId", Value("payload-decoy-item")}};
   expect(sendAction(runtime.channels(), std::move(rename)),
          "rename action enters the worker mailbox");
   std::optional<nlohmann::json> request = bridge.receiveAppServer();
@@ -480,6 +493,17 @@ void directNodeActionsUseOneCorrelatedRequest(UnixBridge &bridge,
            return operationPending(runtime.graph(), request->at("id"));
          }),
          "emitted request has one pending graph correlation");
+  expect(operationTargets(runtime.graph(), request->at("id"), thread),
+         "the operation retains the exact NodeRef selected by the UI action");
+  {
+    std::optional<NodeGraph::ReadAccess> read = runtime.graph().tryRead();
+    const NodeId decoyTurn =
+        scopedTurnNodeId("runtime-thread", "payload-decoy-turn");
+    expect(read && !read->find(decoyTurn) &&
+               !read->find(scopedItemNodeId(decoyTurn, "payload-decoy-item")),
+           "payload identifiers cannot synthesize a replacement operation "
+           "target when an exact action target was supplied");
+  }
   expect(!bridge.receiveAppServer(100ms),
          "non-idempotent rename is not dual-sent");
   expect(bridge.reply(*request, nlohmann::json::object()),

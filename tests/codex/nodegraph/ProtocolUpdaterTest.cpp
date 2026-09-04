@@ -852,6 +852,248 @@ void rootOrderAndThreadHierarchyAreExplicit() {
   }
 }
 
+void agentChildAggregatesTrackEveryReferencingItem() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+
+  for (const std::string_view id :
+       {"shared-agent-child", "replacement-agent-child"}) {
+    static_cast<void>(updater.apply(
+        {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+         Value::Object{{"thread", Value(Value::Object{{"id", Value(id)}})}}}));
+  }
+
+  const auto agentItem = [](std::string id, std::string childId) {
+    return Value(Value::Object{{"id", Value(std::move(id))},
+                               {"type", Value("subAgentActivity")},
+                               {"agentThreadId", Value(std::move(childId))}});
+  };
+  Value::Object owner{
+      {"id", Value("agent-owner")},
+      {"turns",
+       Value(Value::Array{Value(Value::Object{
+           {"id", Value("agent-owner-turn")},
+           {"items",
+            Value(Value::Array{
+                agentItem("first-agent-item", "shared-agent-child"),
+                agentItem("second-agent-item", "shared-agent-child")})}})})}};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{{"thread", Value(std::move(owner))}}}));
+
+  NodeRef firstItem;
+  NodeRef secondItem;
+  NodeRef sharedChild;
+  NodeRef replacementChild;
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const NodeRef ownerThread = read->find({NodeKind::Thread, "agent-owner"});
+    firstItem =
+        findItem(*read, "agent-owner", "agent-owner-turn", "first-agent-item");
+    secondItem =
+        findItem(*read, "agent-owner", "agent-owner-turn", "second-agent-item");
+    sharedChild = read->find({NodeKind::Thread, "shared-agent-child"});
+    replacementChild =
+        read->find({NodeKind::Thread, "replacement-agent-child"});
+    const auto roots = read->related(runtime, RelationKind::RootThread);
+    require(ownerThread && firstItem && secondItem && sharedChild &&
+                replacementChild &&
+                read->related(firstItem, RelationKind::AgentChildThread) ==
+                    std::vector<NodeRef>{sharedChild} &&
+                read->related(secondItem, RelationKind::AgentChildThread) ==
+                    std::vector<NodeRef>{sharedChild} &&
+                read->related(ownerThread, RelationKind::AgentChildThread) ==
+                    std::vector<NodeRef>{sharedChild} &&
+                read->related(sharedChild, RelationKind::ThreadOwner) ==
+                    std::vector<NodeRef>{ownerThread} &&
+                std::ranges::find(roots, sharedChild) == roots.end(),
+            "multiple items share one owner-level agent-child relation");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/completed", std::nullopt,
+       Value::Object{{"threadId", Value("agent-owner")},
+                     {"turnId", Value("agent-owner-turn")},
+                     {"item", agentItem("first-agent-item",
+                                        "replacement-agent-child")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const NodeRef ownerThread = read->find({NodeKind::Thread, "agent-owner"});
+    const auto roots = read->related(runtime, RelationKind::RootThread);
+    require(ownerThread && firstItem && secondItem && sharedChild &&
+                replacementChild &&
+                read->related(firstItem, RelationKind::AgentChildThread) ==
+                    std::vector<NodeRef>{replacementChild} &&
+                read->related(secondItem, RelationKind::AgentChildThread) ==
+                    std::vector<NodeRef>{sharedChild} &&
+                read->related(ownerThread, RelationKind::AgentChildThread) ==
+                    std::vector<NodeRef>{replacementChild, sharedChild} &&
+                read->related(sharedChild, RelationKind::ThreadOwner) ==
+                    std::vector<NodeRef>{ownerThread} &&
+                read->related(replacementChild, RelationKind::ThreadOwner) ==
+                    std::vector<NodeRef>{ownerThread} &&
+                std::ranges::find(roots, sharedChild) == roots.end() &&
+                std::ranges::find(roots, replacementChild) == roots.end(),
+            "reassigning one of multiple items preserves the aggregate edge "
+            "still referenced by its sibling item");
+  }
+
+  const ProtocolRequestId firstReadId("agent-owner-first-read");
+  const ApplyResult firstRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/read", firstReadId,
+       Value::Object{{"threadId", Value("agent-owner")}}});
+  Value::Object retainedOwner{
+      {"id", Value("agent-owner")},
+      {"turns",
+       Value(Value::Array{Value(Value::Object{
+           {"id", Value("agent-owner-turn")},
+           {"items", Value(Value::Array{agentItem(
+                         "second-agent-item", "shared-agent-child")})}})})}};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read", firstReadId,
+       Value::Object{{"thread", Value(std::move(retainedOwner))}},
+       firstRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const NodeRef ownerThread = read->find({NodeKind::Thread, "agent-owner"});
+    const auto roots = read->related(runtime, RelationKind::RootThread);
+    require(firstItem && read->removed(firstItem) &&
+                !read->find(firstItem->id()) && ownerThread && secondItem &&
+                read->find(secondItem->id()) == secondItem && sharedChild &&
+                replacementChild &&
+                read->related(ownerThread, RelationKind::AgentChildThread) ==
+                    std::vector<NodeRef>{sharedChild} &&
+                read->related(sharedChild, RelationKind::ThreadOwner) ==
+                    std::vector<NodeRef>{ownerThread} &&
+                read->related(replacementChild, RelationKind::ThreadOwner)
+                    .empty() &&
+                std::ranges::find(roots, sharedChild) == roots.end() &&
+                std::ranges::find(roots, replacementChild) != roots.end(),
+            "removing one referencing item keeps the shared owner aggregate "
+            "and releases only its unreferenced child");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/completed", std::nullopt,
+       Value::Object{{"threadId", Value("agent-owner")},
+                     {"turnId", Value("agent-owner-turn")},
+                     {"item", agentItem("second-agent-item",
+                                        "replacement-agent-child")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const NodeRef ownerThread = read->find({NodeKind::Thread, "agent-owner"});
+    const auto roots = read->related(runtime, RelationKind::RootThread);
+    require(ownerThread && secondItem && sharedChild && replacementChild &&
+                read->related(secondItem, RelationKind::AgentChildThread) ==
+                    std::vector<NodeRef>{replacementChild} &&
+                read->related(ownerThread, RelationKind::AgentChildThread) ==
+                    std::vector<NodeRef>{replacementChild} &&
+                read->related(sharedChild, RelationKind::ThreadOwner).empty() &&
+                read->related(replacementChild, RelationKind::ThreadOwner) ==
+                    std::vector<NodeRef>{ownerThread} &&
+                std::ranges::find(roots, sharedChild) != roots.end() &&
+                std::ranges::find(roots, replacementChild) == roots.end(),
+            "reassigning the final referencing item replaces only its exact "
+            "owner aggregate and promotes the released child");
+  }
+
+  const ProtocolRequestId emptyReadId("agent-owner-empty-read");
+  const ApplyResult emptyRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/read", emptyReadId,
+       Value::Object{{"threadId", Value("agent-owner")}}});
+  Value::Object emptyOwner{{"id", Value("agent-owner")},
+                           {"turns", Value(Value::Array{Value(Value::Object{
+                                         {"id", Value("agent-owner-turn")},
+                                         {"items", Value(Value::Array{})}})})}};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read", emptyReadId,
+       Value::Object{{"thread", Value(std::move(emptyOwner))}},
+       emptyRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const NodeRef ownerThread = read->find({NodeKind::Thread, "agent-owner"});
+    const auto roots = read->related(runtime, RelationKind::RootThread);
+    require(secondItem && read->removed(secondItem) &&
+                !read->find(secondItem->id()) && ownerThread &&
+                replacementChild &&
+                read->related(ownerThread, RelationKind::AgentChildThread)
+                    .empty() &&
+                read->related(replacementChild, RelationKind::ThreadOwner)
+                    .empty() &&
+                std::ranges::find(roots, replacementChild) != roots.end(),
+            "removing the final referencing item clears the aggregate and "
+            "promotes its released child");
+  }
+}
+
+void forkRelationsFollowTheCurrentSource() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+
+  for (const std::string_view id : {"fork-source-a", "fork-source-b"}) {
+    static_cast<void>(updater.apply(
+        {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+         Value::Object{{"thread", Value(Value::Object{{"id", Value(id)}})}}}));
+  }
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/fork",
+       ProtocolRequestId("initial-fork"),
+       Value::Object{
+           {"thread",
+            Value(Value::Object{{"id", Value("changing-fork")},
+                                {"forkedFromId", Value("fork-source-a")}})}}}));
+
+  NodeRef fork;
+  {
+    auto read = graph.tryRead();
+    const NodeRef sourceA = read->find({NodeKind::Thread, "fork-source-a"});
+    fork = read->find({NodeKind::Thread, "changing-fork"});
+    require(sourceA && fork &&
+                read->related(sourceA, RelationKind::ForkChildThread) ==
+                    std::vector<NodeRef>{fork},
+            "a fork starts with one source-to-child relation");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{
+           {"thread",
+            Value(Value::Object{{"id", Value("changing-fork")},
+                                {"forkedFromId", Value("fork-source-b")}})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef sourceA = read->find({NodeKind::Thread, "fork-source-a"});
+    const NodeRef sourceB = read->find({NodeKind::Thread, "fork-source-b"});
+    require(read->find({NodeKind::Thread, "changing-fork"}) == fork &&
+                read->related(sourceA, RelationKind::ForkChildThread).empty() &&
+                read->related(sourceB, RelationKind::ForkChildThread) ==
+                    std::vector<NodeRef>{fork},
+            "fork reassignment removes the old source-to-child direction "
+            "before adding the new source");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{{"thread", Value(Value::Object{
+                                    {"id", Value("changing-fork")},
+                                    {"forkedFromId", Value(nullptr)}})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef sourceA = read->find({NodeKind::Thread, "fork-source-a"});
+    const NodeRef sourceB = read->find({NodeKind::Thread, "fork-source-b"});
+    require(read->find({NodeKind::Thread, "changing-fork"}) == fork &&
+                read->related(sourceA, RelationKind::ForkChildThread).empty() &&
+                read->related(sourceB, RelationKind::ForkChildThread).empty(),
+            "clearing forkedFromId removes the prior source relation while "
+            "preserving the fork NodeRef");
+  }
+}
+
 void semanticDeltasAndHydratedOrderStayCurrent() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -1750,6 +1992,73 @@ void lateResultsCannotRecreateDeletedTargets() {
                     late.change.removed.end(),
             "a late mutation result retires without recreating its deleted "
             "original target");
+  }
+}
+
+void exactRequestTargetsOverridePayloadAddressingAndLifetime() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{
+           {"thread", Value(Value::Object{{"id", Value("exact-target")},
+                                          {"name", Value("Original")}})}}}));
+
+  NodeRef exactTarget;
+  {
+    auto read = graph.tryRead();
+    exactTarget = read->find({NodeKind::Thread, "exact-target"});
+  }
+  const ProtocolRequestId requestId("exact-target-read");
+  DecodedMessage request{
+      DecodedMessageKind::ClientRequest, "thread/read", requestId,
+      Value::Object{{"threadId", Value("exact-target")},
+                    {"turnId", Value("payload-decoy-turn")},
+                    {"itemId", Value("payload-decoy-item")}}};
+  request.requestTarget = exactTarget;
+  const ApplyResult admitted = updater.apply(std::move(request));
+  {
+    auto read = graph.tryRead();
+    const NodeId decoyTurn =
+        scopedTurnNodeId("exact-target", "payload-decoy-turn");
+    require(
+        admitted.primary && exactTarget &&
+            read->related(admitted.primary, RelationKind::OperationTarget) ==
+                std::vector<NodeRef>{exactTarget} &&
+            !read->find(decoyTurn) &&
+            !read->find(scopedItemNodeId(decoyTurn, "payload-decoy-item")),
+        "a client request retains its exact action NodeRef instead of "
+        "reconstructing a more-specific target from payload fields");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/deleted", std::nullopt,
+       Value::Object{{"threadId", Value("exact-target")}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{
+           {"thread", Value(Value::Object{{"id", Value("exact-target")},
+                                          {"name", Value("Replacement")}})}}}));
+  const ApplyResult late = updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read", requestId,
+       Value::Object{
+           {"thread", Value(Value::Object{{"id", Value("exact-target")},
+                                          {"name", Value("Late stale")},
+                                          {"turns", Value(Value::Array{})}})}},
+       admitted.primary});
+  {
+    auto read = graph.tryRead();
+    const NodeRef replacement = read->find({NodeKind::Thread, "exact-target"});
+    const Value *name =
+        replacement ? field(read->state(replacement), "name") : nullptr;
+    require(replacement && replacement != exactTarget &&
+                read->removed(exactTarget) && name && name->asString() &&
+                *name->asString() == "Replacement" &&
+                !read->find(admitted.primary->id()) &&
+                std::ranges::find(late.change.removed, admitted.primary) !=
+                    late.change.removed.end(),
+            "removing an exact target prevents its late response from "
+            "mutating a replacement node with the same canonical id");
   }
 }
 
@@ -3127,6 +3436,8 @@ int main() {
   threadItemPagesMaintainScopedContainmentAndOrder();
   scopedProviderIdentityCannotCrossParents();
   rootOrderAndThreadHierarchyAreExplicit();
+  agentChildAggregatesTrackEveryReferencingItem();
+  forkRelationsFollowTheCurrentSource();
   semanticDeltasAndHydratedOrderStayCurrent();
   realtimeNotificationsMaintainOneCurrentSession();
   hookRunsKeepNestedIdentityAndCurrentOwnership();
@@ -3135,6 +3446,7 @@ int main() {
   turnRootsAndPagedHistoryStayExplicit();
   resultsAndListsCorrelate();
   lateResultsCannotRecreateDeletedTargets();
+  exactRequestTargetsOverridePayloadAddressingAndLifetime();
   accountFacetsConvergeAndRateLimitPatchesStaySparse();
   successfulRefreshesRetireInvalidationsAndConfigWritesInvalidate();
   reusedWireIdsRequireExactCurrentNodes();

@@ -227,8 +227,8 @@ template <typename Operation, typename Published, typename Completed>
 std::string dispatchRequestHandled(codex::frontend::CodexBridge &sdk,
                                    nlohmann::json parameters,
                                    nodegraph::WorkerLogic &workerLogic,
-                                   nodegraph::NodeRef, Published published,
-                                   Completed completed) {
+                                   nodegraph::NodeRef requestTarget,
+                                   Published published, Completed completed) {
   struct RequestPublication final {
     bool requestPublished = false;
     nodegraph::NodeRef operation;
@@ -271,13 +271,16 @@ std::string dispatchRequestHandled(codex::frontend::CodexBridge &sdk,
           publication->synchronousResult.emplace(std::move(outcome));
       });
   const nodegraph::ProtocolRequestId typedRequestId(requestId);
-  nodegraph::WorkerApplyResult applied = workerLogic.applyDetailed(
-      nodegraph::DecodedMessage{nodegraph::DecodedMessageKind::ClientRequest,
-                                std::string(Operation::method),
-                                typedRequestId,
-                                decodedObject(parameters),
-                                {},
-                                threadActivityAt(Operation::method)});
+  nodegraph::DecodedMessage decodedRequest{
+      nodegraph::DecodedMessageKind::ClientRequest,
+      std::string(Operation::method),
+      typedRequestId,
+      decodedObject(parameters),
+      {},
+      threadActivityAt(Operation::method)};
+  decodedRequest.requestTarget = std::move(requestTarget);
+  nodegraph::WorkerApplyResult applied =
+      workerLogic.applyDetailed(std::move(decodedRequest));
   publication->operation = std::move(applied.primary);
   published(typedRequestId);
   publication->requestPublished = true;
@@ -290,10 +293,10 @@ template <typename Operation, typename Published, typename Completed>
 std::string dispatchRequest(codex::frontend::CodexBridge &sdk,
                             nlohmann::json parameters,
                             nodegraph::WorkerLogic &workerLogic,
-                            nodegraph::NodeRef expectedNode,
+                            nodegraph::NodeRef requestTarget,
                             Published published, Completed completed) {
   return dispatchRequestHandled<Operation>(
-      sdk, std::move(parameters), workerLogic, std::move(expectedNode),
+      sdk, std::move(parameters), workerLogic, std::move(requestTarget),
       std::move(published),
       [&workerLogic, completed = std::move(completed)](
           RequestOutcome outcome, nodegraph::DecodedMessage decoded) mutable {
@@ -306,9 +309,9 @@ template <typename Operation, typename Completed>
 std::string
 dispatchRequest(codex::frontend::CodexBridge &sdk, nlohmann::json parameters,
                 nodegraph::WorkerLogic &workerLogic,
-                nodegraph::NodeRef expectedNode, Completed completed) {
+                nodegraph::NodeRef requestTarget, Completed completed) {
   return dispatchRequest<Operation>(
-      sdk, std::move(parameters), workerLogic, std::move(expectedNode),
+      sdk, std::move(parameters), workerLogic, std::move(requestTarget),
       [](const nodegraph::ProtocolRequestId &) {}, std::move(completed));
 }
 
@@ -316,9 +319,9 @@ template <typename Operation>
 std::string dispatchRequest(codex::frontend::CodexBridge &sdk,
                             nlohmann::json parameters,
                             nodegraph::WorkerLogic &workerLogic,
-                            nodegraph::NodeRef expectedNode = {}) {
+                            nodegraph::NodeRef requestTarget = {}) {
   return dispatchRequest<Operation>(sdk, std::move(parameters), workerLogic,
-                                    std::move(expectedNode),
+                                    std::move(requestTarget),
                                     [](RequestOutcome) {});
 }
 

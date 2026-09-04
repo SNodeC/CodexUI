@@ -915,19 +915,6 @@ void clearThreadOwners(NodeGraph::WriteAccess &write, const NodeRef &child) {
   }
 }
 
-void clearThreadOwnerKind(NodeGraph::WriteAccess &write, const NodeRef &child,
-                          RelationKind kind) {
-  const std::vector<NodeRef> owners =
-      write.related(child, RelationKind::ThreadOwner);
-  for (const NodeRef &owner : owners) {
-    const std::vector<NodeRef> children = write.related(owner, kind);
-    if (std::find(children.begin(), children.end(), child) == children.end())
-      continue;
-    write.unrelate(owner, kind, child);
-    write.unrelate(child, RelationKind::ThreadOwner, owner);
-  }
-}
-
 void assignThreadOwner(NodeGraph::WriteAccess &write, const NodeRef &owner,
                        RelationKind kind, const NodeRef &child) {
   if (!owner || !child || owner == child)
@@ -1002,6 +989,34 @@ std::vector<std::string> agentChildIds(const Value::Object &item) {
       children.emplace_back(std::move(child));
   }
   return children;
+}
+
+std::vector<NodeRef> referencedAgentChildren(NodeGraph::WriteAccess &write,
+                                             const NodeRef &thread) {
+  std::vector<NodeRef> referenced;
+  if (!thread)
+    return referenced;
+
+  std::unordered_set<const Node *> seenItems;
+  std::unordered_set<const Node *> seenChildren;
+  for (const NodeRef &turn : write.children(thread)) {
+    if (!turn || turn->id().kind != NodeKind::Turn)
+      continue;
+    std::vector<NodeRef> items = write.children(turn);
+    items = mergeExistingTail(std::move(items),
+                              write.related(turn, RelationKind::TurnRootItem));
+    for (const NodeRef &item : items) {
+      if (!item || item->id().kind != NodeKind::Item ||
+          !seenItems.insert(item.get()).second)
+        continue;
+      for (const NodeRef &child :
+           write.related(item, RelationKind::AgentChildThread)) {
+        if (child && seenChildren.insert(child.get()).second)
+          referenced.emplace_back(child);
+      }
+    }
+  }
+  return referenced;
 }
 
 bool isUserMessage(const Value::Object &item) {
@@ -1663,42 +1678,52 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
       write.setField(operation, "requestTargetRevision",
                      Value(write.revision() + 1));
     write.setStatus(operation, NodeStatus::Pending);
-    const std::string threadId = addressedId(message.payload, NodeKind::Thread);
-    const std::string turnId = addressedId(message.payload, NodeKind::Turn);
-    const std::string itemId = addressedId(message.payload, NodeKind::Item);
-    NodeRef thread;
-    if (!threadId.empty())
-      thread = write.upsert({NodeKind::Thread, threadId});
-    NodeRef turn;
-    if (!turnId.empty())
-      turn = ensureTurn(write, thread, turnId);
     NodeRef target;
-    if (beginsWith(message.method, "command/exec") ||
-        beginsWith(message.method, "process/")) {
-      target = ensureProcess(write, message.payload);
-      if (target) {
-        mergeObject(write, target, message.payload);
-        if (message.method == "command/exec" ||
-            message.method == "process/spawn")
-          write.setStatus(target, NodeStatus::Running);
+    const bool exactTargetSupplied = static_cast<bool>(message.requestTarget);
+    if (exactTargetSupplied) {
+      if (write.find(message.requestTarget->id()) == message.requestTarget)
+        target = message.requestTarget;
+    } else {
+      const std::string threadId =
+          addressedId(message.payload, NodeKind::Thread);
+      const std::string turnId = addressedId(message.payload, NodeKind::Turn);
+      const std::string itemId = addressedId(message.payload, NodeKind::Item);
+      NodeRef thread;
+      if (!threadId.empty())
+        thread = write.upsert({NodeKind::Thread, threadId});
+      NodeRef turn;
+      if (!turnId.empty())
+        turn = ensureTurn(write, thread, turnId);
+      if (beginsWith(message.method, "command/exec") ||
+          beginsWith(message.method, "process/")) {
+        target = ensureProcess(write, message.payload);
+        if (target) {
+          mergeObject(write, target, message.payload);
+          if (message.method == "command/exec" ||
+              message.method == "process/spawn")
+            write.setStatus(target, NodeStatus::Running);
+        }
+      } else if (message.method == "fs/watch" ||
+                 message.method == "fs/unwatch") {
+        target = ensureWatch(write, message.payload);
+        if (target) {
+          mergeObject(write, target, message.payload);
+          if (message.method == "fs/watch")
+            write.setStatus(target, NodeStatus::Pending);
+        }
+      } else if (!itemId.empty()) {
+        target = ensureItem(write, turn, itemId);
       }
-    } else if (message.method == "fs/watch" || message.method == "fs/unwatch") {
-      target = ensureWatch(write, message.payload);
-      if (target) {
-        mergeObject(write, target, message.payload);
-        if (message.method == "fs/watch")
-          write.setStatus(target, NodeStatus::Pending);
-      }
-    } else if (!itemId.empty())
-      target = ensureItem(write, turn, itemId);
-    if (!target && turn)
-      target = turn;
-    if (!target && thread)
-      target = thread;
+      if (!target && turn)
+        target = turn;
+      if (!target && thread)
+        target = thread;
+    }
     if (target) {
       write.relate(operation, RelationKind::OperationTarget, target);
-      write.setField(operation, "hadOperationTarget", Value(true));
     }
+    if (target || exactTargetSupplied)
+      write.setField(operation, "hadOperationTarget", Value(true));
     return operation;
   }
 
@@ -2734,6 +2759,8 @@ NodeRef ProtocolUpdater::ingestThread(
   if (id.empty())
     return {};
   NodeRef thread = write.upsert({NodeKind::Thread, id});
+  const std::string previousForkSourceId =
+      canonicalValue(member(write.state(thread)->fields, "forkedFromId"));
   const auto acceptsField = [&](std::string_view field) {
     return !preserveChangesAfter ||
            write.fieldChangedRevision(thread, field) <= *preserveChangesAfter;
@@ -2761,8 +2788,12 @@ NodeRef ProtocolUpdater::ingestThread(
 
   if (const Value *forkValue = member(object, "forkedFromId");
       forkValue && acceptsField("forkedFromId")) {
-    clearThreadOwnerKind(write, thread, RelationKind::ForkChildThread);
     const std::string forkedFromId = canonicalValue(forkValue);
+    if (!previousForkSourceId.empty() && previousForkSourceId != forkedFromId) {
+      if (NodeRef previousSource =
+              write.find({NodeKind::Thread, previousForkSourceId}))
+        write.unrelate(previousSource, RelationKind::ForkChildThread, thread);
+    }
     if (!forkedFromId.empty() && forkedFromId != id) {
       NodeRef source = write.upsert({NodeKind::Thread, forkedFromId});
       write.relate(source, RelationKind::ForkChildThread, thread);
@@ -2792,6 +2823,8 @@ NodeRef ProtocolUpdater::ingestThread(
       write.replaceChildren(
           thread, mergeExistingTail(std::move(order), write.children(thread)));
     refreshActiveTurn(write, thread);
+    if (replaceTurns)
+      reconcileAgentChildRelations(write, thread);
   }
   return thread;
 }
@@ -2840,6 +2873,7 @@ ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess &write,
         }
       }
       replaceSingleRelation(write, turn, RelationKind::TurnRootItem, root);
+      reconcileAgentChildRelations(write, write.parent(turn));
     }
   }
   if (updateCurrentRelation)
@@ -2876,20 +2910,37 @@ ProtocolUpdater::ingestItem(NodeGraph::WriteAccess &write,
       children.emplace_back(write.upsert({NodeKind::Thread, childThreadId}));
     write.replaceRelated(item, RelationKind::AgentChildThread, children);
     NodeRef owner = turn ? write.parent(turn) : NodeRef{};
-    if (owner) {
-      for (const NodeRef &child : children)
-        assignThreadOwner(write, owner, RelationKind::AgentChildThread, child);
-    }
-    for (const NodeRef &released : previous) {
-      if (std::find(children.begin(), children.end(), released) ==
-          children.end()) {
-        clearThreadOwnerKind(write, released, RelationKind::AgentChildThread);
-        if (!hasThreadOwner(write, released))
-          admitRootThread(write, released, false);
-      }
-    }
+    if (owner && previous != children)
+      reconcileAgentChildRelations(write, owner);
   }
   return item;
+}
+
+void ProtocolUpdater::reconcileAgentChildRelations(
+    NodeGraph::WriteAccess &write, const NodeRef &thread) {
+  if (!thread)
+    return;
+  const std::vector<NodeRef> previous =
+      write.related(thread, RelationKind::AgentChildThread);
+  const std::vector<NodeRef> referenced =
+      referencedAgentChildren(write, thread);
+
+  for (const NodeRef &child : referenced)
+    assignThreadOwner(write, thread, RelationKind::AgentChildThread, child);
+  write.replaceRelated(thread, RelationKind::AgentChildThread, referenced);
+
+  const std::vector<NodeRef> structural =
+      write.related(thread, RelationKind::StructuralChildThread);
+  for (const NodeRef &released : previous) {
+    if (std::find(referenced.begin(), referenced.end(), released) !=
+        referenced.end())
+      continue;
+    if (std::find(structural.begin(), structural.end(), released) ==
+        structural.end())
+      write.unrelate(released, RelationKind::ThreadOwner, thread);
+    if (!hasThreadOwner(write, released))
+      admitRootThread(write, released, false);
+  }
 }
 
 void ProtocolUpdater::admitRootThread(NodeGraph::WriteAccess &write,
