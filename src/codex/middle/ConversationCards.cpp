@@ -2,7 +2,7 @@
 
 #include "codex/middle/ConversationCards.h"
 
-#include "codex/PresentationStatus.h"
+#include "codex/UiStatus.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
@@ -23,6 +23,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -40,6 +41,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 #include <unordered_set>
@@ -145,12 +147,11 @@ public:
     morph_ = new QVariantAnimation(this);
     morph_->setDuration(CopyMorphDurationMilliseconds);
     morph_->setEasingCurve(QEasingCurve::InOutCubic);
-    QObject::connect(
-        morph_, &QVariantAnimation::valueChanged, this,
-        [this](const QVariant &value) {
-          morphProgress_ = value.toReal();
-          update();
-        });
+    QObject::connect(morph_, &QVariantAnimation::valueChanged, this,
+                     [this](const QVariant &value) {
+                       morphProgress_ = value.toReal();
+                       update();
+                     });
     QObject::connect(morph_, &QVariantAnimation::finished, this, [this] {
       if (returningToCopy_) {
         finishFeedback();
@@ -736,7 +737,9 @@ bool presentationEquals(const VisibleCardData &left,
            first->imagePaths == second->imagePaths &&
            first->state == second->state &&
            first->showPendingAnimation == second->showPendingAnimation &&
-           first->error == second->error;
+           first->error == second->error &&
+           first->admittedAtMs == second->admittedAtMs &&
+           first->requiresExplicitRecovery == second->requiresExplicitRecovery;
   }
   return left.payload == right.payload;
 }
@@ -880,12 +883,11 @@ CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
     preservedScrollValue_ = verticalScrollBar()->value();
     followsLatest_ = isAtBottom();
   });
-  connect(verticalScrollBar(), &QScrollBar::actionTriggered, this,
-          [this](int) {
-            preservedScrollValue_ = verticalScrollBar()->sliderPosition();
-            followsLatest_ =
-                preservedScrollValue_ >= verticalScrollBar()->maximum() - 1;
-          });
+  connect(verticalScrollBar(), &QScrollBar::actionTriggered, this, [this](int) {
+    preservedScrollValue_ = verticalScrollBar()->sliderPosition();
+    followsLatest_ =
+        preservedScrollValue_ >= verticalScrollBar()->maximum() - 1;
+  });
   connect(verticalScrollBar(), &QScrollBar::rangeChanged, this,
           [this](int, int) {
             if (!programmaticScroll_)
@@ -1080,6 +1082,10 @@ public:
   void promoteToAuthoritativeUserMessage() {
     if (animationTimer)
       animationTimer->stop();
+    if (pendingDelayTimer)
+      pendingDelayTimer->stop();
+    pendingFeedbackVisible = false;
+    pendingFeedbackDeadlineMs.reset();
     owner->setObjectName(QStringLiteral("conversationCard"));
     owner->setProperty("conversationCardKind",
                        static_cast<int>(CardKind::UserMessage));
@@ -1092,6 +1098,8 @@ public:
       metadata->clear();
       metadata->hide();
     }
+    if (recovery)
+      recovery->hide();
   }
 
   void setCollapsed(bool next) {
@@ -1131,6 +1139,16 @@ public:
       refreshPendingPresentation();
     owner->style()->unpolish(owner);
     owner->style()->polish(owner);
+    owner->update();
+  }
+
+  void setViewportVisible(bool visible) {
+    if (viewportVisible == visible)
+      return;
+    viewportVisible = visible;
+    owner->setProperty("conversationViewportVisible", visible);
+    if (refreshPendingPresentation())
+      owner->updateGeometry();
     owner->update();
   }
 
@@ -1437,10 +1455,28 @@ public:
     metadata = makeLabel({}, "meta", content);
     contentLayout->addWidget(body);
     contentLayout->addWidget(metadata);
+    recovery = new QPushButton(QStringLiteral("Restore to composer"), content);
+    recovery->setObjectName(QStringLiteral("promptRecoveryButton"));
+    recovery->setProperty("kind", "secondary");
+    recovery->setAccessibleName(QStringLiteral("Restore prompt to composer"));
+    recovery->hide();
+    contentLayout->addWidget(recovery, 0, Qt::AlignLeft);
+    QObject::connect(recovery, &QPushButton::clicked, owner,
+                     [this] { emit owner->recoveryRequested(); });
     createImageContainer();
     animationTimer = new QTimer(owner);
+    animationTimer->setObjectName(QStringLiteral("pendingAnimationTimer"));
     animationTimer->setInterval(PendingAnimationIntervalMilliseconds);
     QObject::connect(animationTimer, &QTimer::timeout, owner, [this] {
+      if (refreshPendingPresentation())
+        owner->updateGeometry();
+      owner->update();
+    });
+    pendingDelayTimer = new QTimer(owner);
+    pendingDelayTimer->setObjectName(QStringLiteral("pendingDelayTimer"));
+    pendingDelayTimer->setSingleShot(true);
+    QObject::connect(pendingDelayTimer, &QTimer::timeout, owner, [this] {
+      pendingFeedbackVisible = true;
       if (refreshPendingPresentation())
         owner->updateGeometry();
       owner->update();
@@ -1462,11 +1498,10 @@ public:
                          prompt->state == PromptState::InFlight;
     const bool failed = prompt->state == PromptState::Failed;
     const bool steering = owner->property("nestedConversationCard").toBool();
-    const QString foreground =
-        waiting
-            ? steering ? QStringLiteral("#146f73") : QStringLiteral("#536b8f")
-        : failed ? QStringLiteral("#982f3d")
-                 : QStringLiteral("#1d2633");
+    const QString foreground = waiting  ? steering ? QStringLiteral("#146f73")
+                                                   : QStringLiteral("#536b8f")
+                                : failed ? QStringLiteral("#982f3d")
+                                        : QStringLiteral("#1d2633");
     const QString style =
         QStringLiteral("background:transparent;color:%1;").arg(foreground);
     bool changed = false;
@@ -1484,12 +1519,51 @@ public:
                    : QStringLiteral("Not sent: %1").arg(text(prompt->error));
 
     changed = setVisibleText(metadata, status) || changed;
+    const bool recoveryVisible = failed && prompt->requiresExplicitRecovery;
+    if (recovery && recovery->isVisible() != recoveryVisible) {
+      recovery->setVisible(recoveryVisible);
+      changed = true;
+    }
 
-    if (waiting && prompt->showPendingAnimation) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (waiting) {
+      if (prompt->admittedAtMs) {
+        const std::int64_t admitted = *prompt->admittedAtMs;
+        constexpr std::int64_t maximum =
+            std::numeric_limits<std::int64_t>::max();
+        pendingFeedbackDeadlineMs =
+            admitted > maximum - PendingAnimationDelayMilliseconds
+                ? maximum
+                : admitted + PendingAnimationDelayMilliseconds;
+      } else if (!pendingFeedbackDeadlineMs) {
+        pendingFeedbackDeadlineMs = now + PendingAnimationDelayMilliseconds;
+      }
+      pendingFeedbackVisible =
+          prompt->showPendingAnimation ||
+          (pendingFeedbackDeadlineMs && now >= *pendingFeedbackDeadlineMs);
+    } else {
+      pendingFeedbackVisible = false;
+      pendingFeedbackDeadlineMs.reset();
+    }
+    owner->setProperty("pendingFeedbackVisible",
+                       waiting && pendingFeedbackVisible);
+
+    if (!waiting || !viewportVisible) {
+      pendingDelayTimer->stop();
+      animationTimer->stop();
+    } else if (pendingFeedbackVisible) {
+      pendingDelayTimer->stop();
       if (!animationTimer->isActive())
         animationTimer->start();
     } else {
       animationTimer->stop();
+      const qint64 remaining =
+          std::max<qint64>(1, *pendingFeedbackDeadlineMs - now);
+      const int interval = static_cast<int>(
+          std::min<qint64>(remaining, std::numeric_limits<int>::max()));
+      if (!pendingDelayTimer->isActive() ||
+          pendingDelayTimer->remainingTime() > interval + 1)
+        pendingDelayTimer->start(interval);
     }
     return changed;
   }
@@ -1512,6 +1586,11 @@ public:
   ContentSizedTextView *command = nullptr;
   CommandOutputView *output = nullptr;
   QTimer *animationTimer = nullptr;
+  QTimer *pendingDelayTimer = nullptr;
+  QPushButton *recovery = nullptr;
+  bool pendingFeedbackVisible = false;
+  bool viewportVisible = true;
+  std::optional<qint64> pendingFeedbackDeadlineMs;
   ImageRibbon *images = nullptr;
   QWidget *nestedCards = nullptr;
   QVBoxLayout *nestedLayout = nullptr;
@@ -1553,6 +1632,10 @@ void ConversationCard::setNestedCards(
 
 void ConversationCard::setNestedItems(const std::vector<QWidget *> &items) {
   impl_->setNestedItems(items);
+}
+
+void ConversationCard::setViewportVisible(bool visible) {
+  impl_->setViewportVisible(visible);
 }
 
 std::optional<CommandOutputView::ScrollState>
@@ -1613,13 +1696,12 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
                        prompt->state == PromptState::InFlight;
   const bool failed = prompt->state == PromptState::Failed;
   const bool steering = property("nestedConversationCard").toBool();
-  const bool animated = waiting && prompt->showPendingAnimation;
+  const bool animated = waiting && property("pendingFeedbackVisible").toBool();
   const QColor background = failed
                                 ? QColor(QStringLiteral("#fff0f2"))
                                 : QColor(steering ? QStringLiteral("#eefafa")
                                                   : QStringLiteral("#eaf2ff"));
-  const QColor border = failed
-                            ? QColor(QStringLiteral("#efb8c0"))
+  const QColor border = failed ? QColor(QStringLiteral("#efb8c0"))
                         : waiting
                             ? QColor(steering ? QStringLiteral("#5caeb1")
                                               : QStringLiteral("#79a0d7"))

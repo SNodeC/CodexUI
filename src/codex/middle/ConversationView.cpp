@@ -3,6 +3,7 @@
 #include "codex/middle/ConversationView.h"
 
 #include "codex/middle/ConversationCards.h"
+#include "codex/nodegraph/ProtocolUpdater.h"
 #include "codex/ui/QtNodeAttachment.h"
 
 #include <QAbstractSlider>
@@ -35,6 +36,8 @@ namespace {
 constexpr int CardSpacing = 8;
 constexpr int NativeScrollLineStep = 20;
 constexpr int MaxCardOperationsPerPass = 8;
+constexpr std::size_t MaxVisibilitySlotChecksPerPass = 64;
+constexpr std::size_t MaxVisibilitySectionChecksPerPass = 64;
 constexpr int EstimatedGraphHistoryItemExtent = 66;
 
 class GraphHistoryPlaceholder final : public QWidget {
@@ -205,6 +208,34 @@ std::vector<std::string> graphStrings(const nodegraph::Value *value) {
     if (const auto *text = entry.asString())
       result.push_back(*text);
   return result;
+}
+
+std::uint64_t graphOmittedTextBytes(const nodegraph::NodeState &state,
+                                    std::string_view field) {
+  const nodegraph::Value *retention = graphField(state, "textRetention");
+  const auto *retentionObject = retention ? retention->asObject() : nullptr;
+  const nodegraph::Value *entry =
+      retentionObject ? graphMember(*retentionObject, field) : nullptr;
+  const auto *entryObject = entry ? entry->asObject() : nullptr;
+  const nodegraph::Value *discarded =
+      entryObject ? graphMember(*entryObject, "discardedBytes") : nullptr;
+  if (const auto *number = discarded ? discarded->asUInt64() : nullptr)
+    return *number;
+  if (const auto *number = discarded ? discarded->asInt64() : nullptr;
+      number && *number >= 0)
+    return static_cast<std::uint64_t>(*number);
+  return 0;
+}
+
+std::string withTruncationNotice(std::string value, std::uint64_t omitted,
+                                 std::string_view subject, bool markdown) {
+  if (omitted == 0)
+    return value;
+  const std::string notice = "Earlier " + std::string(subject) +
+                             " was truncated (" + std::to_string(omitted) +
+                             " bytes omitted).";
+  return markdown ? "> " + notice + "\n\n" + value
+                  : '[' + notice + "]\n" + value;
 }
 
 std::string graphMessageText(const nodegraph::NodeState &state) {
@@ -495,7 +526,8 @@ bool graphCardVisible(const nodegraph::NodeState &state,
 VisibleCardData graphCardData(const nodegraph::NodeRef &item,
                               std::string threadId, std::string turnId,
                               const nodegraph::NodeState &state) {
-  const std::string itemId = item ? item->id().canonical : std::string{};
+  const std::string itemId =
+      item ? nodegraph::protocolCanonicalId(state, item) : std::string{};
   const std::string type = graphString(graphField(state, "type"));
   GenericActivityData generic;
   generic.type = type;
@@ -515,14 +547,22 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
         UserMessageData{graphMessageText(state), graphImagePaths(state)};
     break;
   case CardKind::AgentMessage:
-    result.payload = AgentMessageData{graphMessageText(state),
-                                      graphString(graphField(state, "phase")) ==
-                                          "final_answer"};
+    result.payload = AgentMessageData{
+        withTruncationNotice(graphMessageText(state),
+                             graphOmittedTextBytes(state, "text"),
+                             "Codex response", true),
+        graphString(graphField(state, "phase")) == "final_answer"};
     break;
   case CardKind::CommandExecution: {
+    std::string outputField = "aggregatedOutput";
     std::string output = graphString(graphField(state, "aggregatedOutput"));
-    if (output.empty())
+    if (output.empty()) {
+      outputField = "output";
       output = graphString(graphField(state, "output"));
+    }
+    output = withTruncationNotice(std::move(output),
+                                  graphOmittedTextBytes(state, outputField),
+                                  "command output", false);
     if (!terminalOutputHasVisibleText(output))
       output.clear();
     const auto exit = graphInteger(graphField(state, "exitCode"));
@@ -553,8 +593,9 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
                           graphString(graphField(state, "senderThreadId"))};
     break;
   case CardKind::Reasoning:
-    result.payload =
-        ReasoningData{graphJoinedText(graphField(state, "summary"))};
+    result.payload = ReasoningData{withTruncationNotice(
+        graphJoinedText(graphField(state, "summary")),
+        graphOmittedTextBytes(state, "summary"), "reasoning", true)};
     break;
   case CardKind::FileChanges: {
     FileChangesData projected{graphStatus(state), {}};
@@ -599,7 +640,12 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
     if (graphHasStructuredPlan(state))
       result.payload = graphPlanData(state);
     else
-      result.payload = PlanData{{}, {}, graphMessageText(state)};
+      result.payload =
+          PlanData{{},
+                   {},
+                   withTruncationNotice(graphMessageText(state),
+                                        graphOmittedTextBytes(state, "text"),
+                                        "plan text", true)};
     if (item && item->id().kind == nodegraph::NodeKind::Turn) {
       result.key = TurnPlanKey{result.threadId, result.turnId};
       result.itemId.clear();
@@ -629,13 +675,25 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
         promptState,
         graphField(state, "showPendingAnimation")
             ? graphBool(graphField(state, "showPendingAnimation"))
-            : promptState == PromptState::InFlight,
+            : false,
         graphString(graphField(state, "error")),
-        graphLocalPromptImagePaths(state)};
+        graphLocalPromptImagePaths(state),
+        graphInteger(graphField(state, "admittedAtMs")),
+        graphBool(graphField(state, "requiresExplicitRecovery"))};
     break;
   }
   }
   return result;
+}
+
+void setAttachmentViewportVisibility(ui::QtNodeAttachment &attachment,
+                                     bool visible) {
+  attachment.viewportVisible = visible;
+  attachment.materialization = visible
+                                   ? ui::NodeMaterialization::ViewportVisible
+                                   : ui::NodeMaterialization::Overscan;
+  if (auto *card = qobject_cast<ConversationCard *>(attachment.widget.data()))
+    card->setViewportVisible(visible);
 }
 
 QLabel *makeEmptyLabel() {
@@ -676,6 +734,7 @@ public:
   QPointer<GraphHistoryPlaceholder> historyPlaceholder;
   std::size_t hiddenItemCount = 0;
   std::string rootKey;
+  std::string protocolId;
   nodegraph::NodeRef graphNode;
   bool graphActive = false;
 };
@@ -707,10 +766,22 @@ ConversationView::ConversationView(QWidget *parent)
   loadMore_->hide();
   connect(loadMore_, &QPushButton::clicked, this, [this] {
     if (graph_) {
-      const std::size_t available =
+      const bool requestProviderPage =
+          graphProviderHasMore_ &&
+          graphHiddenItemCount_ <= AuthoritativeHistoryPageSize;
+      const std::size_t requestedAvailable =
+          std::numeric_limits<std::size_t>::max() - graphRequestedHistoryLimit_;
+      graphRequestedHistoryLimit_ +=
+          std::min(AuthoritativeHistoryPageSize, requestedAvailable);
+      const std::size_t effectiveAvailable =
           std::numeric_limits<std::size_t>::max() - graphHistoryLimit_;
-      graphHistoryLimit_ += std::min(AuthoritativeHistoryPageSize, available);
+      graphHistoryLimit_ +=
+          std::min(AuthoritativeHistoryPageSize, effectiveAvailable);
+      storeCurrentThreadState();
       scheduleGraphRefresh();
+      if (requestProviderPage && loadMoreAction_)
+        loadMoreAction_();
+      return;
     }
     if (loadMoreAction_)
       loadMoreAction_();
@@ -804,9 +875,8 @@ void ConversationView::bindGraph(const nodegraph::NodeGraph &graph,
 
   graph_ = &graph;
   graphThread_ = std::move(selectedThread);
-  graphHistoryLimit_ = AuthoritativeHistoryPageSize;
-  graphKnownItemCount_ = 0;
   graphHiddenItemCount_ = 0;
+  graphWindowItemCount_ = 0;
   graphProviderHasMore_ = false;
   runGraphRefresh();
   if (restored) {
@@ -821,12 +891,25 @@ void ConversationView::graphChanged(
     std::span<const nodegraph::NodeRef> removed) {
   if (!graph_)
     return;
-  if (!removed.empty())
-    detachGraphWidgets(removed);
-  // The eventfd delivery already runs on a Qt event-loop pass. Reconcile the
-  // lightweight structure now, then let the bounded visibility pass schedule
-  // only its remaining widget work.
+  detachRemovedNodes(removed);
   runGraphRefresh();
+}
+
+void ConversationView::graphChangedDeferred(
+    std::span<const nodegraph::NodeRef> removed) {
+  if (!graph_)
+    return;
+  detachRemovedNodes(removed);
+  // A single eventfd drain may carry hundreds of streaming revisions. Keep
+  // removal detachment synchronous for node lifetime, but coalesce ordinary
+  // structural/render reconciliation into one later Qt event-loop pass.
+  scheduleGraphRefresh();
+}
+
+void ConversationView::detachRemovedNodes(
+    std::span<const nodegraph::NodeRef> removed) {
+  if (graph_ && !removed.empty())
+    detachGraphWidgets(removed);
 }
 
 void ConversationView::clearGraph() {
@@ -857,10 +940,16 @@ void ConversationView::clearGraph() {
       ->setItemCount(0);
   graphThread_.reset();
   graph_ = nullptr;
-  graphHistoryLimit_ = AuthoritativeHistoryPageSize;
-  graphKnownItemCount_ = 0;
   graphHiddenItemCount_ = 0;
+  graphWindowItemCount_ = 0;
   graphProviderHasMore_ = false;
+  visibilitySectionCursor_ = 0;
+  visibilitySlotCursor_ = 0;
+  visibilitySlotsRemaining_ = 0;
+  visibilityScanScrollTop_ = -1;
+  visibilityScanViewportHeight_ = -1;
+  visibilityScanViewportWidth_ = -1;
+  visibilityScanContentHeight_ = -1;
   graphRefreshScheduled_ = false;
   visibilityPassScheduled_ = false;
 }
@@ -884,6 +973,7 @@ void ConversationView::runGraphRefresh() {
     std::shared_ptr<const nodegraph::NodeState> state;
     nodegraph::NodeRef materializedPrompt;
     std::shared_ptr<const nodegraph::NodeState> materializedPromptState;
+    bool suppressedByLocalPrompt = false;
   };
   struct TurnPin final {
     nodegraph::NodeRef node;
@@ -898,6 +988,7 @@ void ConversationView::runGraphRefresh() {
     std::size_t totalItems = 0;
     std::size_t leadingHiddenItems = 0;
     std::size_t hiddenItems = 0;
+    std::string newestItemKey;
     std::vector<TurnPin> turns;
   } structure;
 
@@ -927,23 +1018,64 @@ void ConversationView::runGraphRefresh() {
             return candidate;
         return nodegraph::NodeRef{};
       };
+      const auto newestItem = [&read, &turnRoot, this]() -> nodegraph::NodeRef {
+        for (std::size_t turnIndex = read->childCount(graphThread_);
+             turnIndex > 0;) {
+          nodegraph::NodeRef turn = read->childAt(graphThread_, --turnIndex);
+          if (!turn || turn->id().kind != nodegraph::NodeKind::Turn ||
+              read->removed(turn))
+            continue;
+          for (std::size_t itemIndex = read->childCount(turn); itemIndex > 0;) {
+            nodegraph::NodeRef item = read->childAt(turn, --itemIndex);
+            if (item && item->id().kind == nodegraph::NodeKind::Item &&
+                !read->removed(item))
+              return item;
+          }
+          if (nodegraph::NodeRef root = turnRoot(turn))
+            return root;
+        }
+        return {};
+      }();
+      if (newestItem)
+        structure.newestItemKey = newestItem->id().canonical;
+      if (mode_ == Mode::Paused && graphKnownItemCount_ != 0 &&
+          loadedItemCount && *loadedItemCount > graphKnownItemCount_ &&
+          !graphNewestItemKey_.empty() && !structure.newestItemKey.empty() &&
+          structure.newestItemKey != graphNewestItemKey_) {
+        // A paused view grows its retained tail only for genuinely new
+        // activity. Older provider pages increase the loaded count while the
+        // newest item stays identical and must remain hidden above the anchor.
+        const std::size_t appended = *loadedItemCount - graphKnownItemCount_;
+        const std::size_t available =
+            std::numeric_limits<std::size_t>::max() - graphHistoryLimit_;
+        graphHistoryLimit_ += std::min(appended, available);
+      }
       const auto pinItem = [&read](const nodegraph::NodeRef &item) {
         nodegraph::NodeRef localPrompt;
         std::shared_ptr<const nodegraph::NodeState> localPromptState;
+        bool suppressedByLocalPrompt = false;
         for (const nodegraph::NodeRef &candidate : read->related(
                  item, nodegraph::RelationKind::PromptMaterialization)) {
           if (!candidate || candidate->id().kind != nodegraph::NodeKind::Item ||
               read->removed(candidate))
             continue;
           const auto state = read->state(candidate);
-          if (graphString(graphField(*state, "type")) == "localPrompt") {
+          if (graphString(graphField(*state, "type")) != "localPrompt")
+            continue;
+          if (graphString(graphField(*state, "dispatchState")) ==
+              "awaitingMaterialization") {
             localPrompt = candidate;
             localPromptState = state;
-            break;
+          } else {
+            // Correlation is not delivery acknowledgement, but it does prove
+            // both nodes represent the same authored message. Keep the local
+            // card visible until the exact request result permits handoff.
+            suppressedByLocalPrompt = true;
           }
+          break;
         }
         return ItemPin{item, read->state(item), std::move(localPrompt),
-                       std::move(localPromptState)};
+                       std::move(localPromptState), suppressedByLocalPrompt};
       };
 
       if (loadedItemCount) {
@@ -1080,36 +1212,6 @@ void ConversationView::runGraphRefresh() {
         structure.hiddenItems += structure.leadingHiddenItems;
       }
 
-      std::vector<TurnPin> orderedTurns;
-      orderedTurns.reserve(structure.turns.size());
-      for (nodegraph::NodeRef turn : read->children(graphThread_)) {
-        if (!turn || turn->id().kind != nodegraph::NodeKind::Turn ||
-            read->removed(turn))
-          continue;
-        const auto retained = std::ranges::find_if(
-            structure.turns, [&turn](const TurnPin &candidate) {
-              return candidate.node == turn;
-            });
-        if (retained != structure.turns.end()) {
-          orderedTurns.push_back(std::move(*retained));
-        } else {
-          const std::shared_ptr<const nodegraph::NodeState> state =
-              read->state(turn);
-          const bool hasItem = std::ranges::any_of(
-              read->children(turn), [&read](const nodegraph::NodeRef &child) {
-                return child && child->id().kind == nodegraph::NodeKind::Item &&
-                       !read->removed(child);
-              });
-          if (hasItem || !state || !graphHasStructuredPlan(*state))
-            continue;
-          orderedTurns.push_back({turn, std::move(state), turnRoot(turn), {}});
-        }
-        TurnPin &pinned = orderedTurns.back();
-        if (pinned.state && graphHasStructuredPlan(*pinned.state))
-          pinned.items.push_back({pinned.node, pinned.state, {}, {}});
-      }
-      structure.turns = std::move(orderedTurns);
-
       std::unordered_set<const nodegraph::Node *> materializedLocals;
       for (const TurnPin &turn : structure.turns)
         for (const ItemPin &item : turn.items)
@@ -1119,7 +1221,8 @@ void ConversationView::runGraphRefresh() {
       for (TurnPin &turn : structure.turns) {
         const std::size_t before = turn.items.size();
         std::erase_if(turn.items, [&materializedLocals](const ItemPin &item) {
-          return materializedLocals.contains(item.node.get());
+          return item.suppressedByLocalPrompt ||
+                 materializedLocals.contains(item.node.get());
         });
         hiddenDuplicates += before - turn.items.size();
       }
@@ -1184,8 +1287,12 @@ void ConversationView::runGraphRefresh() {
                            QString::fromStdString(turn.node->id().canonical));
     }
     section->graphNode = turn.node;
-    section->setProperty("turnId",
-                         QString::fromStdString(turn.node->id().canonical));
+    section->protocolId =
+        turn.state ? nodegraph::protocolCanonicalId(*turn.state, turn.node)
+                   : turn.node->id().canonical;
+    section->setProperty("turnSectionKey",
+                         QString::fromStdString(section->protocolId));
+    section->setProperty("turnId", QString::fromStdString(section->protocolId));
     section->graphActive =
         turn.state && turn.state->status == nodegraph::NodeStatus::Running;
     section->rootKey.clear();
@@ -1207,6 +1314,20 @@ void ConversationView::runGraphRefresh() {
         slot = std::move(retained->second);
         retainedSlots.erase(retained);
         if (transferringPrompt) {
+          // The provider item may already have been independently visible
+          // before the exact request result acknowledged the local prompt.
+          // Prefer the authored card's stable identity and retire that
+          // short-lived duplicate before moving the local attachment.
+          if (auto duplicate = retainedSlots.find(item.node.get());
+              duplicate != retainedSlots.end()) {
+            TurnSectionWidget::CardSlot &displaced = duplicate->second;
+            if (displaced.attachment &&
+                item.node->uiAttachment() == displaced.attachment.get())
+              item.node->setUiAttachment(nullptr);
+            displaced.attachment.reset();
+            delete displaced.item;
+            retainedSlots.erase(duplicate);
+          }
           if (slot.attachment &&
               item.materializedPrompt->uiAttachment() == slot.attachment.get())
             item.materializedPrompt->setUiAttachment(nullptr);
@@ -1227,8 +1348,8 @@ void ConversationView::runGraphRefresh() {
               rawId < 0 ? 0 : static_cast<std::uint64_t>(rawId);
           slot.key = stableKey(LocalPromptKey{*slot.promptVisualId});
         } else if (item.node->id().kind == nodegraph::NodeKind::Turn) {
-          slot.key = stableKey(TurnPlanKey{graphThread_->id().canonical,
-                                           turn.node->id().canonical});
+          slot.key = stableKey(
+              TurnPlanKey{graphThread_->id().canonical, section->protocolId});
         } else if (graphCardKind(*item.state) == CardKind::LocalPrompt) {
           const std::int64_t rawId =
               graphInteger(graphField(*item.state, "submissionId")).value_or(0);
@@ -1237,8 +1358,8 @@ void ConversationView::runGraphRefresh() {
           slot.key = stableKey(LocalPromptKey{*slot.promptVisualId});
         } else {
           slot.key = stableKey(AuthoritativeItemKey{
-              graphThread_->id().canonical, turn.node->id().canonical,
-              item.node->id().canonical});
+              graphThread_->id().canonical, section->protocolId,
+              nodegraph::protocolCanonicalId(*item.state, item.node)});
         }
         slot.measuredHeight = initialCardHeight(graphCardKind(*item.state));
         slot.item =
@@ -1306,7 +1427,9 @@ void ConversationView::runGraphRefresh() {
     contentLayout_->insertWidget(2 + static_cast<int>(index),
                                  graphSections_[index]);
   graphKnownItemCount_ = structure.totalItems;
+  graphNewestItemKey_ = std::move(structure.newestItemKey);
   graphHiddenItemCount_ = structure.hiddenItems;
+  graphWindowItemCount_ = nextOrder.size();
   graphProviderHasMore_ = structure.providerHasMore;
   updateGraphChrome();
 
@@ -1319,7 +1442,9 @@ void ConversationView::runGraphRefresh() {
   content_->setUpdatesEnabled(true);
   viewport()->setUpdatesEnabled(true);
   viewport()->update();
-  static_cast<void>(runGraphVisibilityPass());
+  visibilitySlotsRemaining_ = 0;
+  if (runGraphVisibilityPass())
+    scheduleVisibilityPass();
   storeCurrentThreadState();
   if (promptMaterializedAction_) {
     for (nodegraph::NodeRef &prompt : materializedPrompts) {
@@ -1391,16 +1516,25 @@ void ConversationView::detachGraphWidgets(
     ++section;
   }
   if (removeThread) {
+    // The removed NodeRef must not survive into the already-scheduled refresh:
+    // FrontendSession may acknowledge UI detachment as soon as this Qt pass
+    // returns, after which retired graph membership can be released.
+    graphThread_.reset();
     graphKnownItemCount_ = 0;
+    graphNewestItemKey_.clear();
     graphHiddenItemCount_ = 0;
+    graphWindowItemCount_ = 0;
     graphProviderHasMore_ = false;
     static_cast<GraphHistoryPlaceholder *>(graphLeadingPlaceholder_)
         ->setItemCount(0);
   } else {
     graphKnownItemCount_ -= std::min(graphKnownItemCount_, removedWindowItems);
+    graphWindowItemCount_ -=
+        std::min(graphWindowItemCount_, removedWindowItems);
     if (graphKnownItemCount_ == 0)
       graphHiddenItemCount_ = 0;
   }
+  visibilitySlotsRemaining_ = 0;
   updateGraphChrome();
   recomputeGeometry();
   if (follow)
@@ -1420,6 +1554,11 @@ void ConversationView::setLoadMoreAction(std::function<void()> action) {
 void ConversationView::setPromptMaterializedAction(
     std::function<bool(nodegraph::NodeRef)> action) {
   promptMaterializedAction_ = std::move(action);
+}
+
+void ConversationView::setPromptRecoveryAction(
+    std::function<void(nodegraph::NodeRef)> action) {
+  promptRecoveryAction_ = std::move(action);
 }
 
 void ConversationView::updateGraphChrome() {
@@ -1481,7 +1620,13 @@ void ConversationView::setPresentationOptions(PresentationOptions options) {
 void ConversationView::storeCurrentThreadState() {
   if (threadId_.empty())
     return;
-  threadStates_[threadId_] = {mode_, captureAnchor(), pausedByComposerGrowth_};
+  threadStates_[threadId_] = {mode_,
+                              captureAnchor(),
+                              pausedByComposerGrowth_,
+                              graphRequestedHistoryLimit_,
+                              graphHistoryLimit_,
+                              graphKnownItemCount_,
+                              graphNewestItemKey_};
 }
 
 void ConversationView::setThread(const std::string &threadId) {
@@ -1494,6 +1639,17 @@ void ConversationView::setThread(const std::string &threadId) {
   mode_ = saved == threadStates_.end() ? Mode::Following : saved->second.mode;
   pausedByComposerGrowth_ =
       saved != threadStates_.end() && saved->second.pausedByComposerGrowth;
+  graphRequestedHistoryLimit_ = saved == threadStates_.end()
+                                    ? AuthoritativeHistoryPageSize
+                                    : saved->second.graphRequestedHistoryLimit;
+  graphHistoryLimit_ = saved == threadStates_.end() || mode_ == Mode::Following
+                           ? graphRequestedHistoryLimit_
+                           : saved->second.graphHistoryLimit;
+  graphKnownItemCount_ =
+      saved == threadStates_.end() ? 0 : saved->second.graphKnownItemCount;
+  graphNewestItemKey_ = saved == threadStates_.end()
+                            ? std::string{}
+                            : saved->second.graphNewestItemKey;
 }
 
 void ConversationView::arrangeSection(TurnSectionWidget *section) {
@@ -1613,42 +1769,60 @@ void ConversationView::scheduleVisibilityPass() {
   });
 }
 
+void ConversationView::resetGraphVisibilityScan() {
+  visibilitySectionCursor_ = 0;
+  visibilitySlotCursor_ = 0;
+  visibilitySlotsRemaining_ = graphWindowItemCount_;
+  visibilityScanScrollTop_ = verticalScrollBar()->value();
+  visibilityScanViewportHeight_ = viewport() ? viewport()->height() : 0;
+  visibilityScanViewportWidth_ = viewport() ? viewport()->width() : 0;
+  visibilityScanContentHeight_ = contentHeight_;
+  if (visibilitySlotsRemaining_ == 0 || graphSections_.empty() || !content_ ||
+      !viewport())
+    return;
+
+  const int targetY =
+      visibilityScanScrollTop_ + std::max(1, visibilityScanViewportHeight_) / 2;
+  std::size_t lower = 0;
+  std::size_t upper = graphSections_.size();
+  while (lower < upper) {
+    const std::size_t middle = lower + (upper - lower) / 2;
+    TurnSectionWidget *section = graphSections_[middle];
+    const int bottom =
+        section->mapTo(content_, QPoint{}).y() + std::max(1, section->height());
+    if (bottom < targetY)
+      lower = middle + 1;
+    else
+      upper = middle;
+  }
+  visibilitySectionCursor_ = std::min(lower, graphSections_.size() - 1);
+  TurnSectionWidget *section = graphSections_[visibilitySectionCursor_];
+  if (section->cardSlots.empty())
+    return;
+  const int top = section->mapTo(content_, QPoint{}).y();
+  const int height = std::max(1, section->height());
+  const double relative = std::clamp(static_cast<double>(targetY - top) /
+                                         static_cast<double>(height),
+                                     0.0, 1.0);
+  const std::size_t estimated =
+      std::min(section->cardSlots.size() - 1,
+               static_cast<std::size_t>(
+                   relative * static_cast<double>(section->cardSlots.size())));
+  constexpr std::size_t LookBehind = MaxVisibilitySlotChecksPerPass / 4;
+  visibilitySlotCursor_ = estimated > LookBehind ? estimated - LookBehind : 0;
+}
+
 bool ConversationView::runVisibilityPass() { return runGraphVisibilityPass(); }
 
 bool ConversationView::runGraphVisibilityPass() {
   if (applying_ || !graph_ || !content_ || !viewport())
     return false;
 
-  bool recoveredExternalDeletion = false;
-  for (TurnSectionWidget *section : graphSections_) {
-    if (!section->historyPlaceholder) {
-      section->historyPlaceholder = new GraphHistoryPlaceholder(section);
-      section->historyPlaceholder->setItemCount(section->hiddenItemCount);
-      recoveredExternalDeletion = true;
-    }
-    for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
-      if (slot.itemGuard) {
-        slot.item = slot.itemGuard.data();
-        continue;
-      }
-      if (slot.graphNode && slot.attachment &&
-          slot.graphNode->uiAttachment() == slot.attachment.get())
-        slot.graphNode->setUiAttachment(nullptr);
-      slot.attachment.reset();
-      slot.item = new MeasuredCardPlaceholder(
-          slot.key, slot.projectionVisible ? slot.measuredHeight : 0, section);
-      slot.itemGuard = slot.item;
-      slot.item->setVisible(slot.projectionVisible);
-      recoveredExternalDeletion = true;
-    }
-  }
-  if (recoveredExternalDeletion) {
-    for (TurnSectionWidget *section : graphSections_)
-      arrangeSection(section);
-    recomputeGeometry();
-  }
-
   enum class Operation { Materialize, Render, Release };
+  struct ScannedSlot final {
+    TurnSectionWidget *section = nullptr;
+    TurnSectionWidget::CardSlot *slot = nullptr;
+  };
   struct Candidate final {
     TurnSectionWidget *section = nullptr;
     TurnSectionWidget::CardSlot *slot = nullptr;
@@ -1662,6 +1836,86 @@ bool ConversationView::runGraphVisibilityPass() {
 
   const int scrollTop = verticalScrollBar()->value();
   const int viewportHeight = std::max(1, viewport()->height());
+  if (visibilitySlotsRemaining_ == 0 || visibilityScanScrollTop_ != scrollTop ||
+      visibilityScanViewportHeight_ != viewport()->height() ||
+      visibilityScanViewportWidth_ != viewport()->width() ||
+      visibilityScanContentHeight_ != contentHeight_)
+    resetGraphVisibilityScan();
+  if (visibilitySlotsRemaining_ == 0)
+    return false;
+
+  const std::size_t batchStartSection = visibilitySectionCursor_;
+  const std::size_t batchStartSlot = visibilitySlotCursor_;
+  const std::size_t batchStartRemaining = visibilitySlotsRemaining_;
+  std::vector<TurnSectionWidget *> scannedSections;
+  scannedSections.reserve(MaxVisibilitySectionChecksPerPass);
+  std::vector<ScannedSlot> scanned;
+  scanned.reserve(
+      std::min(MaxVisibilitySlotChecksPerPass, visibilitySlotsRemaining_));
+  const std::size_t scanLimit =
+      std::min(MaxVisibilitySlotChecksPerPass, visibilitySlotsRemaining_);
+  std::size_t sectionChecks = 0;
+  while (scanned.size() < scanLimit &&
+         sectionChecks < MaxVisibilitySectionChecksPerPass) {
+    if (visibilitySectionCursor_ >= graphSections_.size())
+      visibilitySectionCursor_ = 0;
+    TurnSectionWidget *section = graphSections_[visibilitySectionCursor_];
+    if (std::ranges::find(scannedSections, section) == scannedSections.end())
+      scannedSections.push_back(section);
+    if (visibilitySlotCursor_ >= section->cardSlots.size()) {
+      visibilitySectionCursor_ =
+          (visibilitySectionCursor_ + 1) % graphSections_.size();
+      visibilitySlotCursor_ = 0;
+      ++sectionChecks;
+      continue;
+    }
+    scanned.push_back({section, &section->cardSlots[visibilitySlotCursor_]});
+    ++visibilitySlotCursor_;
+    if (visibilitySlotCursor_ >= section->cardSlots.size()) {
+      visibilitySectionCursor_ =
+          (visibilitySectionCursor_ + 1) % graphSections_.size();
+      visibilitySlotCursor_ = 0;
+      ++sectionChecks;
+    }
+    --visibilitySlotsRemaining_;
+  }
+
+  std::vector<TurnSectionWidget *> recoveredSections;
+  const auto rememberSection = [](std::vector<TurnSectionWidget *> &sections,
+                                  TurnSectionWidget *section) {
+    if (section && std::ranges::find(sections, section) == sections.end())
+      sections.push_back(section);
+  };
+  for (TurnSectionWidget *section : scannedSections) {
+    if (section->historyPlaceholder)
+      continue;
+    section->historyPlaceholder = new GraphHistoryPlaceholder(section);
+    section->historyPlaceholder->setItemCount(section->hiddenItemCount);
+    rememberSection(recoveredSections, section);
+  }
+  for (const ScannedSlot &entry : scanned) {
+    TurnSectionWidget *section = entry.section;
+    TurnSectionWidget::CardSlot &slot = *entry.slot;
+    if (slot.itemGuard) {
+      slot.item = slot.itemGuard.data();
+      continue;
+    }
+    if (slot.graphNode && slot.attachment &&
+        slot.graphNode->uiAttachment() == slot.attachment.get())
+      slot.graphNode->setUiAttachment(nullptr);
+    slot.attachment.reset();
+    slot.item = new MeasuredCardPlaceholder(
+        slot.key, slot.projectionVisible ? slot.measuredHeight : 0, section);
+    slot.itemGuard = slot.item;
+    slot.item->setVisible(slot.projectionVisible);
+    rememberSection(recoveredSections, section);
+  }
+  if (!recoveredSections.empty()) {
+    for (TurnSectionWidget *section : recoveredSections)
+      arrangeSection(section);
+    recomputeGeometry();
+  }
+
   const QRect visibleRect(0, scrollTop, std::max(1, content_->width()),
                           viewportHeight);
   const QRect materializationRect(0, std::max(0, scrollTop - viewportHeight),
@@ -1670,47 +1924,68 @@ bool ConversationView::runGraphVisibilityPass() {
   const QRect retentionRect(0, std::max(0, scrollTop - 2 * viewportHeight),
                             std::max(1, content_->width()), viewportHeight * 5);
   std::vector<Candidate> candidates;
-
-  for (TurnSectionWidget *section : graphSections_) {
-    for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
-      QWidget *item = slot.item;
-      const QRect itemRect(item->mapTo(content_, QPoint{}), item->size());
-      const bool presented =
-          slot.projectionVisible && item->isVisibleTo(content_);
-      const bool wanted = presented && itemRect.intersects(materializationRect);
-      const bool retained = presented && itemRect.intersects(retentionRect);
-      const bool inViewport = presented && itemRect.intersects(visibleRect);
-      const int center = itemRect.center().y();
-      const int distance =
-          center < visibleRect.top()
-              ? visibleRect.top() - center
-              : (center > visibleRect.bottom() ? center - visibleRect.bottom()
-                                               : 0);
-      QWidget *widget =
-          slot.attachment ? slot.attachment->widget.data() : nullptr;
-      if (widget) {
-        QWidget *focus = QApplication::focusWidget();
-        const bool ownsFocus =
-            focus && (focus == widget || widget->isAncestorOf(focus));
-        if (!retained && !ownsFocus) {
-          candidates.push_back(
-              {section, &slot, Operation::Release, false, distance});
-        } else if (wanted) {
-          candidates.push_back({section, &slot, Operation::Render, inViewport,
-                                distance, slot.attachment->renderedRevision});
-        }
-      } else if (wanted) {
+  candidates.reserve(scanned.size());
+  QWidget *focus = QApplication::focusWidget();
+  const auto updateAttachmentVisibility = [this](const ScannedSlot &entry) {
+    TurnSectionWidget::CardSlot &slot = *entry.slot;
+    if (!slot.attachment)
+      return;
+    QWidget *widget = slot.attachment->widget.data();
+    const bool visible =
+        widget && widget->isVisibleTo(viewport()) &&
+        QRect(widget->mapTo(viewport(), QPoint{}), widget->size())
+            .intersects(viewport()->rect());
+    setAttachmentViewportVisibility(*slot.attachment, visible);
+  };
+  for (const ScannedSlot &entry : scanned) {
+    TurnSectionWidget::CardSlot &slot = *entry.slot;
+    QWidget *item = slot.itemGuard.data();
+    if (!item)
+      continue;
+    slot.item = item;
+    const QRect itemRect(item->mapTo(content_, QPoint{}), item->size());
+    const bool presented =
+        slot.projectionVisible && item->isVisibleTo(content_);
+    const bool wanted = presented && itemRect.intersects(materializationRect);
+    const bool retained = presented && itemRect.intersects(retentionRect);
+    const bool inViewport = presented && itemRect.intersects(visibleRect);
+    const int center = itemRect.center().y();
+    const int distance =
+        center < visibleRect.top()
+            ? visibleRect.top() - center
+            : (center > visibleRect.bottom() ? center - visibleRect.bottom()
+                                             : 0);
+    QWidget *widget =
+        slot.attachment ? slot.attachment->widget.data() : nullptr;
+    if (widget) {
+      const bool ownsFocus =
+          focus && (focus == widget || widget->isAncestorOf(focus));
+      if (!retained && !ownsFocus) {
         candidates.push_back(
-            {section, &slot, Operation::Materialize, inViewport, distance});
+            {entry.section, &slot, Operation::Release, false, distance});
+      } else if (wanted) {
+        candidates.push_back({entry.section, &slot, Operation::Render,
+                              inViewport, distance,
+                              slot.attachment->renderedRevision});
       }
+    } else if (wanted) {
+      candidates.push_back(
+          {entry.section, &slot, Operation::Materialize, inViewport, distance});
     }
+    updateAttachmentVisibility(entry);
   }
 
-  {
+  const bool needsGraphRead =
+      std::ranges::any_of(candidates, [](const Candidate &candidate) {
+        return candidate.operation != Operation::Release;
+      });
+  if (needsGraphRead) {
     std::optional<nodegraph::NodeGraph::ReadAccess> read = graph_->tryRead();
     if (!read) {
-      scheduleVisibilityPass();
-      return false;
+      visibilitySectionCursor_ = batchStartSection;
+      visibilitySlotCursor_ = batchStartSlot;
+      visibilitySlotsRemaining_ = batchStartRemaining;
+      return true;
     }
     for (Candidate &candidate : candidates) {
       if (candidate.operation == Operation::Release ||
@@ -1742,24 +2017,30 @@ bool ConversationView::runGraphVisibilityPass() {
           return urgency(left.operation) < urgency(right.operation);
         return left.distance < right.distance;
       });
-  if (candidates.empty()) {
-    for (TurnSectionWidget *section : graphSections_)
-      for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
-        if (slot.attachment) {
-          QWidget *widget = slot.attachment->widget.data();
-          const bool visible =
-              widget && widget->isVisibleTo(viewport()) &&
-              QRect(widget->mapTo(viewport(), QPoint{}), widget->size())
-                  .intersects(viewport()->rect());
-          slot.attachment->viewportVisible = visible;
-          slot.attachment->materialization =
-              visible ? ui::NodeMaterialization::ViewportVisible
-                      : ui::NodeMaterialization::Overscan;
-        }
-    return false;
+  if (candidates.empty())
+    return !recoveredSections.empty() || visibilitySlotsRemaining_ != 0;
+
+  Anchor anchor;
+  anchor.absoluteValue = verticalScrollBar()->value();
+  TurnSectionWidget::CardSlot *anchorSlot = nullptr;
+  int anchorContentTop = std::numeric_limits<int>::max();
+  for (const ScannedSlot &entry : scanned) {
+    TurnSectionWidget::CardSlot &slot = *entry.slot;
+    QWidget *item = slot.itemGuard.data();
+    if (!item || !slot.projectionVisible || !item->isVisibleTo(content_))
+      continue;
+    const int viewportTop = item->mapTo(viewport(), QPoint{}).y();
+    if (viewportTop + item->height() < 0)
+      continue;
+    const int contentTop = item->mapTo(content_, QPoint{}).y();
+    if (contentTop >= anchorContentTop)
+      continue;
+    anchorContentTop = contentTop;
+    anchorSlot = &slot;
+    anchor.stableKey = slot.key;
+    anchor.pixelOffset = viewportTop;
   }
 
-  const Anchor anchor = captureAnchor();
   const bool follow = mode_ == Mode::Following;
   const bool followedBottom = follow && isAtBottom();
   const int previousValue = verticalScrollBar()->value();
@@ -1783,6 +2064,11 @@ bool ConversationView::runGraphVisibilityPass() {
                   if (cardForStableKey(key) == card)
                     setCardCollapsed(key, card, collapsed);
                 });
+        connect(card, &ConversationCard::recoveryRequested, this,
+                [this, node = slot.graphNode] {
+                  if (promptRecoveryAction_)
+                    promptRecoveryAction_(node);
+                });
         if (const auto saved = commandOutputStates_.find(slot.key);
             saved != commandOutputStates_.end()) {
           outputRestorations.emplace_back(card, saved->second);
@@ -1791,6 +2077,7 @@ bool ConversationView::runGraphVisibilityPass() {
       };
   int operations = 0;
   bool workRemaining = false;
+  std::vector<TurnSectionWidget *> changedSections;
 
   for (Candidate &candidate : candidates) {
     if (operations >= MaxCardOperationsPerPass) {
@@ -1804,9 +2091,9 @@ bool ConversationView::runGraphVisibilityPass() {
       auto *placeholder = dynamic_cast<MeasuredCardPlaceholder *>(slot.item);
       if (!placeholder)
         continue;
-      VisibleCardData data = graphCardData(
-          slot.graphNode, graphThread_->id().canonical,
-          candidate.section->graphNode->id().canonical, *candidate.state);
+      VisibleCardData data =
+          graphCardData(slot.graphNode, graphThread_->id().canonical,
+                        candidate.section->protocolId, *candidate.state);
       if (slot.promptVisualId)
         data.key = LocalPromptKey{*slot.promptVisualId};
       auto *card = createConversationCard(
@@ -1820,13 +2107,11 @@ bool ConversationView::runGraphVisibilityPass() {
       slot.attachment = std::make_unique<ui::QtNodeAttachment>();
       slot.attachment->widget = card;
       slot.attachment->renderedRevision = candidate.nodeRevision;
-      slot.attachment->materialization =
-          candidate.inViewport ? ui::NodeMaterialization::ViewportVisible
-                               : ui::NodeMaterialization::Overscan;
-      slot.attachment->viewportVisible = candidate.inViewport;
+      setAttachmentViewportVisibility(*slot.attachment, candidate.inViewport);
       Q_ASSERT(slot.graphNode->uiAttachment() == nullptr);
       slot.graphNode->setUiAttachment(slot.attachment.get());
       delete placeholder;
+      rememberSection(changedSections, candidate.section);
       ++operations;
       continue;
     }
@@ -1838,9 +2123,9 @@ bool ConversationView::runGraphVisibilityPass() {
     if (candidate.operation == Operation::Render) {
       if (!card || !candidate.state)
         continue;
-      VisibleCardData data = graphCardData(
-          slot.graphNode, graphThread_->id().canonical,
-          candidate.section->graphNode->id().canonical, *candidate.state);
+      VisibleCardData data =
+          graphCardData(slot.graphNode, graphThread_->id().canonical,
+                        candidate.section->protocolId, *candidate.state);
       if (slot.promptVisualId)
         data.key = LocalPromptKey{*slot.promptVisualId};
       if (!card->canApply(data)) {
@@ -1876,10 +2161,8 @@ bool ConversationView::runGraphVisibilityPass() {
       }
       card->setVisible(slot.projectionVisible);
       slot.attachment->renderedRevision = candidate.nodeRevision;
-      slot.attachment->materialization =
-          candidate.inViewport ? ui::NodeMaterialization::ViewportVisible
-                               : ui::NodeMaterialization::Overscan;
-      slot.attachment->viewportVisible = candidate.inViewport;
+      setAttachmentViewportVisibility(*slot.attachment, candidate.inViewport);
+      rememberSection(changedSections, candidate.section);
       continue;
     }
 
@@ -1912,44 +2195,44 @@ bool ConversationView::runGraphVisibilityPass() {
     slot.item = placeholder;
     slot.itemGuard = placeholder;
     delete card;
+    rememberSection(changedSections, candidate.section);
     ++operations;
   }
 
-  for (TurnSectionWidget *section : graphSections_)
+  if (workRemaining) {
+    visibilitySectionCursor_ = batchStartSection;
+    visibilitySlotCursor_ = batchStartSlot;
+    visibilitySlotsRemaining_ = batchStartRemaining;
+  }
+  for (TurnSectionWidget *section : changedSections)
     arrangeSection(section);
   recomputeGeometry();
   for (const auto &[card, state] : outputRestorations)
     card->restoreCommandOutputScrollState(state);
   if (followedBottom)
     setScrollValue(verticalScrollBar()->maximum());
-  else
-    restoreAnchor(anchor);
+  else {
+    int value = anchor.absoluteValue;
+    if (anchorSlot && !anchor.stableKey.empty()) {
+      if (QWidget *item = anchorSlot->itemGuard.data())
+        value = item->mapTo(content_, QPoint{}).y() - anchor.pixelOffset;
+    }
+    setScrollValue(std::clamp(value, verticalScrollBar()->minimum(),
+                              verticalScrollBar()->maximum()));
+  }
   applying_ = false;
   content_->setUpdatesEnabled(true);
   viewport()->setUpdatesEnabled(true);
   viewport()->update();
 
-  for (TurnSectionWidget *section : graphSections_)
-    for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
-      if (slot.attachment) {
-        QWidget *widget = slot.attachment->widget.data();
-        const bool visible =
-            widget && widget->isVisibleTo(viewport()) &&
-            QRect(widget->mapTo(viewport(), QPoint{}), widget->size())
-                .intersects(viewport()->rect());
-        slot.attachment->viewportVisible = visible;
-        slot.attachment->materialization =
-            visible ? ui::NodeMaterialization::ViewportVisible
-                    : ui::NodeMaterialization::Overscan;
-      }
+  for (const ScannedSlot &entry : scanned)
+    updateAttachmentVisibility(entry);
   if (follow && !followedBottom) {
     const int stableValue = verticalScrollBar()->value();
     if (verticalScrollBar()->maximum() > stableValue + 3)
       animateToBottom(std::min(previousValue, stableValue));
   }
-  if (workRemaining || operations == MaxCardOperationsPerPass)
-    scheduleVisibilityPass();
-  return operations > 0;
+  return workRemaining || visibilitySlotsRemaining_ != 0 || operations > 0;
 }
 
 void ConversationView::setCardCollapsed(const std::string &key,
@@ -2044,6 +2327,7 @@ void ConversationView::setTrailingSpaceHeight(int height) {
   if (!grew && isAtBottom()) {
     mode_ = Mode::Following;
     pausedByComposerGrowth_ = false;
+    restoreRequestedGraphHistoryLimit();
   }
 
   applying_ = false;
@@ -2058,6 +2342,7 @@ void ConversationView::prepareForLocalPromptAdmission() {
     return;
   mode_ = Mode::Following;
   pausedByComposerGrowth_ = false;
+  restoreRequestedGraphHistoryLimit();
   storeCurrentThreadState();
 }
 
@@ -2187,6 +2472,13 @@ void ConversationView::setScrollValue(int value) {
 void ConversationView::stopFollowingAnimation() {
   if (followAnimation_->state() != QAbstractAnimation::Stopped)
     followAnimation_->stop();
+}
+
+void ConversationView::restoreRequestedGraphHistoryLimit() {
+  if (graphHistoryLimit_ == graphRequestedHistoryLimit_)
+    return;
+  graphHistoryLimit_ = graphRequestedHistoryLimit_;
+  scheduleGraphRefresh();
 }
 
 void ConversationView::animateToBottom(int previousValue) {
@@ -2376,6 +2668,8 @@ void ConversationView::handleUserScrollValue(int value) {
   pausedByComposerGrowth_ = false;
   mode_ = value >= verticalScrollBar()->maximum() - 1 ? Mode::Following
                                                       : Mode::Paused;
+  if (mode_ == Mode::Following)
+    restoreRequestedGraphHistoryLimit();
   storeCurrentThreadState();
 }
 
@@ -2409,8 +2703,10 @@ bool ConversationView::applyWheel(QWheelEvent *event) {
   positionContent();
   if (verticalScrollBar()->value() < oldValue)
     mode_ = Mode::Paused;
-  if (verticalScrollBar()->value() >= verticalScrollBar()->maximum() - 1)
+  if (verticalScrollBar()->value() >= verticalScrollBar()->maximum() - 1) {
     mode_ = Mode::Following;
+    restoreRequestedGraphHistoryLimit();
+  }
   storeCurrentThreadState();
   event->accept();
   return true;

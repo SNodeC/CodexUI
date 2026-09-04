@@ -21,9 +21,9 @@ class ConversationView;
 class InspectorPane;
 class ThreadPane;
 
-// The sole geometry owner for the three-pane workspace. Protocol and domain
-// decisions remain behind UiSession; this class owns only visible layout and
-// wheel routing across the complete center strip.
+// The sole geometry owner for the three-pane workspace. Protocol and graph
+// updates remain on the worker; this class owns only visible layout and wheel
+// routing across the complete center strip.
 class MiddleRegionWidget final : public QWidget {
 public:
   explicit MiddleRegionWidget(QWidget *parent = nullptr);
@@ -35,8 +35,8 @@ public:
   [[nodiscard]] QSplitter *splitterWidget() const noexcept;
 
   void setThreadHeading(QString title, QString metadata,
-                        QString trailingMetadata = {},
-                        QString state = {}, QString stateTone = {});
+                        QString trailingMetadata = {}, QString state = {},
+                        QString stateTone = {});
   void showNotice(QString message, bool error = true);
   void showSidebar(bool visible);
   void showInspector(bool visible);

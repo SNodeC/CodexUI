@@ -394,6 +394,8 @@ nodegraph::NodeState fixtureNodeState(const VisibleCardData &card) {
     }
     fields.emplace("dispatchState", dispatch);
     fields.emplace("showPendingAnimation", data.showPendingAnimation);
+    if (data.admittedAtMs)
+      fields.emplace("admittedAtMs", *data.admittedAtMs);
     nodegraph::Value::Array attachments;
     for (const std::string &path : data.imagePaths) {
       nodegraph::Value::Object attachment;
@@ -3022,6 +3024,118 @@ bool testGraphBackedLazyRenderingAndLifetime() {
   return result;
 }
 
+bool testGraphStreamTruncationNotices() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  nodegraph::NodeRef agent;
+  nodegraph::NodeRef command;
+  nodegraph::NodeRef reasoning;
+  nodegraph::NodeRef plan;
+  const auto addRetention = [](nodegraph::NodeState &state, std::string field,
+                               std::uint64_t omitted, std::uint64_t retained) {
+    nodegraph::Value::Object entry{
+        {"discardedBytes", nodegraph::Value(omitted)},
+        {"retainedBytes", nodegraph::Value(retained)}};
+    nodegraph::Value::Object retention;
+    retention.emplace(std::move(field), nodegraph::Value(std::move(entry)));
+    state.fields.emplace("textRetention",
+                         nodegraph::Value(std::move(retention)));
+  };
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{4});
+    thread = write.upsert({nodegraph::NodeKind::Thread, "truncation-thread"},
+                          std::move(threadState));
+    turn = write.upsert({nodegraph::NodeKind::Turn, "truncation-turn"});
+    write.setParent(thread, turn);
+
+    nodegraph::NodeState agentState =
+        graphMessageState("agentMessage", "retained response");
+    agentState.fields.emplace("phase", "final_answer");
+    addRetention(agentState, "text", 123, 17);
+    agent = write.upsert({nodegraph::NodeKind::Item, "truncation-agent"},
+                         std::move(agentState));
+
+    nodegraph::NodeState commandState;
+    commandState.status = nodegraph::NodeStatus::Completed;
+    commandState.fields = {{"type", "commandExecution"},
+                           {"command", "printf retained"},
+                           {"aggregatedOutput", "retained output"}};
+    addRetention(commandState, "aggregatedOutput", 456, 15);
+    command = write.upsert({nodegraph::NodeKind::Item, "truncation-command"},
+                           std::move(commandState));
+
+    nodegraph::NodeState reasoningState;
+    reasoningState.status = nodegraph::NodeStatus::Completed;
+    reasoningState.fields = {
+        {"type", "reasoning"},
+        {"summary",
+         nodegraph::Value::Array{nodegraph::Value("retained reasoning")}}};
+    addRetention(reasoningState, "summary", 789, 18);
+    reasoning =
+        write.upsert({nodegraph::NodeKind::Item, "truncation-reasoning"},
+                     std::move(reasoningState));
+
+    nodegraph::NodeState planState =
+        graphMessageState("plan", "retained plan text");
+    addRetention(planState, "text", 42, 18);
+    plan = write.upsert({nodegraph::NodeKind::Item, "truncation-plan"},
+                        std::move(planState));
+
+    for (const nodegraph::NodeRef &item : {agent, command, reasoning, plan})
+      write.setParent(turn, item);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(720, 1000);
+  view.show();
+  view.bindGraph(graph, thread);
+  spin(160);
+
+  const auto attachedCard = [](const nodegraph::NodeRef &node) {
+    ui::QtNodeAttachment *attachment = graphAttachment(node);
+    return attachment
+               ? qobject_cast<ConversationCard *>(attachment->widget.data())
+               : nullptr;
+  };
+  ConversationCard *agentCard = attachedCard(agent);
+  ConversationCard *commandCard = attachedCard(command);
+  ConversationCard *reasoningCard = attachedCard(reasoning);
+  ConversationCard *planCard = attachedCard(plan);
+  const auto *agentData =
+      agentCard ? std::get_if<AgentMessageData>(&agentCard->data().payload)
+                : nullptr;
+  const auto *commandData =
+      commandCard
+          ? std::get_if<CommandExecutionData>(&commandCard->data().payload)
+          : nullptr;
+  const auto *reasoningData =
+      reasoningCard ? std::get_if<ReasoningData>(&reasoningCard->data().payload)
+                    : nullptr;
+  const auto *planData =
+      planCard ? std::get_if<PlanData>(&planCard->data().payload) : nullptr;
+  return expect(
+      agentData &&
+          agentData->text.starts_with(
+              "> Earlier Codex response was truncated (123 bytes omitted).") &&
+          commandData &&
+          commandData->output.starts_with(
+              "[Earlier command output was truncated (456 "
+              "bytes omitted).]") &&
+          reasoningData &&
+          reasoningData->summary.starts_with(
+              "> Earlier reasoning was truncated (789 bytes "
+              "omitted).") &&
+          planData &&
+          planData->legacyText.starts_with(
+              "> Earlier plan text was truncated (42 bytes "
+              "omitted)."),
+      "visible graph cards disclose every bounded protocol text tail");
+}
+
 bool testGraphBoundedHistoryAndExplicitRoot() {
   constexpr std::size_t ItemCount = 5000;
   nodegraph::NodeGraph graph;
@@ -3099,7 +3213,22 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
       "five thousand graph items create only the bounded visible history "
       "window and one pinned root");
 
+  int heartbeatCount = 0;
+  qint64 longestHeartbeatGap = 0;
+  QElapsedTimer heartbeatGap;
+  heartbeatGap.start();
+  QTimer heartbeat;
+  heartbeat.setInterval(1);
+  QObject::connect(&heartbeat, &QTimer::timeout, &view, [&] {
+    longestHeartbeatGap = std::max(longestHeartbeatGap, heartbeatGap.restart());
+    ++heartbeatCount;
+  });
+  heartbeat.start();
   spin(80);
+  heartbeat.stop();
+  result &= expect(heartbeatCount >= 5 && longestHeartbeatGap < 50,
+                   "visibility continuations for five thousand graph items "
+                   "preserve the Qt heartbeat");
   ui::QtNodeAttachment *steeringAttachment = graphAttachment(steering);
   auto *steeringCard =
       steeringAttachment
@@ -3111,8 +3240,9 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
 
   const qulonglong hiddenBeforePaging = hiddenItemCount();
   loadMore->click();
-  result &= expect(providerPageRequests == 1,
-                   "graph Load More preserves the provider paging callback");
+  result &= expect(
+      providerPageRequests == 0,
+      "graph Load More reveals retained history before paging the provider");
   spin(80);
   result &= expect(
       hiddenItemCount() + AuthoritativeHistoryPageSize == hiddenBeforePaging &&
@@ -3140,6 +3270,144 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
                  steeringCard->property("nestedConversationCard").toBool(),
              "the explicit parentless root remains the container for a paged "
              "steering message");
+  return result;
+}
+
+bool testGraphHistoryPagingAndPausedTailGrowth() {
+  constexpr std::size_t InitialItemCount = 100;
+  constexpr std::size_t PrependedItemCount = 5;
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef currentTurn;
+  nodegraph::NodeRef root;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", InitialItemCount);
+    threadState.fields.emplace("historyHasMore", true);
+    threadState.fields.emplace("historyNextCursor", "older-page");
+    thread = write.upsert({nodegraph::NodeKind::Thread, "paging-thread"},
+                          std::move(threadState));
+    currentTurn =
+        write.upsert({nodegraph::NodeKind::Turn, "paging-current-turn"});
+    write.setParent(thread, currentTurn);
+    for (std::size_t index = 0; index < InitialItemCount; ++index) {
+      nodegraph::NodeState state = graphMessageState(
+          index == 0 ? "userMessage" : "agentMessage",
+          index == 0 ? "Opening prompt"
+                     : "Current history " + std::to_string(index));
+      if (index != 0)
+        state.fields.emplace("phase", "final_answer");
+      nodegraph::NodeRef item =
+          write.upsert({nodegraph::NodeKind::Item,
+                        "paging-current-item-" + std::to_string(index)},
+                       std::move(state));
+      write.setParent(currentTurn, item);
+      if (index == 0)
+        root = item;
+    }
+    write.relate(currentTurn, nodegraph::RelationKind::TurnRootItem, root);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  int providerPageRequests = 0;
+  view.setLoadMoreAction([&providerPageRequests] { ++providerPageRequests; });
+  view.resize(620, 420);
+  view.show();
+  view.bindGraph(graph, thread);
+  spin(80);
+
+  const auto hiddenItemCount = [&view] {
+    qulonglong count = 0;
+    for (QWidget *widget : view.findChildren<QWidget *>())
+      if (widget->objectName() ==
+          QStringLiteral("conversationHistoryPlaceholder"))
+        count += widget->property("hiddenItemCount").toULongLong();
+    return count;
+  };
+
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  spin(80);
+  const auto anchorBeforePrepend = firstVisible(view);
+  const qulonglong hiddenBeforePrepend = hiddenItemCount();
+  bool result = expect(view.mode() == ConversationView::Mode::Paused &&
+                           !anchorBeforePrepend.first.empty(),
+                       "the retained graph history can be paused at a stable "
+                       "anchor");
+
+  nodegraph::GraphChange prepended;
+  {
+    auto write = graph.write();
+    nodegraph::NodeRef olderTurn =
+        write.upsert({nodegraph::NodeKind::Turn, "paging-older-turn"});
+    for (std::size_t index = 0; index < PrependedItemCount; ++index) {
+      nodegraph::NodeState state =
+          graphMessageState(index == 0 ? "userMessage" : "agentMessage",
+                            "Older history " + std::to_string(index));
+      if (index != 0)
+        state.fields.emplace("phase", "final_answer");
+      nodegraph::NodeRef item =
+          write.upsert({nodegraph::NodeKind::Item,
+                        "paging-older-item-" + std::to_string(index)},
+                       std::move(state));
+      write.setParent(olderTurn, item);
+    }
+    std::vector<nodegraph::NodeRef> turns{olderTurn, currentTurn};
+    write.replaceChildren(thread, turns);
+    write.setField(thread, "historyLoadedItemCount",
+                   InitialItemCount + PrependedItemCount);
+    prepended = write.finish();
+  }
+  view.graphChanged(prepended.removed);
+  spin(100);
+  const auto anchorAfterPrepend = firstVisible(view);
+  const qulonglong hiddenAfterPrepend = hiddenItemCount();
+  result &= expect(
+      hiddenAfterPrepend == hiddenBeforePrepend + PrependedItemCount &&
+          anchorAfterPrepend.first == anchorBeforePrepend.first &&
+          std::abs(anchorAfterPrepend.second - anchorBeforePrepend.second) <= 1,
+      "an older provider page stays above the paused requested window without "
+      "double-expanding it");
+
+  nodegraph::GraphChange appended;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState state =
+        graphMessageState("agentMessage", "New activity at the tail");
+    state.fields.emplace("phase", "final_answer");
+    nodegraph::NodeRef item = write.upsert(
+        {nodegraph::NodeKind::Item, "paging-newest-item"}, std::move(state));
+    write.setParent(currentTurn, item);
+    write.setField(thread, "historyLoadedItemCount",
+                   InitialItemCount + PrependedItemCount + 1);
+    appended = write.finish();
+  }
+  view.graphChanged(appended.removed);
+  spin(100);
+  const auto anchorAfterAppend = firstVisible(view);
+  result &= expect(
+      hiddenItemCount() == hiddenAfterPrepend &&
+          anchorAfterAppend.first == anchorBeforePrepend.first &&
+          std::abs(anchorAfterAppend.second - anchorBeforePrepend.second) <= 1,
+      "a true paused tail append temporarily expands the effective window and "
+      "preserves its painted anchor");
+
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMaximum);
+  spin(100);
+  result &= expect(
+      view.mode() == ConversationView::Mode::Following &&
+          hiddenItemCount() == hiddenAfterPrepend + 1,
+      "resuming following restores the requested history bound after its "
+      "temporary paused expansion");
+
+  QPushButton *loadMore = historyButton(view);
+  if (loadMore)
+    loadMore->click();
+  result &= expect(
+      loadMore && providerPageRequests == 1,
+      "the final retained page requests the provider continuation exactly "
+      "once");
   return result;
 }
 
@@ -3368,6 +3636,42 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
   view.graphChanged(materialized.removed);
   spin(80);
 
+  result &= expect(
+      graphAttachment(localPrompt) == localAttachment &&
+          graphAttachment(authoritative) == nullptr && stableCard &&
+          stableCard->data().kind == CardKind::LocalPrompt &&
+          acknowledgements.empty(),
+      "a correlated authoritative item stays hidden behind the one stable "
+      "local card until exact prompt acknowledgement");
+
+  nodegraph::GraphChange failed;
+  {
+    auto write = graph.write();
+    write.setField(localPrompt, "dispatchState", "failed");
+    write.setField(localPrompt, "error", "result failed");
+    write.setStatus(localPrompt, nodegraph::NodeStatus::Failed);
+    failed = write.finish();
+  }
+  view.graphChanged(failed.removed);
+  spin(40);
+  result &=
+      expect(stableCard && graphAttachment(authoritative) == nullptr &&
+                 stableCard->data().kind == CardKind::LocalPrompt &&
+                 std::get<LocalPromptData>(stableCard->data().payload).state ==
+                     PromptState::Failed,
+             "a failed exact result keeps one recoverable authored card and no "
+             "correlated duplicate");
+
+  nodegraph::GraphChange acknowledged;
+  {
+    auto write = graph.write();
+    write.setField(localPrompt, "dispatchState", "awaitingMaterialization");
+    write.setStatus(localPrompt, nodegraph::NodeStatus::Running);
+    acknowledged = write.finish();
+  }
+  view.graphChanged(acknowledged.removed);
+  spin(80);
+
   ui::QtNodeAttachment *authoritativeAttachment =
       graphAttachment(authoritative);
   auto *authoritativeCard = authoritativeAttachment
@@ -3383,8 +3687,8 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
           authoritativeCard->property("conversationAnchorKey").toString() ==
               QStringLiteral("prompt:42") &&
           acknowledgements == std::vector<nodegraph::NodeRef>{localPrompt},
-      "authoritative materialization transfers the attachment and morphs the "
-      "same card before acknowledging cleanup");
+      "correlation plus exact result acknowledgement transfers and morphs the "
+      "same card before cleanup");
 
   nodegraph::GraphChange removed;
   {
@@ -3402,7 +3706,7 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
   return result;
 }
 
-bool testGraphTurnPlanUsesTurnNodeAttachment() {
+bool testStructuredTurnPlanRemainsInspectorOnly() {
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef thread;
   nodegraph::NodeRef turn;
@@ -3436,15 +3740,9 @@ bool testGraphTurnPlanUsesTurnNodeAttachment() {
   const std::string key =
       stableKey(CardKey{TurnPlanKey{"plan-thread", "plan-turn"}});
   QPointer<ConversationCard> planCard = card(view, key);
-  const auto *initial =
-      planCard ? std::get_if<PlanData>(&planCard->data().payload) : nullptr;
-  bool result =
-      expect(planCard && graphAttachment(turn) &&
-                 graphAttachment(turn)->widget == planCard && initial &&
-                 initial->explanation == "Current graph plan" &&
-                 initial->steps.size() == 2 &&
-                 initial->steps.back().status == "inProgress",
-             "a plan-only turn renders directly from the turn node attachment");
+  bool result = expect(!planCard && graphAttachment(turn) == nullptr,
+                       "structured turn plans remain Inspector-only and do "
+                       "not create a duplicate conversation card");
 
   nodegraph::GraphChange cleared;
   {
@@ -3458,7 +3756,109 @@ bool testGraphTurnPlanUsesTurnNodeAttachment() {
   spin();
   result &= expect(!planCard && graphAttachment(turn) == nullptr &&
                        !hasConversationItem(view, key),
-                   "removing current plan state detaches its plan widget");
+                   "clearing Inspector-only plan state leaves conversation "
+                   "geometry unchanged");
+  return result;
+}
+
+bool testOverduePromptStartsOnlyWhenVisible() {
+  constexpr int promptCount = 32;
+  const std::int64_t admittedAt = QDateTime::currentMSecsSinceEpoch() -
+                                  PendingAnimationDelayMilliseconds - 250;
+  ConversationGraphSpec snapshot;
+  snapshot.threadId = "overdue-prompts";
+  TurnGraphSpec turn{"turn:overdue-prompts", "turn", {}};
+  turn.cards.reserve(promptCount);
+  for (int index = 0; index < promptCount; ++index) {
+    const std::uint64_t submission = 7000U + static_cast<std::uint64_t>(index);
+    turn.cards.push_back(
+        {LocalPromptKey{submission},
+         CardKind::LocalPrompt,
+         snapshot.threadId,
+         turn.turnId,
+         {},
+         LocalPromptData{submission,
+                         "retained overdue prompt " + std::to_string(index),
+                         PromptState::InFlight,
+                         false,
+                         {},
+                         {},
+                         admittedAt}});
+  }
+  snapshot.sections.push_back(std::move(turn));
+
+  ConversationView view;
+  view.resize(620, 240);
+  view.show();
+  applyConversation(view, snapshot);
+  spin(120);
+
+  std::vector<nodegraph::NodeRef> prompts;
+  prompts.reserve(promptCount);
+  {
+    auto read = snapshot.storage->graph.tryRead();
+    if (read) {
+      for (int index = 0; index < promptCount; ++index) {
+        prompts.push_back(read->find(
+            {nodegraph::NodeKind::Item,
+             "fixture-local-prompt:" + std::to_string(7000 + index)}));
+      }
+    }
+  }
+
+  bool foundDormantOverscan = false;
+  for (const nodegraph::NodeRef &prompt : prompts) {
+    ui::QtNodeAttachment *attachment = graphAttachment(prompt);
+    if (!attachment || attachment->viewportVisible || !attachment->widget)
+      continue;
+    auto *promptCard =
+        qobject_cast<ConversationCard *>(attachment->widget.data());
+    QTimer *animation = promptCard
+                            ? promptCard->findChild<QTimer *>(
+                                  QStringLiteral("pendingAnimationTimer"))
+                            : nullptr;
+    QTimer *delay = promptCard ? promptCard->findChild<QTimer *>(
+                                     QStringLiteral("pendingDelayTimer"))
+                               : nullptr;
+    if (promptCard && animation && delay && !animation->isActive() &&
+        !delay->isActive()) {
+      foundDormantOverscan = true;
+      break;
+    }
+  }
+  bool result = expect(
+      foundDormantOverscan,
+      "an overdue materialized overscan prompt performs no timer work while "
+      "its node attachment is outside the viewport");
+
+  const nodegraph::NodeRef first = prompts.empty() ? nullptr : prompts.front();
+  result &= expect(graphAttachment(first) == nullptr,
+                   "a distant overdue prompt remains an unmaterialized graph "
+                   "node until its viewport is requested");
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  spin(160);
+
+  ui::QtNodeAttachment *attachment = graphAttachment(first);
+  auto *promptCard =
+      attachment ? qobject_cast<ConversationCard *>(attachment->widget.data())
+                 : nullptr;
+  QTimer *animation = promptCard ? promptCard->findChild<QTimer *>(
+                                       QStringLiteral("pendingAnimationTimer"))
+                                 : nullptr;
+  QTimer *delay =
+      promptCard
+          ? promptCard->findChild<QTimer *>(QStringLiteral("pendingDelayTimer"))
+          : nullptr;
+  const auto *promptData =
+      promptCard ? std::get_if<LocalPromptData>(&promptCard->data().payload)
+                 : nullptr;
+  result &= expect(
+      attachment && attachment->viewportVisible && promptCard && promptData &&
+          promptData->admittedAtMs == admittedAt &&
+          promptCard->property("pendingFeedbackVisible").toBool() &&
+          animation && animation->isActive() && delay && !delay->isActive(),
+      "materializing an already-overdue graph prompt starts feedback "
+      "immediately from its retained admission deadline");
   return result;
 }
 
@@ -3485,6 +3885,13 @@ bool testPendingPromptAnimation() {
                        first.pixelColor(10, first.height() - 10).blue() >
                            first.pixelColor(10, first.height() - 10).green(),
                    "the temporary You card stays in the blue identity family");
+
+  spin(950);
+  const QImage delayedFirst = card.grab().toImage();
+  spin(110);
+  result &= expect(delayedFirst != card.grab().toImage(),
+                   "pending feedback starts locally after one second without "
+                   "a worker or graph timer update");
 
   auto &prompt = std::get<LocalPromptData>(pending.payload);
   prompt.showPendingAnimation = true;
@@ -3884,11 +4291,14 @@ int main(int argc, char **argv) {
   result &= testCommandOutputStateAcrossNavigation();
   result &= testViewportLazyMaterialization();
   result &= testGraphBackedLazyRenderingAndLifetime();
+  result &= testGraphStreamTruncationNotices();
   result &= testGraphBoundedHistoryAndExplicitRoot();
+  result &= testGraphHistoryPagingAndPausedTailGrowth();
   result &= testGraphRootReplacementAndAttachmentRecovery();
   result &= testGraphLastItemRemovalUpdatesChromeSynchronously();
   result &= testGraphLocalPromptMorphsWithoutReplacingItsWidget();
-  result &= testGraphTurnPlanUsesTurnNodeAttachment();
+  result &= testStructuredTurnPlanRemainsInspectorOnly();
+  result &= testOverduePromptStartsOnlyWhenVisible();
   result &= testPendingPromptAnimation();
   result &= testMessageImagePresentation();
   result &= testGeneratedImagePresentationAndGenericBound();

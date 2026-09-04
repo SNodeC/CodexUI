@@ -40,7 +40,14 @@ ChannelSendStatus ThreadChannels::sendGraphChanged(GraphChange change) {
   if (change.empty())
     return ChannelSendStatus::Accepted;
   const std::uint64_t revision = change.revision;
-  if (workerToQt_.sizeApprox() >= WorkerToQtCapacity - 1) {
+  if (change.affected.size() > MaximumDirectGraphReferences ||
+      change.removed.size() >
+          MaximumDirectGraphReferences - change.affected.size()) {
+    requireRescan(revision);
+    return wakeWorkerToQt(true);
+  }
+  if (workerToQt_.sizeApprox() >=
+      WorkerToQtCapacity - WorkerToQtReservedSlots) {
     requireRescan(revision);
     return wakeWorkerToQt(true);
   }
@@ -55,7 +62,10 @@ ChannelSendStatus ThreadChannels::sendGraphChanged(GraphChange change) {
 }
 
 ChannelSendStatus ThreadChannels::sendUiEffect(UiEffect &effect) {
-  if (workerToQt_.sizeApprox() >= WorkerToQtCapacity - 1)
+  const std::size_t limit = effect.kind == UiEffectKind::SelectThread
+                                ? WorkerToQtCapacity - 1
+                                : WorkerToQtCapacity - WorkerToQtReservedSlots;
+  if (workerToQt_.sizeApprox() >= limit)
     return ChannelSendStatus::QueueFull;
   if (!workerToQt_.tryEmplace(std::in_place_type<UiEffect>, std::move(effect)))
     return ChannelSendStatus::QueueFull;

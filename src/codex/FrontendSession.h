@@ -12,6 +12,7 @@
 #include <memory>
 #include <span>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 class QSocketNotifier;
@@ -60,6 +61,7 @@ private:
 
   void drainWorkerMessages();
   void scheduleWorkerMessageDrain();
+  void requireRescanRetirementCollection();
   void collectRescanRetirements();
   void collectDetachedNodes(std::span<const nodegraph::NodeRef> nodes);
   void flushDetachAcknowledgements();
@@ -73,12 +75,17 @@ private:
   GraphChangedHandler graphChangedHandler;
   GraphUiEffectHandler graphUiEffectHandler;
   std::vector<nodegraph::NodeRef> pendingDetachAcknowledgements;
+  std::unordered_set<nodegraph::Node *> pendingDetachAcknowledgementIndex;
+  std::size_t retirementScanOffset = 0;
+  std::uint64_t retirementScanOrderGeneration = 0;
   std::atomic_bool workerFinished{false};
   bool started = false;
   bool stopping = false;
   bool runtimeStopReported = false;
   bool workerDrainScheduled = false;
   bool rescanRetirementPending = false;
+  bool retirementScanGenerationKnown = false;
+  bool retirementRetryNeeded = false;
   Configuration &configuration;
 };
 

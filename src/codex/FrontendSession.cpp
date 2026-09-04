@@ -111,7 +111,25 @@ void FrontendSession::drainWorkerMessages() {
   if (stopping)
     return;
 
-  static_cast<void>(channels.drainWorkerToQtWake());
+  const nodegraph::EventFd::DrainResult wake = channels.drainWorkerToQtWake();
+  if (!wake.accepted()) {
+    if (workerNotifier)
+      workerNotifier->setEnabled(false);
+    if (graphUiEffectHandler) {
+      try {
+        graphUiEffectHandler(nodegraph::UiEffect{
+            nodegraph::UiEffectKind::ShowNotice,
+            std::nullopt,
+            "Worker-to-Qt wake-up failed; CodexUI is shutting down",
+            {}});
+      } catch (...) {
+      }
+    }
+    // The application quit path calls shutdown(), which uses the independently
+    // owned Qt-to-worker eventfd before joining the worker.
+    notifyRuntimeStopped();
+    return;
+  }
   if (rescanRetirementPending)
     collectRescanRetirements();
 
@@ -133,7 +151,7 @@ void FrontendSession::drainWorkerMessages() {
             }
             collectDetachedNodes(payload.removed);
             if (payload.rescanRequired) {
-              rescanRetirementPending = true;
+              requireRescanRetirementCollection();
               collectRescanRetirements();
             }
           } else if constexpr (std::is_same_v<Message, nodegraph::UiEffect>) {
@@ -150,9 +168,18 @@ void FrontendSession::drainWorkerMessages() {
         message);
   }
 
-  flushDetachAcknowledgements();
-  if (channels.workerToQtSizeApprox() != 0 || channels.rescanPending() ||
-      rescanRetirementPending || !pendingDetachAcknowledgements.empty())
+  // A synthesized rescan is deliberately delivered ahead of older queued
+  // notifications. Keep retired nodes graph-readable until that entire older
+  // backlog has passed Qt; queued NodeRefs alone pin lifetime but do not keep
+  // ReadAccess membership after releaseRetired().
+  const bool workerBacklogDrained =
+      channels.workerToQtSizeApprox() == 0 && !channels.rescanPending();
+  if (workerBacklogDrained && !rescanRetirementPending)
+    flushDetachAcknowledgements();
+  if (workerFinished.load(std::memory_order_acquire))
+    notifyRuntimeStopped();
+  if (!workerBacklogDrained || rescanRetirementPending ||
+      !pendingDetachAcknowledgements.empty())
     scheduleWorkerMessageDrain();
 }
 
@@ -166,16 +193,42 @@ void FrontendSession::scheduleWorkerMessageDrain() {
   });
 }
 
+void FrontendSession::requireRescanRetirementCollection() {
+  if (!rescanRetirementPending) {
+    retirementScanOffset = 0;
+    retirementScanGenerationKnown = false;
+    retirementRetryNeeded = false;
+  }
+  rescanRetirementPending = true;
+}
+
 void FrontendSession::collectRescanRetirements() {
+  constexpr std::size_t MaximumRetirementsPerPass = 64;
   auto read = graph.tryRead();
   if (!read) {
     scheduleWorkerMessageDrain();
     return;
   }
 
-  std::vector<nodegraph::NodeRef> retired(read->retiredNodes().begin(),
-                                          read->retiredNodes().end());
+  const std::uint64_t orderGeneration = read->retiredOrderGeneration();
+  if (!retirementScanGenerationKnown ||
+      orderGeneration != retirementScanOrderGeneration) {
+    retirementScanOffset = 0;
+    retirementScanOrderGeneration = orderGeneration;
+    retirementScanGenerationKnown = true;
+    retirementRetryNeeded = false;
+  }
+
+  const std::size_t count = read->retiredCount();
+  retirementScanOffset = std::min(retirementScanOffset, count);
+  const std::size_t end =
+      std::min(count, retirementScanOffset + MaximumRetirementsPerPass);
+  std::vector<nodegraph::NodeRef> retired;
+  retired.reserve(end - retirementScanOffset);
+  for (std::size_t index = retirementScanOffset; index < end; ++index)
+    retired.emplace_back(read->retiredAt(index));
   const std::uint64_t revision = read->revision();
+  const bool complete = end == count;
   read.reset();
 
   if (graphChangedHandler && !retired.empty()) {
@@ -186,10 +239,18 @@ void FrontendSession::collectRescanRetirements() {
   }
   collectDetachedNodes(retired);
 
-  rescanRetirementPending =
-      std::ranges::any_of(retired, [](const nodegraph::NodeRef &node) {
-        return node && node->uiAttachment() != nullptr;
-      });
+  if (!complete) {
+    retirementScanOffset = end;
+    return;
+  }
+
+  retirementScanOffset = 0;
+  if (retirementRetryNeeded) {
+    retirementRetryNeeded = false;
+    return;
+  }
+  rescanRetirementPending = false;
+  retirementScanGenerationKnown = false;
 }
 
 void FrontendSession::collectDetachedNodes(
@@ -200,22 +261,25 @@ void FrontendSession::collectDetachedNodes(
     if (!node)
       continue;
     if (node->uiAttachment() != nullptr) {
-      rescanRetirementPending = true;
+      requireRescanRetirementCollection();
+      retirementRetryNeeded = true;
       continue;
     }
-    if (std::find(pendingDetachAcknowledgements.begin(),
-                  pendingDetachAcknowledgements.end(),
-                  node) == pendingDetachAcknowledgements.end())
+    if (pendingDetachAcknowledgementIndex.insert(node.get()).second)
       pendingDetachAcknowledgements.emplace_back(node);
   }
 }
 
 void FrontendSession::flushDetachAcknowledgements() {
-  while (!pendingDetachAcknowledgements.empty()) {
+  constexpr std::size_t MaximumAcknowledgementsPerPass = 64;
+  std::size_t processed = 0;
+  while (!pendingDetachAcknowledgements.empty() &&
+         processed < MaximumAcknowledgementsPerPass) {
     if (pendingDetachAcknowledgements.back()->uiAttachment() != nullptr) {
-      rescanRetirementPending = true;
+      requireRescanRetirementCollection();
       return;
     }
+    nodegraph::Node *const target = pendingDetachAcknowledgements.back().get();
     nodegraph::NodeAction action;
     action.target = pendingDetachAcknowledgements.back();
     action.kind = nodegraph::NodeActionKind::UiDetached;
@@ -223,6 +287,8 @@ void FrontendSession::flushDetachAcknowledgements() {
     if (!nodegraph::messageAdmitted(status))
       return;
     pendingDetachAcknowledgements.pop_back();
+    pendingDetachAcknowledgementIndex.erase(target);
+    ++processed;
   }
 }
 

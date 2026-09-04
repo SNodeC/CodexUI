@@ -6,9 +6,11 @@
 #include "codex/nodegraph/Messages.h"
 
 #include <QFrame>
+#include <QPoint>
 
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -72,6 +74,7 @@ public:
 private:
   struct GraphThreadItem;
   struct GraphTopology;
+  struct GraphScan;
   struct GraphRowRender;
   struct OptimisticThread {
     std::string id;
@@ -81,20 +84,26 @@ private:
     std::string previousId;
   };
   void updateSortButton();
-  void toggleExpanded(const std::string &threadId);
+  void toggleExpanded(GraphThreadItem &thread);
   void navigateHierarchy(int key);
-  void setContextHighlight(const std::string &threadId, bool highlighted);
   void showContextMenu(const QPoint &position);
+  void showContextMenu(const nodegraph::NodeRef &node,
+                       std::optional<QPoint> requestedPosition);
   void leaveGraph();
   void scheduleGraphRefresh();
+  void scheduleGraphScanPass();
   void runGraphRefresh();
   void applyGraphTopology(GraphTopology topology);
+  void scheduleTopologyPass();
+  void runTopologyPass();
   void scheduleVisibilityPass();
   void runVisibilityPass();
   void detachRemoved(const nodegraph::GraphChanged &change);
   void dematerialize(GraphThreadItem &item, bool deferred = true);
   void renderGraphRow(GraphThreadItem &item, const GraphRowRender &render);
   [[nodiscard]] GraphThreadItem *graphItem(const QListWidgetItem *item) const;
+  [[nodiscard]] GraphThreadItem *
+  attachedGraphItem(const nodegraph::NodeRef &node) const;
 
   Controls controls;
   NodeActions nodeActions;
@@ -105,12 +114,18 @@ private:
   QMenu *contextMenu = nullptr;
   QTimer *optimisticAnimation = nullptr;
   std::vector<OptimisticThread> optimisticThreads;
+  std::vector<GraphThreadItem *> materializedItems;
   const nodegraph::NodeGraph *graph = nullptr;
   nodegraph::NodeRef selectedGraphThread;
   std::string selectedOptimisticThreadId;
   std::unordered_set<const nodegraph::Node *> graphExpandedThreads;
   bool revealSelectedGraphThread = false;
   bool graphRefreshScheduled = false;
+  std::unique_ptr<GraphScan> pendingGraphScan;
+  std::unique_ptr<GraphTopology> pendingGraphTopology;
+  std::size_t topologyCursor = 0;
+  int topologySearchCursor = -1;
+  bool topologyPassScheduled = false;
   bool visibilityPassScheduled = false;
   int visibilityFirst = -1;
   int visibilityLast = -1;

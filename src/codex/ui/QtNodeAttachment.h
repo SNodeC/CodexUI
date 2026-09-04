@@ -22,6 +22,9 @@ enum class NodeMaterialization : std::uint8_t {
 
 struct QtNodeAttachment final {
   QPointer<QWidget> widget;
+  // Optional toolkit-owned binding (for example the lightweight list item
+  // that owns this attachment). It is never inspected by the worker.
+  void *binding = nullptr;
   std::uint64_t renderedRevision = 0;
   NodeMaterialization materialization = NodeMaterialization::Placeholder;
   bool viewportVisible = false;

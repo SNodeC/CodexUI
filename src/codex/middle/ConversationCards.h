@@ -97,6 +97,9 @@ public:
   // that are outside the viewport.  They share the existing nested layout so
   // materializing a card does not change the turn's visual structure.
   void setNestedItems(const std::vector<QWidget *> &items);
+  // ConversationView mirrors QtNodeAttachment::viewportVisible here so
+  // pending feedback consumes no timer ticks outside the viewport.
+  void setViewportVisible(bool visible);
   [[nodiscard]] std::optional<CommandOutputView::ScrollState>
   commandOutputScrollState() const;
   void
@@ -111,6 +114,7 @@ public:
 
 signals:
   void foldRequested(bool collapsed);
+  void recoveryRequested();
 
 protected:
   void paintEvent(QPaintEvent *event) override;

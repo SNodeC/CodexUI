@@ -68,24 +68,9 @@ set(
     src/codex/NodeGraphJson.h
     src/codex/PendingRequestPolicy.cpp
     src/codex/PendingRequestPolicy.h
-    src/codex/PresentationModel.cpp
-    src/codex/PresentationModel.h
-    src/codex/PresentationClient.h
-    src/codex/PresentationStatus.h
-    src/codex/PresentationProtocol.cpp
-    src/codex/PresentationProtocol.h
-    src/codex/ProtocolNormalizer.cpp
-    src/codex/ProtocolNormalizer.h
-    src/codex/UiSession.cpp
-    src/codex/UiSession.h
+    src/codex/UiStatus.h
     src/codex/WorkerMailboxReceiver.cpp
     src/codex/WorkerMailboxReceiver.h
-    src/codex/ipc/QtSocketPairEndpoint.cpp
-    src/codex/ipc/QtSocketPairEndpoint.h
-    src/codex/ipc/SNodeSocketPairEndpoint.cpp
-    src/codex/ipc/SNodeSocketPairEndpoint.h
-    src/codex/ipc/SocketPair.cpp
-    src/codex/ipc/SocketPair.h
     src/codex/main.cpp
     src/codex/ui/ExpandingPromptEditor.cpp
     src/codex/ui/ExpandingPromptEditor.h
@@ -94,9 +79,6 @@ set(
     src/codex/ui/QtNodeAttachment.h
     src/codex/ui/UiStyle.cpp
     src/codex/ui/UiStyle.h
-    src/codex/ui/UiViewProjection.cpp
-    src/codex/ui/UiViewProjection.h
-    src/codex/ui/UiViewState.h
 )
 
 set(
@@ -107,8 +89,6 @@ set(
     src/codex/middle/ComposerPane.h
     src/codex/middle/ConversationCards.cpp
     src/codex/middle/ConversationCards.h
-    src/codex/middle/ConversationProjection.cpp
-    src/codex/middle/ConversationProjection.h
     src/codex/middle/ConversationView.cpp
     src/codex/middle/ConversationView.h
     src/codex/middle/InspectorPane.cpp
@@ -117,8 +97,6 @@ set(
     src/codex/middle/MiddleRegionWidget.h
     src/codex/middle/MiddleTypes.cpp
     src/codex/middle/MiddleTypes.h
-    src/codex/middle/PromptCoordinator.cpp
-    src/codex/middle/PromptCoordinator.h
     src/codex/middle/ThreadPane.cpp
     src/codex/middle/ThreadPane.h
 )
@@ -204,7 +182,8 @@ if(BUILD_TESTING)
         codexui-current-protocol-adapters-test PRIVATE src
     )
     target_link_libraries(
-        codexui-current-protocol-adapters-test PRIVATE AISuite::OpenAICodex
+        codexui-current-protocol-adapters-test
+        PRIVATE AISuite::OpenAICodex codexui-nodegraph
     )
     add_test(
         NAME codexui-current-protocol-adapters
@@ -215,59 +194,26 @@ if(BUILD_TESTING)
     )
 
     add_executable(
-        codexui-socketpair-contract-test
-        tests/codex/SocketPairContractTest.cpp
-        src/codex/ipc/QtSocketPairEndpoint.cpp
-        src/codex/ipc/QtSocketPairEndpoint.h
-        src/codex/ipc/SNodeSocketPairEndpoint.cpp
-        src/codex/ipc/SNodeSocketPairEndpoint.h
-        src/codex/ipc/SocketPair.cpp
-        src/codex/ipc/SocketPair.h
+        codexui-client-runtime-dispatch-test
+        tests/codex/ClientRuntimeDispatchTest.cpp
+        src/codex/ClientRuntime.cpp
+        src/codex/ClientRuntime.h
+        src/codex/Configuration.cpp
+        src/codex/Configuration.h
+        src/codex/CurrentProtocolAdapters.h
+        src/codex/NodeGraphJson.cpp
+        src/codex/NodeGraphJson.h
+        src/codex/WorkerMailboxReceiver.cpp
+        src/codex/WorkerMailboxReceiver.h
     )
-    target_compile_features(
-        codexui-socketpair-contract-test PRIVATE cxx_std_20
-    )
-    target_include_directories(
-        codexui-socketpair-contract-test PRIVATE src
-    )
-    target_link_libraries(
-        codexui-socketpair-contract-test
-        PRIVATE Qt6::Core Threads::Threads snodec::net-un-stream-legacy
-    )
+    configure_codexui_target(codexui-client-runtime-dispatch-test)
     add_test(
-        NAME codexui-socketpair-contract
-        COMMAND codexui-socketpair-contract-test
+        NAME codexui-client-runtime-dispatch
+        COMMAND codexui-client-runtime-dispatch-test
     )
     set_tests_properties(
-        codexui-socketpair-contract PROPERTIES TIMEOUT 10
-    )
-
-    add_executable(
-        codexui-presentation-pipeline-test
-        tests/codex/PresentationPipelineTest.cpp
-        src/codex/PresentationModel.cpp
-        src/codex/PresentationModel.h
-        src/codex/PresentationProtocol.cpp
-        src/codex/PresentationProtocol.h
-        src/codex/ProtocolNormalizer.cpp
-        src/codex/ProtocolNormalizer.h
-    )
-    target_compile_features(
-        codexui-presentation-pipeline-test PRIVATE cxx_std_20
-    )
-    target_include_directories(
-        codexui-presentation-pipeline-test PRIVATE src
-    )
-    target_link_libraries(
-        codexui-presentation-pipeline-test
-        PRIVATE AISuite::OpenAICodex
-    )
-    add_test(
-        NAME codexui-presentation-pipeline
-        COMMAND codexui-presentation-pipeline-test
-    )
-    set_tests_properties(
-        codexui-presentation-pipeline PROPERTIES TIMEOUT 10
+        codexui-client-runtime-dispatch
+        PROPERTIES TIMEOUT 20
     )
 
     add_executable(
@@ -288,58 +234,6 @@ if(BUILD_TESTING)
     )
     set_tests_properties(
         codexui-pending-request-policy PROPERTIES TIMEOUT 10
-    )
-
-    add_executable(
-        codexui-ui-session-test
-        tests/codex/UiSessionTest.cpp
-        src/codex/UiSession.cpp
-        src/codex/UiSession.h
-        src/codex/PendingRequestPolicy.cpp
-        src/codex/PendingRequestPolicy.h
-        src/codex/PresentationClient.h
-        src/codex/PresentationModel.cpp
-        src/codex/PresentationModel.h
-        src/codex/PresentationProtocol.cpp
-        src/codex/PresentationProtocol.h
-        src/codex/PresentationStatus.h
-        src/codex/AttachmentDraft.h
-        src/codex/ui/UiViewProjection.cpp
-        src/codex/ui/UiViewProjection.h
-        src/codex/ui/UiViewState.h
-        src/codex/middle/ConversationProjection.cpp
-        src/codex/middle/ConversationProjection.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
-        src/codex/middle/PromptCoordinator.cpp
-        src/codex/middle/PromptCoordinator.h
-    )
-    target_compile_features(codexui-ui-session-test PRIVATE cxx_std_20)
-    target_include_directories(codexui-ui-session-test PRIVATE src)
-    add_test(NAME codexui-ui-session COMMAND codexui-ui-session-test)
-    set_tests_properties(codexui-ui-session PROPERTIES TIMEOUT 10)
-
-    add_executable(
-        codexui-conversation-projection-test
-        tests/codex/ConversationProjectionTest.cpp
-        src/codex/middle/ConversationProjection.cpp
-        src/codex/middle/ConversationProjection.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
-        src/codex/middle/PromptCoordinator.cpp
-        src/codex/middle/PromptCoordinator.h
-        src/codex/AttachmentDraft.h
-    )
-    target_compile_features(
-        codexui-conversation-projection-test PRIVATE cxx_std_20
-    )
-    target_include_directories(codexui-conversation-projection-test PRIVATE src)
-    add_test(
-        NAME codexui-conversation-projection
-        COMMAND codexui-conversation-projection-test
-    )
-    set_tests_properties(
-        codexui-conversation-projection PROPERTIES TIMEOUT 10
     )
 
     qt_add_executable(
@@ -379,19 +273,12 @@ if(BUILD_TESTING)
         src/codex/GitDiffProvider.h
         src/codex/FileSelectionDialog.cpp
         src/codex/FileSelectionDialog.h
-        src/codex/PresentationModel.cpp
-        src/codex/PresentationModel.h
-        src/codex/PresentationProtocol.cpp
-        src/codex/PresentationProtocol.h
         src/codex/TurnSettingsWidget.cpp
         src/codex/TurnSettingsWidget.h
         src/codex/ui/ExpandingPromptEditor.cpp
         src/codex/ui/ExpandingPromptEditor.h
         src/codex/ui/UiStyle.cpp
         src/codex/ui/UiStyle.h
-        src/codex/ui/UiViewProjection.cpp
-        src/codex/ui/UiViewProjection.h
-        src/codex/ui/UiViewState.h
         src/codex/middle/ComposerPane.cpp
         src/codex/middle/ComposerPane.h
         src/codex/middle/ConversationCards.cpp

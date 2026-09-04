@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
-#ifndef CODEXUI_CODEX_PRESENTATIONSTATUS_H
-#define CODEXUI_CODEX_PRESENTATIONSTATUS_H
+#ifndef CODEXUI_CODEX_UISTATUS_H
+#define CODEXUI_CODEX_UISTATUS_H
 
 #include <cctype>
 #include <string>
@@ -19,13 +19,13 @@ enum class StatusKind {
   NotLoaded,
 };
 
-struct PresentationStatus {
+struct UiStatus {
   StatusKind kind;
   std::string_view text;
   std::string_view tone;
 };
 
-constexpr PresentationStatus classifyStatus(std::string_view status) noexcept {
+constexpr UiStatus classifyStatus(std::string_view status) noexcept {
   if (status == "active" || status == "inProgress" || status == "running" ||
       status == "started")
     return {StatusKind::Active, "running", "active"};
@@ -44,7 +44,7 @@ constexpr PresentationStatus classifyStatus(std::string_view status) noexcept {
 }
 
 inline std::string displayStatus(std::string_view status) {
-  const PresentationStatus classified = classifyStatus(status);
+  const UiStatus classified = classifyStatus(status);
   if (classified.kind != StatusKind::Unknown || status.empty())
     return std::string(classified.text);
 
@@ -88,4 +88,4 @@ constexpr bool isTerminalTurnStatus(std::string_view status) noexcept {
 
 } // namespace codexui::codex
 
-#endif // CODEXUI_CODEX_PRESENTATIONSTATUS_H
+#endif // CODEXUI_CODEX_UISTATUS_H

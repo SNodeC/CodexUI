@@ -6,6 +6,7 @@
 #include <exception>
 #include <functional>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace codexui::nodegraph {
 namespace {
@@ -86,6 +87,19 @@ NodeGraph::ReadAccess::retiredNodes() const noexcept {
   return graph_->retiredNodes_;
 }
 
+std::size_t NodeGraph::ReadAccess::retiredCount() const noexcept {
+  return graph_->retiredNodes_.size();
+}
+
+NodeRef NodeGraph::ReadAccess::retiredAt(std::size_t index) const {
+  return index < graph_->retiredNodes_.size() ? graph_->retiredNodes_[index]
+                                              : NodeRef{};
+}
+
+std::uint64_t NodeGraph::ReadAccess::retiredOrderGeneration() const noexcept {
+  return graph_->retiredOrderGeneration_;
+}
+
 std::shared_ptr<const NodeState>
 NodeGraph::ReadAccess::state(const NodeRef &node) const {
   if (!node)
@@ -144,6 +158,26 @@ NodeGraph::ReadAccess::children(const NodeRef &node) const {
   return result;
 }
 
+std::size_t NodeGraph::ReadAccess::relatedCount(const NodeRef &node,
+                                                RelationKind kind) const {
+  if (!node)
+    return 0;
+  requireMember(node);
+  const auto found = node->relations_.find(kind);
+  return found == node->relations_.end() ? 0 : found->second.size();
+}
+
+NodeRef NodeGraph::ReadAccess::relatedAt(const NodeRef &node, RelationKind kind,
+                                         std::size_t index) const {
+  if (!node)
+    return {};
+  requireMember(node);
+  const auto found = node->relations_.find(kind);
+  if (found == node->relations_.end() || index >= found->second.size())
+    return {};
+  return pin(found->second[index]);
+}
+
 std::vector<NodeRef> NodeGraph::ReadAccess::related(const NodeRef &node,
                                                     RelationKind kind) const {
   std::vector<NodeRef> result;
@@ -162,7 +196,7 @@ std::vector<NodeRef> NodeGraph::ReadAccess::related(const NodeRef &node,
 void NodeGraph::ReadAccess::requireMember(const NodeRef &node) const {
   const auto active = graph_->nodes_.find(node->id_);
   if ((active != graph_->nodes_.end() && active->second == node) ||
-      contains(graph_->retiredNodes_, node))
+      graph_->retiredIndex_.contains(node.get()))
     return;
   throw std::invalid_argument("node does not belong to this graph");
 }
@@ -174,7 +208,11 @@ NodeGraph::WriteAccess::WriteAccess(
 NodeGraph::WriteAccess::WriteAccess(WriteAccess &&other) noexcept
     : graph_(std::exchange(other.graph_, nullptr)),
       lock_(std::move(other.lock_)), affected_(std::move(other.affected_)),
-      removed_(std::move(other.removed_)), dirty_(other.dirty_),
+      affectedIndex_(std::move(other.affectedIndex_)),
+      revisionTouches_(std::move(other.revisionTouches_)),
+      revisionTouchIndex_(std::move(other.revisionTouchIndex_)),
+      removed_(std::move(other.removed_)),
+      removedIndex_(std::move(other.removedIndex_)), dirty_(other.dirty_),
       finished_(other.finished_) {
   other.dirty_ = false;
   other.finished_ = true;
@@ -197,6 +235,16 @@ NodeRef NodeGraph::WriteAccess::find(const NodeId &id) const {
 const std::vector<NodeRef> &
 NodeGraph::WriteAccess::orderedNodes() const noexcept {
   return graph_->orderedNodes_;
+}
+
+std::uint64_t
+NodeGraph::WriteAccess::changedRevision(const NodeRef &node) const {
+  requireLive(node);
+  return node->changedRevision_;
+}
+
+bool NodeGraph::WriteAccess::hasPendingChanges() const noexcept {
+  return dirty_;
 }
 
 NodeRef NodeGraph::WriteAccess::upsert(NodeId id, NodeState initial) {
@@ -272,20 +320,6 @@ void NodeGraph::WriteAccess::eraseField(const NodeRef &node,
   replaceState(node, std::move(next));
 }
 
-void NodeGraph::WriteAccess::appendStringField(const NodeRef &node,
-                                               std::string key,
-                                               std::string_view suffix) {
-  requireLive(node);
-  NodeState next = *node->state_;
-  Value &field = next.fields[std::move(key)];
-  std::string combined;
-  if (const std::string *current = field.asString())
-    combined = *current;
-  combined.append(suffix);
-  field = Value(std::move(combined));
-  replaceState(node, std::move(next));
-}
-
 void NodeGraph::WriteAccess::setStatus(const NodeRef &node, NodeStatus status) {
   requireLive(node);
   if (node->state_->status == status)
@@ -293,6 +327,13 @@ void NodeGraph::WriteAccess::setStatus(const NodeRef &node, NodeStatus status) {
   NodeState next = *node->state_;
   next.status = status;
   replaceState(node, std::move(next));
+}
+
+void NodeGraph::WriteAccess::touchRevision(const NodeRef &node) {
+  requireLive(node);
+  if (!affectedIndex_.contains(node.get()) &&
+      revisionTouchIndex_.insert(node.get()).second)
+    revisionTouches_.emplace_back(node);
 }
 
 void NodeGraph::WriteAccess::setParent(const NodeRef &parent,
@@ -309,8 +350,7 @@ void NodeGraph::WriteAccess::setParent(const NodeRef &parent,
     return;
   clearParent(child);
   child->parent_ = parent.get();
-  if (!contains(parent->children_, child.get()))
-    parent->children_.emplace_back(child.get());
+  parent->children_.emplace_back(child.get());
   markAffected(parent);
   markAffected(child);
 }
@@ -331,6 +371,8 @@ void NodeGraph::WriteAccess::replaceChildren(
   requireLive(parent);
   std::vector<NodeRef> next;
   next.reserve(children.size());
+  std::unordered_set<const Node *> seen;
+  seen.reserve(children.size());
   for (const NodeRef &child : children) {
     requireLive(child);
     if (parent == child)
@@ -340,7 +382,7 @@ void NodeGraph::WriteAccess::replaceChildren(
       if (ancestor == child.get())
         throw std::invalid_argument("a parent relation cannot form a cycle");
     }
-    if (!contains(next, child))
+    if (seen.insert(child.get()).second)
       next.emplace_back(child);
   }
 
@@ -359,9 +401,7 @@ void NodeGraph::WriteAccess::replaceChildren(
 
   const std::vector<Node *> previous = parent->children_;
   for (Node *oldChildPointer : previous) {
-    if (std::ranges::none_of(next, [oldChildPointer](const NodeRef &child) {
-          return child.get() == oldChildPointer;
-        })) {
+    if (!seen.contains(oldChildPointer)) {
       NodeRef oldChild = pin(oldChildPointer);
       oldChild->parent_ = nullptr;
       markAffected(oldChild);
@@ -417,9 +457,11 @@ void NodeGraph::WriteAccess::replaceRelated(const NodeRef &source,
   requireLive(source);
   std::vector<NodeRef> next;
   next.reserve(targets.size());
+  std::unordered_set<const Node *> seen;
+  seen.reserve(targets.size());
   for (const NodeRef &target : targets) {
     requireLive(target);
-    if (!contains(next, target))
+    if (seen.insert(target.get()).second)
       next.emplace_back(target);
   }
 
@@ -494,20 +536,31 @@ void NodeGraph::WriteAccess::remove(const NodeRef &node) {
   graph_->nodes_.erase(node->id_);
   eraseValue(graph_->orderedNodes_, node);
   node->removed_ = true;
-  if (!contains(graph_->retiredNodes_, node))
+  if (!graph_->retiredIndex_.contains(node.get())) {
+    graph_->retiredIndex_.emplace(node.get(), graph_->retiredNodes_.size());
     graph_->retiredNodes_.emplace_back(node);
-  if (!contains(removed_, node))
+  }
+  if (removedIndex_.insert(node.get()).second)
     removed_.emplace_back(node);
   dirty_ = true;
 }
 
 void NodeGraph::WriteAccess::releaseRetired(std::span<const NodeRef> nodes) {
   for (const NodeRef &node : nodes) {
-    const auto found = std::find(graph_->retiredNodes_.begin(),
-                                 graph_->retiredNodes_.end(), node);
-    if (found == graph_->retiredNodes_.end())
+    if (!node)
       continue;
-    graph_->retiredNodes_.erase(found);
+    const auto found = graph_->retiredIndex_.find(node.get());
+    if (found == graph_->retiredIndex_.end())
+      continue;
+    const std::size_t index = found->second;
+    const std::size_t last = graph_->retiredNodes_.size() - 1;
+    if (index != last) {
+      graph_->retiredNodes_[index] = std::move(graph_->retiredNodes_.back());
+      graph_->retiredIndex_.at(graph_->retiredNodes_[index].get()) = index;
+    }
+    graph_->retiredNodes_.pop_back();
+    graph_->retiredIndex_.erase(found);
+    ++graph_->retiredOrderGeneration_;
   }
 }
 
@@ -531,7 +584,7 @@ void NodeGraph::WriteAccess::requireLive(const NodeRef &node) const {
 }
 
 void NodeGraph::WriteAccess::markAffected(const NodeRef &node) {
-  if (node && !contains(affected_, node))
+  if (node && affectedIndex_.insert(node.get()).second)
     affected_.emplace_back(node);
   dirty_ = true;
 }
@@ -542,6 +595,8 @@ GraphChange NodeGraph::WriteAccess::publish() {
     return GraphChange{graph_->revision_, {}, {}};
   ++graph_->revision_;
   for (const NodeRef &node : affected_)
+    node->changedRevision_ = graph_->revision_;
+  for (const NodeRef &node : revisionTouches_)
     node->changedRevision_ = graph_->revision_;
   for (const NodeRef &node : removed_)
     node->changedRevision_ = graph_->revision_;

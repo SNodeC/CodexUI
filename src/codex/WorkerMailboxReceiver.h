@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <string>
 
 namespace codexui::codex {
 
@@ -21,11 +22,13 @@ class WorkerMailboxReceiver final
     : private core::eventreceiver::ReadEventReceiver {
 public:
   using MessageHandler = std::function<void(nodegraph::QtToWorkerMessage)>;
+  using FailureHandler = std::function<void(std::string)>;
 
   // Must be called on the SNode.C worker thread. The returned pointer remains
   // valid only until close() starts deferred destruction.
   [[nodiscard]] static WorkerMailboxReceiver *
-  create(nodegraph::ThreadChannels &channels, MessageHandler onMessage);
+  create(nodegraph::ThreadChannels &channels, MessageHandler onMessage,
+         FailureHandler onFailure);
 
   WorkerMailboxReceiver(const WorkerMailboxReceiver &) = delete;
   WorkerMailboxReceiver &operator=(const WorkerMailboxReceiver &) = delete;
@@ -38,7 +41,7 @@ private:
   static constexpr std::size_t MaximumMessagesPerEvent = 64;
 
   WorkerMailboxReceiver(nodegraph::ThreadChannels &channels,
-                        MessageHandler onMessage);
+                        MessageHandler onMessage, FailureHandler onFailure);
   ~WorkerMailboxReceiver() override;
 
   void readEvent() override;
@@ -49,9 +52,11 @@ private:
   void consumeWakeAndMessages();
   void scheduleNextDrain();
   void invalidateScheduledDrain() noexcept;
+  void fail(std::string reason) noexcept;
 
   nodegraph::ThreadChannels &channels_;
   MessageHandler onMessage_;
+  FailureHandler onFailure_;
   std::shared_ptr<WorkerMailboxReceiver *> deferredReceiver_;
   bool drainScheduled_ = false;
   bool closing_ = false;

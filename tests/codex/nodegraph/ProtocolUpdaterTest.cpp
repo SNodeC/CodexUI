@@ -47,6 +47,13 @@ const Value *field(const std::shared_ptr<const NodeState> &state,
   return found == state->fields.end() ? nullptr : &found->second;
 }
 
+const Value *objectField(const Value::Object *object, std::string_view key) {
+  if (!object)
+    return nullptr;
+  const auto found = object->find(key);
+  return found == object->end() ? nullptr : &found->second;
+}
+
 std::vector<std::string> canonicalIds(const std::vector<NodeRef> &nodes) {
   std::vector<std::string> result;
   result.reserve(nodes.size());
@@ -134,11 +141,13 @@ void catalogIsComplete() {
       break;
     }
   }
-  require(graphUpdates == 81, "81 server notifications update the graph");
+  require(graphUpdates == 75, "75 server notifications update graph state");
   require(operations == 158,
           "157 requests plus initialized are worker operations");
   require(interactions == 11, "all server requests are interactions");
-  require(effects == 0, "no protocol fact is reduced to only a UI effect");
+  require(
+      effects == 6,
+      "six provider notices update graph state and request a typed UI effect");
   require(neutral == 2, "two internal raw-response events are neutral");
   require(!findProtocolMethod(ProtocolDirection::ServerNotification,
                               "unknown/method"),
@@ -232,6 +241,151 @@ void nestedEntitiesAndStreamsStayCurrent() {
   }
 }
 
+void streamedTextIsBoundedAndReportsOmission() {
+  constexpr std::size_t RetainedTailBytes = 192 * 1024;
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+
+  Value::Array items{Value(Value::Object{{"id", Value("bounded-agent")},
+                                         {"type", Value("agentMessage")}}),
+                     Value(Value::Object{{"id", Value("bounded-reasoning")},
+                                         {"type", Value("reasoning")}})};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{
+           {"thread",
+            Value(Value::Object{
+                {"id", Value("bounded-stream-thread")},
+                {"turns", Value(Value::Array{Value(Value::Object{
+                              {"id", Value("bounded-stream-turn")},
+                              {"items", Value(std::move(items))}})})}})}}}));
+
+  std::string firstChunk;
+  firstChunk.reserve(300001);
+  for (std::size_t index = 0; index < 100000; ++index)
+    firstChunk.append("\xE2\x82\xAC");
+  firstChunk.push_back('x');
+  const std::size_t firstChunkBytes = firstChunk.size();
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ServerNotification,
+                     "item/agentMessage/delta", std::nullopt,
+                     Value::Object{{"threadId", Value("bounded-stream-thread")},
+                                   {"turnId", Value("bounded-stream-turn")},
+                                   {"itemId", Value("bounded-agent")},
+                                   {"delta", Value(std::move(firstChunk))}}}));
+
+  const auto retentionCounts = [](const std::shared_ptr<const NodeState> &state,
+                                  std::string_view retainedField) {
+    const Value *retention = field(state, "textRetention");
+    const Value *entry =
+        objectField(retention ? retention->asObject() : nullptr, retainedField);
+    const Value *discarded =
+        objectField(entry ? entry->asObject() : nullptr, "discardedBytes");
+    const Value *retained =
+        objectField(entry ? entry->asObject() : nullptr, "retainedBytes");
+    return std::pair{
+        discarded && discarded->asUInt64() ? *discarded->asUInt64() : 0U,
+        retained && retained->asUInt64() ? *retained->asUInt64() : 0U};
+  };
+
+  {
+    auto read = graph.tryRead();
+    const NodeRef item = findItem(*read, "bounded-stream-thread",
+                                  "bounded-stream-turn", "bounded-agent");
+    const auto state = read->state(item);
+    const std::string *text = field(state, "text")->asString();
+    const auto [discarded, retained] = retentionCounts(state, "text");
+    require(text && !text->empty() && text->size() <= RetainedTailBytes &&
+                (static_cast<unsigned char>(text->front()) & 0xc0U) != 0x80U &&
+                text->back() == 'x' && retained == text->size() &&
+                discarded + retained == firstChunkBytes,
+            "large agent deltas retain a UTF-8-aligned bounded tail and exact "
+            "omission metadata");
+  }
+
+  std::string secondChunk(100 * 1024, 'z');
+  const std::size_t totalAgentBytes = firstChunkBytes + secondChunk.size();
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ServerNotification,
+                     "item/agentMessage/delta", std::nullopt,
+                     Value::Object{{"threadId", Value("bounded-stream-thread")},
+                                   {"turnId", Value("bounded-stream-turn")},
+                                   {"itemId", Value("bounded-agent")},
+                                   {"delta", Value(std::move(secondChunk))}}}));
+  {
+    auto read = graph.tryRead();
+    const auto state =
+        read->state(findItem(*read, "bounded-stream-thread",
+                             "bounded-stream-turn", "bounded-agent"));
+    const std::string *text = field(state, "text")->asString();
+    const auto [discarded, retained] = retentionCounts(state, "text");
+    require(text && text->size() <= RetainedTailBytes &&
+                retained == text->size() &&
+                discarded + retained == totalAgentBytes,
+            "successive stream truncations accumulate exact omitted bytes "
+            "without growing current node state");
+  }
+
+  std::string reasoningChunk(270 * 1024, 'r');
+  const std::size_t reasoningBytes = reasoningChunk.size();
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification,
+       "item/reasoning/summaryTextDelta", std::nullopt,
+       Value::Object{{"threadId", Value("bounded-stream-thread")},
+                     {"turnId", Value("bounded-stream-turn")},
+                     {"itemId", Value("bounded-reasoning")},
+                     {"summaryIndex", Value(std::uint64_t{0})},
+                     {"delta", Value(std::move(reasoningChunk))}}}));
+  {
+    auto read = graph.tryRead();
+    const auto state =
+        read->state(findItem(*read, "bounded-stream-thread",
+                             "bounded-stream-turn", "bounded-reasoning"));
+    const Value::Array *summary = field(state, "summary")->asArray();
+    const std::string *text =
+        summary && !summary->empty() ? summary->front().asString() : nullptr;
+    const auto [discarded, retained] = retentionCounts(state, "summary");
+    require(summary && summary->size() == 1 && text &&
+                text->size() <= RetainedTailBytes && retained == text->size() &&
+                discarded + retained == reasoningBytes,
+            "indexed reasoning streams retain one bounded tail with omission "
+            "metadata");
+  }
+  const std::uint64_t beforeSparseIndex = graph.publishedRevision();
+  const ApplyResult sparseIndex =
+      updater.apply({DecodedMessageKind::ServerNotification,
+                     "item/reasoning/summaryTextDelta", std::nullopt,
+                     Value::Object{{"threadId", Value("bounded-stream-thread")},
+                                   {"turnId", Value("bounded-stream-turn")},
+                                   {"itemId", Value("bounded-reasoning")},
+                                   {"summaryIndex", Value(std::uint64_t{5000})},
+                                   {"delta", Value("ignored")}}});
+  require(sparseIndex.change.empty() &&
+              graph.publishedRevision() == beforeSparseIndex,
+          "an out-of-range text index cannot allocate an unbounded sparse "
+          "array or publish a false change");
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/completed", std::nullopt,
+       Value::Object{
+           {"threadId", Value("bounded-stream-thread")},
+           {"turnId", Value("bounded-stream-turn")},
+           {"item", Value(Value::Object{{"id", Value("bounded-agent")},
+                                        {"type", Value("agentMessage")},
+                                        {"text", Value("complete text")}})}}}));
+  {
+    auto read = graph.tryRead();
+    const auto state =
+        read->state(findItem(*read, "bounded-stream-thread",
+                             "bounded-stream-turn", "bounded-agent"));
+    require(field(state, "text") && field(state, "text")->asString() &&
+                *field(state, "text")->asString() == "complete text" &&
+                !field(state, "textRetention"),
+            "authoritative completion replaces the stream tail and clears its "
+            "obsolete truncation notice");
+  }
+}
+
 void scopedProviderIdentityCannotCrossParents() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -313,6 +467,282 @@ void scopedProviderIdentityCannotCrossParents() {
           "length-prefixed scope encoding is collision-safe");
 }
 
+void activeTurnRelationTracksLifecycle() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "turn/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("active-thread")},
+           {"turn", Value(Value::Object{{"id", Value("active-turn")},
+                                        {"status", Value("inProgress")}})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "active-thread"});
+    const NodeRef turn = findTurn(*read, "active-thread", "active-turn");
+    require(thread && turn &&
+                read->related(thread, RelationKind::ActiveTurn) ==
+                    std::vector<NodeRef>{turn},
+            "turn start records the current active turn directly");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/status/changed",
+       std::nullopt,
+       Value::Object{
+           {"threadId", Value("active-thread")},
+           {"status", Value(Value::Object{{"type", Value("idle")}})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "active-thread"});
+    require(thread && read->state(thread)->status == NodeStatus::Completed &&
+                read->related(thread, RelationKind::ActiveTurn).empty(),
+            "object-shaped idle thread status normalizes typed state and "
+            "clears the direct active-turn relation");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "turn/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("active-thread")},
+           {"turn", Value(Value::Object{{"id", Value("active-turn")},
+                                        {"status", Value("inProgress")}})}}}));
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "turn/completed", std::nullopt,
+       Value::Object{
+           {"threadId", Value("active-thread")},
+           {"turn", Value(Value::Object{{"id", Value("active-turn")}})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "active-thread"});
+    require(thread && read->related(thread, RelationKind::ActiveTurn).empty(),
+            "turn completion clears the direct active-turn relation even "
+            "when the payload omits status");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "turn/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("active-thread")},
+           {"turn", Value(Value::Object{{"id", Value("closing-turn")},
+                                        {"status", Value("inProgress")}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/closed", std::nullopt,
+       Value::Object{{"threadId", Value("active-thread")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "active-thread"});
+    const Value *status = field(read->state(thread), "status");
+    require(thread && read->state(thread)->status == NodeStatus::NotLoaded &&
+                status && status->asString() &&
+                *status->asString() == "notLoaded" &&
+                read->related(thread, RelationKind::ActiveTurn).empty(),
+            "closing a thread clears its active turn and converges both "
+            "typed and protocol-facing status");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/status/changed",
+       std::nullopt,
+       Value::Object{
+           {"threadId", Value("active-thread")},
+           {"status", Value(Value::Object{{"type", Value("systemError")}})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "active-thread"});
+    require(thread && read->state(thread)->status == NodeStatus::Failed,
+            "object-shaped systemError status normalizes to typed failure");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "turn/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("active-thread")},
+           {"turn", Value(Value::Object{{"id", Value("stale-active")},
+                                        {"status", Value("inProgress")}})}}}));
+  Value::Array replacementTurns{Value(Value::Object{
+      {"id", Value("replacement-turn")}, {"status", Value("completed")}})};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read",
+       ProtocolRequestId("active-thread-replacement"),
+       Value::Object{
+           {"thread", Value(Value::Object{
+                          {"id", Value("active-thread")},
+                          {"turns", Value(std::move(replacementTurns))}})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "active-thread"});
+    const NodeRef stale = findTurn(*read, "active-thread", "stale-active");
+    require(thread && stale && !read->parent(stale) &&
+                read->related(thread, RelationKind::ActiveTurn).empty(),
+            "authoritative history replacement cannot retain an omitted "
+            "active turn as the current action target");
+  }
+}
+
+void effectiveThreadSettingsConvergeAcrossWireShapes() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/resume",
+       ProtocolRequestId("settings-resume"),
+       Value::Object{
+           {"thread", Value(Value::Object{{"id", Value("settings-thread")}})},
+           {"model", Value("gpt-current")},
+           {"reasoningEffort", Value("high")},
+           {"approvalPolicy", Value("never")},
+           {"sandbox", Value("workspaceWrite")},
+           {"activePermissionProfile", Value("trusted")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
+    const auto state = read->state(thread);
+    require(thread && field(state, "model") &&
+                *field(state, "model")->asString() == "gpt-current" &&
+                field(state, "reasoningEffort") &&
+                *field(state, "reasoningEffort")->asString() == "high" &&
+                field(state, "approvalPolicy") &&
+                *field(state, "approvalPolicy")->asString() == "never" &&
+                field(state, "sandbox") &&
+                *field(state, "sandbox")->asString() == "workspaceWrite" &&
+                field(state, "activePermissionProfile") &&
+                *field(state, "activePermissionProfile")->asString() ==
+                    "trusted",
+            "thread resume wrapper settings become direct current thread "
+            "state");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/settings/updated",
+       std::nullopt,
+       Value::Object{
+           {"threadId", Value("settings-thread")},
+           {"threadSettings",
+            Value(Value::Object{{"model", Value("gpt-next")},
+                                {"effort", Value("medium")},
+                                {"sandboxPolicy", Value("readOnly")},
+                                {"personality", Value("friendly")}})}}}));
+  std::uint64_t firstSettingsRevision = 0;
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
+    const auto state = read->state(thread);
+    const Value *revision = field(state, "settingsRevision");
+    firstSettingsRevision =
+        revision && revision->asUInt64() ? *revision->asUInt64() : 0;
+    require(field(state, "model") &&
+                *field(state, "model")->asString() == "gpt-next" &&
+                field(state, "effort") &&
+                *field(state, "effort")->asString() == "medium" &&
+                !field(state, "reasoningEffort") &&
+                field(state, "sandboxPolicy") &&
+                *field(state, "sandboxPolicy")->asString() == "readOnly" &&
+                !field(state, "sandbox") && firstSettingsRevision != 0,
+            "modern settings merge sparsely and retire stale legacy aliases");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/settings/updated",
+       std::nullopt,
+       Value::Object{
+           {"threadId", Value("settings-thread")},
+           {"threadSettings",
+            Value(Value::Object{{"personality", Value(nullptr)}})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "settings-thread"});
+    const auto state = read->state(thread);
+    const Value *latest = field(state, "latestSettingsUpdate");
+    const Value::Object *latestObject = latest ? latest->asObject() : nullptr;
+    const Value *revision = field(state, "settingsRevision");
+    require(field(state, "model") &&
+                *field(state, "model")->asString() == "gpt-next" &&
+                !field(state, "personality") && latestObject &&
+                latestObject->size() == 1 &&
+                latestObject->contains("personality") &&
+                latestObject->at("personality").isNull() && revision &&
+                revision->asUInt64() &&
+                *revision->asUInt64() > firstSettingsRevision,
+            "sparse settings retain prior facts, merge explicit null, retain "
+            "the latest patch, and advance a settings-only revision");
+  }
+}
+
+void threadItemPagesMaintainScopedContainmentAndOrder() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  const ProtocolRequestId firstId("items-page-one");
+  const ApplyResult firstRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/items/list", firstId,
+       Value::Object{{"threadId", Value("items-thread")},
+                     {"turnId", Value("items-turn")},
+                     {"sortDirection", Value("desc")}}});
+  Value::Array firstPage{
+      Value(Value::Object{
+          {"turnId", Value("items-turn")},
+          {"item", Value(Value::Object{{"id", Value("newer-item")},
+                                       {"type", Value("agentMessage")}})}}),
+      Value(Value::Object{
+          {"turnId", Value("items-turn")},
+          {"item", Value(Value::Object{{"id", Value("older-item")},
+                                       {"type", Value("agentMessage")}})}})};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/items/list", firstId,
+       Value::Object{{"data", Value(std::move(firstPage))},
+                     {"nextCursor", Value("older-page")}},
+       firstRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef turn = findTurn(*read, "items-thread", "items-turn");
+    const auto state = read->state(turn);
+    require(turn &&
+                protocolIds(*read, read->children(turn)) ==
+                    std::vector<std::string>{"older-item", "newer-item"} &&
+                field(state, "itemsHistoryHasMore") &&
+                *field(state, "itemsHistoryHasMore")->asBool() &&
+                field(state, "itemsHistoryNextCursor") &&
+                *field(state, "itemsHistoryNextCursor")->asString() ==
+                    "older-page",
+            "thread/items/list decodes entry containment, canonicalizes a "
+            "descending page, and retains its cursor on the addressed turn");
+  }
+
+  const ProtocolRequestId secondId("items-page-two");
+  const ApplyResult secondRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/items/list", secondId,
+       Value::Object{{"threadId", Value("items-thread")},
+                     {"turnId", Value("items-turn")},
+                     {"cursor", Value("older-page")},
+                     {"sortDirection", Value("desc")}}});
+  Value::Array secondPage{Value(Value::Object{
+      {"turnId", Value("items-turn")},
+      {"item", Value(Value::Object{{"id", Value("oldest-item")},
+                                   {"type", Value("agentMessage")}})}})};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/items/list", secondId,
+       Value::Object{{"data", Value(std::move(secondPage))},
+                     {"nextCursor", Value(nullptr)},
+                     {"backwardsCursor", Value("newer-page")}},
+       secondRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef turn = findTurn(*read, "items-thread", "items-turn");
+    const auto state = read->state(turn);
+    require(protocolIds(*read, read->children(turn)) ==
+                    std::vector<std::string>{"oldest-item", "older-item",
+                                             "newer-item"} &&
+                field(state, "itemsHistoryHasMore") &&
+                !*field(state, "itemsHistoryHasMore")->asBool() &&
+                !field(state, "itemsHistoryNextCursor") &&
+                field(state, "itemsHistoryBackwardsCursor") &&
+                *field(state, "itemsHistoryBackwardsCursor")->asString() ==
+                    "newer-page",
+            "later item pages prepend without rebuilding or duplicating the "
+            "current turn order");
+  }
+}
+
 void rootOrderAndThreadHierarchyAreExplicit() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -351,8 +781,10 @@ void rootOrderAndThreadHierarchyAreExplicit() {
     require(parent && child &&
                 canonicalIds(read->related(
                     parent, RelationKind::StructuralChildThread)) ==
-                    std::vector<std::string>{"structural-child"},
-            "parentThreadId creates a direct structural thread relation");
+                    std::vector<std::string>{"structural-child"} &&
+                read->related(child, RelationKind::ThreadOwner) ==
+                    std::vector<NodeRef>{parent},
+            "parentThreadId creates direct structural and owner relations");
   }
 
   static_cast<void>(updater.apply(
@@ -404,7 +836,9 @@ void rootOrderAndThreadHierarchyAreExplicit() {
                 read->related(parent, RelationKind::AgentChildThread) ==
                     std::vector<NodeRef>{child} &&
                 read->related(item, RelationKind::AgentChildThread) ==
-                    std::vector<NodeRef>{child},
+                    std::vector<NodeRef>{child} &&
+                read->related(child, RelationKind::ThreadOwner) ==
+                    std::vector<NodeRef>{parent},
             "agent activity relates both its owner thread and source item to "
             "the stable child thread");
   }
@@ -634,6 +1068,157 @@ void realtimeNotificationsMaintainOneCurrentSession() {
                     "session-two" &&
                 !field(state, "errors") && !field(state, "transcripts"),
             "new realtime start atomically resets only the current session");
+  }
+}
+
+void hookRunsKeepNestedIdentityAndCurrentOwnership() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  const auto notify = [&](std::string method, Value::Object payload) {
+    return updater.apply({DecodedMessageKind::ServerNotification,
+                          std::move(method), std::nullopt, std::move(payload)});
+  };
+
+  const ApplyResult firstStarted = notify(
+      "hook/started",
+      Value::Object{
+          {"threadId", Value("hook-thread")},
+          {"turnId", Value("hook-turn")},
+          {"run", Value(Value::Object{{"id", Value("hook-run-a")},
+                                      {"eventName", Value("preToolUse")},
+                                      {"handlerType", Value("command")},
+                                      {"status", Value("running")},
+                                      {"startedAt", Value(std::int64_t{100})},
+                                      {"entries", Value(Value::Array{})}})}});
+  const ApplyResult secondStarted = notify(
+      "hook/started",
+      Value::Object{{"threadId", Value("hook-thread")},
+                    {"run", Value(Value::Object{
+                                {"id", Value("hook-run-b")},
+                                {"eventName", Value("postToolUse")},
+                                {"handlerType", Value("mcpTool")},
+                                {"status", Value("running")},
+                                {"startedAt", Value(std::int64_t{110})}})}});
+
+  NodeRef first;
+  NodeRef second;
+  std::uint64_t secondStartedRevision = 0;
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "hook-thread"});
+    const NodeRef turn = findTurn(*read, "hook-thread", "hook-turn");
+    first = read->find({NodeKind::Hook, "hook-run-a"});
+    second = read->find({NodeKind::Hook, "hook-run-b"});
+    const auto firstState = read->state(first);
+    const auto secondState = read->state(second);
+    secondStartedRevision = read->changedRevision(second);
+    require(first && second && first != second && thread && turn &&
+                read->parent(first) == turn && read->parent(turn) == thread &&
+                read->parent(second) == thread,
+            "nested run ids preserve concurrent hook nodes under their "
+            "optional turn or thread owner");
+    require(firstState->status == NodeStatus::Running &&
+                secondState->status == NodeStatus::Running &&
+                protocolCanonicalId(*firstState, first) == "hook-run-a" &&
+                protocolCanonicalId(*secondState, second) == "hook-run-b" &&
+                field(firstState, "eventName") &&
+                *field(firstState, "eventName")->asString() == "preToolUse" &&
+                field(firstState, "threadId") &&
+                *field(firstState, "threadId")->asString() == "hook-thread" &&
+                field(firstState, "turnId") &&
+                *field(firstState, "turnId")->asString() == "hook-turn",
+            "hook starts retain the current nested summary and protocol "
+            "addressing fields");
+    require(std::ranges::find(firstStarted.change.affected, first) !=
+                    firstStarted.change.affected.end() &&
+                std::ranges::find(secondStarted.change.affected, second) !=
+                    secondStarted.change.affected.end(),
+            "each hook start reports its independently affected run");
+  }
+
+  const ApplyResult firstCompleted = notify(
+      "hook/completed",
+      Value::Object{
+          {"threadId", Value("hook-thread")},
+          {"turnId", Value("hook-turn")},
+          {"run",
+           Value(Value::Object{
+               {"id", Value("hook-run-a")},
+               {"eventName", Value("preToolUse")},
+               {"status", Value("completed")},
+               {"completedAt", Value(std::int64_t{145})},
+               {"durationMs", Value(std::int64_t{45})},
+               {"statusMessage", Value("accepted")},
+               {"entries", Value(Value::Array{Value(Value::Object{
+                               {"kind", Value("context")},
+                               {"text", Value("current output")}})})}})}});
+  {
+    auto read = graph.tryRead();
+    const NodeRef currentFirst = read->find({NodeKind::Hook, "hook-run-a"});
+    const NodeRef currentSecond = read->find({NodeKind::Hook, "hook-run-b"});
+    const auto firstState = read->state(currentFirst);
+    const auto secondState = read->state(currentSecond);
+    const Value *entries = field(firstState, "entries");
+    require(
+        currentFirst == first && currentSecond == second &&
+            firstState->status == NodeStatus::Completed &&
+            field(firstState, "startedAt") &&
+            *field(firstState, "startedAt")->asInt64() == 100 &&
+            field(firstState, "completedAt") &&
+            *field(firstState, "completedAt")->asInt64() == 145 &&
+            field(firstState, "lastMethod") &&
+            *field(firstState, "lastMethod")->asString() == "hook/completed" &&
+            entries && entries->asArray() && entries->asArray()->size() == 1,
+        "hook completion updates the same run with its latest fields "
+        "while retaining still-current start facts");
+    require(secondState->status == NodeStatus::Running &&
+                read->changedRevision(second) == secondStartedRevision &&
+                std::ranges::find(firstCompleted.change.affected, second) ==
+                    firstCompleted.change.affected.end(),
+            "completing one hook run does not conflate or rewrite a concurrent "
+            "run");
+  }
+
+  static_cast<void>(notify(
+      "hook/completed",
+      Value::Object{{"threadId", Value("hook-thread")},
+                    {"run", Value(Value::Object{
+                                {"id", Value("hook-run-b")},
+                                {"status", Value("blocked")},
+                                {"statusMessage",
+                                 Value("policy prevented execution")}})}}));
+  static_cast<void>(notify(
+      "hook/completed",
+      Value::Object{{"threadId", Value("hook-thread")},
+                    {"run", Value(Value::Object{
+                                {"id", Value("hook-run-c")},
+                                {"completedAt", Value(std::int64_t{200})}})}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef blocked = read->find({NodeKind::Hook, "hook-run-b"});
+    const NodeRef completed = read->find({NodeKind::Hook, "hook-run-c"});
+    require(
+        blocked == second &&
+            read->state(blocked)->status == NodeStatus::Failed && completed &&
+            read->state(completed)->status == NodeStatus::Completed &&
+            field(read->state(completed), "status") &&
+            *field(read->state(completed), "status")->asString() == "completed",
+        "hook terminal status is normalized while the raw current status "
+        "remains available on the node");
+  }
+
+  const std::uint64_t beforeInvalid = graph.publishedRevision();
+  const ApplyResult invalid =
+      notify("hook/started",
+             Value::Object{
+                 {"threadId", Value("hook-thread")},
+                 {"run", Value(Value::Object{{"status", Value("running")}})}});
+  {
+    auto read = graph.tryRead();
+    require(invalid.change.empty() && read->revision() == beforeInvalid &&
+                !read->find({NodeKind::Hook, "hook/started"}),
+            "a hook notification without nested run.id is explicitly "
+            "state-neutral instead of collapsing unrelated runs");
   }
 }
 
@@ -908,19 +1493,24 @@ void turnRootsAndPagedHistoryStayExplicit() {
             "windowing");
     threadRevision = read->changedRevision(thread);
   }
-  static_cast<void>(
+  const ApplyResult streamUpdate =
       updater.apply({DecodedMessageKind::ServerNotification,
                      "item/agentMessage/delta", std::nullopt,
                      Value::Object{{"threadId", Value("history-thread")},
                                    {"turnId", Value("long-turn")},
                                    {"itemId", Value("activity-81")},
-                                   {"delta", Value("streamed")}}}));
+                                   {"delta", Value("streamed")}}});
   {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "history-thread"});
-    require(read->changedRevision(thread) == threadRevision,
-            "an existing-item stream delta does not touch thread history "
-            "metadata");
+    const Value *loaded = field(read->state(thread), "historyLoadedItemCount");
+    require(read->changedRevision(thread) > threadRevision && loaded &&
+                loaded->asUInt64() && *loaded->asUInt64() == 84 &&
+                std::ranges::find(streamUpdate.change.affected, thread) ==
+                    streamUpdate.change.affected.end(),
+            "an existing-item stream advances its aggregate correlation "
+            "revision without recomputing history metadata or scheduling a "
+            "thread-row render");
   }
 
   Value::Array retainedSuffix{
@@ -1101,6 +1691,416 @@ void resultsAndListsCorrelate() {
   }
 }
 
+void lateResultsCannotRecreateDeletedTargets() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  const ProtocolRequestId requestId("late-rename");
+
+  const ApplyResult request = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/name/set", requestId,
+       Value::Object{{"threadId", Value("deleted-target")},
+                     {"name", Value("stale name")}}});
+  require(static_cast<bool>(request.primary),
+          "an addressed rename request exposes its pending operation");
+  {
+    auto read = graph.tryRead();
+    require(read->find({NodeKind::Thread, "deleted-target"}) &&
+                read->related(request.primary, RelationKind::OperationTarget) ==
+                    std::vector<NodeRef>{
+                        read->find({NodeKind::Thread, "deleted-target"})},
+            "an addressed rename records its original operation target");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/deleted", std::nullopt,
+       Value::Object{{"threadId", Value("deleted-target")}}}));
+  {
+    auto read = graph.tryRead();
+    require(
+        !read->find({NodeKind::Thread, "deleted-target"}) &&
+            read->find(request.primary->id()) == request.primary &&
+            read->related(request.primary, RelationKind::OperationTarget)
+                .empty(),
+        "deleting the rename target unlinks it while retaining the in-flight "
+        "operation for correlation");
+  }
+
+  const ApplyResult late =
+      updater.apply({DecodedMessageKind::ClientResult, "thread/name/set",
+                     requestId, Value::Object{}, request.primary});
+  {
+    auto read = graph.tryRead();
+    require(!read->find({NodeKind::Thread, "deleted-target"}) &&
+                !read->find(request.primary->id()) &&
+                std::ranges::find(late.change.removed, request.primary) !=
+                    late.change.removed.end(),
+            "a late mutation result retires without recreating its deleted "
+            "original target");
+  }
+}
+
+void accountFacetsConvergeAndRateLimitPatchesStaySparse() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+
+  const ProtocolRequestId accountReadId("account-read");
+  const ApplyResult accountRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "account/read", accountReadId, {}});
+  const Value::Object fullAccount{
+      {"account", Value(Value::Object{{"type", Value("chatgpt")},
+                                      {"email", Value("person@example.com")},
+                                      {"planType", Value("plus")}})},
+      {"requiresOpenaiAuth", Value(false)}};
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ClientResult, "account/read",
+                     accountReadId, fullAccount, accountRequest.primary}));
+
+  NodeRef accountNode;
+  {
+    auto read = graph.tryRead();
+    accountNode = read->find({NodeKind::Account, "account"});
+    require(accountNode && !read->find({NodeKind::Account, "account/read"}),
+            "account/read materializes the one current account facet");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "account/updated", std::nullopt,
+       Value::Object{{"authMode", Value("chatgpt")},
+                     {"planType", Value("team")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef current = read->find({NodeKind::Account, "account"});
+    const auto state = current ? read->state(current) : nullptr;
+    const Value *account = field(state, "account");
+    const Value *email =
+        objectField(account ? account->asObject() : nullptr, "email");
+    const Value *requiresAuth = field(state, "requiresOpenaiAuth");
+    const Value *authMode = field(state, "authMode");
+    const Value *planType = field(state, "planType");
+    require(current == accountNode &&
+                !read->find({NodeKind::Account, "account/updated"}) && email &&
+                email->asString() &&
+                *email->asString() == "person@example.com" && requiresAuth &&
+                requiresAuth->asBool() && !*requiresAuth->asBool() &&
+                authMode && authMode->asString() &&
+                *authMode->asString() == "chatgpt" && planType &&
+                planType->asString() && *planType->asString() == "team",
+            "account/updated sparsely augments the same account/read node");
+  }
+
+  const ProtocolRequestId rateReadId("rate-limits-read");
+  const ApplyResult rateRequest =
+      updater.apply({DecodedMessageKind::ClientRequest,
+                     "account/rateLimits/read",
+                     rateReadId,
+                     {}});
+  const Value::Object fullRateLimits{
+      {"accountId", Value("account-1")},
+      {"rateLimitUpsell",
+       Value(Value::Object{{"message", Value("upgrade available")}})},
+      {"rateLimitResetCredits",
+       Value(Value::Object{{"availableCount", Value(2)}})},
+      {"rateLimitsByLimitId",
+       Value(Value::Object{
+           {"secondary-limit",
+            Value(Value::Object{{"limitName", Value("secondary")}})}})},
+      {"rateLimits",
+       Value(Value::Object{
+           {"limitId", Value("old-limit")},
+           {"limitName", Value("preserve")},
+           {"planType", Value("plus")},
+           {"primary", Value(Value::Object{{"usedPercent", Value(25)},
+                                           {"resetsAt", Value(1000)},
+                                           {"windowDurationMins", Value(300)},
+                                           {"futurePrimary", Value("keep")}})},
+           {"secondary", Value(Value::Object{{"usedPercent", Value(10)},
+                                             {"resetsAt", Value(2000)}})},
+           {"futureOld", Value(1)}})}};
+  static_cast<void>(updater.apply({DecodedMessageKind::ClientResult,
+                                   "account/rateLimits/read", rateReadId,
+                                   fullRateLimits, rateRequest.primary}));
+
+  NodeRef rateLimitsNode;
+  {
+    auto read = graph.tryRead();
+    rateLimitsNode = read->find({NodeKind::Account, "rate-limits"});
+    require(rateLimitsNode &&
+                !read->find({NodeKind::Account, "account/rateLimits/read"}),
+            "rate-limit reads materialize one current rate-limit facet");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "account/rateLimits/updated",
+       std::nullopt,
+       Value::Object{
+           {"rateLimits",
+            Value(Value::Object{
+                {"limitId", Value("new-limit")},
+                {"primary", Value(Value::Object{{"usedPercent", Value(40)}})},
+                {"futureNew", Value(2)}})}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef current = read->find({NodeKind::Account, "rate-limits"});
+    const auto state = current ? read->state(current) : nullptr;
+    const Value *limitsValue = field(state, "rateLimits");
+    const Value::Object *limits =
+        limitsValue ? limitsValue->asObject() : nullptr;
+    const Value *primaryValue = objectField(limits, "primary");
+    const Value::Object *primary =
+        primaryValue ? primaryValue->asObject() : nullptr;
+    const Value *secondaryValue = objectField(limits, "secondary");
+    const Value::Object *secondary =
+        secondaryValue ? secondaryValue->asObject() : nullptr;
+    const Value *limitId = objectField(limits, "limitId");
+    const Value *limitName = objectField(limits, "limitName");
+    const Value *planType = objectField(limits, "planType");
+    const Value *usedPercent = objectField(primary, "usedPercent");
+    const Value *resetsAt = objectField(primary, "resetsAt");
+    const Value *duration = objectField(primary, "windowDurationMins");
+    const Value *futurePrimary = objectField(primary, "futurePrimary");
+    const Value *secondaryPercent = objectField(secondary, "usedPercent");
+    require(
+        current == rateLimitsNode &&
+            !read->find({NodeKind::Account, "account/rateLimits/updated"}) &&
+            limitId && limitId->asString() &&
+            *limitId->asString() == "new-limit" && limitName &&
+            limitName->asString() && *limitName->asString() == "preserve" &&
+            planType && planType->asString() &&
+            *planType->asString() == "plus" && usedPercent &&
+            usedPercent->asInt64() && *usedPercent->asInt64() == 40 &&
+            resetsAt && resetsAt->asInt64() && *resetsAt->asInt64() == 1000 &&
+            duration && duration->asInt64() && *duration->asInt64() == 300 &&
+            futurePrimary && futurePrimary->asString() &&
+            *futurePrimary->asString() == "keep" && secondaryPercent &&
+            secondaryPercent->asInt64() && *secondaryPercent->asInt64() == 10 &&
+            objectField(limits, "futureOld") &&
+            objectField(limits, "futureNew") &&
+            field(state, "rateLimitUpsell") &&
+            field(state, "rateLimitResetCredits") &&
+            field(state, "rateLimitsByLimitId"),
+        "a sparse rate-limit notification patches present nested fields "
+        "without clearing full-read metadata");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "account/rateLimits/updated",
+       std::nullopt,
+       Value::Object{{"rateLimits",
+                      Value(Value::Object{{"limitName", Value(nullptr)}})}}}));
+  {
+    auto read = graph.tryRead();
+    const auto state = read->state(rateLimitsNode);
+    const Value *limitsValue = field(state, "rateLimits");
+    const Value::Object *limits =
+        limitsValue ? limitsValue->asObject() : nullptr;
+    const Value *limitName = objectField(limits, "limitName");
+    const Value *primaryValue = objectField(limits, "primary");
+    const Value::Object *primary =
+        primaryValue ? primaryValue->asObject() : nullptr;
+    const Value *usedPercent = objectField(primary, "usedPercent");
+    require(limitName && limitName->isNull() && usedPercent &&
+                usedPercent->asInt64() && *usedPercent->asInt64() == 40 &&
+                field(state, "rateLimitResetCredits"),
+            "an explicit null clears only its rate-limit field while omitted "
+            "current fields remain intact");
+  }
+
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ClientResult, "account/usage/read",
+                     std::nullopt, Value::Object{{"usage", Value(7)}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "account/workspaceMessages/read",
+       std::nullopt, Value::Object{{"messages", Value(Value::Array{})}}}));
+  {
+    auto read = graph.tryRead();
+    require(
+        read->find({NodeKind::Account, "account"}) == accountNode &&
+            read->find({NodeKind::Account, "rate-limits"}) == rateLimitsNode &&
+            read->find({NodeKind::Account, "account/usage/read"}) &&
+            read->find({NodeKind::Account, "account/workspaceMessages/read"}),
+        "usage and workspace-message snapshots remain separate account "
+        "facets");
+  }
+
+  const ProtocolRequestId logoutId("account-logout");
+  const ApplyResult logoutRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "account/logout", logoutId, {}});
+  static_cast<void>(updater.apply({DecodedMessageKind::ClientResult,
+                                   "account/logout",
+                                   logoutId,
+                                   {},
+                                   logoutRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef current = read->find({NodeKind::Account, "account"});
+    const auto state = current ? read->state(current) : nullptr;
+    require(
+        current == accountNode &&
+            !read->find({NodeKind::Account, "account/logout"}) &&
+            field(state, "account") && field(state, "account")->isNull() &&
+            field(state, "authMode") && field(state, "authMode")->isNull() &&
+            field(state, "planType") && field(state, "planType")->isNull() &&
+            field(state, "requiresOpenaiAuth") &&
+            field(state, "requiresOpenaiAuth")->asBool() &&
+            !*field(state, "requiresOpenaiAuth")->asBool() &&
+            field(state, "lastMethod") &&
+            field(state, "lastMethod")->asString() &&
+            *field(state, "lastMethod")->asString() == "account/logout",
+        "logout clears the canonical account facet while preserving the "
+        "provider authentication requirement");
+  }
+}
+
+void successfulRefreshesRetireInvalidationsAndConfigWritesInvalidate() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+
+  static_cast<void>(updater.apply({DecodedMessageKind::ServerNotification,
+                                   "skills/changed",
+                                   std::nullopt,
+                                   {}}));
+  static_cast<void>(updater.apply({DecodedMessageKind::ServerNotification,
+                                   "app/list/updated",
+                                   std::nullopt,
+                                   {}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "skills/list", std::nullopt,
+       Value::Object{{"data", Value(Value::Array{Value("skill")})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "app/list", std::nullopt,
+       Value::Object{{"data", Value(Value::Array{Value("app")})}}}));
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "project/changed", std::nullopt,
+       Value::Object{{"projectId", Value("project-refresh")}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "project/read", std::nullopt,
+       Value::Object{
+           {"project", Value(Value::Object{{"id", Value("project-refresh")},
+                                           {"name", Value("Current")}})}}}));
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/queue/changed",
+       std::nullopt, Value::Object{{"threadId", Value("refresh-thread")}}}));
+  const ProtocolRequestId queueId("queue-refresh");
+  const ApplyResult queueRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/queue/list", queueId,
+       Value::Object{{"threadId", Value("refresh-thread")}}});
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/queue/list", queueId,
+       Value::Object{{"data", Value(Value::Array{Value("queued")})}},
+       queueRequest.primary}));
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/reverted", std::nullopt,
+       Value::Object{{"threadId", Value("refresh-thread")}}}));
+  const ProtocolRequestId readId("history-refresh");
+  const ApplyResult readRequest =
+      updater.apply({DecodedMessageKind::ClientRequest, "thread/read", readId,
+                     Value::Object{{"threadId", Value("refresh-thread")},
+                                   {"includeTurns", Value(true)}}});
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read", readId,
+       Value::Object{
+           {"thread", Value(Value::Object{{"id", Value("refresh-thread")},
+                                          {"turns", Value(Value::Array{})}})}},
+       readRequest.primary}));
+
+  {
+    auto read = graph.tryRead();
+    const auto skills = read->state(read->find({NodeKind::Catalog, "skills"}));
+    const auto apps = read->state(read->find({NodeKind::Catalog, "app"}));
+    const auto project =
+        read->state(read->find({NodeKind::Project, "project-refresh"}));
+    const auto thread =
+        read->state(read->find({NodeKind::Thread, "refresh-thread"}));
+    require(!field(skills, "stale") && !field(skills, "invalidatedBy") &&
+                !field(apps, "stale") && !field(apps, "invalidatedBy") &&
+                !field(project, "stale") && !field(thread, "queueStale") &&
+                !field(thread, "historyStale"),
+            "successful snapshots retire their matching invalidation facts");
+  }
+
+  const Value::Object firstConfig{
+      {"config", Value(Value::Object{{"model", Value("old-model")}})},
+      {"origins", Value(Value::Object{})}};
+  static_cast<void>(updater.apply({DecodedMessageKind::ClientResult,
+                                   "config/read", std::nullopt, firstConfig}));
+  NodeRef configuration;
+  {
+    auto read = graph.tryRead();
+    configuration = read->find({NodeKind::Configuration, "config/read"});
+  }
+
+  const ProtocolRequestId writeId("config-write");
+  const ApplyResult writeRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "config/value/write", writeId,
+       Value::Object{{"keyPath", Value("model")},
+                     {"value", Value("new-model")}}});
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "config/value/write", writeId,
+       Value::Object{{"status", Value("ok")}, {"version", Value("2")}},
+       writeRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef current =
+        read->find({NodeKind::Configuration, "config/read"});
+    const auto state = current ? read->state(current) : nullptr;
+    require(current == configuration && field(state, "stale") &&
+                field(state, "stale")->asBool() &&
+                *field(state, "stale")->asBool() &&
+                field(state, "invalidatedBy") &&
+                field(state, "invalidatedBy")->asString() &&
+                *field(state, "invalidatedBy")->asString() ==
+                    "config/value/write" &&
+                !read->find({NodeKind::Configuration, "config/value/write"}),
+            "config writes invalidate the canonical effective snapshot");
+  }
+
+  const Value::Object refreshedConfig{
+      {"config", Value(Value::Object{{"model", Value("new-model")}})},
+      {"origins", Value(Value::Object{})}};
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ClientResult, "config/read",
+                     std::nullopt, refreshedConfig}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef current =
+        read->find({NodeKind::Configuration, "config/read"});
+    const auto state = current ? read->state(current) : nullptr;
+    const Value *configValue = field(state, "config");
+    const Value *model =
+        objectField(configValue ? configValue->asObject() : nullptr, "model");
+    require(current == configuration && !field(state, "stale") &&
+                !field(state, "invalidatedBy") && model && model->asString() &&
+                *model->asString() == "new-model",
+            "a fresh config read replaces and validates the same singleton");
+  }
+
+  const ProtocolRequestId batchId("config-batch-write");
+  const ApplyResult batchRequest =
+      updater.apply({DecodedMessageKind::ClientRequest, "config/batchWrite",
+                     batchId, Value::Object{{"edits", Value(Value::Array{})}}});
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "config/batchWrite", batchId,
+       Value::Object{{"status", Value("ok")}, {"version", Value("3")}},
+       batchRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef current =
+        read->find({NodeKind::Configuration, "config/read"});
+    const auto state = current ? read->state(current) : nullptr;
+    require(
+        current == configuration && field(state, "stale") &&
+            field(state, "stale")->asBool() &&
+            *field(state, "stale")->asBool() && field(state, "invalidatedBy") &&
+            field(state, "invalidatedBy")->asString() &&
+            *field(state, "invalidatedBy")->asString() == "config/batchWrite" &&
+            !read->find({NodeKind::Configuration, "config/batchWrite"}),
+        "batch config writes invalidate that same effective snapshot");
+  }
+}
+
 void reusedWireIdsRequireExactCurrentNodes() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -1183,6 +2183,282 @@ void reusedWireIdsRequireExactCurrentNodes() {
           "the exact current interaction resolves normally");
 }
 
+void keyedRuntimeNotificationsKeepIndependentCurrentState() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+
+  const auto importResults = [](std::string_view itemType) {
+    return Value::Array{
+        Value(Value::Object{{"itemType", Value(itemType)},
+                            {"successes", Value(Value::Array{})},
+                            {"failures", Value(Value::Array{})}})};
+  };
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification,
+       "externalAgentConfig/import/progress", std::nullopt,
+       Value::Object{{"importId", Value("import-a")},
+                     {"itemTypeResults", Value(importResults("SKILLS"))}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification,
+       "externalAgentConfig/import/progress", std::nullopt,
+       Value::Object{{"importId", Value("import-b")},
+                     {"itemTypeResults", Value(importResults("CONFIG"))}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification,
+       "externalAgentConfig/import/completed", std::nullopt,
+       Value::Object{{"importId", Value("import-a")},
+                     {"itemTypeResults", Value(importResults("PLUGINS"))}}}));
+
+  const auto fuzzyFiles = [](std::string_view path) {
+    return Value::Array{
+        Value(Value::Object{{"file_name", Value(path)},
+                            {"match_type", Value("file")},
+                            {"path", Value(path)},
+                            {"root", Value("/workspace")},
+                            {"score", Value(std::uint64_t{1})}})};
+  };
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "fuzzyFileSearch/sessionUpdated",
+       std::nullopt,
+       Value::Object{{"sessionId", Value("search-a")},
+                     {"query", Value("alpha")},
+                     {"files", Value(fuzzyFiles("alpha.cpp"))}}}));
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ServerNotification,
+                     "fuzzyFileSearch/sessionUpdated", std::nullopt,
+                     Value::Object{{"sessionId", Value("search-b")},
+                                   {"query", Value("beta")},
+                                   {"files", Value(fuzzyFiles("beta.cpp"))}}}));
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ServerNotification,
+                     "fuzzyFileSearch/sessionCompleted", std::nullopt,
+                     Value::Object{{"sessionId", Value("search-a")}}}));
+
+  static_cast<void>(updater.apply({DecodedMessageKind::ServerNotification,
+                                   "account/login/completed", std::nullopt,
+                                   Value::Object{{"loginId", Value("login-a")},
+                                                 {"success", Value(true)},
+                                                 {"error", Value(nullptr)}}}));
+  static_cast<void>(updater.apply({DecodedMessageKind::ServerNotification,
+                                   "account/login/completed", std::nullopt,
+                                   Value::Object{{"loginId", Value("login-b")},
+                                                 {"success", Value(false)},
+                                                 {"error", Value("denied")}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "account/login/completed",
+       std::nullopt,
+       Value::Object{{"loginId", Value(nullptr)},
+                     {"success", Value(true)},
+                     {"error", Value(nullptr)},
+                     {"onboardingEntrypoint", Value("life_sciences")}}}));
+
+  auto read = graph.tryRead();
+  const NodeRef importA =
+      read->find({NodeKind::ExternalAgentImport, "import-a"});
+  const NodeRef importB =
+      read->find({NodeKind::ExternalAgentImport, "import-b"});
+  const auto importAState = importA ? read->state(importA) : nullptr;
+  const auto importBState = importB ? read->state(importB) : nullptr;
+  const Value *importAResults = field(importAState, "itemTypeResults");
+  const Value *importBResults = field(importBState, "itemTypeResults");
+  const auto firstItemType = [](const Value *results) -> std::string {
+    const Value::Array *items = results ? results->asArray() : nullptr;
+    const Value::Object *item =
+        items && !items->empty() ? items->front().asObject() : nullptr;
+    const auto found =
+        item ? item->find("itemType") : Value::Object::const_iterator{};
+    const Value *type = item && found != item->end() ? &found->second : nullptr;
+    return type && type->asString() ? *type->asString() : std::string{};
+  };
+  require(importA && importB && importA != importB && importAState &&
+              importBState && importAState->status == NodeStatus::Completed &&
+              importBState->status == NodeStatus::Running &&
+              firstItemType(importAResults) == "PLUGINS" &&
+              firstItemType(importBResults) == "CONFIG",
+          "concurrent external-agent imports remain distinct by importId and "
+          "completion updates only the addressed import");
+
+  const NodeRef searchA =
+      findProtocolNode(*read, NodeKind::FuzzyFileSearchSession, "search-a", 0);
+  const NodeRef searchB =
+      findProtocolNode(*read, NodeKind::FuzzyFileSearchSession, "search-b", 0);
+  const auto searchAState = searchA ? read->state(searchA) : nullptr;
+  const auto searchBState = searchB ? read->state(searchB) : nullptr;
+  const Value *searchAQuery = field(searchAState, "query");
+  const Value *searchBQuery = field(searchBState, "query");
+  const Value *searchAFiles = field(searchAState, "files");
+  require(searchA && searchB && searchA != searchB && searchAState &&
+              searchBState && searchAState->status == NodeStatus::Completed &&
+              searchBState->status == NodeStatus::Running && searchAQuery &&
+              searchAQuery->asString() &&
+              *searchAQuery->asString() == "alpha" && searchBQuery &&
+              searchBQuery->asString() && *searchBQuery->asString() == "beta" &&
+              searchAFiles && searchAFiles->asArray() &&
+              searchAFiles->asArray()->size() == 1,
+          "fuzzy-search completion addresses one connection-scoped session "
+          "and retains its prior query and result snapshot");
+
+  NodeRef loginA;
+  NodeRef loginB;
+  NodeRef nullLogin;
+  std::size_t loginCount = 0;
+  for (const NodeRef &node : read->orderedNodes()) {
+    if (node->id().kind != NodeKind::LoginAttempt)
+      continue;
+    ++loginCount;
+    const auto state = read->state(node);
+    const Value *protocolId = field(state, "protocolId");
+    if (protocolId && protocolId->asString() &&
+        *protocolId->asString() == "login-a")
+      loginA = node;
+    else if (protocolId && protocolId->asString() &&
+             *protocolId->asString() == "login-b")
+      loginB = node;
+    else if (protocolId && protocolId->isNull())
+      nullLogin = node;
+  }
+  const auto loginAState = loginA ? read->state(loginA) : nullptr;
+  const auto loginBState = loginB ? read->state(loginB) : nullptr;
+  const auto nullLoginState = nullLogin ? read->state(nullLogin) : nullptr;
+  const Value *nullProtocolId = field(nullLoginState, "protocolId");
+  require(loginCount == 3 && loginA && loginB && nullLogin &&
+              loginA != loginB && loginA != nullLogin && loginB != nullLogin &&
+              loginAState->status == NodeStatus::Completed &&
+              loginBState->status == NodeStatus::Failed &&
+              nullLoginState->status == NodeStatus::Completed &&
+              nullProtocolId && nullProtocolId->isNull(),
+          "login completions retain independent valued loginId attempts and "
+          "an explicit nullable-loginId attempt without collisions");
+}
+
+void turnErrorsUpdateAddressedStateWithoutLosingTheNotice() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  const Value::Object retryError{
+      {"message", Value("provider disconnected")},
+      {"additionalDetails", Value("retrying shortly")},
+      {"codexErrorInfo", Value("responseStreamDisconnected")}};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "error", std::nullopt,
+       Value::Object{{"threadId", Value("error-thread")},
+                     {"turnId", Value("error-turn")},
+                     {"error", Value(retryError)},
+                     {"willRetry", Value(true)}}}));
+
+  {
+    auto read = graph.tryRead();
+    const NodeRef notice = read->find({NodeKind::Notice, "provider-notice"});
+    const NodeRef thread = read->find({NodeKind::Thread, "error-thread"});
+    const NodeRef turn = findTurn(*read, "error-thread", "error-turn");
+    const auto noticeState = notice ? read->state(notice) : nullptr;
+    const auto threadState = thread ? read->state(thread) : nullptr;
+    const auto turnState = turn ? read->state(turn) : nullptr;
+    const Value *threadError = field(threadState, "error");
+    const Value *turnError = field(turnState, "error");
+    const Value *threadRetry = field(threadState, "willRetry");
+    const Value *turnRetry = field(turnState, "willRetry");
+    require(notice && noticeState &&
+                noticeState->status == NodeStatus::Failed && thread && turn &&
+                read->parent(turn) == thread && threadError && turnError &&
+                *threadError == Value(retryError) &&
+                *turnError == Value(retryError) && threadRetry &&
+                threadRetry->asBool() && *threadRetry->asBool() && turnRetry &&
+                turnRetry->asBool() && *turnRetry->asBool(),
+            "error remains a provider notice while atomically updating the "
+            "addressed thread and scoped turn error/retry facts");
+  }
+
+  const Value::Object finalError{{"message", Value("retry exhausted")}};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "error", std::nullopt,
+       Value::Object{{"threadId", Value("error-thread")},
+                     {"turnId", Value("error-turn")},
+                     {"error", Value(finalError)},
+                     {"willRetry", Value(false)}}}));
+  auto read = graph.tryRead();
+  const auto threadState =
+      read->state(read->find({NodeKind::Thread, "error-thread"}));
+  const auto turnState =
+      read->state(findTurn(*read, "error-thread", "error-turn"));
+  const Value *threadRetry = field(threadState, "willRetry");
+  const Value *turnRetry = field(turnState, "willRetry");
+  require(field(threadState, "error") &&
+              *field(threadState, "error") == Value(finalError) &&
+              field(turnState, "error") &&
+              *field(turnState, "error") == Value(finalError) && threadRetry &&
+              threadRetry->asBool() && !*threadRetry->asBool() && turnRetry &&
+              turnRetry->asBool() && !*turnRetry->asBool(),
+          "a later terminal turn error replaces current error state and "
+          "clears willRetry on exactly the same thread and turn nodes");
+}
+
+void mcpServerNotificationsKeepCanonicalScope() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  const auto apply = [&](std::string method, Value::Object payload) {
+    static_cast<void>(
+        updater.apply({DecodedMessageKind::ServerNotification,
+                       std::move(method), std::nullopt, std::move(payload)}));
+  };
+
+  apply("mcpServer/startupStatus/updated",
+        {{"name", Value("server-a")}, {"status", Value("ready")}});
+  apply("mcpServer/startupStatus/updated",
+        {{"name", Value("server-b")}, {"status", Value("failed")}});
+  apply("mcpServer/oauthLogin/completed",
+        {{"name", Value("server-a")}, {"success", Value(true)}});
+  apply("mcpServer/startupStatus/updated", {{"threadId", Value("thread-one")},
+                                            {"name", Value("server-a")},
+                                            {"status", Value("starting")}});
+  apply("mcpServer/event/stream/notification",
+        {{"subscriptionId", Value("subscription-one")},
+         {"notification", Value(Value::Object{{"method", Value("first")}})}});
+  apply("mcpServer/event/stream/notification",
+        {{"subscriptionId", Value("subscription-two")},
+         {"notification", Value(Value::Object{{"method", Value("second")}})}});
+
+  auto read = graph.tryRead();
+  std::vector<NodeRef> servers;
+  for (const NodeRef &node : read->orderedNodes())
+    if (node->id().kind == NodeKind::McpServer)
+      servers.push_back(node);
+
+  const auto find = [&](std::string_view protocolId,
+                        std::string_view threadId = {}) {
+    return std::ranges::find_if(servers, [&](const NodeRef &node) {
+      const auto state = read->state(node);
+      const Value *thread = field(state, "threadId");
+      const std::string actualThread =
+          thread && thread->asString() ? *thread->asString() : std::string{};
+      return protocolCanonicalId(*state, node) == protocolId &&
+             actualThread == threadId;
+    });
+  };
+  const auto globalA = find("server-a");
+  const auto globalB = find("server-b");
+  const auto threadA = find("server-a", "thread-one");
+  const auto subscriptionOne = find("subscription-one");
+  const auto subscriptionTwo = find("subscription-two");
+  require(servers.size() == 5 && globalA != servers.end() &&
+              globalB != servers.end() && threadA != servers.end() &&
+              subscriptionOne != servers.end() &&
+              subscriptionTwo != servers.end(),
+          "MCP server and subscription notifications retain distinct "
+          "canonical scopes");
+  if (globalA != servers.end()) {
+    const auto state = read->state(*globalA);
+    require(field(state, "success") && field(state, "success")->asBool() &&
+                *field(state, "success")->asBool(),
+            "OAuth completion updates the matching global MCP server");
+  }
+  if (globalB != servers.end()) {
+    const auto state = read->state(*globalB);
+    require(field(state, "status") && field(state, "status")->asString() &&
+                *field(state, "status")->asString() == "failed",
+            "one MCP server update cannot overwrite another server");
+  }
+}
+
 void interactionsAndRemovalKeepLifetime() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -1215,9 +2491,15 @@ void interactionsAndRemovalKeepLifetime() {
     require(turn && thread && read->parent(targets.front()) == turn &&
                 read->parent(turn) == thread,
             "interaction targets retain their addressed containment chain");
-    require(read->related(thread, RelationKind::PendingInteraction) ==
-                std::vector<NodeRef>{interaction},
-            "the addressed thread directly indexes its pending interaction");
+    require(
+        read->related(thread, RelationKind::PendingInteraction) ==
+                std::vector<NodeRef>{interaction} &&
+            field(read->state(thread), "pendingInteractionCount") &&
+            field(read->state(thread), "pendingInteractionCount")->asUInt64() &&
+            *field(read->state(thread), "pendingInteractionCount")
+                    ->asUInt64() == 1,
+        "the addressed thread directly indexes and counts its pending "
+        "interaction");
     const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
     require(runtime &&
                 read->related(runtime, RelationKind::PendingInteraction) ==
@@ -1234,9 +2516,15 @@ void interactionsAndRemovalKeepLifetime() {
     const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
     require(read->state(interaction)->status == NodeStatus::Failed,
             "rejected response remains visibly failed");
-    require(thread && read->related(thread, RelationKind::PendingInteraction) ==
-                          std::vector<NodeRef>{interaction},
-            "a rejected response remains discoverable for thread recovery");
+    require(
+        thread &&
+            read->related(thread, RelationKind::PendingInteraction) ==
+                std::vector<NodeRef>{interaction} &&
+            field(read->state(thread), "pendingInteractionCount") &&
+            field(read->state(thread), "pendingInteractionCount")->asUInt64() &&
+            *field(read->state(thread), "pendingInteractionCount")
+                    ->asUInt64() == 1,
+        "a rejected response remains counted as unresolved thread attention");
     require(runtime &&
                 read->related(runtime, RelationKind::PendingInteraction) ==
                     std::vector<NodeRef>{interaction},
@@ -1258,8 +2546,36 @@ void interactionsAndRemovalKeepLifetime() {
     require(
         thread && runtime &&
             read->related(thread, RelationKind::PendingInteraction).empty() &&
+            read->related(runtime, RelationKind::PendingInteraction).empty() &&
+            field(read->state(thread), "pendingInteractionCount") &&
+            field(read->state(thread), "pendingInteractionCount")->asUInt64() &&
+            *field(read->state(thread), "pendingInteractionCount")
+                    ->asUInt64() == 0,
+        "interaction removal unlinks both direct pending indexes and keeps "
+        "the derived count current");
+  }
+
+  const ProtocolRequestId externallyResolvedId("approval-externally-resolved");
+  static_cast<void>(
+      updater.apply({DecodedMessageKind::ServerRequest,
+                     "item/fileChange/requestApproval", externallyResolvedId,
+                     Value::Object{{"threadId", Value("thread-approval")}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "serverRequest/resolved",
+       std::nullopt,
+       Value::Object{{"requestId", Value("approval-externally-resolved")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "thread-approval"});
+    const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+    const Value *count = field(read->state(thread), "pendingInteractionCount");
+    require(
+        thread && runtime && count && count->asUInt64() &&
+            *count->asUInt64() == 0 &&
+            read->related(thread, RelationKind::PendingInteraction).empty() &&
             read->related(runtime, RelationKind::PendingInteraction).empty(),
-        "interaction removal unlinks both direct pending indexes");
+        "provider-side request resolution clears the same indexes and "
+        "cached thread attention count");
   }
 }
 
@@ -1422,25 +2738,266 @@ void deletionUnlinksWholeGraph() {
   }
 }
 
+void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+
+  const ProtocolRequestId mergingReadId("merging-thread-read");
+  const ApplyResult mergingRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/read", mergingReadId,
+       Value::Object{{"threadId", Value("merging-read-thread")}}});
+  require(static_cast<bool>(mergingRequest.primary),
+          "correlated merging read exposes its exact operation");
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "turn/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("merging-read-thread")},
+           {"turn", Value(Value::Object{{"id", Value("live-turn")},
+                                        {"status", Value("inProgress")}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/plan/delta", std::nullopt,
+       Value::Object{{"threadId", Value("merging-read-thread")},
+                     {"turnId", Value("live-turn")},
+                     {"itemId", Value("live-plan")},
+                     {"delta", Value("live plan text")}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/name/updated",
+       std::nullopt,
+       Value::Object{{"threadId", Value("merging-read-thread")},
+                     {"threadName", Value("Live thread name")}}}));
+  Value::Array snapshotItems{Value(Value::Object{
+      {"id", Value("snapshot-item")}, {"type", Value("agentMessage")}})};
+  Value::Object snapshotTurn{{"id", Value("snapshot-turn")},
+                             {"items", Value(std::move(snapshotItems))}};
+  Value::Array staleLiveItems{
+      Value(Value::Object{{"id", Value("live-plan")},
+                          {"type", Value("agentMessage")},
+                          {"text", Value("stale snapshot text")}})};
+  Value::Object staleLiveTurn{{"id", Value("live-turn")},
+                              {"status", Value("completed")},
+                              {"items", Value(std::move(staleLiveItems))}};
+  Value::Array snapshotTurns{Value(std::move(snapshotTurn)),
+                             Value(std::move(staleLiveTurn))};
+  Value::Object mergingThread{{"id", Value("merging-read-thread")},
+                              {"name", Value("Stale snapshot name")},
+                              {"turns", Value(std::move(snapshotTurns))}};
+  DecodedMessage mergingResult{
+      DecodedMessageKind::ClientResult, "thread/read", mergingReadId,
+      Value::Object{{"thread", Value(std::move(mergingThread))}},
+      mergingRequest.primary};
+  const ApplyResult merged = updater.apply(std::move(mergingResult));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread =
+        read->find({NodeKind::Thread, "merging-read-thread"});
+    const NodeRef liveTurn =
+        findTurn(*read, "merging-read-thread", "live-turn");
+    const NodeRef livePlan =
+        findItem(*read, "merging-read-thread", "live-turn", "live-plan");
+    const NodeRef snapshotTurn =
+        findTurn(*read, "merging-read-thread", "snapshot-turn");
+    const Value *text = field(read->state(livePlan), "text");
+    const Value *name = field(read->state(thread), "name");
+    const Value *type = field(read->state(livePlan), "type");
+    require(!read->find(mergingRequest.primary->id()) && thread && liveTurn &&
+                livePlan && snapshotTurn &&
+                protocolIds(*read, read->children(thread)) ==
+                    std::vector<std::string>{"snapshot-turn", "live-turn"} &&
+                read->children(liveTurn) == std::vector<NodeRef>{livePlan} &&
+                text && text->asString() &&
+                *text->asString() == "live plan text" && !type &&
+                read->state(liveTurn)->status == NodeStatus::Running && name &&
+                name->asString() && *name->asString() == "Live thread name" &&
+                std::ranges::find(merged.change.affected, livePlan) ==
+                    merged.change.affected.end(),
+            "an intervening live plan mutation makes the correlated read "
+            "merge its history prefix without replacing newer top-level or "
+            "child state and order");
+  }
+
+  NodeGraph replacingGraph;
+  ProtocolUpdater replacingUpdater(replacingGraph);
+  static_cast<void>(replacingUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("replacing-read-thread")},
+           {"turnId", Value("old-turn")},
+           {"item", Value(Value::Object{{"id", Value("old-item")},
+                                        {"type", Value("agentMessage")}})}}}));
+  const ProtocolRequestId replacingReadId("replacing-thread-read");
+  const ApplyResult replacingRequest = replacingUpdater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/read", replacingReadId,
+       Value::Object{{"threadId", Value("replacing-read-thread")}}});
+  require(static_cast<bool>(replacingRequest.primary),
+          "correlated replacing read exposes its exact operation");
+  static_cast<void>(replacingUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/name/updated",
+       std::nullopt,
+       Value::Object{{"threadId", Value("unrelated-thread")},
+                     {"threadName", Value("Unrelated change")}}}));
+  Value::Array freshItems{Value(Value::Object{
+      {"id", Value("fresh-item")}, {"type", Value("agentMessage")}})};
+  Value::Object freshTurn{{"id", Value("fresh-turn")},
+                          {"items", Value(std::move(freshItems))}};
+  Value::Array freshTurns{Value(std::move(freshTurn))};
+  Value::Object replacingThread{{"id", Value("replacing-read-thread")},
+                                {"name", Value("Fresh snapshot name")},
+                                {"turns", Value(std::move(freshTurns))}};
+  DecodedMessage replacingResult{
+      DecodedMessageKind::ClientResult, "thread/read", replacingReadId,
+      Value::Object{{"thread", Value(std::move(replacingThread))}},
+      replacingRequest.primary};
+  static_cast<void>(replacingUpdater.apply(std::move(replacingResult)));
+  {
+    auto read = replacingGraph.tryRead();
+    const NodeRef thread =
+        read->find({NodeKind::Thread, "replacing-read-thread"});
+    const NodeRef freshTurn =
+        findTurn(*read, "replacing-read-thread", "fresh-turn");
+    const NodeRef oldTurn =
+        findTurn(*read, "replacing-read-thread", "old-turn");
+    const Value *name = field(read->state(thread), "name");
+    require(thread && freshTurn && oldTurn &&
+                read->children(thread) == std::vector<NodeRef>{freshTurn} &&
+                !read->parent(oldTurn) && name && name->asString() &&
+                *name->asString() == "Fresh snapshot name",
+            "an unrelated thread mutation does not prevent the correlated "
+            "read from replacing stale addressed-thread history");
+  }
+}
+
+void rollbackAndRevertReplaceAuthoritativeHistory() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  const auto turn = [](std::string id, std::string itemId) {
+    return Value(
+        Value::Object{{"id", Value(std::move(id))},
+                      {"status", Value("completed")},
+                      {"items", Value(Value::Array{Value(Value::Object{
+                                    {"id", Value(std::move(itemId))},
+                                    {"type", Value("agentMessage")}})})}});
+  };
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{
+           {"thread",
+            Value(Value::Object{
+                {"id", Value("history-mutation")},
+                {"turns", Value(Value::Array{turn("turn-1", "item-1"),
+                                             turn("turn-2", "item-2"),
+                                             turn("turn-3", "item-3")})}})}}}));
+  NodeRef removedTurn;
+  NodeRef removedItem;
+  {
+    auto read = graph.tryRead();
+    removedTurn = findTurn(*read, "history-mutation", "turn-3");
+    removedItem = findItem(*read, "history-mutation", "turn-3", "item-3");
+  }
+
+  const ProtocolRequestId rollbackId("rollback-history");
+  const ApplyResult rollbackRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/rollback", rollbackId,
+       Value::Object{{"threadId", Value("history-mutation")},
+                     {"numTurns", Value(std::uint64_t{1})}}});
+  const ApplyResult rolledBack = updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/rollback", rollbackId,
+       Value::Object{
+           {"thread",
+            Value(Value::Object{
+                {"id", Value("history-mutation")},
+                {"turns", Value(Value::Array{turn("turn-1", "item-1"),
+                                             turn("turn-2", "item-2")})}})}},
+       rollbackRequest.primary});
+  NodeRef firstTurn;
+  NodeRef secondTurn;
+  {
+    auto read = graph.tryRead();
+    const NodeRef threadNode =
+        read->find({NodeKind::Thread, "history-mutation"});
+    firstTurn = findTurn(*read, "history-mutation", "turn-1");
+    secondTurn = findTurn(*read, "history-mutation", "turn-2");
+    require(threadNode && firstTurn && secondTurn &&
+                protocolIds(*read, read->children(threadNode)) ==
+                    std::vector<std::string>{"turn-1", "turn-2"} &&
+                !read->find(removedTurn->id()) &&
+                !read->find(removedItem->id()) && read->removed(removedTurn) &&
+                read->removed(removedItem) &&
+                std::ranges::find(rolledBack.change.removed, removedTurn) !=
+                    rolledBack.change.removed.end(),
+            "successful rollback replaces returned history and retires every "
+            "superseded turn and item");
+  }
+
+  const ProtocolRequestId revertId("revert-history");
+  const ApplyResult revertRequest = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/revert", revertId,
+       Value::Object{{"threadId", Value("history-mutation")},
+                     {"beforeTurnId", Value("turn-2")}}});
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/revert", revertId,
+       Value::Object{
+           {"thread", Value(Value::Object{{"id", Value("history-mutation")},
+                                          {"turns", Value(Value::Array{})}})},
+           {"turnsBackwardsCursor", Value("retained-prefix-cursor")},
+           {"itemsBackwardsCursor", Value("retained-items-cursor")}},
+       revertRequest.primary}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef threadNode =
+        read->find({NodeKind::Thread, "history-mutation"});
+    const auto state = threadNode ? read->state(threadNode) : nullptr;
+    require(threadNode && read->children(threadNode).empty() &&
+                !read->find(firstTurn->id()) && !read->find(secondTurn->id()) &&
+                read->removed(firstTurn) && read->removed(secondTurn) &&
+                field(state, "historyHasMore") &&
+                field(state, "historyHasMore")->asBool() &&
+                *field(state, "historyHasMore")->asBool() &&
+                field(state, "historyNextCursor") &&
+                field(state, "historyNextCursor")->asString() &&
+                *field(state, "historyNextCursor")->asString() ==
+                    "retained-prefix-cursor" &&
+                field(state, "itemsHistoryBackwardsCursor") &&
+                field(state, "itemsHistoryBackwardsCursor")->asString() &&
+                *field(state, "itemsHistoryBackwardsCursor")->asString() ==
+                    "retained-items-cursor",
+            "successful paginated revert unlinks cached history and exposes "
+            "only authoritative reload cursors");
+  }
+}
+
 } // namespace
 
 int main() {
   catalogIsComplete();
   everyKnownMethodDispatches();
   nestedEntitiesAndStreamsStayCurrent();
+  streamedTextIsBoundedAndReportsOmission();
+  activeTurnRelationTracksLifecycle();
+  effectiveThreadSettingsConvergeAcrossWireShapes();
+  threadItemPagesMaintainScopedContainmentAndOrder();
   scopedProviderIdentityCannotCrossParents();
   rootOrderAndThreadHierarchyAreExplicit();
   semanticDeltasAndHydratedOrderStayCurrent();
   realtimeNotificationsMaintainOneCurrentSession();
+  hookRunsKeepNestedIdentityAndCurrentOwnership();
   graphRelationsInvalidationAndIncarnationsAreExplicit();
   promptMaterializationDoesNotAcknowledgeDelivery();
   turnRootsAndPagedHistoryStayExplicit();
   resultsAndListsCorrelate();
+  lateResultsCannotRecreateDeletedTargets();
+  accountFacetsConvergeAndRateLimitPatchesStaySparse();
+  successfulRefreshesRetireInvalidationsAndConfigWritesInvalidate();
   reusedWireIdsRequireExactCurrentNodes();
+  keyedRuntimeNotificationsKeepIndependentCurrentState();
+  turnErrorsUpdateAddressedStateWithoutLosingTheNotice();
+  mcpServerNotificationsKeepCanonicalScope();
   interactionsAndRemovalKeepLifetime();
   unknownAndNeutralAreIsolated();
   lifecycleFactsAndRemovalPreserveThreadHierarchy();
   deletionUnlinksWholeGraph();
+  correlatedThreadReadsPreserveOnlyInterveningLiveState();
+  rollbackAndRevertReplaceAuthoritativeHistory();
 
   if (failures != 0) {
     std::cerr << failures << " nodegraph protocol assertion(s) failed\n";

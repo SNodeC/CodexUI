@@ -6,6 +6,7 @@ add_library(
     NodeGraph.cpp
     ProtocolCatalog.cpp
     ProtocolUpdater.cpp
+    PromptText.cpp
     EventFd.cpp
     ThreadChannels.cpp
     WorkerLogic.cpp

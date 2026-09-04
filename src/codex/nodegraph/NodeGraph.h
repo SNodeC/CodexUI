@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -43,6 +44,9 @@ enum class NodeKind : std::uint8_t {
   Process,
   RealtimeSession,
   FilesystemWatch,
+  ExternalAgentImport,
+  FuzzyFileSearchSession,
+  LoginAttempt,
   Notice,
   UnknownProtocol,
 };
@@ -84,6 +88,7 @@ enum class RelationKind : std::uint8_t {
   RootThread,
   StructuralChildThread,
   AgentChildThread,
+  ThreadOwner,
   ForkChildThread,
   ProjectMembership,
   SectionMembership,
@@ -94,6 +99,8 @@ enum class RelationKind : std::uint8_t {
   PendingPrompt,
   PromptMaterialization,
   ProcessOwner,
+  ActiveTurn,
+  UiSelectionTarget,
 };
 
 class Node final : public std::enable_shared_from_this<Node> {
@@ -157,15 +164,23 @@ public:
     [[nodiscard]] NodeRef find(const NodeId &id) const;
     [[nodiscard]] const std::vector<NodeRef> &orderedNodes() const noexcept;
     [[nodiscard]] const std::vector<NodeRef> &retiredNodes() const noexcept;
+    [[nodiscard]] std::size_t retiredCount() const noexcept;
+    [[nodiscard]] NodeRef retiredAt(std::size_t index) const;
+    // Changes only when an existing retirement is released. Appending a
+    // newly removed node preserves every earlier index.
+    [[nodiscard]] std::uint64_t retiredOrderGeneration() const noexcept;
     [[nodiscard]] std::shared_ptr<const NodeState>
     state(const NodeRef &node) const;
     [[nodiscard]] std::uint64_t changedRevision(const NodeRef &node) const;
     [[nodiscard]] bool removed(const NodeRef &node) const;
     [[nodiscard]] NodeRef parent(const NodeRef &node) const;
     [[nodiscard]] std::size_t childCount(const NodeRef &node) const;
-    [[nodiscard]] NodeRef childAt(const NodeRef &node,
-                                  std::size_t index) const;
+    [[nodiscard]] NodeRef childAt(const NodeRef &node, std::size_t index) const;
     [[nodiscard]] std::vector<NodeRef> children(const NodeRef &node) const;
+    [[nodiscard]] std::size_t relatedCount(const NodeRef &node,
+                                           RelationKind kind) const;
+    [[nodiscard]] NodeRef relatedAt(const NodeRef &node, RelationKind kind,
+                                    std::size_t index) const;
     [[nodiscard]] std::vector<NodeRef> related(const NodeRef &node,
                                                RelationKind kind) const;
 
@@ -190,6 +205,8 @@ public:
     [[nodiscard]] std::uint64_t revision() const noexcept;
     [[nodiscard]] NodeRef find(const NodeId &id) const;
     [[nodiscard]] const std::vector<NodeRef> &orderedNodes() const noexcept;
+    [[nodiscard]] std::uint64_t changedRevision(const NodeRef &node) const;
+    [[nodiscard]] bool hasPendingChanges() const noexcept;
     [[nodiscard]] NodeRef upsert(NodeId id, NodeState initial = {});
     [[nodiscard]] std::shared_ptr<const NodeState>
     state(const NodeRef &node) const;
@@ -201,9 +218,11 @@ public:
     void replaceState(const NodeRef &node, NodeState state);
     void setField(const NodeRef &node, std::string key, Value value);
     void eraseField(const NodeRef &node, std::string_view key);
-    void appendStringField(const NodeRef &node, std::string key,
-                           std::string_view suffix);
     void setStatus(const NodeRef &node, NodeStatus status);
+    // Advance an owning aggregate's changed revision after a concrete
+    // descendant mutation without adding redundant render work to the
+    // transaction's affected-node notification.
+    void touchRevision(const NodeRef &node);
     void setParent(const NodeRef &parent, const NodeRef &child);
     void clearParent(const NodeRef &child);
     void replaceChildren(const NodeRef &parent,
@@ -239,7 +258,11 @@ public:
     NodeGraph *graph_;
     std::unique_lock<std::shared_mutex> lock_;
     std::vector<NodeRef> affected_;
+    std::unordered_set<Node *> affectedIndex_;
+    std::vector<NodeRef> revisionTouches_;
+    std::unordered_set<Node *> revisionTouchIndex_;
     std::vector<NodeRef> removed_;
+    std::unordered_set<Node *> removedIndex_;
     bool dirty_ = false;
     bool finished_ = false;
   };
@@ -249,6 +272,8 @@ private:
   std::unordered_map<NodeId, NodeRef, NodeIdHash> nodes_;
   std::vector<NodeRef> orderedNodes_;
   std::vector<NodeRef> retiredNodes_;
+  std::unordered_map<Node *, std::size_t> retiredIndex_;
+  std::uint64_t retiredOrderGeneration_ = 0;
   std::uint64_t revision_ = 0;
   std::atomic<std::uint64_t> publishedRevision_{0};
 };

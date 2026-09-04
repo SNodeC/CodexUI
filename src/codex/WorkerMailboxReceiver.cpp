@@ -22,11 +22,13 @@ snode::log::Scope makeLogScope() {
 
 WorkerMailboxReceiver *
 WorkerMailboxReceiver::create(nodegraph::ThreadChannels &channels,
-                              MessageHandler onMessage) {
+                              MessageHandler onMessage,
+                              FailureHandler onFailure) {
   if (!onMessage || channels.qtToWorkerEventFd() < 0)
     return nullptr;
 
-  auto *receiver = new WorkerMailboxReceiver(channels, std::move(onMessage));
+  auto *receiver = new WorkerMailboxReceiver(channels, std::move(onMessage),
+                                             std::move(onFailure));
   if (!receiver->ReadEventReceiver::enable(channels.qtToWorkerEventFd())) {
     delete receiver;
     return nullptr;
@@ -35,10 +37,12 @@ WorkerMailboxReceiver::create(nodegraph::ThreadChannels &channels,
 }
 
 WorkerMailboxReceiver::WorkerMailboxReceiver(
-    nodegraph::ThreadChannels &channels, MessageHandler onMessage)
+    nodegraph::ThreadChannels &channels, MessageHandler onMessage,
+    FailureHandler onFailure)
     : core::eventreceiver::ReadEventReceiver("CodexUI worker mailbox",
                                              makeLogScope(), TIMEOUT::DISABLE),
       channels_(channels), onMessage_(std::move(onMessage)),
+      onFailure_(std::move(onFailure)),
       deferredReceiver_(std::make_shared<WorkerMailboxReceiver *>(this)) {}
 
 WorkerMailboxReceiver::~WorkerMailboxReceiver() { invalidateScheduledDrain(); }
@@ -73,7 +77,7 @@ void WorkerMailboxReceiver::consumeWakeAndMessages() {
 
   const nodegraph::EventFd::DrainResult wake = channels_.drainQtToWorkerWake();
   if (!wake.accepted()) {
-    close();
+    fail("Qt-to-worker eventfd failed while draining");
     return;
   }
 
@@ -89,7 +93,7 @@ void WorkerMailboxReceiver::consumeWakeAndMessages() {
       // released its slot before application logic is entered.
       onMessage_(std::move(message));
     } catch (...) {
-      close();
+      fail("Qt-to-worker action handler threw an exception");
       return;
     }
   }
@@ -114,7 +118,21 @@ void WorkerMailboxReceiver::scheduleNextDrain() {
     });
   } catch (...) {
     drainScheduled_ = false;
-    close();
+    fail("SNode.C rejected deferred Qt-to-worker mailbox draining");
+  }
+}
+
+void WorkerMailboxReceiver::fail(std::string reason) noexcept {
+  if (closing_)
+    return;
+  close();
+  if (!onFailure_)
+    return;
+  try {
+    onFailure_(std::move(reason));
+  } catch (...) {
+    // The receiver is already closed. Failure reporting must never revive the
+    // only mailbox consumer or prevent the worker shutdown path.
   }
 }
 

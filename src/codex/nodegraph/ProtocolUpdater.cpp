@@ -5,13 +5,20 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 namespace codexui::nodegraph {
 namespace {
+
+constexpr std::size_t MaximumRetainedStreamBytes = 256 * 1024;
+constexpr std::size_t RetainedStreamTailBytes = 192 * 1024;
+constexpr std::size_t MaximumIndexedTextParts = 4096;
 
 const Value *member(const Value::Object &object, std::string_view name) {
   const auto found = object.find(name);
@@ -42,6 +49,14 @@ std::string canonicalValue(const Value *value) {
   return {};
 }
 
+bool isLocalPrompt(NodeGraph::WriteAccess &write, const NodeRef &node) {
+  if (!node || node->id().kind != NodeKind::Item)
+    return false;
+  const std::shared_ptr<const NodeState> state = write.state(node);
+  const Value *type = member(state->fields, "type");
+  return type && type->asString() && *type->asString() == "localPrompt";
+}
+
 std::string firstId(const Value::Object &object,
                     std::span<const std::string_view> names) {
   for (const std::string_view name : names) {
@@ -66,6 +81,8 @@ std::string scopedCanonical(std::string_view owner,
 }
 
 NodeStatus statusFromValue(const Value *value) {
+  if (const Value::Object *object = value ? value->asObject() : nullptr)
+    value = member(*object, "type");
   const std::string *status = value ? value->asString() : nullptr;
   if (!status)
     return NodeStatus::Unknown;
@@ -73,11 +90,15 @@ NodeStatus statusFromValue(const Value *value) {
     return NodeStatus::Pending;
   if (*status == "running" || *status == "inProgress" || *status == "active")
     return NodeStatus::Running;
-  if (*status == "completed" || *status == "complete" || *status == "succeeded")
+  if (*status == "completed" || *status == "complete" ||
+      *status == "succeeded" || *status == "idle")
     return NodeStatus::Completed;
-  if (*status == "failed" || *status == "error")
+  if (*status == "failed" || *status == "error" || *status == "systemError")
     return NodeStatus::Failed;
-  if (*status == "interrupted" || *status == "cancelled")
+  if (*status == "blocked")
+    return NodeStatus::Failed;
+  if (*status == "interrupted" || *status == "cancelled" ||
+      *status == "stopped")
     return NodeStatus::Interrupted;
   if (*status == "notLoaded")
     return NodeStatus::NotLoaded;
@@ -97,10 +118,216 @@ void mergeObject(NodeGraph::WriteAccess &write, const NodeRef &node,
       continue;
     next.fields.insert_or_assign(key, value);
   }
-  const NodeStatus status = statusFromValue(member(object, "status"));
-  if (status != NodeStatus::Unknown)
-    next.status = status;
+  if (const Value *status = member(object, "status"))
+    next.status = statusFromValue(status);
   write.replaceState(node, std::move(next));
+}
+
+std::uint64_t unsignedValue(const Value *value) noexcept {
+  if (const std::uint64_t *number = value ? value->asUInt64() : nullptr)
+    return *number;
+  if (const std::int64_t *number = value ? value->asInt64() : nullptr;
+      number && *number >= 0)
+    return static_cast<std::uint64_t>(*number);
+  return 0;
+}
+
+std::size_t utf8TailStart(std::string_view value,
+                          std::size_t retainedBytes) noexcept {
+  if (value.size() <= retainedBytes)
+    return 0;
+  std::size_t start = value.size() - retainedBytes;
+  while (start < value.size() &&
+         (static_cast<unsigned char>(value[start]) & 0xc0U) == 0x80U)
+    ++start;
+  return start;
+}
+
+Value::Object *textRetention(NodeState &state) {
+  Value &retention = state.fields["textRetention"];
+  if (!retention.isObject())
+    retention = Value::Object{};
+  return retention.asObject();
+}
+
+const Value::Object *textRetention(const NodeState &state) {
+  const Value *retention = member(state.fields, "textRetention");
+  return retention ? retention->asObject() : nullptr;
+}
+
+bool hasTextRetention(const NodeState &state, std::string_view field) {
+  const Value::Object *retention = textRetention(state);
+  return retention && member(*retention, field);
+}
+
+void clearTextRetention(NodeState &state, std::string_view field) {
+  Value *retentionValue = nullptr;
+  if (auto found = state.fields.find("textRetention");
+      found != state.fields.end())
+    retentionValue = &found->second;
+  Value::Object *retention =
+      retentionValue ? retentionValue->asObject() : nullptr;
+  if (!retention)
+    return;
+  retention->erase(std::string(field));
+  if (retention->empty())
+    state.fields.erase("textRetention");
+}
+
+void updateTextRetention(NodeState &state, std::string_view field,
+                         std::size_t retainedBytes,
+                         std::size_t newlyDiscardedBytes) {
+  Value::Object *retention = textRetention(state);
+  Value &entryValue = (*retention)[std::string(field)];
+  if (!entryValue.isObject())
+    entryValue = Value::Object{};
+  Value::Object &entry = *entryValue.asObject();
+  const std::uint64_t previous = unsignedValue(member(entry, "discardedBytes"));
+  const std::uint64_t increment =
+      static_cast<std::uint64_t>(newlyDiscardedBytes);
+  const std::uint64_t discarded =
+      increment > std::numeric_limits<std::uint64_t>::max() - previous
+          ? std::numeric_limits<std::uint64_t>::max()
+          : previous + increment;
+  entry.insert_or_assign("discardedBytes", Value(discarded));
+  entry.insert_or_assign("retainedBytes",
+                         Value(static_cast<std::uint64_t>(retainedBytes)));
+}
+
+void boundScalarText(NodeState &state, std::string_view field) {
+  const auto found = state.fields.find(field);
+  std::string *value =
+      found == state.fields.end() ? nullptr : found->second.asString();
+  if (!value)
+    return;
+  std::size_t discarded = 0;
+  if (value->size() > MaximumRetainedStreamBytes) {
+    discarded = utf8TailStart(*value, RetainedStreamTailBytes);
+    value->erase(0, discarded);
+  }
+  if (discarded != 0 || hasTextRetention(state, field))
+    updateTextRetention(state, field, value->size(), discarded);
+}
+
+void boundIndexedText(NodeState &state, std::string_view field) {
+  const auto found = state.fields.find(field);
+  Value::Array *parts =
+      found == state.fields.end() ? nullptr : found->second.asArray();
+  if (!parts)
+    return;
+
+  std::uint64_t total = 0;
+  for (const Value &part : *parts) {
+    const std::string *text = part.asString();
+    if (!text)
+      continue;
+    const std::uint64_t bytes = static_cast<std::uint64_t>(text->size());
+    total = bytes > std::numeric_limits<std::uint64_t>::max() - total
+                ? std::numeric_limits<std::uint64_t>::max()
+                : total + bytes;
+  }
+
+  std::size_t discarded = 0;
+  if (total > MaximumRetainedStreamBytes) {
+    std::uint64_t toDiscard = total - RetainedStreamTailBytes;
+    for (Value &part : *parts) {
+      std::string *text = part.asString();
+      if (!text || text->empty() || toDiscard == 0)
+        continue;
+      std::size_t count = 0;
+      if (toDiscard >= text->size()) {
+        count = text->size();
+      } else {
+        count = utf8TailStart(*text, text->size() -
+                                         static_cast<std::size_t>(toDiscard));
+      }
+      text->erase(0, count);
+      toDiscard -= std::min<std::uint64_t>(toDiscard, count);
+      discarded += count;
+    }
+  }
+
+  std::size_t retained = 0;
+  for (const Value &part : *parts)
+    if (const std::string *text = part.asString())
+      retained += text->size();
+  if (discarded != 0 || hasTextRetention(state, field))
+    updateTextRetention(state, field, retained, discarded);
+}
+
+void boundRetainedItemText(NodeGraph::WriteAccess &write, const NodeRef &item,
+                           const Value::Object &incoming) {
+  NodeState next = *write.state(item);
+  for (const std::string_view field :
+       {std::string_view("text"), std::string_view("output"),
+        std::string_view("aggregatedOutput"), std::string_view("summary"),
+        std::string_view("content")}) {
+    if (incoming.contains(field))
+      clearTextRetention(next, field);
+  }
+
+  const std::string type = canonicalValue(member(next.fields, "type"));
+  if (type == "commandExecution") {
+    boundScalarText(next, "aggregatedOutput");
+    boundScalarText(next, "output");
+  } else if (type == "agentMessage" || type == "plan") {
+    boundScalarText(next, "text");
+  } else if (type == "reasoning") {
+    boundIndexedText(next, "summary");
+    boundIndexedText(next, "content");
+  } else if (type == "fileChange") {
+    boundScalarText(next, "output");
+  } else if (type != "userMessage") {
+    boundScalarText(next, "text");
+    boundScalarText(next, "output");
+    boundScalarText(next, "aggregatedOutput");
+    boundIndexedText(next, "summary");
+    boundIndexedText(next, "content");
+  }
+  write.replaceState(item, std::move(next));
+}
+
+void appendBoundedStringField(NodeGraph::WriteAccess &write,
+                              const NodeRef &node, std::string field,
+                              std::string_view suffix) {
+  NodeState next = *write.state(node);
+  Value &stored = next.fields[field];
+  std::string existing;
+  if (const std::string *current = stored.asString())
+    existing = *current;
+
+  std::size_t discarded = 0;
+  if (suffix.size() > MaximumRetainedStreamBytes) {
+    const std::size_t start = utf8TailStart(suffix, RetainedStreamTailBytes);
+    discarded = existing.size() + start;
+    existing.assign(suffix.substr(start));
+  } else {
+    existing.append(suffix);
+    if (existing.size() > MaximumRetainedStreamBytes) {
+      discarded = utf8TailStart(existing, RetainedStreamTailBytes);
+      existing.erase(0, discarded);
+    }
+  }
+  stored = Value(std::move(existing));
+  const std::size_t retained = stored.asString()->size();
+  if (discarded != 0 || hasTextRetention(next, field))
+    updateTextRetention(next, field, retained, discarded);
+  write.replaceState(node, std::move(next));
+}
+
+void mergeSparseRateLimitFields(Value::Object &current,
+                                const Value::Object &patch) {
+  for (const auto &[key, value] : patch) {
+    const auto found = current.find(key);
+    const Value::Object *patchObject = value.asObject();
+    if (found != current.end() && patchObject) {
+      if (Value::Object *currentObject = found->second.asObject()) {
+        mergeSparseRateLimitFields(*currentObject, *patchObject);
+        continue;
+      }
+    }
+    current.insert_or_assign(key, value);
+  }
 }
 
 std::string retainedProtocolId(NodeGraph::WriteAccess &write,
@@ -125,6 +352,81 @@ NodeRef ensureTurn(NodeGraph::WriteAccess &write, const NodeRef &thread,
   return turn;
 }
 
+bool isActiveTurn(const NodeState &state) {
+  const std::string status = canonicalValue(member(state.fields, "status"));
+  return state.status == NodeStatus::Running || status == "active" ||
+         status == "running" || status == "inProgress";
+}
+
+void updateActiveTurn(NodeGraph::WriteAccess &write, const NodeRef &thread,
+                      const NodeRef &turn) {
+  if (!thread || !turn)
+    return;
+  if (isActiveTurn(*write.state(turn))) {
+    const std::array<NodeRef, 1> active{turn};
+    write.replaceRelated(thread, RelationKind::ActiveTurn, active);
+    return;
+  }
+  write.unrelate(thread, RelationKind::ActiveTurn, turn);
+}
+
+void refreshActiveTurn(NodeGraph::WriteAccess &write, const NodeRef &thread) {
+  NodeRef active;
+  const std::vector<NodeRef> turns = write.children(thread);
+  for (auto iterator = turns.rbegin(); iterator != turns.rend(); ++iterator) {
+    if (*iterator && (*iterator)->id().kind == NodeKind::Turn &&
+        isActiveTurn(*write.state(*iterator))) {
+      active = *iterator;
+      break;
+    }
+  }
+  if (active) {
+    const std::array<NodeRef, 1> current{std::move(active)};
+    write.replaceRelated(thread, RelationKind::ActiveTurn, current);
+  } else {
+    write.replaceRelated(thread, RelationKind::ActiveTurn,
+                         std::span<const NodeRef>{});
+  }
+}
+
+void mergeEffectiveThreadSettings(NodeGraph::WriteAccess &write,
+                                  const NodeRef &thread,
+                                  const Value::Object &settings) {
+  if (!thread)
+    return;
+  if (settings.contains("effort"))
+    write.eraseField(thread, "reasoningEffort");
+  if (settings.contains("reasoningEffort"))
+    write.eraseField(thread, "effort");
+  if (settings.contains("sandboxPolicy"))
+    write.eraseField(thread, "sandbox");
+  if (settings.contains("sandbox"))
+    write.eraseField(thread, "sandboxPolicy");
+  for (const auto &[key, value] : settings) {
+    if (value.isNull())
+      write.eraseField(thread, key);
+    else
+      write.setField(thread, key, value);
+  }
+}
+
+void mergeThreadResultSettings(NodeGraph::WriteAccess &write,
+                               const NodeRef &thread,
+                               const Value::Object &result) {
+  Value::Object settings;
+  for (const std::string_view key :
+       {std::string_view("approvalPolicy"),
+        std::string_view("approvalsReviewer"), std::string_view("cwd"),
+        std::string_view("instructionSources"), std::string_view("model"),
+        std::string_view("modelProvider"), std::string_view("reasoningEffort"),
+        std::string_view("sandbox"), std::string_view("serviceTier"),
+        std::string_view("activePermissionProfile")}) {
+    if (const Value *value = member(result, key))
+      settings.emplace(key, *value);
+  }
+  mergeEffectiveThreadSettings(write, thread, settings);
+}
+
 NodeRef ensureItem(NodeGraph::WriteAccess &write, const NodeRef &turn,
                    std::string_view rawItemId) {
   if (!turn || turn->id().kind != NodeKind::Turn || rawItemId.empty())
@@ -137,6 +439,59 @@ NodeRef ensureItem(NodeGraph::WriteAccess &write, const NodeRef &turn,
     write.setField(item, "protocolThreadId", Value(thread->id().canonical));
   write.setParent(turn, item);
   return item;
+}
+
+NodeRef applyHookNotification(NodeGraph::WriteAccess &write,
+                              const DecodedMessage &message) {
+  const Value::Object *run = objectMember(message.payload, "run");
+  const std::string runId =
+      run ? canonicalValue(member(*run, "id")) : std::string{};
+  if (runId.empty())
+    return {};
+
+  NodeRef hook = write.upsert({NodeKind::Hook, runId});
+  mergeObject(write, hook, *run);
+  write.setField(hook, "protocolId", Value(runId));
+  write.setField(hook, "lastMethod", Value(message.method));
+
+  const Value *threadValue = member(message.payload, "threadId");
+  const Value *turnValue = member(message.payload, "turnId");
+  const std::string threadId = canonicalValue(threadValue);
+  const std::string turnId = canonicalValue(turnValue);
+  if (threadId.empty()) {
+    write.eraseField(hook, "threadId");
+    write.eraseField(hook, "protocolThreadId");
+  } else {
+    write.setField(hook, "threadId", Value(threadId));
+    write.setField(hook, "protocolThreadId", Value(threadId));
+  }
+  if (turnId.empty()) {
+    write.eraseField(hook, "turnId");
+    write.eraseField(hook, "protocolTurnId");
+  } else {
+    write.setField(hook, "turnId", Value(turnId));
+    write.setField(hook, "protocolTurnId", Value(turnId));
+  }
+
+  if (!threadId.empty()) {
+    NodeRef thread = write.upsert({NodeKind::Thread, threadId});
+    NodeRef owner = thread;
+    if (!turnId.empty())
+      if (NodeRef turn = ensureTurn(write, thread, turnId))
+        owner = std::move(turn);
+    write.setParent(owner, hook);
+  }
+
+  const Value *rawStatus = member(*run, "status");
+  NodeStatus status = statusFromValue(rawStatus);
+  if (status == NodeStatus::Unknown) {
+    const bool started = message.method == "hook/started";
+    status = started ? NodeStatus::Running : NodeStatus::Completed;
+    if (!rawStatus)
+      write.setField(hook, "status", Value(started ? "running" : "completed"));
+  }
+  write.setStatus(hook, status);
+  return hook;
 }
 
 std::optional<std::size_t> indexValue(const Value *value) {
@@ -152,8 +507,10 @@ std::optional<std::size_t> indexValue(const Value *value) {
 void appendIndexedField(NodeGraph::WriteAccess &write, const NodeRef &node,
                         std::string field, std::size_t index,
                         std::string_view suffix) {
+  if (index >= MaximumIndexedTextParts)
+    return;
   NodeState next = *write.state(node);
-  Value &stored = next.fields[std::move(field)];
+  Value &stored = next.fields[field];
   if (!stored.isArray())
     stored = Value::Array{};
   Value::Array &parts = *stored.asArray();
@@ -164,6 +521,7 @@ void appendIndexedField(NodeGraph::WriteAccess &write, const NodeRef &node,
     combined = *existing;
   combined.append(suffix);
   parts[index] = Value(std::move(combined));
+  boundIndexedText(next, field);
   write.replaceState(node, std::move(next));
 }
 
@@ -186,14 +544,14 @@ void appendSemanticDelta(NodeGraph::WriteAccess &write, const NodeRef &item,
     return;
   }
   if (method == "item/commandExecution/outputDelta") {
-    write.appendStringField(item, "aggregatedOutput", delta);
+    appendBoundedStringField(write, item, "aggregatedOutput", delta);
     return;
   }
   if (method == "item/fileChange/outputDelta") {
-    write.appendStringField(item, "output", delta);
+    appendBoundedStringField(write, item, "output", delta);
     return;
   }
-  write.appendStringField(item, "text", delta);
+  appendBoundedStringField(write, item, "text", delta);
 }
 
 std::string addressedId(const Value::Object &payload, NodeKind kind) {
@@ -260,6 +618,30 @@ bool isItemDeltaMethod(std::string_view method) {
          method == "item/fileChange/outputDelta";
 }
 
+bool isProviderNoticeMethod(std::string_view method) {
+  return method == "error" || method == "warning" ||
+         method == "guardianWarning" || method == "deprecationNotice" ||
+         method == "configWarning" || method == "windows/worldWritableWarning";
+}
+
+std::string mcpServerNodeKey(std::string_view method,
+                             const Value::Object &payload) {
+  if (method == "mcpServer/event/stream/notification") {
+    const std::string subscription =
+        canonicalValue(member(payload, "subscriptionId"));
+    return subscription.empty() ? std::string(method)
+                                : scopedCanonical("subscription", subscription);
+  }
+
+  const std::string name = canonicalValue(member(payload, "name"));
+  if (name.empty())
+    return std::string(method);
+  const std::string threadId = canonicalValue(member(payload, "threadId"));
+  return scopedCanonical(threadId.empty() ? std::string_view("global")
+                                          : std::string_view(threadId),
+                         name);
+}
+
 NodeKind kindForMethod(std::string_view method) {
   if (beginsWith(method, "item/"))
     return NodeKind::Item;
@@ -301,21 +683,80 @@ NodeRef containingThread(NodeGraph::WriteAccess &write, NodeRef node) {
   return node;
 }
 
+void refreshPendingInteractionCount(NodeGraph::WriteAccess &write,
+                                    const NodeRef &thread) {
+  if (!thread)
+    return;
+  std::size_t pending = 0;
+  for (const NodeRef &interaction :
+       write.related(thread, RelationKind::PendingInteraction)) {
+    if (interaction &&
+        (write.state(interaction)->status == NodeStatus::Pending ||
+         write.state(interaction)->status == NodeStatus::Failed))
+      ++pending;
+  }
+  write.setField(thread, "pendingInteractionCount",
+                 Value(static_cast<std::uint64_t>(pending)));
+}
+
 void clearPendingInteractionOwner(NodeGraph::WriteAccess &write,
                                   const NodeRef &interaction) {
   if (NodeRef runtime = write.find({NodeKind::Runtime, "runtime"}))
     write.unrelate(runtime, RelationKind::PendingInteraction, interaction);
   for (const NodeRef &target :
        write.related(interaction, RelationKind::InteractionTarget)) {
-    if (NodeRef thread = containingThread(write, target))
+    if (NodeRef thread = containingThread(write, target)) {
       write.unrelate(thread, RelationKind::PendingInteraction, interaction);
+      refreshPendingInteractionCount(write, thread);
+    }
   }
+}
+
+NodeRef newestInteractionForRequest(NodeGraph::WriteAccess &write,
+                                    std::string_view requestId) {
+  const auto &nodes = write.orderedNodes();
+  for (auto node = nodes.rbegin(); node != nodes.rend(); ++node) {
+    if (!*node || (*node)->id().kind != NodeKind::Interaction)
+      continue;
+    if (canonicalValue(member(write.state(*node)->fields, "requestId")) ==
+        requestId)
+      return *node;
+  }
+  return {};
+}
+
+bool interactionGenerationDiffers(const NodeState &state,
+                                  const DecodedMessage &message) {
+  if (message.connectionGeneration) {
+    const Value *stored = member(state.fields, "connectionGeneration");
+    if (!stored || unsignedValue(stored) != *message.connectionGeneration)
+      return true;
+  }
+  if (message.providerGeneration) {
+    const Value *stored = member(state.fields, "providerGeneration");
+    if (!stored || unsignedValue(stored) != *message.providerGeneration)
+      return true;
+  }
+  return false;
+}
+
+std::string scopedInteractionKey(const ProtocolRequestId &requestId,
+                                 const DecodedMessage &message) {
+  const std::string generation =
+      "connection:" + std::to_string(message.connectionGeneration.value_or(0)) +
+      ":provider:" + std::to_string(message.providerGeneration.value_or(0));
+  return "request:" + scopedCanonical(generation, requestId.canonical());
 }
 
 std::vector<NodeRef> mergeExistingTail(std::vector<NodeRef> first,
                                        const std::vector<NodeRef> &existing) {
+  std::unordered_set<const Node *> seen;
+  seen.reserve(first.size() + existing.size());
+  for (const NodeRef &node : first)
+    if (node)
+      seen.insert(node.get());
   for (const NodeRef &node : existing) {
-    if (std::find(first.begin(), first.end(), node) == first.end())
+    if (node && seen.insert(node.get()).second)
       first.emplace_back(node);
   }
   return first;
@@ -324,11 +765,16 @@ std::vector<NodeRef> mergeExistingTail(std::vector<NodeRef> first,
 std::vector<NodeRef> mergeLocalTail(NodeGraph::WriteAccess &write,
                                     std::vector<NodeRef> first,
                                     const std::vector<NodeRef> &existing) {
+  std::unordered_set<const Node *> seen;
+  seen.reserve(first.size() + existing.size());
+  for (const NodeRef &node : first)
+    if (node)
+      seen.insert(node.get());
   for (const NodeRef &node : existing) {
     const std::shared_ptr<const NodeState> state = write.state(node);
     const Value *local = member(state->fields, "local");
-    if ((!local || !local->asBool() || !*local->asBool()) ||
-        std::find(first.begin(), first.end(), node) != first.end())
+    if ((!local || !local->asBool() || !*local->asBool()) || !node ||
+        !seen.insert(node.get()).second)
       continue;
     first.emplace_back(node);
   }
@@ -336,35 +782,29 @@ std::vector<NodeRef> mergeLocalTail(NodeGraph::WriteAccess &write,
 }
 
 bool hasThreadOwner(NodeGraph::WriteAccess &write, const NodeRef &child) {
-  for (const NodeRef &candidate : write.orderedNodes()) {
-    if (candidate->id().kind != NodeKind::Thread || candidate == child)
-      continue;
-    for (const RelationKind kind : {RelationKind::StructuralChildThread,
-                                    RelationKind::AgentChildThread}) {
-      const std::vector<NodeRef> children = write.related(candidate, kind);
-      if (std::find(children.begin(), children.end(), child) != children.end())
-        return true;
-    }
-  }
-  return false;
+  return !write.related(child, RelationKind::ThreadOwner).empty();
 }
 
 void clearThreadOwners(NodeGraph::WriteAccess &write, const NodeRef &child) {
-  const std::vector<NodeRef> nodes = write.orderedNodes();
-  for (const NodeRef &candidate : nodes) {
-    if (candidate->id().kind != NodeKind::Thread || candidate == child)
-      continue;
-    write.unrelate(candidate, RelationKind::StructuralChildThread, child);
-    write.unrelate(candidate, RelationKind::AgentChildThread, child);
+  const std::vector<NodeRef> owners =
+      write.related(child, RelationKind::ThreadOwner);
+  for (const NodeRef &owner : owners) {
+    write.unrelate(owner, RelationKind::StructuralChildThread, child);
+    write.unrelate(owner, RelationKind::AgentChildThread, child);
+    write.unrelate(child, RelationKind::ThreadOwner, owner);
   }
 }
 
 void clearThreadOwnerKind(NodeGraph::WriteAccess &write, const NodeRef &child,
                           RelationKind kind) {
-  const std::vector<NodeRef> nodes = write.orderedNodes();
-  for (const NodeRef &candidate : nodes) {
-    if (candidate->id().kind == NodeKind::Thread && candidate != child)
-      write.unrelate(candidate, kind, child);
+  const std::vector<NodeRef> owners =
+      write.related(child, RelationKind::ThreadOwner);
+  for (const NodeRef &owner : owners) {
+    const std::vector<NodeRef> children = write.related(owner, kind);
+    if (std::find(children.begin(), children.end(), child) == children.end())
+      continue;
+    write.unrelate(owner, kind, child);
+    write.unrelate(child, RelationKind::ThreadOwner, owner);
   }
 }
 
@@ -374,6 +814,7 @@ void assignThreadOwner(NodeGraph::WriteAccess &write, const NodeRef &owner,
     return;
   clearThreadOwners(write, child);
   write.relate(owner, kind, child);
+  write.relate(child, RelationKind::ThreadOwner, owner);
   if (NodeRef runtime = write.find({NodeKind::Runtime, "runtime"})) {
     std::vector<NodeRef> roots =
         write.related(runtime, RelationKind::RootThread);
@@ -428,16 +869,16 @@ void assignSection(NodeGraph::WriteAccess &write, const NodeRef &thread,
 
 std::vector<std::string> agentChildIds(const Value::Object &item) {
   std::vector<std::string> children;
+  std::unordered_set<std::string> seen;
   std::string child = canonicalValue(member(item, "agentThreadId"));
-  if (!child.empty())
+  if (!child.empty() && seen.insert(child).second)
     children.emplace_back(std::move(child));
   const Value::Array *receivers = arrayMember(item, "receiverThreadIds");
   if (!receivers)
     return children;
   for (const Value &receiver : *receivers) {
     child = canonicalValue(&receiver);
-    if (!child.empty() &&
-        std::find(children.begin(), children.end(), child) == children.end())
+    if (!child.empty() && seen.insert(child).second)
       children.emplace_back(std::move(child));
   }
   return children;
@@ -496,6 +937,26 @@ void updateLoadedHistoryItemCount(NodeGraph::WriteAccess &write,
                  Value(static_cast<std::uint64_t>(loaded.size())));
 }
 
+void incrementLoadedHistoryItemCount(NodeGraph::WriteAccess &write,
+                                     const NodeRef &thread, std::size_t added) {
+  if (!thread || added == 0)
+    return;
+  const Value *current =
+      member(write.state(thread)->fields, "historyLoadedItemCount");
+  std::uint64_t count = 0;
+  if (const std::uint64_t *number = current ? current->asUInt64() : nullptr)
+    count = *number;
+  else if (const std::int64_t *number = current ? current->asInt64() : nullptr;
+           number && *number >= 0)
+    count = static_cast<std::uint64_t>(*number);
+  else {
+    updateLoadedHistoryItemCount(write, thread);
+    return;
+  }
+  write.setField(thread, "historyLoadedItemCount",
+                 Value(count + static_cast<std::uint64_t>(added)));
+}
+
 NodeId realtimeSessionNodeId(std::string_view threadId) {
   return NodeId{NodeKind::RealtimeSession,
                 scopedCanonical(threadId, "current")};
@@ -507,9 +968,20 @@ NodeId realtimeItemNodeId(const NodeRef &session, std::string_view itemId) {
 }
 
 void removeContained(NodeGraph::WriteAccess &write, const NodeRef &node) {
-  for (const NodeRef &child : write.children(node)) {
+  std::vector<NodeRef> owned = write.children(node);
+  std::unordered_set<const Node *> seen;
+  seen.reserve(owned.size() + 1);
+  for (const NodeRef &child : owned)
+    if (child)
+      seen.insert(child.get());
+  for (const NodeRef &root : write.related(node, RelationKind::TurnRootItem)) {
+    if (root && seen.insert(root.get()).second)
+      owned.emplace_back(root);
+  }
+  for (const NodeRef &child : owned) {
     removeContained(write, child);
-    write.remove(child);
+    if (write.find(child->id()) == child)
+      write.remove(child);
   }
 }
 
@@ -558,6 +1030,9 @@ void updateRoleTranscript(NodeGraph::WriteAccess &write, const NodeRef &session,
                           std::string_view role, std::string_view text,
                           bool append, bool completed) {
   NodeState next = *write.state(session);
+  const std::string retentionField = "transcripts/" + std::string(role);
+  if (!append)
+    clearTextRetention(next, retentionField);
   Value &stored = next.fields["transcripts"];
   if (!stored.isObject())
     stored = Value::Object{};
@@ -571,7 +1046,15 @@ void updateRoleTranscript(NodeGraph::WriteAccess &write, const NodeRef &session,
   } else {
     combined = std::string(text);
   }
+  std::size_t discarded = 0;
+  if (combined.size() > MaximumRetainedStreamBytes) {
+    discarded = utf8TailStart(combined, RetainedStreamTailBytes);
+    combined.erase(0, discarded);
+  }
   roleText = Value(std::move(combined));
+  if (discarded != 0 || hasTextRetention(next, retentionField))
+    updateTextRetention(next, retentionField, roleText.asString()->size(),
+                        discarded);
 
   if (completed) {
     Value &completion = next.fields["transcriptCompleted"];
@@ -640,6 +1123,221 @@ NodeRef ensureWatch(NodeGraph::WriteAccess &write,
                                     canonicalValue(member(payload, "watchId")));
 }
 
+bool applyExternalAgentImportUpdate(NodeGraph::WriteAccess &write,
+                                    const DecodedMessage &message) {
+  const std::string_view method = message.method;
+  const bool importResult =
+      message.kind == DecodedMessageKind::ClientResult &&
+      (method == "externalAgentConfig/import" ||
+       method == "externalAgentConfig/import/recordHistory");
+  const bool progress = method == "externalAgentConfig/import/progress";
+  const bool completed =
+      method == "externalAgentConfig/import/completed" ||
+      (importResult && method == "externalAgentConfig/import/recordHistory");
+  if (!importResult && !progress && !completed)
+    return false;
+
+  const std::string importId =
+      canonicalValue(member(message.payload, "importId"));
+  if (importId.empty())
+    return true;
+
+  NodeRef import = write.upsert({NodeKind::ExternalAgentImport, importId});
+  mergeObject(write, import, message.payload);
+  write.setField(import, "protocolId", Value(importId));
+  write.setField(import, "lastMethod", Value(message.method));
+  write.setStatus(import,
+                  completed ? NodeStatus::Completed : NodeStatus::Running);
+  write.setField(import, "lifecycle",
+                 Value(completed ? "completed" : "running"));
+  return true;
+}
+
+bool applyFuzzyFileSearchSessionUpdate(NodeGraph::WriteAccess &write,
+                                       const DecodedMessage &message) {
+  const std::string_view method = message.method;
+  const bool notification = method == "fuzzyFileSearch/sessionUpdated" ||
+                            method == "fuzzyFileSearch/sessionCompleted";
+  const bool result = message.kind == DecodedMessageKind::ClientResult &&
+                      (method == "fuzzyFileSearch/sessionStart" ||
+                       method == "fuzzyFileSearch/sessionUpdate" ||
+                       method == "fuzzyFileSearch/sessionStop");
+  if (!notification && !result)
+    return false;
+
+  const std::string sessionId =
+      canonicalValue(member(message.payload, "sessionId"));
+  if (sessionId.empty())
+    return true;
+
+  NodeRef session = ensureConnectionScopedNode(
+      write, NodeKind::FuzzyFileSearchSession, sessionId);
+  mergeObject(write, session, message.payload);
+  write.setField(session, "lastMethod", Value(message.method));
+  const bool completed = method == "fuzzyFileSearch/sessionCompleted";
+  const bool stopped = method == "fuzzyFileSearch/sessionStop";
+  write.setStatus(session, completed ? NodeStatus::Completed
+                           : stopped ? NodeStatus::Interrupted
+                                     : NodeStatus::Running);
+  write.setField(session, "lifecycle",
+                 Value(completed ? "completed"
+                       : stopped ? "stopped"
+                                 : "running"));
+  return true;
+}
+
+std::string loginAttemptNodeKey(const Value *loginId) {
+  if (!loginId || loginId->isNull())
+    return "login-id:none";
+  if (const std::string *id = loginId->asString())
+    return scopedCanonical("login-id", *id);
+  return "login-id:invalid";
+}
+
+bool applyAccountLoginUpdate(NodeGraph::WriteAccess &write,
+                             const DecodedMessage &message) {
+  const bool completed = message.method == "account/login/completed";
+  const bool startResult = message.kind == DecodedMessageKind::ClientResult &&
+                           message.method == "account/login/start";
+  const bool cancelResult = message.kind == DecodedMessageKind::ClientResult &&
+                            message.method == "account/login/cancel";
+  if (!completed && !startResult && !cancelResult)
+    return false;
+
+  const Value *loginId = member(message.payload, "loginId");
+  NodeRef attempt =
+      write.upsert({NodeKind::LoginAttempt, loginAttemptNodeKey(loginId)});
+  mergeObject(write, attempt, message.payload);
+  if (loginId)
+    write.setField(attempt, "protocolId", *loginId);
+  write.setField(attempt, "lastMethod", Value(message.method));
+  if (completed) {
+    const Value *success = member(message.payload, "success");
+    if (!success || !success->asBool())
+      return true;
+    write.setStatus(attempt, *success->asBool() ? NodeStatus::Completed
+                                                : NodeStatus::Failed);
+    write.setField(attempt, "lifecycle",
+                   Value(*success->asBool() ? "completed" : "failed"));
+  } else if (cancelResult) {
+    const std::string status =
+        canonicalValue(member(message.payload, "status"));
+    write.setStatus(attempt, status == "canceled" ? NodeStatus::Interrupted
+                                                  : NodeStatus::Completed);
+    write.setField(attempt, "lifecycle",
+                   Value(status.empty() ? "cancelled" : status));
+  } else {
+    write.setStatus(attempt, NodeStatus::Running);
+    write.setField(attempt, "lifecycle", Value("running"));
+  }
+  return true;
+}
+
+bool applyAccountUpdate(NodeGraph::WriteAccess &write,
+                        const DecodedMessage &message) {
+  const bool readResult = message.kind == DecodedMessageKind::ClientResult &&
+                          message.method == "account/read";
+  const bool logoutResult = message.kind == DecodedMessageKind::ClientResult &&
+                            message.method == "account/logout";
+  const bool notification =
+      message.kind == DecodedMessageKind::ServerNotification &&
+      message.method == "account/updated";
+  if (!readResult && !logoutResult && !notification)
+    return false;
+
+  NodeRef account = write.upsert({NodeKind::Account, "account"});
+  if (logoutResult) {
+    NodeState next;
+    const std::shared_ptr<const NodeState> previous = write.state(account);
+    if (const Value *requiresAuth =
+            member(previous->fields, "requiresOpenaiAuth"))
+      next.fields.emplace("requiresOpenaiAuth", *requiresAuth);
+    next.fields.emplace("account", Value(nullptr));
+    next.fields.emplace("authMode", Value(nullptr));
+    next.fields.emplace("planType", Value(nullptr));
+    next.fields.emplace("lastMethod", Value(message.method));
+    write.replaceState(account, std::move(next));
+    return true;
+  }
+  mergeObject(write, account, message.payload);
+  write.setField(account, "lastMethod", Value(message.method));
+  return true;
+}
+
+bool applyAccountRateLimitsUpdate(NodeGraph::WriteAccess &write,
+                                  const DecodedMessage &message) {
+  const bool readResult = message.kind == DecodedMessageKind::ClientResult &&
+                          message.method == "account/rateLimits/read";
+  const bool notification =
+      message.kind == DecodedMessageKind::ServerNotification &&
+      message.method == "account/rateLimits/updated";
+  if (!readResult && !notification)
+    return false;
+
+  NodeRef rateLimits = write.upsert({NodeKind::Account, "rate-limits"});
+  NodeState next = readResult ? NodeState{} : *write.state(rateLimits);
+  if (readResult)
+    next.fields = message.payload;
+  else
+    mergeSparseRateLimitFields(next.fields, message.payload);
+  next.fields.insert_or_assign("lastMethod", Value(message.method));
+  write.replaceState(rateLimits, std::move(next));
+  return true;
+}
+
+bool applyConfigurationUpdate(NodeGraph::WriteAccess &write,
+                              const DecodedMessage &message) {
+  if (message.kind != DecodedMessageKind::ClientResult)
+    return false;
+
+  const bool readResult = message.method == "config/read";
+  const bool writeResult = message.method == "config/value/write" ||
+                           message.method == "config/batchWrite";
+  if (!readResult && !writeResult)
+    return false;
+
+  NodeRef configuration =
+      write.upsert({NodeKind::Configuration, "config/read"});
+  if (readResult) {
+    NodeState next;
+    next.fields = message.payload;
+    next.fields.insert_or_assign("lastMethod", Value(message.method));
+    write.replaceState(configuration, std::move(next));
+    return true;
+  }
+
+  // A successful write confirms that the prior effective snapshot is no
+  // longer authoritative, but its result does not contain enough information
+  // to reconstruct layered effective config safely.
+  write.setField(configuration, "stale", Value(true));
+  write.setField(configuration, "invalidatedBy", Value(message.method));
+  write.setField(configuration, "lastMethod", Value(message.method));
+  return true;
+}
+
+void applyAddressedTurnError(NodeGraph::WriteAccess &write,
+                             const Value::Object &payload) {
+  const std::string threadId = addressedId(payload, NodeKind::Thread);
+  if (threadId.empty())
+    return;
+
+  NodeRef thread = write.upsert({NodeKind::Thread, threadId});
+  const std::string turnId = addressedId(payload, NodeKind::Turn);
+  NodeRef turn = ensureTurn(write, thread, turnId);
+  const Value *error = member(payload, "error");
+  const Value *willRetry = member(payload, "willRetry");
+  for (const NodeRef &target : {thread, turn}) {
+    if (!target)
+      continue;
+    if (error)
+      write.setField(target, "error", *error);
+    if (willRetry)
+      write.setField(target, "willRetry", *willRetry);
+  }
+  if (turn)
+    write.setField(thread, "errorTurnId", Value(turnId));
+}
+
 } // namespace
 
 NodeId scopedTurnNodeId(std::string_view threadId, std::string_view turnId) {
@@ -669,25 +1367,41 @@ std::string ProtocolRequestId::canonical() const {
 ProtocolUpdater::ProtocolUpdater(NodeGraph &graph) noexcept : graph_(&graph) {}
 
 ApplyResult ProtocolUpdater::apply(DecodedMessage message) {
+  auto write = graph_->write();
+  AppliedMessage applied = applyInto(write, message);
+  return ApplyResult{applied.knownMethod, applied.disposition, write.finish(),
+                     std::move(applied.primary)};
+}
+
+AppliedMessage ProtocolUpdater::applyInto(NodeGraph::WriteAccess &write,
+                                          const DecodedMessage &message) {
+  const auto touchAddressedThread = [&] {
+    if (!write.hasPendingChanges())
+      return;
+    std::string threadId = addressedId(message.payload, NodeKind::Thread);
+    if (threadId.empty()) {
+      if (const Value::Object *object = objectMember(message.payload, "thread"))
+        threadId = nestedId(*object);
+    }
+    if (!threadId.empty()) {
+      if (NodeRef thread = write.find({NodeKind::Thread, threadId}))
+        write.touchRevision(thread);
+    }
+  };
   const ProtocolDirection direction = catalogDirection(message.kind);
   const auto descriptor = findProtocolMethod(direction, message.method);
   if (!descriptor) {
-    auto write = graph_->write();
     applyUnknown(write, message);
     applyThreadActivity(write, message);
-    return ApplyResult{
-        false, MessageDisposition::GraphUpdate, write.finish(), {}};
+    touchAddressedThread();
+    return AppliedMessage{false, MessageDisposition::GraphUpdate, {}};
   }
 
   if (descriptor->get().disposition ==
       MessageDisposition::IntentionallyStateNeutral) {
-    return ApplyResult{true,
-                       descriptor->get().disposition,
-                       GraphChange{graph_->publishedRevision(), {}, {}},
-                       {}};
+    return AppliedMessage{true, descriptor->get().disposition, {}};
   }
 
-  auto write = graph_->write();
   NodeRef primary;
   switch (descriptor->get().disposition) {
   case MessageDisposition::WorkerOperationResult:
@@ -704,8 +1418,9 @@ ApplyResult ProtocolUpdater::apply(DecodedMessage message) {
     break;
   }
   applyThreadActivity(write, message);
-  return ApplyResult{true, descriptor->get().disposition, write.finish(),
-                     std::move(primary)};
+  touchAddressedThread();
+  return AppliedMessage{true, descriptor->get().disposition,
+                        std::move(primary)};
 }
 
 void ProtocolUpdater::applyThreadActivity(NodeGraph::WriteAccess &write,
@@ -740,25 +1455,9 @@ void ProtocolUpdater::applyThreadActivity(NodeGraph::WriteAccess &write,
     if (newer)
       write.setField(thread, "localActivityAt", Value(*message.activityAt));
 
-    NodeRef owner;
-    for (const NodeRef &candidate : write.orderedNodes()) {
-      if (!candidate || candidate->id().kind != NodeKind::Thread ||
-          candidate == thread)
-        continue;
-      for (const RelationKind relation : {RelationKind::StructuralChildThread,
-                                          RelationKind::AgentChildThread}) {
-        const std::vector<NodeRef> children =
-            write.related(candidate, relation);
-        if (std::find(children.begin(), children.end(), thread) !=
-            children.end()) {
-          owner = candidate;
-          break;
-        }
-      }
-      if (owner)
-        break;
-    }
-    thread = std::move(owner);
+    const std::vector<NodeRef> owners =
+        write.related(thread, RelationKind::ThreadOwner);
+    thread = owners.empty() ? NodeRef{} : owners.front();
   }
 }
 
@@ -767,14 +1466,18 @@ ProtocolUpdater::resolveInteraction(const ProtocolRequestId &requestId,
                                     bool accepted, std::string error) {
   auto write = graph_->write();
   NodeRef interaction =
-      write.find({NodeKind::Interaction, requestId.canonical()});
+      newestInteractionForRequest(write, requestId.canonical());
   if (!interaction)
     return write.finish();
   if (!accepted) {
     write.setStatus(interaction, NodeStatus::Failed);
     write.setField(interaction, "error", Value(std::move(error)));
+    for (const NodeRef &target :
+         write.related(interaction, RelationKind::InteractionTarget))
+      refreshPendingInteractionCount(write, containingThread(write, target));
     return write.finish();
   }
+  clearPendingInteractionOwner(write, interaction);
   write.remove(interaction);
   return write.finish();
 }
@@ -791,8 +1494,12 @@ GraphChange ProtocolUpdater::resolveInteraction(const NodeRef &interaction,
   if (!accepted) {
     write.setStatus(interaction, NodeStatus::Failed);
     write.setField(interaction, "error", Value(std::move(error)));
+    for (const NodeRef &target :
+         write.related(interaction, RelationKind::InteractionTarget))
+      refreshPendingInteractionCount(write, containingThread(write, target));
     return write.finish();
   }
+  clearPendingInteractionOwner(write, interaction);
   write.remove(interaction);
   return write.finish();
 }
@@ -832,6 +1539,9 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
     NodeRef operation = write.upsert({NodeKind::Operation, operationId});
     write.setField(operation, "method", Value(message.method));
     write.setField(operation, "requestPayload", Value(message.payload));
+    if (message.method == "thread/read")
+      write.setField(operation, "requestTargetRevision",
+                     Value(write.revision() + 1));
     write.setStatus(operation, NodeStatus::Pending);
     const std::string threadId = addressedId(message.payload, NodeKind::Thread);
     const std::string turnId = addressedId(message.payload, NodeKind::Turn);
@@ -865,8 +1575,10 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
       target = turn;
     if (!target && thread)
       target = thread;
-    if (target)
+    if (target) {
       write.relate(operation, RelationKind::OperationTarget, target);
+      write.setField(operation, "hadOperationTarget", Value(true));
+    }
     return operation;
   }
 
@@ -892,6 +1604,17 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
       !storedMethod->asString() || *storedMethod->asString() != message.method)
     return {};
 
+  const Value *hadOperationTarget =
+      member(operationState->fields, "hadOperationTarget");
+  if (hadOperationTarget && hadOperationTarget->asBool() &&
+      *hadOperationTarget->asBool() &&
+      write.related(operation, RelationKind::OperationTarget).empty()) {
+    // The target was deleted after this request was sent. Retire the exact
+    // operation without allowing any late result payload to recreate it.
+    write.remove(operation);
+    return {};
+  }
+
   if (message.kind == DecodedMessageKind::ClientResult) {
     DecodedMessage correlated = message;
     const auto request = operationState->fields.find("requestPayload");
@@ -901,7 +1624,17 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
           correlated.payload.try_emplace(key, value);
       }
     }
-    applyGraphUpdate(write, correlated);
+    bool replaceThreadRead = true;
+    if (message.method == "thread/read") {
+      const Value *started =
+          member(operationState->fields, "requestTargetRevision");
+      const std::uint64_t *revision = started ? started->asUInt64() : nullptr;
+      const std::vector<NodeRef> targets =
+          write.related(operation, RelationKind::OperationTarget);
+      replaceThreadRead = revision && !targets.empty() && targets.front() &&
+                          write.changedRevision(targets.front()) == *revision;
+    }
+    applyGraphUpdate(write, correlated, replaceThreadRead);
   }
   // Operations model only work that is currently pending. Results/errors are
   // applied to current state and then the operation is retired in this same
@@ -914,11 +1647,27 @@ NodeRef ProtocolUpdater::applyInteraction(NodeGraph::WriteAccess &write,
                                           const DecodedMessage &message) {
   if (!message.requestId)
     throw std::invalid_argument("a server request requires an id");
-  if (NodeRef previous =
-          write.find({NodeKind::Interaction, message.requestId->canonical()}))
+  const std::string requestId = message.requestId->canonical();
+  std::string interactionKey = requestId;
+  if (NodeRef previous = write.find({NodeKind::Interaction, requestId})) {
+    const std::shared_ptr<const NodeState> previousState =
+        write.state(previous);
+    const Value *recovery = member(previousState->fields, "recoveryOnly");
+    const bool recoveryOnly =
+        recovery && recovery->asBool() && *recovery->asBool();
+    if (recoveryOnly || interactionGenerationDiffers(*previousState, message)) {
+      interactionKey = scopedInteractionKey(*message.requestId, message);
+    } else {
+      clearPendingInteractionOwner(write, previous);
+      write.remove(previous);
+    }
+  }
+  if (NodeRef previous = write.find({NodeKind::Interaction, interactionKey})) {
+    clearPendingInteractionOwner(write, previous);
     write.remove(previous);
+  }
   NodeRef interaction =
-      write.upsert({NodeKind::Interaction, message.requestId->canonical()});
+      write.upsert({NodeKind::Interaction, std::move(interactionKey)});
   clearPendingInteractionOwner(write, interaction);
   const std::vector<NodeRef> previousTargets =
       write.related(interaction, RelationKind::InteractionTarget);
@@ -928,7 +1677,13 @@ NodeRef ProtocolUpdater::applyInteraction(NodeGraph::WriteAccess &write,
   state.status = NodeStatus::Pending;
   state.fields.emplace("method", Value(message.method));
   state.fields.emplace("payload", Value(message.payload));
-  state.fields.emplace("requestId", Value(message.requestId->canonical()));
+  state.fields.emplace("requestId", Value(requestId));
+  if (message.connectionGeneration)
+    state.fields.emplace("connectionGeneration",
+                         Value(*message.connectionGeneration));
+  if (message.providerGeneration)
+    state.fields.emplace("providerGeneration",
+                         Value(*message.providerGeneration));
   write.replaceState(interaction, std::move(state));
 
   const std::string threadId = addressedId(message.payload, NodeKind::Thread);
@@ -952,8 +1707,10 @@ NodeRef ProtocolUpdater::applyInteraction(NodeGraph::WriteAccess &write,
     target = thread;
   if (target) {
     write.relate(interaction, RelationKind::InteractionTarget, target);
-    if (NodeRef owner = containingThread(write, target))
+    if (NodeRef owner = containingThread(write, target)) {
       write.relate(owner, RelationKind::PendingInteraction, interaction);
+      refreshPendingInteractionCount(write, owner);
+    }
   }
   NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
   write.relate(runtime, RelationKind::PendingInteraction, interaction);
@@ -1055,7 +1812,7 @@ bool ProtocolUpdater::applyRealtimeUpdate(NodeGraph::WriteAccess &write,
       const std::string delta =
           canonicalValue(member(message.payload, "delta"));
       if (!delta.empty())
-        write.appendStringField(realtimeItem, "transcript", delta);
+        appendBoundedStringField(write, realtimeItem, "transcript", delta);
     }
     return true;
   }
@@ -1114,8 +1871,49 @@ bool ProtocolUpdater::applyRealtimeUpdate(NodeGraph::WriteAccess &write,
 }
 
 void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
-                                       const DecodedMessage &message) {
+                                       const DecodedMessage &message,
+                                       bool replaceThreadRead) {
   const std::string_view method = message.method;
+
+  if (isProviderNoticeMethod(method)) {
+    NodeRef notice = write.upsert({NodeKind::Notice, "provider-notice"});
+    write.setField(notice, "method", Value(std::string(method)));
+    write.setField(notice, "severity",
+                   Value(method == "error" ? "error" : "warning"));
+    mergeObject(write, notice, message.payload);
+    write.setStatus(notice, method == "error" ? NodeStatus::Failed
+                                              : NodeStatus::Completed);
+    if (method == "error")
+      applyAddressedTurnError(write, message.payload);
+    return;
+  }
+
+  if (applyExternalAgentImportUpdate(write, message) ||
+      applyFuzzyFileSearchSessionUpdate(write, message) ||
+      applyAccountLoginUpdate(write, message) ||
+      applyAccountUpdate(write, message) ||
+      applyAccountRateLimitsUpdate(write, message) ||
+      applyConfigurationUpdate(write, message))
+    return;
+
+  if (method.starts_with("mcpServer/")) {
+    NodeRef server = write.upsert(
+        {NodeKind::McpServer, mcpServerNodeKey(method, message.payload)});
+    const std::string protocolId =
+        method == "mcpServer/event/stream/notification"
+            ? canonicalValue(member(message.payload, "subscriptionId"))
+            : canonicalValue(member(message.payload, "name"));
+    if (!protocolId.empty())
+      write.setField(server, "protocolId", Value(protocolId));
+    write.setField(server, "lastMethod", Value(std::string(method)));
+    mergeObject(write, server, message.payload);
+    return;
+  }
+
+  if (method == "hook/started" || method == "hook/completed") {
+    static_cast<void>(applyHookNotification(write, message));
+    return;
+  }
 
   if (applyRealtimeUpdate(write, message))
     return;
@@ -1129,8 +1927,9 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
     const std::string delta =
         canonicalValue(member(message.payload, "deltaBase64"));
     if (!delta.empty())
-      write.appendStringField(
-          process, (stream.empty() ? "output" : stream) + "Base64", delta);
+      appendBoundedStringField(write, process,
+                               (stream.empty() ? "output" : stream) + "Base64",
+                               delta);
     if (const Value *capReached = member(message.payload, "capReached"))
       write.setField(process,
                      (stream.empty() ? "output" : stream) + "CapReached",
@@ -1185,13 +1984,23 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
     const Value *requestId = member(message.payload, "requestId");
     const std::string canonical = canonicalValue(requestId);
     if (!canonical.empty()) {
-      NodeRef interaction =
-          write.find({NodeKind::Interaction, requestId && requestId->asString()
-                                                 ? "string:" + canonical
-                                                 : "number:" + canonical});
+      const std::string typedRequestId = requestId && requestId->asString()
+                                             ? "string:" + canonical
+                                             : "number:" + canonical;
+      NodeRef interaction;
+      if (message.expectedNode &&
+          write.find(message.expectedNode->id()) == message.expectedNode &&
+          canonicalValue(member(write.state(message.expectedNode)->fields,
+                                "requestId")) == typedRequestId) {
+        interaction = message.expectedNode;
+      } else if (!message.expectedNode) {
+        interaction = newestInteractionForRequest(write, typedRequestId);
+      }
       if (interaction &&
-          (!message.expectedNode || message.expectedNode == interaction))
+          (!message.expectedNode || message.expectedNode == interaction)) {
+        clearPendingInteractionOwner(write, interaction);
         write.remove(interaction);
+      }
     }
     return;
   }
@@ -1224,7 +2033,10 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
         admitRootThread(write, thread, false);
       } else {
         write.setField(thread, "lifecycle", Value("closed"));
+        write.setField(thread, "status", Value("notLoaded"));
         write.setStatus(thread, NodeStatus::NotLoaded);
+        write.replaceRelated(thread, RelationKind::ActiveTurn,
+                             std::span<const NodeRef>{});
       }
     }
     return;
@@ -1247,6 +2059,16 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
     return;
   }
 
+  if (message.kind == DecodedMessageKind::ClientResult &&
+      (method == "skills/list" || method == "app/list")) {
+    NodeRef catalog = write.upsert(
+        {NodeKind::Catalog, method == "skills/list" ? "skills" : "app"});
+    mergeObject(write, catalog, message.payload);
+    write.eraseField(catalog, "stale");
+    write.eraseField(catalog, "invalidatedBy");
+    return;
+  }
+
   if (method == "thread/queue/changed" || method == "thread/reverted") {
     const std::string id = addressedId(message.payload, NodeKind::Thread);
     if (!id.empty()) {
@@ -1255,6 +2077,17 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
                      method == "thread/queue/changed" ? "queueStale"
                                                       : "historyStale",
                      Value(true));
+    }
+    return;
+  }
+
+  if (message.kind == DecodedMessageKind::ClientResult &&
+      method == "thread/queue/list") {
+    const std::string id = addressedId(message.payload, NodeKind::Thread);
+    if (!id.empty()) {
+      NodeRef thread = write.upsert({NodeKind::Thread, id});
+      mergeObject(write, thread, message.payload);
+      write.eraseField(thread, "queueStale");
     }
     return;
   }
@@ -1306,8 +2139,10 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
       if (const Value *status = member(message.payload, "status")) {
         write.setField(thread, "status", *status);
         const NodeStatus normalized = statusFromValue(status);
-        if (normalized != NodeStatus::Unknown)
-          write.setStatus(thread, normalized);
+        write.setStatus(thread, normalized);
+        if (normalized != NodeStatus::Running)
+          write.replaceRelated(thread, RelationKind::ActiveTurn,
+                               std::span<const NodeRef>{});
       }
     }
     return;
@@ -1333,6 +2168,7 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
           if (!id.empty()) {
             NodeRef project = write.upsert({NodeKind::Project, id});
             mergeObject(write, project, *object);
+            write.eraseField(project, "stale");
           }
         }
       }
@@ -1356,6 +2192,7 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
       mergeObject(write, project, *object);
     else
       mergeObject(write, project, message.payload);
+    write.eraseField(project, "stale");
     return;
   }
 
@@ -1406,6 +2243,79 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
   }
 
   if (message.kind == DecodedMessageKind::ClientResult &&
+      method == "thread/items/list") {
+    const std::string id = addressedId(message.payload, NodeKind::Thread);
+    if (id.empty())
+      return;
+    NodeRef thread = write.upsert({NodeKind::Thread, id});
+    std::vector<std::pair<NodeRef, std::vector<NodeRef>>> pages;
+    std::unordered_map<const Node *, std::size_t> pageIndexes;
+    std::vector<std::unordered_set<const Node *>> pageItems;
+    if (const Value::Array *entries = arrayMember(message.payload, "data")) {
+      pages.reserve(entries->size());
+      pageItems.reserve(entries->size());
+      for (const Value &value : *entries) {
+        const Value::Object *entry = value.asObject();
+        const Value::Object *itemObject =
+            entry ? objectMember(*entry, "item") : nullptr;
+        const std::string turnId =
+            entry ? canonicalValue(member(*entry, "turnId")) : std::string{};
+        if (!itemObject || turnId.empty())
+          continue;
+        NodeRef turn = ensureTurn(write, thread, turnId);
+        NodeRef item = ingestItem(write, *itemObject, turn);
+        if (!item)
+          continue;
+        auto [position, inserted] =
+            pageIndexes.emplace(turn.get(), pages.size());
+        if (inserted) {
+          pages.emplace_back(turn, std::vector<NodeRef>{});
+          pageItems.emplace_back();
+        }
+        const std::size_t page = position->second;
+        if (pageItems[page].insert(item.get()).second)
+          pages[page].second.emplace_back(std::move(item));
+      }
+    }
+
+    const std::string direction =
+        canonicalValue(member(message.payload, "sortDirection"));
+    for (auto &[turn, page] : pages) {
+      if (direction == "desc")
+        std::reverse(page.begin(), page.end());
+      const std::vector<NodeRef> existing = write.children(turn);
+      if (direction == "asc")
+        write.replaceChildren(turn, mergeExistingTail(existing, page));
+      else
+        write.replaceChildren(turn,
+                              mergeExistingTail(std::move(page), existing));
+    }
+
+    NodeRef cursorOwner = thread;
+    const std::string requestedTurn =
+        canonicalValue(member(message.payload, "turnId"));
+    if (!requestedTurn.empty())
+      cursorOwner = ensureTurn(write, thread, requestedTurn);
+    const std::string nextCursor =
+        canonicalValue(member(message.payload, "nextCursor"));
+    write.setField(cursorOwner, "itemsHistoryHasMore",
+                   Value(!nextCursor.empty()));
+    if (nextCursor.empty())
+      write.eraseField(cursorOwner, "itemsHistoryNextCursor");
+    else
+      write.setField(cursorOwner, "itemsHistoryNextCursor", Value(nextCursor));
+    const std::string backwardsCursor =
+        canonicalValue(member(message.payload, "backwardsCursor"));
+    if (backwardsCursor.empty())
+      write.eraseField(cursorOwner, "itemsHistoryBackwardsCursor");
+    else
+      write.setField(cursorOwner, "itemsHistoryBackwardsCursor",
+                     Value(backwardsCursor));
+    updateLoadedHistoryItemCount(write, thread);
+    return;
+  }
+
+  if (message.kind == DecodedMessageKind::ClientResult &&
       method == "thread/turns/list") {
     const std::string id = addressedId(message.payload, NodeKind::Thread);
     if (id.empty())
@@ -1418,17 +2328,21 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
       turns = arrayMember(message.payload, "turns");
     if (turns) {
       page.reserve(turns->size());
+      std::unordered_set<const Node *> seen;
+      seen.reserve(turns->size());
       for (const Value &value : *turns) {
         const Value::Object *turnObject = value.asObject();
         if (!turnObject)
           continue;
         NodeRef turn = ingestTurn(write, *turnObject, thread, {}, true);
-        if (turn && std::find(page.begin(), page.end(), turn) == page.end())
+        if (turn && seen.insert(turn.get()).second)
           page.emplace_back(std::move(turn));
       }
       write.replaceChildren(thread,
                             mergeExistingTail(std::move(page), previous));
     }
+
+    refreshActiveTurn(write, thread);
 
     const std::string nextCursor =
         canonicalValue(member(message.payload, "nextCursor"));
@@ -1448,19 +2362,11 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
     NodeRef thread;
     NodeRef turn;
     NodeRef item;
-    bool historyMembershipMayChange = false;
+    bool newItemMembership = false;
     if (!threadId.empty())
       thread = write.upsert({NodeKind::Thread, threadId});
-    if (!turnId.empty()) {
-      const NodeId turnNodeId = scopedTurnNodeId(threadId, turnId);
-      const NodeRef previousTurn = thread ? write.find(turnNodeId) : NodeRef{};
-      const NodeRef previousParent =
-          previousTurn ? write.parent(previousTurn) : NodeRef{};
+    if (!turnId.empty())
       turn = ensureTurn(write, thread, turnId);
-      if (turn) {
-        historyMembershipMayChange |= previousParent != thread;
-      }
-    }
     if (!itemId.empty()) {
       const NodeId itemNodeId = turn ? scopedItemNodeId(turn->id(), itemId)
                                      : NodeId{NodeKind::Item, {}};
@@ -1469,12 +2375,12 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
           previousItem ? write.parent(previousItem) : NodeRef{};
       item = ensureItem(write, turn, itemId);
       if (item) {
-        historyMembershipMayChange |= previousParent != turn;
+        newItemMembership = previousParent != turn;
         appendSemanticDelta(write, item, method, message.payload);
       }
     }
-    if (historyMembershipMayChange)
-      updateLoadedHistoryItemCount(write, thread);
+    if (newItemMembership)
+      incrementLoadedHistoryItemCount(write, thread, 1);
     return;
   }
 
@@ -1482,18 +2388,78 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
   NodeRef turn;
   NodeRef item;
   bool historyMembershipMayChange = false;
+  bool historyMembershipRequiresRecount = false;
+  std::size_t newHistoryItems = 0;
+  const auto refreshHistoryCount = [&] {
+    if (historyMembershipRequiresRecount)
+      updateLoadedHistoryItemCount(write, thread);
+    else
+      incrementLoadedHistoryItemCount(write, thread, newHistoryItems);
+  };
   if (const Value::Object *threadObject =
           objectMember(message.payload, "thread")) {
-    historyMembershipMayChange = arrayMember(*threadObject, "turns") != nullptr;
+    const bool authoritativeHistoryResult =
+        message.kind == DecodedMessageKind::ClientResult &&
+        (method == "thread/rollback" || method == "thread/revert");
+    historyMembershipMayChange = authoritativeHistoryResult ||
+                                 arrayMember(*threadObject, "turns") != nullptr;
+    historyMembershipRequiresRecount = historyMembershipMayChange;
     const bool replaceTurns =
         message.kind == DecodedMessageKind::ClientResult &&
-        method == "thread/read";
-    thread = ingestThread(write, *threadObject, {}, replaceTurns);
+        ((replaceThreadRead && method == "thread/read") ||
+         authoritativeHistoryResult);
+    const bool mergeThreadState =
+        !(message.kind == DecodedMessageKind::ClientResult &&
+          method == "thread/read" && !replaceThreadRead);
+    const std::string returnedThreadId = nestedId(*threadObject);
+    const NodeRef previousThread =
+        returnedThreadId.empty()
+            ? NodeRef{}
+            : write.find({NodeKind::Thread, returnedThreadId});
+    const std::vector<NodeRef> previousTurns =
+        previousThread ? write.children(previousThread)
+                       : std::vector<NodeRef>{};
+    thread =
+        ingestThread(write, *threadObject, {}, replaceTurns, mergeThreadState);
+    if (authoritativeHistoryResult && thread) {
+      std::unordered_set<const Node *> retainedTurns;
+      for (const NodeRef &retained : write.children(thread))
+        if (retained)
+          retainedTurns.insert(retained.get());
+      for (const NodeRef &removed : previousTurns) {
+        if (!removed || retainedTurns.contains(removed.get()) ||
+            write.find(removed->id()) != removed)
+          continue;
+        removeContained(write, removed);
+        write.remove(removed);
+      }
+      const std::string turnsCursor =
+          canonicalValue(member(message.payload, "turnsBackwardsCursor"));
+      write.setField(thread, "historyHasMore", Value(!turnsCursor.empty()));
+      if (turnsCursor.empty())
+        write.eraseField(thread, "historyNextCursor");
+      else
+        write.setField(thread, "historyNextCursor", Value(turnsCursor));
+      const std::string itemsCursor =
+          canonicalValue(member(message.payload, "itemsBackwardsCursor"));
+      if (itemsCursor.empty())
+        write.eraseField(thread, "itemsHistoryBackwardsCursor");
+      else
+        write.setField(thread, "itemsHistoryBackwardsCursor",
+                       Value(itemsCursor));
+      write.eraseField(thread, "historyStale");
+    }
     if (thread && (method == "thread/started" ||
                    (message.kind == DecodedMessageKind::ClientResult &&
                     (method == "thread/start" || method == "thread/resume" ||
                      method == "thread/fork" || method == "thread/read"))))
       admitRootThread(write, thread, true);
+    if (thread && message.kind == DecodedMessageKind::ClientResult &&
+        method == "thread/read" && replaceTurns) {
+      const Value *includeTurns = member(message.payload, "includeTurns");
+      if (includeTurns && includeTurns->asBool() && *includeTurns->asBool())
+        write.eraseField(thread, "historyStale");
+    }
   } else {
     const std::string threadId = addressedId(message.payload, NodeKind::Thread);
     if (!threadId.empty())
@@ -1511,13 +2477,20 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
     historyMembershipMayChange |=
         arrayMember(*turnObject, "items") != nullptr ||
         (thread && previousParent != thread);
+    historyMembershipRequiresRecount |=
+        arrayMember(*turnObject, "items") != nullptr;
     turn = ingestTurn(write, *turnObject, thread);
     if (turn && method == "turn/started" &&
-        write.state(turn)->status == NodeStatus::Unknown)
+        write.state(turn)->status == NodeStatus::Unknown) {
       write.setStatus(turn, NodeStatus::Running);
+      write.setField(turn, "status", Value("running"));
+    }
     if (turn && method == "turn/completed" &&
-        statusFromValue(member(*turnObject, "status")) == NodeStatus::Unknown)
+        statusFromValue(member(*turnObject, "status")) == NodeStatus::Unknown) {
       write.setStatus(turn, NodeStatus::Completed);
+      write.setField(turn, "status", Value("completed"));
+    }
+    updateActiveTurn(write, thread, turn);
   } else {
     const std::string id = addressedId(message.payload, NodeKind::Turn);
     if (!id.empty()) {
@@ -1540,7 +2513,10 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
                             : write.find(scopedItemNodeId(turn->id(), id));
     const NodeRef previousParent =
         previousItem ? write.parent(previousItem) : NodeRef{};
-    historyMembershipMayChange |= turn && previousParent != turn;
+    if (turn && previousParent != turn) {
+      historyMembershipMayChange = true;
+      ++newHistoryItems;
+    }
     item = ingestItem(write, *itemObject, turn);
     if (item) {
       if (const Value *startedAt = member(message.payload, "startedAtMs"))
@@ -1549,11 +2525,15 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
         write.setField(item, "completedAtMs", *completedAt);
     }
     if (item && method == "item/started" &&
-        write.state(item)->status == NodeStatus::Unknown)
+        write.state(item)->status == NodeStatus::Unknown) {
       write.setStatus(item, NodeStatus::Running);
+      write.setField(item, "status", Value("running"));
+    }
     if (item && method == "item/completed" &&
-        statusFromValue(member(*itemObject, "status")) == NodeStatus::Unknown)
+        statusFromValue(member(*itemObject, "status")) == NodeStatus::Unknown) {
       write.setStatus(item, NodeStatus::Completed);
+      write.setField(item, "status", Value("completed"));
+    }
   } else {
     const std::string id = addressedId(message.payload, NodeKind::Item);
     if (!id.empty()) {
@@ -1563,8 +2543,25 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
           previousItem ? write.parent(previousItem) : NodeRef{};
       item = ensureItem(write, turn, id);
       if (item) {
-        historyMembershipMayChange |= previousParent != turn;
+        if (previousParent != turn) {
+          historyMembershipMayChange = true;
+          ++newHistoryItems;
+        }
       }
+    }
+  }
+
+  if (thread && message.kind == DecodedMessageKind::ClientResult &&
+      (method == "thread/start" || method == "thread/resume" ||
+       method == "thread/fork")) {
+    mergeThreadResultSettings(write, thread, message.payload);
+  }
+  if (thread && method == "thread/settings/updated") {
+    if (const Value::Object *settings =
+            objectMember(message.payload, "threadSettings")) {
+      mergeEffectiveThreadSettings(write, thread, *settings);
+      write.setField(thread, "latestSettingsUpdate", Value(*settings));
+      write.setField(thread, "settingsRevision", Value(write.revision() + 1));
     }
   }
 
@@ -1574,7 +2571,7 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
     if (const Value *plan = member(message.payload, "plan"))
       write.setField(turn, "plan", *plan);
     if (historyMembershipMayChange)
-      updateLoadedHistoryItemCount(write, thread);
+      refreshHistoryCount();
     return;
   }
 
@@ -1582,7 +2579,7 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
     if (const Value *diff = member(message.payload, "diff"))
       write.setField(turn, "diff", *diff);
     if (historyMembershipMayChange)
-      updateLoadedHistoryItemCount(write, thread);
+      refreshHistoryCount();
     return;
   }
 
@@ -1597,7 +2594,7 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
       const std::string delta =
           canonicalValue(member(message.payload, "delta"));
       if (!delta.empty())
-        write.appendStringField(node, "output", delta);
+        appendBoundedStringField(write, node, "output", delta);
     } else {
       mergeObject(write, node, message.payload);
     }
@@ -1608,7 +2605,7 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
       objectMember(message.payload, "turn") ||
       objectMember(message.payload, "item")) {
     if (historyMembershipMayChange)
-      updateLoadedHistoryItemCount(write, thread);
+      refreshHistoryCount();
     return;
   }
 
@@ -1616,7 +2613,7 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
   if (addressed)
     mergeObject(write, addressed, message.payload);
   if (historyMembershipMayChange)
-    updateLoadedHistoryItemCount(write, thread);
+    refreshHistoryCount();
 }
 
 void ProtocolUpdater::applyUnknown(NodeGraph::WriteAccess &write,
@@ -1636,50 +2633,57 @@ void ProtocolUpdater::applyUnknown(NodeGraph::WriteAccess &write,
 NodeRef ProtocolUpdater::ingestThread(NodeGraph::WriteAccess &write,
                                       const Value::Object &object,
                                       std::string_view fallbackId,
-                                      bool replaceTurns) {
+                                      bool replaceTurns,
+                                      bool mergeThreadState) {
   const std::string id = nestedId(object, fallbackId);
   if (id.empty())
     return {};
   NodeRef thread = write.upsert({NodeKind::Thread, id});
-  mergeObject(write, thread, object, "turns");
+  if (mergeThreadState) {
+    mergeObject(write, thread, object, "turns");
 
-  if (const Value *projectId = member(object, "projectId"))
-    assignProject(write, thread, projectId);
-  if (const Value *section = member(object, "section"))
-    assignSection(write, thread, section);
+    if (const Value *projectId = member(object, "projectId"))
+      assignProject(write, thread, projectId);
+    if (const Value *section = member(object, "section"))
+      assignSection(write, thread, section);
 
-  if (const Value *parentValue = member(object, "parentThreadId")) {
-    const std::string parentId = canonicalValue(parentValue);
-    if (!parentId.empty() && parentId != id) {
-      NodeRef parent = write.upsert({NodeKind::Thread, parentId});
-      assignThreadOwner(write, parent, RelationKind::StructuralChildThread,
-                        thread);
-    } else if (parentValue->isNull() || parentId.empty()) {
-      const std::vector<NodeRef> nodes = write.orderedNodes();
-      for (const NodeRef &candidate : nodes) {
-        if (candidate->id().kind == NodeKind::Thread)
-          write.unrelate(candidate, RelationKind::StructuralChildThread,
-                         thread);
+    if (const Value *parentValue = member(object, "parentThreadId")) {
+      const std::string parentId = canonicalValue(parentValue);
+      if (!parentId.empty() && parentId != id) {
+        NodeRef parent = write.upsert({NodeKind::Thread, parentId});
+        assignThreadOwner(write, parent, RelationKind::StructuralChildThread,
+                          thread);
+      } else if (parentValue->isNull() || parentId.empty()) {
+        clearThreadOwners(write, thread);
       }
     }
-  }
 
-  if (const Value *forkValue = member(object, "forkedFromId")) {
-    clearThreadOwnerKind(write, thread, RelationKind::ForkChildThread);
-    const std::string forkedFromId = canonicalValue(forkValue);
-    if (!forkedFromId.empty() && forkedFromId != id) {
-      NodeRef source = write.upsert({NodeKind::Thread, forkedFromId});
-      write.relate(source, RelationKind::ForkChildThread, thread);
+    if (const Value *forkValue = member(object, "forkedFromId")) {
+      clearThreadOwnerKind(write, thread, RelationKind::ForkChildThread);
+      const std::string forkedFromId = canonicalValue(forkValue);
+      if (!forkedFromId.empty() && forkedFromId != id) {
+        NodeRef source = write.upsert({NodeKind::Thread, forkedFromId});
+        write.relate(source, RelationKind::ForkChildThread, thread);
+      }
     }
   }
 
   if (const Value::Array *turns = arrayMember(object, "turns")) {
     std::vector<NodeRef> order;
     order.reserve(turns->size());
+    std::unordered_set<const Node *> ordered;
+    ordered.reserve(turns->size());
     for (const Value &value : *turns) {
       if (const Value::Object *turnObject = value.asObject()) {
-        NodeRef turn = ingestTurn(write, *turnObject, thread, {}, replaceTurns);
-        if (turn && std::find(order.begin(), order.end(), turn) == order.end())
+        const std::string turnId = nestedId(*turnObject);
+        const bool existed =
+            !turnId.empty() &&
+            write.find(scopedTurnNodeId(thread->id().canonical, turnId));
+        NodeRef turn =
+            ingestTurn(write, *turnObject, thread, {}, replaceTurns,
+                       mergeThreadState || !existed, mergeThreadState);
+        if (turn && (mergeThreadState || !existed) &&
+            ordered.insert(turn.get()).second)
           order.emplace_back(std::move(turn));
       }
     }
@@ -1689,6 +2693,8 @@ NodeRef ProtocolUpdater::ingestThread(NodeGraph::WriteAccess &write,
     else if (!order.empty())
       write.replaceChildren(
           thread, mergeExistingTail(std::move(order), write.children(thread)));
+    if (mergeThreadState)
+      refreshActiveTurn(write, thread);
   }
   return thread;
 }
@@ -1697,19 +2703,28 @@ NodeRef ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess &write,
                                     const Value::Object &object,
                                     const NodeRef &thread,
                                     std::string_view fallbackId,
-                                    bool replaceItems) {
+                                    bool replaceItems, bool mergeExistingState,
+                                    bool updateCurrentRelation) {
   const std::string id = nestedId(object, fallbackId);
   if (id.empty() || !thread)
     return {};
   NodeRef turn = ensureTurn(write, thread, id);
-  mergeObject(write, turn, object, "items");
+  if (mergeExistingState)
+    mergeObject(write, turn, object, "items");
   if (const Value::Array *items = arrayMember(object, "items")) {
     std::vector<NodeRef> order;
     order.reserve(items->size());
+    std::unordered_set<const Node *> ordered;
+    ordered.reserve(items->size());
     for (const Value &value : *items) {
       if (const Value::Object *itemObject = value.asObject()) {
-        NodeRef item = ingestItem(write, *itemObject, turn);
-        if (item && std::find(order.begin(), order.end(), item) == order.end())
+        const std::string itemId = nestedId(*itemObject);
+        const bool existed =
+            !itemId.empty() && write.find(scopedItemNodeId(turn->id(), itemId));
+        NodeRef item = ingestItem(write, *itemObject, turn, {},
+                                  mergeExistingState || !existed);
+        if (item && (mergeExistingState || !existed) &&
+            ordered.insert(item.get()).second)
           order.emplace_back(std::move(item));
       }
     }
@@ -1720,19 +2735,27 @@ NodeRef ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess &write,
       write.replaceChildren(
           turn, mergeExistingTail(std::move(order), write.children(turn)));
   }
+  if (updateCurrentRelation)
+    updateActiveTurn(write, thread, turn);
   return turn;
 }
 
 NodeRef ProtocolUpdater::ingestItem(NodeGraph::WriteAccess &write,
                                     const Value::Object &object,
                                     const NodeRef &turn,
-                                    std::string_view fallbackId) {
+                                    std::string_view fallbackId,
+                                    bool mergeExistingState) {
   const std::string id = nestedId(object, fallbackId);
   if (id.empty() || !turn)
     return {};
   NodeRef item = ensureItem(write, turn, id);
-  mergeObject(write, item, object);
-  correlateLocalPrompt(write, item, object);
+  if (mergeExistingState) {
+    mergeObject(write, item, object);
+    boundRetainedItemText(write, item, object);
+    correlateLocalPrompt(write, item, object);
+  }
+  if (!mergeExistingState)
+    return item;
   if (isUserMessage(object) &&
       write.related(turn, RelationKind::TurnRootItem).empty())
     write.relate(turn, RelationKind::TurnRootItem, item);
@@ -1786,25 +2809,27 @@ void ProtocolUpdater::replaceThreadList(NodeGraph::WriteAccess &write,
       write.related(runtime, RelationKind::RootThread);
   std::vector<NodeRef> listed;
   listed.reserve(threads.size());
+  std::unordered_set<const Node *> listedSet;
+  listedSet.reserve(threads.size());
   for (const Value &value : threads) {
     const Value::Object *object = value.asObject();
     if (!object)
       continue;
     NodeRef thread = ingestThread(write, *object);
-    if (thread &&
-        std::find(listed.begin(), listed.end(), thread) == listed.end())
+    if (thread && listedSet.insert(thread.get()).second)
       listed.emplace_back(std::move(thread));
   }
 
   std::vector<NodeRef> roots;
   roots.reserve(listed.size() + previous.size());
+  std::unordered_set<const Node *> rootSet;
+  rootSet.reserve(listed.size() + previous.size());
   for (const NodeRef &thread : listed) {
-    if (!hasThreadOwner(write, thread))
+    if (!hasThreadOwner(write, thread) && rootSet.insert(thread.get()).second)
       roots.emplace_back(thread);
   }
   for (const NodeRef &thread : previous) {
-    if (!hasThreadOwner(write, thread) &&
-        std::find(roots.begin(), roots.end(), thread) == roots.end())
+    if (!hasThreadOwner(write, thread) && rootSet.insert(thread.get()).second)
       roots.emplace_back(thread);
   }
   write.replaceRelated(runtime, RelationKind::RootThread, roots);
@@ -1846,11 +2871,69 @@ void ProtocolUpdater::removeThread(NodeGraph::WriteAccess &write,
     }
   };
   collect(collect, thread);
-  for (const NodeRef &descendant : descendants)
-    write.remove(descendant);
+
+  std::vector<NodeRef> localPrompts;
+  for (const NodeRef &descendant : descendants) {
+    if (isLocalPrompt(write, descendant))
+      localPrompts.emplace_back(descendant);
+  }
+
+  NodeRef recoveryThread;
+  if (!localPrompts.empty()) {
+    if (!runtime)
+      runtime = write.upsert({NodeKind::Runtime, "runtime"});
+    const std::string recoverySuffix =
+        std::to_string(write.revision() + 1) + ':' + thread->id().canonical;
+    NodeState recoveryState;
+    recoveryState.status = NodeStatus::Failed;
+    recoveryState.fields = {{"type", Value("localRecoveryThread")},
+                            {"local", Value(true)},
+                            {"recoveryOnly", Value(true)},
+                            {"name", Value("Unsent prompt")}};
+    recoveryThread = write.upsert(
+        {NodeKind::Thread, "local-recovery-thread:removed:" + recoverySuffix},
+        std::move(recoveryState));
+
+    std::size_t promptIndex = 0;
+    for (const NodeRef &prompt : localPrompts) {
+      NodeState turnState;
+      turnState.status = NodeStatus::Failed;
+      turnState.fields = {{"type", Value("localRecoveryTurn")},
+                          {"local", Value(true)}};
+      NodeRef recoveryTurn = write.upsert(
+          {NodeKind::Turn, "local-recovery-turn:removed:" + recoverySuffix +
+                               ':' + std::to_string(promptIndex++)},
+          std::move(turnState));
+      write.setParent(recoveryThread, recoveryTurn);
+      write.setParent(recoveryTurn, prompt);
+      write.setStatus(prompt, NodeStatus::Failed);
+      write.setField(prompt, "dispatchState", Value("uncertain"));
+      write.setField(prompt, "error",
+                     Value("The destination thread was removed"));
+      write.setField(prompt, "requiresExplicitRecovery", Value(true));
+      write.setField(prompt, "threadId", Value(recoveryThread->id().canonical));
+      write.setField(prompt, "startsTurn", Value(true));
+      write.eraseField(prompt, "turnId");
+      write.eraseField(prompt, "expectedTurnId");
+      write.eraseField(prompt, "requestId");
+      write.eraseField(prompt, "uiMaterialized");
+      write.relate(runtime, RelationKind::PendingPrompt, prompt);
+      write.relate(recoveryThread, RelationKind::PendingPrompt, prompt);
+    }
+  }
+
+  for (const NodeRef &descendant : descendants) {
+    if (!isLocalPrompt(write, descendant))
+      write.remove(descendant);
+  }
   write.remove(thread);
 
   std::size_t next = std::min(insertion, roots.size());
+  if (recoveryThread) {
+    roots.insert(roots.begin() + static_cast<std::ptrdiff_t>(next),
+                 recoveryThread);
+    ++next;
+  }
   for (const NodeRef &child : promoted) {
     if (hasThreadOwner(write, child) ||
         std::find(roots.begin(), roots.end(), child) != roots.end())

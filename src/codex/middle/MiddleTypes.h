@@ -168,6 +168,11 @@ struct LocalPromptData {
   bool showPendingAnimation = false;
   std::string error;
   std::vector<std::string> imagePaths;
+  // Absolute admission time retained by the shared node.  The Qt card uses
+  // this only to derive its visual-feedback deadline; it never advances
+  // domain state or asks the worker to schedule a timer.
+  std::optional<std::int64_t> admittedAtMs;
+  bool requiresExplicitRecovery = false;
 
   bool operator==(const LocalPromptData &) const = default;
 };

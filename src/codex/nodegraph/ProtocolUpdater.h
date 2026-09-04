@@ -49,6 +49,11 @@ struct DecodedMessage final {
   // Tests and other headless users need no clock; absence leaves activity
   // unchanged. Hydration, global, and catalog traffic deliberately omit it.
   std::optional<std::int64_t> activityAt;
+  // JSON-RPC request ids are connection-scoped. WorkerLogic supplies both
+  // generations for server requests so a replacement provider can reuse a
+  // wire id without replacing a retained recovery interaction.
+  std::optional<std::uint64_t> connectionGeneration;
+  std::optional<std::uint64_t> providerGeneration;
 };
 
 struct ApplyResult final {
@@ -57,6 +62,13 @@ struct ApplyResult final {
       MessageDisposition::IntentionallyStateNeutral;
   GraphChange change;
   // The exact newly-created Operation or Interaction, when applicable.
+  NodeRef primary;
+};
+
+struct AppliedMessage final {
+  bool knownMethod = false;
+  MessageDisposition disposition =
+      MessageDisposition::IntentionallyStateNeutral;
   NodeRef primary;
 };
 
@@ -78,6 +90,11 @@ public:
   explicit ProtocolUpdater(NodeGraph &graph) noexcept;
 
   [[nodiscard]] ApplyResult apply(DecodedMessage message);
+  // WorkerLogic uses this concrete transaction form when a request result
+  // must update its operation and associated local prompt/hydration state in
+  // the same graph revision. The caller owns and finishes the write access.
+  [[nodiscard]] AppliedMessage applyInto(NodeGraph::WriteAccess &write,
+                                         const DecodedMessage &message);
 
   // Called on the worker after CodexBridge accepts the matching server-request
   // response. This is a lifecycle operation, not a Qt callback.
@@ -96,7 +113,8 @@ private:
   [[nodiscard]] NodeRef applyInteraction(NodeGraph::WriteAccess &write,
                                          const DecodedMessage &message);
   void applyGraphUpdate(NodeGraph::WriteAccess &write,
-                        const DecodedMessage &message);
+                        const DecodedMessage &message,
+                        bool replaceThreadRead = true);
   [[nodiscard]] bool applyRealtimeUpdate(NodeGraph::WriteAccess &write,
                                          const DecodedMessage &message);
   void applyUnknown(NodeGraph::WriteAccess &write,
@@ -107,16 +125,18 @@ private:
   [[nodiscard]] NodeRef ingestThread(NodeGraph::WriteAccess &write,
                                      const Value::Object &object,
                                      std::string_view fallbackId = {},
-                                     bool replaceTurns = false);
-  [[nodiscard]] NodeRef ingestTurn(NodeGraph::WriteAccess &write,
-                                   const Value::Object &object,
-                                   const NodeRef &thread,
-                                   std::string_view fallbackId = {},
-                                   bool replaceItems = false);
+                                     bool replaceTurns = false,
+                                     bool mergeThreadState = true);
+  [[nodiscard]] NodeRef
+  ingestTurn(NodeGraph::WriteAccess &write, const Value::Object &object,
+             const NodeRef &thread, std::string_view fallbackId = {},
+             bool replaceItems = false, bool mergeExistingState = true,
+             bool updateCurrentRelation = true);
   [[nodiscard]] NodeRef ingestItem(NodeGraph::WriteAccess &write,
                                    const Value::Object &object,
                                    const NodeRef &turn,
-                                   std::string_view fallbackId = {});
+                                   std::string_view fallbackId = {},
+                                   bool mergeExistingState = true);
   void admitRootThread(NodeGraph::WriteAccess &write, const NodeRef &thread,
                        bool prepend);
   void replaceThreadList(NodeGraph::WriteAccess &write,

@@ -1968,6 +1968,373 @@ bool testThreadPaneDirectGraphBinding() {
   return result;
 }
 
+bool testLargeThreadTopologyKeepsQtHeartbeatAlive() {
+  constexpr int ThreadCount = 1536;
+  nodegraph::NodeGraph graph;
+  std::vector<nodegraph::NodeRef> roots;
+  roots.reserve(ThreadCount);
+  {
+    auto write = graph.write();
+    for (int index = 0; index < ThreadCount; ++index) {
+      const std::string suffix = std::to_string(index);
+      nodegraph::NodeState state;
+      state.status = nodegraph::NodeStatus::Completed;
+      state.fields = {{"name", nodegraph::Value("Large thread " + suffix)},
+                      {"status", nodegraph::Value("completed")},
+                      {"recencyAt", nodegraph::Value(index)}};
+      roots.emplace_back(
+          write.upsert({nodegraph::NodeKind::Thread, "large-thread-" + suffix},
+                       std::move(state)));
+    }
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
+
+  ThreadPane pane;
+  pane.resize(320, 220);
+  pane.show();
+  auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
+  std::uint64_t heartbeatCount = 0;
+  std::uint64_t partialHeartbeatCount = 0;
+  QTimer heartbeat;
+  heartbeat.setInterval(0);
+  QObject::connect(&heartbeat, &QTimer::timeout, &heartbeat, [&] {
+    ++heartbeatCount;
+    if (list && list->count() > 0 && list->count() < ThreadCount)
+      ++partialHeartbeatCount;
+  });
+  heartbeat.start();
+
+  pane.refresh(graph, roots.front());
+  bool result = expect(list && list->count() == 0,
+                       "large topology refresh schedules instead of "
+                       "constructing all placeholders synchronously");
+  QElapsedTimer deadline;
+  deadline.start();
+  while (list && list->count() != ThreadCount && deadline.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    QThread::msleep(1);
+  }
+  spin(50);
+  heartbeat.stop();
+
+  QListWidgetItem *requestedSelection =
+      threadItem(list, roots.front()->id().canonical);
+  result &= expect(
+      list && requestedSelection && list->currentItem() == requestedSelection &&
+          pane.visiblySelectedThread() == roots.front(),
+      "large initial reconciliation restores the exact requested NodeRef "
+      "selection after its row is sliced in last");
+
+  std::uint64_t reorderHeartbeatCount = 0;
+  std::uint64_t partialReorderHeartbeatCount = 0;
+  QTimer reorderHeartbeat;
+  reorderHeartbeat.setInterval(0);
+  QObject::connect(&reorderHeartbeat, &QTimer::timeout, &reorderHeartbeat, [&] {
+    ++reorderHeartbeatCount;
+    if (!list || list->count() != ThreadCount)
+      return;
+    const std::string first =
+        list->item(0)->data(Qt::UserRole).toString().toStdString();
+    const std::string last = list->item(ThreadCount - 1)
+                                 ->data(Qt::UserRole)
+                                 .toString()
+                                 .toStdString();
+    if (first == "large-thread-0" && last != "large-thread-1535")
+      ++partialReorderHeartbeatCount;
+  });
+  reorderHeartbeat.start();
+
+  pane.setSortCriterion(ThreadPane::SortCriterion::Alphanumeric);
+  deadline.restart();
+  while (list &&
+         (list->count() != ThreadCount ||
+          list->item(0)->data(Qt::UserRole).toString() !=
+              QStringLiteral("large-thread-0") ||
+          list->item(ThreadCount - 1)->data(Qt::UserRole).toString() !=
+              QStringLiteral("large-thread-1535")) &&
+         deadline.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    QThread::msleep(1);
+  }
+  spin(50);
+  reorderHeartbeat.stop();
+
+  requestedSelection = threadItem(list, roots.front()->id().canonical);
+  result &= expect(
+      list && list->count() == ThreadCount &&
+          list->item(0)->data(Qt::UserRole).toString() ==
+              QStringLiteral("large-thread-0") &&
+          list->item(ThreadCount - 1)->data(Qt::UserRole).toString() ==
+              QStringLiteral("large-thread-1535") &&
+          reorderHeartbeatCount > 1 && partialReorderHeartbeatCount > 0 &&
+          requestedSelection && list->currentItem() == requestedSelection &&
+          pane.visiblySelectedThread() == roots.front(),
+      "reverse large-list reorder yields Qt ticks between bounded moves and "
+      "preserves the requested selection");
+
+  std::size_t materialized = 0;
+  for (const nodegraph::NodeRef &node : roots) {
+    const auto *attachment =
+        static_cast<const ui::QtNodeAttachment *>(node->uiAttachment());
+    if (attachment && attachment->widget)
+      ++materialized;
+  }
+  result &= expect(
+      list && list->count() == ThreadCount && heartbeatCount > 1 &&
+          partialHeartbeatCount > 0 && materialized > 0 && materialized < 32,
+      "large thread topology reconciliation is sliced across Qt passes while "
+      "only viewport rows materialize");
+  return result;
+}
+
+bool testLargeThreadScanReplacesAnObsoleteRevision() {
+  constexpr int ThreadCount = 1024;
+  nodegraph::NodeGraph graph;
+  std::vector<nodegraph::NodeRef> roots;
+  roots.reserve(ThreadCount);
+  {
+    auto write = graph.write();
+    for (int index = 0; index < ThreadCount; ++index) {
+      const std::string suffix = std::to_string(index);
+      roots.emplace_back(addThread(write, "revision-old-" + suffix,
+                                   "Old revision " + suffix, "completed", {},
+                                   {}, index));
+    }
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
+
+  const nodegraph::NodeRef selected = roots[ThreadCount / 2];
+  ThreadPane pane;
+  pane.resize(320, 220);
+  pane.show();
+  auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
+  pane.refresh(graph, selected);
+
+  bool replaced = false;
+  bool staleTopologyObserved = false;
+  int eventTicks = 0;
+  int replacementTick = 0;
+  nodegraph::NodeRef latest;
+  QTimer revisionChanger;
+  revisionChanger.setInterval(0);
+  QObject::connect(&revisionChanger, &QTimer::timeout, &revisionChanger, [&] {
+    ++eventTicks;
+    if (!replaced && eventTicks >= 4 && list && list->count() == 0) {
+      const nodegraph::NodeRef retired = roots.front();
+      auto write = graph.write();
+      write.remove(retired);
+      latest = addThread(write, "revision-newest", "Newest revision",
+                         "completed", {}, {}, ThreadCount + 1000);
+      std::vector<nodegraph::NodeRef> replacementRoots(roots.begin() + 1,
+                                                       roots.end());
+      replacementRoots.emplace_back(latest);
+      const nodegraph::NodeRef runtime =
+          write.find({nodegraph::NodeKind::Runtime, "runtime"});
+      write.replaceRelated(runtime, nodegraph::RelationKind::RootThread,
+                           replacementRoots);
+      static_cast<void>(write.finish());
+      replaced = true;
+      replacementTick = eventTicks;
+    }
+    if (replaced && list && list->count() > 0 &&
+        list->item(0)->data(Qt::UserRole).toString() !=
+            QStringLiteral("revision-newest"))
+      staleTopologyObserved = true;
+  });
+  revisionChanger.start();
+
+  QElapsedTimer deadline;
+  deadline.start();
+  while ((!replaced || !list || list->count() != ThreadCount ||
+          list->item(0)->data(Qt::UserRole).toString() !=
+              QStringLiteral("revision-newest")) &&
+         deadline.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    QThread::msleep(1);
+  }
+  spin(30);
+  revisionChanger.stop();
+
+  QListWidgetItem *selectedItem = threadItem(list, selected->id().canonical);
+  return expect(
+      replaced && replacementTick >= 4 && !staleTopologyObserved && list &&
+          list->count() == ThreadCount &&
+          list->item(0)->data(Qt::UserRole).toString() ==
+              QStringLiteral("revision-newest") &&
+          !threadItem(list, "revision-old-0") && latest &&
+          latest->uiAttachment() != nullptr && selectedItem &&
+          list->currentItem() == selectedItem &&
+          pane.visiblySelectedThread() == selected,
+      "an in-flight scan discards its obsolete revision before exposing rows "
+      "and restores selection from the replacement revision");
+}
+
+bool testRemovalBeforeMaterializationReleasesSelection() {
+  constexpr int ThreadCount = 512;
+  nodegraph::NodeGraph graph;
+  std::vector<nodegraph::NodeRef> roots;
+  roots.reserve(ThreadCount);
+  {
+    auto write = graph.write();
+    for (int index = 0; index < ThreadCount; ++index) {
+      const std::string suffix = std::to_string(index);
+      roots.emplace_back(addThread(write, "unmaterialized-" + suffix,
+                                   "Unmaterialized " + suffix, "completed", {},
+                                   {}, index));
+    }
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
+
+  nodegraph::NodeRef selected = roots.front();
+  nodegraph::NodeRef placeholder = roots.back();
+  std::weak_ptr<nodegraph::Node> selectedLifetime = selected;
+  std::weak_ptr<nodegraph::Node> placeholderLifetime = placeholder;
+  ThreadPane pane;
+  pane.resize(320, 220);
+  pane.show();
+  auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
+  pane.refresh(graph, selected);
+
+  bool removed = false;
+  bool removedBeforeMaterialization = false;
+  bool detachedSynchronously = false;
+  bool releasedAfterAcknowledgement = false;
+  int eventTicks = 0;
+  QTimer remover;
+  remover.setInterval(0);
+  QObject::connect(&remover, &QTimer::timeout, &remover, [&] {
+    ++eventTicks;
+    QListWidgetItem *placeholderItem =
+        placeholder ? threadItem(list, placeholder->id().canonical) : nullptr;
+    if (removed || eventTicks < 4 || !list || list->count() == 0 ||
+        list->count() >= ThreadCount || !placeholderItem ||
+        threadItem(list, selected->id().canonical))
+      return;
+
+    {
+      const nodegraph::NodeRef retiringSelection = selected;
+      const nodegraph::NodeRef retiringPlaceholder = placeholder;
+      const auto *attachment = static_cast<const ui::QtNodeAttachment *>(
+          retiringPlaceholder->uiAttachment());
+      removedBeforeMaterialization =
+          attachment && !attachment->widget && list->currentItem() == nullptr;
+      nodegraph::GraphChange removal;
+      {
+        auto write = graph.write();
+        write.remove(retiringSelection);
+        write.remove(retiringPlaceholder);
+        removal = write.finish();
+      }
+      pane.graphChanged(nodegraph::GraphChanged{
+          removal.revision, removal.affected, removal.removed, false});
+      detachedSynchronously = retiringSelection->uiAttachment() == nullptr &&
+                              retiringPlaceholder->uiAttachment() == nullptr &&
+                              pane.visiblySelectedThreadId().empty();
+      {
+        const std::array<nodegraph::NodeRef, 2> acknowledged{
+            retiringSelection, retiringPlaceholder};
+        auto write = graph.write();
+        write.releaseRetired(acknowledged);
+        static_cast<void>(write.finish());
+      }
+      std::erase_if(roots, [&](const nodegraph::NodeRef &node) {
+        return node == retiringSelection || node == retiringPlaceholder;
+      });
+      selected.reset();
+      placeholder.reset();
+      removal.affected.clear();
+      removal.removed.clear();
+    }
+    releasedAfterAcknowledgement =
+        selectedLifetime.expired() && placeholderLifetime.expired();
+    removed = true;
+  });
+  remover.start();
+
+  QElapsedTimer deadline;
+  deadline.start();
+  while ((!removed || !list || list->count() != ThreadCount - 2) &&
+         deadline.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    QThread::msleep(1);
+  }
+  spin(30);
+  remover.stop();
+
+  return expect(
+      removed && eventTicks >= 4 && removedBeforeMaterialization &&
+          detachedSynchronously && releasedAfterAcknowledgement && list &&
+          list->count() == ThreadCount - 2 &&
+          pane.visiblySelectedThreadId().empty(),
+      "removal before widget materialization detaches its placeholder, "
+      "cancels a not-yet-inserted selection, and permits safe retirement");
+}
+
+bool testDestroyThreadPaneWithQueuedTopologyPasses() {
+  constexpr int ThreadCount = 512;
+  nodegraph::NodeGraph graph;
+  std::vector<nodegraph::NodeRef> roots;
+  roots.reserve(ThreadCount);
+  {
+    auto write = graph.write();
+    for (int index = 0; index < ThreadCount; ++index) {
+      const std::string suffix = std::to_string(index);
+      roots.emplace_back(addThread(write, "destroy-queued-" + suffix,
+                                   "Destroy queued " + suffix, "completed", {},
+                                   {}, index));
+    }
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
+
+  QPointer<ThreadPane> pane = new ThreadPane;
+  pane->resize(320, 220);
+  pane->show();
+  QPointer<QListWidget> list =
+      pane->findChild<QListWidget *>(QStringLiteral("threadList"));
+  pane->refresh(graph, roots.front());
+
+  bool destroyedDuringPartialTopology = false;
+  bool hadAttachedPlaceholders = false;
+  QTimer destroyer;
+  destroyer.setInterval(0);
+  QObject::connect(&destroyer, &QTimer::timeout, &destroyer, [&] {
+    if (!pane || !list || list->count() == 0 || list->count() >= ThreadCount)
+      return;
+    for (const nodegraph::NodeRef &node : roots)
+      hadAttachedPlaceholders =
+          hadAttachedPlaceholders || node->uiAttachment() != nullptr;
+    destroyedDuringPartialTopology = true;
+    destroyer.stop();
+    delete pane.data();
+  });
+  destroyer.start();
+
+  QElapsedTimer deadline;
+  deadline.start();
+  while (pane && deadline.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    QThread::msleep(1);
+  }
+  destroyer.stop();
+  spin(50);
+
+  const bool allAttachmentsCleared =
+      std::ranges::all_of(roots, [](const nodegraph::NodeRef &node) {
+        return node->uiAttachment() == nullptr;
+      });
+  if (pane)
+    delete pane.data();
+  return expect(
+      destroyedDuringPartialTopology && hadAttachedPlaceholders && !pane &&
+          !list && allAttachmentsCleared,
+      "destroying ThreadPane during a partial topology clears every opaque "
+      "attachment and cancels all queued Qt passes");
+}
+
 bool testNestedCommandScrollOwnership() {
   MiddleRegionWidget region;
   region.resize(1500, 820);
@@ -2858,6 +3225,10 @@ int main(int argc, char **argv) {
   result &= testOptimisticThreadRowLifecycle();
   result &= testThreadRowReorderOwnership();
   result &= testThreadPaneDirectGraphBinding();
+  result &= testLargeThreadTopologyKeepsQtHeartbeatAlive();
+  result &= testLargeThreadScanReplacesAnObsoleteRevision();
+  result &= testRemovalBeforeMaterializationReleasesSelection();
+  result &= testDestroyThreadPaneWithQueuedTopologyPasses();
   result &= testNestedCommandScrollOwnership();
   result &= testInfoViewerLayout();
   result &= testInspectorDetailParity();

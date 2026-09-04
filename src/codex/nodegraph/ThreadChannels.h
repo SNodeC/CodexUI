@@ -31,6 +31,13 @@ class ThreadChannels final {
 public:
   static constexpr std::size_t WorkerToQtCapacity = 512;
   static constexpr std::size_t QtToWorkerCapacity = 256;
+  // Larger transactions are already committed and are cheaper for Qt to
+  // rediscover through its bounded graph scans than to process as one event.
+  static constexpr std::size_t MaximumDirectGraphReferences = 64;
+  // Graph bursts and ordinary notices stop before the final two slots. One
+  // remains available for a critical selection effect and one for terminal
+  // WorkerStopped delivery.
+  static constexpr std::size_t WorkerToQtReservedSlots = 2;
 
   ThreadChannels() = default;
   ThreadChannels(const ThreadChannels &) = delete;

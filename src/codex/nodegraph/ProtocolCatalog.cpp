@@ -27,6 +27,11 @@ namespace {
     methodName, ProtocolDirection::ServerNotification,                         \
         MessageDisposition::IntentionallyStateNeutral                          \
   }
+#define CODEXUI_UI_NOTIFICATION(methodName)                                    \
+  MethodDescriptor {                                                           \
+    methodName, ProtocolDirection::ServerNotification,                         \
+        MessageDisposition::TypedUiEffect                                      \
+  }
 #define CODEXUI_CLIENT_NOTIFICATION(methodName)                                \
   MethodDescriptor {                                                           \
     methodName, ProtocolDirection::ClientNotification,                         \
@@ -204,7 +209,7 @@ constexpr std::array<MethodDescriptor, 252> Methods{{
     CODEXUI_SERVER_REQUEST("applyPatchApproval"),
     CODEXUI_SERVER_REQUEST("execCommandApproval"),
 
-    CODEXUI_GRAPH_NOTIFICATION("error"),
+    CODEXUI_UI_NOTIFICATION("error"),
     CODEXUI_GRAPH_NOTIFICATION("thread/started"),
     CODEXUI_GRAPH_NOTIFICATION("thread/status/changed"),
     CODEXUI_GRAPH_NOTIFICATION("thread/archived"),
@@ -267,10 +272,10 @@ constexpr std::array<MethodDescriptor, 252> Methods{{
     CODEXUI_GRAPH_NOTIFICATION("modelProvider/authRecoveryCompleted"),
     CODEXUI_GRAPH_NOTIFICATION("turn/moderationMetadata"),
     CODEXUI_GRAPH_NOTIFICATION("model/safetyBuffering/updated"),
-    CODEXUI_GRAPH_NOTIFICATION("warning"),
-    CODEXUI_GRAPH_NOTIFICATION("guardianWarning"),
-    CODEXUI_GRAPH_NOTIFICATION("deprecationNotice"),
-    CODEXUI_GRAPH_NOTIFICATION("configWarning"),
+    CODEXUI_UI_NOTIFICATION("warning"),
+    CODEXUI_UI_NOTIFICATION("guardianWarning"),
+    CODEXUI_UI_NOTIFICATION("deprecationNotice"),
+    CODEXUI_UI_NOTIFICATION("configWarning"),
     CODEXUI_GRAPH_NOTIFICATION("fuzzyFileSearch/sessionUpdated"),
     CODEXUI_GRAPH_NOTIFICATION("fuzzyFileSearch/sessionCompleted"),
     CODEXUI_GRAPH_NOTIFICATION("thread/realtime/started"),
@@ -284,7 +289,7 @@ constexpr std::array<MethodDescriptor, 252> Methods{{
     CODEXUI_GRAPH_NOTIFICATION("thread/realtime/sdp"),
     CODEXUI_GRAPH_NOTIFICATION("thread/realtime/error"),
     CODEXUI_GRAPH_NOTIFICATION("thread/realtime/closed"),
-    CODEXUI_GRAPH_NOTIFICATION("windows/worldWritableWarning"),
+    CODEXUI_UI_NOTIFICATION("windows/worldWritableWarning"),
     CODEXUI_GRAPH_NOTIFICATION("windowsSandbox/setupCompleted"),
     CODEXUI_GRAPH_NOTIFICATION("account/login/completed"),
 
@@ -293,6 +298,7 @@ constexpr std::array<MethodDescriptor, 252> Methods{{
 
 #undef CODEXUI_CLIENT_REQUEST
 #undef CODEXUI_SERVER_REQUEST
+#undef CODEXUI_UI_NOTIFICATION
 #undef CODEXUI_GRAPH_NOTIFICATION
 #undef CODEXUI_NEUTRAL_NOTIFICATION
 #undef CODEXUI_CLIENT_NOTIFICATION
@@ -337,10 +343,10 @@ static_assert(countDirection(ProtocolDirection::ClientNotification) == 1);
 static_assert(countDisposition(MessageDisposition::WorkerOperationResult) ==
               158);
 static_assert(countDisposition(MessageDisposition::ReverseInteraction) == 11);
-static_assert(countDisposition(MessageDisposition::GraphUpdate) == 81);
+static_assert(countDisposition(MessageDisposition::GraphUpdate) == 75);
 static_assert(countDisposition(MessageDisposition::IntentionallyStateNeutral) ==
               2);
-static_assert(countDisposition(MessageDisposition::TypedUiEffect) == 0);
+static_assert(countDisposition(MessageDisposition::TypedUiEffect) == 6);
 static_assert(hasUniqueKeys());
 
 } // namespace

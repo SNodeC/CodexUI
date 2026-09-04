@@ -3,12 +3,14 @@
 #include "codex/middle/InspectorPane.h"
 
 #include "codex/DiffViewer.h"
-#include "codex/PresentationStatus.h"
+#include "codex/UiStatus.h"
+#include "codex/nodegraph/ProtocolUpdater.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
 #include <QClipboard>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QLabel>
 #include <QMimeData>
 #include <QPainter>
@@ -17,6 +19,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QShowEvent>
 #include <QStackedWidget>
 #include <QStyleOptionButton>
 #include <QTabWidget>
@@ -27,6 +30,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <string_view>
 #include <utility>
@@ -41,6 +45,111 @@ constexpr int StatePage = 1;
 constexpr int ProtocolPage = 2;
 constexpr qsizetype MaximumGraphDiagnosticCharacters = 32 * 1024;
 constexpr std::size_t MaximumInspectorWidgetChangesPerPass = 12;
+constexpr std::size_t MaximumInspectorGraphReadsPerPass = 64;
+constexpr std::size_t MaximumInspectorChangeNodesToInspect = 64;
+constexpr std::size_t MaximumInspectorAncestryDepth = 16;
+constexpr std::size_t MaximumInspectorMaterializedRows = 48;
+constexpr std::size_t InspectorRowOverscan = 2;
+constexpr int PlanEstimatedRowHeight = 72;
+constexpr int AgentEstimatedRowHeight = 56;
+constexpr int RequestEstimatedRowHeight = 144;
+
+struct InspectorRowWindow final {
+  std::size_t first = 0;
+  std::size_t end = 0;
+};
+
+std::size_t planComponentCount(const InspectorPlanData &snapshot) {
+  return snapshot.totalRows;
+}
+
+std::size_t agentsComponentCount(const InspectorAgentsData &snapshot) {
+  return snapshot.totalRows;
+}
+
+std::size_t requestsComponentCount(const InspectorRequestsData &snapshot) {
+  return snapshot.totalRows;
+}
+
+std::size_t renderedPlanComponentCount(const InspectorPlanData &snapshot) {
+  if (!snapshot.threadPresent || !snapshot.plan)
+    return 1;
+  return snapshot.plan->steps.size() +
+         (snapshot.plan->includesExplanation ? 1U : 0U);
+}
+
+std::size_t renderedAgentsComponentCount(const InspectorAgentsData &snapshot) {
+  return snapshot.agents.empty() && snapshot.totalRows == 1
+             ? 1
+             : snapshot.agents.size();
+}
+
+std::size_t
+renderedRequestsComponentCount(const InspectorRequestsData &snapshot) {
+  return snapshot.requests.empty() && snapshot.totalRows == 1
+             ? 1
+             : snapshot.requests.size();
+}
+
+InspectorRowWindow visibleRowWindow(QScrollArea *scroll, std::size_t rowCount,
+                                    int estimatedRowHeight, int scrollValue) {
+  if (rowCount == 0)
+    return {};
+  const std::size_t viewportRows = std::max<std::size_t>(
+      1, (static_cast<std::size_t>(std::max(1, scroll->viewport()->height())) +
+          static_cast<std::size_t>(estimatedRowHeight) - 1) /
+             static_cast<std::size_t>(estimatedRowHeight));
+  const std::size_t scrollableRows =
+      rowCount > viewportRows ? rowCount - viewportRows : 0;
+  const int scrollMaximum = scroll->verticalScrollBar()->maximum();
+  const double scrollFraction =
+      scrollMaximum > 0
+          ? static_cast<double>(std::clamp(scrollValue, 0, scrollMaximum)) /
+                static_cast<double>(scrollMaximum)
+          : 0.0;
+  const std::size_t firstVisible = static_cast<std::size_t>(
+      scrollFraction * static_cast<double>(scrollableRows));
+  const std::size_t first = firstVisible > InspectorRowOverscan
+                                ? firstVisible - InspectorRowOverscan
+                                : 0;
+  const std::size_t desiredEnd = std::min(
+      rowCount, firstVisible + viewportRows + InspectorRowOverscan + 1);
+  return {first,
+          std::min(desiredEnd, first + MaximumInspectorMaterializedRows)};
+}
+
+int estimatedSpacerHeight(std::size_t rows, int estimatedRowHeight) {
+  constexpr std::size_t MaximumSpacerHeight =
+      static_cast<std::size_t>(std::numeric_limits<int>::max() / 4);
+  const std::size_t height = static_cast<std::size_t>(estimatedRowHeight);
+  return static_cast<int>(rows > MaximumSpacerHeight / height
+                              ? MaximumSpacerHeight
+                              : rows * height);
+}
+
+bool materializedRowsCoverViewport(QVBoxLayout *layout, QScrollArea *scroll,
+                                   std::size_t firstRow, std::size_t endRow,
+                                   std::size_t totalRows) {
+  QWidget *firstWidget = nullptr;
+  QWidget *lastWidget = nullptr;
+  for (int index = 0; index < layout->count(); ++index) {
+    QWidget *widget = layout->itemAt(index)->widget();
+    if (!widget)
+      continue;
+    if (!firstWidget)
+      firstWidget = widget;
+    lastWidget = widget;
+  }
+  if (!firstWidget || !lastWidget)
+    return false;
+  const int viewportTop = scroll->verticalScrollBar()->value();
+  const int viewportBottom = viewportTop + scroll->viewport()->height();
+  const bool coversTop =
+      firstRow == 0 || viewportTop >= firstWidget->geometry().top();
+  const bool coversBottom =
+      endRow == totalRows || viewportBottom <= lastWidget->geometry().bottom();
+  return coversTop && coversBottom;
+}
 
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -78,7 +187,7 @@ QLabel *makeLabel(QString value, const char *kind = "body") {
 }
 
 QLabel *statusLabel(const std::string &status) {
-  const PresentationStatus classified = classifyStatus(status);
+  const UiStatus classified = classifyStatus(status);
   auto *label = makeLabel(text(displayStatus(status)), "meta");
   if (!classified.tone.empty())
     label->setProperty("tone", classified.tone.data());
@@ -352,6 +461,10 @@ std::optional<std::uint64_t> graphUnsigned(const nodegraph::Value *value) {
   return std::nullopt;
 }
 
+bool graphBool(const nodegraph::Value *value) {
+  return value && value->asBool() && *value->asBool();
+}
+
 std::string graphStatus(const nodegraph::NodeState &state) {
   if (std::string status = graphString(graphField(state, "status"));
       !status.empty())
@@ -395,6 +508,13 @@ std::string effectivePlanStepStatus(const std::string &stepStatus,
   if (outcome == StatusKind::Interrupted)
     return "interrupted";
   return stepStatus;
+}
+
+bool hasStructuredPlan(const nodegraph::NodeState &state) {
+  const nodegraph::Value *planValue = graphField(state, "plan");
+  return (planValue && planValue->asArray()) ||
+         (planValue && planValue->asObject() &&
+          graphField(*planValue->asObject(), "steps"));
 }
 
 bool terminalStatus(std::string_view status) {
@@ -449,6 +569,12 @@ std::string_view nodeKindName(nodegraph::NodeKind kind) {
     return "RealtimeSession";
   case nodegraph::NodeKind::FilesystemWatch:
     return "FilesystemWatch";
+  case nodegraph::NodeKind::ExternalAgentImport:
+    return "ExternalAgentImport";
+  case nodegraph::NodeKind::FuzzyFileSearchSession:
+    return "FuzzyFileSearchSession";
+  case nodegraph::NodeKind::LoginAttempt:
+    return "LoginAttempt";
   case nodegraph::NodeKind::Notice:
     return "Notice";
   case nodegraph::NodeKind::UnknownProtocol:
@@ -594,6 +720,124 @@ void appendGraphObject(QString &target, const nodegraph::Value::Object &object,
 
 } // namespace
 
+struct InspectorPane::PlanGraphScan final {
+  std::uint64_t revision = 0;
+  nodegraph::NodeRef thread;
+  std::shared_ptr<const nodegraph::NodeState> threadState;
+  std::unordered_set<const nodegraph::Node *> dependencies;
+  std::size_t turnCursor = 0;
+  nodegraph::NodeRef currentTurn;
+  std::shared_ptr<const nodegraph::NodeState> currentTurnState;
+  std::size_t itemCursor = 0;
+  nodegraph::NodeRef sourceTurn;
+  std::shared_ptr<const nodegraph::NodeState> sourceTurnState;
+  nodegraph::NodeRef sourceItem;
+  std::shared_ptr<const nodegraph::NodeState> sourceItemState;
+};
+
+struct InspectorPane::AgentsGraphScan final {
+  enum class Phase {
+    MainTurns,
+    MainItems,
+    ChildRelations,
+    ChildTurns,
+    ChildItems,
+  };
+
+  std::uint64_t revision = 0;
+  nodegraph::NodeRef thread;
+  std::unordered_set<const nodegraph::Node *> dependencies;
+  InspectorAgentsData snapshot;
+  std::size_t renderEnd = 0;
+  std::size_t matchingCount = 0;
+  Phase phase = Phase::MainTurns;
+  std::size_t turnCursor = 0;
+  std::size_t turnCount = 0;
+  nodegraph::NodeRef currentTurn;
+  std::size_t itemCursor = 0;
+  std::size_t itemCount = 0;
+  nodegraph::NodeRef sourceItem;
+  std::shared_ptr<const nodegraph::NodeState> sourceState;
+  nodegraph::NodeRef childThread;
+  std::shared_ptr<const nodegraph::NodeState> childState;
+  std::shared_ptr<const nodegraph::NodeState> latestResultState;
+  std::size_t relationCursor = 0;
+  std::size_t relationCount = 0;
+  std::size_t childTurnCursor = 0;
+  nodegraph::NodeRef currentChildTurn;
+  std::size_t childItemCursor = 0;
+};
+
+struct InspectorPane::RequestsGraphScan final {
+  std::uint64_t revision = 0;
+  nodegraph::NodeRef runtime;
+  nodegraph::NodeRef connection;
+  std::unordered_set<const nodegraph::Node *> dependencies;
+  InspectorRequestsData snapshot;
+  bool canControl = false;
+  std::uint64_t generation = 0;
+  std::size_t pendingCount = 0;
+  std::size_t pendingCursor = 0;
+  std::size_t matchingCount = 0;
+  std::size_t renderEnd = 0;
+  nodegraph::NodeRef currentInteraction;
+  std::optional<InspectorRequestRender> currentRow;
+  std::size_t targetCount = 0;
+  std::size_t targetCursor = 0;
+  nodegraph::NodeRef targetAncestor;
+  std::size_t targetAncestryDepth = 0;
+};
+
+struct InspectorPane::ChangesGraphScan final {
+  enum class Phase { Turns, Items, ChangeEntries };
+
+  std::uint64_t revision = 0;
+  nodegraph::NodeRef thread;
+  std::unordered_set<const nodegraph::Node *> dependencies;
+  InspectorChangesData snapshot;
+  Phase phase = Phase::Turns;
+  std::size_t turnCursor = 0;
+  std::size_t turnCount = 0;
+  nodegraph::NodeRef currentTurn;
+  std::size_t itemCursor = 0;
+  std::size_t itemCount = 0;
+  std::shared_ptr<const nodegraph::NodeState> changeState;
+  std::size_t changeCursor = 0;
+};
+
+struct InspectorPane::StateGraphScan final {
+  std::uint64_t revision = 0;
+  std::size_t nodeCount = 0;
+  std::size_t nodeCursor = 0;
+  std::map<std::string, std::size_t, std::less<>> kindCounts;
+  std::size_t pendingInteractions = 0;
+  std::unordered_set<const nodegraph::Node *> dependencies;
+  std::string selectedId;
+  std::string parentId;
+  std::uint64_t selectedRevision = 0;
+  std::size_t childCount = 0;
+  std::shared_ptr<const nodegraph::NodeState> selectedState;
+};
+
+struct InspectorPane::ProtocolGraphScan final {
+  struct Entry final {
+    nodegraph::NodeKind kind = nodegraph::NodeKind::Operation;
+    std::string id;
+    std::string method;
+    std::string status;
+    QString direction;
+  };
+
+  std::uint64_t revision = 0;
+  std::size_t nodeCount = 0;
+  std::size_t nodeCursor = 0;
+  std::size_t operationCount = 0;
+  std::size_t unknownCount = 0;
+  std::size_t pendingCount = 0;
+  std::vector<Entry> entries;
+  std::unordered_set<const nodegraph::Node *> dependencies;
+};
+
 QFrame *InspectorPane::agentFrame(const InspectorAgentRender &agent,
                                   std::string_view threadId) {
   auto *frame = new QFrame;
@@ -713,13 +957,15 @@ QFrame *InspectorPane::requestFrame(const InspectorRequestRender &request) {
   auto *layout = new QVBoxLayout(frame);
   layout->setContentsMargins(12, 10, 12, 10);
   layout->setSpacing(6);
+  const std::string &displayId =
+      request.displayId.empty() ? request.id : request.displayId;
   layout->addWidget(
       makeLabel(UiStyle::humanizeLabel(text(request.kind)), "title"));
   layout->addWidget(
       makeLabel(QStringLiteral("thread %1  |  generation %2  |  request %3")
                     .arg(text(request.threadContext))
                     .arg(static_cast<qulonglong>(request.generation))
-                    .arg(text(request.id)),
+                    .arg(text(displayId)),
                 "meta"));
   const auto addMetadata = [layout](const std::string &value,
                                     const char *prefix) {
@@ -739,7 +985,7 @@ QFrame *InspectorPane::requestFrame(const InspectorRequestRender &request) {
   if (request.command.empty() && request.reason.empty() &&
       request.message.empty() && !request.questionCount)
     layout->addWidget(makeLabel(
-        QStringLiteral("Request %1 needs a decision.").arg(text(request.id)),
+        QStringLiteral("Request %1 needs a decision.").arg(text(displayId)),
         "meta"));
   auto *actions = new QHBoxLayout;
   actions->setContentsMargins(0, 2, 0, 0);
@@ -767,7 +1013,7 @@ QFrame *InspectorPane::requestFrame(const InspectorRequestRender &request) {
     auto *review = new QPushButton(QStringLiteral("Review"));
     review->setProperty("kind", "request");
     review->setFixedHeight(28);
-    review->setEnabled(request.actionable);
+    review->setEnabled(request.actionable || request.recoverable);
     connect(review, &QPushButton::clicked, this, [this, id = request.id] {
       if (reviewRequest)
         reviewRequest(id);
@@ -892,6 +1138,7 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   });
   const auto showInfoChoices = [this] {
     infoStack->setCurrentIndex(InfoChoicePage);
+    refreshCurrentTab();
   };
   connect(stateBack, &QPushButton::clicked, this, showInfoChoices);
   connect(protocolBack, &QPushButton::clicked, this, showInfoChoices);
@@ -899,6 +1146,50 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   planScroll = makeScroll(planContent);
   agentsScroll = makeScroll(agentsContent);
   requestsScroll = makeScroll(requestsContent);
+  connect(planScroll->verticalScrollBar(), &QScrollBar::valueChanged, this,
+          [this](int value) {
+            QScrollBar *bar = planScroll->verticalScrollBar();
+            if (!pendingPlanSnapshot)
+              planScrollFollowsTail =
+                  bar->maximum() > 0 && value == bar->maximum();
+            refreshGraphPlanViewport();
+          });
+  connect(planScroll->verticalScrollBar(), &QScrollBar::rangeChanged, this,
+          [this](int, int maximum) {
+            if (planScrollFollowsTail)
+              planScroll->verticalScrollBar()->setValue(maximum);
+            QTimer::singleShot(0, this, [this] { refreshGraphPlanViewport(); });
+          });
+  connect(agentsScroll->verticalScrollBar(), &QScrollBar::valueChanged, this,
+          [this](int value) {
+            QScrollBar *bar = agentsScroll->verticalScrollBar();
+            if (!pendingAgentsSnapshot)
+              agentsScrollFollowsTail =
+                  bar->maximum() > 0 && value == bar->maximum();
+            refreshGraphAgentsViewport();
+          });
+  connect(agentsScroll->verticalScrollBar(), &QScrollBar::rangeChanged, this,
+          [this](int, int maximum) {
+            if (agentsScrollFollowsTail)
+              agentsScroll->verticalScrollBar()->setValue(maximum);
+            QTimer::singleShot(0, this,
+                               [this] { refreshGraphAgentsViewport(); });
+          });
+  connect(requestsScroll->verticalScrollBar(), &QScrollBar::valueChanged, this,
+          [this](int value) {
+            QScrollBar *bar = requestsScroll->verticalScrollBar();
+            if (!pendingRequestsSnapshot)
+              requestsScrollFollowsTail =
+                  bar->maximum() > 0 && value == bar->maximum();
+            refreshGraphRequestsViewport();
+          });
+  connect(requestsScroll->verticalScrollBar(), &QScrollBar::rangeChanged, this,
+          [this](int, int maximum) {
+            if (requestsScrollFollowsTail)
+              requestsScroll->verticalScrollBar()->setValue(maximum);
+            QTimer::singleShot(0, this,
+                               [this] { refreshGraphRequestsViewport(); });
+          });
   inspectorTabs->addTab(planScroll, QStringLiteral("Plan"));
   inspectorTabs->addTab(agentsScroll, QStringLiteral("Agents"));
   inspectorTabs->addTab(diffViewer, QStringLiteral("Changes"));
@@ -908,6 +1199,23 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
 
   connect(inspectorTabs, &QTabWidget::currentChanged, this,
           [this](int) { refreshCurrentTab(); });
+}
+
+InspectorPane::~InspectorPane() = default;
+
+void InspectorPane::showEvent(QShowEvent *event) {
+  graphRefreshSuspended = false;
+  QFrame::showEvent(event);
+  if (graphRefreshDirty)
+    scheduleGraphRefresh();
+}
+
+void InspectorPane::hideEvent(QHideEvent *event) {
+  graphRefreshSuspended = true;
+  graphRefreshDirty = graph != nullptr;
+  cancelGraphScans();
+  cancelGraphRowRenders();
+  QFrame::hideEvent(event);
 }
 
 void InspectorPane::setHideAction(std::function<void()> hide) {
@@ -926,16 +1234,18 @@ void InspectorPane::refresh(const nodegraph::NodeGraph &nextGraph,
                             nodegraph::NodeRef selectedThread) {
   if (graph != &nextGraph) {
     cancelGraphRowRenders();
+    cancelGraphScans();
     graph = &nextGraph;
-    planSnapshot.reset();
-    agentsSnapshot.reset();
-    requestsSnapshot.reset();
     changesSnapshot.reset();
+    planKnownRows = 1;
+    agentsKnownRows = 0;
+    requestsKnownRows = 0;
     stateSnapshot.clear();
     protocolStatsSnapshot.clear();
   }
   if (selectedGraphThread != selectedThread) {
     cancelGraphRowRenders();
+    cancelGraphScans();
     activeGraphDependencies.clear();
     graphDependenciesTab = -1;
     graphDependenciesInfoPage = -1;
@@ -945,13 +1255,27 @@ void InspectorPane::refresh(const nodegraph::NodeGraph &nextGraph,
 }
 
 void InspectorPane::graphChanged(const nodegraph::GraphChanged &change) {
-  if (graph && graphChangeAffectsCurrentTab(change))
+  if (!graph)
+    return;
+  if (graphRefreshSuspended) {
+    graphRefreshDirty = true;
+    cancelGraphScans();
+    cancelGraphRowRenders();
+    return;
+  }
+  if (graphChangeAffectsCurrentTab(change)) {
+    cancelGraphScans();
     scheduleGraphRefresh();
+  }
 }
 
 bool InspectorPane::graphChangeAffectsCurrentTab(
     const nodegraph::GraphChanged &change) {
   if (change.rescanRequired)
+    return true;
+  if (change.affected.size() > MaximumInspectorChangeNodesToInspect ||
+      change.removed.size() >
+          MaximumInspectorChangeNodesToInspect - change.affected.size())
     return true;
 
   const int tab = inspectorTabs->currentIndex();
@@ -1010,8 +1334,11 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
       continue;
     bool belowSelectedThread = false;
     bool belowActiveDependency = false;
+    std::size_t ancestryDepth = 0;
     for (nodegraph::NodeRef ancestor = node; ancestor;
          ancestor = read->parent(ancestor)) {
+      if (++ancestryDepth > MaximumInspectorAncestryDepth)
+        return true;
       belowSelectedThread = belowSelectedThread || ancestor == thread;
       belowActiveDependency =
           belowActiveDependency || knownDependency(ancestor);
@@ -1022,7 +1349,7 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
     if (node->id().kind == nodegraph::NodeKind::Thread)
       return belowActiveDependency || node == thread;
     if (node->id().kind == nodegraph::NodeKind::Turn)
-      return true;
+      return tab == 0 || tab == 2 || (tab == 1 && knownDependency(node));
     if (node->id().kind != nodegraph::NodeKind::Item)
       continue;
 
@@ -1033,7 +1360,7 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
     if (tab == 1) {
       if (type == "subAgentActivity" || type == "collabAgentToolCall")
         return true;
-      if (type == "agentMessage" && belowActiveDependency)
+      if (type == "agentMessage" && knownDependency(node))
         return true;
     }
     if (tab == 2 && (type == "commandExecution" || type == "fileChange"))
@@ -1043,6 +1370,12 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
 }
 
 void InspectorPane::cancelGraphRowRenders() {
+  if (pendingPlanSnapshot)
+    planRowsMaterialized = false;
+  if (pendingAgentsSnapshot)
+    agentsRowsMaterialized = false;
+  if (pendingRequestsSnapshot)
+    requestsRowsMaterialized = false;
   pendingPlanSnapshot.reset();
   pendingAgentsSnapshot.reset();
   pendingRequestsSnapshot.reset();
@@ -1052,11 +1385,19 @@ void InspectorPane::cancelGraphRowRenders() {
   planRenderCursor = 0;
   agentsRenderCursor = 0;
   requestsRenderCursor = 0;
-  agentsPreservedRows = 0;
-  requestsPreservedRows = 0;
+}
+
+void InspectorPane::cancelGraphScans() {
+  planGraphScan.reset();
+  agentsGraphScan.reset();
+  requestsGraphScan.reset();
+  changesGraphScan.reset();
+  stateGraphScan.reset();
+  protocolGraphScan.reset();
 }
 
 void InspectorPane::refreshCurrentTab() {
+  cancelGraphScans();
   activeGraphDependencies.clear();
   graphDependenciesTab = -1;
   graphDependenciesInfoPage = -1;
@@ -1064,11 +1405,15 @@ void InspectorPane::refreshCurrentTab() {
 }
 
 void InspectorPane::scheduleGraphRefresh() {
-  if (!graph || graphRefreshScheduled)
+  graphRefreshDirty = graph != nullptr;
+  if (!graph || graphRefreshScheduled || graphRefreshSuspended)
     return;
   graphRefreshScheduled = true;
   QTimer::singleShot(0, this, [this] {
     graphRefreshScheduled = false;
+    if (graphRefreshSuspended)
+      return;
+    graphRefreshDirty = false;
     runGraphRefresh();
   });
 }
@@ -1079,233 +1424,251 @@ void InspectorPane::runGraphRefresh() {
 
   const int tab = inspectorTabs->currentIndex();
   const int infoPage = tab == 4 ? infoStack->currentIndex() : InfoChoicePage;
-  if (tab == 4 && infoPage == InfoChoicePage)
-    return;
+  if (tab == 0) {
+    runPlanGraphScan();
+  } else if (tab == 1) {
+    runAgentsGraphScan();
+  } else if (tab == 2) {
+    runChangesGraphScan();
+  } else if (tab == 3) {
+    runRequestsGraphRefresh();
+  } else if (tab == 4 && infoPage == StatePage) {
+    runStateGraphScan();
+  } else if (tab == 4 && infoPage == ProtocolPage) {
+    runProtocolGraphScan();
+  }
+}
 
-  auto read = graph->tryRead();
+void InspectorPane::runPlanGraphScan() {
+  auto read = graph ? graph->tryRead() : std::nullopt;
   if (!read) {
     scheduleGraphRefresh();
     return;
   }
 
-  nodegraph::NodeRef thread;
-  if (selectedGraphThread &&
-      selectedGraphThread->id().kind == nodegraph::NodeKind::Thread &&
-      read->find(selectedGraphThread->id()) == selectedGraphThread)
-    thread = selectedGraphThread;
-
-  std::unordered_set<const nodegraph::Node *> dependencies;
-  if (thread)
-    dependencies.insert(thread.get());
-  const auto publishDependencies = [this, tab,
-                                    infoPage](auto nextDependencies) {
-    activeGraphDependencies = std::move(nextDependencies);
-    graphDependenciesTab = tab;
-    graphDependenciesInfoPage = infoPage;
-  };
-
-  if (tab == 0) {
-    struct PlanSource final {
-      nodegraph::NodeRef turn;
-      std::shared_ptr<const nodegraph::NodeState> turnState;
-      nodegraph::NodeRef item;
-      std::shared_ptr<const nodegraph::NodeState> itemState;
-    };
-
-    const std::shared_ptr<const nodegraph::NodeState> threadState =
-        thread ? read->state(thread) : nullptr;
-    PlanSource source;
-    if (thread) {
-      const std::vector<nodegraph::NodeRef> turns = read->children(thread);
-      for (auto turnIterator = turns.rbegin(); turnIterator != turns.rend();
-           ++turnIterator) {
-        if ((*turnIterator)->id().kind != nodegraph::NodeKind::Turn)
-          continue;
-        dependencies.insert(turnIterator->get());
-        const std::shared_ptr<const nodegraph::NodeState> turnState =
-            read->state(*turnIterator);
-        const nodegraph::Value *planValue = graphField(*turnState, "plan");
-        const bool hasStructuredPlan =
-            (planValue && planValue->asArray()) ||
-            (planValue && planValue->asObject() &&
-             graphField(*planValue->asObject(), "steps"));
-        if (hasStructuredPlan) {
-          source.turn = *turnIterator;
-          source.turnState = turnState;
-          break;
-        }
-
-        const std::vector<nodegraph::NodeRef> items =
-            read->children(*turnIterator);
-        for (auto itemIterator = items.rbegin(); itemIterator != items.rend();
-             ++itemIterator) {
-          if ((*itemIterator)->id().kind != nodegraph::NodeKind::Item)
-            continue;
-          const std::shared_ptr<const nodegraph::NodeState> itemState =
-              read->state(*itemIterator);
-          if (graphString(graphField(*itemState, "type")) != "plan")
-            continue;
-          dependencies.insert(itemIterator->get());
-          source.turn = *turnIterator;
-          source.turnState = turnState;
-          source.item = *itemIterator;
-          source.itemState = itemState;
-          break;
-        }
-        if (source.item)
-          break;
-      }
+  const std::uint64_t revision = read->revision();
+  if (!planGraphScan || planGraphScan->revision != revision) {
+    planGraphScan = std::make_unique<PlanGraphScan>();
+    PlanGraphScan &scan = *planGraphScan;
+    scan.revision = revision;
+    if (selectedGraphThread &&
+        selectedGraphThread->id().kind == nodegraph::NodeKind::Thread &&
+        read->find(selectedGraphThread->id()) == selectedGraphThread)
+      scan.thread = selectedGraphThread;
+    if (scan.thread) {
+      scan.dependencies.insert(scan.thread.get());
+      scan.threadState = read->state(scan.thread);
+      scan.turnCursor = read->childCount(scan.thread);
     }
-    read.reset();
-    publishDependencies(std::move(dependencies));
+  }
 
-    InspectorPlanData snapshot;
-    snapshot.threadId = thread ? thread->id().canonical : std::string{};
-    snapshot.threadPresent = static_cast<bool>(thread);
-    if (threadState && source.turnState) {
-      const std::string threadStatus = graphStatus(*threadState);
-      const nodegraph::Value *planValue = graphField(*source.turnState, "plan");
-      const nodegraph::Value::Array *steps = nullptr;
-      std::string explanation =
-          graphString(graphField(*source.turnState, "planExplanation"));
-      bool hasStructuredPlan = false;
-      if (const nodegraph::Value::Array *array =
-              planValue ? planValue->asArray() : nullptr) {
-        hasStructuredPlan = true;
-        steps = array;
-      } else if (const nodegraph::Value::Object *plan =
-                     planValue ? planValue->asObject() : nullptr) {
-        const nodegraph::Value *nestedSteps = graphField(*plan, "steps");
-        hasStructuredPlan = nestedSteps != nullptr;
-        steps = nestedSteps ? nestedSteps->asArray() : nullptr;
-        if (explanation.empty())
-          explanation = graphString(graphField(*plan, "explanation"));
+  PlanGraphScan &scan = *planGraphScan;
+  bool complete = false;
+  std::size_t work = 0;
+  while (work < MaximumInspectorGraphReadsPerPass && !complete) {
+    if (scan.currentTurn) {
+      if (scan.itemCursor == 0) {
+        scan.currentTurn.reset();
+        scan.currentTurnState.reset();
+        continue;
       }
-      if (hasStructuredPlan) {
-        InspectorPlanRender plan;
-        plan.explanation = std::move(explanation);
-        if (steps) {
-          plan.steps.reserve(steps->size());
-          const std::string turnStatus = graphStatus(*source.turnState);
-          for (const nodegraph::Value &entry : *steps) {
-            const nodegraph::Value::Object *step = entry.asObject();
-            if (!step)
-              continue;
-            const std::string status = graphString(graphField(*step, "status"));
-            plan.steps.push_back(
-                {graphString(graphField(*step, "step")),
-                 effectivePlanStepStatus(status, turnStatus, threadStatus)});
-          }
-        }
-        snapshot.plan = std::move(plan);
-      } else if (source.itemState) {
-        snapshot.planItem = graphString(graphField(*source.itemState, "text"));
-      }
+      const nodegraph::NodeRef item =
+          read->childAt(scan.currentTurn, --scan.itemCursor);
+      ++work;
+      if (!item || item->id().kind != nodegraph::NodeKind::Item)
+        continue;
+      const std::shared_ptr<const nodegraph::NodeState> itemState =
+          read->state(item);
+      if (graphString(graphField(*itemState, "type")) != "plan")
+        continue;
+      scan.dependencies.insert(item.get());
+      scan.sourceTurn = scan.currentTurn;
+      scan.sourceTurnState = scan.currentTurnState;
+      scan.sourceItem = item;
+      scan.sourceItemState = itemState;
+      complete = true;
+      continue;
     }
-    renderGraphPlan(std::move(snapshot));
+
+    if (scan.turnCursor == 0) {
+      complete = true;
+      continue;
+    }
+    const nodegraph::NodeRef turn =
+        read->childAt(scan.thread, --scan.turnCursor);
+    ++work;
+    if (!turn || turn->id().kind != nodegraph::NodeKind::Turn)
+      continue;
+    scan.dependencies.insert(turn.get());
+    const std::shared_ptr<const nodegraph::NodeState> turnState =
+        read->state(turn);
+    if (hasStructuredPlan(*turnState)) {
+      scan.sourceTurn = turn;
+      scan.sourceTurnState = turnState;
+      complete = true;
+      continue;
+    }
+    scan.currentTurn = turn;
+    scan.currentTurnState = turnState;
+    scan.itemCursor = read->childCount(turn);
+  }
+  read.reset();
+
+  if (!complete) {
+    scheduleGraphRefresh();
+    return;
+  }
+  std::unique_ptr<PlanGraphScan> finished = std::move(planGraphScan);
+  if (graph->publishedRevision() != finished->revision) {
+    scheduleGraphRefresh();
     return;
   }
 
-  if (tab == 1) {
-    struct AgentSource final {
-      nodegraph::NodeRef item;
-      std::shared_ptr<const nodegraph::NodeState> state;
-      nodegraph::NodeRef childThread;
-      std::shared_ptr<const nodegraph::NodeState> childState;
-      std::shared_ptr<const nodegraph::NodeState> latestResultState;
-    };
-    std::vector<AgentSource> sources;
-    if (thread) {
-      for (const nodegraph::NodeRef &turn : read->children(thread)) {
-        if (turn->id().kind != nodegraph::NodeKind::Turn)
-          continue;
-        dependencies.insert(turn.get());
-        for (const nodegraph::NodeRef &item : read->children(turn)) {
-          if (item->id().kind != nodegraph::NodeKind::Item)
-            continue;
-          const std::shared_ptr<const nodegraph::NodeState> state =
-              read->state(item);
-          const std::string type = graphString(graphField(*state, "type"));
-          if (type != "subAgentActivity" && type != "collabAgentToolCall")
-            continue;
-          dependencies.insert(item.get());
+  activeGraphDependencies = std::move(finished->dependencies);
+  graphDependenciesTab = 0;
+  graphDependenciesInfoPage = InfoChoicePage;
 
-          nodegraph::NodeRef childThread;
-          for (const nodegraph::NodeRef &candidate :
-               read->related(item, nodegraph::RelationKind::AgentChildThread)) {
-            if (candidate->id().kind == nodegraph::NodeKind::Thread) {
-              childThread = candidate;
-              break;
-            }
+  InspectorPlanData snapshot;
+  snapshot.threadId =
+      finished->thread ? finished->thread->id().canonical : std::string{};
+  snapshot.threadPresent = static_cast<bool>(finished->thread);
+  if (finished->threadState && finished->sourceTurnState) {
+    const std::string threadStatus = graphStatus(*finished->threadState);
+    const nodegraph::Value *planValue =
+        graphField(*finished->sourceTurnState, "plan");
+    const nodegraph::Value::Array *steps = nullptr;
+    const nodegraph::Value *explanationValue =
+        graphField(*finished->sourceTurnState, "planExplanation");
+    bool structured = false;
+    if (const nodegraph::Value::Array *array =
+            planValue ? planValue->asArray() : nullptr) {
+      structured = true;
+      steps = array;
+    } else if (const nodegraph::Value::Object *plan =
+                   planValue ? planValue->asObject() : nullptr) {
+      const nodegraph::Value *nestedSteps = graphField(*plan, "steps");
+      structured = nestedSteps != nullptr;
+      steps = nestedSteps ? nestedSteps->asArray() : nullptr;
+      const std::string *explanation =
+          explanationValue ? explanationValue->asString() : nullptr;
+      if (!explanation || explanation->empty())
+        explanationValue = graphField(*plan, "explanation");
+    }
+    if (structured) {
+      InspectorPlanRender plan;
+      const std::string *explanation =
+          explanationValue ? explanationValue->asString() : nullptr;
+      plan.hasExplanation = explanation && !explanation->empty();
+      snapshot.totalRows =
+          (steps ? steps->size() : 0) + (plan.hasExplanation ? 1U : 0U);
+      const InspectorRowWindow window = visibleRowWindow(
+          planScroll, snapshot.totalRows, PlanEstimatedRowHeight,
+          planScroll->verticalScrollBar()->value());
+      snapshot.firstRow = window.first;
+      plan.includesExplanation =
+          plan.hasExplanation && window.first == 0 && window.end != 0;
+      if (plan.includesExplanation)
+        plan.explanation = *explanation;
+      if (steps) {
+        const std::size_t explanationRows = plan.hasExplanation ? 1U : 0U;
+        plan.firstStep =
+            window.first > explanationRows ? window.first - explanationRows : 0;
+        const std::size_t endStep =
+            window.end > explanationRows
+                ? std::min(steps->size(), window.end - explanationRows)
+                : 0;
+        plan.steps.reserve(endStep - plan.firstStep);
+        const std::string turnStatus = graphStatus(*finished->sourceTurnState);
+        for (std::size_t index = plan.firstStep; index < endStep; ++index) {
+          const nodegraph::Value &entry = (*steps)[index];
+          const nodegraph::Value::Object *step = entry.asObject();
+          if (!step) {
+            plan.steps.emplace_back();
+            continue;
           }
-          if (type == "collabAgentToolCall") {
-            const std::string tool = graphString(graphField(*state, "tool"));
-            const bool spawn = tool == "spawn_agent" || tool == "spawnAgent" ||
-                               tool == "spawn_agents_on_csv" ||
-                               tool == "spawnAgentsOnCsv";
-            if (!spawn || !childThread)
-              continue;
-          }
-
-          AgentSource source{item, state, childThread};
-          if (childThread) {
-            dependencies.insert(childThread.get());
-            source.childState = read->state(childThread);
-            const std::vector<nodegraph::NodeRef> childTurns =
-                read->children(childThread);
-            for (auto childTurn = childTurns.rbegin();
-                 childTurn != childTurns.rend() && !source.latestResultState;
-                 ++childTurn) {
-              if ((*childTurn)->id().kind != nodegraph::NodeKind::Turn)
-                continue;
-              dependencies.insert(childTurn->get());
-              const std::vector<nodegraph::NodeRef> childItems =
-                  read->children(*childTurn);
-              for (auto childItem = childItems.rbegin();
-                   childItem != childItems.rend(); ++childItem) {
-                if ((*childItem)->id().kind != nodegraph::NodeKind::Item)
-                  continue;
-                const std::shared_ptr<const nodegraph::NodeState>
-                    childItemState = read->state(*childItem);
-                if (graphString(graphField(*childItemState, "type")) !=
-                    "agentMessage")
-                  continue;
-                dependencies.insert(childItem->get());
-                if (!graphString(graphField(*childItemState, "text")).empty()) {
-                  source.latestResultState = childItemState;
-                  break;
-                }
-              }
-            }
-          }
-          sources.emplace_back(std::move(source));
+          const std::string status = graphString(graphField(*step, "status"));
+          plan.steps.push_back(
+              {graphString(graphField(*step, "step")),
+               effectivePlanStepStatus(status, turnStatus, threadStatus)});
         }
       }
+      snapshot.plan = std::move(plan);
+    } else if (finished->sourceItemState) {
+      snapshot.planItem =
+          graphString(graphField(*finished->sourceItemState, "text"));
     }
-    read.reset();
-    publishDependencies(std::move(dependencies));
+  }
+  renderGraphPlan(std::move(snapshot));
+}
 
-    InspectorAgentsData snapshot;
-    snapshot.threadId = thread ? thread->id().canonical : std::string{};
-    snapshot.threadPresent = static_cast<bool>(thread);
-    snapshot.agents.reserve(sources.size());
-    for (const AgentSource &source : sources) {
-      InspectorAgentRender row;
-      row.id = source.item->id().canonical;
-      row.status = graphStatus(*source.state);
-      row.agentPath = graphString(graphField(*source.state, "agentPath"));
-      row.tool = graphString(graphField(*source.state, "tool"));
-      row.model = graphString(graphField(*source.state, "model"));
-      row.reasoningEffort =
-          graphString(graphField(*source.state, "reasoningEffort"));
-      row.prompt = graphString(graphField(*source.state, "prompt"));
-      row.resultText = graphString(graphField(*source.state, "resultText"));
-      row.senderThreadId =
-          graphString(graphField(*source.state, "senderThreadId"));
+void InspectorPane::runAgentsGraphScan() {
+  const InspectorRowWindow requestedWindow = visibleRowWindow(
+      agentsScroll,
+      agentsKnownRows == 0 ? MaximumInspectorMaterializedRows : agentsKnownRows,
+      AgentEstimatedRowHeight, agentsScroll->verticalScrollBar()->value());
+  auto read = graph ? graph->tryRead() : std::nullopt;
+  if (!read) {
+    scheduleGraphRefresh();
+    return;
+  }
+
+  const std::uint64_t revision = read->revision();
+  if (!agentsGraphScan || agentsGraphScan->revision != revision) {
+    agentsGraphScan = std::make_unique<AgentsGraphScan>();
+    AgentsGraphScan &scan = *agentsGraphScan;
+    scan.revision = revision;
+    if (selectedGraphThread &&
+        selectedGraphThread->id().kind == nodegraph::NodeKind::Thread &&
+        read->find(selectedGraphThread->id()) == selectedGraphThread)
+      scan.thread = selectedGraphThread;
+    scan.snapshot.threadId =
+        scan.thread ? scan.thread->id().canonical : std::string{};
+    scan.snapshot.threadPresent = static_cast<bool>(scan.thread);
+    scan.snapshot.firstRow = requestedWindow.first;
+    scan.renderEnd = requestedWindow.end;
+    if (scan.thread)
+      scan.turnCount = read->childCount(scan.thread);
+  }
+
+  AgentsGraphScan &scan = *agentsGraphScan;
+  const auto clearSource = [&scan] {
+    scan.sourceItem.reset();
+    scan.sourceState.reset();
+    scan.childThread.reset();
+    scan.childState.reset();
+    scan.latestResultState.reset();
+    scan.relationCursor = 0;
+    scan.relationCount = 0;
+    scan.childTurnCursor = 0;
+    scan.currentChildTurn.reset();
+    scan.childItemCursor = 0;
+    scan.phase = AgentsGraphScan::Phase::MainItems;
+  };
+  const auto appendSource = [&scan, &clearSource] {
+    const std::size_t rowIndex = scan.matchingCount++;
+    if (rowIndex < scan.snapshot.firstRow || rowIndex >= scan.renderEnd) {
+      clearSource();
+      return;
+    }
+    scan.dependencies.insert(scan.sourceItem.get());
+    if (scan.childThread)
+      scan.dependencies.insert(scan.childThread.get());
+    InspectorAgentRender row;
+    row.id = nodegraph::protocolCanonicalId(*scan.sourceState, scan.sourceItem);
+    row.status = graphStatus(*scan.sourceState);
+    row.agentPath = graphString(graphField(*scan.sourceState, "agentPath"));
+    row.tool = graphString(graphField(*scan.sourceState, "tool"));
+    row.model = graphString(graphField(*scan.sourceState, "model"));
+    row.reasoningEffort =
+        graphString(graphField(*scan.sourceState, "reasoningEffort"));
+    row.prompt = graphString(graphField(*scan.sourceState, "prompt"));
+    row.resultText = graphString(graphField(*scan.sourceState, "resultText"));
+    row.senderThreadId =
+        graphString(graphField(*scan.sourceState, "senderThreadId"));
+    if (const nodegraph::Value *receiversValue =
+            graphField(*scan.sourceState, "receiverThreadIds")) {
       if (const nodegraph::Value::Array *receivers =
-              graphField(*source.state, "receiverThreadIds")
-                  ? graphField(*source.state, "receiverThreadIds")->asArray()
-                  : nullptr) {
+              receiversValue->asArray()) {
         row.receiverThreadIds.reserve(receivers->size());
         for (const nodegraph::Value &receiver : *receivers) {
           std::string id = graphString(&receiver);
@@ -1313,369 +1676,661 @@ void InspectorPane::runGraphRefresh() {
             row.receiverThreadIds.emplace_back(std::move(id));
         }
       }
-      if (source.childThread) {
-        row.childThreadId = source.childThread->id().canonical;
-        const std::string childStatus = graphStatus(*source.childState);
-        if (row.status.empty() || terminalStatus(childStatus))
-          row.status = childStatus;
-        if (source.latestResultState)
-          row.resultText =
-              graphString(graphField(*source.latestResultState, "text"));
-      } else {
-        row.childThreadId =
-            graphString(graphField(*source.state, "agentThreadId"));
-      }
-      snapshot.agents.emplace_back(std::move(row));
     }
-    renderGraphAgents(std::move(snapshot));
-    return;
-  }
+    if (scan.childThread) {
+      row.childThreadId = scan.childThread->id().canonical;
+      const std::string childStatus = graphStatus(*scan.childState);
+      if (row.status.empty() || terminalStatus(childStatus))
+        row.status = childStatus;
+      if (scan.latestResultState)
+        row.resultText =
+            graphString(graphField(*scan.latestResultState, "text"));
+    } else {
+      row.childThreadId =
+          graphString(graphField(*scan.sourceState, "agentThreadId"));
+    }
+    scan.snapshot.agents.emplace_back(std::move(row));
+    clearSource();
+  };
 
-  if (tab == 2) {
-    struct ItemSource final {
-      nodegraph::NodeRef item;
-      std::shared_ptr<const nodegraph::NodeState> state;
-    };
-    const std::shared_ptr<const nodegraph::NodeState> threadState =
-        thread ? read->state(thread) : nullptr;
-    std::vector<ItemSource> sources;
-    if (thread) {
-      for (const nodegraph::NodeRef &turn : read->children(thread)) {
-        if (turn->id().kind != nodegraph::NodeKind::Turn)
-          continue;
-        dependencies.insert(turn.get());
-        for (const nodegraph::NodeRef &item : read->children(turn)) {
-          if (item->id().kind != nodegraph::NodeKind::Item)
-            continue;
-          const std::shared_ptr<const nodegraph::NodeState> state =
-              read->state(item);
-          const std::string type = graphString(graphField(*state, "type"));
-          if (type != "commandExecution" && type != "fileChange")
-            continue;
-          dependencies.insert(item.get());
-          sources.push_back({item, state});
-        }
+  bool complete = false;
+  std::size_t work = 0;
+  while (work < MaximumInspectorGraphReadsPerPass && !complete) {
+    switch (scan.phase) {
+    case AgentsGraphScan::Phase::MainTurns: {
+      if (scan.turnCursor == scan.turnCount) {
+        complete = true;
+        break;
       }
+      const nodegraph::NodeRef turn =
+          read->childAt(scan.thread, scan.turnCursor++);
+      ++work;
+      if (!turn || turn->id().kind != nodegraph::NodeKind::Turn)
+        break;
+      scan.currentTurn = turn;
+      scan.itemCursor = 0;
+      scan.itemCount = read->childCount(turn);
+      scan.phase = AgentsGraphScan::Phase::MainItems;
+      break;
     }
-    read.reset();
-    publishDependencies(std::move(dependencies));
-
-    InspectorChangesData snapshot;
-    snapshot.threadId = thread ? thread->id().canonical : std::string{};
-    if (threadState) {
-      snapshot.cwd = graphString(graphField(*threadState, "cwd"));
-      for (const ItemSource &source : sources) {
-        const std::string type = graphString(graphField(*source.state, "type"));
-        if (type == "commandExecution") {
-          appendUniqueBounded(snapshot.commandCwds,
-                              graphString(graphField(*source.state, "cwd")),
-                              64);
-        } else if (const nodegraph::Value::Array *changes =
-                       graphField(*source.state, "changes")
-                           ? graphField(*source.state, "changes")->asArray()
-                           : nullptr) {
-          for (const nodegraph::Value &change : *changes) {
-            const nodegraph::Value::Object *object = change.asObject();
-            if (!object)
-              continue;
-            appendUniqueBounded(snapshot.changedPaths,
-                                graphString(graphField(*object, "path")), 512);
-          }
-        }
+    case AgentsGraphScan::Phase::MainItems: {
+      if (scan.itemCursor == scan.itemCount) {
+        scan.currentTurn.reset();
+        scan.phase = AgentsGraphScan::Phase::MainTurns;
+        break;
       }
-    }
-    if (!changesSnapshot || *changesSnapshot != snapshot) {
-      changesSnapshot = snapshot;
-      renderChanges(*changesSnapshot);
-    }
-    return;
-  }
-
-  if (tab == 3) {
-    struct RequestSource final {
-      nodegraph::NodeRef interaction;
-      std::shared_ptr<const nodegraph::NodeState> state;
-      nodegraph::NodeRef targetThread;
-      std::shared_ptr<const nodegraph::NodeState> targetState;
-    };
-    nodegraph::NodeRef connection;
-    std::shared_ptr<const nodegraph::NodeState> connectionState;
-    if ((connection =
-             read->find({nodegraph::NodeKind::Connection, "connection"}))) {
-      dependencies.insert(connection.get());
-      connectionState = read->state(connection);
-    }
-    const nodegraph::NodeRef runtime =
-        read->find({nodegraph::NodeKind::Runtime, "runtime"});
-    if (runtime)
-      dependencies.insert(runtime.get());
-    std::vector<RequestSource> sources;
-    const std::vector<nodegraph::NodeRef> pendingInteractions =
-        runtime ? read->related(runtime,
-                                nodegraph::RelationKind::PendingInteraction)
-                : std::vector<nodegraph::NodeRef>{};
-    sources.reserve(pendingInteractions.size());
-    for (const nodegraph::NodeRef &candidate : pendingInteractions) {
-      if (!candidate ||
-          candidate->id().kind != nodegraph::NodeKind::Interaction)
-        continue;
-      dependencies.insert(candidate.get());
+      const nodegraph::NodeRef item =
+          read->childAt(scan.currentTurn, scan.itemCursor++);
+      ++work;
+      if (!item || item->id().kind != nodegraph::NodeKind::Item)
+        break;
       const std::shared_ptr<const nodegraph::NodeState> state =
-          read->state(candidate);
-      if (state->status != nodegraph::NodeStatus::Pending &&
-          state->status != nodegraph::NodeStatus::Failed)
-        continue;
-      RequestSource source{candidate, state};
-      for (nodegraph::NodeRef target : read->related(
-               candidate, nodegraph::RelationKind::InteractionTarget)) {
-        while (target && target->id().kind != nodegraph::NodeKind::Thread) {
-          dependencies.insert(target.get());
-          target = read->parent(target);
-        }
-        if (target) {
-          dependencies.insert(target.get());
-          source.targetThread = target;
-          source.targetState = read->state(target);
+          read->state(item);
+      const std::string type = graphString(graphField(*state, "type"));
+      if (type != "subAgentActivity" && type != "collabAgentToolCall")
+        break;
+      if (type == "collabAgentToolCall") {
+        const std::string tool = graphString(graphField(*state, "tool"));
+        if (tool != "spawn_agent" && tool != "spawnAgent" &&
+            tool != "spawn_agents_on_csv" && tool != "spawnAgentsOnCsv")
           break;
-        }
       }
-      sources.emplace_back(std::move(source));
+      scan.sourceItem = item;
+      scan.sourceState = state;
+      scan.relationCursor = 0;
+      scan.relationCount =
+          read->relatedCount(item, nodegraph::RelationKind::AgentChildThread);
+      scan.phase = AgentsGraphScan::Phase::ChildRelations;
+      break;
     }
-    read.reset();
-    publishDependencies(std::move(dependencies));
+    case AgentsGraphScan::Phase::ChildRelations: {
+      if (!scan.childThread && scan.relationCursor < scan.relationCount) {
+        const nodegraph::NodeRef candidate = read->relatedAt(
+            scan.sourceItem, nodegraph::RelationKind::AgentChildThread,
+            scan.relationCursor++);
+        ++work;
+        if (candidate && candidate->id().kind == nodegraph::NodeKind::Thread)
+          scan.childThread = candidate;
+        break;
+      }
+      const std::string type =
+          graphString(graphField(*scan.sourceState, "type"));
+      if (type == "collabAgentToolCall" && !scan.childThread) {
+        clearSource();
+        break;
+      }
+      if (!scan.childThread) {
+        appendSource();
+        break;
+      }
+      scan.childState = read->state(scan.childThread);
+      scan.childTurnCursor = read->childCount(scan.childThread);
+      scan.phase = AgentsGraphScan::Phase::ChildTurns;
+      break;
+    }
+    case AgentsGraphScan::Phase::ChildTurns: {
+      if (scan.childTurnCursor == 0) {
+        appendSource();
+        break;
+      }
+      const nodegraph::NodeRef childTurn =
+          read->childAt(scan.childThread, --scan.childTurnCursor);
+      ++work;
+      if (!childTurn || childTurn->id().kind != nodegraph::NodeKind::Turn)
+        break;
+      scan.currentChildTurn = childTurn;
+      scan.childItemCursor = read->childCount(childTurn);
+      scan.phase = AgentsGraphScan::Phase::ChildItems;
+      break;
+    }
+    case AgentsGraphScan::Phase::ChildItems: {
+      if (scan.childItemCursor == 0) {
+        scan.currentChildTurn.reset();
+        scan.phase = AgentsGraphScan::Phase::ChildTurns;
+        break;
+      }
+      const nodegraph::NodeRef childItem =
+          read->childAt(scan.currentChildTurn, --scan.childItemCursor);
+      ++work;
+      if (!childItem || childItem->id().kind != nodegraph::NodeKind::Item)
+        break;
+      const std::shared_ptr<const nodegraph::NodeState> childItemState =
+          read->state(childItem);
+      if (graphString(graphField(*childItemState, "type")) != "agentMessage")
+        break;
+      if (graphString(graphField(*childItemState, "text")).empty())
+        break;
+      scan.latestResultState = childItemState;
+      appendSource();
+      break;
+    }
+    }
+  }
+  read.reset();
 
-    InspectorRequestsData snapshot;
-    bool canControl = false;
-    std::uint64_t generation = 0;
-    if (connectionState) {
+  if (!complete) {
+    scheduleGraphRefresh();
+    return;
+  }
+  std::unique_ptr<AgentsGraphScan> finished = std::move(agentsGraphScan);
+  if (graph->publishedRevision() != finished->revision) {
+    scheduleGraphRefresh();
+    return;
+  }
+  activeGraphDependencies = std::move(finished->dependencies);
+  graphDependenciesTab = 1;
+  graphDependenciesInfoPage = InfoChoicePage;
+  if (finished->matchingCount == 0) {
+    finished->snapshot.firstRow = 0;
+    finished->snapshot.totalRows = 1;
+  } else if (finished->snapshot.firstRow >= finished->matchingCount) {
+    agentsKnownRows = finished->matchingCount;
+    scheduleGraphRefresh();
+    return;
+  } else {
+    finished->snapshot.totalRows = finished->matchingCount;
+  }
+  renderGraphAgents(std::move(finished->snapshot));
+}
+
+void InspectorPane::runChangesGraphScan() {
+  auto read = graph ? graph->tryRead() : std::nullopt;
+  if (!read) {
+    scheduleGraphRefresh();
+    return;
+  }
+
+  const std::uint64_t revision = read->revision();
+  if (!changesGraphScan || changesGraphScan->revision != revision) {
+    changesGraphScan = std::make_unique<ChangesGraphScan>();
+    ChangesGraphScan &scan = *changesGraphScan;
+    scan.revision = revision;
+    if (selectedGraphThread &&
+        selectedGraphThread->id().kind == nodegraph::NodeKind::Thread &&
+        read->find(selectedGraphThread->id()) == selectedGraphThread)
+      scan.thread = selectedGraphThread;
+    scan.snapshot.threadId =
+        scan.thread ? scan.thread->id().canonical : std::string{};
+    if (scan.thread) {
+      scan.dependencies.insert(scan.thread.get());
+      const std::shared_ptr<const nodegraph::NodeState> threadState =
+          read->state(scan.thread);
+      scan.snapshot.cwd = graphString(graphField(*threadState, "cwd"));
+      scan.turnCount = read->childCount(scan.thread);
+    }
+  }
+
+  ChangesGraphScan &scan = *changesGraphScan;
+  bool complete = false;
+  std::size_t work = 0;
+  while (work < MaximumInspectorGraphReadsPerPass && !complete) {
+    switch (scan.phase) {
+    case ChangesGraphScan::Phase::Turns: {
+      if (scan.turnCursor == scan.turnCount) {
+        complete = true;
+        break;
+      }
+      const nodegraph::NodeRef turn =
+          read->childAt(scan.thread, scan.turnCursor++);
+      ++work;
+      if (!turn || turn->id().kind != nodegraph::NodeKind::Turn)
+        break;
+      scan.dependencies.insert(turn.get());
+      scan.currentTurn = turn;
+      scan.itemCursor = 0;
+      scan.itemCount = read->childCount(turn);
+      scan.phase = ChangesGraphScan::Phase::Items;
+      break;
+    }
+    case ChangesGraphScan::Phase::Items: {
+      if (scan.itemCursor == scan.itemCount) {
+        scan.currentTurn.reset();
+        scan.phase = ChangesGraphScan::Phase::Turns;
+        break;
+      }
+      const nodegraph::NodeRef item =
+          read->childAt(scan.currentTurn, scan.itemCursor++);
+      ++work;
+      if (!item || item->id().kind != nodegraph::NodeKind::Item)
+        break;
+      const std::shared_ptr<const nodegraph::NodeState> state =
+          read->state(item);
+      const std::string type = graphString(graphField(*state, "type"));
+      if (type != "commandExecution" && type != "fileChange")
+        break;
+      scan.dependencies.insert(item.get());
+      if (type == "commandExecution") {
+        appendUniqueBounded(scan.snapshot.commandCwds,
+                            graphString(graphField(*state, "cwd")), 64);
+        break;
+      }
+      scan.changeState = state;
+      scan.changeCursor = 0;
+      scan.phase = ChangesGraphScan::Phase::ChangeEntries;
+      break;
+    }
+    case ChangesGraphScan::Phase::ChangeEntries: {
+      const nodegraph::Value *changesValue =
+          graphField(*scan.changeState, "changes");
+      const nodegraph::Value::Array *changes =
+          changesValue ? changesValue->asArray() : nullptr;
+      if (!changes || scan.changeCursor == changes->size()) {
+        scan.changeState.reset();
+        scan.changeCursor = 0;
+        scan.phase = ChangesGraphScan::Phase::Items;
+        break;
+      }
+      const nodegraph::Value &change = (*changes)[scan.changeCursor++];
+      ++work;
+      const nodegraph::Value::Object *object = change.asObject();
+      if (object)
+        appendUniqueBounded(scan.snapshot.changedPaths,
+                            graphString(graphField(*object, "path")), 512);
+      break;
+    }
+    }
+  }
+  read.reset();
+
+  if (!complete) {
+    scheduleGraphRefresh();
+    return;
+  }
+  std::unique_ptr<ChangesGraphScan> finished = std::move(changesGraphScan);
+  if (graph->publishedRevision() != finished->revision) {
+    scheduleGraphRefresh();
+    return;
+  }
+  activeGraphDependencies = std::move(finished->dependencies);
+  graphDependenciesTab = 2;
+  graphDependenciesInfoPage = InfoChoicePage;
+  if (!changesSnapshot || *changesSnapshot != finished->snapshot) {
+    changesSnapshot = std::move(finished->snapshot);
+    renderChanges(*changesSnapshot);
+  }
+}
+
+void InspectorPane::runRequestsGraphRefresh() {
+  const InspectorRowWindow requestedWindow = visibleRowWindow(
+      requestsScroll,
+      requestsKnownRows == 0 ? MaximumInspectorMaterializedRows
+                             : requestsKnownRows,
+      RequestEstimatedRowHeight, requestsScroll->verticalScrollBar()->value());
+  auto read = graph ? graph->tryRead() : std::nullopt;
+  if (!read) {
+    scheduleGraphRefresh();
+    return;
+  }
+
+  const std::uint64_t revision = read->revision();
+  if (!requestsGraphScan || requestsGraphScan->revision != revision) {
+    requestsGraphScan = std::make_unique<RequestsGraphScan>();
+    RequestsGraphScan &scan = *requestsGraphScan;
+    scan.revision = revision;
+    if (selectedGraphThread &&
+        selectedGraphThread->id().kind == nodegraph::NodeKind::Thread &&
+        read->find(selectedGraphThread->id()) == selectedGraphThread)
+      scan.dependencies.insert(selectedGraphThread.get());
+
+    scan.connection =
+        read->find({nodegraph::NodeKind::Connection, "connection"});
+    if (scan.connection) {
+      scan.dependencies.insert(scan.connection.get());
+      const std::shared_ptr<const nodegraph::NodeState> connectionState =
+          read->state(scan.connection);
       const std::string transport =
           graphString(graphField(*connectionState, "transportState"));
       const std::string provider =
           graphString(graphField(*connectionState, "providerState"));
       const std::string role =
           graphString(graphField(*connectionState, "role"));
-      canControl =
+      scan.canControl =
           (transport == "connected" ||
            connectionState->status == nodegraph::NodeStatus::Connected) &&
           provider == "ready" && role == "controller";
-      generation =
+      scan.generation =
           graphUnsigned(graphField(*connectionState, "connectionGeneration"))
               .value_or(graphUnsigned(
                             graphField(*connectionState, "providerGeneration"))
                             .value_or(0));
     }
 
-    snapshot.requests.reserve(sources.size());
-    for (const RequestSource &source : sources) {
-      const std::string method =
-          graphString(graphField(*source.state, "method"));
-      const nodegraph::Value *payloadValue =
-          graphField(*source.state, "payload");
-      const nodegraph::Value::Object *payload =
-          payloadValue ? payloadValue->asObject() : nullptr;
-
-      InspectorRequestRender row;
-      row.id = source.interaction->id().canonical;
-      row.kind = requestKind(method);
-      row.generation = generation;
-      row.actionable =
-          canControl && source.state->status == nodegraph::NodeStatus::Pending;
-      if (payload) {
-        row.command = graphString(graphField(*payload, "command"));
-        row.reason = graphString(graphField(*payload, "reason"));
-        row.message = graphString(graphField(*payload, "message"));
-        const nodegraph::Value *questionsValue =
-            graphField(*payload, "questions");
-        if (const nodegraph::Value::Array *questions =
-                questionsValue ? questionsValue->asArray() : nullptr)
-          row.questionCount = questions->size();
-      }
-      if (row.message.empty())
-        row.message = graphString(graphField(*source.state, "error"));
-
-      if (source.targetThread) {
-        row.threadContext = source.targetThread->id().canonical;
-        std::string title =
-            graphString(graphField(*source.targetState, "name"));
-        if (title.empty())
-          title = graphString(graphField(*source.targetState, "title"));
-        if (!title.empty())
-          row.threadContext = std::move(title);
-      } else if (payload) {
-        row.threadContext = graphString(graphField(*payload, "threadId"));
-      }
-      snapshot.requests.emplace_back(std::move(row));
+    scan.runtime = read->find({nodegraph::NodeKind::Runtime, "runtime"});
+    if (scan.runtime) {
+      scan.dependencies.insert(scan.runtime.get());
+      scan.pendingCount = read->relatedCount(
+          scan.runtime, nodegraph::RelationKind::PendingInteraction);
     }
-    renderGraphRequests(std::move(snapshot));
+    scan.snapshot.firstRow = requestedWindow.first;
+    scan.renderEnd = requestedWindow.end;
+    scan.snapshot.requests.reserve(requestedWindow.end - requestedWindow.first);
+  }
+
+  RequestsGraphScan &scan = *requestsGraphScan;
+  const auto clearCurrent = [&scan] {
+    scan.currentInteraction.reset();
+    scan.currentRow.reset();
+    scan.targetCount = 0;
+    scan.targetCursor = 0;
+    scan.targetAncestor.reset();
+    scan.targetAncestryDepth = 0;
+  };
+  const auto appendCurrent = [&scan, &clearCurrent] {
+    scan.snapshot.requests.emplace_back(std::move(*scan.currentRow));
+    clearCurrent();
+  };
+
+  bool complete = false;
+  std::size_t work = 0;
+  while (work < MaximumInspectorGraphReadsPerPass && !complete) {
+    if (scan.currentRow) {
+      if (scan.targetAncestor) {
+        if (scan.targetAncestor->id().kind == nodegraph::NodeKind::Thread) {
+          scan.dependencies.insert(scan.targetAncestor.get());
+          const std::shared_ptr<const nodegraph::NodeState> targetState =
+              read->state(scan.targetAncestor);
+          scan.currentRow->threadContext = scan.targetAncestor->id().canonical;
+          std::string title = graphString(graphField(*targetState, "name"));
+          if (title.empty())
+            title = graphString(graphField(*targetState, "title"));
+          if (!title.empty())
+            scan.currentRow->threadContext = std::move(title);
+          appendCurrent();
+          continue;
+        }
+        if (++scan.targetAncestryDepth > MaximumInspectorAncestryDepth) {
+          scan.targetAncestor.reset();
+          continue;
+        }
+        scan.targetAncestor = read->parent(scan.targetAncestor);
+        ++work;
+        continue;
+      }
+      if (scan.targetCursor < scan.targetCount) {
+        scan.targetAncestor = read->relatedAt(
+            scan.currentInteraction, nodegraph::RelationKind::InteractionTarget,
+            scan.targetCursor++);
+        scan.targetAncestryDepth = 0;
+        ++work;
+        continue;
+      }
+      appendCurrent();
+      continue;
+    }
+
+    if (scan.pendingCursor == scan.pendingCount) {
+      complete = true;
+      continue;
+    }
+    const nodegraph::NodeRef candidate = read->relatedAt(
+        scan.runtime, nodegraph::RelationKind::PendingInteraction,
+        scan.pendingCursor++);
+    ++work;
+    if (!candidate || candidate->id().kind != nodegraph::NodeKind::Interaction)
+      continue;
+    const std::shared_ptr<const nodegraph::NodeState> state =
+        read->state(candidate);
+    if (state->status != nodegraph::NodeStatus::Pending &&
+        state->status != nodegraph::NodeStatus::Failed)
+      continue;
+    const std::size_t rowIndex = scan.matchingCount++;
+    if (rowIndex < scan.snapshot.firstRow || rowIndex >= scan.renderEnd)
+      continue;
+
+    scan.dependencies.insert(candidate.get());
+    scan.currentInteraction = candidate;
+    scan.currentRow.emplace();
+    InspectorRequestRender &row = *scan.currentRow;
+    row.id = candidate->id().canonical;
+    row.displayId = graphString(graphField(*state, "requestId"));
+    row.kind = requestKind(graphString(graphField(*state, "method")));
+    row.generation = scan.generation;
+    const bool recoveryOnly = graphBool(graphField(*state, "recoveryOnly"));
+    row.actionable = scan.canControl && !recoveryOnly;
+    const nodegraph::Value *retained =
+        graphField(*state, "retainedResponsePayload");
+    row.recoverable = recoveryOnly && retained && retained->asObject();
+    const nodegraph::Value *payloadValue = graphField(*state, "payload");
+    const nodegraph::Value::Object *payload =
+        payloadValue ? payloadValue->asObject() : nullptr;
+    if (payload) {
+      row.command = graphString(graphField(*payload, "command"));
+      row.reason = graphString(graphField(*payload, "reason"));
+      row.message = graphString(graphField(*payload, "message"));
+      row.threadContext = graphString(graphField(*payload, "threadId"));
+      const nodegraph::Value *questionsValue =
+          graphField(*payload, "questions");
+      if (const nodegraph::Value::Array *questions =
+              questionsValue ? questionsValue->asArray() : nullptr)
+        row.questionCount = questions->size();
+    }
+    if (row.message.empty())
+      row.message = graphString(graphField(*state, "error"));
+    scan.targetCount = read->relatedCount(
+        candidate, nodegraph::RelationKind::InteractionTarget);
+  }
+  read.reset();
+
+  if (!complete) {
+    scheduleGraphRefresh();
+    return;
+  }
+  std::unique_ptr<RequestsGraphScan> finished = std::move(requestsGraphScan);
+  if (graph->publishedRevision() != finished->revision) {
+    scheduleGraphRefresh();
+    return;
+  }
+  if (finished->matchingCount == 0) {
+    finished->snapshot.firstRow = 0;
+    finished->snapshot.totalRows = 1;
+  } else if (finished->snapshot.firstRow >= finished->matchingCount) {
+    requestsKnownRows = finished->matchingCount;
+    scheduleGraphRefresh();
+    return;
+  } else {
+    finished->snapshot.totalRows = finished->matchingCount;
+  }
+  activeGraphDependencies = std::move(finished->dependencies);
+  graphDependenciesTab = 3;
+  graphDependenciesInfoPage = InfoChoicePage;
+  renderGraphRequests(std::move(finished->snapshot));
+}
+
+void InspectorPane::runStateGraphScan() {
+  auto read = graph ? graph->tryRead() : std::nullopt;
+  if (!read) {
+    scheduleGraphRefresh();
     return;
   }
 
-  if (tab == 4 && infoPage == StatePage) {
-    struct StateNodeSource final {
-      nodegraph::NodeRef node;
-      std::shared_ptr<const nodegraph::NodeState> state;
-    };
-    const std::uint64_t revision = read->revision();
-    const std::size_t nodeCount = read->orderedNodes().size();
-    std::vector<StateNodeSource> nodes;
-    nodes.reserve(nodeCount);
-    for (const nodegraph::NodeRef &node : read->orderedNodes()) {
-      nodes.push_back({node, node->id().kind == nodegraph::NodeKind::Interaction
-                                 ? read->state(node)
-                                 : nullptr});
-    }
-
-    std::string selectedId;
-    std::string parentId;
-    std::uint64_t selectedRevision = 0;
-    std::size_t childCount = 0;
-    std::shared_ptr<const nodegraph::NodeState> selectedState;
+  const std::uint64_t revision = read->revision();
+  if (!stateGraphScan || stateGraphScan->revision != revision) {
+    stateGraphScan = std::make_unique<StateGraphScan>();
+    StateGraphScan &scan = *stateGraphScan;
+    scan.revision = revision;
+    scan.nodeCount = read->orderedNodes().size();
+    nodegraph::NodeRef thread;
+    if (selectedGraphThread &&
+        selectedGraphThread->id().kind == nodegraph::NodeKind::Thread &&
+        read->find(selectedGraphThread->id()) == selectedGraphThread)
+      thread = selectedGraphThread;
     if (thread) {
-      selectedId = thread->id().canonical;
-      selectedState = read->state(thread);
-      selectedRevision = read->changedRevision(thread);
-      childCount = read->childCount(thread);
+      scan.dependencies.insert(thread.get());
+      scan.selectedId = thread->id().canonical;
+      scan.selectedState = read->state(thread);
+      scan.selectedRevision = read->changedRevision(thread);
+      scan.childCount = read->childCount(thread);
       if (const nodegraph::NodeRef parent = read->parent(thread))
-        parentId = parent->id().canonical;
+        scan.parentId = parent->id().canonical;
     }
-    read.reset();
-    publishDependencies(std::move(dependencies));
+  }
 
-    std::map<std::string, std::size_t, std::less<>> kindCounts;
-    std::size_t pendingInteractions = 0;
-    for (const StateNodeSource &source : nodes) {
-      ++kindCounts[std::string(nodeKindName(source.node->id().kind))];
-      if (source.node->id().kind == nodegraph::NodeKind::Interaction &&
-          source.state &&
-          source.state->status == nodegraph::NodeStatus::Pending)
-        ++pendingInteractions;
-    }
-    const std::string selectedStatus =
-        selectedState ? graphStatus(*selectedState) : std::string{};
+  StateGraphScan &scan = *stateGraphScan;
+  const std::vector<nodegraph::NodeRef> &nodes = read->orderedNodes();
+  std::size_t work = 0;
+  while (scan.nodeCursor < scan.nodeCount &&
+         work < MaximumInspectorGraphReadsPerPass) {
+    const nodegraph::NodeRef &node = nodes[scan.nodeCursor++];
+    ++work;
+    ++scan.kindCounts[std::string(nodeKindName(node->id().kind))];
+    if (node->id().kind != nodegraph::NodeKind::Interaction)
+      continue;
+    const std::shared_ptr<const nodegraph::NodeState> state = read->state(node);
+    if (state->status == nodegraph::NodeStatus::Pending)
+      ++scan.pendingInteractions;
+  }
+  const bool complete = scan.nodeCursor == scan.nodeCount;
+  read.reset();
 
-    QString value = QStringLiteral("Shared NodeGraph\nRevision: %1\nNodes: %2\n"
-                                   "Pending interactions: %3\n")
-                        .arg(revision)
-                        .arg(nodeCount)
-                        .arg(pendingInteractions);
-    appendDiagnostic(value, QStringLiteral("Node kinds:\n"));
-    for (const auto &[kind, count] : kindCounts) {
-      appendDiagnostic(value,
-                       QStringLiteral("  %1: %2\n").arg(text(kind)).arg(count));
-    }
-    appendDiagnostic(value, QStringLiteral("\nSelected thread:\n"));
-    if (!selectedState) {
-      appendDiagnostic(value, QStringLiteral("  <none>\n"));
-    } else {
-      appendDiagnostic(
-          value,
-          QStringLiteral("  id: %1\n  status: %2\n"
-                         "  changed revision: %3\n"
-                         "  parent: %4\n  turns: %5\n  fields: ")
-              .arg(text(selectedId), text(selectedStatus))
-              .arg(selectedRevision)
-              .arg(parentId.empty() ? QStringLiteral("<root>") : text(parentId))
-              .arg(childCount));
-      appendGraphObject(value, selectedState->fields, 2, 0);
-      appendDiagnostic(value, QStringLiteral("\n"));
-    }
-    if (value.size() >= MaximumGraphDiagnosticCharacters) {
-      value.truncate(MaximumGraphDiagnosticCharacters - 34);
-      value += QStringLiteral("\n[Graph diagnostic truncated]\n");
-    }
-    renderGraphState(std::move(value));
+  if (!complete) {
+    scheduleGraphRefresh();
+    return;
+  }
+  std::unique_ptr<StateGraphScan> finished = std::move(stateGraphScan);
+  if (graph->publishedRevision() != finished->revision) {
+    scheduleGraphRefresh();
+    return;
+  }
+  activeGraphDependencies = std::move(finished->dependencies);
+  graphDependenciesTab = 4;
+  graphDependenciesInfoPage = StatePage;
+
+  const std::string selectedStatus = finished->selectedState
+                                         ? graphStatus(*finished->selectedState)
+                                         : std::string{};
+  QString value = QStringLiteral("Shared NodeGraph\nRevision: %1\nNodes: %2\n"
+                                 "Pending interactions: %3\n")
+                      .arg(finished->revision)
+                      .arg(finished->nodeCount)
+                      .arg(finished->pendingInteractions);
+  appendDiagnostic(value, QStringLiteral("Node kinds:\n"));
+  for (const auto &[kind, count] : finished->kindCounts) {
+    appendDiagnostic(value,
+                     QStringLiteral("  %1: %2\n").arg(text(kind)).arg(count));
+  }
+  appendDiagnostic(value, QStringLiteral("\nSelected thread:\n"));
+  if (!finished->selectedState) {
+    appendDiagnostic(value, QStringLiteral("  <none>\n"));
+  } else {
+    appendDiagnostic(
+        value, QStringLiteral("  id: %1\n  status: %2\n"
+                              "  changed revision: %3\n"
+                              "  parent: %4\n  turns: %5\n  fields: ")
+                   .arg(text(finished->selectedId), text(selectedStatus))
+                   .arg(finished->selectedRevision)
+                   .arg(finished->parentId.empty() ? QStringLiteral("<root>")
+                                                   : text(finished->parentId))
+                   .arg(finished->childCount));
+    appendGraphObject(value, finished->selectedState->fields, 2, 0);
+    appendDiagnostic(value, QStringLiteral("\n"));
+  }
+  if (value.size() >= MaximumGraphDiagnosticCharacters) {
+    value.truncate(MaximumGraphDiagnosticCharacters - 34);
+    value += QStringLiteral("\n[Graph diagnostic truncated]\n");
+  }
+  renderGraphState(std::move(value));
+}
+
+void InspectorPane::runProtocolGraphScan() {
+  auto read = graph ? graph->tryRead() : std::nullopt;
+  if (!read) {
+    scheduleGraphRefresh();
     return;
   }
 
-  if (tab == 4 && infoPage == ProtocolPage) {
-    struct DiagnosticSource final {
-      nodegraph::NodeKind kind = nodegraph::NodeKind::Operation;
-      std::string id;
-      std::shared_ptr<const nodegraph::NodeState> state;
-    };
-    const std::uint64_t revision = read->revision();
-    const std::size_t nodeCount = read->orderedNodes().size();
-    std::vector<DiagnosticSource> sources;
-    for (const nodegraph::NodeRef &node : read->orderedNodes()) {
-      if (node->id().kind != nodegraph::NodeKind::Operation &&
-          node->id().kind != nodegraph::NodeKind::UnknownProtocol)
-        continue;
-      dependencies.insert(node.get());
-      sources.push_back(
-          {node->id().kind, node->id().canonical, read->state(node)});
-    }
-    read.reset();
-    publishDependencies(std::move(dependencies));
-
-    struct DiagnosticEntry final {
-      nodegraph::NodeKind kind = nodegraph::NodeKind::Operation;
-      std::string id;
-      std::string method;
-      std::string status;
-      QString direction;
-    };
-    std::size_t operationCount = 0;
-    std::size_t unknownCount = 0;
-    std::size_t pendingCount = 0;
-    std::vector<DiagnosticEntry> entries;
-    entries.reserve(
-        std::min<std::size_t>(sources.size(), MaximumProtocolLines));
-    for (const DiagnosticSource &source : sources) {
-      if (source.kind == nodegraph::NodeKind::Operation) {
-        ++operationCount;
-        if (source.state->status == nodegraph::NodeStatus::Pending)
-          ++pendingCount;
-      } else {
-        ++unknownCount;
-      }
-      if (entries.size() == MaximumProtocolLines)
-        continue;
-      entries.push_back(
-          {source.kind, source.id,
-           graphString(graphField(*source.state, "method")),
-           graphStatus(*source.state),
-           protocolDirection(graphField(*source.state, "direction"))});
-    }
-
-    QString log;
-    appendDiagnostic(log, QStringLiteral("Current worker operations\n"));
-    bool wroteOperation = false;
-    for (const DiagnosticEntry &entry : entries) {
-      if (entry.kind != nodegraph::NodeKind::Operation)
-        continue;
-      wroteOperation = true;
-      appendDiagnostic(log, QStringLiteral("%1  %2  %3\n")
-                                .arg(text(entry.status), text(entry.id),
-                                     text(entry.method)));
-    }
-    if (!wroteOperation)
-      appendDiagnostic(log, QStringLiteral("<none>\n"));
-    appendDiagnostic(log, QStringLiteral("\nUnknown protocol alternatives\n"));
-    bool wroteUnknown = false;
-    for (const DiagnosticEntry &entry : entries) {
-      if (entry.kind != nodegraph::NodeKind::UnknownProtocol)
-        continue;
-      wroteUnknown = true;
-      appendDiagnostic(
-          log, QStringLiteral("%1  %2  %3\n")
-                   .arg(entry.direction, text(entry.id), text(entry.method)));
-    }
-    if (!wroteUnknown)
-      appendDiagnostic(log, QStringLiteral("<none>\n"));
-    if (operationCount + unknownCount > entries.size())
-      appendDiagnostic(
-          log, QStringLiteral("\n%1 more entries omitted\n")
-                   .arg(operationCount + unknownCount - entries.size()));
-    const QString statistics =
-        QStringLiteral("revision %1  |  nodes %2  |  operations %3  |  "
-                       "pending %4  |  unknown %5")
-            .arg(revision)
-            .arg(nodeCount)
-            .arg(operationCount)
-            .arg(pendingCount)
-            .arg(unknownCount);
-    renderGraphProtocol(std::move(log), statistics);
+  const std::uint64_t revision = read->revision();
+  if (!protocolGraphScan || protocolGraphScan->revision != revision) {
+    protocolGraphScan = std::make_unique<ProtocolGraphScan>();
+    ProtocolGraphScan &scan = *protocolGraphScan;
+    scan.revision = revision;
+    scan.nodeCount = read->orderedNodes().size();
+    scan.entries.reserve(
+        std::min<std::size_t>(scan.nodeCount, MaximumProtocolLines));
   }
+
+  ProtocolGraphScan &scan = *protocolGraphScan;
+  const std::vector<nodegraph::NodeRef> &nodes = read->orderedNodes();
+  std::size_t work = 0;
+  while (scan.nodeCursor < scan.nodeCount &&
+         work < MaximumInspectorGraphReadsPerPass) {
+    const nodegraph::NodeRef &node = nodes[scan.nodeCursor++];
+    ++work;
+    if (node->id().kind != nodegraph::NodeKind::Operation &&
+        node->id().kind != nodegraph::NodeKind::UnknownProtocol)
+      continue;
+    scan.dependencies.insert(node.get());
+    const std::shared_ptr<const nodegraph::NodeState> state = read->state(node);
+    if (node->id().kind == nodegraph::NodeKind::Operation) {
+      ++scan.operationCount;
+      if (state->status == nodegraph::NodeStatus::Pending)
+        ++scan.pendingCount;
+    } else {
+      ++scan.unknownCount;
+    }
+    if (scan.entries.size() == MaximumProtocolLines)
+      continue;
+    scan.entries.push_back(
+        {node->id().kind, node->id().canonical,
+         graphString(graphField(*state, "method")), graphStatus(*state),
+         protocolDirection(graphField(*state, "direction"))});
+  }
+  const bool complete = scan.nodeCursor == scan.nodeCount;
+  read.reset();
+
+  if (!complete) {
+    scheduleGraphRefresh();
+    return;
+  }
+  std::unique_ptr<ProtocolGraphScan> finished = std::move(protocolGraphScan);
+  if (graph->publishedRevision() != finished->revision) {
+    scheduleGraphRefresh();
+    return;
+  }
+  activeGraphDependencies = std::move(finished->dependencies);
+  graphDependenciesTab = 4;
+  graphDependenciesInfoPage = ProtocolPage;
+
+  QString log;
+  appendDiagnostic(log, QStringLiteral("Current worker operations\n"));
+  bool wroteOperation = false;
+  for (const ProtocolGraphScan::Entry &entry : finished->entries) {
+    if (entry.kind != nodegraph::NodeKind::Operation)
+      continue;
+    wroteOperation = true;
+    appendDiagnostic(
+        log, QStringLiteral("%1  %2  %3\n")
+                 .arg(text(entry.status), text(entry.id), text(entry.method)));
+  }
+  if (!wroteOperation)
+    appendDiagnostic(log, QStringLiteral("<none>\n"));
+  appendDiagnostic(log, QStringLiteral("\nUnknown protocol alternatives\n"));
+  bool wroteUnknown = false;
+  for (const ProtocolGraphScan::Entry &entry : finished->entries) {
+    if (entry.kind != nodegraph::NodeKind::UnknownProtocol)
+      continue;
+    wroteUnknown = true;
+    appendDiagnostic(
+        log, QStringLiteral("%1  %2  %3\n")
+                 .arg(entry.direction, text(entry.id), text(entry.method)));
+  }
+  if (!wroteUnknown)
+    appendDiagnostic(log, QStringLiteral("<none>\n"));
+  if (finished->operationCount + finished->unknownCount >
+      finished->entries.size()) {
+    appendDiagnostic(log, QStringLiteral("\n%1 more entries omitted\n")
+                              .arg(finished->operationCount +
+                                   finished->unknownCount -
+                                   finished->entries.size()));
+  }
+  const QString statistics =
+      QStringLiteral("revision %1  |  nodes %2  |  operations %3  |  "
+                     "pending %4  |  unknown %5")
+          .arg(finished->revision)
+          .arg(finished->nodeCount)
+          .arg(finished->operationCount)
+          .arg(finished->pendingCount)
+          .arg(finished->unknownCount);
+  renderGraphProtocol(std::move(log), statistics);
 }
 
 void InspectorPane::renderGraphPlan(InspectorPlanData snapshot) {
@@ -1683,12 +2338,17 @@ void InspectorPane::renderGraphPlan(InspectorPlanData snapshot) {
     scheduleGraphPlanRender();
     return;
   }
-  if (!pendingPlanSnapshot && planSnapshot && *planSnapshot == snapshot)
-    return;
   pendingPlanSnapshot = std::move(snapshot);
-  planRenderCursor = 0;
+  planKnownRows = pendingPlanSnapshot->totalRows;
+  planRenderFirst = pendingPlanSnapshot->firstRow;
+  planRenderEnd =
+      planRenderFirst + renderedPlanComponentCount(*pendingPlanSnapshot);
+  planRenderCursor = planRenderFirst;
   planRenderClearing = true;
-  planScrollValue = planScroll->verticalScrollBar()->value();
+  QScrollBar *planScrollBar = planScroll->verticalScrollBar();
+  planScrollValue = planScrollBar->value();
+  planScrollFollowsTail = planScrollBar->maximum() > 0 &&
+                          planScrollValue == planScrollBar->maximum();
   scheduleGraphPlanRender();
 }
 
@@ -1697,26 +2357,17 @@ void InspectorPane::renderGraphAgents(InspectorAgentsData snapshot) {
     scheduleGraphAgentsRender();
     return;
   }
-  if (!pendingAgentsSnapshot && agentsSnapshot && *agentsSnapshot == snapshot)
-    return;
-
-  const bool interruptedRender = pendingAgentsSnapshot.has_value();
-  std::size_t preserved = 0;
-  if (!interruptedRender && agentsSnapshot &&
-      agentsSnapshot->threadId == snapshot.threadId &&
-      agentsSnapshot->threadPresent == snapshot.threadPresent &&
-      agentsSnapshot->threadPresent) {
-    const std::size_t common =
-        std::min(agentsSnapshot->agents.size(), snapshot.agents.size());
-    while (preserved < common &&
-           agentsSnapshot->agents[preserved] == snapshot.agents[preserved])
-      ++preserved;
-  }
   pendingAgentsSnapshot = std::move(snapshot);
-  agentsPreservedRows = preserved;
-  agentsRenderCursor = preserved;
+  agentsKnownRows = pendingAgentsSnapshot->totalRows;
+  agentsRenderFirst = pendingAgentsSnapshot->firstRow;
+  agentsRenderEnd =
+      agentsRenderFirst + renderedAgentsComponentCount(*pendingAgentsSnapshot);
+  agentsRenderCursor = agentsRenderFirst;
   agentsRenderClearing = true;
-  agentsScrollValue = agentsScroll->verticalScrollBar()->value();
+  QScrollBar *agentsScrollBar = agentsScroll->verticalScrollBar();
+  agentsScrollValue = agentsScrollBar->value();
+  agentsScrollFollowsTail = agentsScrollBar->maximum() > 0 &&
+                            agentsScrollValue == agentsScrollBar->maximum();
   scheduleGraphAgentsRender();
 }
 
@@ -1725,29 +2376,80 @@ void InspectorPane::renderGraphRequests(InspectorRequestsData snapshot) {
     scheduleGraphRequestsRender();
     return;
   }
-  if (!pendingRequestsSnapshot && requestsSnapshot &&
-      *requestsSnapshot == snapshot)
-    return;
-
-  const bool interruptedRender = pendingRequestsSnapshot.has_value();
-  std::size_t preserved = 0;
-  if (!interruptedRender && requestsSnapshot) {
-    const std::size_t common =
-        std::min(requestsSnapshot->requests.size(), snapshot.requests.size());
-    while (preserved < common && requestsSnapshot->requests[preserved] ==
-                                     snapshot.requests[preserved])
-      ++preserved;
-  }
   pendingRequestsSnapshot = std::move(snapshot);
-  requestsPreservedRows = preserved;
-  requestsRenderCursor = preserved;
+  requestsKnownRows = pendingRequestsSnapshot->totalRows;
+  requestsRenderFirst = pendingRequestsSnapshot->firstRow;
+  requestsRenderEnd = requestsRenderFirst +
+                      renderedRequestsComponentCount(*pendingRequestsSnapshot);
+  requestsRenderCursor = requestsRenderFirst;
   requestsRenderClearing = true;
-  requestsScrollValue = requestsScroll->verticalScrollBar()->value();
+  QScrollBar *requestsScrollBar = requestsScroll->verticalScrollBar();
+  requestsScrollValue = requestsScrollBar->value();
+  requestsScrollFollowsTail =
+      requestsScrollBar->maximum() > 0 &&
+      requestsScrollValue == requestsScrollBar->maximum();
   scheduleGraphRequestsRender();
 }
 
+void InspectorPane::refreshGraphPlanViewport() {
+  if (pendingPlanSnapshot || graphRefreshSuspended ||
+      inspectorTabs->currentIndex() != 0)
+    return;
+  if (planRowsMaterialized && materializedRowsCoverViewport(
+                                  planLayout, planScroll, planMaterializedFirst,
+                                  planMaterializedEnd, planKnownRows))
+    return;
+  const int scrollValue = planScroll->verticalScrollBar()->value();
+  const InspectorRowWindow window = visibleRowWindow(
+      planScroll, planKnownRows, PlanEstimatedRowHeight, scrollValue);
+  if (planRowsMaterialized && window.first == planMaterializedFirst &&
+      window.end == planMaterializedEnd)
+    return;
+  planGraphScan.reset();
+  scheduleGraphRefresh();
+}
+
+void InspectorPane::refreshGraphAgentsViewport() {
+  if (pendingAgentsSnapshot || graphRefreshSuspended ||
+      inspectorTabs->currentIndex() != 1)
+    return;
+  if (agentsRowsMaterialized &&
+      materializedRowsCoverViewport(agentsLayout, agentsScroll,
+                                    agentsMaterializedFirst,
+                                    agentsMaterializedEnd, agentsKnownRows))
+    return;
+  const int scrollValue = agentsScroll->verticalScrollBar()->value();
+  const InspectorRowWindow window = visibleRowWindow(
+      agentsScroll, agentsKnownRows, AgentEstimatedRowHeight, scrollValue);
+  if (agentsRowsMaterialized && window.first == agentsMaterializedFirst &&
+      window.end == agentsMaterializedEnd)
+    return;
+  agentsGraphScan.reset();
+  scheduleGraphRefresh();
+}
+
+void InspectorPane::refreshGraphRequestsViewport() {
+  if (pendingRequestsSnapshot || graphRefreshSuspended ||
+      inspectorTabs->currentIndex() != 3)
+    return;
+  if (requestsRowsMaterialized &&
+      materializedRowsCoverViewport(requestsLayout, requestsScroll,
+                                    requestsMaterializedFirst,
+                                    requestsMaterializedEnd, requestsKnownRows))
+    return;
+  const int scrollValue = requestsScroll->verticalScrollBar()->value();
+  const InspectorRowWindow window =
+      visibleRowWindow(requestsScroll, requestsKnownRows,
+                       RequestEstimatedRowHeight, scrollValue);
+  if (requestsRowsMaterialized && window.first == requestsMaterializedFirst &&
+      window.end == requestsMaterializedEnd)
+    return;
+  requestsGraphScan.reset();
+  scheduleGraphRefresh();
+}
+
 void InspectorPane::scheduleGraphPlanRender() {
-  if (!pendingPlanSnapshot || planRenderScheduled)
+  if (!pendingPlanSnapshot || planRenderScheduled || graphRefreshSuspended)
     return;
   planRenderScheduled = true;
   QTimer::singleShot(0, this, [this] {
@@ -1757,7 +2459,7 @@ void InspectorPane::scheduleGraphPlanRender() {
 }
 
 void InspectorPane::scheduleGraphAgentsRender() {
-  if (!pendingAgentsSnapshot || agentsRenderScheduled)
+  if (!pendingAgentsSnapshot || agentsRenderScheduled || graphRefreshSuspended)
     return;
   agentsRenderScheduled = true;
   QTimer::singleShot(0, this, [this] {
@@ -1767,7 +2469,8 @@ void InspectorPane::scheduleGraphAgentsRender() {
 }
 
 void InspectorPane::scheduleGraphRequestsRender() {
-  if (!pendingRequestsSnapshot || requestsRenderScheduled)
+  if (!pendingRequestsSnapshot || requestsRenderScheduled ||
+      graphRefreshSuspended)
     return;
   requestsRenderScheduled = true;
   QTimer::singleShot(0, this, [this] {
@@ -1777,7 +2480,8 @@ void InspectorPane::scheduleGraphRequestsRender() {
 }
 
 void InspectorPane::runGraphPlanRender() {
-  if (!pendingPlanSnapshot || !graph || inspectorTabs->currentIndex() != 0)
+  if (!pendingPlanSnapshot || !graph || graphRefreshSuspended ||
+      inspectorTabs->currentIndex() != 0)
     return;
 
   std::size_t work = 0;
@@ -1793,26 +2497,29 @@ void InspectorPane::runGraphPlanRender() {
   planRenderClearing = false;
 
   const InspectorPlanData &snapshot = *pendingPlanSnapshot;
-  const bool hasExplanation =
-      snapshot.plan && !snapshot.plan->explanation.empty();
-  const std::size_t componentCount =
-      !snapshot.threadPresent ? 1
-      : snapshot.plan ? snapshot.plan->steps.size() + (hasExplanation ? 1U : 0U)
-                      : 1;
-  while (planRenderCursor < componentCount &&
+  const std::size_t componentCount = planComponentCount(snapshot);
+  if (planLayout->count() == 0 && planRenderFirst != 0) {
+    planLayout->addSpacing(
+        estimatedSpacerHeight(planRenderFirst, PlanEstimatedRowHeight));
+  }
+  while (planRenderCursor < planRenderEnd &&
          work < MaximumInspectorWidgetChangesPerPass) {
     QWidget *component = nullptr;
     if (!snapshot.threadPresent) {
       component = makeLabel(QStringLiteral("No selected thread."), "muted");
     } else if (snapshot.plan) {
-      if (hasExplanation && planRenderCursor == 0) {
+      if (snapshot.plan->includesExplanation && planRenderCursor == 0) {
         component = makeMarkdownLabel(text(snapshot.plan->explanation));
       } else {
+        const std::size_t explanationRows =
+            snapshot.plan->hasExplanation ? 1U : 0U;
         const std::size_t stepIndex =
-            planRenderCursor - (hasExplanation ? 1U : 0U);
-        const InspectorPlanStepRender &step = snapshot.plan->steps[stepIndex];
+            planRenderCursor - explanationRows - snapshot.plan->firstStep;
+        const InspectorPlanStepRender &step =
+            snapshot.plan->steps.at(stepIndex);
         auto *row = new QFrame;
         row->setObjectName(QStringLiteral("inspectorPlanStep"));
+        row->setProperty("rowIndex", static_cast<qulonglong>(planRenderCursor));
         row->setProperty("kind", "raised");
         auto *layout = new QVBoxLayout(row);
         layout->setContentsMargins(12, 10, 12, 10);
@@ -1835,46 +2542,56 @@ void InspectorPane::runGraphPlanRender() {
     ++planRenderCursor;
     ++work;
   }
-  if (planRenderCursor != componentCount) {
+  if (planRenderCursor != planRenderEnd) {
     scheduleGraphPlanRender();
     return;
   }
 
+  if (planRenderEnd < componentCount) {
+    planLayout->addSpacing(estimatedSpacerHeight(componentCount - planRenderEnd,
+                                                 PlanEstimatedRowHeight));
+  }
   planLayout->addStretch();
-  planSnapshot = std::move(*pendingPlanSnapshot);
+  planMaterializedFirst = planRenderFirst;
+  planMaterializedEnd = planRenderEnd;
+  planRowsMaterialized = true;
   pendingPlanSnapshot.reset();
   QTimer::singleShot(
-      0, planScroll, [scroll = planScroll, value = planScrollValue] {
-        scroll->verticalScrollBar()->setValue(
-            std::clamp(value, scroll->verticalScrollBar()->minimum(),
-                       scroll->verticalScrollBar()->maximum()));
+      0, planScroll,
+      [this, scroll = planScroll, value = planScrollValue,
+       followsTail = planScrollFollowsTail] {
+        QScrollBar *bar = scroll->verticalScrollBar();
+        bar->setValue(followsTail
+                          ? bar->maximum()
+                          : std::clamp(value, bar->minimum(), bar->maximum()));
+        refreshGraphPlanViewport();
       });
 }
 
 void InspectorPane::runGraphAgentsRender() {
-  if (!pendingAgentsSnapshot || !graph || inspectorTabs->currentIndex() != 1)
+  if (!pendingAgentsSnapshot || !graph || graphRefreshSuspended ||
+      inspectorTabs->currentIndex() != 1)
     return;
 
   std::size_t work = 0;
-  while (agentsRenderClearing &&
-         agentsLayout->count() > static_cast<int>(agentsPreservedRows) &&
+  while (agentsRenderClearing && agentsLayout->count() != 0 &&
          work < MaximumInspectorWidgetChangesPerPass) {
     static_cast<void>(deleteLastLayoutItem(agentsLayout));
     ++work;
   }
-  if (agentsRenderClearing &&
-      agentsLayout->count() > static_cast<int>(agentsPreservedRows)) {
+  if (agentsRenderClearing && agentsLayout->count() != 0) {
     scheduleGraphAgentsRender();
     return;
   }
   agentsRenderClearing = false;
 
   const InspectorAgentsData &snapshot = *pendingAgentsSnapshot;
-  const std::size_t componentCount =
-      !snapshot.threadPresent || snapshot.agents.empty()
-          ? 1
-          : snapshot.agents.size();
-  while (agentsRenderCursor < componentCount &&
+  const std::size_t componentCount = agentsComponentCount(snapshot);
+  if (agentsLayout->count() == 0 && agentsRenderFirst != 0) {
+    agentsLayout->addSpacing(
+        estimatedSpacerHeight(agentsRenderFirst, AgentEstimatedRowHeight));
+  }
+  while (agentsRenderCursor < agentsRenderEnd &&
          work < MaximumInspectorWidgetChangesPerPass) {
     if (!snapshot.threadPresent) {
       agentsLayout->addWidget(
@@ -1884,74 +2601,97 @@ void InspectorPane::runGraphAgentsRender() {
           QStringLiteral("No agent activity for this thread."), "muted"));
     } else {
       agentsLayout->addWidget(
-          agentFrame(snapshot.agents[agentsRenderCursor], snapshot.threadId));
+          agentFrame(snapshot.agents.at(agentsRenderCursor - snapshot.firstRow),
+                     snapshot.threadId));
     }
     ++agentsRenderCursor;
     ++work;
   }
-  if (agentsRenderCursor != componentCount) {
+  if (agentsRenderCursor != agentsRenderEnd) {
     scheduleGraphAgentsRender();
     return;
   }
 
+  if (agentsRenderEnd < componentCount) {
+    agentsLayout->addSpacing(estimatedSpacerHeight(
+        componentCount - agentsRenderEnd, AgentEstimatedRowHeight));
+  }
   agentsLayout->addStretch();
-  agentsSnapshot = std::move(*pendingAgentsSnapshot);
+  agentsMaterializedFirst = agentsRenderFirst;
+  agentsMaterializedEnd = agentsRenderEnd;
+  agentsRowsMaterialized = true;
   pendingAgentsSnapshot.reset();
   QTimer::singleShot(
-      0, agentsScroll, [scroll = agentsScroll, value = agentsScrollValue] {
-        scroll->verticalScrollBar()->setValue(
-            std::clamp(value, scroll->verticalScrollBar()->minimum(),
-                       scroll->verticalScrollBar()->maximum()));
+      0, agentsScroll,
+      [this, scroll = agentsScroll, value = agentsScrollValue,
+       followsTail = agentsScrollFollowsTail] {
+        QScrollBar *bar = scroll->verticalScrollBar();
+        bar->setValue(followsTail
+                          ? bar->maximum()
+                          : std::clamp(value, bar->minimum(), bar->maximum()));
+        refreshGraphAgentsViewport();
       });
 }
 
 void InspectorPane::runGraphRequestsRender() {
-  if (!pendingRequestsSnapshot || !graph || inspectorTabs->currentIndex() != 3)
+  if (!pendingRequestsSnapshot || !graph || graphRefreshSuspended ||
+      inspectorTabs->currentIndex() != 3)
     return;
 
   std::size_t work = 0;
-  while (requestsRenderClearing &&
-         requestsLayout->count() > static_cast<int>(requestsPreservedRows) &&
+  while (requestsRenderClearing && requestsLayout->count() != 0 &&
          work < MaximumInspectorWidgetChangesPerPass) {
     static_cast<void>(deleteLastLayoutItem(requestsLayout));
     ++work;
   }
-  if (requestsRenderClearing &&
-      requestsLayout->count() > static_cast<int>(requestsPreservedRows)) {
+  if (requestsRenderClearing && requestsLayout->count() != 0) {
     scheduleGraphRequestsRender();
     return;
   }
   requestsRenderClearing = false;
 
   const InspectorRequestsData &snapshot = *pendingRequestsSnapshot;
-  const std::size_t componentCount =
-      snapshot.requests.empty() ? 1 : snapshot.requests.size();
-  while (requestsRenderCursor < componentCount &&
+  const std::size_t componentCount = requestsComponentCount(snapshot);
+  if (requestsLayout->count() == 0 && requestsRenderFirst != 0) {
+    requestsLayout->addSpacing(
+        estimatedSpacerHeight(requestsRenderFirst, RequestEstimatedRowHeight));
+  }
+  while (requestsRenderCursor < requestsRenderEnd &&
          work < MaximumInspectorWidgetChangesPerPass) {
     if (snapshot.requests.empty()) {
       requestsLayout->addWidget(
           makeLabel(QStringLiteral("No pending requests."), "muted"));
     } else {
-      requestsLayout->addWidget(
-          requestFrame(snapshot.requests[requestsRenderCursor]));
+      requestsLayout->addWidget(requestFrame(
+          snapshot.requests.at(requestsRenderCursor - snapshot.firstRow)));
     }
     ++requestsRenderCursor;
     ++work;
   }
-  if (requestsRenderCursor != componentCount) {
+  if (requestsRenderCursor != requestsRenderEnd) {
     scheduleGraphRequestsRender();
     return;
   }
 
+  if (requestsRenderEnd < componentCount) {
+    requestsLayout->addSpacing(estimatedSpacerHeight(
+        componentCount - requestsRenderEnd, RequestEstimatedRowHeight));
+  }
   requestsLayout->addStretch();
-  requestsSnapshot = std::move(*pendingRequestsSnapshot);
+  requestsMaterializedFirst = requestsRenderFirst;
+  requestsMaterializedEnd = requestsRenderEnd;
+  requestsRowsMaterialized = true;
   pendingRequestsSnapshot.reset();
-  QTimer::singleShot(0, requestsScroll,
-                     [scroll = requestsScroll, value = requestsScrollValue] {
-                       scroll->verticalScrollBar()->setValue(std::clamp(
-                           value, scroll->verticalScrollBar()->minimum(),
-                           scroll->verticalScrollBar()->maximum()));
-                     });
+  QTimer::singleShot(
+      0, requestsScroll,
+      [this, scroll = requestsScroll, value = requestsScrollValue,
+       followsTail = requestsScrollFollowsTail] {
+        QScrollBar *bar = scroll->verticalScrollBar();
+        bar->setValue(followsTail
+                          ? bar->maximum()
+                          : std::clamp(value, bar->minimum(), bar->maximum()));
+        refreshGraphRequestsViewport();
+      });
 }
 
 void InspectorPane::renderChanges(const InspectorChangesData &snapshot) {

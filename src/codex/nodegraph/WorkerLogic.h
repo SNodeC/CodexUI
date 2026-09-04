@@ -51,6 +51,7 @@ struct PromptCommand final {
   // moves turnOptions into options after thread/start returns.
   Value::Object turnOptions;
   std::string requestedName;
+  std::string creationCorrelation;
 };
 
 struct PromptTransition final {
@@ -68,7 +69,7 @@ public:
 
   [[nodiscard]] ChannelSendStatus apply(DecodedMessage message);
   [[nodiscard]] WorkerApplyResult applyDetailed(DecodedMessage message);
-  [[nodiscard]] WorkerGenerations generations() const noexcept;
+  [[nodiscard]] WorkerGenerations generations() const;
 
   // A successful transport connection begins a new connection generation.
   // Retry and disconnect events retain that generation so late bridge/provider
@@ -85,21 +86,43 @@ public:
 
   [[nodiscard]] ChannelSendStatus connectionSettings(Value::Object settings);
 
+  [[nodiscard]] ChannelSendStatus threadHydration(const NodeRef &thread,
+                                                  std::string state,
+                                                  std::string error = {});
+  [[nodiscard]] ChannelSendStatus
+  completeThreadHydration(DecodedMessage result, const NodeRef &thread,
+                          std::string state, std::string error = {});
+  [[nodiscard]] std::vector<NodeRef> activeAgentChildren(const NodeRef &thread);
+  [[nodiscard]] ChannelSendStatus showNotice(std::string message);
+  [[nodiscard]] ChannelSendStatus selectThread(const NodeRef &thread);
+
   [[nodiscard]] ChannelSendStatus
   resolveInteraction(const ProtocolRequestId &requestId, bool accepted,
                      std::string error = {});
   [[nodiscard]] ChannelSendStatus resolveInteraction(const NodeRef &interaction,
                                                      bool accepted,
                                                      std::string error = {});
+  [[nodiscard]] ChannelSendStatus
+  rejectInteractionResponse(const NodeRef &interaction,
+                            Value::Object authoredResponse, std::string error);
 
   // RuntimeAction::CreateThread uses the explicit payload shape
   // {threadStart: Object, turnStart: Object, requestedName: String}.
   // NodeAction::SubmitPrompt payload is the exact extra turn/start options.
-  [[nodiscard]] PromptTransition admitPrompt(NodeAction action);
-  [[nodiscard]] PromptTransition admitFirstPrompt(RuntimeAction action);
+  [[nodiscard]] PromptTransition
+  admitPrompt(NodeAction action,
+              std::optional<std::int64_t> activityAt = std::nullopt,
+              std::optional<std::int64_t> admittedAtMs = std::nullopt);
+  [[nodiscard]] PromptTransition
+  admitFirstPrompt(RuntimeAction action,
+                   std::optional<std::int64_t> activityAt = std::nullopt,
+                   std::optional<std::int64_t> admittedAtMs = std::nullopt);
   [[nodiscard]] ChannelSendStatus
   attachCreatedThread(PromptCommand &command, std::string threadId,
                       NodeState providerState = {});
+  [[nodiscard]] ChannelSendStatus
+  completeCreatedThread(DecodedMessage result, PromptCommand &command,
+                        std::string threadId, NodeState providerState = {});
   [[nodiscard]] ChannelSendStatus
   markPromptDispatched(const NodeRef &localPrompt,
                        const ProtocolRequestId &requestId);
@@ -107,6 +130,10 @@ public:
   completePrompt(const NodeRef &localPrompt, bool accepted,
                  std::string error = {},
                  std::optional<std::string> turnId = std::nullopt);
+  [[nodiscard]] PromptTransition
+  completePromptResult(DecodedMessage result, const NodeRef &localPrompt,
+                       bool accepted, std::string error = {},
+                       std::optional<std::string> turnId = std::nullopt);
   [[nodiscard]] PromptTransition failPrompt(const NodeRef &localPrompt,
                                             std::string error);
   [[nodiscard]] ChannelSendStatus
@@ -119,19 +146,6 @@ public:
   [[nodiscard]] ChannelSendStatus sendWorkerStopped(std::string reason);
 
 private:
-  struct ConnectionCurrentState final {
-    std::string transportState;
-    std::string transportDetail;
-    std::uint64_t connectionGeneration = 0;
-    std::string connectionId;
-    std::string role;
-    std::string controllerConnectionId;
-    std::uint64_t providerGeneration = 0;
-    std::string providerState;
-    std::string providerDetail;
-    Value::Object settings;
-  };
-
   struct PendingPrompt final {
     NodeRef localPrompt;
     NodeRef thread;
@@ -141,30 +155,47 @@ private:
     Value::Object options;
     Value::Object turnOptions;
     std::string requestedName;
+    std::string creationCorrelation;
     bool createsThread = false;
   };
 
   [[nodiscard]] ChannelSendStatus publish(GraphChange change);
-  [[nodiscard]] ChannelSendStatus publishConnection(bool resetProvider,
-                                                    std::string resetReason);
-  [[nodiscard]] NodeState connectionNodeState() const;
-  [[nodiscard]] PromptTransition admit(PendingPrompt pending);
+  void forgetRemoved(const GraphChange &change);
+  void updateThreadHydration(NodeGraph::WriteAccess &write,
+                             const NodeRef &thread, std::string state,
+                             std::string error);
+  [[nodiscard]] bool attachCreatedThread(NodeGraph::WriteAccess &write,
+                                         PromptCommand &command,
+                                         std::string threadId,
+                                         NodeState providerState,
+                                         NodeRef &authoritative);
+  [[nodiscard]] std::optional<PromptCommand>
+  completePrompt(NodeGraph::WriteAccess &write, const NodeRef &localPrompt,
+                 bool accepted, std::string error,
+                 std::optional<std::string> turnId);
+  [[nodiscard]] PromptTransition
+  admit(PendingPrompt pending, std::optional<std::int64_t> activityAt,
+        std::optional<std::int64_t> admittedAtMs);
   [[nodiscard]] std::optional<PromptCommand>
   takeNextPrompt(NodeGraph::WriteAccess &write, const NodeRef &thread);
   [[nodiscard]] NodeRef activeTurn(NodeGraph::WriteAccess &write,
                                    const NodeRef &thread) const;
   void resetProviderDerived(NodeGraph::WriteAccess &write,
                             std::string_view reason);
+  void advancePromptActivity(NodeGraph::WriteAccess &write,
+                             const NodeRef &thread,
+                             std::int64_t proposedActivityAt);
   void forgetPrompt(const NodeRef &localPrompt);
-  void clearBridgeState(bool clearProviderGeneration);
 
   NodeGraph &graph_;
   ThreadChannels &channels_;
   ProtocolUpdater updater_;
-  ConnectionCurrentState connection_;
   std::uint64_t nextSubmissionId_ = 1;
+  std::uint64_t nextNoticeSerial_ = 1;
+  std::uint64_t nextSelectionSerial_ = 1;
   std::unordered_map<const Node *, std::deque<PendingPrompt>> promptQueues_;
   std::unordered_map<const Node *, NodeRef> promptInFlight_;
+  std::unordered_map<std::string, NodeRef> creatingThreads_;
 };
 
 } // namespace codexui::nodegraph

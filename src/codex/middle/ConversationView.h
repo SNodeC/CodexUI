@@ -46,8 +46,9 @@ public:
   ~ConversationView() override;
 
   void setLoadMoreAction(std::function<void()> action);
-  void setPromptMaterializedAction(
-      std::function<bool(nodegraph::NodeRef)> action);
+  void
+  setPromptMaterializedAction(std::function<bool(nodegraph::NodeRef)> action);
+  void setPromptRecoveryAction(std::function<void(nodegraph::NodeRef)> action);
   void setEmptyMessage(QString message);
   void setPresentationOptions(PresentationOptions options);
   [[nodiscard]] PresentationOptions presentationOptions() const noexcept {
@@ -60,6 +61,8 @@ public:
   void bindGraph(const nodegraph::NodeGraph &graph,
                  nodegraph::NodeRef selectedThread);
   void graphChanged(std::span<const nodegraph::NodeRef> removed = {});
+  void graphChangedDeferred(std::span<const nodegraph::NodeRef> removed = {});
+  void detachRemovedNodes(std::span<const nodegraph::NodeRef> removed);
 
   // Extra composer height is represented after the final card, while the
   // viewport itself keeps its canonical geometry.
@@ -99,6 +102,10 @@ private:
     Mode mode = Mode::Following;
     Anchor anchor;
     bool pausedByComposerGrowth = false;
+    std::size_t graphRequestedHistoryLimit = AuthoritativeHistoryPageSize;
+    std::size_t graphHistoryLimit = AuthoritativeHistoryPageSize;
+    std::size_t graphKnownItemCount = 0;
+    std::string graphNewestItemKey;
   };
 
   class TurnSectionWidget;
@@ -111,6 +118,7 @@ private:
   void storeCurrentThreadState();
   void setScrollValue(int value);
   void stopFollowingAnimation();
+  void restoreRequestedGraphHistoryLimit();
   void animateToBottom(int previousValue);
   void recomputeGeometry();
   void arrangeSection(TurnSectionWidget *section);
@@ -120,6 +128,7 @@ private:
   void detachGraphWidgets(std::span<const nodegraph::NodeRef> removed = {});
   void updateGraphChrome();
   void scheduleVisibilityPass();
+  void resetGraphVisibilityScan();
   [[nodiscard]] bool runVisibilityPass();
   [[nodiscard]] bool runGraphVisibilityPass();
   void positionContent();
@@ -138,14 +147,25 @@ private:
   QVariantAnimation *followAnimation_ = nullptr;
   std::function<void()> loadMoreAction_;
   std::function<bool(nodegraph::NodeRef)> promptMaterializedAction_;
+  std::function<void(nodegraph::NodeRef)> promptRecoveryAction_;
 
   const nodegraph::NodeGraph *graph_ = nullptr;
   nodegraph::NodeRef graphThread_;
   std::vector<TurnSectionWidget *> graphSections_;
+  std::size_t graphRequestedHistoryLimit_ = AuthoritativeHistoryPageSize;
   std::size_t graphHistoryLimit_ = AuthoritativeHistoryPageSize;
   std::size_t graphKnownItemCount_ = 0;
+  std::string graphNewestItemKey_;
   std::size_t graphHiddenItemCount_ = 0;
+  std::size_t graphWindowItemCount_ = 0;
   bool graphProviderHasMore_ = false;
+  std::size_t visibilitySectionCursor_ = 0;
+  std::size_t visibilitySlotCursor_ = 0;
+  std::size_t visibilitySlotsRemaining_ = 0;
+  int visibilityScanScrollTop_ = -1;
+  int visibilityScanViewportHeight_ = -1;
+  int visibilityScanViewportWidth_ = -1;
+  int visibilityScanContentHeight_ = -1;
   std::string threadId_;
   std::unordered_map<std::string, ThreadScrollState> threadStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>

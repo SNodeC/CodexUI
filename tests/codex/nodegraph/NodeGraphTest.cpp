@@ -216,8 +216,7 @@ bool testAtomicStateRelationsAndNoOp() {
     write.setStatus(parent, NodeStatus::Running);
     write.setField(parent, "title", "Atomic update");
     write.setField(parent, "sequence", std::uint64_t{12});
-    write.appendStringField(parent, "stream", "first");
-    write.appendStringField(parent, "stream", " second");
+    write.setField(parent, "stream", "first second");
     write.setParent(parent, firstChild);
     write.setParent(parent, secondChild);
     write.setParent(parent, firstChild);
@@ -269,10 +268,21 @@ bool testAtomicStateRelationsAndNoOp() {
             !read->childAt({}, 0) && read->parent(firstChild) == parent &&
             read->parent(secondChild) == parent,
         "parent and bounded child access preserve order and deduplicate");
-    passed &=
-        expect(sameOrder(read->related(parent, RelationKind::OperationTarget),
-                         {firstTarget, secondTarget}),
-               "cross-node relations preserve order and deduplicate");
+    passed &= expect(
+        sameOrder(read->related(parent, RelationKind::OperationTarget),
+                  {firstTarget, secondTarget}) &&
+            read->relatedCount(parent, RelationKind::OperationTarget) == 2 &&
+            read->relatedAt(parent, RelationKind::OperationTarget, 0) ==
+                firstTarget &&
+            read->relatedAt(parent, RelationKind::OperationTarget, 1) ==
+                secondTarget &&
+            !read->relatedAt(parent, RelationKind::OperationTarget, 2) &&
+            read->relatedCount(parent, RelationKind::ProcessOwner) == 0 &&
+            !read->relatedAt(parent, RelationKind::ProcessOwner, 0) &&
+            read->relatedCount({}, RelationKind::OperationTarget) == 0 &&
+            !read->relatedAt({}, RelationKind::OperationTarget, 0),
+        "bounded cross-node relation access preserves order and handles "
+        "missing, out-of-range, and null sources");
     passed &= expect(read->changedRevision(parent) == 2 &&
                          read->changedRevision(firstChild) == 2 &&
                          read->changedRevision(firstTarget) == 2,
@@ -284,7 +294,7 @@ bool testAtomicStateRelationsAndNoOp() {
     write.setStatus(parent, NodeStatus::Running);
     write.setField(parent, "title", "Atomic update");
     write.eraseField(parent, "missing");
-    write.appendStringField(parent, "stream", "");
+    write.setField(parent, "stream", "first second");
     write.setParent(parent, firstChild);
     write.relate(parent, RelationKind::OperationTarget, firstTarget);
     write.unrelate(parent, RelationKind::ProcessOwner, secondTarget);
@@ -421,9 +431,13 @@ bool testRemovalLifetimeAndAttachment() {
                 .empty() &&
             read->related(removedNode, RelationKind::ProcessOwner).empty(),
         "removal unlinks hierarchy and cross-node relations");
-    passed &= expect(read->retiredNodes().size() == 1 &&
-                         read->retiredNodes().front() == removedNode,
-                     "removed nodes remain retained until Qt acknowledges");
+    passed &= expect(
+        read->retiredNodes().size() == 1 &&
+            read->retiredNodes().front() == removedNode &&
+            read->retiredCount() == 1 && read->retiredAt(0) == removedNode &&
+            !read->retiredAt(1) && read->retiredOrderGeneration() == 0,
+        "removed nodes support bounded retirement reads until "
+        "Qt acknowledges");
   }
 
   {
@@ -457,8 +471,11 @@ bool testRemovalLifetimeAndAttachment() {
     auto read = graph.tryRead();
     if (!expect(read.has_value(), "the graph is readable after retirement"))
       return false;
-    passed &= expect(read->retiredNodes().empty(),
-                     "releaseRetired drops graph lifetime ownership");
+    passed &=
+        expect(read->retiredNodes().empty() && read->retiredCount() == 0 &&
+                   read->retiredOrderGeneration() == 1,
+               "releaseRetired drops graph lifetime ownership and "
+               "invalidates an incremental retirement cursor");
   }
   detaching.reset();
   passed &=
@@ -492,23 +509,31 @@ bool testMisuseRejection() {
     auto read = graph.tryRead();
     if (!expect(read.has_value(), "the graph is readable for misuse checks"))
       return false;
-    passed &=
-        expect(throws<std::invalid_argument>(
-                   [&] { static_cast<void>(read->state(foreign)); }) &&
-                   throws<std::invalid_argument>([&] {
-                     static_cast<void>(read->changedRevision(foreign));
-                   }) &&
-                   throws<std::invalid_argument>(
-                       [&] { static_cast<void>(read->removed(foreign)); }) &&
-                   throws<std::invalid_argument>(
-                       [&] { static_cast<void>(read->parent(foreign)); }) &&
-                   throws<std::invalid_argument>(
-                       [&] { static_cast<void>(read->children(foreign)); }) &&
-                   throws<std::invalid_argument>([&] {
-                     static_cast<void>(
-                         read->related(foreign, RelationKind::ForkChildThread));
-                   }),
-               "foreign NodeRefs cannot be read under the wrong graph lock");
+    passed &= expect(
+        throws<std::invalid_argument>(
+            [&] { static_cast<void>(read->state(foreign)); }) &&
+            throws<std::invalid_argument>(
+                [&] { static_cast<void>(read->changedRevision(foreign)); }) &&
+            throws<std::invalid_argument>(
+                [&] { static_cast<void>(read->removed(foreign)); }) &&
+            throws<std::invalid_argument>(
+                [&] { static_cast<void>(read->parent(foreign)); }) &&
+            throws<std::invalid_argument>(
+                [&] { static_cast<void>(read->children(foreign)); }) &&
+            throws<std::invalid_argument>([&] {
+              static_cast<void>(
+                  read->related(foreign, RelationKind::ForkChildThread));
+            }) &&
+            throws<std::invalid_argument>([&] {
+              static_cast<void>(
+                  read->relatedCount(foreign, RelationKind::ForkChildThread));
+            }) &&
+            throws<std::invalid_argument>([&] {
+              static_cast<void>(
+                  read->relatedAt(foreign, RelationKind::ForkChildThread, 0));
+            }),
+        "foreign NodeRefs cannot be read under the wrong graph lock, "
+        "including through bounded relation access");
   }
   {
     auto write = graph.write();

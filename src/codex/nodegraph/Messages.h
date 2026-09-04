@@ -25,9 +25,6 @@ struct GraphChanged final {
 enum class UiEffectKind : std::uint8_t {
   ShowNotice,
   SelectThread,
-  FocusComposer,
-  ClearComposerDraft,
-  PrepareLocalPromptAdmission,
 };
 
 struct UiEffect final {
@@ -58,6 +55,7 @@ struct Attachment final {
 
 enum class NodeActionKind : std::uint8_t {
   Hydrate,
+  Reload,
   LoadHistory,
   Rename,
   Fork,

@@ -193,7 +193,7 @@ bool testDescriptorsAndVariantOrder() {
                    "a graph change is admitted worker-to-Qt");
 
   UiEffect effect{
-      UiEffectKind::FocusComposer, target, "focus", {{"reason", "new-thread"}}};
+      UiEffectKind::ShowNotice, target, "focus", {{"reason", "new-thread"}}};
   const UiEffect expectedEffect = effect;
   passed &= expect(channels.sendUiEffect(effect) == ChannelSendStatus::Accepted,
                    "a UI effect is admitted worker-to-Qt");
@@ -379,10 +379,18 @@ bool testGraphCoalescingAndRetiredLifetime() {
   }
   passed &=
       expect(allOrdinaryAdmissionsAccepted && reachedOrdinaryLimit &&
-                 ordinaryAdmissions + 1 == ThreadChannels::WorkerToQtCapacity &&
+                 ordinaryAdmissions + ThreadChannels::WorkerToQtReservedSlots ==
+                     ThreadChannels::WorkerToQtCapacity &&
                  channels.workerToQtSizeApprox() == ordinaryAdmissions,
-             "ordinary worker notifications wake Qt and stop at the reserved "
-             "stop slot");
+             "ordinary worker notifications preserve critical and terminal "
+             "slots");
+
+  UiEffect selection{
+      UiEffectKind::SelectThread, std::nullopt, "critical selection", {}};
+  passed &= expect(
+      channels.sendUiEffect(selection) == ChannelSendStatus::Accepted &&
+          channels.workerToQtSizeApprox() == ordinaryAdmissions + 1,
+      "critical selection uses its reserved slot under ordinary saturation");
 
   WorkerStopped stopped{"worker finished while Qt was saturated"};
   passed &= expect(
@@ -427,7 +435,7 @@ bool testGraphCoalescingAndRetiredLifetime() {
   const EventFd::DrainResult wake = channels.drainWorkerToQtWake();
   passed &=
       expect(wake.status == EventFd::DrainStatus::Drained &&
-                 wake.count == ordinaryAdmissions + 2,
+                 wake.count == ordinaryAdmissions + 3,
              "coalesced rescan still wakes Qt without queue payload copies");
 
   WorkerToQtMessage message;
@@ -452,6 +460,11 @@ bool testGraphCoalescingAndRetiredLifetime() {
   passed &=
       expect(fifoOrder,
              "queued worker notifications preserve FIFO order after rescan");
+  passed &=
+      expect(channels.tryReceiveForQt(message) &&
+                 std::holds_alternative<UiEffect>(message) &&
+                 std::get<UiEffect>(message).kind == UiEffectKind::SelectThread,
+             "critical selection follows ordinary notifications");
   passed &= expect(channels.tryReceiveForQt(message) &&
                        std::holds_alternative<WorkerStopped>(message) &&
                        std::get<WorkerStopped>(message).reason ==
@@ -544,6 +557,42 @@ bool testWakeFailureAfterAdmission() {
   return passed;
 }
 
+bool testOversizedGraphChangeRequiresRescan() {
+  ThreadChannels channels;
+  NodeGraph graph;
+  GraphChange oversized;
+  {
+    auto write = graph.write();
+    for (std::size_t index = 0;
+         index <= ThreadChannels::MaximumDirectGraphReferences; ++index) {
+      static_cast<void>(write.upsert(
+          id(NodeKind::Item, "oversized/" + std::to_string(index))));
+    }
+    oversized = write.finish();
+  }
+  const std::uint64_t revision = oversized.revision;
+
+  bool passed = true;
+  passed &= expect(
+      channels.sendGraphChanged(std::move(oversized)) ==
+              ChannelSendStatus::CoalescedRescan &&
+          channels.workerToQtSizeApprox() == 0 && channels.rescanPending(),
+      "an oversized committed transaction coalesces even with queue space");
+  passed &= expect(channels.drainWorkerToQtWake().count == 1,
+                   "an oversized graph rescan produces one eventfd wake");
+  WorkerToQtMessage message;
+  passed &= expect(
+      channels.tryReceiveForQt(message) &&
+          std::holds_alternative<GraphChanged>(message) &&
+          std::get<GraphChanged>(message).revision == revision &&
+          std::get<GraphChanged>(message).rescanRequired &&
+          std::get<GraphChanged>(message).affected.empty() &&
+          std::get<GraphChanged>(message).removed.empty(),
+      "Qt receives only the explicit rescan marker, never an unbounded ref "
+      "vector");
+  return passed;
+}
+
 } // namespace
 
 int main() {
@@ -552,6 +601,7 @@ int main() {
   passed &= testDescriptorsAndVariantOrder();
   passed &= testQtToWorkerBackpressure();
   passed &= testGraphCoalescingAndRetiredLifetime();
+  passed &= testOversizedGraphChangeRequiresRescan();
   passed &= testWakeFailureAfterAdmission();
   return passed ? 0 : 1;
 }
