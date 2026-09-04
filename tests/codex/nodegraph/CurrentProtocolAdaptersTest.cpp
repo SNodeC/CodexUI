@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/CurrentProtocolAdapters.h"
+#include "codex/nodegraph/ProtocolCatalog.h"
 
 #include <ai/openai/codex/frontend/CodexBridge.h>
 
+#include <algorithm>
 #include <array>
 #include <concepts>
 #include <cstdlib>
 #include <iostream>
+#include <span>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -20,9 +24,62 @@ namespace adapters = codexui::codex::current_protocol;
 namespace clientRequests = adapters::client_requests;
 namespace requests = adapters::server_requests;
 namespace notifications = adapters::server_notifications;
+namespace generated = ai::openai::codex::generated;
+namespace nodegraph = codexui::nodegraph;
 
 using Bridge = ai::openai::codex::frontend::CodexBridge;
-using GeneratedValue = ai::openai::codex::generated::Value;
+using GeneratedValue = generated::Value;
+
+#define CODEXUI_CAPTURE_CLIENT_REQUEST(Operation, accessor)                    \
+  std::string_view(generated::client_requests::Operation::method),
+constexpr std::array GeneratedClientRequests{
+    AI_OPENAI_CODEX_CLIENT_REQUESTS(CODEXUI_CAPTURE_CLIENT_REQUEST)};
+#undef CODEXUI_CAPTURE_CLIENT_REQUEST
+
+#define CODEXUI_CAPTURE_SERVER_REQUEST(Operation, accessor)                    \
+  std::string_view(generated::server_requests::Operation::method),
+constexpr std::array GeneratedServerRequests{
+    AI_OPENAI_CODEX_SERVER_REQUESTS(CODEXUI_CAPTURE_SERVER_REQUEST)};
+#undef CODEXUI_CAPTURE_SERVER_REQUEST
+
+#define CODEXUI_CAPTURE_CLIENT_NOTIFICATION(Operation, accessor)               \
+  std::string_view(generated::client_notifications::Operation::method),
+constexpr std::array GeneratedClientNotifications{
+    AI_OPENAI_CODEX_CLIENT_NOTIFICATIONS(CODEXUI_CAPTURE_CLIENT_NOTIFICATION)};
+#undef CODEXUI_CAPTURE_CLIENT_NOTIFICATION
+
+#define CODEXUI_CAPTURE_SERVER_NOTIFICATION(Operation, accessor)               \
+  std::string_view(generated::server_notifications::Operation::method),
+constexpr std::array GeneratedServerNotifications{
+    AI_OPENAI_CODEX_SERVER_NOTIFICATIONS(CODEXUI_CAPTURE_SERVER_NOTIFICATION)};
+#undef CODEXUI_CAPTURE_SERVER_NOTIFICATION
+
+constexpr std::array CompatibilityClientRequests{
+    clientRequests::ThreadTurnsList::method,
+};
+constexpr std::array CompatibilityServerRequests{
+    requests::CurrentTimeRead::method,
+};
+constexpr std::array CompatibilityServerNotifications{
+    notifications::ModelProviderAuthRecoveryStarted::method,
+    notifications::ModelProviderAuthRecoveryCompleted::method,
+    notifications::RawResponseItemCompleted::method,
+    notifications::RawResponseCompleted::method,
+    notifications::ThreadRealtimeItemStarted::method,
+    notifications::ThreadRealtimeItemTranscriptDelta::method,
+    notifications::ThreadRealtimeItemCompleted::method,
+};
+
+// These assertions deliberately couple this integration test to the installed
+// generated schema.  An AISuite protocol update must therefore be reconciled
+// with the explicit CodexUI compatibility surface and the graph catalog.
+static_assert(GeneratedClientRequests.size() == 95);
+static_assert(GeneratedServerRequests.size() == 10);
+static_assert(GeneratedServerNotifications.size() == 76);
+static_assert(GeneratedClientNotifications.size() == 1);
+static_assert(CompatibilityClientRequests.size() == 1);
+static_assert(CompatibilityServerRequests.size() == 1);
+static_assert(CompatibilityServerNotifications.size() == 7);
 
 template <typename Operation>
 concept BridgeServerRequest =
@@ -37,8 +94,7 @@ concept BridgeServerRequest =
 
 template <typename Operation>
 concept BridgeClientRequest =
-    requires(Bridge &bridge,
-             Bridge::ResponseHandler<Operation> handler,
+    requires(Bridge &bridge, Bridge::ResponseHandler<Operation> handler,
              const typename Operation::Params &params) {
       {
         bridge.template request<Operation>(params, std::move(handler))
@@ -95,6 +151,124 @@ static_assert(RequiredValueParams<notifications::ThreadRealtimeItemCompleted>);
 bool expect(bool condition, std::string_view message) {
   std::cout << (condition ? "PASS " : "FAIL ") << message << '\n';
   return condition;
+}
+
+bool contains(std::span<const std::string_view> methods,
+              std::string_view method) {
+  return std::ranges::find(methods, method) != methods.end();
+}
+
+bool hasUniqueMethods(std::span<const std::string_view> methods) {
+  for (std::size_t left = 0; left < methods.size(); ++left) {
+    if (std::ranges::find(methods.subspan(left + 1), methods[left]) !=
+        methods.end())
+      return false;
+  }
+  return true;
+}
+
+bool hasDisjointMethods(
+    std::span<const std::string_view> generatedMethods,
+    std::span<const std::string_view> compatibilityMethods) {
+  return std::ranges::none_of(generatedMethods,
+                              [compatibilityMethods](std::string_view method) {
+                                return contains(compatibilityMethods, method);
+                              });
+}
+
+bool catalogContainsAll(std::span<const std::string_view> sourceMethods,
+                        nodegraph::ProtocolDirection direction,
+                        std::string_view sourceName) {
+  for (const std::string_view method : sourceMethods) {
+    if (!nodegraph::findProtocolMethod(direction, method)) {
+      std::cerr << "Catalog is missing " << sourceName << " method " << method
+                << '\n';
+      return false;
+    }
+  }
+  return true;
+}
+
+bool catalogDirectionEqualsUnion(
+    nodegraph::ProtocolDirection direction,
+    std::span<const std::string_view> generatedMethods,
+    std::span<const std::string_view> compatibilityMethods) {
+  if (nodegraph::protocolMethodCount(direction) !=
+      generatedMethods.size() + compatibilityMethods.size())
+    return false;
+
+  return std::ranges::all_of(
+      nodegraph::protocolMethods(),
+      [direction, generatedMethods,
+       compatibilityMethods](const nodegraph::MethodDescriptor &descriptor) {
+        return descriptor.direction != direction ||
+               contains(generatedMethods, descriptor.method) ||
+               contains(compatibilityMethods, descriptor.method);
+      });
+}
+
+bool testGeneratedSchemaCatalogCoverage() {
+  using enum nodegraph::ProtocolDirection;
+
+  bool passed = true;
+  passed &= expect(hasUniqueMethods(GeneratedClientRequests) &&
+                       hasUniqueMethods(GeneratedServerRequests) &&
+                       hasUniqueMethods(GeneratedServerNotifications) &&
+                       hasUniqueMethods(GeneratedClientNotifications),
+                   "generated ProtocolTypes macros contain unique methods");
+  passed &= expect(
+      hasUniqueMethods(CompatibilityClientRequests) &&
+          hasUniqueMethods(CompatibilityServerRequests) &&
+          hasUniqueMethods(CompatibilityServerNotifications) &&
+          hasDisjointMethods(GeneratedClientRequests,
+                             CompatibilityClientRequests) &&
+          hasDisjointMethods(GeneratedServerRequests,
+                             CompatibilityServerRequests) &&
+          hasDisjointMethods(GeneratedServerNotifications,
+                             CompatibilityServerNotifications),
+      "compatibility adapters are unique additions to generated ProtocolTypes");
+
+  passed &= expect(
+      catalogContainsAll(GeneratedClientRequests, ClientRequest,
+                         "generated client request") &&
+          catalogContainsAll(GeneratedServerRequests, ServerRequest,
+                             "generated server request") &&
+          catalogContainsAll(GeneratedServerNotifications, ServerNotification,
+                             "generated server notification") &&
+          catalogContainsAll(GeneratedClientNotifications, ClientNotification,
+                             "generated client notification"),
+      "catalog classifies every method in generated ProtocolTypes");
+  passed &=
+      expect(catalogContainsAll(CompatibilityClientRequests, ClientRequest,
+                                "compatibility client request") &&
+                 catalogContainsAll(CompatibilityServerRequests, ServerRequest,
+                                    "compatibility server request") &&
+                 catalogContainsAll(CompatibilityServerNotifications,
+                                    ServerNotification,
+                                    "compatibility server notification"),
+             "catalog classifies every explicit CodexUI compatibility adapter");
+
+  passed &=
+      expect(catalogDirectionEqualsUnion(ServerRequest, GeneratedServerRequests,
+                                         CompatibilityServerRequests),
+             "11 server requests exactly match generated types plus adapters");
+  passed &= expect(
+      catalogDirectionEqualsUnion(ServerNotification,
+                                  GeneratedServerNotifications,
+                                  CompatibilityServerNotifications),
+      "83 server notifications exactly match generated types plus adapters");
+  passed &=
+      expect(catalogDirectionEqualsUnion(ClientNotification,
+                                         GeneratedClientNotifications, {}),
+             "one client notification exactly matches generated ProtocolTypes");
+
+  constexpr std::size_t NewerClientRequestsWithoutLocalTypedAdapters = 61;
+  passed &= expect(
+      nodegraph::protocolMethodCount(ClientRequest) ==
+          GeneratedClientRequests.size() + CompatibilityClientRequests.size() +
+              NewerClientRequestsWithoutLocalTypedAdapters,
+      "157 client requests retain the verified newer-schema extension set");
+  return passed;
 }
 
 template <typename Operation>
@@ -215,8 +389,8 @@ bool testCodexBridgeDispatchesCompatibilityOperations() {
             bridge.respond<requests::CurrentTimeRead>(request, response));
       });
 #define CODEXUI_TEST_REGISTER_NOTIFICATION(OperationName)                      \
-  bridge.onServerNotification<notifications::OperationName>(                  \
-      [&notificationCount](notifications::OperationName::Params &) {          \
+  bridge.onServerNotification<notifications::OperationName>(                   \
+      [&notificationCount](notifications::OperationName::Params &) {           \
         ++notificationCount;                                                   \
       });
   CODEXUI_TEST_REGISTER_NOTIFICATION(ModelProviderAuthRecoveryStarted)
@@ -232,13 +406,12 @@ bool testCodexBridgeDispatchesCompatibilityOperations() {
                                   {"event", "opened"},
                                   {"connectionId", "bridge-test"},
                                   {"role", "controller"}});
-  accepted &= bridge.receive(
-      {{"kind", "appserver"},
-       {"payload",
-        {{"jsonrpc", "2.0"},
-         {"id", "clock-bridge"},
-         {"method", requests::CurrentTimeRead::method},
-         {"params", {{"threadId", "thread-bridge"}}}}}});
+  accepted &= bridge.receive({{"kind", "appserver"},
+                              {"payload",
+                               {{"jsonrpc", "2.0"},
+                                {"id", "clock-bridge"},
+                                {"method", requests::CurrentTimeRead::method},
+                                {"params", {{"threadId", "thread-bridge"}}}}}});
 
   constexpr std::array notificationMethods{
       notifications::ModelProviderAuthRecoveryStarted::method,
@@ -250,10 +423,11 @@ bool testCodexBridgeDispatchesCompatibilityOperations() {
       notifications::ThreadRealtimeItemCompleted::method,
   };
   for (const std::string_view method : notificationMethods) {
-    accepted &= bridge.receive(
-        {{"kind", "appserver"},
-         {"payload", {{"jsonrpc", "2.0"}, {"method", method},
-                      {"params", {{"marker", method}}}}}});
+    accepted &= bridge.receive({{"kind", "appserver"},
+                                {"payload",
+                                 {{"jsonrpc", "2.0"},
+                                  {"method", method},
+                                  {"params", {{"marker", method}}}}}});
   }
 
   const nlohmann::json response =
@@ -271,6 +445,7 @@ bool testCodexBridgeDispatchesCompatibilityOperations() {
 
 int main() {
   bool passed = true;
+  passed &= testGeneratedSchemaCatalogCoverage();
   passed &= testExactMethods();
   passed &= testCurrentTimeRequestAndResponse();
   passed &= testNotificationPayloads();
