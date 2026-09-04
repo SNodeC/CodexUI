@@ -5,6 +5,7 @@
 
 #include "codex/nodegraph/Value.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -127,6 +128,10 @@ private:
   std::unordered_map<RelationKind, std::vector<Node *>> relations_;
   std::unordered_map<std::string, std::uint64_t> fieldChangedRevisions_;
   std::uint64_t statusChangedRevision_ = 0;
+  // Changes only when this node's parent, ordered children, or an outgoing
+  // relation changes. UI scans use the stamp to validate bounded structural
+  // reads without treating ordinary streaming fields as topology changes.
+  std::uint64_t structureChangedRevision_ = 0;
   std::uint64_t changedRevision_ = 0;
   // Immutable position in the graph's append-only insertion order. Qt uses
   // this only to resume bounded scans after unrelated removals shift the
@@ -158,6 +163,8 @@ public:
   [[nodiscard]] WriteAccess write();
   [[nodiscard]] std::optional<ReadAccess> tryRead() const;
   [[nodiscard]] std::uint64_t publishedRevision() const noexcept;
+  [[nodiscard]] std::uint64_t
+  publishedStructureRevision(NodeKind kind) const noexcept;
 
   class ReadAccess final {
   public:
@@ -167,6 +174,7 @@ public:
     ReadAccess &operator=(const ReadAccess &) = delete;
 
     [[nodiscard]] std::uint64_t revision() const noexcept;
+    [[nodiscard]] std::uint64_t structureRevision(NodeKind kind) const noexcept;
     [[nodiscard]] NodeRef find(const NodeId &id) const;
     [[nodiscard]] const std::vector<NodeRef> &orderedNodes() const noexcept;
     [[nodiscard]] std::uint64_t insertionOrder(const NodeRef &node) const;
@@ -183,6 +191,8 @@ public:
     fieldChangedRevision(const NodeRef &node, std::string_view field) const;
     [[nodiscard]] std::uint64_t
     statusChangedRevision(const NodeRef &node) const;
+    [[nodiscard]] std::uint64_t
+    structureChangedRevision(const NodeRef &node) const;
     [[nodiscard]] bool removed(const NodeRef &node) const;
     [[nodiscard]] NodeRef parent(const NodeRef &node) const;
     [[nodiscard]] std::size_t childCount(const NodeRef &node) const;
@@ -221,6 +231,8 @@ public:
     fieldChangedRevision(const NodeRef &node, std::string_view field) const;
     [[nodiscard]] std::uint64_t
     statusChangedRevision(const NodeRef &node) const;
+    [[nodiscard]] std::uint64_t
+    structureChangedRevision(const NodeRef &node) const;
     [[nodiscard]] bool hasPendingChanges() const noexcept;
     [[nodiscard]] NodeRef upsert(NodeId id, NodeState initial = {});
     [[nodiscard]] std::shared_ptr<const NodeState>
@@ -273,6 +285,7 @@ public:
     void requireLive(const NodeRef &node) const;
     void noteStateChanges(const NodeRef &node, const NodeState &before,
                           const NodeState &after);
+    void noteStructureChange(const NodeRef &node);
     void markAffected(const NodeRef &node);
     void unlinkNode(const NodeRef &node);
     [[nodiscard]] GraphChange publish();
@@ -284,6 +297,7 @@ public:
     std::vector<NodeRef> revisionTouches_;
     std::unordered_set<Node *> revisionTouchIndex_;
     std::unordered_map<Node *, PendingStateRevision> pendingStateRevisions_;
+    std::unordered_set<Node *> pendingStructureRevisions_;
     std::vector<NodeRef> removed_;
     std::unordered_set<Node *> removedIndex_;
     bool dirty_ = false;
@@ -291,6 +305,9 @@ public:
   };
 
 private:
+  static constexpr std::size_t NodeKindCount =
+      static_cast<std::size_t>(NodeKind::UnknownProtocol) + 1;
+
   mutable std::shared_mutex mutex_;
   std::unordered_map<NodeId, NodeRef, NodeIdHash> nodes_;
   std::vector<NodeRef> orderedNodes_;
@@ -299,7 +316,10 @@ private:
   std::uint64_t retiredOrderGeneration_ = 0;
   std::uint64_t nextInsertionOrder_ = 1;
   std::uint64_t revision_ = 0;
+  std::array<std::uint64_t, NodeKindCount> structureRevisions_{};
   std::atomic<std::uint64_t> publishedRevision_{0};
+  std::array<std::atomic<std::uint64_t>, NodeKindCount>
+      publishedStructureRevisions_{};
 };
 
 } // namespace codexui::nodegraph

@@ -65,12 +65,28 @@ std::uint64_t NodeGraph::publishedRevision() const noexcept {
   return publishedRevision_.load(std::memory_order_acquire);
 }
 
+std::uint64_t
+NodeGraph::publishedStructureRevision(NodeKind kind) const noexcept {
+  const std::size_t index = static_cast<std::size_t>(kind);
+  if (index >= publishedStructureRevisions_.size())
+    return 0;
+  return publishedStructureRevisions_[index].load(std::memory_order_acquire);
+}
+
 NodeGraph::ReadAccess::ReadAccess(
     const NodeGraph &graph, std::shared_lock<std::shared_mutex> lock) noexcept
     : graph_(&graph), lock_(std::move(lock)) {}
 
 std::uint64_t NodeGraph::ReadAccess::revision() const noexcept {
   return graph_->revision_;
+}
+
+std::uint64_t
+NodeGraph::ReadAccess::structureRevision(NodeKind kind) const noexcept {
+  const std::size_t index = static_cast<std::size_t>(kind);
+  return index < graph_->structureRevisions_.size()
+             ? graph_->structureRevisions_[index]
+             : 0;
 }
 
 NodeRef NodeGraph::ReadAccess::find(const NodeId &id) const {
@@ -140,6 +156,14 @@ NodeGraph::ReadAccess::statusChangedRevision(const NodeRef &node) const {
     return 0;
   requireMember(node);
   return node->statusChangedRevision_;
+}
+
+std::uint64_t
+NodeGraph::ReadAccess::structureChangedRevision(const NodeRef &node) const {
+  if (!node)
+    return 0;
+  requireMember(node);
+  return node->structureChangedRevision_;
 }
 
 bool NodeGraph::ReadAccess::removed(const NodeRef &node) const {
@@ -238,6 +262,7 @@ NodeGraph::WriteAccess::WriteAccess(WriteAccess &&other) noexcept
       revisionTouches_(std::move(other.revisionTouches_)),
       revisionTouchIndex_(std::move(other.revisionTouchIndex_)),
       pendingStateRevisions_(std::move(other.pendingStateRevisions_)),
+      pendingStructureRevisions_(std::move(other.pendingStructureRevisions_)),
       removed_(std::move(other.removed_)),
       removedIndex_(std::move(other.removedIndex_)), dirty_(other.dirty_),
       finished_(other.finished_) {
@@ -282,6 +307,12 @@ std::uint64_t
 NodeGraph::WriteAccess::statusChangedRevision(const NodeRef &node) const {
   requireLive(node);
   return node->statusChangedRevision_;
+}
+
+std::uint64_t
+NodeGraph::WriteAccess::structureChangedRevision(const NodeRef &node) const {
+  requireLive(node);
+  return node->structureChangedRevision_;
 }
 
 bool NodeGraph::WriteAccess::hasPendingChanges() const noexcept {
@@ -417,6 +448,8 @@ void NodeGraph::WriteAccess::setParent(const NodeRef &parent,
   clearParent(child);
   child->parent_ = parent.get();
   parent->children_.emplace_back(child.get());
+  noteStructureChange(parent);
+  noteStructureChange(child);
   markAffected(parent);
   markAffected(child);
 }
@@ -428,6 +461,8 @@ void NodeGraph::WriteAccess::clearParent(const NodeRef &child) {
   NodeRef parent = pin(child->parent_);
   eraseValue(parent->children_, child.get());
   child->parent_ = nullptr;
+  noteStructureChange(parent);
+  noteStructureChange(child);
   markAffected(parent);
   markAffected(child);
 }
@@ -470,23 +505,29 @@ void NodeGraph::WriteAccess::replaceChildren(
     if (!seen.contains(oldChildPointer)) {
       NodeRef oldChild = pin(oldChildPointer);
       oldChild->parent_ = nullptr;
+      noteStructureChange(oldChild);
       markAffected(oldChild);
     }
   }
 
   for (const NodeRef &child : next) {
+    const bool parentChanged = child->parent_ != parent.get();
     if (child->parent_ && child->parent_ != parent.get()) {
       NodeRef previousParent = pin(child->parent_);
       eraseValue(previousParent->children_, child.get());
+      noteStructureChange(previousParent);
       markAffected(previousParent);
     }
     child->parent_ = parent.get();
+    if (parentChanged)
+      noteStructureChange(child);
     markAffected(child);
   }
   parent->children_.clear();
   parent->children_.reserve(next.size());
   for (const NodeRef &child : next)
     parent->children_.emplace_back(child.get());
+  noteStructureChange(parent);
   markAffected(parent);
 }
 
@@ -498,6 +539,7 @@ void NodeGraph::WriteAccess::relate(const NodeRef &source, RelationKind kind,
   if (contains(targets, target.get()))
     return;
   targets.emplace_back(target.get());
+  noteStructureChange(source);
   markAffected(source);
   markAffected(target);
 }
@@ -513,6 +555,7 @@ void NodeGraph::WriteAccess::unrelate(const NodeRef &source, RelationKind kind,
   eraseValue(found->second, target.get());
   if (found->second.empty())
     source->relations_.erase(found);
+  noteStructureChange(source);
   markAffected(source);
   markAffected(target);
 }
@@ -555,6 +598,7 @@ void NodeGraph::WriteAccess::replaceRelated(const NodeRef &source,
       ordered.emplace_back(target.get());
     source->relations_.insert_or_assign(kind, std::move(ordered));
   }
+  noteStructureChange(source);
   markAffected(source);
   for (Node *target : previous)
     markAffected(pin(target));
@@ -567,11 +611,16 @@ void NodeGraph::WriteAccess::unlinkNode(const NodeRef &node) {
     NodeRef parent = pin(node->parent_);
     eraseValue(parent->children_, node.get());
     node->parent_ = nullptr;
+    noteStructureChange(parent);
+    noteStructureChange(node);
     markAffected(parent);
   }
+  if (!node->children_.empty())
+    noteStructureChange(node);
   for (Node *childPointer : node->children_) {
     NodeRef child = pin(childPointer);
     child->parent_ = nullptr;
+    noteStructureChange(child);
     markAffected(child);
   }
   node->children_.clear();
@@ -590,9 +639,13 @@ void NodeGraph::WriteAccess::unlinkNode(const NodeRef &node) {
       else
         ++relation;
     }
-    if (changed)
+    if (changed) {
+      noteStructureChange(candidate);
       markAffected(candidate);
+    }
   }
+  if (!node->relations_.empty())
+    noteStructureChange(node);
   node->relations_.clear();
 }
 
@@ -655,6 +708,11 @@ void NodeGraph::WriteAccess::markAffected(const NodeRef &node) {
   dirty_ = true;
 }
 
+void NodeGraph::WriteAccess::noteStructureChange(const NodeRef &node) {
+  if (node)
+    pendingStructureRevisions_.insert(node.get());
+}
+
 GraphChange NodeGraph::WriteAccess::publish() {
   finished_ = true;
   if (!dirty_)
@@ -665,6 +723,18 @@ GraphChange NodeGraph::WriteAccess::publish() {
       node->statusChangedRevision_ = graph_->revision_;
     for (const std::string &field : pending.fields)
       node->fieldChangedRevisions_.insert_or_assign(field, graph_->revision_);
+  }
+  std::array<bool, NodeGraph::NodeKindCount> changedStructureKinds{};
+  for (Node *node : pendingStructureRevisions_) {
+    node->structureChangedRevision_ = graph_->revision_;
+    changedStructureKinds[static_cast<std::size_t>(node->id_.kind)] = true;
+  }
+  for (std::size_t index = 0; index < changedStructureKinds.size(); ++index) {
+    if (!changedStructureKinds[index])
+      continue;
+    graph_->structureRevisions_[index] = graph_->revision_;
+    graph_->publishedStructureRevisions_[index].store(
+        graph_->revision_, std::memory_order_release);
   }
   for (const NodeRef &node : affected_)
     node->changedRevision_ = graph_->revision_;

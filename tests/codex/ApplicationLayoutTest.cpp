@@ -1879,6 +1879,7 @@ bool testThreadPaneDirectGraphBinding() {
       static_cast<void>(write.finish());
     }
     spin(100);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 
     auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
     std::size_t materialized = 0;
@@ -2089,6 +2090,7 @@ bool testLargeThreadTopologyKeepsQtHeartbeatAlive() {
       "reverse large-list reorder yields Qt ticks between bounded moves and "
       "preserves the requested selection");
 
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
   std::size_t materialized = 0;
   for (const nodegraph::NodeRef &node : roots) {
     const auto *attachment =
@@ -2150,7 +2152,10 @@ bool testLargeThreadScanReplacesAnObsoleteRevision() {
           write.find({nodegraph::NodeKind::Runtime, "runtime"});
       write.replaceRelated(runtime, nodegraph::RelationKind::RootThread,
                            replacementRoots);
-      static_cast<void>(write.finish());
+      const nodegraph::GraphChange replacement = write.finish();
+      pane.graphChanged(nodegraph::GraphChanged{replacement.revision,
+                                                replacement.affected,
+                                                replacement.removed, false});
       replaced = true;
       replacementTick = eventTicks;
     }
@@ -2185,6 +2190,244 @@ bool testLargeThreadScanReplacesAnObsoleteRevision() {
           pane.visiblySelectedThread() == selected,
       "an in-flight scan discards its obsolete revision before exposing rows "
       "and restores selection from the replacement revision");
+}
+
+bool testThreadScanCompletesUnderContinuousGraphChanges() {
+  constexpr int ThreadCount = 768;
+  nodegraph::NodeGraph graph;
+  std::vector<nodegraph::NodeRef> roots;
+  roots.reserve(ThreadCount);
+  nodegraph::NodeRef unrelated;
+  {
+    auto write = graph.write();
+    for (int index = 0; index < ThreadCount; ++index) {
+      const std::string suffix = std::to_string(index);
+      roots.emplace_back(addThread(write, "churn-thread-" + suffix,
+                                   "Churn thread " + suffix, "completed", {},
+                                   {}, index));
+    }
+    static_cast<void>(runtimeWithRoots(write, roots));
+    unrelated =
+        write.upsert({nodegraph::NodeKind::Item, "unrelated-stream-item"});
+    static_cast<void>(write.finish());
+  }
+
+  ThreadPane pane;
+  pane.resize(320, 220);
+  pane.show();
+  auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
+  bool result = true;
+
+  // Force the first scheduled read to encounter the writer. The retry must be
+  // deferred rather than spinning a zero-delay timer while the lock is held.
+  {
+    auto write = graph.write();
+    pane.refresh(graph, roots.front());
+    QCoreApplication::processEvents(QEventLoop::AllEvents);
+    result &=
+        expect(pane.graphReadRetryCount() > 0 && list && list->count() == 0,
+               "ThreadPane records nonblocking graph-lock contention and "
+               "leaves the current UI untouched");
+    static_cast<void>(write.finish());
+  }
+
+  int churnTicks = 0;
+  int contendedNotifications = 0;
+  QTimer churn;
+  churn.setInterval(0);
+  QObject::connect(&churn, &QTimer::timeout, &churn, [&] {
+    ++churnTicks;
+    nodegraph::GraphChange change;
+    {
+      auto write = graph.write();
+      if (churnTicks % 2 == 0) {
+        write.setField(unrelated, "streamSequence",
+                       nodegraph::Value(churnTicks));
+      } else {
+        // This is a real Thread notification, but does not change roots,
+        // hierarchy, or sorting. It must coalesce a follow-up rather than
+        // repeatedly cancelling the topology currently making progress.
+        write.setField(roots.front(), "streamSequence",
+                       nodegraph::Value(churnTicks));
+      }
+      change = write.finish();
+    }
+    // Model the next worker transaction already owning the graph when Qt
+    // handles the previous notification. Classification contention must not
+    // turn state-only churn into topology invalidation.
+    {
+      auto nextWorkerWrite = graph.write();
+      pane.graphChanged(nodegraph::GraphChanged{
+          change.revision, change.affected, change.removed, false});
+      ++contendedNotifications;
+      static_cast<void>(nextWorkerWrite.finish());
+    }
+  });
+  churn.start();
+
+  QElapsedTimer deadline;
+  deadline.start();
+  while (pane.completedTopologyCount() == 0 && deadline.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    QThread::msleep(1);
+  }
+  const bool completedDuringChurn =
+      pane.completedTopologyCount() > 0 && list && list->count() == ThreadCount;
+  churn.stop();
+
+  deadline.restart();
+  while (pane.completedTopologyCount() < 2 && deadline.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    QThread::msleep(1);
+  }
+  spin(30);
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+
+  result &= expect(
+      completedDuringChurn && churnTicks > 8 && contendedNotifications > 8 &&
+          pane.completedTopologyCount() >= 2,
+      "continuous unrelated and Thread state revisions cannot starve a scan, "
+      "and one coalesced topology catches up afterward");
+  result &= expect(
+      pane.maximumGraphScanWorkObserved() <= 64 &&
+          pane.maximumTopologyWorkObserved() <= 32 &&
+          pane.maximumVisibilityWorkObserved() <= 12 &&
+          pane.materializedRowCount() > 0 && pane.materializedRowCount() < 32,
+      "ThreadPane instrumentation proves graph, topology, and visible-widget "
+      "work stay within their fixed per-pass and viewport bounds");
+
+  QListWidgetItem *firstItem = list ? list->item(0) : nullptr;
+  if (firstItem && list) {
+    const QPoint position = list->visualItemRect(firstItem).center();
+    const std::uint64_t retriesBefore = pane.contextMenuReadRetryCount();
+    {
+      auto write = graph.write();
+      QContextMenuEvent contextMenuEvent(
+          QContextMenuEvent::Mouse, position,
+          list->viewport()->mapToGlobal(position));
+      QApplication::sendEvent(list->viewport(), &contextMenuEvent);
+      result &= expect(
+          pane.contextMenuReadRetryCount() == retriesBefore + 1,
+          "a contended context-menu read schedules a bounded nonzero retry");
+      static_cast<void>(write.finish());
+    }
+    spin(40);
+    if (QWidget *popup = QApplication::activePopupWidget())
+      popup->close();
+  } else {
+    result &= expect(false, "the churn test retains a row for context actions");
+  }
+  return result;
+}
+
+bool testThreadRelationChangeDuringValidationRestartsCandidate() {
+  constexpr int ChildCount = 512;
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef parentX;
+  nodegraph::NodeRef parentY;
+  std::vector<nodegraph::NodeRef> children;
+  children.reserve(ChildCount);
+  {
+    auto write = graph.write();
+    parentX = addThread(write, "validation-parent-x", "Parent X");
+    parentY = addThread(write, "validation-parent-y", "Parent Y");
+    for (int index = 0; index < ChildCount; ++index) {
+      children.emplace_back(
+          addThread(write, "validation-child-" + std::to_string(index),
+                    "Validation child " + std::to_string(index)));
+    }
+    write.replaceRelated(
+        parentX, nodegraph::RelationKind::StructuralChildThread, children);
+    const std::array roots{parentX, parentY};
+    static_cast<void>(runtimeWithRoots(write, roots));
+    static_cast<void>(write.finish());
+  }
+
+  const nodegraph::NodeRef movedChild = children.front();
+  ThreadPane pane;
+  pane.resize(320, 220);
+  pane.show();
+  auto *list = pane.findChild<QListWidget *>(QStringLiteral("threadList"));
+  pane.refresh(graph, parentY);
+
+  bool movedBetweenValidationPasses = false;
+  bool notificationDeliveredAfterValidationTurn = false;
+  bool discardedBeforeNotification = false;
+  std::optional<nodegraph::GraphChange> delayedNotification;
+  QTimer mover;
+  mover.setInterval(0);
+  QObject::connect(&mover, &QTimer::timeout, &mover, [&] {
+    if (movedBetweenValidationPasses) {
+      if (delayedNotification && pane.discardedTopologyCount() > 0) {
+        discardedBeforeNotification = true;
+        pane.graphChanged(nodegraph::GraphChanged{
+            delayedNotification->revision, delayedNotification->affected,
+            delayedNotification->removed, false});
+        delayedNotification.reset();
+        notificationDeliveredAfterValidationTurn = true;
+      }
+      return;
+    }
+    if (pane.topologyValidationPassCount() == 0 ||
+        pane.completedTopologyCount() != 0)
+      return;
+    {
+      auto write = graph.write();
+      write.unrelate(parentX, nodegraph::RelationKind::StructuralChildThread,
+                     movedChild);
+      write.relate(parentY, nodegraph::RelationKind::StructuralChildThread,
+                   movedChild);
+      delayedNotification = write.finish();
+    }
+    movedBetweenValidationPasses = true;
+  });
+  mover.start();
+
+  QElapsedTimer deadline;
+  deadline.start();
+  while ((!notificationDeliveredAfterValidationTurn ||
+          pane.completedTopologyCount() == 0) &&
+         deadline.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    QThread::msleep(1);
+  }
+  mover.stop();
+
+  const std::uint64_t completedBeforeReveal = pane.completedTopologyCount();
+  pane.refresh(graph, movedChild);
+  QListWidgetItem *movedItem = nullptr;
+  deadline.restart();
+  while (deadline.elapsed() < 5000) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    QThread::msleep(1);
+    movedItem = threadItem(list, movedChild->id().canonical);
+    if (pane.completedTopologyCount() > completedBeforeReveal && movedItem &&
+        movedItem->data(Qt::UserRole + 5).toString() ==
+            QStringLiteral("validation-parent-y"))
+      break;
+  }
+  spin(30);
+
+  int childRows = 0;
+  if (list) {
+    for (int row = 0; row < list->count(); ++row) {
+      if (list->item(row)->data(Qt::UserRole).toString() ==
+          QString::fromStdString(movedChild->id().canonical))
+        ++childRows;
+    }
+  }
+  const bool correct = movedBetweenValidationPasses &&
+                       notificationDeliveredAfterValidationTurn &&
+                       discardedBeforeNotification && movedItem &&
+                       childRows == 1 &&
+                       movedItem->data(Qt::UserRole + 5).toString() ==
+                           QStringLiteral("validation-parent-y") &&
+                       pane.visiblySelectedThread() == movedChild &&
+                       pane.maximumTopologyWorkObserved() <= 32;
+  return expect(
+      correct,
+      "a child reassigned between bounded relation-validation chunks is "
+      "published once under its current canonical parent");
 }
 
 bool testRemovalBeforeMaterializationReleasesSelection() {
@@ -3226,6 +3469,8 @@ int main(int argc, char **argv) {
   result &= testThreadPaneDirectGraphBinding();
   result &= testLargeThreadTopologyKeepsQtHeartbeatAlive();
   result &= testLargeThreadScanReplacesAnObsoleteRevision();
+  result &= testThreadScanCompletesUnderContinuousGraphChanges();
+  result &= testThreadRelationChangeDuringValidationRestartsCandidate();
   result &= testRemovalBeforeMaterializationReleasesSelection();
   result &= testDestroyThreadPaneWithQueuedTopologyPasses();
   result &= testNestedCommandScrollOwnership();

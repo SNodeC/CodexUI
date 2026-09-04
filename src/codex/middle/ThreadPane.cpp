@@ -29,10 +29,13 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <array>
+#include <deque>
 #include <limits>
+#include <map>
 #include <memory>
+#include <set>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 
 namespace codexui::codex::middle {
@@ -48,6 +51,11 @@ constexpr int OptimisticFailedRole = Qt::UserRole + 7;
 constexpr int ChildIndent = 16;
 constexpr int DisclosureWidth = 16;
 constexpr int DisclosureExtent = 24;
+constexpr unsigned MaximumReadRetryExponent = 4;
+
+int readRetryDelay(unsigned attempt) {
+  return 1 << std::min(attempt, MaximumReadRetryExponent);
+}
 
 class ThreadListWidget final : public QListWidget {
 public:
@@ -439,16 +447,35 @@ struct ThreadPane::GraphTopology final {
     std::string previousLocalId;
   };
 
-  std::vector<Row> rows;
+  struct Relation final {
+    nodegraph::NodeRef source;
+    nodegraph::RelationKind kind = nodegraph::RelationKind::RootThread;
+    std::uint64_t expectedStructureRevision = 0;
+    std::deque<nodegraph::NodeRef> expected;
+    std::size_t cursor = 0;
+    bool countChecked = false;
+  };
+
+  std::deque<Row> rows;
+  std::deque<Relation> relations;
   std::string selectedId;
   GraphThreadItem *selectedItem = nullptr;
+  std::uint64_t inputEpoch = 0;
+  std::uint64_t runtimeStructureRevision = 0;
+  std::uint64_t threadStructureRevision = 0;
+  std::size_t relationValidationCursor = 0;
+  std::size_t rowValidationCursor = 0;
+  std::size_t validatedCount = 0;
+  bool relationsMatch = true;
+  bool validated = false;
 };
 
 struct ThreadPane::GraphScan final {
   struct ReadThread final {
     nodegraph::NodeRef node;
     nodegraph::NodeRef parent;
-    std::vector<nodegraph::NodeRef> children;
+    bool root = false;
+    std::deque<nodegraph::NodeRef> children;
     std::string title;
     std::optional<std::int64_t> createdAt;
     std::optional<std::int64_t> updatedAt;
@@ -459,6 +486,7 @@ struct ThreadPane::GraphScan final {
   struct Visit final {
     nodegraph::NodeRef node;
     nodegraph::NodeRef parent;
+    bool root = false;
   };
 
   struct PendingThread final {
@@ -467,7 +495,9 @@ struct ThreadPane::GraphScan final {
     std::size_t structuralCount = 0;
     std::size_t agentCursor = 0;
     std::size_t agentCount = 0;
-    std::unordered_set<const nodegraph::Node *> children;
+    std::size_t structuralValidation = 0;
+    std::size_t agentValidation = 0;
+    std::set<const nodegraph::Node *> children;
   };
 
   struct MergeHead final {
@@ -500,26 +530,25 @@ struct ThreadPane::GraphScan final {
   nodegraph::NodeRef runtime;
   std::size_t rootCount = 0;
   std::size_t rootCursor = 0;
-  std::vector<nodegraph::NodeRef> roots;
-  std::unordered_set<const nodegraph::Node *> rootSet;
-  std::vector<Visit> visits;
+  std::deque<nodegraph::NodeRef> roots;
+  std::deque<Visit> visits;
   std::size_t visitCursor = 0;
   std::optional<PendingThread> pendingThread;
-  std::vector<ReadThread> threads;
-  std::unordered_map<const nodegraph::Node *, std::size_t> positions;
-  std::unordered_map<std::string, std::size_t> idPositions;
-  std::unordered_set<const nodegraph::Node *>::iterator expandedCursor;
+  std::deque<ReadThread> threads;
+  std::map<const nodegraph::Node *, std::size_t> positions;
+  std::map<std::string, std::size_t> idPositions;
+  std::set<const nodegraph::Node *>::iterator expandedCursor;
   bool expandedCursorInitialized = false;
   nodegraph::NodeRef selectedAncestor;
   bool selectedIsPresent = false;
   std::size_t sortCursor = 0;
   std::size_t mergeInitCursor = 0;
-  std::vector<MergeHead> mergeHeap;
-  std::vector<nodegraph::NodeRef> sortedRoots;
+  std::deque<MergeHead> mergeHeap;
+  std::deque<nodegraph::NodeRef> sortedRoots;
   std::size_t optimisticCursor = 0;
   std::size_t appendRootCursor = 0;
-  std::vector<AppendFrame> appendStack;
-  std::unordered_set<const nodegraph::Node *> appended;
+  std::deque<AppendFrame> appendStack;
+  std::set<const nodegraph::Node *> appended;
   GraphTopology topology;
   Phase phase = Phase::Roots;
 };
@@ -872,20 +901,63 @@ void ThreadPane::graphChanged(const nodegraph::GraphChanged &change) {
            std::ranges::any_of(change.removed, matches);
   };
   const bool interactionChanged = hasKind(nodegraph::NodeKind::Interaction);
+  const bool mustInvalidate = change.rescanRequired ||
+                              hasKind(nodegraph::NodeKind::Runtime, true) ||
+                              hasKind(nodegraph::NodeKind::Thread, true);
+  bool topologyInputChanged = mustInvalidate;
+  if (!topologyInputChanged && !interactionChanged) {
+    auto read = graph->tryRead();
+    if (read) {
+      constexpr std::array<std::string_view, 6> SortFields{
+          "name",      "title",     "createdAt",
+          "updatedAt", "recencyAt", "localPromptActivityAt"};
+      for (const nodegraph::NodeRef &node : change.affected) {
+        if (!node || (node->id().kind != nodegraph::NodeKind::Runtime &&
+                      node->id().kind != nodegraph::NodeKind::Thread))
+          continue;
+        if (read->structureChangedRevision(node) == change.revision) {
+          topologyInputChanged = true;
+          break;
+        }
+        if (node->id().kind == nodegraph::NodeKind::Thread &&
+            std::ranges::any_of(SortFields, [&](std::string_view field) {
+              return read->fieldChangedRevision(node, field) == change.revision;
+            })) {
+          topologyInputChanged = true;
+          break;
+        }
+      }
+      read.reset();
+    }
+    // On contention, per-kind published structure stamps still reject an
+    // obsolete hierarchy without taking the lock. Unknown field-only changes
+    // merely request the coalesced follow-up below, so a busy writer cannot
+    // repeatedly invalidate an otherwise progressing scan.
+  }
+  if (topologyInputChanged)
+    ++topologyInputEpoch;
   const bool topologyChanged =
-      change.rescanRequired || hasKind(nodegraph::NodeKind::Runtime, true) ||
-      hasKind(nodegraph::NodeKind::Thread, true) ||
+      mustInvalidate ||
       (!interactionChanged && (hasKind(nodegraph::NodeKind::Runtime) ||
                                hasKind(nodegraph::NodeKind::Thread)));
-  if (topologyChanged) {
-    // A partially applied topology is render work only. Discard it whenever a
-    // newer structural revision arrives; stable NodeRefs remain authoritative
-    // in the graph and the next try-read rebuilds the pending row order.
+  if (mustInvalidate) {
+    // Removed NodeRefs must never be attached again after this handler returns,
+    // and a coalesced rescan deliberately carries no precise invalidation set.
     pendingGraphScan.reset();
     pendingGraphTopology.reset();
     topologyCursor = 0;
     topologySearchCursor = -1;
+    graphRefreshAfterCurrent = false;
     scheduleGraphRefresh();
+  } else if (topologyChanged) {
+    // Field and relation notifications may arrive continuously while a large
+    // hierarchy is being scanned or reconciled. Finish that bounded pass, then
+    // perform one coalesced refresh. This guarantees forward progress without
+    // treating a stale projection as canonical graph state.
+    if (pendingGraphScan || pendingGraphTopology || topologyPassScheduled)
+      graphRefreshAfterCurrent = true;
+    else
+      scheduleGraphRefresh();
   } else if (interactionChanged) {
     scheduleVisibilityPass();
   }
@@ -940,7 +1012,13 @@ void ThreadPane::detachRemoved(const nodegraph::GraphChanged &change) {
 }
 
 void ThreadPane::leaveGraph() {
+  ++graphBindingEpoch;
+  ++contextMenuRetryToken;
   graphRefreshScheduled = false;
+  graphRefreshAfterCurrent = false;
+  graphReadRetryAttempt = 0;
+  topologyReadRetryAttempt = 0;
+  visibilityReadRetryAttempt = 0;
   pendingGraphScan.reset();
   pendingGraphTopology.reset();
   topologyCursor = 0;
@@ -973,6 +1051,7 @@ void ThreadPane::leaveGraph() {
 void ThreadPane::scheduleGraphRefresh() {
   if (!graph)
     return;
+  graphRefreshAfterCurrent = false;
   pendingGraphScan.reset();
   pendingGraphTopology.reset();
   topologyCursor = 0;
@@ -980,11 +1059,20 @@ void ThreadPane::scheduleGraphRefresh() {
   scheduleGraphScanPass();
 }
 
-void ThreadPane::scheduleGraphScanPass() {
+void ThreadPane::scheduleGraphScanPass(bool lockContended) {
   if (!graph || graphRefreshScheduled)
     return;
+  const int delay = lockContended ? readRetryDelay(graphReadRetryAttempt) : 0;
+  if (lockContended) {
+    graphReadRetryAttempt =
+        std::min(graphReadRetryAttempt + 1, MaximumReadRetryExponent);
+    ++graphReadRetries;
+  }
   graphRefreshScheduled = true;
-  QTimer::singleShot(0, this, [this] {
+  const std::uint64_t bindingEpoch = graphBindingEpoch;
+  QTimer::singleShot(delay, this, [this, bindingEpoch] {
+    if (bindingEpoch != graphBindingEpoch)
+      return;
     graphRefreshScheduled = false;
     runGraphRefresh();
   });
@@ -997,8 +1085,12 @@ void ThreadPane::runGraphRefresh() {
   constexpr std::size_t SortChunkSize = 64;
 
   if (pendingGraphScan &&
-      graph->publishedRevision() != pendingGraphScan->revision) {
+      (graph->publishedStructureRevision(nodegraph::NodeKind::Runtime) !=
+           pendingGraphScan->topology.runtimeStructureRevision ||
+       graph->publishedStructureRevision(nodegraph::NodeKind::Thread) !=
+           pendingGraphScan->topology.threadStructureRevision)) {
     pendingGraphScan.reset();
+    graphRefreshAfterCurrent = false;
     scheduleGraphScanPass();
     return;
   }
@@ -1010,28 +1102,30 @@ void ThreadPane::runGraphRefresh() {
   if (needsRead) {
     read = graph->tryRead();
     if (!read) {
-      scheduleGraphScanPass();
+      scheduleGraphScanPass(true);
       return;
     }
+    graphReadRetryAttempt = 0;
   }
 
   if (!pendingGraphScan) {
     pendingGraphScan = std::make_unique<GraphScan>();
     pendingGraphScan->revision = read->revision();
+    pendingGraphScan->topology.inputEpoch = topologyInputEpoch;
+    pendingGraphScan->topology.runtimeStructureRevision =
+        read->structureRevision(nodegraph::NodeKind::Runtime);
+    pendingGraphScan->topology.threadStructureRevision =
+        read->structureRevision(nodegraph::NodeKind::Thread);
     pendingGraphScan->runtime =
         read->find({nodegraph::NodeKind::Runtime, "runtime"});
     if (pendingGraphScan->runtime) {
       pendingGraphScan->rootCount = read->relatedCount(
           pendingGraphScan->runtime, nodegraph::RelationKind::RootThread);
-      pendingGraphScan->roots.reserve(pendingGraphScan->rootCount);
-      pendingGraphScan->rootSet.reserve(pendingGraphScan->rootCount);
-      pendingGraphScan->visits.reserve(pendingGraphScan->rootCount);
+      pendingGraphScan->topology.relations.push_back(
+          {pendingGraphScan->runtime, nodegraph::RelationKind::RootThread});
+      pendingGraphScan->topology.relations.back().expectedStructureRevision =
+          read->structureChangedRevision(pendingGraphScan->runtime);
     }
-  } else if (read && read->revision() != pendingGraphScan->revision) {
-    pendingGraphScan.reset();
-    read.reset();
-    scheduleGraphScanPass();
-    return;
   }
 
   GraphScan &scan = *pendingGraphScan;
@@ -1094,6 +1188,9 @@ void ThreadPane::runGraphRefresh() {
   };
 
   std::size_t work = 0;
+  const auto recordWork = [this, &work] {
+    maximumGraphScanWork = std::max(maximumGraphScanWork, work);
+  };
   while (work < MaximumGraphWorkPerPass) {
     switch (scan.phase) {
     case GraphScan::Phase::Roots:
@@ -1103,18 +1200,19 @@ void ThreadPane::runGraphRefresh() {
             read->relatedAt(scan.runtime, nodegraph::RelationKind::RootThread,
                             scan.rootCursor++);
         ++work;
+        scan.topology.relations.front().expected.emplace_back(root);
         if (!root || root->id().kind != nodegraph::NodeKind::Thread ||
-            read->find(root->id()) != root ||
-            !scan.rootSet.insert(root.get()).second)
+            read->find(root->id()) != root)
           continue;
         scan.roots.emplace_back(root);
-        scan.visits.push_back({std::move(root), {}});
+        scan.visits.push_back({std::move(root), {}, true});
       }
       if (scan.rootCursor == scan.rootCount) {
         scan.phase = GraphScan::Phase::Threads;
         continue;
       }
       read.reset();
+      recordWork();
       scheduleGraphScanPass();
       return;
 
@@ -1136,10 +1234,10 @@ void ThreadPane::runGraphRefresh() {
           const std::size_t position = scan.threads.size();
           scan.positions.emplace(visit.node.get(), position);
           scan.idPositions.emplace(visit.node->id().canonical, position);
-          scan.threads.push_back(
-              GraphScan::ReadThread{visit.node, std::move(visit.parent)});
+          scan.threads.push_back(GraphScan::ReadThread{
+              visit.node, std::move(visit.parent), visit.root});
           GraphScan::ReadThread &thread = scan.threads.back();
-          if (scan.rootSet.contains(thread.node.get())) {
+          if (thread.root) {
             const std::shared_ptr<const nodegraph::NodeState> state =
                 read->state(thread.node);
             thread.title = graphString(graphField(*state, "name"));
@@ -1157,19 +1255,29 @@ void ThreadPane::runGraphRefresh() {
               thread.node, nodegraph::RelationKind::StructuralChildThread);
           pending.agentCount = read->relatedCount(
               thread.node, nodegraph::RelationKind::AgentChildThread);
-          pending.children.reserve(pending.structuralCount +
-                                   pending.agentCount);
+          pending.structuralValidation = scan.topology.relations.size();
+          scan.topology.relations.push_back(
+              {thread.node, nodegraph::RelationKind::StructuralChildThread});
+          scan.topology.relations.back().expectedStructureRevision =
+              read->structureChangedRevision(thread.node);
+          pending.agentValidation = scan.topology.relations.size();
+          scan.topology.relations.push_back(
+              {thread.node, nodegraph::RelationKind::AgentChildThread});
+          scan.topology.relations.back().expectedStructureRevision =
+              read->structureChangedRevision(thread.node);
           scan.pendingThread = std::move(pending);
         }
 
         GraphScan::PendingThread &pending = *scan.pendingThread;
         GraphScan::ReadThread &thread = scan.threads[pending.position];
         nodegraph::NodeRef child;
+        std::size_t relationValidation = pending.structuralValidation;
         if (pending.structuralCursor < pending.structuralCount) {
           child = read->relatedAt(
               thread.node, nodegraph::RelationKind::StructuralChildThread,
               pending.structuralCursor++);
         } else if (pending.agentCursor < pending.agentCount) {
+          relationValidation = pending.agentValidation;
           child = read->relatedAt(thread.node,
                                   nodegraph::RelationKind::AgentChildThread,
                                   pending.agentCursor++);
@@ -1178,14 +1286,17 @@ void ThreadPane::runGraphRefresh() {
           continue;
         }
         ++work;
+        scan.topology.relations[relationValidation].expected.emplace_back(
+            child);
         if (child && child->id().kind == nodegraph::NodeKind::Thread &&
             pending.children.insert(child.get()).second) {
           thread.children.emplace_back(child);
-          scan.visits.push_back({std::move(child), thread.node});
+          scan.visits.push_back({std::move(child), thread.node, false});
         }
       }
       if (scan.phase == GraphScan::Phase::Threads) {
         read.reset();
+        recordWork();
         scheduleGraphScanPass();
         return;
       }
@@ -1214,6 +1325,7 @@ void ThreadPane::runGraphRefresh() {
         scan.phase = GraphScan::Phase::ExpandSelection;
         continue;
       }
+      recordWork();
       scheduleGraphScanPass();
       return;
 
@@ -1242,10 +1354,20 @@ void ThreadPane::runGraphRefresh() {
         scan.phase = GraphScan::Phase::SortChunks;
         continue;
       }
+      recordWork();
       scheduleGraphScanPass();
       return;
 
     case GraphScan::Phase::SortChunks: {
+      // MergeInitialize relies on fixed SortChunkSize boundaries. A small
+      // final/root-only chunk may use this pass's remainder; a full chunk
+      // starts on a fresh pass so it remains both bounded and mergeable.
+      if (work != 0 && scan.roots.size() - scan.sortCursor >
+                           MaximumGraphWorkPerPass - work) {
+        recordWork();
+        scheduleGraphScanPass();
+        return;
+      }
       if (scan.sortCursor < scan.roots.size()) {
         const std::size_t end =
             std::min(scan.roots.size(), scan.sortCursor + SortChunkSize);
@@ -1256,12 +1378,10 @@ void ThreadPane::runGraphRefresh() {
         scan.sortCursor = end;
       }
       if (scan.sortCursor == scan.roots.size()) {
-        scan.mergeHeap.reserve((scan.roots.size() + SortChunkSize - 1) /
-                               SortChunkSize);
-        scan.sortedRoots.reserve(scan.roots.size());
         scan.phase = GraphScan::Phase::MergeInitialize;
         continue;
       }
+      recordWork();
       scheduleGraphScanPass();
       return;
     }
@@ -1280,6 +1400,7 @@ void ThreadPane::runGraphRefresh() {
         scan.phase = GraphScan::Phase::Merge;
         continue;
       }
+      recordWork();
       scheduleGraphScanPass();
       return;
 
@@ -1300,6 +1421,7 @@ void ThreadPane::runGraphRefresh() {
         scan.phase = GraphScan::Phase::OptimisticRows;
         continue;
       }
+      recordWork();
       scheduleGraphScanPass();
       return;
 
@@ -1342,6 +1464,7 @@ void ThreadPane::runGraphRefresh() {
         scan.phase = GraphScan::Phase::Rows;
         continue;
       }
+      recordWork();
       scheduleGraphScanPass();
       return;
 
@@ -1394,15 +1517,18 @@ void ThreadPane::runGraphRefresh() {
       }
       if (scan.appendRootCursor != scan.sortedRoots.size() ||
           !scan.appendStack.empty()) {
+        recordWork();
         scheduleGraphScanPass();
         return;
       }
       GraphTopology topology = std::move(scan.topology);
       pendingGraphScan.reset();
+      recordWork();
       applyGraphTopology(std::move(topology));
       return;
     }
   }
+  recordWork();
   scheduleGraphScanPass();
 }
 
@@ -1416,11 +1542,21 @@ void ThreadPane::applyGraphTopology(GraphTopology topology) {
   scheduleTopologyPass();
 }
 
-void ThreadPane::scheduleTopologyPass() {
+void ThreadPane::scheduleTopologyPass(bool lockContended) {
   if (!graph || !pendingGraphTopology || topologyPassScheduled)
     return;
+  const int delay =
+      lockContended ? readRetryDelay(topologyReadRetryAttempt) : 0;
+  if (lockContended) {
+    topologyReadRetryAttempt =
+        std::min(topologyReadRetryAttempt + 1, MaximumReadRetryExponent);
+    ++graphReadRetries;
+  }
   topologyPassScheduled = true;
-  QTimer::singleShot(0, this, [this] {
+  const std::uint64_t bindingEpoch = graphBindingEpoch;
+  QTimer::singleShot(delay, this, [this, bindingEpoch] {
+    if (bindingEpoch != graphBindingEpoch)
+      return;
     topologyPassScheduled = false;
     runTopologyPass();
   });
@@ -1432,10 +1568,113 @@ void ThreadPane::runTopologyPass() {
 
   constexpr std::size_t MaximumItemsPerPass = 32;
   GraphTopology &topology = *pendingGraphTopology;
+  const auto candidateInputsAreCurrent = [this, &topology] {
+    return topology.inputEpoch == topologyInputEpoch &&
+           graph->publishedStructureRevision(nodegraph::NodeKind::Runtime) ==
+               topology.runtimeStructureRevision &&
+           graph->publishedStructureRevision(nodegraph::NodeKind::Thread) ==
+               topology.threadStructureRevision;
+  };
+  std::size_t work = 0;
+  if (!topology.validated) {
+    ++topologyValidationPasses;
+    if (!candidateInputsAreCurrent()) {
+      ++discardedTopologies;
+      pendingGraphTopology.reset();
+      topologyCursor = 0;
+      topologySearchCursor = -1;
+      graphRefreshAfterCurrent = false;
+      scheduleGraphRefresh();
+      return;
+    }
+    auto read = graph->tryRead();
+    if (!read) {
+      scheduleTopologyPass(true);
+      return;
+    }
+    topologyReadRetryAttempt = 0;
+    while (topology.relationValidationCursor < topology.relations.size() &&
+           topology.relationsMatch && work < MaximumItemsPerPass) {
+      GraphTopology::Relation &relation =
+          topology.relations[topology.relationValidationCursor];
+      if (!relation.countChecked) {
+        relation.countChecked = true;
+        topology.relationsMatch =
+            relation.source &&
+            read->find(relation.source->id()) == relation.source &&
+            read->structureChangedRevision(relation.source) ==
+                relation.expectedStructureRevision &&
+            read->relatedCount(relation.source, relation.kind) ==
+                relation.expected.size();
+        ++work;
+        if (!topology.relationsMatch || work == MaximumItemsPerPass)
+          break;
+      }
+      while (relation.cursor < relation.expected.size() &&
+             work < MaximumItemsPerPass) {
+        topology.relationsMatch =
+            read->relatedAt(relation.source, relation.kind, relation.cursor) ==
+            relation.expected[relation.cursor];
+        ++relation.cursor;
+        ++work;
+        if (!topology.relationsMatch)
+          break;
+      }
+      if (topology.relationsMatch &&
+          relation.cursor == relation.expected.size())
+        ++topology.relationValidationCursor;
+    }
+    while (topology.relationsMatch &&
+           topology.relationValidationCursor == topology.relations.size() &&
+           topology.rowValidationCursor < topology.rows.size() &&
+           work < MaximumItemsPerPass) {
+      GraphTopology::Row &row = topology.rows[topology.rowValidationCursor++];
+      bool live = !row.node || read->find(row.node->id()) == row.node;
+      if (live && row.parent)
+        live = read->find(row.parent->id()) == row.parent;
+      if (live) {
+        if (topology.validatedCount != topology.rowValidationCursor - 1)
+          topology.rows[topology.validatedCount] = std::move(row);
+        ++topology.validatedCount;
+      }
+      ++work;
+    }
+    read.reset();
+    maximumTopologyWork = std::max(maximumTopologyWork, work);
+    if (!candidateInputsAreCurrent()) {
+      ++discardedTopologies;
+      pendingGraphTopology.reset();
+      topologyCursor = 0;
+      topologySearchCursor = -1;
+      graphRefreshAfterCurrent = false;
+      scheduleGraphRefresh();
+      return;
+    }
+    if (!topology.relationsMatch) {
+      ++discardedTopologies;
+      pendingGraphTopology.reset();
+      topologyCursor = 0;
+      topologySearchCursor = -1;
+      graphRefreshAfterCurrent = false;
+      scheduleGraphRefresh();
+      return;
+    }
+    if (topology.relationValidationCursor != topology.relations.size() ||
+        topology.rowValidationCursor != topology.rows.size()) {
+      scheduleTopologyPass();
+      return;
+    }
+    topology.rows.resize(topology.validatedCount);
+    topology.validated = true;
+    if (work == MaximumItemsPerPass) {
+      scheduleTopologyPass();
+      return;
+    }
+  }
+
   const bool signalsWereBlocked = list->blockSignals(true);
   const bool updatesWereEnabled = list->updatesEnabled();
   list->setUpdatesEnabled(false);
-  std::size_t work = 0;
 
   const auto matches = [](const GraphThreadItem &item,
                           const GraphTopology::Row &row) {
@@ -1460,7 +1699,7 @@ void ThreadPane::runTopologyPass() {
       if (topologySearchCursor < destination + 1)
         topologySearchCursor = destination + 1;
       while (topologySearchCursor < list->count() &&
-             work < MaximumItemsPerPass) {
+             work + 1 < MaximumItemsPerPass) {
         const int candidateIndex = topologySearchCursor++;
         GraphThreadItem *candidate = graphItem(list->item(candidateIndex));
         ++work;
@@ -1482,7 +1721,7 @@ void ThreadPane::runTopologyPass() {
         // Charge the shifted placeholder span against this pass. Large lists
         // therefore perform one model move, while tiny lists can still finish
         // their reconciliation within the established three Qt turns.
-        work = std::min(MaximumItemsPerPass,
+        work = std::min(MaximumItemsPerPass - 1,
                         work + static_cast<std::size_t>(list->count()));
       } else {
         item = new GraphThreadItem;
@@ -1537,6 +1776,7 @@ void ThreadPane::runTopologyPass() {
 
   list->setUpdatesEnabled(updatesWereEnabled);
   list->blockSignals(signalsWereBlocked);
+  maximumTopologyWork = std::max(maximumTopologyWork, work);
   if (topologyCursor != topology.rows.size() ||
       list->count() > static_cast<int>(topology.rows.size())) {
     scheduleTopologyPass();
@@ -1554,14 +1794,30 @@ void ThreadPane::runTopologyPass() {
   if (!selectedId.empty() && selectedItem)
     list->setCurrentItem(selectedItem);
   list->blockSignals(finalSignalsWereBlocked);
+  ++completedTopologies;
+  if (graphRefreshAfterCurrent) {
+    graphRefreshAfterCurrent = false;
+    scheduleGraphRefresh();
+    return;
+  }
   scheduleVisibilityPass();
 }
 
-void ThreadPane::scheduleVisibilityPass() {
+void ThreadPane::scheduleVisibilityPass(bool lockContended) {
   if (!graph || visibilityPassScheduled)
     return;
+  const int delay =
+      lockContended ? readRetryDelay(visibilityReadRetryAttempt) : 0;
+  if (lockContended) {
+    visibilityReadRetryAttempt =
+        std::min(visibilityReadRetryAttempt + 1, MaximumReadRetryExponent);
+    ++graphReadRetries;
+  }
   visibilityPassScheduled = true;
-  QTimer::singleShot(0, this, [this] {
+  const std::uint64_t bindingEpoch = graphBindingEpoch;
+  QTimer::singleShot(delay, this, [this, bindingEpoch] {
+    if (bindingEpoch != graphBindingEpoch)
+      return;
     visibilityPassScheduled = false;
     runVisibilityPass();
   });
@@ -1602,6 +1858,9 @@ void ThreadPane::runVisibilityPass() {
   }
 
   std::size_t work = 0;
+  const auto recordWork = [this, &work] {
+    maximumVisibilityWork = std::max(maximumVisibilityWork, work);
+  };
   std::unordered_map<GraphThreadItem *, int> desiredRows;
   if (first >= 0) {
     desiredRows.reserve(static_cast<std::size_t>(last - first + 1));
@@ -1620,6 +1879,7 @@ void ThreadPane::runVisibilityPass() {
   }
   for (GraphThreadItem *item : staleMaterializations) {
     if (work == MaxWidgetWork) {
+      recordWork();
       scheduleVisibilityPass();
       return;
     }
@@ -1637,8 +1897,10 @@ void ThreadPane::runVisibilityPass() {
               : ui::NodeMaterialization::Overscan;
     }
   }
-  if (first < 0)
+  if (first < 0) {
+    recordWork();
     return;
+  }
 
   struct Candidate final {
     GraphThreadItem *item = nullptr;
@@ -1663,9 +1925,11 @@ void ThreadPane::runVisibilityPass() {
   if (needsGraphRead) {
     read = graph->tryRead();
     if (!read) {
-      scheduleVisibilityPass();
+      recordWork();
+      scheduleVisibilityPass(true);
       return;
     }
+    visibilityReadRetryAttempt = 0;
   }
 
   std::vector<std::pair<GraphThreadItem *, GraphRowRender>> renders;
@@ -1753,6 +2017,7 @@ void ThreadPane::runVisibilityPass() {
 
   for (auto &[item, render] : renders)
     renderGraphRow(*item, render);
+  recordWork();
   visibilityCursor = end >= last ? first : end + 1;
   if (end < last)
     scheduleVisibilityPass();
@@ -1854,6 +2119,42 @@ nodegraph::NodeRef ThreadPane::visiblySelectedThread() const {
   return item ? item->node : nodegraph::NodeRef{};
 }
 
+std::size_t ThreadPane::maximumGraphScanWorkObserved() const noexcept {
+  return maximumGraphScanWork;
+}
+
+std::size_t ThreadPane::maximumTopologyWorkObserved() const noexcept {
+  return maximumTopologyWork;
+}
+
+std::size_t ThreadPane::maximumVisibilityWorkObserved() const noexcept {
+  return maximumVisibilityWork;
+}
+
+std::size_t ThreadPane::materializedRowCount() const noexcept {
+  return materializedItems.size();
+}
+
+std::uint64_t ThreadPane::completedTopologyCount() const noexcept {
+  return completedTopologies;
+}
+
+std::uint64_t ThreadPane::topologyValidationPassCount() const noexcept {
+  return topologyValidationPasses;
+}
+
+std::uint64_t ThreadPane::discardedTopologyCount() const noexcept {
+  return discardedTopologies;
+}
+
+std::uint64_t ThreadPane::graphReadRetryCount() const noexcept {
+  return graphReadRetries;
+}
+
+std::uint64_t ThreadPane::contextMenuReadRetryCount() const noexcept {
+  return contextMenuReadRetries;
+}
+
 void ThreadPane::showContextMenu(const QPoint &position) {
   if (!graph)
     return;
@@ -1861,12 +2162,15 @@ void ThreadPane::showContextMenu(const QPoint &position) {
   GraphThreadItem *item = graphItem(listItem);
   if (!item || !item->node)
     return;
-  showContextMenu(item->node, position);
+  const std::uint64_t retryToken = ++contextMenuRetryToken;
+  showContextMenu(item->node, position, retryToken, 0);
 }
 
 void ThreadPane::showContextMenu(const nodegraph::NodeRef &node,
-                                 std::optional<QPoint> requestedPosition) {
-  if (!graph || !node)
+                                 std::optional<QPoint> requestedPosition,
+                                 std::uint64_t retryToken,
+                                 unsigned retryAttempt) {
+  if (!graph || !node || retryToken != contextMenuRetryToken)
     return;
   GraphThreadItem *item = attachedGraphItem(node);
   if (!item)
@@ -1875,8 +2179,16 @@ void ThreadPane::showContextMenu(const nodegraph::NodeRef &node,
 
   auto read = graph->tryRead();
   if (!read) {
-    QTimer::singleShot(0, this,
-                       [this, node] { showContextMenu(node, std::nullopt); });
+    const int delay = readRetryDelay(retryAttempt);
+    const unsigned nextRetryAttempt =
+        std::min(retryAttempt + 1, MaximumReadRetryExponent);
+    ++contextMenuReadRetries;
+    QTimer::singleShot(
+        delay, this,
+        [this, node, requestedPosition, retryToken, nextRetryAttempt] {
+          showContextMenu(node, requestedPosition, retryToken,
+                          nextRetryAttempt);
+        });
     return;
   }
   if (read->find(node->id()) != node)

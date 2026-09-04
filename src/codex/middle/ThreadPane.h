@@ -12,9 +12,8 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 class QListWidget;
@@ -70,6 +69,17 @@ public:
   [[nodiscard]] SortCriterion currentSortCriterion() const noexcept;
   [[nodiscard]] std::string visiblySelectedThreadId() const;
   [[nodiscard]] nodegraph::NodeRef visiblySelectedThread() const;
+  // Narrow scheduling instrumentation used by the responsiveness regression
+  // tests. The counters describe Qt work, not graph/domain state.
+  [[nodiscard]] std::size_t maximumGraphScanWorkObserved() const noexcept;
+  [[nodiscard]] std::size_t maximumTopologyWorkObserved() const noexcept;
+  [[nodiscard]] std::size_t maximumVisibilityWorkObserved() const noexcept;
+  [[nodiscard]] std::size_t materializedRowCount() const noexcept;
+  [[nodiscard]] std::uint64_t completedTopologyCount() const noexcept;
+  [[nodiscard]] std::uint64_t topologyValidationPassCount() const noexcept;
+  [[nodiscard]] std::uint64_t discardedTopologyCount() const noexcept;
+  [[nodiscard]] std::uint64_t graphReadRetryCount() const noexcept;
+  [[nodiscard]] std::uint64_t contextMenuReadRetryCount() const noexcept;
 
 private:
   struct GraphThreadItem;
@@ -88,15 +98,16 @@ private:
   void navigateHierarchy(int key);
   void showContextMenu(const QPoint &position);
   void showContextMenu(const nodegraph::NodeRef &node,
-                       std::optional<QPoint> requestedPosition);
+                       std::optional<QPoint> requestedPosition,
+                       std::uint64_t retryToken, unsigned retryAttempt);
   void leaveGraph();
   void scheduleGraphRefresh();
-  void scheduleGraphScanPass();
+  void scheduleGraphScanPass(bool lockContended = false);
   void runGraphRefresh();
   void applyGraphTopology(GraphTopology topology);
-  void scheduleTopologyPass();
+  void scheduleTopologyPass(bool lockContended = false);
   void runTopologyPass();
-  void scheduleVisibilityPass();
+  void scheduleVisibilityPass(bool lockContended = false);
   void runVisibilityPass();
   void detachRemoved(const nodegraph::GraphChanged &change);
   void dematerialize(GraphThreadItem &item, bool deferred = true);
@@ -118,9 +129,16 @@ private:
   const nodegraph::NodeGraph *graph = nullptr;
   nodegraph::NodeRef selectedGraphThread;
   std::string selectedOptimisticThreadId;
-  std::unordered_set<const nodegraph::Node *> graphExpandedThreads;
+  std::set<const nodegraph::Node *> graphExpandedThreads;
   bool revealSelectedGraphThread = false;
+  bool graphRefreshAfterCurrent = false;
   bool graphRefreshScheduled = false;
+  unsigned graphReadRetryAttempt = 0;
+  unsigned topologyReadRetryAttempt = 0;
+  unsigned visibilityReadRetryAttempt = 0;
+  std::uint64_t graphBindingEpoch = 0;
+  std::uint64_t topologyInputEpoch = 0;
+  std::uint64_t contextMenuRetryToken = 0;
   std::unique_ptr<GraphScan> pendingGraphScan;
   std::unique_ptr<GraphTopology> pendingGraphTopology;
   std::size_t topologyCursor = 0;
@@ -130,6 +148,14 @@ private:
   int visibilityFirst = -1;
   int visibilityLast = -1;
   int visibilityCursor = -1;
+  std::size_t maximumGraphScanWork = 0;
+  std::size_t maximumTopologyWork = 0;
+  std::size_t maximumVisibilityWork = 0;
+  std::uint64_t completedTopologies = 0;
+  std::uint64_t topologyValidationPasses = 0;
+  std::uint64_t discardedTopologies = 0;
+  std::uint64_t graphReadRetries = 0;
+  std::uint64_t contextMenuReadRetries = 0;
 };
 
 } // namespace middle

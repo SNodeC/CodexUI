@@ -310,6 +310,158 @@ bool testAtomicStateRelationsAndNoOp() {
   return passed;
 }
 
+bool testStructuralChangeRevision() {
+  NodeGraph graph;
+  NodeRef source;
+  NodeRef child;
+  NodeRef target;
+  {
+    auto write = graph.write();
+    source = write.upsert(id(NodeKind::Thread, "structure-source"));
+    child = write.upsert(id(NodeKind::Thread, "structure-child"));
+    target = write.upsert(id(NodeKind::Thread, "structure-target"));
+    static_cast<void>(write.finish());
+  }
+
+  bool passed = true;
+  {
+    auto read = graph.tryRead();
+    if (!expect(read.has_value(), "new nodes expose structural revisions"))
+      return false;
+    passed &=
+        expect(read->structureChangedRevision(source) == 0 &&
+                   read->structureChangedRevision(child) == 0 &&
+                   read->structureChangedRevision(target) == 0 &&
+                   read->structureChangedRevision({}) == 0 &&
+                   read->structureRevision(NodeKind::Thread) == 0 &&
+                   graph.publishedStructureRevision(NodeKind::Thread) == 0,
+               "node insertion alone does not report a relation change");
+  }
+
+  {
+    auto write = graph.write();
+    write.setField(source, "stream", "field-only");
+    const GraphChange stateOnly = write.finish();
+    passed &= expect(stateOnly.revision == 2,
+                     "the state-only control mutation publishes");
+  }
+  {
+    auto read = graph.tryRead();
+    if (!expect(read.has_value(), "state-only structure stamps are readable"))
+      return false;
+    passed &= expect(read->structureChangedRevision(source) == 0,
+                     "ordinary fields do not advance structural revisions");
+  }
+
+  {
+    auto write = graph.write();
+    write.setParent(source, child);
+    write.relate(source, RelationKind::StructuralChildThread, target);
+    const GraphChange structured = write.finish();
+    passed &= expect(structured.revision == 3,
+                     "parent and relation changes publish together");
+  }
+  {
+    auto read = graph.tryRead();
+    if (!expect(read.has_value(), "changed structure stamps are readable"))
+      return false;
+    passed &= expect(
+        read->structureChangedRevision(source) == 3 &&
+            read->structureChangedRevision(child) == 3 &&
+            read->structureChangedRevision(target) == 0,
+        "parents, children, and outgoing relation owners receive the exact "
+        "structural transaction revision");
+    passed &= expect(
+        read->structureRevision(NodeKind::Thread) == 3 &&
+            graph.publishedStructureRevision(NodeKind::Thread) == 3,
+        "the locked and published per-kind structure stamps advance together");
+  }
+
+  {
+    auto write = graph.write();
+    write.setStatus(source, NodeStatus::Running);
+    const GraphChange stateOnly = write.finish();
+    passed &= expect(stateOnly.revision == 4,
+                     "a later status-only mutation publishes independently");
+  }
+  {
+    auto read = graph.tryRead();
+    if (!expect(read.has_value(), "stable structure stamps are readable"))
+      return false;
+    passed &=
+        expect(read->structureChangedRevision(source) == 3 &&
+                   read->structureChangedRevision(child) == 3 &&
+                   read->structureRevision(NodeKind::Thread) == 3 &&
+                   graph.publishedStructureRevision(NodeKind::Thread) == 3,
+               "status churn leaves structural revisions stable");
+  }
+
+  {
+    auto write = graph.write();
+    write.clearParent(child);
+    write.unrelate(source, RelationKind::StructuralChildThread, target);
+    const GraphChange cleared = write.finish();
+    passed &= expect(cleared.revision == 5,
+                     "clearing structure publishes one revision");
+  }
+  {
+    auto read = graph.tryRead();
+    if (!expect(read.has_value(), "cleared structure stamps are readable"))
+      return false;
+    passed &= expect(read->structureChangedRevision(source) == 5 &&
+                         read->structureChangedRevision(child) == 5 &&
+                         read->structureChangedRevision(target) == 0,
+                     "cleared parent and outgoing relations advance only "
+                     "their structural owners");
+  }
+
+  {
+    auto write = graph.write();
+    write.relate(source, RelationKind::StructuralChildThread, target);
+    static_cast<void>(write.finish());
+  }
+  {
+    auto write = graph.write();
+    write.remove(target);
+    const GraphChange removed = write.finish();
+    passed &= expect(removed.revision == 7,
+                     "removing a relation target publishes once");
+  }
+  {
+    auto read = graph.tryRead();
+    if (!expect(read.has_value(), "removal structure stamps are readable"))
+      return false;
+    passed &= expect(
+        read->structureChangedRevision(source) == 7 &&
+            read->related(source, RelationKind::StructuralChildThread).empty(),
+        "removal advances owners whose outgoing relations were unlinked");
+  }
+
+  NodeRef turn;
+  NodeRef item;
+  {
+    auto write = graph.write();
+    turn = write.upsert(id(NodeKind::Turn, "structure-turn"));
+    item = write.upsert(id(NodeKind::Item, "structure-item"));
+    write.setParent(turn, item);
+    const GraphChange itemStructure = write.finish();
+    passed &= expect(itemStructure.revision == 8,
+                     "an unrelated item hierarchy publishes once");
+  }
+  {
+    auto read = graph.tryRead();
+    if (!expect(read.has_value(), "per-kind structure stamps are readable"))
+      return false;
+    passed &= expect(
+        read->structureRevision(NodeKind::Thread) == 7 &&
+            graph.publishedStructureRevision(NodeKind::Thread) == 7 &&
+            read->structureRevision(NodeKind::Turn) == 8 &&
+            read->structureRevision(NodeKind::Item) == 8,
+        "item hierarchy changes do not advance the thread topology stamp");
+  }
+  return passed;
+}
+
 bool testAuthoritativeOrderingReplacement() {
   NodeGraph graph;
   NodeRef runtime;
@@ -590,6 +742,7 @@ int main() {
   passed &= testValue();
   passed &= testInsertionLookupAndOrder();
   passed &= testAtomicStateRelationsAndNoOp();
+  passed &= testStructuralChangeRevision();
   passed &= testAuthoritativeOrderingReplacement();
   passed &= testRemovalLifetimeAndAttachment();
   passed &= testMisuseRejection();
