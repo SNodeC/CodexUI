@@ -185,6 +185,10 @@ public:
     // Changes only when an existing retirement is released. Appending a
     // newly removed node preserves every earlier index.
     [[nodiscard]] std::uint64_t retiredOrderGeneration() const noexcept;
+    // Retained UI NodeRefs may outlive retirement acknowledgement. This
+    // non-throwing probe lets a deferred Qt pass discard such a reference
+    // before asking for graph-owned state.
+    [[nodiscard]] bool contains(const NodeRef &node) const noexcept;
     [[nodiscard]] std::shared_ptr<const NodeState>
     state(const NodeRef &node) const;
     [[nodiscard]] std::uint64_t changedRevision(const NodeRef &node) const;

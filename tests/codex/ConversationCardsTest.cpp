@@ -3714,6 +3714,65 @@ bool testLargeGraphResetUsesBoundedRetiredCleanup() {
   return result;
 }
 
+bool testDeferredRefreshSurvivesRetirementAcknowledgement() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", 1);
+    thread = write.upsert(
+        {nodegraph::NodeKind::Thread, "deferred-retirement-thread"},
+        std::move(threadState));
+    nodegraph::NodeRef turn = write.upsert(
+        {nodegraph::NodeKind::Turn, "deferred-retirement-turn"});
+    nodegraph::NodeRef item = write.upsert(
+        {nodegraph::NodeKind::Item, "deferred-retirement-item"},
+        graphMessageState("agentMessage", "Visible before retirement"));
+    write.setParent(thread, turn);
+    write.setParent(turn, item);
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 360);
+  view.show();
+  view.bindGraph(graph, thread);
+  bool result = expect(
+      dispatchUntil([&] {
+        return card(view,
+                    stableKey(AuthoritativeItemKey{
+                        "deferred-retirement-thread",
+                        "deferred-retirement-turn",
+                        "deferred-retirement-item"})) != nullptr;
+      }),
+      "the deferred-retirement fixture materializes its selected thread");
+
+  nodegraph::GraphChange removal;
+  {
+    auto write = graph.write();
+    write.remove(thread);
+    removal = write.finish();
+  }
+  // FrontendSession acknowledges detached UI nodes immediately after the
+  // GraphChanged callback, before this view's deferred refresh executes.
+  view.graphChangedDeferred(removal.affected, removal.removed);
+  {
+    auto write = graph.write();
+    write.releaseRetired(removal.removed);
+    static_cast<void>(write.finish());
+  }
+  dispatchPasses(8);
+  result &= expect(
+      card(view,
+           stableKey(AuthoritativeItemKey{"deferred-retirement-thread",
+                                          "deferred-retirement-turn",
+                                          "deferred-retirement-item"})) ==
+          nullptr,
+      "a deferred Qt pass safely discards purged NodeRefs after detachment");
+  return result;
+}
+
 bool testAffectedNodeRequeuedAfterCursorConsumption() {
   constexpr int ItemCount = 64;
   nodegraph::NodeGraph graph;
@@ -5243,6 +5302,7 @@ int main(int argc, char **argv) {
   result &= testFocusedGraphCardSurvivesViewportReconciliation();
   result &= testGraphRootFoldSuppressesAndRestoresChildExtent();
   result &= testLargeGraphResetUsesBoundedRetiredCleanup();
+  result &= testDeferredRefreshSurvivesRetirementAcknowledgement();
   result &= testAffectedNodeRequeuedAfterCursorConsumption();
   result &= testGraphStreamTruncationNotices();
   result &= testGraphBoundedHistoryAndExplicitRoot();

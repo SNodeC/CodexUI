@@ -591,7 +591,8 @@ bool testRemovalLifetimeAndAttachment() {
         read->retiredNodes().size() == 1 &&
             read->retiredNodes().front() == removedNode &&
             read->retiredCount() == 1 && read->retiredAt(0) == removedNode &&
-            !read->retiredAt(1) && read->retiredOrderGeneration() == 0,
+            !read->retiredAt(1) && read->retiredOrderGeneration() == 0 &&
+            read->contains(removedNode),
         "removed nodes support bounded retirement reads until "
         "Qt acknowledges");
   }
@@ -629,7 +630,8 @@ bool testRemovalLifetimeAndAttachment() {
       return false;
     passed &=
         expect(read->retiredNodes().empty() && read->retiredCount() == 0 &&
-                   read->retiredOrderGeneration() == 1,
+                   read->retiredOrderGeneration() == 1 &&
+                   !read->contains(detaching),
                "releaseRetired drops graph lifetime ownership and "
                "invalidates an incremental retirement cursor");
   }

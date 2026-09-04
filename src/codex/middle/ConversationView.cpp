@@ -1483,7 +1483,7 @@ void ConversationView::runGraphRefresh() {
     return;
   }
 
-  if (read->removed(graphThread_)) {
+  if (!read->contains(graphThread_) || read->removed(graphThread_)) {
     threadRemoved = true;
   } else {
     const std::shared_ptr<const nodegraph::NodeState> threadState =
@@ -1518,7 +1518,7 @@ void ConversationView::runGraphRefresh() {
             graphGeometry_->turns[graphGeometry_->structureValidationCursor++]
                 .get();
         ++structureReads;
-        if (!turn->node || read->removed(turn->node)) {
+        if (!read->contains(turn->node) || read->removed(turn->node)) {
           resetRetainedGeometry();
           break;
         }
@@ -1575,7 +1575,8 @@ void ConversationView::runGraphRefresh() {
            index > 0 && structureReads < MaxStructureRecordsPerPass;) {
         nodegraph::NodeRef turn = read->childAt(graphThread_, --index);
         ++structureReads;
-        if (!turn || turn->id().kind != nodegraph::NodeKind::Turn ||
+        if (!turn || !read->contains(turn) ||
+            turn->id().kind != nodegraph::NodeKind::Turn ||
             read->removed(turn))
           continue;
         newestTurn = turn;
@@ -1583,7 +1584,8 @@ void ConversationView::runGraphRefresh() {
              itemIndex > 0 && structureReads < MaxStructureRecordsPerPass;) {
           nodegraph::NodeRef item = read->childAt(turn, --itemIndex);
           ++structureReads;
-          if (item && item->id().kind == nodegraph::NodeKind::Item &&
+          if (item && read->contains(item) &&
+              item->id().kind == nodegraph::NodeKind::Item &&
               !read->removed(item)) {
             newestItem = std::move(item);
             break;
@@ -1653,7 +1655,8 @@ void ConversationView::runGraphRefresh() {
         for (std::size_t index = 0; index < count; ++index) {
           nodegraph::NodeRef candidate = read->relatedAt(
               turn, nodegraph::RelationKind::TurnRootItem, index);
-          if (candidate && candidate->id().kind == nodegraph::NodeKind::Item &&
+          if (candidate && read->contains(candidate) &&
+              candidate->id().kind == nodegraph::NodeKind::Item &&
               !read->removed(candidate))
             return candidate;
         }
@@ -1665,7 +1668,7 @@ void ConversationView::runGraphRefresh() {
            &promptTransfers](const nodegraph::NodeRef &item,
                              GraphViewportGeometry::TurnGeometry *turn)
           -> std::unique_ptr<GraphViewportGeometry::ItemGeometry> {
-        if (!item || !turn || read->removed(item))
+        if (!item || !turn || !read->contains(item) || read->removed(item))
           return {};
         const std::shared_ptr<const nodegraph::NodeState> state =
             read->state(item);
@@ -1680,7 +1683,8 @@ void ConversationView::runGraphRefresh() {
         for (std::size_t index = 0; index < relationCount; ++index) {
           nodegraph::NodeRef candidate = read->relatedAt(
               item, nodegraph::RelationKind::PromptMaterialization, index);
-          if (!candidate || candidate->id().kind != nodegraph::NodeKind::Item ||
+          if (!candidate || !read->contains(candidate) ||
+              candidate->id().kind != nodegraph::NodeKind::Item ||
               read->removed(candidate))
             continue;
           const std::shared_ptr<const nodegraph::NodeState> candidateState =
@@ -1816,7 +1820,7 @@ void ConversationView::runGraphRefresh() {
         nodegraph::NodeRef affected =
             graphGeometry_->affected[graphGeometry_->affectedCursor++];
         ++structureReads;
-        if (!affected || read->removed(affected) ||
+        if (!affected || !read->contains(affected) || read->removed(affected) ||
             affected->id().kind != nodegraph::NodeKind::Item)
           continue;
         nodegraph::NodeRef turnNode = read->parent(affected);
@@ -1846,7 +1850,8 @@ void ConversationView::runGraphRefresh() {
           }
           continue;
         }
-        if (!turnNode || turnNode->id().kind != nodegraph::NodeKind::Turn ||
+        if (!turnNode || !read->contains(turnNode) ||
+            turnNode->id().kind != nodegraph::NodeKind::Turn ||
             read->removed(turnNode) || read->parent(turnNode) != graphThread_)
           continue;
 
@@ -1941,7 +1946,8 @@ void ConversationView::runGraphRefresh() {
           nodegraph::NodeRef turnNode =
               read->childAt(graphThread_, --scan.nextTurnIndex);
           ++structureReads;
-          if (!turnNode || turnNode->id().kind != nodegraph::NodeKind::Turn ||
+          if (!turnNode || !read->contains(turnNode) ||
+              turnNode->id().kind != nodegraph::NodeKind::Turn ||
               read->removed(turnNode))
             continue;
 
@@ -2020,7 +2026,8 @@ void ConversationView::runGraphRefresh() {
         nodegraph::NodeRef item =
             read->childAt(turn->node, --scan.nextItemIndex);
         ++structureReads;
-        if (!item || item->id().kind != nodegraph::NodeKind::Item ||
+        if (!item || !read->contains(item) ||
+            item->id().kind != nodegraph::NodeKind::Item ||
             read->removed(item))
           continue;
         if (scan.nextItemIndex + 1 == scan.directItemsInTurn)
@@ -3465,7 +3472,8 @@ bool ConversationView::runGraphVisibilityPass() {
       if (candidate.operation == Operation::Release ||
           !candidate.slot->graphNode)
         continue;
-      if (read->removed(candidate.slot->graphNode)) {
+      if (!read->contains(candidate.slot->graphNode) ||
+          read->removed(candidate.slot->graphNode)) {
         candidate.operation = Operation::Release;
         continue;
       }

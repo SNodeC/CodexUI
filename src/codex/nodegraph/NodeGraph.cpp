@@ -136,6 +136,14 @@ std::uint64_t NodeGraph::ReadAccess::retiredOrderGeneration() const noexcept {
   return graph_->retiredOrderGeneration_;
 }
 
+bool NodeGraph::ReadAccess::contains(const NodeRef &node) const noexcept {
+  if (!node)
+    return false;
+  const auto active = graph_->nodes_.find(node->id_);
+  return (active != graph_->nodes_.end() && active->second == node) ||
+         graph_->retiredIndex_.contains(node.get());
+}
+
 std::shared_ptr<const NodeState>
 NodeGraph::ReadAccess::state(const NodeRef &node) const {
   if (!node)
@@ -256,9 +264,7 @@ std::vector<NodeRef> NodeGraph::ReadAccess::related(const NodeRef &node,
 }
 
 void NodeGraph::ReadAccess::requireMember(const NodeRef &node) const {
-  const auto active = graph_->nodes_.find(node->id_);
-  if ((active != graph_->nodes_.end() && active->second == node) ||
-      graph_->retiredIndex_.contains(node.get()))
+  if (contains(node))
     return;
   throw std::invalid_argument("node does not belong to this graph");
 }
