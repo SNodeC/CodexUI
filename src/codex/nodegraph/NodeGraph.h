@@ -125,6 +125,8 @@ private:
   Node *parent_ = nullptr;
   std::vector<Node *> children_;
   std::unordered_map<RelationKind, std::vector<Node *>> relations_;
+  std::unordered_map<std::string, std::uint64_t> fieldChangedRevisions_;
+  std::uint64_t statusChangedRevision_ = 0;
   std::uint64_t changedRevision_ = 0;
   bool removed_ = false;
   std::atomic<void *> uiAttachment_{nullptr};
@@ -172,6 +174,10 @@ public:
     [[nodiscard]] std::shared_ptr<const NodeState>
     state(const NodeRef &node) const;
     [[nodiscard]] std::uint64_t changedRevision(const NodeRef &node) const;
+    [[nodiscard]] std::uint64_t
+    fieldChangedRevision(const NodeRef &node, std::string_view field) const;
+    [[nodiscard]] std::uint64_t
+    statusChangedRevision(const NodeRef &node) const;
     [[nodiscard]] bool removed(const NodeRef &node) const;
     [[nodiscard]] NodeRef parent(const NodeRef &node) const;
     [[nodiscard]] std::size_t childCount(const NodeRef &node) const;
@@ -206,6 +212,10 @@ public:
     [[nodiscard]] NodeRef find(const NodeId &id) const;
     [[nodiscard]] const std::vector<NodeRef> &orderedNodes() const noexcept;
     [[nodiscard]] std::uint64_t changedRevision(const NodeRef &node) const;
+    [[nodiscard]] std::uint64_t
+    fieldChangedRevision(const NodeRef &node, std::string_view field) const;
+    [[nodiscard]] std::uint64_t
+    statusChangedRevision(const NodeRef &node) const;
     [[nodiscard]] bool hasPendingChanges() const noexcept;
     [[nodiscard]] NodeRef upsert(NodeId id, NodeState initial = {});
     [[nodiscard]] std::shared_ptr<const NodeState>
@@ -247,10 +257,17 @@ public:
 
   private:
     friend class NodeGraph;
+    struct PendingStateRevision final {
+      bool status = false;
+      std::unordered_set<std::string> fields;
+    };
+
     WriteAccess(NodeGraph &graph,
                 std::unique_lock<std::shared_mutex> lock) noexcept;
 
     void requireLive(const NodeRef &node) const;
+    void noteStateChanges(const NodeRef &node, const NodeState &before,
+                          const NodeState &after);
     void markAffected(const NodeRef &node);
     void unlinkNode(const NodeRef &node);
     [[nodiscard]] GraphChange publish();
@@ -261,6 +278,7 @@ public:
     std::unordered_set<Node *> affectedIndex_;
     std::vector<NodeRef> revisionTouches_;
     std::unordered_set<Node *> revisionTouchIndex_;
+    std::unordered_map<Node *, PendingStateRevision> pendingStateRevisions_;
     std::vector<NodeRef> removed_;
     std::unordered_set<Node *> removedIndex_;
     bool dirty_ = false;

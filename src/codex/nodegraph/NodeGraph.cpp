@@ -116,6 +116,24 @@ NodeGraph::ReadAccess::changedRevision(const NodeRef &node) const {
   return node->changedRevision_;
 }
 
+std::uint64_t
+NodeGraph::ReadAccess::fieldChangedRevision(const NodeRef &node,
+                                            std::string_view field) const {
+  if (!node)
+    return 0;
+  requireMember(node);
+  const auto found = node->fieldChangedRevisions_.find(std::string(field));
+  return found == node->fieldChangedRevisions_.end() ? 0 : found->second;
+}
+
+std::uint64_t
+NodeGraph::ReadAccess::statusChangedRevision(const NodeRef &node) const {
+  if (!node)
+    return 0;
+  requireMember(node);
+  return node->statusChangedRevision_;
+}
+
 bool NodeGraph::ReadAccess::removed(const NodeRef &node) const {
   if (!node)
     return true;
@@ -211,6 +229,7 @@ NodeGraph::WriteAccess::WriteAccess(WriteAccess &&other) noexcept
       affectedIndex_(std::move(other.affectedIndex_)),
       revisionTouches_(std::move(other.revisionTouches_)),
       revisionTouchIndex_(std::move(other.revisionTouchIndex_)),
+      pendingStateRevisions_(std::move(other.pendingStateRevisions_)),
       removed_(std::move(other.removed_)),
       removedIndex_(std::move(other.removedIndex_)), dirty_(other.dirty_),
       finished_(other.finished_) {
@@ -243,6 +262,20 @@ NodeGraph::WriteAccess::changedRevision(const NodeRef &node) const {
   return node->changedRevision_;
 }
 
+std::uint64_t
+NodeGraph::WriteAccess::fieldChangedRevision(const NodeRef &node,
+                                             std::string_view field) const {
+  requireLive(node);
+  const auto found = node->fieldChangedRevisions_.find(std::string(field));
+  return found == node->fieldChangedRevisions_.end() ? 0 : found->second;
+}
+
+std::uint64_t
+NodeGraph::WriteAccess::statusChangedRevision(const NodeRef &node) const {
+  requireLive(node);
+  return node->statusChangedRevision_;
+}
+
 bool NodeGraph::WriteAccess::hasPendingChanges() const noexcept {
   return dirty_;
 }
@@ -253,6 +286,12 @@ NodeRef NodeGraph::WriteAccess::upsert(NodeId id, NodeState initial) {
   NodeRef node(new Node(std::move(id), std::move(initial)));
   graph_->nodes_.emplace(node->id_, node);
   graph_->orderedNodes_.emplace_back(node);
+  PendingStateRevision &pending = pendingStateRevisions_[node.get()];
+  pending.status = node->state_->status != NodeStatus::Unknown;
+  for (const auto &[field, value] : node->state_->fields) {
+    static_cast<void>(value);
+    pending.fields.insert(field);
+  }
   markAffected(node);
   return node;
 }
@@ -296,8 +335,26 @@ void NodeGraph::WriteAccess::replaceState(const NodeRef &node,
   requireLive(node);
   if (*node->state_ == state)
     return;
+  noteStateChanges(node, *node->state_, state);
   node->state_ = std::make_shared<const NodeState>(std::move(state));
   markAffected(node);
+}
+
+void NodeGraph::WriteAccess::noteStateChanges(const NodeRef &node,
+                                              const NodeState &before,
+                                              const NodeState &after) {
+  PendingStateRevision &pending = pendingStateRevisions_[node.get()];
+  pending.status = pending.status || before.status != after.status;
+  for (const auto &[field, value] : before.fields) {
+    const auto found = after.fields.find(field);
+    if (found == after.fields.end() || found->second != value)
+      pending.fields.insert(field);
+  }
+  for (const auto &[field, value] : after.fields) {
+    const auto found = before.fields.find(field);
+    if (found == before.fields.end() || found->second != value)
+      pending.fields.insert(field);
+  }
 }
 
 void NodeGraph::WriteAccess::setField(const NodeRef &node, std::string key,
@@ -594,6 +651,12 @@ GraphChange NodeGraph::WriteAccess::publish() {
   if (!dirty_)
     return GraphChange{graph_->revision_, {}, {}};
   ++graph_->revision_;
+  for (auto &[node, pending] : pendingStateRevisions_) {
+    if (pending.status)
+      node->statusChangedRevision_ = graph_->revision_;
+    for (const std::string &field : pending.fields)
+      node->fieldChangedRevisions_.insert_or_assign(field, graph_->revision_);
+  }
   for (const NodeRef &node : affected_)
     node->changedRevision_ = graph_->revision_;
   for (const NodeRef &node : revisionTouches_)

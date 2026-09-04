@@ -66,6 +66,48 @@ bool isLocalPrompt(const NodeState &state) {
   return stringField(state, "type") == "localPrompt";
 }
 
+bool hydrationResultIsUsable(NodeGraph::WriteAccess &write,
+                             const DecodedMessage &result,
+                             const NodeRef &thread) {
+  if (!thread || write.find(thread->id()) != thread)
+    return false;
+  // A successfully reduced correlated result retires its transient operation
+  // in the same transaction. If it is still live, the response was stale or
+  // mismatched and cannot make this thread ready.
+  if (result.expectedNode &&
+      write.find(result.expectedNode->id()) == result.expectedNode)
+    return false;
+  const Value *threadValue = objectField(result.payload, "thread");
+  const Value::Object *threadObject =
+      threadValue ? threadValue->asObject() : nullptr;
+  if (!threadObject ||
+      objectString(*threadObject, "id") != thread->id().canonical)
+    return false;
+
+  std::unordered_set<const Node *> checkedItems;
+  const auto itemIsUsable = [&](const NodeRef &item) {
+    if (!item || item->id().kind != NodeKind::Item ||
+        !checkedItems.insert(item.get()).second)
+      return true;
+    const NodeState &state = *write.state(item);
+    return isLocalPrompt(state) || !stringField(state, "type").empty();
+  };
+  for (const NodeRef &turn : write.children(thread)) {
+    if (!turn || turn->id().kind != NodeKind::Turn)
+      continue;
+    for (const NodeRef &item : write.children(turn)) {
+      if (!itemIsUsable(item))
+        return false;
+    }
+    for (const NodeRef &root :
+         write.related(turn, RelationKind::TurnRootItem)) {
+      if (!itemIsUsable(root))
+        return false;
+    }
+  }
+  return true;
+}
+
 bool isLocalShell(const NodeRef &node) {
   return node && (node->id().canonical.starts_with("local-thread:") ||
                   node->id().canonical.starts_with("local-turn:") ||
@@ -345,6 +387,11 @@ ChannelSendStatus WorkerLogic::completeThreadHydration(DecodedMessage result,
   {
     auto write = graph_.write();
     static_cast<void>(updater_.applyInto(write, result));
+    if (state == "ready" && !hydrationResultIsUsable(write, result, thread)) {
+      state = "failed";
+      if (error.empty())
+        error = "Thread hydration returned incomplete item identity";
+    }
     updateThreadHydration(write, thread, std::move(state), std::move(error));
     change = write.finish();
   }

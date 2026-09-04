@@ -114,7 +114,7 @@ private:
                                          const DecodedMessage &message);
   void applyGraphUpdate(NodeGraph::WriteAccess &write,
                         const DecodedMessage &message,
-                        bool replaceThreadRead = true);
+                        std::optional<std::uint64_t> preserveChangesAfter = {});
   [[nodiscard]] bool applyRealtimeUpdate(NodeGraph::WriteAccess &write,
                                          const DecodedMessage &message);
   void applyUnknown(NodeGraph::WriteAccess &write,
@@ -122,21 +122,20 @@ private:
   void applyThreadActivity(NodeGraph::WriteAccess &write,
                            const DecodedMessage &message);
 
-  [[nodiscard]] NodeRef ingestThread(NodeGraph::WriteAccess &write,
-                                     const Value::Object &object,
-                                     std::string_view fallbackId = {},
-                                     bool replaceTurns = false,
-                                     bool mergeThreadState = true);
+  [[nodiscard]] NodeRef
+  ingestThread(NodeGraph::WriteAccess &write, const Value::Object &object,
+               std::string_view fallbackId = {}, bool replaceTurns = false,
+               std::optional<std::uint64_t> preserveChangesAfter = {});
   [[nodiscard]] NodeRef
   ingestTurn(NodeGraph::WriteAccess &write, const Value::Object &object,
              const NodeRef &thread, std::string_view fallbackId = {},
-             bool replaceItems = false, bool mergeExistingState = true,
+             bool replaceItems = false,
+             std::optional<std::uint64_t> preserveChangesAfter = {},
              bool updateCurrentRelation = true);
-  [[nodiscard]] NodeRef ingestItem(NodeGraph::WriteAccess &write,
-                                   const Value::Object &object,
-                                   const NodeRef &turn,
-                                   std::string_view fallbackId = {},
-                                   bool mergeExistingState = true);
+  [[nodiscard]] NodeRef
+  ingestItem(NodeGraph::WriteAccess &write, const Value::Object &object,
+             const NodeRef &turn, std::string_view fallbackId = {},
+             std::optional<std::uint64_t> preserveChangesAfter = {});
   void admitRootThread(NodeGraph::WriteAccess &write, const NodeRef &thread,
                        bool prepend);
   void replaceThreadList(NodeGraph::WriteAccess &write,

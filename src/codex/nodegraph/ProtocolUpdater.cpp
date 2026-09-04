@@ -111,14 +111,20 @@ NodeStatus statusFromValue(const Value *value) {
 
 void mergeObject(NodeGraph::WriteAccess &write, const NodeRef &node,
                  const Value::Object &object,
-                 std::string_view omittedChildField = {}) {
+                 std::string_view omittedChildField = {},
+                 std::optional<std::uint64_t> preserveChangesAfter = {}) {
   NodeState next = *write.state(node);
   for (const auto &[key, value] : object) {
     if (!omittedChildField.empty() && key == omittedChildField)
       continue;
+    if (preserveChangesAfter &&
+        write.fieldChangedRevision(node, key) > *preserveChangesAfter)
+      continue;
     next.fields.insert_or_assign(key, value);
   }
-  if (const Value *status = member(object, "status"))
+  if (const Value *status = member(object, "status");
+      status && (!preserveChangesAfter ||
+                 write.statusChangedRevision(node) <= *preserveChangesAfter))
     next.status = statusFromValue(status);
   write.replaceState(node, std::move(next));
 }
@@ -255,14 +261,18 @@ void boundIndexedText(NodeState &state, std::string_view field) {
     updateTextRetention(state, field, retained, discarded);
 }
 
-void boundRetainedItemText(NodeGraph::WriteAccess &write, const NodeRef &item,
-                           const Value::Object &incoming) {
+void boundRetainedItemText(
+    NodeGraph::WriteAccess &write, const NodeRef &item,
+    const Value::Object &incoming,
+    std::optional<std::uint64_t> preserveChangesAfter = {}) {
   NodeState next = *write.state(item);
   for (const std::string_view field :
        {std::string_view("text"), std::string_view("output"),
         std::string_view("aggregatedOutput"), std::string_view("summary"),
         std::string_view("content")}) {
-    if (incoming.contains(field))
+    if (incoming.contains(field) &&
+        (!preserveChangesAfter ||
+         write.fieldChangedRevision(item, field) <= *preserveChangesAfter))
       clearTextRetention(next, field);
   }
 
@@ -762,23 +772,133 @@ std::vector<NodeRef> mergeExistingTail(std::vector<NodeRef> first,
   return first;
 }
 
-std::vector<NodeRef> mergeLocalTail(NodeGraph::WriteAccess &write,
-                                    std::vector<NodeRef> first,
-                                    const std::vector<NodeRef> &existing) {
-  std::unordered_set<const Node *> seen;
-  seen.reserve(first.size() + existing.size());
-  for (const NodeRef &node : first)
-    if (node)
-      seen.insert(node.get());
-  for (const NodeRef &node : existing) {
-    const std::shared_ptr<const NodeState> state = write.state(node);
-    const Value *local = member(state->fields, "local");
-    if ((!local || !local->asBool() || !*local->asBool()) || !node ||
-        !seen.insert(node.get()).second)
-      continue;
-    first.emplace_back(node);
+void removeContained(NodeGraph::WriteAccess &write, const NodeRef &node);
+
+bool isExplicitLocalOptimistic(NodeGraph::WriteAccess &write,
+                               const NodeRef &node) {
+  if (!node)
+    return false;
+  const NodeState &state = *write.state(node);
+  const Value *local = member(state.fields, "local");
+  if (!local || !local->asBool() || !*local->asBool())
+    return false;
+  const std::string type = canonicalValue(member(state.fields, "type"));
+  return type == "localPrompt" || type == "localTurn" ||
+         type == "localThread" || type == "localRecoveryTurn" ||
+         type == "localRecoveryThread";
+}
+
+bool omittedSubtreeChangedAfter(NodeGraph::WriteAccess &write,
+                                const NodeRef &node,
+                                std::uint64_t preserveChangesAfter,
+                                std::unordered_set<const Node *> &visited) {
+  if (!node || !visited.insert(node.get()).second)
+    return false;
+  if (!isExplicitLocalOptimistic(write, node) &&
+      write.changedRevision(node) > preserveChangesAfter)
+    return true;
+  for (const NodeRef &child : write.children(node)) {
+    if (omittedSubtreeChangedAfter(write, child, preserveChangesAfter, visited))
+      return true;
   }
-  return first;
+  if (node->id().kind == NodeKind::Turn) {
+    for (const NodeRef &root :
+         write.related(node, RelationKind::TurnRootItem)) {
+      if (omittedSubtreeChangedAfter(write, root, preserveChangesAfter,
+                                     visited))
+        return true;
+    }
+  }
+  return false;
+}
+
+void collectLocalOptimisticItems(NodeGraph::WriteAccess &write,
+                                 const NodeRef &node,
+                                 std::vector<NodeRef> &items,
+                                 std::unordered_set<const Node *> &visited) {
+  if (!node || !visited.insert(node.get()).second)
+    return;
+  if (node->id().kind == NodeKind::Item &&
+      isExplicitLocalOptimistic(write, node)) {
+    items.emplace_back(node);
+    return;
+  }
+  for (const NodeRef &child : write.children(node))
+    collectLocalOptimisticItems(write, child, items, visited);
+  if (node->id().kind == NodeKind::Turn) {
+    for (const NodeRef &root : write.related(node, RelationKind::TurnRootItem))
+      collectLocalOptimisticItems(write, root, items, visited);
+  }
+}
+
+NodeRef preserveLocalOptimisticTail(NodeGraph::WriteAccess &write,
+                                    const NodeRef &thread,
+                                    const NodeRef &omitted) {
+  if (!thread || thread->id().kind != NodeKind::Thread || !omitted)
+    return {};
+  std::vector<NodeRef> prompts;
+  std::unordered_set<const Node *> visited;
+  collectLocalOptimisticItems(write, omitted, prompts, visited);
+  if (prompts.empty())
+    return {};
+
+  NodeState state;
+  state.status = NodeStatus::Running;
+  state.fields = {{"type", Value("localTurn")},
+                  {"local", Value(true)},
+                  {"replacementCarrier", Value(true)}};
+  const std::string carrierId =
+      "local-turn:replacement:" +
+      scopedCanonical(thread->id().canonical,
+                      std::to_string(write.revision() + 1) + ':' +
+                          omitted->id().canonical);
+  NodeRef carrier = write.upsert({NodeKind::Turn, carrierId}, std::move(state));
+  write.setParent(thread, carrier);
+  for (const NodeRef &prompt : prompts) {
+    if (omitted->id().kind == NodeKind::Turn)
+      write.unrelate(omitted, RelationKind::TurnRootItem, prompt);
+    write.setParent(carrier, prompt);
+  }
+  return carrier;
+}
+
+std::vector<NodeRef> replaceAuthoritativeChildren(
+    NodeGraph::WriteAccess &write, const NodeRef &parent,
+    std::vector<NodeRef> authoritative, const std::vector<NodeRef> &existing,
+    std::optional<std::uint64_t> preserveChangesAfter) {
+  std::unordered_set<const Node *> retained;
+  retained.reserve(authoritative.size() + existing.size());
+  for (const NodeRef &node : authoritative)
+    if (node)
+      retained.insert(node.get());
+
+  for (const NodeRef &node : existing) {
+    if (!node || retained.contains(node.get()) ||
+        write.find(node->id()) != node)
+      continue;
+    if (isExplicitLocalOptimistic(write, node)) {
+      retained.insert(node.get());
+      authoritative.emplace_back(node);
+      continue;
+    }
+    if (preserveChangesAfter) {
+      std::unordered_set<const Node *> visited;
+      if (omittedSubtreeChangedAfter(write, node, *preserveChangesAfter,
+                                     visited)) {
+        retained.insert(node.get());
+        authoritative.emplace_back(node);
+        continue;
+      }
+    }
+    if (NodeRef carrier = preserveLocalOptimisticTail(write, parent, node)) {
+      retained.insert(carrier.get());
+      authoritative.emplace_back(std::move(carrier));
+    }
+    removeContained(write, node);
+    if (write.find(node->id()) == node)
+      write.remove(node);
+  }
+  return authoritative;
 }
 
 bool hasThreadOwner(NodeGraph::WriteAccess &write, const NodeRef &child) {
@@ -1624,17 +1744,15 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
           correlated.payload.try_emplace(key, value);
       }
     }
-    bool replaceThreadRead = true;
+    std::optional<std::uint64_t> preserveChangesAfter;
     if (message.method == "thread/read") {
       const Value *started =
           member(operationState->fields, "requestTargetRevision");
       const std::uint64_t *revision = started ? started->asUInt64() : nullptr;
-      const std::vector<NodeRef> targets =
-          write.related(operation, RelationKind::OperationTarget);
-      replaceThreadRead = revision && !targets.empty() && targets.front() &&
-                          write.changedRevision(targets.front()) == *revision;
+      if (revision)
+        preserveChangesAfter = *revision;
     }
-    applyGraphUpdate(write, correlated, replaceThreadRead);
+    applyGraphUpdate(write, correlated, preserveChangesAfter);
   }
   // Operations model only work that is currently pending. Results/errors are
   // applied to current state and then the operation is retired in this same
@@ -1870,9 +1988,9 @@ bool ProtocolUpdater::applyRealtimeUpdate(NodeGraph::WriteAccess &write,
   return true;
 }
 
-void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
-                                       const DecodedMessage &message,
-                                       bool replaceThreadRead) {
+void ProtocolUpdater::applyGraphUpdate(
+    NodeGraph::WriteAccess &write, const DecodedMessage &message,
+    std::optional<std::uint64_t> preserveChangesAfter) {
   const std::string_view method = message.method;
 
   if (isProviderNoticeMethod(method)) {
@@ -2406,33 +2524,11 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
     historyMembershipRequiresRecount = historyMembershipMayChange;
     const bool replaceTurns =
         message.kind == DecodedMessageKind::ClientResult &&
-        ((replaceThreadRead && method == "thread/read") ||
-         authoritativeHistoryResult);
-    const bool mergeThreadState =
-        !(message.kind == DecodedMessageKind::ClientResult &&
-          method == "thread/read" && !replaceThreadRead);
-    const std::string returnedThreadId = nestedId(*threadObject);
-    const NodeRef previousThread =
-        returnedThreadId.empty()
-            ? NodeRef{}
-            : write.find({NodeKind::Thread, returnedThreadId});
-    const std::vector<NodeRef> previousTurns =
-        previousThread ? write.children(previousThread)
-                       : std::vector<NodeRef>{};
-    thread =
-        ingestThread(write, *threadObject, {}, replaceTurns, mergeThreadState);
+        (method == "thread/read" || authoritativeHistoryResult);
+    thread = ingestThread(write, *threadObject, {}, replaceTurns,
+                          method == "thread/read" ? preserveChangesAfter
+                                                  : std::nullopt);
     if (authoritativeHistoryResult && thread) {
-      std::unordered_set<const Node *> retainedTurns;
-      for (const NodeRef &retained : write.children(thread))
-        if (retained)
-          retainedTurns.insert(retained.get());
-      for (const NodeRef &removed : previousTurns) {
-        if (!removed || retainedTurns.contains(removed.get()) ||
-            write.find(removed->id()) != removed)
-          continue;
-        removeContained(write, removed);
-        write.remove(removed);
-      }
       const std::string turnsCursor =
           canonicalValue(member(message.payload, "turnsBackwardsCursor"));
       write.setField(thread, "historyHasMore", Value(!turnsCursor.empty()));
@@ -2630,41 +2726,46 @@ void ProtocolUpdater::applyUnknown(NodeGraph::WriteAccess &write,
   write.replaceState(unknown, std::move(state));
 }
 
-NodeRef ProtocolUpdater::ingestThread(NodeGraph::WriteAccess &write,
-                                      const Value::Object &object,
-                                      std::string_view fallbackId,
-                                      bool replaceTurns,
-                                      bool mergeThreadState) {
+NodeRef ProtocolUpdater::ingestThread(
+    NodeGraph::WriteAccess &write, const Value::Object &object,
+    std::string_view fallbackId, bool replaceTurns,
+    std::optional<std::uint64_t> preserveChangesAfter) {
   const std::string id = nestedId(object, fallbackId);
   if (id.empty())
     return {};
   NodeRef thread = write.upsert({NodeKind::Thread, id});
-  if (mergeThreadState) {
-    mergeObject(write, thread, object, "turns");
+  const auto acceptsField = [&](std::string_view field) {
+    return !preserveChangesAfter ||
+           write.fieldChangedRevision(thread, field) <= *preserveChangesAfter;
+  };
+  mergeObject(write, thread, object, "turns", preserveChangesAfter);
 
-    if (const Value *projectId = member(object, "projectId"))
-      assignProject(write, thread, projectId);
-    if (const Value *section = member(object, "section"))
-      assignSection(write, thread, section);
+  if (const Value *projectId = member(object, "projectId");
+      projectId && acceptsField("projectId"))
+    assignProject(write, thread, projectId);
+  if (const Value *section = member(object, "section");
+      section && acceptsField("section"))
+    assignSection(write, thread, section);
 
-    if (const Value *parentValue = member(object, "parentThreadId")) {
-      const std::string parentId = canonicalValue(parentValue);
-      if (!parentId.empty() && parentId != id) {
-        NodeRef parent = write.upsert({NodeKind::Thread, parentId});
-        assignThreadOwner(write, parent, RelationKind::StructuralChildThread,
-                          thread);
-      } else if (parentValue->isNull() || parentId.empty()) {
-        clearThreadOwners(write, thread);
-      }
+  if (const Value *parentValue = member(object, "parentThreadId");
+      parentValue && acceptsField("parentThreadId")) {
+    const std::string parentId = canonicalValue(parentValue);
+    if (!parentId.empty() && parentId != id) {
+      NodeRef parent = write.upsert({NodeKind::Thread, parentId});
+      assignThreadOwner(write, parent, RelationKind::StructuralChildThread,
+                        thread);
+    } else if (parentValue->isNull() || parentId.empty()) {
+      clearThreadOwners(write, thread);
     }
+  }
 
-    if (const Value *forkValue = member(object, "forkedFromId")) {
-      clearThreadOwnerKind(write, thread, RelationKind::ForkChildThread);
-      const std::string forkedFromId = canonicalValue(forkValue);
-      if (!forkedFromId.empty() && forkedFromId != id) {
-        NodeRef source = write.upsert({NodeKind::Thread, forkedFromId});
-        write.relate(source, RelationKind::ForkChildThread, thread);
-      }
+  if (const Value *forkValue = member(object, "forkedFromId");
+      forkValue && acceptsField("forkedFromId")) {
+    clearThreadOwnerKind(write, thread, RelationKind::ForkChildThread);
+    const std::string forkedFromId = canonicalValue(forkValue);
+    if (!forkedFromId.empty() && forkedFromId != id) {
+      NodeRef source = write.upsert({NodeKind::Thread, forkedFromId});
+      write.relate(source, RelationKind::ForkChildThread, thread);
     }
   }
 
@@ -2676,41 +2777,36 @@ NodeRef ProtocolUpdater::ingestThread(NodeGraph::WriteAccess &write,
     for (const Value &value : *turns) {
       if (const Value::Object *turnObject = value.asObject()) {
         const std::string turnId = nestedId(*turnObject);
-        const bool existed =
-            !turnId.empty() &&
-            write.find(scopedTurnNodeId(thread->id().canonical, turnId));
-        NodeRef turn =
-            ingestTurn(write, *turnObject, thread, {}, replaceTurns,
-                       mergeThreadState || !existed, mergeThreadState);
-        if (turn && (mergeThreadState || !existed) &&
-            ordered.insert(turn.get()).second)
+        NodeRef turn = ingestTurn(write, *turnObject, thread, {}, replaceTurns,
+                                  preserveChangesAfter, true);
+        if (turn && ordered.insert(turn.get()).second)
           order.emplace_back(std::move(turn));
       }
     }
     if (replaceTurns)
-      write.replaceChildren(thread, mergeLocalTail(write, std::move(order),
-                                                   write.children(thread)));
+      write.replaceChildren(
+          thread, replaceAuthoritativeChildren(write, thread, std::move(order),
+                                               write.children(thread),
+                                               preserveChangesAfter));
     else if (!order.empty())
       write.replaceChildren(
           thread, mergeExistingTail(std::move(order), write.children(thread)));
-    if (mergeThreadState)
-      refreshActiveTurn(write, thread);
+    refreshActiveTurn(write, thread);
   }
   return thread;
 }
 
-NodeRef ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess &write,
-                                    const Value::Object &object,
-                                    const NodeRef &thread,
-                                    std::string_view fallbackId,
-                                    bool replaceItems, bool mergeExistingState,
-                                    bool updateCurrentRelation) {
+NodeRef
+ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess &write,
+                            const Value::Object &object, const NodeRef &thread,
+                            std::string_view fallbackId, bool replaceItems,
+                            std::optional<std::uint64_t> preserveChangesAfter,
+                            bool updateCurrentRelation) {
   const std::string id = nestedId(object, fallbackId);
   if (id.empty() || !thread)
     return {};
   NodeRef turn = ensureTurn(write, thread, id);
-  if (mergeExistingState)
-    mergeObject(write, turn, object, "items");
+  mergeObject(write, turn, object, "items", preserveChangesAfter);
   if (const Value::Array *items = arrayMember(object, "items")) {
     std::vector<NodeRef> order;
     order.reserve(items->size());
@@ -2719,43 +2815,50 @@ NodeRef ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess &write,
     for (const Value &value : *items) {
       if (const Value::Object *itemObject = value.asObject()) {
         const std::string itemId = nestedId(*itemObject);
-        const bool existed =
-            !itemId.empty() && write.find(scopedItemNodeId(turn->id(), itemId));
-        NodeRef item = ingestItem(write, *itemObject, turn, {},
-                                  mergeExistingState || !existed);
-        if (item && (mergeExistingState || !existed) &&
-            ordered.insert(item.get()).second)
+        NodeRef item =
+            ingestItem(write, *itemObject, turn, {}, preserveChangesAfter);
+        if (item && ordered.insert(item.get()).second)
           order.emplace_back(std::move(item));
       }
     }
-    if (replaceItems)
+    if (replaceItems) {
+      const std::vector<NodeRef> existing =
+          mergeExistingTail(write.children(turn),
+                            write.related(turn, RelationKind::TurnRootItem));
       write.replaceChildren(
-          turn, mergeLocalTail(write, std::move(order), write.children(turn)));
-    else if (!order.empty())
+          turn, replaceAuthoritativeChildren(write, turn, std::move(order),
+                                             existing, preserveChangesAfter));
+    } else if (!order.empty())
       write.replaceChildren(
           turn, mergeExistingTail(std::move(order), write.children(turn)));
+    if (replaceItems) {
+      NodeRef root;
+      for (const NodeRef &candidate : write.children(turn)) {
+        if (candidate && isUserMessage(write.state(candidate)->fields)) {
+          root = candidate;
+          break;
+        }
+      }
+      replaceSingleRelation(write, turn, RelationKind::TurnRootItem, root);
+    }
   }
   if (updateCurrentRelation)
     updateActiveTurn(write, thread, turn);
   return turn;
 }
 
-NodeRef ProtocolUpdater::ingestItem(NodeGraph::WriteAccess &write,
-                                    const Value::Object &object,
-                                    const NodeRef &turn,
-                                    std::string_view fallbackId,
-                                    bool mergeExistingState) {
+NodeRef
+ProtocolUpdater::ingestItem(NodeGraph::WriteAccess &write,
+                            const Value::Object &object, const NodeRef &turn,
+                            std::string_view fallbackId,
+                            std::optional<std::uint64_t> preserveChangesAfter) {
   const std::string id = nestedId(object, fallbackId);
   if (id.empty() || !turn)
     return {};
   NodeRef item = ensureItem(write, turn, id);
-  if (mergeExistingState) {
-    mergeObject(write, item, object);
-    boundRetainedItemText(write, item, object);
-    correlateLocalPrompt(write, item, object);
-  }
-  if (!mergeExistingState)
-    return item;
+  mergeObject(write, item, object, {}, preserveChangesAfter);
+  boundRetainedItemText(write, item, object, preserveChangesAfter);
+  correlateLocalPrompt(write, item, object);
   if (isUserMessage(object) &&
       write.related(turn, RelationKind::TurnRootItem).empty())
     write.relate(turn, RelationKind::TurnRootItem, item);
@@ -2763,7 +2866,8 @@ NodeRef ProtocolUpdater::ingestItem(NodeGraph::WriteAccess &write,
   const bool hasAgentChildren =
       member(object, "agentThreadId") || member(object, "receiverThreadIds");
   if (hasAgentChildren) {
-    const std::vector<std::string> childThreadIds = agentChildIds(object);
+    const std::vector<std::string> childThreadIds =
+        agentChildIds(write.state(item)->fields);
     const std::vector<NodeRef> previous =
         write.related(item, RelationKind::AgentChildThread);
     std::vector<NodeRef> children;

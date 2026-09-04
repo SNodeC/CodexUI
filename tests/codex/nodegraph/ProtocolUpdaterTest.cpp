@@ -561,23 +561,31 @@ void activeTurnRelationTracksLifecycle() {
            {"threadId", Value("active-thread")},
            {"turn", Value(Value::Object{{"id", Value("stale-active")},
                                         {"status", Value("inProgress")}})}}}));
+  NodeRef staleActive;
+  {
+    auto read = graph.tryRead();
+    staleActive = findTurn(*read, "active-thread", "stale-active");
+  }
   Value::Array replacementTurns{Value(Value::Object{
       {"id", Value("replacement-turn")}, {"status", Value("completed")}})};
-  static_cast<void>(updater.apply(
+  const ApplyResult replacement = updater.apply(
       {DecodedMessageKind::ClientResult, "thread/read",
        ProtocolRequestId("active-thread-replacement"),
        Value::Object{
            {"thread", Value(Value::Object{
                           {"id", Value("active-thread")},
-                          {"turns", Value(std::move(replacementTurns))}})}}}));
+                          {"turns", Value(std::move(replacementTurns))}})}}});
   {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "active-thread"});
-    const NodeRef stale = findTurn(*read, "active-thread", "stale-active");
-    require(thread && stale && !read->parent(stale) &&
+    require(thread && staleActive &&
+                !findTurn(*read, "active-thread", "stale-active") &&
+                read->removed(staleActive) &&
+                std::ranges::find(replacement.change.removed, staleActive) !=
+                    replacement.change.removed.end() &&
                 read->related(thread, RelationKind::ActiveTurn).empty(),
-            "authoritative history replacement cannot retain an omitted "
-            "active turn as the current action target");
+            "authoritative history replacement retires an omitted active "
+            "turn and clears it as the current action target");
   }
 }
 
@@ -1518,44 +1526,50 @@ void turnRootsAndPagedHistoryStayExplicit() {
                           {"type", Value("userMessage")}}),
       Value(Value::Object{{"id", Value("latest-activity")},
                           {"type", Value("agentMessage")}})};
-  static_cast<void>(updater.apply(
+  Value::Object suffixTurn{{"id", Value("long-turn")},
+                           {"items", Value(std::move(retainedSuffix))}};
+  Value::Object suffixThread{
+      {"id", Value("history-thread")},
+      {"turns", Value(Value::Array{Value(std::move(suffixTurn))})}};
+  const ApplyResult suffixReplacement = updater.apply(
       {DecodedMessageKind::ClientResult, "thread/read",
        ProtocolRequestId("suffix-history"),
-       Value::Object{
-           {"thread",
-            Value(Value::Object{
-                {"id", Value("history-thread")},
-                {"turns",
-                 Value(Value::Array{Value(Value::Object{
-                     {"id", Value("long-turn")},
-                     {"items", Value(std::move(retainedSuffix))}})})}})}}}));
+       Value::Object{{"thread", Value(std::move(suffixThread))}}});
+  NodeRef retainedTurn;
+  NodeRef steering;
+  NodeRef latest;
   {
     auto read = graph.tryRead();
     const NodeRef thread = read->find({NodeKind::Thread, "history-thread"});
-    const NodeRef turn = findTurn(*read, "history-thread", "long-turn");
-    const NodeRef steering =
-        findItem(*read, "history-thread", "long-turn", "later-steering");
+    retainedTurn = findTurn(*read, "history-thread", "long-turn");
+    steering = findItem(*read, "history-thread", "long-turn", "later-steering");
+    latest = findItem(*read, "history-thread", "long-turn", "latest-activity");
     const Value *loaded = field(read->state(thread), "historyLoadedItemCount");
-    require(read->children(turn) ==
-                    std::vector<NodeRef>{
-                        steering, findItem(*read, "history-thread", "long-turn",
-                                           "latest-activity")} &&
-                read->related(turn, RelationKind::TurnRootItem) ==
-                    std::vector<NodeRef>{openingPrompt},
-            "a retained suffix cannot promote a later steering message over "
-            "the known opening prompt");
-    require(loaded && loaded->asUInt64() && *loaded->asUInt64() == 3,
-            "loaded history count includes a pinned opening prompt outside "
-            "the current item suffix");
+    require(read->children(retainedTurn) ==
+                    std::vector<NodeRef>{steering, latest} &&
+                read->related(retainedTurn, RelationKind::TurnRootItem) ==
+                    std::vector<NodeRef>{steering} &&
+                !read->find(openingPrompt->id()) &&
+                read->removed(openingPrompt) &&
+                std::ranges::find(suffixReplacement.change.removed,
+                                  openingPrompt) !=
+                    suffixReplacement.change.removed.end(),
+            "an authoritative suffix retires its omitted provider items and "
+            "selects the first retained user message as the current root");
+    require(loaded && loaded->asUInt64() && *loaded->asUInt64() == 2,
+            "loaded history count includes only current authoritative items");
   }
 
   const ApplyResult removedHistory = updater.apply(
       {DecodedMessageKind::ServerNotification, "thread/deleted", std::nullopt,
        Value::Object{{"threadId", Value("history-thread")}}});
-  require(std::find(removedHistory.change.removed.begin(),
-                    removedHistory.change.removed.end(),
-                    openingPrompt) != removedHistory.change.removed.end(),
-          "removing a hydrated thread also removes its pinned opening prompt");
+  require(std::ranges::find(removedHistory.change.removed, retainedTurn) !=
+                  removedHistory.change.removed.end() &&
+              std::ranges::find(removedHistory.change.removed, steering) !=
+                  removedHistory.change.removed.end() &&
+              std::ranges::find(removedHistory.change.removed, latest) !=
+                  removedHistory.change.removed.end(),
+          "removing a hydrated thread retires all remaining current history");
 
   const ProtocolRequestId firstPage("turn-page-1");
   const ApplyResult firstPageRequest = updater.apply(
@@ -2742,6 +2756,12 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
 
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{
+           {"thread", Value(Value::Object{{"id", Value("merging-read-thread")},
+                                          {"cwd", Value("/old/cwd")}})}}}));
+
   const ProtocolRequestId mergingReadId("merging-thread-read");
   const ApplyResult mergingRequest = updater.apply(
       {DecodedMessageKind::ClientRequest, "thread/read", mergingReadId,
@@ -2772,7 +2792,7 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
                              {"items", Value(std::move(snapshotItems))}};
   Value::Array staleLiveItems{
       Value(Value::Object{{"id", Value("live-plan")},
-                          {"type", Value("agentMessage")},
+                          {"type", Value("plan")},
                           {"text", Value("stale snapshot text")}})};
   Value::Object staleLiveTurn{{"id", Value("live-turn")},
                               {"status", Value("completed")},
@@ -2781,6 +2801,7 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
                              Value(std::move(staleLiveTurn))};
   Value::Object mergingThread{{"id", Value("merging-read-thread")},
                               {"name", Value("Stale snapshot name")},
+                              {"cwd", Value("/authoritative/cwd")},
                               {"turns", Value(std::move(snapshotTurns))}};
   DecodedMessage mergingResult{
       DecodedMessageKind::ClientResult, "thread/read", mergingReadId,
@@ -2799,6 +2820,7 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
         findTurn(*read, "merging-read-thread", "snapshot-turn");
     const Value *text = field(read->state(livePlan), "text");
     const Value *name = field(read->state(thread), "name");
+    const Value *cwd = field(read->state(thread), "cwd");
     const Value *type = field(read->state(livePlan), "type");
     require(!read->find(mergingRequest.primary->id()) && thread && liveTurn &&
                 livePlan && snapshotTurn &&
@@ -2806,14 +2828,18 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
                     std::vector<std::string>{"snapshot-turn", "live-turn"} &&
                 read->children(liveTurn) == std::vector<NodeRef>{livePlan} &&
                 text && text->asString() &&
-                *text->asString() == "live plan text" && !type &&
+                *text->asString() == "live plan text" && type &&
+                type->asString() && *type->asString() == "plan" &&
                 read->state(liveTurn)->status == NodeStatus::Running && name &&
                 name->asString() && *name->asString() == "Live thread name" &&
-                std::ranges::find(merged.change.affected, livePlan) ==
-                    merged.change.affected.end(),
-            "an intervening live plan mutation makes the correlated read "
-            "merge its history prefix without replacing newer top-level or "
-            "child state and order");
+                cwd && cwd->asString() &&
+                *cwd->asString() == "/authoritative/cwd" &&
+                std::ranges::find(merged.change.affected, livePlan) !=
+                    merged.change.affected.end() &&
+                read->changedRevision(livePlan) == merged.change.revision,
+            "an intervening live plan mutation preserves newer text while "
+            "hydrating its missing authoritative type without replacing newer "
+            "top-level or turn state");
   }
 
   NodeGraph replacingGraph;
@@ -2825,6 +2851,14 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
            {"turnId", Value("old-turn")},
            {"item", Value(Value::Object{{"id", Value("old-item")},
                                         {"type", Value("agentMessage")}})}}}));
+  NodeRef replacedTurn;
+  NodeRef replacedItem;
+  {
+    auto read = replacingGraph.tryRead();
+    replacedTurn = findTurn(*read, "replacing-read-thread", "old-turn");
+    replacedItem =
+        findItem(*read, "replacing-read-thread", "old-turn", "old-item");
+  }
   const ProtocolRequestId replacingReadId("replacing-thread-read");
   const ApplyResult replacingRequest = replacingUpdater.apply(
       {DecodedMessageKind::ClientRequest, "thread/read", replacingReadId,
@@ -2848,23 +2882,123 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
       DecodedMessageKind::ClientResult, "thread/read", replacingReadId,
       Value::Object{{"thread", Value(std::move(replacingThread))}},
       replacingRequest.primary};
-  static_cast<void>(replacingUpdater.apply(std::move(replacingResult)));
+  const ApplyResult replaced =
+      replacingUpdater.apply(std::move(replacingResult));
   {
     auto read = replacingGraph.tryRead();
     const NodeRef thread =
         read->find({NodeKind::Thread, "replacing-read-thread"});
     const NodeRef freshTurn =
         findTurn(*read, "replacing-read-thread", "fresh-turn");
-    const NodeRef oldTurn =
-        findTurn(*read, "replacing-read-thread", "old-turn");
     const Value *name = field(read->state(thread), "name");
-    require(thread && freshTurn && oldTurn &&
+    require(thread && freshTurn && replacedTurn && replacedItem &&
                 read->children(thread) == std::vector<NodeRef>{freshTurn} &&
-                !read->parent(oldTurn) && name && name->asString() &&
+                !findTurn(*read, "replacing-read-thread", "old-turn") &&
+                !read->find(replacedItem->id()) &&
+                read->removed(replacedTurn) && read->removed(replacedItem) &&
+                std::ranges::find(replaced.change.removed, replacedTurn) !=
+                    replaced.change.removed.end() &&
+                name && name->asString() &&
                 *name->asString() == "Fresh snapshot name",
             "an unrelated thread mutation does not prevent the correlated "
-            "read from replacing stale addressed-thread history");
+            "read from retiring omitted addressed-thread history");
   }
+}
+
+void authoritativeReplacementRetiresItemsAndPreservesLocalTail() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  const auto item = [](std::string id) {
+    return Value(Value::Object{{"id", Value(std::move(id))},
+                               {"type", Value("agentMessage")}});
+  };
+  const auto turn = [&](std::string id, Value::Array items) {
+    return Value(Value::Object{{"id", Value(std::move(id))},
+                               {"items", Value(std::move(items))}});
+  };
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{
+           {"thread",
+            Value(Value::Object{
+                {"id", Value("replace-membership")},
+                {"turns",
+                 Value(Value::Array{
+                     turn("retained-turn",
+                          {item("retained-item"), item("omitted-item")}),
+                     turn("omitted-turn", {item("omitted-child")})})}})}}}));
+
+  NodeRef omittedItem;
+  NodeRef omittedTurn;
+  NodeRef omittedChild;
+  NodeRef localTurn;
+  NodeRef localPrompt;
+  {
+    auto write = graph.write();
+    const NodeRef threadNode =
+        write.find({NodeKind::Thread, "replace-membership"});
+    omittedItem = write.find(scopedItemNodeId(
+        scopedTurnNodeId("replace-membership", "retained-turn"),
+        "omitted-item"));
+    omittedTurn =
+        write.find(scopedTurnNodeId("replace-membership", "omitted-turn"));
+    omittedChild = write.find(
+        scopedItemNodeId(scopedTurnNodeId("replace-membership", "omitted-turn"),
+                         "omitted-child"));
+    NodeState localTurnState;
+    localTurnState.status = NodeStatus::Pending;
+    localTurnState.fields = {{"type", Value("localTurn")},
+                             {"local", Value(true)}};
+    localTurn = write.upsert({NodeKind::Turn, "local-turn:protected"},
+                             std::move(localTurnState));
+    NodeState localPromptState;
+    localPromptState.status = NodeStatus::Pending;
+    localPromptState.fields = {{"type", Value("localPrompt")},
+                               {"local", Value(true)},
+                               {"text", Value("authored locally")}};
+    localPrompt = write.upsert({NodeKind::Item, "local-prompt:protected"},
+                               std::move(localPromptState));
+    write.setParent(threadNode, localTurn);
+    write.setParent(localTurn, localPrompt);
+    static_cast<void>(write.finish());
+  }
+
+  const ProtocolRequestId requestId("replace-membership-read");
+  const ApplyResult request = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/read", requestId,
+       Value::Object{{"threadId", Value("replace-membership")}}});
+  const ApplyResult replacement = updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read", requestId,
+       Value::Object{
+           {"thread",
+            Value(Value::Object{
+                {"id", Value("replace-membership")},
+                {"turns", Value(Value::Array{turn(
+                              "retained-turn", {item("retained-item")})})}})}},
+       request.primary});
+
+  auto read = graph.tryRead();
+  const NodeRef threadNode =
+      read->find({NodeKind::Thread, "replace-membership"});
+  const NodeRef retainedTurn =
+      findTurn(*read, "replace-membership", "retained-turn");
+  require(threadNode && retainedTurn && omittedItem && omittedTurn &&
+              omittedChild && !read->find(omittedItem->id()) &&
+              !read->find(omittedTurn->id()) &&
+              !read->find(omittedChild->id()) && read->removed(omittedItem) &&
+              read->removed(omittedTurn) && read->removed(omittedChild) &&
+              std::ranges::find(replacement.change.removed, omittedItem) !=
+                  replacement.change.removed.end(),
+          "authoritative replacement retires omitted provider items and whole "
+          "provider turns instead of leaving resolvable orphans");
+  require(read->find(localTurn->id()) == localTurn &&
+              read->find(localPrompt->id()) == localPrompt &&
+              read->parent(localTurn) == threadNode &&
+              read->parent(localPrompt) == localTurn &&
+              read->children(threadNode) ==
+                  std::vector<NodeRef>{retainedTurn, localTurn},
+          "authoritative replacement preserves the exact explicit local "
+          "optimistic tail and its stable NodeRefs");
 }
 
 void rollbackAndRevertReplaceAuthoritativeHistory() {
@@ -2887,12 +3021,22 @@ void rollbackAndRevertReplaceAuthoritativeHistory() {
                 {"turns", Value(Value::Array{turn("turn-1", "item-1"),
                                              turn("turn-2", "item-2"),
                                              turn("turn-3", "item-3")})}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("history-mutation")},
+           {"turnId", Value("turn-2")},
+           {"item", Value(Value::Object{{"id", Value("item-2-omitted")},
+                                        {"type", Value("agentMessage")}})}}}));
   NodeRef removedTurn;
   NodeRef removedItem;
+  NodeRef removedRetainedTurnItem;
   {
     auto read = graph.tryRead();
     removedTurn = findTurn(*read, "history-mutation", "turn-3");
     removedItem = findItem(*read, "history-mutation", "turn-3", "item-3");
+    removedRetainedTurnItem =
+        findItem(*read, "history-mutation", "turn-2", "item-2-omitted");
   }
 
   const ProtocolRequestId rollbackId("rollback-history");
@@ -2921,9 +3065,14 @@ void rollbackAndRevertReplaceAuthoritativeHistory() {
                 protocolIds(*read, read->children(threadNode)) ==
                     std::vector<std::string>{"turn-1", "turn-2"} &&
                 !read->find(removedTurn->id()) &&
-                !read->find(removedItem->id()) && read->removed(removedTurn) &&
-                read->removed(removedItem) &&
+                !read->find(removedItem->id()) &&
+                !read->find(removedRetainedTurnItem->id()) &&
+                read->removed(removedTurn) && read->removed(removedItem) &&
+                read->removed(removedRetainedTurnItem) &&
                 std::ranges::find(rolledBack.change.removed, removedTurn) !=
+                    rolledBack.change.removed.end() &&
+                std::ranges::find(rolledBack.change.removed,
+                                  removedRetainedTurnItem) !=
                     rolledBack.change.removed.end(),
             "successful rollback replaces returned history and retires every "
             "superseded turn and item");
@@ -2997,6 +3146,7 @@ int main() {
   lifecycleFactsAndRemovalPreserveThreadHierarchy();
   deletionUnlinksWholeGraph();
   correlatedThreadReadsPreserveOnlyInterveningLiveState();
+  authoritativeReplacementRetiresItemsAndPreservesLocalTail();
   rollbackAndRevertReplaceAuthoritativeHistory();
 
   if (failures != 0) {

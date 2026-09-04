@@ -371,6 +371,93 @@ void hydrationReadinessIsCurrentGraphState() {
   }
 }
 
+void hydrationRequiresUsableAuthoritativeItemType() {
+  NodeGraph graph;
+  ThreadChannels channels;
+  WorkerLogic logic(graph, channels);
+  static_cast<void>(logic.transportEvent("connected"));
+  static_cast<void>(takeWorkerMessages(channels));
+  static_cast<void>(logic.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{
+           {"thread", Value(Value::Object{{"id", Value("typed-hydration")},
+                                          {"status", Value("notLoaded")}})}}}));
+  static_cast<void>(logic.apply(
+      {DecodedMessageKind::ServerNotification, "item/plan/delta", std::nullopt,
+       Value::Object{{"threadId", Value("typed-hydration")},
+                     {"turnId", Value("typed-turn")},
+                     {"itemId", Value("typed-plan")},
+                     {"delta", Value("newer streamed plan")}}}));
+  static_cast<void>(takeWorkerMessages(channels));
+
+  NodeRef thread;
+  {
+    auto read = graph.tryRead();
+    thread = read->find({NodeKind::Thread, "typed-hydration"});
+  }
+  const ProtocolRequestId incompleteId("incomplete-hydration");
+  WorkerApplyResult incompleteRequest = logic.applyDetailed(
+      {DecodedMessageKind::ClientRequest, "thread/read", incompleteId,
+       Value::Object{{"threadId", Value("typed-hydration")}}});
+  static_cast<void>(takeWorkerMessages(channels));
+  Value::Object incompleteTurn{{"id", Value("typed-turn")}};
+  Value::Object incompleteThread{
+      {"id", Value("typed-hydration")},
+      {"turns", Value(Value::Array{Value(std::move(incompleteTurn))})}};
+  DecodedMessage incompleteResult{
+      DecodedMessageKind::ClientResult, "thread/read", incompleteId,
+      Value::Object{{"thread", Value(std::move(incompleteThread))}},
+      incompleteRequest.primary};
+  require(logic.completeThreadHydration(std::move(incompleteResult), thread,
+                                        "ready") == ChannelSendStatus::Accepted,
+          "an incomplete hydration result is reduced atomically");
+  static_cast<void>(takeWorkerMessages(channels));
+  {
+    auto read = graph.tryRead();
+    const auto state = read->state(thread);
+    require(stringFieldEquals(state, "hydrationState", "failed") &&
+                stringFieldEquals(
+                    state, "hydrationError",
+                    "Thread hydration returned incomplete item identity"),
+            "a provider item without authoritative type cannot make hydration "
+            "ready");
+  }
+
+  const ProtocolRequestId completeId("complete-typed-hydration");
+  WorkerApplyResult completeRequest = logic.applyDetailed(
+      {DecodedMessageKind::ClientRequest, "thread/read", completeId,
+       Value::Object{{"threadId", Value("typed-hydration")}}});
+  static_cast<void>(takeWorkerMessages(channels));
+  Value::Object completeItem{{"id", Value("typed-plan")},
+                             {"type", Value("plan")},
+                             {"text", Value("newer streamed plan")}};
+  Value::Object completeTurn{
+      {"id", Value("typed-turn")},
+      {"items", Value(Value::Array{Value(std::move(completeItem))})}};
+  Value::Object completeThread{
+      {"id", Value("typed-hydration")},
+      {"turns", Value(Value::Array{Value(std::move(completeTurn))})}};
+  DecodedMessage completeResult{
+      DecodedMessageKind::ClientResult, "thread/read", completeId,
+      Value::Object{{"thread", Value(std::move(completeThread))}},
+      completeRequest.primary};
+  require(logic.completeThreadHydration(std::move(completeResult), thread,
+                                        "ready") == ChannelSendStatus::Accepted,
+          "a complete typed hydration result is reduced atomically");
+  static_cast<void>(takeWorkerMessages(channels));
+  {
+    auto read = graph.tryRead();
+    const NodeRef item = read->find(scopedItemNodeId(
+        scopedTurnNodeId("typed-hydration", "typed-turn"), "typed-plan"));
+    require(
+        item && stringFieldEquals(read->state(item), "type", "plan") &&
+            stringFieldEquals(read->state(thread), "hydrationState", "ready") &&
+            !field(read->state(thread), "hydrationError"),
+        "hydration becomes ready only after the same item has usable "
+        "authoritative identity and type");
+  }
+}
+
 void graphNotificationSaturationCoalesces() {
   NodeGraph graph;
   ThreadChannels channels;
@@ -1916,6 +2003,7 @@ int main() {
   connectionStateAndGenerationsStayCurrent();
   stateNeutralMessagesDoNotWakeQt();
   hydrationReadinessIsCurrentGraphState();
+  hydrationRequiresUsableAuthoritativeItemType();
   graphNotificationSaturationCoalesces();
   uiDetachAcknowledgementIsRevisionNeutral();
   saturatedEffectsHaveCurrentGraphFallbacks();
