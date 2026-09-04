@@ -666,6 +666,8 @@ bool testMessageIdentityPalette() {
 }
 
 bool testActiveWorkBordersFollowStatus() {
+  const QString originalStyleSheet = qApp->styleSheet();
+  qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
   VisibleCardData command{
       AuthoritativeItemKey{"active-border", "turn", "command"},
       CardKind::CommandExecution,
@@ -674,17 +676,26 @@ bool testActiveWorkBordersFollowStatus() {
       "command",
       CommandExecutionData{"sleep 1", {}, "inProgress", {}, {}, {}}};
   ConversationCard commandCard(command);
+  commandCard.resize(560, commandCard.sizeHint().height());
+  commandCard.show();
+  spin();
   auto *commandStatus =
       commandCard.findChild<QLabel *>(QStringLiteral("commandStatus"));
+  const auto emphasizedAtMidpoint = [](ConversationCard &card) {
+    const QImage frame = card.grab().toImage();
+    return frame.pixelColor(1, frame.height() / 2).red() < 180;
+  };
   bool result = expect(
       commandCard.property("activeWork").toBool() && commandStatus &&
+          emphasizedAtMidpoint(commandCard) &&
           commandStatus->property("tone").toString() ==
               QStringLiteral("active"),
       "a running command uses the emphasized card border and active header "
       "status");
   std::get<CommandExecutionData>(command.payload).status = "completed";
   result &= expect(commandCard.apply(command) &&
-                       !commandCard.property("activeWork").toBool(),
+                       !commandCard.property("activeWork").toBool() &&
+                       !emphasizedAtMidpoint(commandCard),
                    "a completed command returns to the normal card border");
 
   VisibleCardData image{AuthoritativeItemKey{"active-border", "turn", "image"},
@@ -710,6 +721,7 @@ bool testActiveWorkBordersFollowStatus() {
           imageStatus->property("tone").toString() == QStringLiteral("success"),
       "a loaded figure returns to the normal card border and success header "
       "status");
+  qApp->setStyleSheet(originalStyleSheet);
   return result;
 }
 
@@ -5034,6 +5046,11 @@ bool testPausedMixedCardBurstKeepsLeafAnchorAndParents() {
   for (const nodegraph::NodeRef &item : incoming)
     allNested = allNested && graphAttachment(item) &&
                 rootIdentity->isAncestorOf(graphAttachment(item)->widget);
+  auto *runningCommandCard =
+      graphAttachment(incoming[2])
+          ? qobject_cast<ConversationCard *>(
+                graphAttachment(incoming[2])->widget.data())
+          : nullptr;
   const int anchorTopAfter =
       anchorWidget ? anchorWidget->mapTo(view.viewport(), QPoint{}).y() : 0;
   const bool paintedStable = std::ranges::all_of(
@@ -5059,6 +5076,8 @@ bool testPausedMixedCardBurstKeepsLeafAnchorAndParents() {
 
   return expect(
       initialReady && anchorWidget && burstReady && allNested &&
+          runningCommandCard &&
+          runningCommandCard->property("activeWork").toBool() &&
           rootIdentity == graphAttachment(root)->widget &&
           reviewIdentity && graphAttachment(review) &&
           graphAttachment(review)->widget == reviewIdentity &&
@@ -5137,8 +5156,13 @@ bool testPausedNormalPromptTurnMaterializesWithoutAnchorJump() {
   nodegraph::GraphChange appended;
   {
     auto write = graph.write();
+    nodegraph::NodeState turnState;
+    turnState.status = nodegraph::NodeStatus::Pending;
+    turnState.fields.emplace("type", "localTurn");
+    turnState.fields.emplace("local", true);
     nodegraph::NodeRef turn = write.upsert(
-        {nodegraph::NodeKind::Turn, "paused-new-prompt-current-turn"});
+        {nodegraph::NodeKind::Turn, "paused-new-prompt-current-turn"},
+        std::move(turnState));
     nodegraph::NodeState promptState;
     promptState.status = nodegraph::NodeStatus::Pending;
     promptState.fields.emplace("type", "localPrompt");
@@ -5165,6 +5189,11 @@ bool testPausedNormalPromptTurnMaterializesWithoutAnchorJump() {
   spin(40);
   paints.active = false;
   const auto anchorAfter = firstVisible(view);
+  auto *promptCard =
+      graphAttachment(prompt)
+          ? qobject_cast<ConversationCard *>(
+                graphAttachment(prompt)->widget.data())
+          : nullptr;
   const bool paintedStable = std::ranges::all_of(
       paints.anchors, [&anchorBefore](const auto &anchor) {
         return anchor.first.empty() ||
@@ -5214,6 +5243,8 @@ bool testPausedNormalPromptTurnMaterializesWithoutAnchorJump() {
 
   return expect(
       initialReady && !anchorBefore.first.empty() && promptReady && retained &&
+          promptCard &&
+          promptCard->property("authoritativeTurnActive").toBool() &&
           view.property("bulkMaterializationCommitAttempts").toULongLong() >
               atomicAttemptsBefore &&
           paints.anchors.size() <= 1 && view.viewport()->updatesEnabled() &&
@@ -5224,8 +5255,9 @@ bool testPausedNormalPromptTurnMaterializesWithoutAnchorJump() {
           anchorAfter.first == anchorBefore.first &&
           std::abs(anchorAfter.second - anchorBefore.second) <= 1 &&
           paintedStable && graphPassBudgetsWereRespected(view),
-      "a normal prompt appends and immediately materializes its new Turn/You "
-      "card without moving or repaint-jumping a paused history viewport");
+      "a normal prompt appends and immediately materializes its active, "
+      "emphasized Turn/You card without moving or repaint-jumping a paused "
+      "history viewport");
 }
 
 bool testGraphHistoryPagingAndPausedTailGrowth() {
@@ -6490,6 +6522,8 @@ int main(int argc, char **argv) {
     return testMutableCardsAndCommandOutput() ? 0 : 1;
   if (qEnvironmentVariableIsSet("CODEXUI_FOLLOW_TESTS"))
     return testFollowPauseAndStableAnchor() ? 0 : 1;
+  if (qEnvironmentVariableIsSet("CODEXUI_BORDER_TESTS"))
+    return testActiveWorkBordersFollowStatus() ? 0 : 1;
   if (qEnvironmentVariableIsSet("CODEXUI_SETTLEMENT_TESTS")) {
     bool focused = testRetainedNestedFinalAnswerGeometrySettlement();
     focused &= testBottomAnchoredCommandOutputGrowth();

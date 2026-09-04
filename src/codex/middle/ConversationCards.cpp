@@ -1740,7 +1740,7 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QColor(QStringLiteral("#98a2b3")), 1.5));
+    painter.setPen(QPen(QColor(QStringLiteral("#98a2b3")), 2.0));
     painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0), 9.0,
                             9.0);
     return;
@@ -1749,7 +1749,7 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QColor(QStringLiteral("#6f98e8")), 1.5));
+    painter.setPen(QPen(QColor(QStringLiteral("#6f98e8")), 2.0));
     painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0), 8.0,
                             8.0);
   };

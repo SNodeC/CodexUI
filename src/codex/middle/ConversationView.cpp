@@ -211,6 +211,17 @@ std::string graphStatus(const nodegraph::NodeState &state) {
   return {};
 }
 
+bool graphTurnIsActive(const nodegraph::NodeState &state) {
+  if (state.status == nodegraph::NodeStatus::Running)
+    return true;
+  // Once Send has been admitted, its provisional local turn is the user's
+  // active Turn/You surface even before the app-server returns the canonical
+  // turn id. Do not extend this optimistic presentation to provider-owned
+  // pending history.
+  return state.status == nodegraph::NodeStatus::Pending &&
+         graphBool(graphField(state, "local"));
+}
+
 std::optional<std::int64_t> graphInteger(const nodegraph::Value *value) {
   if (!value)
     return std::nullopt;
@@ -1646,8 +1657,7 @@ void ConversationView::runGraphRefresh() {
         }
         const std::shared_ptr<const nodegraph::NodeState> turnState =
             read->state(turn->node);
-        const bool active =
-            turnState && turnState->status == nodegraph::NodeStatus::Running;
+        const bool active = turnState && graphTurnIsActive(*turnState);
         if (turn->active != active) {
           turn->active = active;
           turnActivityChanges.emplace_back(turn->node, active);
@@ -2161,8 +2171,7 @@ void ConversationView::runGraphRefresh() {
             inserted->protocolId =
                 turnState ? nodegraph::protocolCanonicalId(*turnState, turnNode)
                           : turnNode->id().canonical;
-            inserted->active = turnState && turnState->status ==
-                                                nodegraph::NodeStatus::Running;
+            inserted->active = turnState && graphTurnIsActive(*turnState);
             inserted->structureRevision =
                 read->structureChangedRevision(turnNode);
             inserted->knownChildCount = read->childCount(turnNode);
