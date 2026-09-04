@@ -100,6 +100,7 @@ enum class RelationKind : std::uint8_t {
   PendingPrompt,
   PromptMaterialization,
   ProcessOwner,
+  ReviewTarget,
   ActiveTurn,
   UiSelectionTarget,
 };

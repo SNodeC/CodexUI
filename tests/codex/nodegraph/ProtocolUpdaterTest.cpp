@@ -156,31 +156,126 @@ void catalogIsComplete() {
 }
 
 void everyKnownMethodDispatches() {
-  NodeGraph graph;
-  ProtocolUpdater updater(graph);
   std::uint64_t ordinal = 0;
   for (const MethodDescriptor &descriptor : protocolMethods()) {
     ++ordinal;
+    NodeGraph graph;
+    ProtocolUpdater updater(graph);
+    const std::string suffix = std::to_string(ordinal);
     DecodedMessage message;
     message.kind = decodedKind(descriptor.direction);
     message.method = std::string(descriptor.method);
-    message.payload.emplace("threadId",
-                            Value("thread-" + std::to_string(ordinal)));
-    message.payload.emplace("turnId", Value("turn-" + std::to_string(ordinal)));
-    message.payload.emplace("itemId", Value("item-" + std::to_string(ordinal)));
+    message.payload = {
+        {"semanticMarker", Value("marker-" + suffix)},
+        {"threadId", Value("thread-" + suffix)},
+        {"turnId", Value("turn-" + suffix)},
+        {"itemId", Value("item-" + suffix)},
+        {"targetItemId", Value("target-" + suffix)},
+        {"reviewId", Value("review-" + suffix)},
+        {"projectId", Value("project-" + suffix)},
+        {"processId", Value("process-" + suffix)},
+        {"watchId", Value("watch-" + suffix)},
+        {"sessionId", Value("session-" + suffix)},
+        {"realtimeSessionId", Value("realtime-" + suffix)},
+        {"subscriptionId", Value("subscription-" + suffix)},
+        {"importId", Value("import-" + suffix)},
+        {"name", Value("name-" + suffix)},
+        {"delta", Value("delta-" + suffix)},
+        {"deltaBase64", Value("ZGVsdGE=")},
+        {"stream", Value("stdout")},
+        {"status", Value("running")},
+        {"thread", Value(Value::Object{{"id", Value("thread-" + suffix)},
+                                       {"turns", Value(Value::Array{})}})},
+        {"turn", Value(Value::Object{{"id", Value("turn-" + suffix)},
+                                     {"items", Value(Value::Array{})}})},
+        {"item", Value(Value::Object{
+                     {"id", Value("item-" + suffix)},
+                     {"type", Value("agentMessage")},
+                     {"realtimeSessionId", Value("realtime-" + suffix)}})},
+        {"run", Value(Value::Object{{"id", Value("hook-" + suffix)},
+                                    {"status", Value("running")}})},
+        {"data", Value(Value::Array{Value(
+                     Value::Object{{"id", Value("entry-" + suffix)},
+                                   {"name", Value("entry-" + suffix)}})})},
+        {"requestId", Value(std::int64_t{9000})}};
     if (descriptor.direction == ProtocolDirection::ClientRequest ||
         descriptor.direction == ProtocolDirection::ServerRequest)
       message.requestId.emplace(std::int64_t(ordinal));
+
+    if (descriptor.direction == ProtocolDirection::ServerNotification &&
+        descriptor.method == "thread/deleted") {
+      auto write = graph.write();
+      static_cast<void>(write.upsert({NodeKind::Thread, "thread-" + suffix}));
+      static_cast<void>(write.finish());
+    }
+    if (descriptor.direction == ProtocolDirection::ServerNotification &&
+        descriptor.method == "serverRequest/resolved") {
+      static_cast<void>(updater.apply(
+          {DecodedMessageKind::ServerRequest,
+           "item/commandExecution/requestApproval", ProtocolRequestId(9000),
+           Value::Object{{"threadId", Value("thread-" + suffix)}}}));
+    }
+
     const std::uint64_t before = graph.publishedRevision();
     const ApplyResult result = updater.apply(std::move(message));
     require(result.knownMethod, "known catalog method dispatches as known");
     require(result.disposition == descriptor.disposition,
             "dispatch returns the catalog disposition");
-    if (descriptor.disposition ==
-        MessageDisposition::IntentionallyStateNeutral) {
+    if (descriptor.direction == ProtocolDirection::ClientRequest) {
+      auto read = graph.tryRead();
+      const auto state = result.primary ? read->state(result.primary) : nullptr;
+      const Value *requestPayload = field(state, "requestPayload");
+      const Value *marker =
+          objectField(requestPayload ? requestPayload->asObject() : nullptr,
+                      "semanticMarker");
+      require(
+          result.primary && result.primary->id().kind == NodeKind::Operation &&
+              state && state->status == NodeStatus::Pending && marker &&
+              marker->asString() && *marker->asString() == "marker-" + suffix,
+          "every client request retains its payload in one pending "
+          "operation");
+      read.reset();
+      const ApplyResult completed = updater.apply(
+          {DecodedMessageKind::ClientResult, std::string(descriptor.method),
+           ProtocolRequestId(static_cast<std::int64_t>(ordinal)),
+           Value::Object{{"resultMarker", Value("result-" + suffix)}},
+           result.primary});
+      read = graph.tryRead();
+      require(
+          completed.knownMethod &&
+              !read->find({NodeKind::Operation,
+                           ProtocolRequestId(static_cast<std::int64_t>(ordinal))
+                               .canonical()}),
+          "every client result consumes its exact request correlation");
+    } else if (descriptor.direction == ProtocolDirection::ServerRequest) {
+      auto read = graph.tryRead();
+      const auto state = result.primary ? read->state(result.primary) : nullptr;
+      const Value *payload = field(state, "payload");
+      const Value *marker = objectField(payload ? payload->asObject() : nullptr,
+                                        "semanticMarker");
+      require(
+          result.primary &&
+              result.primary->id().kind == NodeKind::Interaction && state &&
+              state->status == NodeStatus::Pending && marker &&
+              marker->asString() && *marker->asString() == "marker-" + suffix &&
+              !read->related(result.primary, RelationKind::InteractionTarget)
+                   .empty(),
+          "every server request retains its payload and target relation");
+      read.reset();
+      const NodeRef interaction = result.primary;
+      static_cast<void>(updater.resolveInteraction(interaction, true));
+      read = graph.tryRead();
+      require(!read->find(interaction->id()),
+              "every reverse interaction resolves by exact NodeRef");
+    } else if (descriptor.disposition ==
+               MessageDisposition::IntentionallyStateNeutral) {
       require(result.change.empty(), "state-neutral method changes no nodes");
       require(graph.publishedRevision() == before,
               "state-neutral method does not publish a revision");
+    } else {
+      require(!result.change.empty() && graph.publishedRevision() > before,
+              "state-bearing notification publishes concrete state: " +
+                  std::string(descriptor.method));
     }
   }
 }
@@ -2503,6 +2598,259 @@ void successfulRefreshesRetireInvalidationsAndConfigWritesInvalidate() {
   }
 }
 
+void catalogResultsMaterializeNaturalEntityKinds() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  const auto result = [&](std::string method, Value::Object payload) {
+    return updater.apply({DecodedMessageKind::ClientResult, std::move(method),
+                          std::nullopt, std::move(payload)});
+  };
+
+  static_cast<void>(result(
+      "model/list",
+      {{"data", Value(Value::Array{
+                    Value(Value::Object{{"id", Value("model-a")},
+                                        {"displayName", Value("Model A")}}),
+                    Value(Value::Object{{"id", Value("model-b")},
+                                        {"displayName", Value("Model B")}})})},
+       {"nextCursor", Value("models-next")}}));
+  static_cast<void>(
+      result("permissionProfile/list",
+             {{"data", Value(Value::Array{Value(Value::Object{
+                           {"id", Value("trusted")},
+                           {"description", Value("Trusted profile")},
+                           {"allowed", Value(true)}})})}}));
+  static_cast<void>(
+      result("skills/list",
+             {{"data", Value(Value::Array{Value(Value::Object{
+                           {"cwd", Value("/workspace")},
+                           {"skills", Value(Value::Array{Value(Value::Object{
+                                          {"name", Value("review")},
+                                          {"path", Value("/workspace/review")},
+                                          {"enabled", Value(true)}})})}})})}}));
+  static_cast<void>(
+      result("hooks/list",
+             {{"data", Value(Value::Array{Value(Value::Object{
+                           {"cwd", Value("/workspace")},
+                           {"hooks", Value(Value::Array{Value(Value::Object{
+                                         {"key", Value("after-turn")},
+                                         {"eventName", Value("afterAgent")},
+                                         {"enabled", Value(true)}})})}})})}}));
+  static_cast<void>(
+      result("plugin/list",
+             {{"marketplaces",
+               Value(Value::Array{Value(Value::Object{
+                   {"name", Value("local")},
+                   {"plugins", Value(Value::Array{Value(Value::Object{
+                                   {"id", Value("plugin-a")},
+                                   {"name", Value("Plugin A")}})})}})})}}));
+  static_cast<void>(result(
+      "app/list",
+      {{"data", Value(Value::Array{Value(Value::Object{
+                    {"id", Value("app-a")}, {"name", Value("App A")}})})}}));
+  static_cast<void>(result("mcpServerStatus/list",
+                           {{"data", Value(Value::Array{Value(Value::Object{
+                                         {"name", Value("server-a")},
+                                         {"status", Value("connected")}})})}}));
+
+  NodeRef retainedModel;
+  {
+    auto read = graph.tryRead();
+    const NodeRef models = read->find({NodeKind::Catalog, "model"});
+    const NodeRef profiles =
+        read->find({NodeKind::Catalog, "permissionProfile"});
+    const NodeRef skills = read->find({NodeKind::Catalog, "skills"});
+    const NodeRef hooks = read->find({NodeKind::Catalog, "hooks"});
+    const NodeRef plugins = read->find({NodeKind::Catalog, "plugin"});
+    const NodeRef apps = read->find({NodeKind::Catalog, "app"});
+    const NodeRef servers = read->find({NodeKind::Catalog, "mcpServer"});
+    const auto modelChildren = read->children(models);
+    retainedModel = modelChildren.size() == 2 ? modelChildren[1] : NodeRef{};
+    require(models && profiles && skills && hooks && plugins && apps &&
+                servers && modelChildren.size() == 2 &&
+                modelChildren[0]->id().kind == NodeKind::CatalogEntry &&
+                read->children(profiles).size() == 1 &&
+                read->children(profiles)[0]->id().kind ==
+                    NodeKind::PermissionProfile &&
+                read->children(skills).size() == 1 &&
+                read->children(skills)[0]->id().kind == NodeKind::Skill &&
+                read->children(hooks).size() == 1 &&
+                read->children(hooks)[0]->id().kind == NodeKind::Hook &&
+                read->children(plugins).size() == 1 &&
+                read->children(plugins)[0]->id().kind == NodeKind::Plugin &&
+                read->children(apps).size() == 1 &&
+                read->children(apps)[0]->id().kind == NodeKind::App &&
+                read->children(servers).size() == 1 &&
+                read->children(servers)[0]->id().kind == NodeKind::McpServer &&
+                field(read->state(models), "nextCursor") &&
+                field(read->state(read->children(skills)[0]), "catalogScope"),
+            "catalog envelopes retain paging facts while concrete ordered "
+            "children use every declared natural entity kind");
+  }
+
+  static_cast<void>(result(
+      "model/list",
+      {{"data",
+        Value(Value::Array{
+            Value(Value::Object{{"id", Value("model-b")},
+                                {"displayName", Value("Model B2")}}),
+            Value(Value::Object{{"id", Value("model-c")},
+                                {"displayName", Value("Model C")}})})}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef models = read->find({NodeKind::Catalog, "model"});
+    const auto children = read->children(models);
+    const auto retainedState =
+        retainedModel ? read->state(retainedModel) : nullptr;
+    require(children.size() == 2,
+            "authoritative catalog replacement has two current rows");
+    require(!children.empty() && children[0] == retainedModel,
+            "authoritative catalog replacement preserves stable retained "
+            "NodeRefs and first-to-last provider order");
+    require(field(retainedState, "displayName") &&
+                field(retainedState, "displayName")->asString() &&
+                *field(retainedState, "displayName")->asString() == "Model B2",
+            "authoritative catalog replacement refreshes retained row state");
+    require(!read->find({NodeKind::CatalogEntry, "scope:5:model:7:model-a"}),
+            "authoritative catalog replacement retires omitted entity rows");
+  }
+}
+
+void specializedNotificationFamiliesKeepCurrentSemantics() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  const auto notify = [&](std::string method, Value::Object payload) {
+    return updater.apply({DecodedMessageKind::ServerNotification,
+                          std::move(method), std::nullopt, std::move(payload)});
+  };
+
+  static_cast<void>(notify(
+      "item/started",
+      {{"threadId", Value("semantic-notifications")},
+       {"turnId", Value("turn-1")},
+       {"item", Value(Value::Object{{"id", Value("target-1")},
+                                    {"type", Value("commandExecution")}})}}));
+  static_cast<void>(
+      notify("item/autoApprovalReview/started",
+             {{"threadId", Value("semantic-notifications")},
+              {"turnId", Value("turn-1")},
+              {"targetItemId", Value("target-1")},
+              {"reviewId", Value("review-1")},
+              {"action", Value(Value::Object{{"type", Value("command")}})},
+              {"review", Value(Value::Object{{"status", Value("pending")}})}}));
+
+  NodeRef review;
+  NodeRef target;
+  {
+    auto read = graph.tryRead();
+    const NodeRef turn = findTurn(*read, "semantic-notifications", "turn-1");
+    review = findItem(*read, "semantic-notifications", "turn-1", "review-1");
+    target = findItem(*read, "semantic-notifications", "turn-1", "target-1");
+    const auto state = review ? read->state(review) : nullptr;
+    require(turn && review && target && state &&
+                state->status == NodeStatus::Running && field(state, "type") &&
+                field(state, "type")->asString() &&
+                *field(state, "type")->asString() == "autoApprovalReview" &&
+                read->related(review, RelationKind::ReviewTarget) ==
+                    std::vector<NodeRef>{target},
+            "auto-review start creates one concrete review item related to "
+            "its exact target item");
+  }
+  static_cast<void>(notify(
+      "item/autoApprovalReview/completed",
+      {{"threadId", Value("semantic-notifications")},
+       {"turnId", Value("turn-1")},
+       {"targetItemId", Value("target-1")},
+       {"reviewId", Value("review-1")},
+       {"decisionSource", Value("guardian")},
+       {"review", Value(Value::Object{{"status", Value("approved")}})}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef current =
+        findItem(*read, "semantic-notifications", "turn-1", "review-1");
+    const auto state = current ? read->state(current) : nullptr;
+    require(current == review && state &&
+                state->status == NodeStatus::Completed &&
+                field(state, "decisionSource") &&
+                read->related(current, RelationKind::ReviewTarget) ==
+                    std::vector<NodeRef>{target},
+            "auto-review completion updates the stable review and preserves "
+            "its target relation");
+  }
+
+  static_cast<void>(notify("item/reasoning/summaryPartAdded",
+                           {{"threadId", Value("semantic-notifications")},
+                            {"turnId", Value("turn-1")},
+                            {"itemId", Value("reasoning-1")},
+                            {"summaryIndex", Value(2)}}));
+  static_cast<void>(notify("item/reasoning/summaryTextDelta",
+                           {{"threadId", Value("semantic-notifications")},
+                            {"turnId", Value("turn-1")},
+                            {"itemId", Value("reasoning-1")},
+                            {"summaryIndex", Value(2)},
+                            {"delta", Value("third part")}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef reasoning =
+        findItem(*read, "semantic-notifications", "turn-1", "reasoning-1");
+    const auto state = reasoning ? read->state(reasoning) : nullptr;
+    const Value *summary = field(state, "summary");
+    const Value::Array *parts = summary ? summary->asArray() : nullptr;
+    require(parts && parts->size() == 3 && (*parts)[2].asString() &&
+                *(*parts)[2].asString() == "third part",
+            "summary part boundaries materialize their indexed empty slot "
+            "before later text deltas append");
+  }
+
+  static_cast<void>(notify("autoApprovalReview/strictReviewRequired",
+                           {{"threadId", Value("semantic-notifications")},
+                            {"turnId", Value("turn-1")},
+                            {"startedAtMs", Value(15)}}));
+  static_cast<void>(notify("thread/environment/connected",
+                           {{"threadId", Value("semantic-notifications")},
+                            {"environmentId", Value("environment-1")}}));
+  static_cast<void>(notify("thread/environment/disconnected",
+                           {{"threadId", Value("semantic-notifications")},
+                            {"environmentId", Value("environment-1")},
+                            {"reason", Value("closed")}}));
+  static_cast<void>(
+      notify("thread/compacted", {{"threadId", Value("semantic-notifications")},
+                                  {"turnId", Value("turn-1")}}));
+  static_cast<void>(
+      notify("modelProvider/authRecoveryStarted",
+             {{"provider", Value("openai")}, {"attempt", Value(2)}}));
+  static_cast<void>(
+      notify("modelProvider/authRecoveryCompleted",
+             {{"provider", Value("openai")}, {"recovered", Value(true)}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread =
+        read->find({NodeKind::Thread, "semantic-notifications"});
+    const NodeRef turn = findTurn(*read, "semantic-notifications", "turn-1");
+    const NodeRef provider = read->find({NodeKind::Catalog, "modelProvider"});
+    const auto threadState = thread ? read->state(thread) : nullptr;
+    const auto turnState = turn ? read->state(turn) : nullptr;
+    const auto providerState = provider ? read->state(provider) : nullptr;
+    require(threadState && turnState && providerState &&
+                field(turnState, "strictReviewRequired") &&
+                field(turnState, "strictReviewRequired")->asBool() &&
+                *field(turnState, "strictReviewRequired")->asBool() &&
+                field(threadState, "environmentConnected") &&
+                field(threadState, "environmentConnected")->asBool() &&
+                !*field(threadState, "environmentConnected")->asBool() &&
+                field(threadState, "environmentStatus") &&
+                field(threadState, "compacted") &&
+                field(threadState, "lastCompactedTurnId") &&
+                field(providerState, "authRecoveryActive") &&
+                field(providerState, "authRecoveryActive")->asBool() &&
+                !*field(providerState, "authRecoveryActive")->asBool() &&
+                field(providerState, "recovered") &&
+                providerState->status == NodeStatus::Completed,
+            "review escalation, environment, compaction, and provider-auth "
+            "families retain explicit current lifecycle facts");
+  }
+}
+
 void reusedWireIdsRequireExactCurrentNodes() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -3580,6 +3928,8 @@ int main() {
   exactRequestTargetsOverridePayloadAddressingAndLifetime();
   accountFacetsConvergeAndRateLimitPatchesStaySparse();
   successfulRefreshesRetireInvalidationsAndConfigWritesInvalidate();
+  catalogResultsMaterializeNaturalEntityKinds();
+  specializedNotificationFamiliesKeepCurrentSemantics();
   reusedWireIdsRequireExactCurrentNodes();
   keyedRuntimeNotificationsKeepIndependentCurrentState();
   turnErrorsUpdateAddressedStateWithoutLosingTheNotice();

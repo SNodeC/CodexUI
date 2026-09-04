@@ -573,6 +573,12 @@ void appendIndexedField(NodeGraph::WriteAccess &write, const NodeRef &node,
 void appendSemanticDelta(NodeGraph::WriteAccess &write, const NodeRef &item,
                          std::string_view method,
                          const Value::Object &payload) {
+  if (method == "item/reasoning/summaryPartAdded") {
+    appendIndexedField(write, item, "summary",
+                       indexValue(member(payload, "summaryIndex")).value_or(0),
+                       {});
+    return;
+  }
   const std::string delta = canonicalValue(member(payload, "delta"));
   if (delta.empty())
     return;
@@ -658,6 +664,7 @@ bool beginsWith(std::string_view value, std::string_view prefix) {
 bool isItemDeltaMethod(std::string_view method) {
   return method == "item/agentMessage/delta" || method == "item/plan/delta" ||
          method == "item/reasoning/summaryTextDelta" ||
+         method == "item/reasoning/summaryPartAdded" ||
          method == "item/reasoning/textDelta" ||
          method == "item/commandExecution/outputDelta" ||
          method == "item/fileChange/outputDelta";
@@ -720,6 +727,218 @@ NodeKind kindForMethod(std::string_view method) {
 std::string catalogKey(std::string_view method) {
   const std::size_t slash = method.find('/');
   return std::string(method.substr(0, slash));
+}
+
+struct CatalogEntitySeed final {
+  NodeKind kind = NodeKind::CatalogEntry;
+  const Value::Object *fields = nullptr;
+  std::string scope;
+};
+
+std::string catalogEntityId(const Value::Object &fields) {
+  constexpr std::array names{
+      std::string_view("id"),         std::string_view("model"),
+      std::string_view("key"),        std::string_view("name"),
+      std::string_view("path"),       std::string_view("connectorId"),
+      std::string_view("runtimeName")};
+  return firstId(fields, names);
+}
+
+void appendDirectCatalogEntries(std::vector<CatalogEntitySeed> &entries,
+                                const Value::Array *values, NodeKind kind,
+                                std::string_view scope = {}) {
+  if (!values)
+    return;
+  entries.reserve(entries.size() + values->size());
+  for (const Value &value : *values) {
+    if (const Value::Object *object = value.asObject())
+      entries.push_back({kind, object, std::string(scope)});
+  }
+}
+
+// Catalog envelopes retain cursors/errors on their Catalog node. Concrete
+// rows live as ordered child nodes so declared entity kinds are not opaque
+// blobs and stable NodeRefs survive ordinary refreshes.
+bool applyNaturalCatalogSnapshot(NodeGraph::WriteAccess &write,
+                                 const DecodedMessage &message) {
+  const std::string_view method = message.method;
+  const bool appNotification =
+      message.kind == DecodedMessageKind::ServerNotification &&
+      method == "app/list/updated";
+  if (message.kind != DecodedMessageKind::ClientResult && !appNotification)
+    return false;
+
+  std::string_view catalogId;
+  NodeKind directKind = NodeKind::CatalogEntry;
+  const Value::Array *directEntries = nullptr;
+  std::vector<CatalogEntitySeed> entries;
+
+  if (method == "model/list") {
+    catalogId = "model";
+    directEntries = arrayMember(message.payload, "data");
+  } else if (method == "permissionProfile/list") {
+    catalogId = "permissionProfile";
+    directKind = NodeKind::PermissionProfile;
+    directEntries = arrayMember(message.payload, "data");
+  } else if (method == "experimentalFeature/list") {
+    catalogId = "experimentalFeature";
+    directEntries = arrayMember(message.payload, "data");
+  } else if (method == "collaborationMode/list") {
+    catalogId = "collaborationMode";
+    directEntries = arrayMember(message.payload, "data");
+  } else if (method == "mcpServerStatus/list") {
+    catalogId = "mcpServer";
+    directKind = NodeKind::McpServer;
+    directEntries = arrayMember(message.payload, "data");
+  } else if (method == "app/list" || appNotification) {
+    catalogId = "app";
+    directKind = NodeKind::App;
+    directEntries = arrayMember(message.payload, "data");
+    if (appNotification && !directEntries)
+      return false;
+  } else if (method == "skills/list") {
+    catalogId = "skills";
+    if (const Value::Array *groups = arrayMember(message.payload, "data")) {
+      for (const Value &value : *groups) {
+        const Value::Object *group = value.asObject();
+        if (!group)
+          continue;
+        appendDirectCatalogEntries(entries, arrayMember(*group, "skills"),
+                                   NodeKind::Skill,
+                                   canonicalValue(member(*group, "cwd")));
+      }
+    }
+  } else if (method == "hooks/list") {
+    catalogId = "hooks";
+    if (const Value::Array *groups = arrayMember(message.payload, "data")) {
+      for (const Value &value : *groups) {
+        const Value::Object *group = value.asObject();
+        if (!group)
+          continue;
+        appendDirectCatalogEntries(entries, arrayMember(*group, "hooks"),
+                                   NodeKind::Hook,
+                                   canonicalValue(member(*group, "cwd")));
+      }
+    }
+  } else if (method == "plugin/list") {
+    catalogId = "plugin";
+    if (const Value::Array *marketplaces =
+            arrayMember(message.payload, "marketplaces")) {
+      for (const Value &value : *marketplaces) {
+        const Value::Object *marketplace = value.asObject();
+        if (!marketplace)
+          continue;
+        std::string scope = canonicalValue(member(*marketplace, "name"));
+        if (scope.empty())
+          scope = canonicalValue(member(*marketplace, "path"));
+        appendDirectCatalogEntries(entries,
+                                   arrayMember(*marketplace, "plugins"),
+                                   NodeKind::Plugin, scope);
+      }
+    }
+  } else {
+    return false;
+  }
+
+  appendDirectCatalogEntries(entries, directEntries, directKind);
+  NodeRef catalog = write.upsert({NodeKind::Catalog, std::string(catalogId)});
+  const std::vector<NodeRef> previous = write.children(catalog);
+  mergeObject(write, catalog, message.payload);
+  write.setField(catalog, "lastMethod", Value(std::string(method)));
+  write.eraseField(catalog, "stale");
+  write.eraseField(catalog, "invalidatedBy");
+
+  const bool continuation =
+      !canonicalValue(member(message.payload, "cursor")).empty();
+  std::vector<NodeRef> ordered =
+      continuation ? previous : std::vector<NodeRef>{};
+  ordered.reserve(ordered.size() + entries.size());
+  std::unordered_set<const Node *> retained;
+  retained.reserve(ordered.size() + entries.size());
+  for (const NodeRef &entry : ordered)
+    retained.insert(entry.get());
+
+  std::size_t anonymous = 0;
+  for (const CatalogEntitySeed &seed : entries) {
+    if (!seed.fields)
+      continue;
+    std::string protocolId = catalogEntityId(*seed.fields);
+    if (protocolId.empty())
+      protocolId = "anonymous:" + std::to_string(anonymous++);
+    std::string owner(catalogId);
+    if (!seed.scope.empty()) {
+      owner += ':';
+      owner += seed.scope;
+    }
+    NodeState state;
+    state.status = statusFromValue(member(*seed.fields, "status"));
+    state.fields = *seed.fields;
+    state.fields.insert_or_assign("protocolId", Value(protocolId));
+    state.fields.insert_or_assign("catalog", Value(std::string(catalogId)));
+    if (!seed.scope.empty())
+      state.fields.insert_or_assign("catalogScope", Value(seed.scope));
+    NodeId id{seed.kind, scopedCanonical(owner, protocolId)};
+    NodeRef entry = write.find(id);
+    if (entry)
+      write.replaceState(entry, std::move(state));
+    else
+      entry = write.upsert(std::move(id), std::move(state));
+    if (retained.insert(entry.get()).second)
+      ordered.emplace_back(std::move(entry));
+  }
+
+  write.replaceChildren(catalog, ordered);
+  if (!continuation) {
+    std::vector<NodeRef> omitted;
+    omitted.reserve(previous.size());
+    for (const NodeRef &entry : previous)
+      if (entry && !retained.contains(entry.get()))
+        omitted.emplace_back(entry);
+    write.removeMany(omitted);
+  }
+  return true;
+}
+
+bool applyAutoApprovalReview(NodeGraph::WriteAccess &write,
+                             const DecodedMessage &message) {
+  const bool started = message.method == "item/autoApprovalReview/started";
+  const bool completed = message.method == "item/autoApprovalReview/completed";
+  if (!started && !completed)
+    return false;
+
+  const std::string threadId = addressedId(message.payload, NodeKind::Thread);
+  const std::string turnId = addressedId(message.payload, NodeKind::Turn);
+  if (threadId.empty() || turnId.empty())
+    return true;
+  NodeRef thread = write.upsert({NodeKind::Thread, threadId});
+  NodeRef turn = ensureTurn(write, thread, turnId);
+
+  const std::string targetId =
+      canonicalValue(member(message.payload, "targetItemId"));
+  NodeRef target = ensureItem(write, turn, targetId);
+  std::string reviewId = canonicalValue(member(message.payload, "reviewId"));
+  if (reviewId.empty() && !targetId.empty())
+    reviewId = "auto-review:" + targetId;
+  if (reviewId.empty()) {
+    write.setField(turn, "lastAutoApprovalReview", Value(message.payload));
+    return true;
+  }
+
+  NodeRef review = ensureItem(write, turn, reviewId);
+  mergeObject(write, review, message.payload);
+  write.setField(review, "type", Value("autoApprovalReview"));
+  write.setField(review, "phase", Value(started ? "started" : "completed"));
+  write.setField(review, "protocolId", Value(reviewId));
+  write.setStatus(review,
+                  started ? NodeStatus::Running : NodeStatus::Completed);
+  if (target) {
+    const std::array<NodeRef, 1> targets{target};
+    write.replaceRelated(review, RelationKind::ReviewTarget, targets);
+  } else {
+    write.replaceRelated(review, RelationKind::ReviewTarget,
+                         std::span<const NodeRef>{});
+  }
+  return true;
 }
 
 NodeRef containingThread(NodeGraph::WriteAccess &write, NodeRef node) {
@@ -2073,6 +2292,63 @@ void ProtocolUpdater::applyGraphUpdate(
     return;
   }
 
+  if (applyNaturalCatalogSnapshot(write, message) ||
+      applyAutoApprovalReview(write, message))
+    return;
+
+  if (method == "autoApprovalReview/strictReviewRequired") {
+    const std::string threadId = addressedId(message.payload, NodeKind::Thread);
+    const std::string turnId = addressedId(message.payload, NodeKind::Turn);
+    if (!threadId.empty()) {
+      NodeRef thread = write.upsert({NodeKind::Thread, threadId});
+      NodeRef target =
+          turnId.empty() ? thread : ensureTurn(write, thread, turnId);
+      mergeObject(write, target, message.payload);
+      write.setField(target, "strictReviewRequired", Value(true));
+    }
+    return;
+  }
+
+  if (method == "thread/environment/connected" ||
+      method == "thread/environment/disconnected") {
+    const std::string threadId = addressedId(message.payload, NodeKind::Thread);
+    if (!threadId.empty()) {
+      const bool connected = method == "thread/environment/connected";
+      NodeRef thread = write.upsert({NodeKind::Thread, threadId});
+      mergeObject(write, thread, message.payload);
+      write.setField(thread, "environmentConnected", Value(connected));
+      write.setField(thread, "environmentStatus",
+                     Value(connected ? "connected" : "disconnected"));
+    }
+    return;
+  }
+
+  if (method == "modelProvider/authRecoveryStarted" ||
+      method == "modelProvider/authRecoveryCompleted") {
+    const bool active = method == "modelProvider/authRecoveryStarted";
+    NodeRef provider = write.upsert({NodeKind::Catalog, "modelProvider"});
+    mergeObject(write, provider, message.payload);
+    write.setField(provider, "authRecoveryActive", Value(active));
+    write.setField(provider, "authRecoveryStatus",
+                   Value(active ? "recovering" : "completed"));
+    write.setField(provider, "lastMethod", Value(std::string(method)));
+    write.setStatus(provider,
+                    active ? NodeStatus::Running : NodeStatus::Completed);
+    return;
+  }
+
+  if (method == "thread/compacted") {
+    const std::string threadId = addressedId(message.payload, NodeKind::Thread);
+    if (!threadId.empty()) {
+      NodeRef thread = write.upsert({NodeKind::Thread, threadId});
+      mergeObject(write, thread, message.payload);
+      write.setField(thread, "compacted", Value(true));
+      if (const Value *turnId = member(message.payload, "turnId"))
+        write.setField(thread, "lastCompactedTurnId", *turnId);
+    }
+    return;
+  }
+
   if (applyExternalAgentImportUpdate(write, message) ||
       applyFuzzyFileSearchSessionUpdate(write, message) ||
       applyAccountLoginUpdate(write, message) ||
@@ -2241,16 +2517,6 @@ void ProtocolUpdater::applyGraphUpdate(
           write.setField(thread, "goalTurnId", *turnId);
       }
     }
-    return;
-  }
-
-  if (message.kind == DecodedMessageKind::ClientResult &&
-      (method == "skills/list" || method == "app/list")) {
-    NodeRef catalog = write.upsert(
-        {NodeKind::Catalog, method == "skills/list" ? "skills" : "app"});
-    mergeObject(write, catalog, message.payload);
-    write.eraseField(catalog, "stale");
-    write.eraseField(catalog, "invalidatedBy");
     return;
   }
 
