@@ -903,6 +903,227 @@ void directNodeActionsUseOneCorrelatedRequest(UnixBridge &bridge,
   runtime.drainNotifications();
 }
 
+void remainingUiCommandFamiliesUseExactWirePaths(UnixBridge &bridge,
+                                                 RunningRuntime &runtime) {
+  const NodeRef thread =
+      findNode(runtime.graph(), {NodeKind::Thread, "runtime-thread"});
+  expect(static_cast<bool>(thread),
+         "remaining UI command coverage has a stable thread target");
+  if (!thread)
+    return;
+
+  NodeAction history{thread, NodeActionKind::LoadHistory};
+  history.payload = {{"cursor", Value("history-cursor")},
+                     {"limit", Value(std::uint64_t{23})}};
+  expect(sendAction(runtime.channels(), std::move(history)),
+         "history paging enters the typed worker mailbox");
+  std::optional<nlohmann::json> request = bridge.receiveAppServer();
+  expect(request &&
+             request->value("method", std::string{}) == "thread/turns/list" &&
+             request->at("params").value("threadId", std::string{}) ==
+                 "runtime-thread" &&
+             request->at("params").value("cursor", std::string{}) ==
+                 "history-cursor" &&
+             request->at("params").value("limit", 0) == 23 &&
+             request->at("params").value("sortDirection", std::string{}) ==
+                 "desc" &&
+             request->at("params").value("itemsView", std::string{}) == "full",
+         "Load More encodes one scoped thread/turns/list request");
+  if (request) {
+    expect(operationTargets(runtime.graph(), request->at("id"), thread),
+           "history paging preserves its exact thread NodeRef");
+    expect(bridge.reply(*request, {{"data", nlohmann::json::array()},
+                                   {"nextCursor", nullptr}}),
+           "history paging decodes its typed result");
+    expect(waitUntil([&] {
+             return operationRetired(runtime.graph(), request->at("id"));
+           }),
+           "history paging result retires its exact operation");
+  }
+  expect(!bridge.receiveAppServer(100ms),
+         "history paging is never duplicated on the wire");
+
+  NodeAction fork{thread, NodeActionKind::Fork};
+  expect(sendAction(runtime.channels(), std::move(fork)),
+         "fork enters the typed worker mailbox");
+  request = bridge.receiveAppServer();
+  expect(request && request->value("method", std::string{}) == "thread/fork" &&
+             request->at("params").value("threadId", std::string{}) ==
+                 "runtime-thread",
+         "fork encodes one request addressed by the supplied NodeRef");
+  if (request) {
+    expect(operationTargets(runtime.graph(), request->at("id"), thread),
+           "fork preserves its exact thread NodeRef");
+    expect(bridge.replyError(*request, -32043, "focused fork rejection"),
+           "fork decodes a typed provider error");
+    expect(waitUntil([&] {
+             return operationRetired(runtime.graph(), request->at("id"));
+           }),
+           "fork error retires its correlated operation");
+  }
+  expect(!bridge.receiveAppServer(100ms), "fork is never dual-sent");
+
+  const auto archivedIs = [&](bool expected) {
+    std::optional<NodeGraph::ReadAccess> read = runtime.graph().tryRead();
+    if (!read || read->find(thread->id()) != thread)
+      return false;
+    const auto state = read->state(thread);
+    const auto archived = state->fields.find("archived");
+    return archived != state->fields.end() && archived->second.asBool() &&
+           *archived->second.asBool() == expected;
+  };
+  expect(bridge.appServerNotification("thread/archived",
+                                      {{"threadId", "runtime-thread"}}) &&
+             waitUntil([&] { return archivedIs(true); }),
+         "unarchive coverage starts from authoritative archived state");
+  NodeAction unarchive{thread, NodeActionKind::Unarchive};
+  expect(sendAction(runtime.channels(), std::move(unarchive)),
+         "unarchive enters the typed worker mailbox");
+  request = bridge.receiveAppServer();
+  expect(request &&
+             request->value("method", std::string{}) == "thread/unarchive" &&
+             request->at("params").value("threadId", std::string{}) ==
+                 "runtime-thread",
+         "unarchive encodes one request addressed by the supplied NodeRef");
+  if (request) {
+    expect(operationTargets(runtime.graph(), request->at("id"), thread),
+           "unarchive preserves its exact thread NodeRef");
+    expect(bridge.reply(*request, nlohmann::json::object()),
+           "unarchive decodes its typed result");
+    expect(waitUntil([&] {
+             return operationRetired(runtime.graph(), request->at("id"));
+           }),
+           "unarchive result retires its correlated operation");
+  }
+  expect(!bridge.receiveAppServer(100ms), "unarchive is never dual-sent");
+  expect(bridge.appServerNotification("thread/unarchived",
+                                      {{"threadId", "runtime-thread"}}) &&
+             waitUntil([&] { return archivedIs(false); }),
+         "authoritative unarchive restores the thread for prompt coverage");
+
+  RuntimeAction create{RuntimeActionKind::CreateThread};
+  create.correlation = "wire-create-correlation";
+  create.promptText = "Create and send exactly once";
+  create.attachments.push_back(
+      {"/tmp/wire-image.png", "wire-image.png", "image/png", std::nullopt});
+  create.payload = {
+      {"threadStart", Value(Value::Object{{"cwd", Value("/tmp/wire-create")}})},
+      {"turnStart",
+       Value(Value::Object{{"approvalPolicy", Value("on-request")}})}};
+  expect(sendAction(runtime.channels(), std::move(create)),
+         "new-thread prompt enters the typed worker mailbox");
+  request = bridge.receiveAppServer();
+  expect(request && request->value("method", std::string{}) == "thread/start" &&
+             request->at("params").value("cwd", std::string{}) ==
+                 "/tmp/wire-create",
+         "Create Thread encodes its thread options exactly once");
+  if (!request) {
+    runtime.drainNotifications();
+    return;
+  }
+  expect(bridge.reply(*request, {{"thread",
+                                  {{"id", "wire-created-thread"},
+                                   {"name", "Wire created"},
+                                   {"status", "idle"},
+                                   {"turns", nlohmann::json::array()}}}}),
+         "thread/start decodes the canonical created thread");
+
+  request = bridge.receiveAppServer();
+  const nlohmann::json input =
+      request && request->contains("params")
+          ? request->at("params").value("input", nlohmann::json::array())
+          : nlohmann::json::array();
+  expect(request && request->value("method", std::string{}) == "turn/start" &&
+             request->at("params").value("threadId", std::string{}) ==
+                 "wire-created-thread" &&
+             request->at("params").value("approvalPolicy", std::string{}) ==
+                 "on-request" &&
+             input.size() == 2 &&
+             input.at(0).value("type", std::string{}) == "text" &&
+             input.at(0)
+                     .value("text", std::string{})
+                     .find("Create and send exactly once") !=
+                 std::string::npos &&
+             input.at(1).value("type", std::string{}) == "localImage" &&
+             input.at(1).value("path", std::string{}) == "/tmp/wire-image.png",
+         "the first prompt moves text, options, and attachment into one "
+         "turn/start request");
+  if (request) {
+    expect(bridge.reply(*request, {{"turn",
+                                    {{"id", "wire-created-turn"},
+                                     {"status", "inProgress"},
+                                     {"items", nlohmann::json::array()}}}}),
+           "turn/start decodes its canonical turn result");
+  }
+  expect(!bridge.receiveAppServer(100ms),
+         "the first new-thread prompt is never dual-sent");
+
+  const NodeRef created =
+      findNode(runtime.graph(), {NodeKind::Thread, "wire-created-thread"});
+  const NodeRef active =
+      findNode(runtime.graph(),
+               scopedTurnNodeId("wire-created-thread", "wire-created-turn"));
+  expect(created && active,
+         "created-thread command results retain natural thread and turn nodes");
+  if (created && active) {
+    NodeAction steer{created, NodeActionKind::SubmitPrompt};
+    steer.promptText = "Steer the exact active turn";
+    expect(sendAction(runtime.channels(), std::move(steer)),
+           "active-turn steering enters the typed worker mailbox");
+    request = bridge.receiveAppServer();
+    expect(request && request->value("method", std::string{}) == "turn/steer" &&
+               request->at("params").value("threadId", std::string{}) ==
+                   "wire-created-thread" &&
+               request->at("params").value("expectedTurnId", std::string{}) ==
+                   "wire-created-turn",
+           "Submit while active encodes one turn/steer for the exact turn");
+    if (request)
+      expect(bridge.reply(*request, {{"turnId", "wire-created-turn"}}),
+             "turn/steer decodes its typed result");
+    expect(!bridge.receiveAppServer(100ms), "steering is never dual-sent");
+  }
+
+  expect(bridge.appServerNotification("turn/completed",
+                                      {{"threadId", "wire-created-thread"},
+                                       {"turn",
+                                        {{"id", "wire-created-turn"},
+                                         {"status", "completed"},
+                                         {"items", nlohmann::json::array()}}}}),
+         "created active turn receives its authoritative completion");
+
+  if (created) {
+    NodeAction remove{created, NodeActionKind::Delete};
+    expect(sendAction(runtime.channels(), std::move(remove)),
+           "delete enters the typed worker mailbox");
+    request = bridge.receiveAppServer();
+    expect(request &&
+               request->value("method", std::string{}) == "thread/delete" &&
+               request->at("params").value("threadId", std::string{}) ==
+                   "wire-created-thread",
+           "delete encodes one request addressed by the supplied NodeRef");
+    if (request) {
+      expect(operationTargets(runtime.graph(), request->at("id"), created),
+             "delete preserves its exact thread NodeRef");
+      expect(bridge.reply(*request, nlohmann::json::object()),
+             "delete decodes its typed result");
+      expect(waitUntil([&] {
+               return operationRetired(runtime.graph(), request->at("id"));
+             }),
+             "delete result retires its correlated operation");
+    }
+    expect(!bridge.receiveAppServer(100ms), "delete is never dual-sent");
+    expect(bridge.appServerNotification(
+               "thread/deleted", {{"threadId", "wire-created-thread"}}) &&
+               waitUntil([&] {
+                 std::optional<NodeGraph::ReadAccess> read =
+                     runtime.graph().tryRead();
+                 return read && !read->find(created->id());
+               }),
+           "authoritative delete retires the exact created thread");
+  }
+  runtime.drainNotifications();
+}
+
 void runtimeRefreshActionsHaveExactRequestCardinality(UnixBridge &bridge,
                                                       RunningRuntime &runtime) {
   RuntimeAction refresh{RuntimeActionKind::RefreshThreads};
@@ -1567,6 +1788,8 @@ int main(int argc, char **argv) {
     codexui::codex::protocolDiagnosticsPreserveMetadataWithoutPayloads(bridge,
                                                                        runtime);
     codexui::codex::directNodeActionsUseOneCorrelatedRequest(bridge, runtime);
+    codexui::codex::remainingUiCommandFamiliesUseExactWirePaths(bridge,
+                                                                runtime);
     codexui::codex::runtimeRefreshActionsHaveExactRequestCardinality(bridge,
                                                                      runtime);
     codexui::codex::failedWakeUsesBoundedWorkerRecovery(bridge, runtime);
