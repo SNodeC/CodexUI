@@ -759,6 +759,10 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
       pending.localPrompt = write.upsert(
           {NodeKind::Item, "local-prompt:" + suffix}, std::move(promptState));
       write.setParent(turn, pending.localPrompt);
+      if (startsTurn) {
+        const std::array<NodeRef, 1> root{pending.localPrompt};
+        write.replaceRelated(turn, RelationKind::TurnRootItem, root);
+      }
       NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
       write.relate(runtime, RelationKind::PendingPrompt, pending.localPrompt);
       write.relate(pending.thread, RelationKind::PendingPrompt,
@@ -1159,7 +1163,17 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
         if (materializedItem)
           ordered.insert(ordered.begin() + 1, materializedItem);
         write.replaceChildren(turn, ordered);
+        const std::vector<NodeRef> roots =
+            write.related(turn, RelationKind::TurnRootItem);
+        if (roots.empty() ||
+            std::ranges::find(roots, localPrompt) != roots.end()) {
+          const std::array<NodeRef, 1> root{
+              materializedItem ? materializedItem : localPrompt};
+          write.replaceRelated(turn, RelationKind::TurnRootItem, root);
+        }
       }
+      if (previous && previous != turn)
+        write.unrelate(previous, RelationKind::TurnRootItem, localPrompt);
       if (previous && previous != turn && isLocalShell(previous) &&
           write.children(previous).empty())
         write.remove(previous);

@@ -40,6 +40,8 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
@@ -67,29 +69,6 @@ bool containsKind(const nodegraph::GraphChanged &change,
   };
   return std::ranges::any_of(change.affected, matches) ||
          std::ranges::any_of(change.removed, matches);
-}
-
-bool threadPaneAffected(const nodegraph::GraphChanged &change) {
-  return change.rescanRequired ||
-         containsKind(change, {nodegraph::NodeKind::Runtime,
-                               nodegraph::NodeKind::Thread,
-                               nodegraph::NodeKind::Interaction});
-}
-
-bool inspectorAffected(const nodegraph::GraphChanged &change, int tab) {
-  if (change.rescanRequired)
-    return true;
-  if (tab == 3) {
-    return containsKind(
-        change, {nodegraph::NodeKind::Connection, nodegraph::NodeKind::Thread,
-                 nodegraph::NodeKind::Turn, nodegraph::NodeKind::Item,
-                 nodegraph::NodeKind::Interaction});
-  }
-  if (tab == 4)
-    return true;
-  return containsKind(change,
-                      {nodegraph::NodeKind::Thread, nodegraph::NodeKind::Turn,
-                       nodegraph::NodeKind::Item});
 }
 
 QString text(std::string_view value) {
@@ -123,6 +102,47 @@ const nodegraph::Value *graphField(const nodegraph::Value::Object &object,
 
 std::string graphString(const nodegraph::Value *value) {
   return value && value->asString() ? *value->asString() : std::string{};
+}
+
+bool fieldChanged(const nodegraph::NodeGraph::ReadAccess &read,
+                  const nodegraph::NodeRef &node, std::string_view field,
+                  std::uint64_t revision) {
+  return node && read.contains(node) &&
+         read.fieldChangedRevision(node, field) == revision;
+}
+
+bool threadPaneAffected(const nodegraph::GraphChanged &change,
+                        const nodegraph::NodeGraph &graph) {
+  if (change.rescanRequired ||
+      containsKind(change, {nodegraph::NodeKind::Interaction}) ||
+      std::ranges::any_of(change.removed, [](const auto &node) {
+        return node && (node->id().kind == nodegraph::NodeKind::Runtime ||
+                        node->id().kind == nodegraph::NodeKind::Thread);
+      }))
+    return true;
+  const auto read = graph.tryRead();
+  if (!read)
+    return containsKind(change, {nodegraph::NodeKind::Runtime,
+                                 nodegraph::NodeKind::Thread});
+  constexpr std::array<std::string_view, 13> Fields{
+      "name",          "title",       "cwd",
+      "workspace",     "status",      "createdAt",
+      "updatedAt",     "recencyAt",   "lastActivityAt",
+      "localActivityAt", "localPromptActivityAt",
+      "pendingInteractionCount", "hydrationState"};
+  return std::ranges::any_of(change.affected, [&](const auto &node) {
+    if (!node || !read->contains(node))
+      return false;
+    if (node->id().kind == nodegraph::NodeKind::Runtime)
+      return read->structureChangedRevision(node) == change.revision;
+    if (node->id().kind != nodegraph::NodeKind::Thread)
+      return false;
+    return read->statusChangedRevision(node) == change.revision ||
+           read->structureChangedRevision(node) == change.revision ||
+           std::ranges::any_of(Fields, [&](std::string_view field) {
+             return fieldChanged(*read, node, field, change.revision);
+           });
+  });
 }
 
 std::vector<AttachmentDraft>
@@ -167,8 +187,17 @@ bool conversationAffected(const nodegraph::GraphChanged &change,
   const auto belongsToSelection = [&](const nodegraph::NodeRef &node) {
     if (!node)
       return false;
-    if (node == selectedThread)
-      return true;
+    if (node == selectedThread) {
+      if (!read->contains(node))
+        return true;
+      constexpr std::array<std::string_view, 5> Fields{
+          "historyLoadedItemCount", "historyTotalItemCount",
+          "historyHasMore", "hasMore", "hydrationState"};
+      return read->structureChangedRevision(node) == change.revision ||
+             std::ranges::any_of(Fields, [&](std::string_view field) {
+               return fieldChanged(*read, node, field, change.revision);
+             });
+    }
     if (node->id().kind == nodegraph::NodeKind::Thread)
       return false;
     if (node->id().kind != nodegraph::NodeKind::Turn &&
@@ -212,18 +241,40 @@ bool shellChromeAffected(const nodegraph::GraphChanged &change,
   if (change.affected.size() + change.removed.size() > MaximumFilteredNodes)
     return true;
 
-  const auto directlyAffectsChrome = [&selectedThread](const auto &node) {
+  const auto read = graph.tryRead();
+  if (!read)
+    return true;
+  const auto directlyAffectsChrome = [&](const auto &node) {
     if (!node)
       return false;
+    if (!read->contains(node))
+      return true;
     switch (node->id().kind) {
     case nodegraph::NodeKind::Connection:
+      return true;
     case nodegraph::NodeKind::Runtime:
+      return read->structureChangedRevision(node) == change.revision ||
+             fieldChanged(*read, node, "controller", change.revision);
     case nodegraph::NodeKind::Catalog:
+      return node->id().canonical == "model" ||
+             node->id().canonical == "permissionProfile";
     case nodegraph::NodeKind::Interaction:
       return true;
-    case nodegraph::NodeKind::Thread:
-      return selectedThread &&
-             node->id().canonical == selectedThread->id().canonical;
+    case nodegraph::NodeKind::Thread: {
+      if (!selectedThread || node != selectedThread)
+        return false;
+      constexpr std::array<std::string_view, 15> Fields{
+          "name", "title", "cwd", "workspace", "status",
+          "hydrationState", "recoveryOnly", "lastActivityAt",
+          "recencyAt", "updatedAt", "localActivityAt",
+          "localPromptActivityAt", "settingsRevision", "settings",
+          "latestSettingsUpdate"};
+      return read->statusChangedRevision(node) == change.revision ||
+             read->structureChangedRevision(node) == change.revision ||
+             std::ranges::any_of(Fields, [&](std::string_view field) {
+               return fieldChanged(*read, node, field, change.revision);
+             });
+    }
     default:
       return false;
     }
@@ -234,13 +285,15 @@ bool shellChromeAffected(const nodegraph::GraphChanged &change,
   if (!selectedThread)
     return false;
 
-  const auto read = graph.tryRead();
-  if (!read)
-    return true;
   const auto turnBelongsToSelection = [&](const auto &node) {
     if (!node || node->id().kind != nodegraph::NodeKind::Turn)
       return false;
     try {
+      if (!read->contains(node))
+        return true;
+      if (read->statusChangedRevision(node) != change.revision &&
+          read->structureChangedRevision(node) != change.revision)
+        return false;
       if (read->parent(node) == selectedThread)
         return true;
       return graphString(graphField(*read->state(node), "protocolThreadId")) ==
@@ -251,6 +304,22 @@ bool shellChromeAffected(const nodegraph::GraphChanged &change,
   };
   return std::ranges::any_of(change.affected, turnBelongsToSelection) ||
          std::ranges::any_of(change.removed, turnBelongsToSelection);
+}
+
+bool graphUiFallbackAffected(const nodegraph::GraphChanged &change,
+                             const nodegraph::NodeGraph &graph) {
+  if (change.rescanRequired ||
+      containsKind(change, {nodegraph::NodeKind::Notice}))
+    return true;
+  const auto read = graph.tryRead();
+  if (!read)
+    return containsKind(change, {nodegraph::NodeKind::Runtime});
+  return std::ranges::any_of(change.affected, [&](const auto &node) {
+    return node && read->contains(node) &&
+           node->id().kind == nodegraph::NodeKind::Runtime &&
+           (read->structureChangedRevision(node) == change.revision ||
+            fieldChanged(*read, node, "uiSelectionSerial", change.revision));
+  });
 }
 
 bool graphBool(const nodegraph::Value *value, bool fallback = false) {
@@ -482,6 +551,8 @@ struct PendingGraphRequest final {
   bool recoveryOnly = false;
   bool recoverable = false;
   bool actionable = false;
+
+  bool operator==(const PendingGraphRequest &) const = default;
 };
 
 struct PendingGraphRequestSnapshot final {
@@ -571,6 +642,8 @@ struct ShellChromeValues final {
   nlohmann::json settingsUpdate = nlohmann::json::object();
   std::uint64_t settingsRevision = 0;
   std::optional<PendingGraphRequest> attention;
+
+  bool operator==(const ShellChromeValues &) const = default;
 };
 
 nodegraph::Value::Object
@@ -668,9 +741,12 @@ QLabel *makeStatusLabel(QString value, QString objectName, int maximumWidth,
 }
 
 void setStatusLabelText(QLabel *label, QString value) {
-  label->setToolTip(value);
-  label->setText(label->fontMetrics().elidedText(value, Qt::ElideMiddle,
-                                                 label->maximumWidth()));
+  const QString displayed = label->fontMetrics().elidedText(
+      value, Qt::ElideMiddle, label->maximumWidth());
+  if (label->toolTip() != value)
+    label->setToolTip(value);
+  if (label->text() != displayed)
+    label->setText(displayed);
 }
 
 QString statusToneColor(QStringView tone) {
@@ -686,8 +762,11 @@ QString statusToneColor(QStringView tone) {
 }
 
 void setStatusTone(QFrame *dot, QLabel *label, const QString &tone) {
-  dot->setStyleSheet(QStringLiteral("background:%1;border-radius:5px;")
-                         .arg(statusToneColor(tone)));
+  if (dot->property("tone").toString() != tone) {
+    dot->setProperty("tone", tone);
+    dot->setStyleSheet(QStringLiteral("background:%1;border-radius:5px;")
+                           .arg(statusToneColor(tone)));
+  }
   if (label->property("tone").toString() == tone)
     return;
   label->setProperty("tone", tone);
@@ -804,6 +883,11 @@ struct ShellWidget::Impl final {
   bool modelCatalogPresent = false;
   bool permissionProfileCatalogInitialized = false;
   bool permissionProfileCatalogPresent = false;
+  std::optional<ShellChromeValues> renderedChrome;
+  std::uint64_t shellRenderCommits = 0;
+  std::uint64_t threadPaneRoutes = 0;
+  std::uint64_t conversationRoutes = 0;
+  std::uint64_t inspectorRoutes = 0;
 
   middle::MiddleRegionWidget *middleRegion = nullptr;
   QPushButton *restoreSidebarButton = nullptr;
@@ -1224,19 +1308,33 @@ void ShellWidget::Impl::handleGraphChanged(
       });
   // These calls synchronously release every removed node's QWidget
   // attachment before FrontendSession acknowledges the notification.
-  const bool updateThreads = threadPaneAffected(change);
-  if (updateThreads)
+  const bool updateThreads = threadPaneAffected(change, session.nodeGraph());
+  if (updateThreads) {
+    ++threadPaneRoutes;
+    owner->setProperty("threadPaneRoutes",
+                       static_cast<qulonglong>(threadPaneRoutes));
     middleRegion->threads().graphChanged(change);
-  if (conversationAffected(change, session.nodeGraph(), boundGraphThread))
+  }
+  if (conversationAffected(change, session.nodeGraph(), boundGraphThread)) {
+    ++conversationRoutes;
+    owner->setProperty("conversationRoutes",
+                       static_cast<qulonglong>(conversationRoutes));
     middleRegion->conversation().graphChangedDeferred(change.affected,
                                                       change.removed);
-  else
+  } else {
     middleRegion->conversation().detachRemovedNodes(change.removed);
-  if (inspectorAffected(change,
-                        middleRegion->inspector().tabs()->currentIndex()))
+  }
+  if (middleRegion->inspector().graphChangeAffectsVisibleTab(change)) {
+    ++inspectorRoutes;
+    owner->setProperty("inspectorRoutes",
+                       static_cast<qulonglong>(inspectorRoutes));
     middleRegion->inspector().graphChanged(change);
-  reconcileOptimisticCreation(change);
-  reconcileGraphUiFallback();
+  }
+  if (change.rescanRequired ||
+      containsKind(change, {nodegraph::NodeKind::Thread}))
+    reconcileOptimisticCreation(change);
+  if (graphUiFallbackAffected(change, session.nodeGraph()))
+    reconcileGraphUiFallback();
 
   // Promotion may already have rebound a removed optimistic thread. Otherwise
   // clear all pane-held references synchronously before FrontendSession can
@@ -1248,14 +1346,12 @@ void ShellWidget::Impl::handleGraphChanged(
     bindGraphPanes({});
   }
 
-  const bool selectedChanged =
-      !graphPanesBound || change.rescanRequired ||
-      std::ranges::any_of(
-          change.affected,
-          [this](const auto &node) {
-            return node && node->id().kind == nodegraph::NodeKind::Thread &&
-                   node->id().canonical == selectedGraphThreadId;
-          }) ||
+  const bool selectedChanged = !graphPanesBound || change.rescanRequired ||
+      (!boundGraphThread && !selectedGraphThreadId.empty() &&
+       std::ranges::any_of(change.affected, [this](const auto &node) {
+         return node && node->id().kind == nodegraph::NodeKind::Thread &&
+                node->id().canonical == selectedGraphThreadId;
+       })) ||
       std::ranges::any_of(change.removed, [this](const auto &node) {
         return node && node->id().kind == nodegraph::NodeKind::Thread &&
                node->id().canonical == selectedGraphThreadId;
@@ -1753,10 +1849,24 @@ void ShellWidget::Impl::render() {
       selectedSettingsState = state;
       const std::optional<std::int64_t> settingsRevision =
           graphInteger(graphField(*state, "settingsRevision"));
-      values.settingsRevision =
-          settingsRevision && *settingsRevision >= 0
-              ? static_cast<std::uint64_t>(*settingsRevision)
-              : read->changedRevision(selected);
+      if (settingsRevision && *settingsRevision >= 0) {
+        values.settingsRevision =
+            static_cast<std::uint64_t>(*settingsRevision);
+      } else {
+        for (const std::string_view field : {
+                 std::string_view("model"), std::string_view("effort"),
+                 std::string_view("reasoningEffort"),
+                 std::string_view("personality"), std::string_view("sandbox"),
+                 std::string_view("sandboxPolicy"),
+                 std::string_view("approvalPolicy"),
+                 std::string_view("approvalsReviewer"), std::string_view("cwd"),
+                 std::string_view("activePermissionProfile"),
+                 std::string_view("serviceTier"), std::string_view("summary"),
+                 std::string_view("collaborationMode")})
+          values.settingsRevision = std::max(
+              values.settingsRevision,
+              read->fieldChangedRevision(selected, field));
+      }
       nodegraph::NodeRef turn =
           read->relatedAt(selected, nodegraph::RelationKind::ActiveTurn, 0);
       values.activeTurn = turn &&
@@ -1813,31 +1923,7 @@ void ShellWidget::Impl::render() {
   if (attentionSnapshot)
     values.attention = materializePendingRequest(std::move(*attentionSnapshot),
                                                  values.canControl);
-  attentionInteraction =
-      values.attention ? values.attention->node : nodegraph::NodeRef{};
-
-  middleRegion->conversation().setEmptyMessage(
-      values.recoveryOnly
-          ? QStringLiteral(
-                "This thread preserves an unsent prompt. Restore it from the "
-                "failed prompt card before continuing.")
-      : boundGraphThread
-          ? QStringLiteral("Conversation activity appears here.")
-          : (newThreadDraft
-                 ? QStringLiteral("Send a message to create this thread.")
-                 : QStringLiteral("Conversation activity appears here.")));
-  if (boundGraphThread) {
-    const QString activity = values.lastActivityAt
-                                 ? lastActivityText(*values.lastActivityAt)
-                                 : QString{};
-    const QString status = text(values.status);
-    const QString tone = values.activeTurn ? QStringLiteral("active")
-                                           : QStringLiteral("neutral");
-    middleRegion->setThreadHeading(text(values.title), text(values.workspace),
-                                   activity, status, tone);
-  } else {
-    middleRegion->setThreadHeading(text(values.title), text(values.workspace));
-  }
+  const bool chromeChanged = !renderedChrome || *renderedChrome != values;
 
   TurnSettingsWidget *turnSettings = middleRegion->composer().turnSettings();
   if (modelCatalogChanged) {
@@ -1854,11 +1940,42 @@ void ShellWidget::Impl::render() {
     permissionProfileCatalogPresent = nextPermissionProfileCatalogPresent;
     permissionProfileCatalogRevision = nextPermissionProfileCatalogRevision;
   }
+  if (!chromeChanged)
+    return;
+
+  attentionInteraction =
+      values.attention ? values.attention->node : nodegraph::NodeRef{};
+  middleRegion->conversation().setEmptyMessage(
+      values.recoveryOnly
+          ? QStringLiteral(
+                "This thread preserves an unsent prompt. Restore it from the "
+                "failed prompt card before continuing.")
+          : boundGraphThread
+          ? QStringLiteral("Conversation activity appears here.")
+          : (newThreadDraft
+                 ? QStringLiteral("Send a message to create this thread.")
+                 : QStringLiteral("Conversation activity appears here.")));
+  if (boundGraphThread) {
+    const QString activity = values.lastActivityAt
+                                 ? lastActivityText(*values.lastActivityAt)
+                                 : QString{};
+    const QString status = text(values.status);
+    const QString tone = values.activeTurn ? QStringLiteral("active")
+                                           : QStringLiteral("neutral");
+    middleRegion->setThreadHeading(text(values.title), text(values.workspace),
+                                   activity, status, tone);
+  } else {
+    middleRegion->setThreadHeading(text(values.title), text(values.workspace));
+  }
   turnSettings->setCanonicalContext(
       boundGraphThread ? boundGraphThread->id().canonical
                        : std::string(DraftThreadId),
       values.canonicalSettings, values.settingsRevision, values.settingsUpdate);
   renderStatus(values);
+  renderedChrome = values;
+  ++shellRenderCommits;
+  owner->setProperty("shellRenderCommits",
+                     static_cast<qulonglong>(shellRenderCommits));
   if (newThreadDraft)
     scheduleDraftSelection();
 }
@@ -1876,25 +1993,35 @@ void ShellWidget::Impl::renderStatus(const ShellChromeValues &status) {
     dotStyle = QStringLiteral("background:#c43d4d;border-radius:5px;");
     dotTip = QStringLiteral("Disconnected");
   }
-  connectionStatusDot->setStyleSheet(dotStyle);
-  connectionStatusDot->setToolTip(dotTip);
-  connectionButton->setText(status.selectedTransport.empty()
-                                ? QStringLiteral("Connection")
-                                : text(status.selectedTransport));
-  connectionButton->setToolTip(
+  if (connectionStatusDot->styleSheet() != dotStyle)
+    connectionStatusDot->setStyleSheet(dotStyle);
+  if (connectionStatusDot->toolTip() != dotTip)
+    connectionStatusDot->setToolTip(dotTip);
+  const QString connectionText = status.selectedTransport.empty()
+                                     ? QStringLiteral("Connection")
+                                     : text(status.selectedTransport);
+  if (connectionButton->text() != connectionText)
+    connectionButton->setText(connectionText);
+  const QString connectionTip =
       status.connected ? QStringLiteral("Connected bridge transport")
-                       : QStringLiteral("Disconnected bridge transport"));
+                       : QStringLiteral("Disconnected bridge transport");
+  if (connectionButton->toolTip() != connectionTip)
+    connectionButton->setToolTip(connectionTip);
   connectAction->setEnabled(!status.connected);
   disconnectAction->setEnabled(status.connected);
   reconnectAction->setEnabled(status.connected);
-  controllerButton->setText(status.role == "controller"
-                                ? QStringLiteral("Release control")
-                                : QStringLiteral("Claim control"));
+  const QString controllerText =
+      status.role == "controller" ? QStringLiteral("Release control")
+                                  : QStringLiteral("Claim control");
+  if (controllerButton->text() != controllerText)
+    controllerButton->setText(controllerText);
   controllerButton->setEnabled(status.connected);
 
-  requestButton->setText(
-      QStringLiteral("Requests (%1)")
-          .arg(static_cast<qulonglong>(status.totalPending)));
+  const QString requestText = QStringLiteral("Requests (%1)")
+                                  .arg(static_cast<qulonglong>(
+                                      status.totalPending));
+  if (requestButton->text() != requestText)
+    requestButton->setText(requestText);
   requestButton->setVisible(status.totalPending != 0);
   if (status.attention) {
     const PendingGraphRequest &request = *status.attention;
@@ -1933,9 +2060,13 @@ void ShellWidget::Impl::renderStatus(const ShellChromeValues &status) {
   setStatusLabelText(globalStatusLabel, globalStatus);
 
   const QString workspace = text(status.workspace);
-  workspaceBreadcrumb->setToolTip(workspace);
-  workspaceBreadcrumb->setText(workspaceBreadcrumb->fontMetrics().elidedText(
-      workspace, Qt::ElideMiddle, workspaceBreadcrumb->maximumWidth()));
+  if (workspaceBreadcrumb->toolTip() != workspace)
+    workspaceBreadcrumb->setToolTip(workspace);
+  const QString displayedWorkspace =
+      workspaceBreadcrumb->fontMetrics().elidedText(
+          workspace, Qt::ElideMiddle, workspaceBreadcrumb->maximumWidth());
+  if (workspaceBreadcrumb->text() != displayedWorkspace)
+    workspaceBreadcrumb->setText(displayedWorkspace);
 
   middleRegion->composer().setActiveTurn(status.activeTurn);
   middleRegion->composer().setCanSubmit(status.canControl &&

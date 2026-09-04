@@ -10,6 +10,8 @@
 namespace codexui::codex {
 namespace {
 
+constexpr double WakeRecoveryIntervalSeconds = 0.1;
+
 snode::log::Scope makeLogScope() {
   return {.origin = snode::log::Origin::Application,
           .boundary = snode::log::Boundary::Application,
@@ -40,7 +42,8 @@ WorkerMailboxReceiver::WorkerMailboxReceiver(
     nodegraph::ThreadChannels &channels, MessageHandler onMessage,
     FailureHandler onFailure)
     : core::eventreceiver::ReadEventReceiver(
-          "CodexUI worker mailbox", makeLogScope(), utils::Timeval(0.1)),
+          "CodexUI worker mailbox", makeLogScope(),
+          utils::Timeval(WakeRecoveryIntervalSeconds)),
       channels_(channels), onMessage_(std::move(onMessage)),
       onFailure_(std::move(onFailure)),
       deferredReceiver_(std::make_shared<WorkerMailboxReceiver *>(this)) {}
@@ -64,6 +67,13 @@ void WorkerMailboxReceiver::readTimeout() {
   // including ShutdownRequest, so the worker cannot sleep indefinitely.
   if (channels_.qtToWorkerSizeApprox() != 0)
     consumeWakeAndMessages(false);
+
+  // SNode.C descriptor inactivity timeouts remain expired until explicitly
+  // rearmed. Leaving this receiver expired makes the worker event loop poll
+  // with a zero timeout forever after the first idle 100 ms. Rearm the narrow
+  // wake-failure safety net after every timeout so an idle worker sleeps.
+  if (!closing_)
+    setTimeout(utils::Timeval(WakeRecoveryIntervalSeconds));
 }
 
 void WorkerMailboxReceiver::unobservedEvent() {

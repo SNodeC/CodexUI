@@ -362,6 +362,34 @@ bool directGraphRenderingIsLazyAndCurrent() {
               labelContaining(pane, QStringLiteral("Graph-only explanation")),
       "an unrelated thread update preserves Plan widgets");
 
+  const qulonglong hiddenScansBefore =
+      pane.property("inspectorScanPasses").toULongLong();
+  const qulonglong hiddenRowsBefore =
+      pane.property("inspectorRowConstructions").toULongLong();
+  const qulonglong hiddenRebuildsBefore =
+      pane.property("inspectorFullRebuilds").toULongLong();
+  for (int revision = 0; revision < 50; ++revision) {
+    nodegraph::GraphChange hiddenAgentChange;
+    {
+      auto write = graph.write();
+      write.setField(agentItem, "agentPath",
+                     nodegraph::Value("/root/hidden_agent_" +
+                                      std::to_string(revision)));
+      hiddenAgentChange = write.finish();
+    }
+    pane.graphChanged(notification(std::move(hiddenAgentChange)));
+  }
+  spin(20);
+  result &= expect(
+      pane.property("inspectorScanPasses").toULongLong() ==
+              hiddenScansBefore &&
+          pane.property("inspectorRowConstructions").toULongLong() ==
+              hiddenRowsBefore &&
+          pane.property("inspectorFullRebuilds").toULongLong() ==
+              hiddenRebuildsBefore,
+      "fifty hidden Agents revisions perform zero scan, QWidget construction, "
+      "or rebuild work while Plan remains visible");
+
   pane.tabs()->setCurrentIndex(1);
   runOneQueuedPass();
   runOneQueuedPass();
@@ -371,9 +399,14 @@ bool directGraphRenderingIsLazyAndCurrent() {
                    "Agents bounds widget construction per Qt pass");
   spin(80);
   result &= expect(
-      hasLabelContaining(pane, QStringLiteral("graph_agent")) &&
+      hasLabelContaining(pane, QStringLiteral("hidden_agent_49")) &&
           hasLabelContaining(pane, QStringLiteral("completed")),
-      "Agents reads current source and child-thread facts on visibility");
+      "Agents reads only the latest source and child-thread facts on "
+      "visibility");
+  result &= expect(
+      pane.property("inspectorFullRebuilds").toULongLong() ==
+          hiddenRebuildsBefore + 1,
+      "activating the dirty Agents tab materializes its latest state once");
   const qsizetype materializedAgents =
       pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame")).size();
   auto *agentsViewport = qobject_cast<QScrollArea *>(pane.tabs()->widget(1));
@@ -644,6 +677,25 @@ bool directGraphRenderingIsLazyAndCurrent() {
                        protocol->verticalScrollBar()->value() ==
                            protocol->verticalScrollBar()->maximum(),
                    "the first current-protocol render follows the log tail");
+  const qulonglong protocolSyncsBeforeAppend =
+      pane.property("protocolFullSynchronizations").toULongLong();
+  const qulonglong protocolRowsBeforeAppend =
+      pane.property("protocolRowsAppended").toULongLong();
+  const int protocolBlocksBeforeAppend =
+      protocol ? protocol->document()->blockCount() : 0;
+  pane.appendProtocolDiagnostic(
+      protocolDiagnostic(91, "server notification", "item/updated", "merge"));
+  spin(10);
+  result &= expect(
+      protocol && protocol->toPlainText().contains(
+                      QStringLiteral("item/updated")) &&
+          protocol->document()->blockCount() == protocolBlocksBeforeAppend + 1 &&
+          pane.property("protocolRowsAppended").toULongLong() ==
+              protocolRowsBeforeAppend + 1 &&
+          pane.property("protocolFullSynchronizations").toULongLong() ==
+              protocolSyncsBeforeAppend,
+      "a visible Protocol diagnostic appends one row without rebuilding its "
+      "retained document or any Info page");
 
   nodegraph::GraphChange changed;
   {
@@ -709,6 +761,33 @@ bool agentsProjectionTracksLogicalChildren() {
                              QStringLiteral("running")),
       "start and replay records for one canonical child render one Agent row");
 
+  nodegraph::GraphChange notLoaded;
+  {
+    auto write = graph.write();
+    write.setStatus(childOne, nodegraph::NodeStatus::NotLoaded);
+    write.setField(childOne, "status", "notLoaded");
+    notLoaded = write.finish();
+  }
+  pane.graphChanged(notification(std::move(notLoaded)));
+  spin(40);
+  result &= expect(
+      agentFrame(pane, QStringLiteral("child-one")) &&
+          hasLabelContaining(*agentFrame(pane, QStringLiteral("child-one")),
+                             QStringLiteral("not loaded")) &&
+          !hasLabelContaining(*agentFrame(pane, QStringLiteral("child-one")),
+                              QStringLiteral("running")),
+      "the canonical child-thread not-loaded state overrides stale active "
+      "spawn activity");
+
+  {
+    auto write = graph.write();
+    write.setStatus(childOne, nodegraph::NodeStatus::Running);
+    write.setField(childOne, "status", "running");
+    notLoaded = write.finish();
+  }
+  pane.graphChanged(notification(std::move(notLoaded)));
+  spin(40);
+
   if (QFrame *frame = agentFrame(pane, QStringLiteral("child-one"))) {
     if (QToolButton *disclosure = frame->findChild<QToolButton *>(
             QStringLiteral("agentDisclosureButton")))
@@ -721,6 +800,10 @@ bool agentsProjectionTracksLogicalChildren() {
           : nullptr;
   result &= expect(expandedContent && expandedContent->isVisible(),
                    "the existing Agent disclosure behavior remains available");
+  const qulonglong rebuildsBeforeProgress =
+      pane.property("inspectorFullRebuilds").toULongLong();
+  const qulonglong patchesBeforeProgress =
+      pane.property("inspectorRowPatches").toULongLong();
 
   nodegraph::GraphChange progressed;
   {
@@ -759,15 +842,19 @@ bool agentsProjectionTracksLogicalChildren() {
   spin(40);
   QFrame *first = agentFrame(pane, QStringLiteral("child-one"));
   result &= expect(
-      first &&
+      first && first == expanded &&
           pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"))
                   .size() == 1 &&
           hasLabelContaining(*first, QStringLiteral("child_one_interacted")) &&
           hasLabelContaining(*first, QStringLiteral("running")) &&
           first->findChild<QWidget *>(QStringLiteral("agentCardContent"))
-              ->isVisible(),
+              ->isVisible() &&
+          pane.property("inspectorFullRebuilds").toULongLong() ==
+              rebuildsBeforeProgress &&
+          pane.property("inspectorRowPatches").toULongLong() >
+              patchesBeforeProgress,
       "progress and interacted records update the same expanded row without "
-      "terminalizing it");
+      "terminalizing, reconstructing, or losing widget state");
 
   nodegraph::GraphChange completed;
   {

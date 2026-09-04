@@ -194,6 +194,8 @@ public:
     [[nodiscard]] std::uint64_t changedRevision(const NodeRef &node) const;
     [[nodiscard]] std::uint64_t
     fieldChangedRevision(const NodeRef &node, std::string_view field) const;
+    [[nodiscard]] bool fieldsChangedAt(const NodeRef &node,
+                                       std::uint64_t revision) const;
     [[nodiscard]] std::uint64_t
     statusChangedRevision(const NodeRef &node) const;
     [[nodiscard]] std::uint64_t

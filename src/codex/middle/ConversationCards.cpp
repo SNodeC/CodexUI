@@ -1054,12 +1054,12 @@ public:
                                         next.kind == CardKind::UserMessage));
   }
 
-  bool apply(const VisibleCardData &next) {
+  PresentationImpact applyPresentation(const VisibleCardData &next) {
     if (!canApply(next)) {
       Q_ASSERT_X(false, "ConversationCard::apply",
                  "a persistent conversation card received an incompatible "
                  "key or kind");
-      return false;
+      return PresentationImpact::None;
     }
     const bool becomingAuthoritative = current.kind == CardKind::LocalPrompt &&
                                        next.kind == CardKind::UserMessage;
@@ -1069,14 +1069,14 @@ public:
       promoteToAuthoritativeUserMessage();
     current = next;
     if (!presentationChanged)
-      return false;
+      return PresentationImpact::None;
     std::visit([this](const auto &payload) { updateComposition(payload); },
                next.payload);
     refreshCopyPresentation();
     refreshFoldPresentation();
     owner->updateGeometry();
     owner->update();
-    return true;
+    return PresentationImpact::GeometryChanged;
   }
 
   void promoteToAuthoritativeUserMessage() {
@@ -1656,7 +1656,12 @@ void ConversationCard::restoreCommandOutputScrollState(
 }
 
 bool ConversationCard::apply(const VisibleCardData &data) {
-  return impl_->apply(data);
+  return applyPresentation(data) != PresentationImpact::None;
+}
+
+PresentationImpact
+ConversationCard::applyPresentation(const VisibleCardData &data) {
+  return impl_->applyPresentation(data);
 }
 
 bool ConversationCard::canApply(const VisibleCardData &data) const noexcept {

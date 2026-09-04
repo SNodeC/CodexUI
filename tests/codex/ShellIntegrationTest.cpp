@@ -9,6 +9,8 @@
 #include "codex/ShellWidget.h"
 #include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationCards.h"
+#include "codex/middle/ConversationView.h"
+#include "codex/middle/InspectorPane.h"
 #include "codex/middle/ThreadPane.h"
 #include "codex/nodegraph/WorkerLogic.h"
 #include "codex/ui/ExpandingPromptEditor.h"
@@ -1130,6 +1132,12 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
           "the selected conversation materializes its visible agent card");
   middle::ConversationCard *selectedCard =
       agentMessageCard(shell, "Selected original");
+  auto *conversation = dynamic_cast<middle::ConversationView *>(
+      shell.findChild<QWidget *>(QStringLiteral("conversationScroll")));
+  auto *threadPane = dynamic_cast<middle::ThreadPane *>(
+      shell.findChild<QWidget *>(QStringLiteral("sidebar")));
+  auto *inspector = dynamic_cast<middle::InspectorPane *>(
+      shell.findChild<QWidget *>(QStringLiteral("inspector")));
 
   NodeRef selectedItem;
   NodeRef backgroundItem;
@@ -1151,6 +1159,31 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
   if (!selectedItem || !backgroundItem || !selectedCard)
     return;
 
+  const qulonglong threadRoutesBefore =
+      shell.property("threadPaneRoutes").toULongLong();
+  const qulonglong conversationRoutesBefore =
+      shell.property("conversationRoutes").toULongLong();
+  const qulonglong inspectorRoutesBefore =
+      shell.property("inspectorRoutes").toULongLong();
+  const qulonglong shellCommitsBefore =
+      shell.property("shellRenderCommits").toULongLong();
+  const qulonglong topologyBefore =
+      threadPane
+          ? threadPane->property("graphTopologyScansStarted").toULongLong()
+          : 0;
+  const qulonglong rowUpdatesBefore =
+      threadPane ? threadPane->property("rowPresentationUpdates").toULongLong()
+                 : 0;
+  const qulonglong inspectorScansBefore =
+      inspector ? inspector->property("inspectorScanPasses").toULongLong() : 0;
+  const qulonglong inspectorRowsBefore =
+      inspector
+          ? inspector->property("inspectorRowConstructions").toULongLong()
+          : 0;
+  const qulonglong conversationPassesBefore =
+      conversation ? conversation->property("graphRefreshPasses").toULongLong()
+                   : 0;
+
   GraphChange withheldSelectedChange;
   {
     auto write = graph.write();
@@ -1169,9 +1202,30 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
   const auto *afterBackground =
       std::get_if<middle::AgentMessageData>(&selectedCard->data().payload);
   require(afterBackground && afterBackground->text == "Selected original" &&
-              agentMessageCard(shell, "Selected current") == nullptr,
+              agentMessageCard(shell, "Selected current") == nullptr &&
+              shell.property("threadPaneRoutes").toULongLong() ==
+                  threadRoutesBefore &&
+              shell.property("conversationRoutes").toULongLong() ==
+                  conversationRoutesBefore &&
+              shell.property("inspectorRoutes").toULongLong() ==
+                  inspectorRoutesBefore &&
+              shell.property("shellRenderCommits").toULongLong() ==
+                  shellCommitsBefore &&
+              (!threadPane ||
+               (threadPane->property("graphTopologyScansStarted")
+                        .toULongLong() == topologyBefore &&
+                threadPane->property("rowPresentationUpdates").toULongLong() ==
+                    rowUpdatesBefore)) &&
+              (!inspector ||
+               (inspector->property("inspectorScanPasses").toULongLong() ==
+                    inspectorScansBefore &&
+                inspector->property("inspectorRowConstructions")
+                        .toULongLong() == inspectorRowsBefore)) &&
+              (!conversation ||
+               conversation->property("graphRefreshPasses").toULongLong() ==
+                   conversationPassesBefore),
           "a background-only graph delta performs no selected conversation "
-          "refresh or render");
+          "refresh, pane route, scan, row update, or shell render");
 
   require(messageAdmitted(
               channels.sendGraphChanged(std::move(withheldSelectedChange))),
@@ -1182,6 +1236,20 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
             return agent && agent->text == "Selected current";
           }),
           "a selected-item graph delta refreshes the existing card");
+  require(
+      shell.property("conversationRoutes").toULongLong() ==
+              conversationRoutesBefore + 1 &&
+          conversation &&
+          conversation->property("graphRefreshPasses").toULongLong() >
+              conversationPassesBefore &&
+          shell.property("threadPaneRoutes").toULongLong() ==
+              threadRoutesBefore &&
+          shell.property("inspectorRoutes").toULongLong() ==
+              inspectorRoutesBefore &&
+          shell.property("shellRenderCommits").toULongLong() ==
+              shellCommitsBefore,
+      "a selected message routes only to ConversationView and leaves thread, "
+      "Inspector, and shell-chrome boundaries untouched");
 
   QPointer<QWidget> removedWidget = selectedCard;
   GraphChange removal;

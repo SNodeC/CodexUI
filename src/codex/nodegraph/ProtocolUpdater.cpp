@@ -3201,9 +3201,25 @@ ProtocolUpdater::ingestItem(NodeGraph::WriteAccess &write,
   mergeObject(write, item, object, {}, preserveChangesAfter);
   boundRetainedItemText(write, item, object, preserveChangesAfter);
   correlateLocalPrompt(write, item, object);
-  if (isUserMessage(object) &&
-      write.related(turn, RelationKind::TurnRootItem).empty())
-    write.relate(turn, RelationKind::TurnRootItem, item);
+  if (isUserMessage(object)) {
+    const std::vector<NodeRef> roots =
+        write.related(turn, RelationKind::TurnRootItem);
+    bool claimsTurnRoot = roots.empty();
+    if (!claimsTurnRoot) {
+      const std::vector<NodeRef> prompts =
+          write.related(item, RelationKind::PromptMaterialization);
+      claimsTurnRoot = std::ranges::any_of(
+          prompts, [&write, &roots](const NodeRef &prompt) {
+            if (std::ranges::find(roots, prompt) == roots.end())
+              return false;
+            const Value *dispatch =
+                member(write.state(prompt)->fields, "dispatchState");
+            return canonicalValue(dispatch) == "awaitingMaterialization";
+          });
+    }
+    if (claimsTurnRoot)
+      replaceSingleRelation(write, turn, RelationKind::TurnRootItem, item);
+  }
 
   const bool hasAgentChildren =
       member(object, "agentThreadId") || member(object, "receiverThreadIds");

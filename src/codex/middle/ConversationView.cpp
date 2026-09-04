@@ -883,6 +883,7 @@ public:
   bool projectionRefreshPending = false;
   const nodegraph::Node *projectionCursor = nullptr;
   bool geometryRerunRequired = false;
+  bool fullReconcileRequired = true;
 
   [[nodiscard]] static std::int64_t
   rawItemExtent(const ItemGeometry &record) noexcept {
@@ -1200,6 +1201,7 @@ void ConversationView::graphChanged(
   graphGeometry_->affectedCursor = 0;
   graphGeometry_->refreshStructureReads = 0;
   graphGeometry_->forceStructureCheck = true;
+  graphGeometry_->fullReconcileRequired = true;
   ++graphGeometry_->structureRequestGeneration;
   runGraphRefresh();
 }
@@ -1244,9 +1246,7 @@ void ConversationView::graphChangedDeferred(
     }
     pending.insert(node.get());
     graphGeometry_->affected.push_back(node);
-    if (node == graphThread_ || node->id().kind == nodegraph::NodeKind::Turn ||
-        (node->id().kind == nodegraph::NodeKind::Item &&
-         !graphGeometry_->itemIndex.contains(node.get())))
+    if (node == graphThread_ || node->id().kind == nodegraph::NodeKind::Turn)
       structureCheckRequested = true;
   }
   if (affectedOverflow) {
@@ -1259,6 +1259,7 @@ void ConversationView::graphChangedDeferred(
   }
   if (structureCheckRequested) {
     graphGeometry_->forceStructureCheck = true;
+    graphGeometry_->fullReconcileRequired = true;
     ++graphGeometry_->structureRequestGeneration;
   }
   // A single eventfd drain may carry hundreds of streaming revisions. Keep
@@ -1349,6 +1350,7 @@ void ConversationView::clearGraph() {
   graphGeometry_->structureRequestGeneration = 0;
   graphGeometry_->validationGeneration = 0;
   graphGeometry_->geometryRerunRequired = false;
+  graphGeometry_->fullReconcileRequired = true;
   graphThread_.reset();
   graph_ = nullptr;
   graphHiddenItemCount_ = 0;
@@ -1459,6 +1461,9 @@ void ConversationView::publishRetiredGeometryCleanupMetrics() {
 void ConversationView::runGraphRefresh() {
   if (!graph_ || !graphThread_)
     return;
+  ++graphRefreshPasses_;
+  setProperty("graphRefreshPasses",
+              static_cast<qulonglong>(graphRefreshPasses_));
   const bool cleanupRemaining =
       graphGeometry_->drainRetiredStorage(MaxStructureRecordsPerPass);
   publishRetiredGeometryCleanupMetrics();
@@ -1498,6 +1503,19 @@ void ConversationView::runGraphRefresh() {
     const std::size_t childCount = read->childCount(graphThread_);
     const std::uint64_t threadStructure =
         read->structureChangedRevision(graphThread_);
+    const auto turnRoot = [&read](const nodegraph::NodeRef &turn) {
+      const std::size_t count =
+          read->relatedCount(turn, nodegraph::RelationKind::TurnRootItem);
+      for (std::size_t index = 0; index < count; ++index) {
+        nodegraph::NodeRef candidate = read->relatedAt(
+            turn, nodegraph::RelationKind::TurnRootItem, index);
+        if (candidate && read->contains(candidate) &&
+            candidate->id().kind == nodegraph::NodeKind::Item &&
+            !read->removed(candidate))
+          return candidate;
+      }
+      return nodegraph::NodeRef{};
+    };
     const bool requestedStructureCheck = graphGeometry_->forceStructureCheck;
     const auto resetRetainedGeometry = [&resetRequested] {
       resetRequested = true;
@@ -1534,6 +1552,13 @@ void ConversationView::runGraphRefresh() {
             read->structureChangedRevision(turn->node);
         if (revision == turn->structureRevision)
           continue;
+        if (turnRoot(turn->node) != turn->root) {
+          // TurnRootItem is the canonical QWidget ownership boundary. A local
+          // prompt materializing as its provider user item must rebuild that
+          // one retained turn before any nested card is exposed parentless.
+          resetRetainedGeometry();
+          break;
+        }
         const std::size_t currentCount = read->childCount(turn->node);
         if (currentCount > turn->knownChildCount) {
           if (structureReads >= MaxStructureRecordsPerPass) {
@@ -1648,20 +1673,6 @@ void ConversationView::runGraphRefresh() {
         graphGeometry_->threadStructureRevision = threadStructure;
         graphGeometry_->newestTurn = newestTurn;
       }
-
-      const auto turnRoot = [&read](const nodegraph::NodeRef &turn) {
-        const std::size_t count =
-            read->relatedCount(turn, nodegraph::RelationKind::TurnRootItem);
-        for (std::size_t index = 0; index < count; ++index) {
-          nodegraph::NodeRef candidate = read->relatedAt(
-              turn, nodegraph::RelationKind::TurnRootItem, index);
-          if (candidate && read->contains(candidate) &&
-              candidate->id().kind == nodegraph::NodeKind::Item &&
-              !read->removed(candidate))
-            return candidate;
-        }
-        return nodegraph::NodeRef{};
-      };
 
       const auto makeRecord =
           [this, &read, &materializedPrompts,
@@ -2077,6 +2088,7 @@ void ConversationView::runGraphRefresh() {
     graphGeometry_->affectedCursor = 0;
     graphGeometry_->forceSelectedReset = false;
     graphGeometry_->forceStructureCheck = true;
+    graphGeometry_->fullReconcileRequired = true;
     graphGeometry_->projectionRefreshPending = true;
     graphGeometry_->projectionCursor = nullptr;
     scheduleRetiredGeometryCleanup();
@@ -2228,18 +2240,14 @@ bool ConversationView::reconcileGraphViewport() {
   if (!graph_ || !content_ || !viewport())
     return false;
   const std::int64_t viewportHeight = std::max(1, viewport()->height());
-  const std::int64_t scrollTop =
-      mode_ == Mode::Following
-          ? std::max<std::int64_t>(0, graphGeometry_->totalPixelExtent -
-                                          viewportHeight)
-      : pendingGraphAnchorRestore_ ? pendingGraphAnchorRestore_->absoluteValue
-                                   : verticalScrollBar()->value();
-  const std::int64_t targetTop =
-      std::max<std::int64_t>(0, scrollTop - viewportHeight);
-  const std::int64_t targetBottom = std::min(graphGeometry_->totalPixelExtent,
-                                             scrollTop + 2 * viewportHeight);
-  const bool reverse =
-      targetTop > graphGeometry_->totalPixelExtent - targetBottom;
+  const std::int64_t scrollTop = verticalScrollBar()->value();
+  // The loaded-history window is the QWidget lifetime boundary. Materialize
+  // its cards once (in bounded passes) when the thread is selected or another
+  // history page is admitted. Scrolling must never change this target or
+  // trigger card destruction/reconstruction.
+  const std::int64_t targetTop = 0;
+  const std::int64_t targetBottom = graphGeometry_->totalPixelExtent;
+  const bool reverse = false;
   auto &geometryScan = graphGeometry_->geometryScan;
   const bool sameViewportTarget = geometryScan.targetTop == targetTop &&
                                   geometryScan.targetBottom == targetBottom &&
@@ -2255,6 +2263,11 @@ bool ConversationView::reconcileGraphViewport() {
   const bool sameTarget =
       geometryScan.generation == graphGeometry_->geometryGeneration &&
       sameViewportTarget;
+  if (sameTarget && geometryScan.valid && !geometryScan.active &&
+      !graphGeometry_->fullReconcileRequired &&
+      !graphGeometry_->geometryRerunRequired &&
+      graphWindowItemCount_ == geometryScan.found.size())
+    return false;
   if (!sameTarget || (!geometryScan.active && !geometryScan.valid)) {
     geometryScan = {};
     geometryScan.active = true;
@@ -2430,8 +2443,31 @@ bool ConversationView::reconcileGraphViewport() {
     return true;
   }
 
-  const std::vector<GraphViewportGeometry::DesiredGeometry> &positioned =
-      geometryScan.found;
+  // A visible historical child is never allowed to exist as a top-level,
+  // merely indented card. Pin the Turn's one canonical You root into the
+  // bounded viewport set so Qt gives every materialized child its real
+  // QObject/layout parent. This costs at most one additional card per visible
+  // Turn and does not materialize the omitted history between them.
+  std::vector<GraphViewportGeometry::DesiredGeometry> positioned;
+  positioned.reserve(geometryScan.found.size() * 2);
+  std::unordered_set<const nodegraph::Node *> positionedNodes;
+  positionedNodes.reserve(geometryScan.found.size() * 2);
+  for (const GraphViewportGeometry::DesiredGeometry &entry :
+       geometryScan.found) {
+    GraphViewportGeometry::ItemGeometry *root =
+        entry.record && entry.record->turn
+            ? entry.record->turn->rootItem.get()
+            : nullptr;
+    if (root && root->node && root != entry.record && root->projectionVisible &&
+        positionedNodes.insert(root->node.get()).second) {
+      positioned.push_back(
+          {root, entry.top,
+           entry.top + GraphViewportGeometry::rawItemExtent(*root)});
+    }
+    if (entry.record && entry.record->node &&
+        positionedNodes.insert(entry.record->node.get()).second)
+      positioned.push_back(entry);
+  }
   graphGeometry_->lastGeometryRecordsPerPass = geometryReads;
   graphGeometry_->maxGeometryRecordsPerPass =
       std::max(graphGeometry_->maxGeometryRecordsPerPass, geometryReads);
@@ -2450,13 +2486,12 @@ bool ConversationView::reconcileGraphViewport() {
   const bool follow = mode_ == Mode::Following;
   std::size_t operations = graphPassCardOperations_;
   bool widgetRemaining = false;
+  bool structuralLayoutChanged = false;
   std::vector<TurnSectionWidget *> changedSections;
   std::unordered_set<const nodegraph::Node *> focusPinned;
   QWidget *focusedWidget = QApplication::focusWidget();
 
   applying_ = true;
-  viewport()->setUpdatesEnabled(false);
-  content_->setUpdatesEnabled(false);
   const QSignalBlocker scrollSignals(verticalScrollBar());
 
   for (TurnSectionWidget *section : graphSections_) {
@@ -2501,6 +2536,7 @@ bool ConversationView::reconcileGraphViewport() {
       slot->attachment.reset();
       delete slot->item;
       slot = section->cardSlots.erase(slot);
+      structuralLayoutChanged = true;
       ++operations;
       if (std::ranges::find(changedSections, section) == changedSections.end())
         changedSections.push_back(section);
@@ -2525,6 +2561,7 @@ bool ConversationView::reconcileGraphViewport() {
     contentLayout_->removeWidget(*section);
     delete *section;
     section = graphSections_.erase(section);
+    structuralLayoutChanged = true;
     operations += cost;
   }
 
@@ -2600,6 +2637,7 @@ bool ConversationView::reconcileGraphViewport() {
         section->setProperty("turnId",
                              QString::fromStdString(section->protocolId));
         graphSections_.push_back(section);
+        structuralLayoutChanged = true;
         ++operations;
       }
 
@@ -2624,6 +2662,7 @@ bool ConversationView::reconcileGraphViewport() {
       if (entry.record->node == entry.record->turn->root)
         section->rootKey = slot.key;
       section->cardSlots.push_back(std::move(slot));
+      structuralLayoutChanged = true;
       section->geometryDirty = true;
       ++operations;
       if (std::ranges::find(changedSections, section) == changedSections.end())
@@ -2662,8 +2701,10 @@ bool ConversationView::reconcileGraphViewport() {
                             std::ranges::equal_to{}, std::identity{},
                             [](const TurnSectionWidget::CardSlot &slot) {
                               return slot.graphNode.get();
-                            }))
+                            })) {
       section->layoutDirty = true;
+      structuralLayoutChanged = true;
+    }
     section->rootKey.clear();
     for (const TurnSectionWidget::CardSlot &slot : section->cardSlots)
       if (const auto record =
@@ -2672,7 +2713,8 @@ bool ConversationView::reconcileGraphViewport() {
           record->second->turn->root == slot.graphNode)
         section->rootKey = slot.key;
   }
-  if (focusPinned.empty())
+  if (focusPinned.empty()) {
+    std::vector<TurnSectionWidget *> previousSectionOrder = graphSections_;
     std::ranges::stable_sort(
         graphSections_,
         [&desiredOrder](TurnSectionWidget *left, TurnSectionWidget *right) {
@@ -2686,6 +2728,9 @@ bool ConversationView::reconcileGraphViewport() {
           };
           return firstOrder(left) < firstOrder(right);
         });
+    structuralLayoutChanged =
+        structuralLayoutChanged || previousSectionOrder != graphSections_;
+  }
 
   for (TurnSectionWidget *section : changedSections)
     if (std::ranges::find(graphSections_, section) != graphSections_.end())
@@ -2701,6 +2746,7 @@ bool ConversationView::reconcileGraphViewport() {
     section->setVisible(!section->cardSlots.empty());
     section->layoutDirty = false;
     section->geometryDirty = true;
+    structuralLayoutChanged = true;
     ++operations;
   }
   for (std::size_t index = 0; index < graphSections_.size(); ++index) {
@@ -2714,6 +2760,7 @@ bool ConversationView::reconcileGraphViewport() {
       break;
     }
     contentLayout_->insertWidget(wantedIndex, graphSections_[index]);
+    structuralLayoutChanged = true;
     ++operations;
   }
 
@@ -2806,15 +2853,15 @@ bool ConversationView::reconcileGraphViewport() {
   }
 
   updateGraphChrome();
-  recomputeGeometry();
+  if (structuralLayoutChanged || graphGeometry_->fullReconcileRequired) {
+    recomputeGeometry();
+    graphGeometry_->fullReconcileRequired = false;
+  }
   if (follow)
     setScrollValue(verticalScrollBar()->maximum());
   else
     restoreAnchor(anchor);
   applying_ = false;
-  content_->setUpdatesEnabled(true);
-  viewport()->setUpdatesEnabled(true);
-  viewport()->update();
   resetGraphVisibilityScan();
 
   return widgetRemaining || liveRecordCount != wanted.size() || rerunGeometry;
@@ -2864,8 +2911,6 @@ void ConversationView::detachGraphWidgets(
   }
   graphGeometry_->targetDirty = true;
   applying_ = true;
-  viewport()->setUpdatesEnabled(false);
-  content_->setUpdatesEnabled(false);
   const QSignalBlocker scrollSignals(verticalScrollBar());
 
   const bool removeThread = isRemoved(graphThread_);
@@ -2968,9 +3013,6 @@ void ConversationView::detachGraphWidgets(
   else
     restoreAnchor(anchor);
   applying_ = false;
-  content_->setUpdatesEnabled(true);
-  viewport()->setUpdatesEnabled(true);
-  viewport()->update();
 }
 
 void ConversationView::setLoadMoreAction(std::function<void()> action) {
@@ -3398,10 +3440,6 @@ bool ConversationView::runGraphVisibilityPass() {
 
   const QRect visibleRect(0, scrollTop, std::max(1, content_->width()),
                           viewportHeight);
-  const QRect materializationRect(0, std::max(0, scrollTop - viewportHeight),
-                                  std::max(1, content_->width()),
-                                  viewportHeight * 3);
-  const QRect retentionRect = materializationRect;
   std::vector<Candidate> candidates;
   candidates.reserve(scanned.size());
   QWidget *focus = QApplication::focusWidget();
@@ -3425,8 +3463,11 @@ bool ConversationView::runGraphVisibilityPass() {
     const QRect itemRect(item->mapTo(content_, QPoint{}), item->size());
     const bool presented =
         slot.projectionVisible && item->isVisibleTo(content_);
-    const bool wanted = presented && itemRect.intersects(materializationRect);
-    const bool retained = presented && itemRect.intersects(retentionRect);
+    // The loaded graph window, rather than transient QWidget visibility while
+    // a sliced layout commit is settling, defines one-time materialization.
+    // A just-admitted tail placeholder can briefly report not-visible even
+    // though it belongs to the selected thread's loaded page.
+    const bool wanted = slot.projectionVisible;
     const bool inViewport = presented && itemRect.intersects(visibleRect);
     const int center = itemRect.center().y();
     const int distance =
@@ -3439,10 +3480,7 @@ bool ConversationView::runGraphVisibilityPass() {
     if (widget) {
       const bool ownsFocus =
           focus && (focus == widget || widget->isAncestorOf(focus));
-      if (!retained && !ownsFocus) {
-        candidates.push_back(
-            {entry.section, &slot, Operation::Release, false, distance});
-      } else if (wanted) {
+      if (inViewport || ownsFocus) {
         candidates.push_back({entry.section, &slot, Operation::Render,
                               inViewport, distance,
                               slot.attachment->renderedRevision});
@@ -3452,6 +3490,76 @@ bool ConversationView::runGraphVisibilityPass() {
           {entry.section, &slot, Operation::Materialize, inViewport, distance});
     }
     updateAttachmentVisibility(entry);
+  }
+
+  // A materialized child is owned by the Turn's canonical You card, not by a
+  // visually-indented stand-in. The root can be far outside the viewport when
+  // retained history is represented by a large placeholder, so ordinary
+  // rectangle testing would otherwise leave the visible child parentless.
+  // Promote that one root to the same bounded materialization decision as its
+  // nearest visible/retained child. This remains one extra QWidget per visible
+  // Turn and never walks omitted history.
+  for (TurnSectionWidget *section : scannedSections) {
+    if (!section || section->rootKey.empty())
+      continue;
+    const auto root = std::ranges::find_if(
+        section->cardSlots, [section](const TurnSectionWidget::CardSlot &slot) {
+          return slot.key == section->rootKey;
+        });
+    if (root == section->cardSlots.end())
+      continue;
+
+    bool childNeedsOwner = false;
+    bool childInViewport = false;
+    int childDistance = std::numeric_limits<int>::max();
+    for (const TurnSectionWidget::CardSlot &slot : section->cardSlots) {
+      if (&slot == &*root)
+        continue;
+      const auto candidate = std::ranges::find_if(
+          candidates, [&slot](const Candidate &entry) {
+            return entry.slot == &slot &&
+                   entry.operation != Operation::Release;
+          });
+      const bool retainedChild =
+          slot.attachment && slot.attachment->widget &&
+          slot.itemGuard && slot.itemGuard->isVisibleTo(content_);
+      if (candidate == candidates.end() && !retainedChild)
+        continue;
+      childNeedsOwner = true;
+      if (candidate != candidates.end()) {
+        childInViewport = childInViewport || candidate->inViewport;
+        childDistance = std::min(childDistance, candidate->distance);
+      } else {
+        childDistance = 0;
+      }
+    }
+    if (!childNeedsOwner)
+      continue;
+
+    auto rootCandidate = std::ranges::find_if(
+        candidates, [&root](const Candidate &entry) {
+          return entry.slot == &*root;
+        });
+    QWidget *rootWidget =
+        root->attachment ? root->attachment->widget.data() : nullptr;
+    const Operation operation =
+        rootWidget ? Operation::Render : Operation::Materialize;
+    const int distance =
+        childDistance == std::numeric_limits<int>::max() ? 0 : childDistance;
+    if (rootCandidate == candidates.end()) {
+      candidates.push_back({section, &*root, operation, childInViewport,
+                            distance,
+                            root->attachment
+                                ? root->attachment->renderedRevision
+                                : std::uint64_t{0}});
+    } else {
+      rootCandidate->operation = operation;
+      rootCandidate->inViewport = childInViewport;
+      rootCandidate->distance = distance;
+      rootCandidate->renderedRevision =
+          root->attachment ? root->attachment->renderedRevision
+                           : std::uint64_t{0};
+    }
   }
 
   const bool needsGraphRead =
@@ -3537,8 +3645,6 @@ bool ConversationView::runGraphVisibilityPass() {
   const int previousValue = verticalScrollBar()->value();
   stopFollowingAnimation();
   applying_ = true;
-  viewport()->setUpdatesEnabled(false);
-  content_->setUpdatesEnabled(false);
   const QSignalBlocker scrollSignals(verticalScrollBar());
   std::vector<std::pair<ConversationCard *, CommandOutputView::ScrollState>>
       outputRestorations;
@@ -3570,6 +3676,7 @@ bool ConversationView::runGraphVisibilityPass() {
       static_cast<int>(graphPassCardOperations_ + recoveryOperations);
   bool workRemaining = false;
   bool geometryChanged = false;
+  bool structuralWidgetChange = false;
   std::vector<TurnSectionWidget *> changedSections;
 
   for (Candidate &candidate : candidates) {
@@ -3581,6 +3688,23 @@ bool ConversationView::runGraphVisibilityPass() {
     if (candidate.operation == Operation::Materialize) {
       if (!candidate.state)
         continue;
+      if (candidate.section->hasAuthoritativeRoot &&
+          slot.key != candidate.section->rootKey) {
+        const auto root = std::ranges::find_if(
+            candidate.section->cardSlots,
+            [&candidate](const TurnSectionWidget::CardSlot &entry) {
+              return entry.key == candidate.section->rootKey;
+            });
+        ConversationCard *owner =
+            root != candidate.section->cardSlots.end() && root->attachment
+                ? qobject_cast<ConversationCard *>(
+                      root->attachment->widget.data())
+                : nullptr;
+        if (!owner) {
+          workRemaining = true;
+          continue;
+        }
+      }
       auto *placeholder = dynamic_cast<MeasuredCardPlaceholder *>(slot.item);
       if (!placeholder)
         continue;
@@ -3606,6 +3730,7 @@ bool ConversationView::runGraphVisibilityPass() {
       slot.graphNode->setUiAttachment(slot.attachment.get());
       delete placeholder;
       rememberSection(changedSections, candidate.section);
+      structuralWidgetChange = true;
       ++operations;
       continue;
     }
@@ -3648,10 +3773,18 @@ bool ConversationView::runGraphVisibilityPass() {
         Q_ASSERT(slot.graphNode->uiAttachment() == nullptr);
         slot.graphNode->setUiAttachment(slot.attachment.get());
         card = replacement;
+        structuralWidgetChange = true;
         operations += 2;
       } else {
-        card->apply(data);
+        const PresentationImpact impact = card->applyPresentation(data);
+        slot.attachment->renderedRevision = candidate.nodeRevision;
+        setAttachmentViewportVisibility(*slot.attachment,
+                                        candidate.inViewport);
+        if (impact == PresentationImpact::None)
+          continue;
         ++operations;
+        if (impact == PresentationImpact::PaintOnly)
+          continue;
       }
       card->setVisible(slot.projectionVisible);
       slot.cardGeometryDirty = true;
@@ -3688,6 +3821,7 @@ bool ConversationView::runGraphVisibilityPass() {
     slot.itemGuard = placeholder;
     delete card;
     rememberSection(changedSections, candidate.section);
+    structuralWidgetChange = true;
     ++operations;
   }
 
@@ -3698,7 +3832,12 @@ bool ConversationView::runGraphVisibilityPass() {
   }
   for (TurnSectionWidget *section : changedSections)
     arrangeSection(section);
-  recomputeGeometry();
+  const bool loadedWindowMaterializationPending =
+      workRemaining || recoveryRemaining || visibilitySlotsRemaining_ != 0;
+  if (!changedSections.empty() && !structuralWidgetChange)
+    recomputeGeometry(&changedSections);
+  else if (!changedSections.empty() && !loadedWindowMaterializationPending)
+    recomputeGeometry();
   for (TurnSectionWidget *section : changedSections) {
     for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
       auto *card =
@@ -3729,10 +3868,6 @@ bool ConversationView::runGraphVisibilityPass() {
   else
     restoreAnchor(anchor);
   applying_ = false;
-  content_->setUpdatesEnabled(true);
-  viewport()->setUpdatesEnabled(true);
-  viewport()->update();
-
   for (const ScannedSlot &entry : scanned)
     updateAttachmentVisibility(entry);
   if (follow && !followedBottom) {
@@ -3907,35 +4042,11 @@ ConversationView::modeForThread(const std::string &threadId) const noexcept {
 bool ConversationView::eventFilter(QObject *watched, QEvent *event) {
   if (watched == content_ && event->type() == QEvent::LayoutRequest &&
       !applying_) {
-    Anchor anchor = captureAnchor();
-    if (mode_ == Mode::Paused) {
-      const auto retained = threadStates_.find(threadId_);
-      if (retained != threadStates_.end() &&
-          !retained->second.anchor.stableKey.empty())
-        anchor = retained->second.anchor;
-    }
-    const bool follow = mode_ == Mode::Following;
-    stopFollowingAnimation();
-    applying_ = true;
-    viewport()->setUpdatesEnabled(false);
-    const QSignalBlocker scrollSignals(verticalScrollBar());
-    for (TurnSectionWidget *section : graphSections_) {
-      section->geometryDirty = true;
-      for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
-        slot.cardGeometryDirty = true;
-    }
-    recomputeGeometry();
-    restoreAnchor(anchor);
-    applying_ = false;
-    viewport()->setUpdatesEnabled(true);
-    viewport()->update();
-    const int stableValue = verticalScrollBar()->value();
-    if (follow && verticalScrollBar()->maximum() > stableValue + 3)
-      animateToBottom(stableValue);
-    else if (follow)
-      setScrollValue(verticalScrollBar()->maximum());
-    scheduleVisibilityPass();
-    storeCurrentThreadState();
+    // Every managed card mutation, fold, structural commit, composer change,
+    // and resize settles its precise section explicitly before releasing
+    // applying_. A descendant LayoutRequest posted by that work must not
+    // escape the section boundary and trigger a second whole-conversation
+    // layout/repaint transaction.
     return true;
   }
   return QAbstractScrollArea::eventFilter(watched, event);
@@ -4055,17 +4166,38 @@ void ConversationView::animateToBottom(int previousValue) {
   followAnimation_->start();
 }
 
-void ConversationView::recomputeGeometry() {
+void ConversationView::recomputeGeometry(
+    const std::vector<TurnSectionWidget *> *affectedSections) {
   if (!content_ || !viewport())
     return;
-  std::vector<TurnSectionWidget *> layoutSections = graphSections_;
+  std::vector<TurnSectionWidget *> layoutSections =
+      affectedSections ? *affectedSections : graphSections_;
+  std::erase_if(layoutSections, [this](TurnSectionWidget *section) {
+    return !section ||
+           std::ranges::find(graphSections_, section) == graphSections_.end();
+  });
+  std::ranges::sort(layoutSections);
+  layoutSections.erase(
+      std::unique(layoutSections.begin(), layoutSections.end()),
+      layoutSections.end());
   std::vector<ConversationCard *> layoutCards;
-  for (TurnSectionWidget *section : graphSections_)
+  for (TurnSectionWidget *section : layoutSections)
     for (const TurnSectionWidget::CardSlot &slot : section->cardSlots)
-      if (slot.attachment)
+      if (slot.attachment && (!affectedSections || slot.cardGeometryDirty))
         if (auto *card = qobject_cast<ConversationCard *>(
                 slot.attachment->widget.data()))
           layoutCards.push_back(card);
+  ++geometryPasses_;
+  if (!affectedSections)
+    ++fullGeometryPasses_;
+  setProperty("conversationGeometryPasses",
+              static_cast<qulonglong>(geometryPasses_));
+  setProperty("conversationFullGeometryPasses",
+              static_cast<qulonglong>(fullGeometryPasses_));
+  setProperty("conversationSectionsLaidOutLastPass",
+              static_cast<qulonglong>(layoutSections.size()));
+  setProperty("conversationCardsLaidOutLastPass",
+              static_cast<qulonglong>(layoutCards.size()));
   const int width = std::max(0, viewport()->width());
   contentLayout_->invalidate();
   for (TurnSectionWidget *section : layoutSections)
@@ -4206,6 +4338,11 @@ void ConversationView::recomputeGeometry() {
   for (TurnSectionWidget *section : layoutSections)
     QCoreApplication::sendPostedEvents(section, QEvent::LayoutRequest);
   QCoreApplication::sendPostedEvents(content_, QEvent::LayoutRequest);
+  for (TurnSectionWidget *section : layoutSections) {
+    section->geometryDirty = false;
+    for (TurnSectionWidget::CardSlot &slot : section->cardSlots)
+      slot.cardGeometryDirty = false;
+  }
 }
 
 void ConversationView::positionContent() {

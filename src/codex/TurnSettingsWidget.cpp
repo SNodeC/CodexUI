@@ -457,9 +457,13 @@ bool TurnSettingsWidget::applyCanonicalContext(
 }
 
 void TurnSettingsWidget::setControlsEnabled(bool enabled) {
-  setEnabled(enabled);
-  setToolTip(enabled ? QString{}
-                     : QStringLiteral("Settings apply when starting a turn"));
+  if (isEnabled() != enabled)
+    setEnabled(enabled);
+  const QString tip =
+      enabled ? QString{}
+              : QStringLiteral("Settings apply when starting a turn");
+  if (toolTip() != tip)
+    setToolTip(tip);
 }
 
 void TurnSettingsWidget::setWorkspace(QString path) {

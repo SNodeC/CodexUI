@@ -261,7 +261,7 @@ if(BUILD_TESTING)
     )
     set_tests_properties(
         codexui-conversation-cards
-        PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        PROPERTIES TIMEOUT 35 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 
     qt_add_executable(

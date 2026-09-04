@@ -24,6 +24,7 @@
 #include <iostream>
 #include <optional>
 #include <poll.h>
+#include <pthread.h>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -288,6 +289,19 @@ public:
 
   NodeGraph &graph() noexcept { return graph_; }
   ThreadChannels &channels() noexcept { return channels_; }
+
+  std::optional<std::chrono::nanoseconds> workerCpuTime() {
+    if (!worker_.joinable())
+      return std::nullopt;
+    clockid_t clock{};
+    if (::pthread_getcpuclockid(worker_.native_handle(), &clock) != 0)
+      return std::nullopt;
+    timespec value{};
+    if (::clock_gettime(clock, &value) != 0)
+      return std::nullopt;
+    return std::chrono::seconds(value.tv_sec) +
+           std::chrono::nanoseconds(value.tv_nsec);
+  }
 
   void drainNotifications() {
     static_cast<void>(channels_.drainWorkerToQtWake());
@@ -1196,6 +1210,16 @@ void failedWakeUsesBoundedWorkerRecovery(UnixBridge &bridge,
   runtime.drainNotifications();
 }
 
+void idleWorkerSleepsBetweenWakeRecoveryChecks(RunningRuntime &runtime) {
+  const auto before = runtime.workerCpuTime();
+  std::this_thread::sleep_for(350ms);
+  const auto after = runtime.workerCpuTime();
+  expect(before && after && *after >= *before &&
+             *after - *before < 100ms,
+         "an idle worker rearms its mailbox timeout instead of zero-timeout "
+         "polling");
+}
+
 void reverseInteractionsRespondOnceWithAuthoredData(UnixBridge &bridge,
                                                     RunningRuntime &runtime) {
   expect(bridge.appServerRequest("approval-runtime",
@@ -1785,6 +1809,7 @@ int main(int argc, char **argv) {
   codexui::codex::expect(
       ready, "runtime connects and performs one initial provider hydration");
   if (ready) {
+    codexui::codex::idleWorkerSleepsBetweenWakeRecoveryChecks(runtime);
     codexui::codex::protocolDiagnosticsPreserveMetadataWithoutPayloads(bridge,
                                                                        runtime);
     codexui::codex::directNodeActionsUseOneCorrelatedRequest(bridge, runtime);

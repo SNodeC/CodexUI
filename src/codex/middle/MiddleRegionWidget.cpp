@@ -370,6 +370,14 @@ QSplitter *MiddleRegionWidget::splitterWidget() const noexcept {
 void MiddleRegionWidget::setThreadHeading(QString title, QString metadata,
                                           QString trailingMetadata,
                                           QString state, QString stateTone) {
+  const bool separatorVisible = !state.isEmpty();
+  if (conversationTitle->text() == title &&
+      conversationMetadata->text() == metadata &&
+      conversationTrailingMetadata->text() == trailingMetadata &&
+      conversationState->text() == state &&
+      conversationState->property("tone").toString() == stateTone &&
+      conversationStateSeparator->isVisible() == separatorVisible)
+    return;
   if (conversationTitle->text() != title)
     conversationTitle->setText(std::move(title));
   if (conversationMetadata->text() != metadata)
@@ -378,7 +386,7 @@ void MiddleRegionWidget::setThreadHeading(QString title, QString metadata,
     conversationTrailingMetadata->setText(std::move(trailingMetadata));
   if (conversationState->text() != state)
     conversationState->setText(std::move(state));
-  conversationStateSeparator->setVisible(!conversationState->text().isEmpty());
+  conversationStateSeparator->setVisible(separatorVisible);
   if (conversationState->property("tone").toString() != stateTone) {
     conversationState->setProperty("tone", std::move(stateTone));
     conversationState->style()->unpolish(conversationState);

@@ -170,6 +170,17 @@ NodeGraph::ReadAccess::fieldChangedRevision(const NodeRef &node,
   return found == node->fieldChangedRevisions_.end() ? 0 : found->second;
 }
 
+bool NodeGraph::ReadAccess::fieldsChangedAt(const NodeRef &node,
+                                            std::uint64_t revision) const {
+  if (!node)
+    return false;
+  requireMember(node);
+  return std::ranges::any_of(node->fieldChangedRevisions_,
+                             [revision](const auto &field) {
+                               return field.second == revision;
+                             });
+}
+
 std::uint64_t
 NodeGraph::ReadAccess::statusChangedRevision(const NodeRef &node) const {
   if (!node)

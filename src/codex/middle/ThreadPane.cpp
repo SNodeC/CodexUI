@@ -389,6 +389,23 @@ std::string graphStatus(const nodegraph::NodeState &state) {
 
 } // namespace
 
+struct ThreadPane::GraphRowRender final {
+  std::uint64_t revision = 0;
+  std::string id;
+  std::string title;
+  std::string cwd;
+  std::string status;
+  std::optional<std::int64_t> lastActivityAt;
+  std::string parentTitle;
+  std::size_t pending = 0;
+
+  [[nodiscard]] bool samePresentation(const GraphRowRender &other) const {
+    return id == other.id && title == other.title && cwd == other.cwd &&
+           status == other.status && lastActivityAt == other.lastActivityAt &&
+           parentTitle == other.parentTitle && pending == other.pending;
+  }
+};
+
 struct ThreadPane::GraphThreadItem final : public QListWidgetItem {
   ~GraphThreadItem() override { detachNode(); }
 
@@ -426,6 +443,7 @@ struct ThreadPane::GraphThreadItem final : public QListWidgetItem {
   std::size_t depth = 0;
   std::uint64_t renderedRevision = 0;
   std::size_t renderedPending = 0;
+  std::optional<GraphRowRender> renderedPresentation;
   bool hasChildren = false;
   bool expanded = false;
   bool optimistic = false;
@@ -551,17 +569,6 @@ struct ThreadPane::GraphScan final {
   std::set<const nodegraph::Node *> appended;
   GraphTopology topology;
   Phase phase = Phase::Roots;
-};
-
-struct ThreadPane::GraphRowRender final {
-  std::uint64_t revision = 0;
-  std::string id;
-  std::string title;
-  std::string cwd;
-  std::string status;
-  std::optional<std::int64_t> lastActivityAt;
-  std::string parentTitle;
-  std::size_t pending = 0;
 };
 
 ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
@@ -905,26 +912,49 @@ void ThreadPane::graphChanged(const nodegraph::GraphChanged &change) {
                               hasKind(nodegraph::NodeKind::Runtime, true) ||
                               hasKind(nodegraph::NodeKind::Thread, true);
   bool topologyInputChanged = mustInvalidate;
-  if (!topologyInputChanged && !interactionChanged) {
+  bool rowPresentationChanged = interactionChanged;
+  if (!topologyInputChanged) {
     auto read = graph->tryRead();
     if (read) {
-      constexpr std::array<std::string_view, 6> SortFields{
-          "name",      "title",     "createdAt",
-          "updatedAt", "recencyAt", "localPromptActivityAt"};
+      const auto fieldChanged = [&read, &change](const nodegraph::NodeRef &node,
+                                                 std::string_view field) {
+        return read->fieldChangedRevision(node, field) == change.revision;
+      };
+      const auto activeSortFieldChanged = [this, &fieldChanged](
+                                              const nodegraph::NodeRef &node) {
+        if (sortCriterion == SortCriterion::Alphanumeric)
+          return fieldChanged(node, "name") || fieldChanged(node, "title");
+        if (sortCriterion == SortCriterion::Created)
+          return fieldChanged(node, "createdAt");
+        if (sortCriterion == SortCriterion::LastChanged)
+          return fieldChanged(node, "updatedAt") ||
+                 fieldChanged(node, "localPromptActivityAt");
+        return fieldChanged(node, "recencyAt") ||
+               fieldChanged(node, "localPromptActivityAt");
+      };
+      constexpr std::array<std::string_view, 11> RowFields{
+          "name",          "title",       "cwd",
+          "workspace",     "status",      "lastActivityAt",
+          "recencyAt",     "updatedAt",   "localActivityAt",
+          "localPromptActivityAt", "pendingInteractionCount"};
       for (const nodegraph::NodeRef &node : change.affected) {
         if (!node || (node->id().kind != nodegraph::NodeKind::Runtime &&
                       node->id().kind != nodegraph::NodeKind::Thread))
           continue;
+        if (!read->contains(node))
+          continue;
         if (read->structureChangedRevision(node) == change.revision) {
           topologyInputChanged = true;
-          break;
         }
-        if (node->id().kind == nodegraph::NodeKind::Thread &&
-            std::ranges::any_of(SortFields, [&](std::string_view field) {
-              return read->fieldChangedRevision(node, field) == change.revision;
-            })) {
-          topologyInputChanged = true;
-          break;
+        if (node->id().kind == nodegraph::NodeKind::Thread) {
+          topologyInputChanged =
+              topologyInputChanged || activeSortFieldChanged(node);
+          rowPresentationChanged =
+              rowPresentationChanged ||
+              read->statusChangedRevision(node) == change.revision ||
+              std::ranges::any_of(RowFields, [&](std::string_view field) {
+                return fieldChanged(node, field);
+              });
         }
       }
       read.reset();
@@ -936,10 +966,7 @@ void ThreadPane::graphChanged(const nodegraph::GraphChanged &change) {
   }
   if (topologyInputChanged)
     ++topologyInputEpoch;
-  const bool topologyChanged =
-      mustInvalidate ||
-      (!interactionChanged && (hasKind(nodegraph::NodeKind::Runtime) ||
-                               hasKind(nodegraph::NodeKind::Thread)));
+  const bool topologyChanged = topologyInputChanged;
   if (mustInvalidate) {
     // Removed NodeRefs must never be attached again after this handler returns,
     // and a coalesced rescan deliberately carries no precise invalidation set.
@@ -958,7 +985,7 @@ void ThreadPane::graphChanged(const nodegraph::GraphChanged &change) {
       graphRefreshAfterCurrent = true;
     else
       scheduleGraphRefresh();
-  } else if (interactionChanged) {
+  } else if (rowPresentationChanged) {
     scheduleVisibilityPass();
   }
 }
@@ -1028,6 +1055,10 @@ void ThreadPane::leaveGraph() {
   visibilityFirst = -1;
   visibilityLast = -1;
   visibilityCursor = -1;
+  if (topologyCommitUpdatesSuppressed) {
+    topologyCommitUpdatesSuppressed = false;
+    list->setUpdatesEnabled(true);
+  }
   if (contextMenu) {
     QMenu *menu = std::exchange(contextMenu, nullptr);
     menu->close();
@@ -1056,6 +1087,9 @@ void ThreadPane::scheduleGraphRefresh() {
   pendingGraphTopology.reset();
   topologyCursor = 0;
   topologySearchCursor = -1;
+  ++topologyScansStarted;
+  setProperty("graphTopologyScansStarted",
+              static_cast<qulonglong>(topologyScansStarted));
   scheduleGraphScanPass();
 }
 
@@ -1578,7 +1612,7 @@ void ThreadPane::runTopologyPass() {
   std::size_t work = 0;
   if (!topology.validated) {
     ++topologyValidationPasses;
-    if (!candidateInputsAreCurrent()) {
+    if (topologyCursor == 0 && !candidateInputsAreCurrent()) {
       ++discardedTopologies;
       pendingGraphTopology.reset();
       topologyCursor = 0;
@@ -1673,8 +1707,15 @@ void ThreadPane::runTopologyPass() {
   }
 
   const bool signalsWereBlocked = list->blockSignals(true);
-  const bool updatesWereEnabled = list->updatesEnabled();
-  list->setUpdatesEnabled(false);
+  if (!topologyCommitUpdatesSuppressed) {
+    topologyCommitUpdatesSuppressed = list->updatesEnabled();
+    if (topologyCommitUpdatesSuppressed) {
+      list->setUpdatesEnabled(false);
+      ++wholePaneUpdateSuppressions;
+      setProperty("wholePaneUpdateSuppressions",
+                  static_cast<qulonglong>(wholePaneUpdateSuppressions));
+    }
+  }
 
   const auto matches = [](const GraphThreadItem &item,
                           const GraphTopology::Row &row) {
@@ -1742,6 +1783,7 @@ void ThreadPane::runTopologyPass() {
     item->optimistic = row.optimistic;
     item->optimisticFailed = row.optimisticFailed;
     item->renderedRevision = 0;
+    item->renderedPresentation.reset();
     if (item->attachment)
       item->attachment->renderedRevision = 0;
     item->setData(Qt::UserRole, text(item->localId));
@@ -1774,7 +1816,6 @@ void ThreadPane::runTopologyPass() {
     ++work;
   }
 
-  list->setUpdatesEnabled(updatesWereEnabled);
   list->blockSignals(signalsWereBlocked);
   maximumTopologyWork = std::max(maximumTopologyWork, work);
   if (topologyCursor != topology.rows.size() ||
@@ -1794,6 +1835,10 @@ void ThreadPane::runTopologyPass() {
   if (!selectedId.empty() && selectedItem)
     list->setCurrentItem(selectedItem);
   list->blockSignals(finalSignalsWereBlocked);
+  if (topologyCommitUpdatesSuppressed) {
+    topologyCommitUpdatesSuppressed = false;
+    list->setUpdatesEnabled(true);
+  }
   ++completedTopologies;
   if (graphRefreshAfterCurrent) {
     graphRefreshAfterCurrent = false;
@@ -2035,6 +2080,7 @@ void ThreadPane::dematerialize(GraphThreadItem &item, bool deferred) {
   }
   item.renderedRevision = 0;
   item.renderedPending = 0;
+  item.renderedPresentation.reset();
   if (item.attachment) {
     item.attachment->widget.clear();
     item.attachment->renderedRevision = 0;
@@ -2046,6 +2092,13 @@ void ThreadPane::dematerialize(GraphThreadItem &item, bool deferred) {
 void ThreadPane::renderGraphRow(GraphThreadItem &item,
                                 const GraphRowRender &render) {
   QWidget *row = list->itemWidget(&item);
+  if (row && item.renderedPresentation &&
+      item.renderedPresentation->samePresentation(render)) {
+    item.renderedRevision = render.revision;
+    if (item.attachment)
+      item.attachment->renderedRevision = render.revision;
+    return;
+  }
   if (!row) {
     row = createRow();
     list->setItemWidget(&item, row);
@@ -2080,12 +2133,17 @@ void ThreadPane::renderGraphRow(GraphThreadItem &item,
   updateRow(row, render.id, render.title, render.status, render.pending,
             item.depth, item.hasChildren, item.expanded, item.optimistic,
             item.optimisticFailed);
+  item.renderedPresentation = render;
   item.renderedRevision = render.revision;
   item.renderedPending = render.pending;
   if (item.attachment) {
     item.attachment->widget = row;
     item.attachment->renderedRevision = render.revision;
   }
+  ++rowPresentationUpdates;
+  setProperty("rowPresentationUpdates",
+              static_cast<qulonglong>(rowPresentationUpdates));
+  list->viewport()->update(list->visualItemRect(&item));
 }
 
 ThreadPane::GraphThreadItem *

@@ -1846,6 +1846,7 @@ void promptMaterializationDoesNotAcknowledgeDelivery() {
     write.setField(local, "clientUserMessageId", Value("client-prompt"));
     write.setField(local, "dispatchState", Value("awaitingResult"));
     write.setStatus(local, NodeStatus::Running);
+    write.relate(turn, RelationKind::TurnRootItem, local);
     write.relate(runtime, RelationKind::PendingPrompt, local);
     static_cast<void>(write.finish());
   }
@@ -1866,6 +1867,13 @@ void promptMaterializationDoesNotAcknowledgeDelivery() {
   require(read->related(authoritative, RelationKind::PromptMaterialization) ==
               std::vector<NodeRef>{local},
           "authoritative prompt identity is related to its local node");
+  require(read->related(read->parent(authoritative),
+                        RelationKind::TurnRootItem) ==
+                  std::vector<NodeRef>{authoritative} &&
+              read->related(read->parent(local), RelationKind::TurnRootItem) ==
+                  std::vector<NodeRef>{local},
+          "inbound materialization roots the provider Turn without changing "
+          "the still-unacknowledged optimistic Turn ownership");
   require(localState->status == NodeStatus::Running &&
               field(localState, "dispatchState") &&
               *field(localState, "dispatchState")->asString() ==

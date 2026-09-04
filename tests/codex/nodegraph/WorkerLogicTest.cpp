@@ -820,9 +820,12 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
             read->related(runtime, RelationKind::PendingPrompt) ==
                 std::vector<NodeRef>{firstPrompt} &&
             read->related(thread, RelationKind::PendingPrompt) ==
+                std::vector<NodeRef>{firstPrompt} &&
+            read->related(localTurn, RelationKind::TurnRootItem) ==
                 std::vector<NodeRef>{firstPrompt},
         "admission stores one directly-related local prompt with the "
-        "same safe file Markdown sent on the wire");
+        "same safe file Markdown sent on the wire and makes its You card the "
+        "owning turn root");
   }
 
   NodeAction queued;
@@ -887,12 +890,16 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
         authoritative &&
             read->related(authoritative, RelationKind::PromptMaterialization) ==
                 std::vector<NodeRef>{firstPrompt} &&
+            read->related(read->parent(authoritative),
+                          RelationKind::TurnRootItem) ==
+                std::vector<NodeRef>{authoritative} &&
             read->state(firstPrompt)->status == NodeStatus::Running &&
             stringFieldEquals(read->state(firstPrompt), "dispatchState",
                               "awaitingMaterialization"),
         "matching authoritative clientId directly relates the user item "
-        "to its acknowledged local visual identity without replacing the "
-        "exact request-result lifecycle");
+        "to its acknowledged local visual identity and transfers canonical "
+        "turn-root ownership without replacing the exact request-result "
+        "lifecycle");
   }
 
   const ChannelSendStatus removed = logic.promptMaterialized(firstPrompt);
@@ -1085,13 +1092,15 @@ void combinedResultsPublishOneAtomicGraphChange() {
     require(!read->find(turnRequest.primary->id()) && turn && reasoning &&
                 read->children(turn) ==
                     std::vector<NodeRef>{localPrompt, reasoning} &&
+                read->related(turn, RelationKind::TurnRootItem) ==
+                    std::vector<NodeRef>{localPrompt} &&
                 stringFieldEquals(read->state(localPrompt), "dispatchState",
                                   "awaitingMaterialization") &&
                 read->changedRevision(turn) == read->revision() &&
                 read->changedRevision(localPrompt) == read->revision(),
             "the single accepted-result revision contains the retired "
             "operation, acknowledged prompt, and starting prompt ordered "
-            "ahead of provider reasoning");
+            "ahead of provider reasoning with an explicit owning You root");
   }
 
   const ProtocolRequestId readRequestId("atomic-read-result");

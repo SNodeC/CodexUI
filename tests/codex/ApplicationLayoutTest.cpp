@@ -2245,8 +2245,8 @@ bool testThreadScanCompletesUnderContinuousGraphChanges() {
                        nodegraph::Value(churnTicks));
       } else {
         // This is a real Thread notification, but does not change roots,
-        // hierarchy, or sorting. It must coalesce a follow-up rather than
-        // repeatedly cancelling the topology currently making progress.
+        // hierarchy, presentation, or sorting. It must not request topology
+        // work or cancel the topology currently making progress.
         write.setField(roots.front(), "streamSequence",
                        nodegraph::Value(churnTicks));
       }
@@ -2275,19 +2275,14 @@ bool testThreadScanCompletesUnderContinuousGraphChanges() {
       pane.completedTopologyCount() > 0 && list && list->count() == ThreadCount;
   churn.stop();
 
-  deadline.restart();
-  while (pane.completedTopologyCount() < 2 && deadline.elapsed() < 5000) {
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
-    QThread::msleep(1);
-  }
   spin(30);
   QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 
   result &= expect(
       completedDuringChurn && churnTicks > 8 && contendedNotifications > 8 &&
-          pane.completedTopologyCount() >= 2,
+          pane.completedTopologyCount() == 1,
       "continuous unrelated and Thread state revisions cannot starve a scan, "
-      "and one coalesced topology catches up afterward");
+      "and non-presentation fields request no follow-up topology");
   result &= expect(
       pane.maximumGraphScanWorkObserved() <= 64 &&
           pane.maximumTopologyWorkObserved() <= 32 &&
@@ -2295,6 +2290,59 @@ bool testThreadScanCompletesUnderContinuousGraphChanges() {
           pane.materializedRowCount() > 0 && pane.materializedRowCount() < 32,
       "ThreadPane instrumentation proves graph, topology, and visible-widget "
       "work stay within their fixed per-pass and viewport bounds");
+
+  QListWidgetItem *visibleItem = nullptr;
+  if (list)
+    for (int row = 0; row < list->count(); ++row)
+      if (list->itemWidget(list->item(row))) {
+        visibleItem = list->item(row);
+        break;
+      }
+  nodegraph::NodeRef visibleNode;
+  if (visibleItem) {
+    const std::string id =
+        visibleItem->data(Qt::UserRole).toString().toStdString();
+    const auto found = std::ranges::find_if(
+        roots, [&id](const nodegraph::NodeRef &candidate) {
+          return candidate && candidate->id().canonical == id;
+        });
+    if (found != roots.end())
+      visibleNode = *found;
+  }
+  QWidget *visibleRow = visibleItem && list ? list->itemWidget(visibleItem)
+                                            : nullptr;
+  QLabel *visibleTitle = visibleRow
+                             ? visibleRow->findChild<QLabel *>(
+                                   QStringLiteral("threadTitle"))
+                             : nullptr;
+  const qulonglong topologyBeforeRowPatch =
+      pane.property("graphTopologyScansStarted").toULongLong();
+  const qulonglong rowPatchesBefore =
+      pane.property("rowPresentationUpdates").toULongLong();
+  const qulonglong suppressionsBefore =
+      pane.property("wholePaneUpdateSuppressions").toULongLong();
+  if (visibleNode) {
+    nodegraph::GraphChange renamed;
+    {
+      auto write = graph.write();
+      write.setField(visibleNode, "name", "One locally patched row");
+      renamed = write.finish();
+    }
+    pane.graphChanged(nodegraph::GraphChanged{
+        renamed.revision, renamed.affected, renamed.removed, false});
+    spin(40);
+  }
+  result &= expect(
+      visibleNode && visibleTitle &&
+          visibleTitle->text() == QStringLiteral("One locally patched row") &&
+          pane.property("graphTopologyScansStarted").toULongLong() ==
+              topologyBeforeRowPatch &&
+          pane.property("rowPresentationUpdates").toULongLong() ==
+              rowPatchesBefore + 1 &&
+          pane.property("wholePaneUpdateSuppressions").toULongLong() ==
+              suppressionsBefore,
+      "a visible non-sort Thread name change patches exactly one row without "
+      "a topology scan or whole-list update suppression");
 
   QListWidgetItem *firstItem = list ? list->item(0) : nullptr;
   if (firstItem && list) {

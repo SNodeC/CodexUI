@@ -134,6 +134,8 @@ public:
                nodegraph::NodeRef selectedThread = {});
   void graphChanged(const nodegraph::GraphChanged &change);
   void appendProtocolDiagnostic(const nodegraph::UiEffect &effect);
+  [[nodiscard]] bool
+  graphChangeAffectsVisibleTab(const nodegraph::GraphChanged &change);
 
   [[nodiscard]] QTabWidget *tabs() const noexcept { return inspectorTabs; }
 
@@ -163,6 +165,8 @@ private:
   void renderGraphPlan(InspectorPlanData snapshot);
   void renderGraphAgents(InspectorAgentsData snapshot);
   void renderGraphRequests(InspectorRequestsData snapshot);
+  [[nodiscard]] bool patchGraphAgents(const InspectorAgentsData &snapshot);
+  void updateAgentFrame(QFrame *frame, const InspectorAgentRender &agent);
   void scheduleGraphPlanRender();
   void scheduleGraphAgentsRender();
   void scheduleGraphRequestsRender();
@@ -213,6 +217,9 @@ private:
   std::optional<InspectorPlanData> pendingPlanSnapshot;
   std::optional<InspectorAgentsData> pendingAgentsSnapshot;
   std::optional<InspectorRequestsData> pendingRequestsSnapshot;
+  std::optional<InspectorPlanData> renderedPlanSnapshot;
+  std::optional<InspectorAgentsData> renderedAgentsSnapshot;
+  std::optional<InspectorRequestsData> renderedRequestsSnapshot;
   std::unique_ptr<PlanGraphScan> planGraphScan;
   std::unique_ptr<AgentsGraphScan> agentsGraphScan;
   std::unique_ptr<RequestsGraphScan> requestsGraphScan;
@@ -227,6 +234,7 @@ private:
   std::uint64_t receivedProtocolDiagnostics = 0;
   std::uint64_t protocolScrollRevision = 0;
   std::uint64_t stateInsertionFrontier = 0;
+  std::uint64_t protocolInsertionFrontier = 0;
   std::size_t protocolTelemetryCount = 0;
   std::size_t protocolThreadCount = 0;
   std::size_t protocolModelCount = 0;
@@ -276,6 +284,12 @@ private:
   bool requestsScrollFollowsTail = false;
   int graphDependenciesTab = -1;
   int graphDependenciesInfoPage = -1;
+  std::uint64_t inspectorRowConstructions = 0;
+  std::uint64_t inspectorRowPatches = 0;
+  std::uint64_t inspectorFullRebuilds = 0;
+  std::uint64_t inspectorScanPasses = 0;
+  std::uint64_t protocolRowsAppended = 0;
+  std::uint64_t protocolFullSynchronizations = 0;
 };
 
 } // namespace middle

@@ -1062,6 +1062,8 @@ QFrame *InspectorPane::agentFrame(const InspectorAgentRender &agent,
   auto *frame = new QFrame;
   frame->setObjectName(QStringLiteral("inspectorAgentFrame"));
   frame->setProperty("nodeCanonicalId", text(agent.id));
+  frame->setProperty("logicalAgentKey", text(agent.logicalKey));
+  frame->setProperty("copyText", agentCopyText(agent));
   frame->setProperty("kind", "raised");
   frame->setMinimumWidth(0);
   auto *layout = new QVBoxLayout(frame);
@@ -1083,20 +1085,17 @@ QFrame *InspectorPane::agentFrame(const InspectorAgentRender &agent,
   titleLabel->setContentsMargins(0, 0, 0, 0);
   titleLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
   heading->addWidget(titleLabel, 0, Qt::AlignBaseline);
-  if (!agentName.isEmpty()) {
-    auto *nameLabel = makeLabel(agentName, "code");
-    nameLabel->setObjectName(QStringLiteral("agentName"));
-    nameLabel->setWordWrap(false);
-    nameLabel->setContentsMargins(0, 0, 0, 0);
-    nameLabel->setMinimumWidth(0);
-    nameLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    if (!agentPath.isEmpty())
-      nameLabel->setToolTip(agentPath);
-    heading->addWidget(nameLabel, 1, Qt::AlignBaseline);
-  } else {
-    heading->addStretch(1);
-  }
+  auto *nameLabel = makeLabel(agentName, "code");
+  nameLabel->setObjectName(QStringLiteral("agentName"));
+  nameLabel->setWordWrap(false);
+  nameLabel->setContentsMargins(0, 0, 0, 0);
+  nameLabel->setMinimumWidth(0);
+  nameLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  nameLabel->setToolTip(agentPath);
+  nameLabel->setVisible(!agentName.isEmpty());
+  heading->addWidget(nameLabel, 1, Qt::AlignBaseline);
   auto *status = statusLabel(agent.status);
+  status->setObjectName(QStringLiteral("agentStatus"));
   status->setContentsMargins(0, 0, 0, 0);
   status->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
   heading->addWidget(status, 0, Qt::AlignBaseline);
@@ -1117,17 +1116,20 @@ QFrame *InspectorPane::agentFrame(const InspectorAgentRender &agent,
     if (!value->empty())
       metadata << text(*value);
   }
-  if (!metadata.isEmpty())
-    contentLayout->addWidget(
-        makeLabel(metadata.join(QStringLiteral("  ·  ")), "meta"));
-  if (!agent.prompt.empty())
-    contentLayout->addWidget(makeLabel(text(agent.prompt)));
-  if (!agent.resultText.empty()) {
-    auto *result = makeMarkdownLabel(text(agent.resultText));
-    result->setObjectName(QStringLiteral("agentResult"));
-    result->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    contentLayout->addWidget(result);
-  }
+  auto *metadataLabel =
+      makeLabel(metadata.join(QStringLiteral("  ·  ")), "meta");
+  metadataLabel->setObjectName(QStringLiteral("agentMetadata"));
+  metadataLabel->setVisible(!metadata.isEmpty());
+  contentLayout->addWidget(metadataLabel);
+  auto *promptLabel = makeLabel(text(agent.prompt));
+  promptLabel->setObjectName(QStringLiteral("agentPrompt"));
+  promptLabel->setVisible(!agent.prompt.empty());
+  contentLayout->addWidget(promptLabel);
+  auto *result = makeMarkdownLabel(text(agent.resultText));
+  result->setObjectName(QStringLiteral("agentResult"));
+  result->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+  result->setVisible(!agent.resultText.empty());
+  contentLayout->addWidget(result);
   QStringList identities;
   if (!agent.childThreadId.empty())
     identities << QStringLiteral("thread %1").arg(text(agent.childThreadId));
@@ -1137,9 +1139,11 @@ QFrame *InspectorPane::agentFrame(const InspectorAgentRender &agent,
       texts(agent.receiverThreadIds).join(QStringLiteral(", "));
   if (!receivers.isEmpty())
     identities << QStringLiteral("receivers %1").arg(receivers);
-  if (!identities.isEmpty())
-    contentLayout->addWidget(
-        makeLabel(identities.join(QStringLiteral("  |  ")), "meta"));
+  auto *identitiesLabel =
+      makeLabel(identities.join(QStringLiteral("  |  ")), "meta");
+  identitiesLabel->setObjectName(QStringLiteral("agentIdentities"));
+  identitiesLabel->setVisible(!identities.isEmpty());
+  contentLayout->addWidget(identitiesLabel);
   layout->addWidget(content);
 
   const std::string expansionKey =
@@ -1158,15 +1162,147 @@ QFrame *InspectorPane::agentFrame(const InspectorAgentRender &agent,
                      else
                        expandedAgents.erase(expansionKey);
                    });
-  QObject::connect(copy, &QToolButton::clicked, frame, [copy, agent] {
-    const QString value = agentCopyText(agent);
+  QObject::connect(copy, &QToolButton::clicked, frame, [copy, frame] {
+    const QString value = frame->property("copyText").toString();
     auto *mime = new QMimeData;
     mime->setText(value);
     mime->setData("text/markdown", value.toUtf8());
     QApplication::clipboard()->setMimeData(mime);
     copy->showCopiedFeedback();
   });
+  ++inspectorRowConstructions;
+  setProperty("inspectorRowConstructions",
+              static_cast<qulonglong>(inspectorRowConstructions));
   return frame;
+}
+
+void InspectorPane::updateAgentFrame(QFrame *frame,
+                                     const InspectorAgentRender &agent) {
+  if (!frame)
+    return;
+  const QString agentPath = text(agent.agentPath);
+  const QStringList pathParts = agentPath.split('/', Qt::SkipEmptyParts);
+  const QString agentName = !pathParts.isEmpty()
+                                ? pathParts.back()
+                                : text(agent.tool);
+  bool geometryChanged = false;
+  bool paintChanged = false;
+  const auto patchLabel = [&geometryChanged, &paintChanged](
+                              QLabel *label, const QString &value,
+                              bool rich = false) {
+    if (!label)
+      return;
+    QString displayed = value;
+    if (rich) {
+      QTextDocument document;
+      document.setMarkdown(
+          value, QTextDocument::MarkdownFeatures(
+                     QTextDocument::MarkdownDialectGitHub) |
+                     QTextDocument::MarkdownNoHTML);
+      displayed = document.toHtml();
+    }
+    if (label->text() != displayed) {
+      label->setText(displayed);
+      geometryChanged = true;
+      paintChanged = true;
+    }
+    const bool visible = !value.isEmpty();
+    if (label->isVisible() != visible) {
+      label->setVisible(visible);
+      geometryChanged = true;
+      paintChanged = true;
+    }
+  };
+
+  QLabel *name = frame->findChild<QLabel *>(QStringLiteral("agentName"));
+  patchLabel(name, agentName);
+  if (name && name->toolTip() != agentPath)
+    name->setToolTip(agentPath);
+
+  QLabel *status =
+      frame->findChild<QLabel *>(QStringLiteral("agentStatus"));
+  if (status) {
+    const QString displayed = text(displayStatus(agent.status));
+    if (status->text() != displayed) {
+      status->setText(displayed);
+      geometryChanged = true;
+      paintChanged = true;
+    }
+    const UiStatus classified = classifyStatus(agent.status);
+    const QString tone = text(classified.tone);
+    if (status->property("tone").toString() != tone) {
+      status->setProperty("tone", tone);
+      status->style()->unpolish(status);
+      status->style()->polish(status);
+      status->update();
+      paintChanged = true;
+    }
+  }
+
+  QStringList metadata;
+  if (!agent.tool.empty() && !agent.agentPath.empty())
+    metadata << text(agent.tool);
+  for (const std::string *value : {&agent.model, &agent.reasoningEffort})
+    if (!value->empty())
+      metadata << text(*value);
+  patchLabel(frame->findChild<QLabel *>(QStringLiteral("agentMetadata")),
+             metadata.join(QStringLiteral("  ·  ")));
+  patchLabel(frame->findChild<QLabel *>(QStringLiteral("agentPrompt")),
+             text(agent.prompt));
+  patchLabel(frame->findChild<QLabel *>(QStringLiteral("agentResult")),
+             text(agent.resultText), true);
+
+  QStringList identities;
+  if (!agent.childThreadId.empty())
+    identities << QStringLiteral("thread %1").arg(text(agent.childThreadId));
+  if (!agent.senderThreadId.empty())
+    identities << QStringLiteral("sender %1").arg(text(agent.senderThreadId));
+  const QString receivers =
+      texts(agent.receiverThreadIds).join(QStringLiteral(", "));
+  if (!receivers.isEmpty())
+    identities << QStringLiteral("receivers %1").arg(receivers);
+  patchLabel(frame->findChild<QLabel *>(QStringLiteral("agentIdentities")),
+             identities.join(QStringLiteral("  |  ")));
+
+  frame->setProperty("nodeCanonicalId", text(agent.id));
+  frame->setProperty("copyText", agentCopyText(agent));
+  if (geometryChanged)
+    frame->updateGeometry();
+  if (paintChanged)
+    frame->update();
+}
+
+bool InspectorPane::patchGraphAgents(const InspectorAgentsData &snapshot) {
+  if (!renderedAgentsSnapshot || !agentsRowsMaterialized ||
+      renderedAgentsSnapshot->threadId != snapshot.threadId ||
+      renderedAgentsSnapshot->threadPresent != snapshot.threadPresent ||
+      renderedAgentsSnapshot->firstRow != snapshot.firstRow ||
+      renderedAgentsSnapshot->totalRows != snapshot.totalRows ||
+      renderedAgentsSnapshot->agents.size() != snapshot.agents.size())
+    return false;
+  for (std::size_t index = 0; index < snapshot.agents.size(); ++index)
+    if (renderedAgentsSnapshot->agents[index].logicalKey !=
+        snapshot.agents[index].logicalKey)
+      return false;
+
+  const int layoutOffset = snapshot.firstRow == 0 ? 0 : 1;
+  for (std::size_t index = 0; index < snapshot.agents.size(); ++index) {
+    if (renderedAgentsSnapshot->agents[index] == snapshot.agents[index])
+      continue;
+    QLayoutItem *item = agentsLayout->itemAt(
+        layoutOffset + static_cast<int>(index));
+    auto *frame = item ? qobject_cast<QFrame *>(item->widget()) : nullptr;
+    if (!frame || frame->property("logicalAgentKey").toString() !=
+                      text(snapshot.agents[index].logicalKey))
+      return false;
+    updateAgentFrame(frame, snapshot.agents[index]);
+    ++inspectorRowPatches;
+  }
+  setProperty("inspectorRowPatches",
+              static_cast<qulonglong>(inspectorRowPatches));
+  renderedAgentsSnapshot = snapshot;
+  agentsKnownRows = snapshot.totalRows;
+  return true;
 }
 
 QFrame *InspectorPane::requestFrame(const InspectorRequestRender &request) {
@@ -1493,6 +1629,10 @@ void InspectorPane::refresh(const nodegraph::NodeGraph &nextGraph,
     stateSnapshot.clear();
     protocolStatsSnapshot.clear();
     stateInsertionFrontier = 0;
+    protocolInsertionFrontier = 0;
+    renderedPlanSnapshot.reset();
+    renderedAgentsSnapshot.reset();
+    renderedRequestsSnapshot.reset();
   }
   if (selectedGraphThread != selectedThread) {
     cancelGraphRowRenders();
@@ -1651,8 +1791,12 @@ void InspectorPane::appendProtocolDiagnostic(
       const ScrollPosition position{protocolFollowsTail || atVisibleTail,
                                     protocolPausedScrollValue};
       mutatingProtocolLog = true;
-      for (const QString &line : recorded)
+      for (const QString &line : recorded) {
         protocolLog->appendPlainText(line);
+        ++protocolRowsAppended;
+      }
+      setProperty("protocolRowsAppended",
+                  static_cast<qulonglong>(protocolRowsAppended));
       restoreProtocolScroll(position.followsTail, position.value);
     }
     refreshProtocolStatistics();
@@ -1681,17 +1825,25 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
       // ordinary streaming updates to old Items as topology changes.
       if (!change.removed.empty())
         return true;
-      const auto stateNode = [this](const nodegraph::NodeRef &node) {
-        return node && (node == selectedGraphThread ||
-                        node->id().kind == nodegraph::NodeKind::Thread ||
-                        node->id().kind == nodegraph::NodeKind::Turn ||
-                        node->id().kind == nodegraph::NodeKind::Interaction ||
-                        stateDomainKind(node->id().kind));
-      };
-      if (std::ranges::any_of(change.affected, stateNode))
-        return true;
       auto read = graph->tryRead();
       if (!read)
+        return true;
+      const auto stateNode = [this, &read, &change](
+                                 const nodegraph::NodeRef &node) {
+        if (!node || !read->contains(node))
+          return false;
+        if (node->id().kind == nodegraph::NodeKind::Interaction ||
+            stateDomainKind(node->id().kind))
+          return true;
+        if (node != selectedGraphThread &&
+            node->id().kind != nodegraph::NodeKind::Thread &&
+            node->id().kind != nodegraph::NodeKind::Turn)
+          return false;
+        return read->fieldsChangedAt(node, change.revision) ||
+               read->statusChangedRevision(node) == change.revision ||
+               read->structureChangedRevision(node) == change.revision;
+      };
+      if (std::ranges::any_of(change.affected, stateNode))
         return true;
       const std::uint64_t frontier = stateGraphScan
                                          ? stateGraphScan->maximumInsertionOrder
@@ -1704,21 +1856,36 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
     }
     if (protocolSelectedStructureAffected(change))
       return true;
-    const auto protocolNode = [](const nodegraph::NodeRef &node) {
+    auto read = graph->tryRead();
+    if (!read)
+      return true;
+    const std::uint64_t frontier =
+        protocolGraphScan ? protocolGraphScan->maximumInsertionOrder
+                          : protocolInsertionFrontier;
+    const auto protocolNode = [&read, frontier](
+                                  const nodegraph::NodeRef &node) {
       if (!node)
         return false;
       switch (node->id().kind) {
       case nodegraph::NodeKind::Catalog:
       case nodegraph::NodeKind::Interaction:
-      case nodegraph::NodeKind::Thread:
       case nodegraph::NodeKind::UnknownProtocol:
         return true;
+      case nodegraph::NodeKind::Thread:
+        return read->contains(node) &&
+               read->insertionOrder(node) > frontier;
       default:
         return false;
       }
     };
     return std::ranges::any_of(change.affected, protocolNode) ||
-           std::ranges::any_of(change.removed, protocolNode);
+           std::ranges::any_of(change.removed, [](const auto &node) {
+             return node &&
+                    (node->id().kind == nodegraph::NodeKind::Catalog ||
+                     node->id().kind == nodegraph::NodeKind::Interaction ||
+                     node->id().kind == nodegraph::NodeKind::Thread ||
+                     node->id().kind == nodegraph::NodeKind::UnknownProtocol);
+           });
   }
 
   const bool dependenciesCurrent =
@@ -1731,7 +1898,7 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
   const auto selectedThread = [this](const nodegraph::NodeRef &node) {
     return node && selectedGraphThread && node == selectedGraphThread;
   };
-  const auto directMatch = [&](const nodegraph::NodeRef &node) {
+  const auto removedDirectMatch = [&](const nodegraph::NodeRef &node) {
     if (!node)
       return false;
     if (knownDependency(node) || selectedThread(node))
@@ -1742,8 +1909,13 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
              node->id().kind == nodegraph::NodeKind::Interaction;
     return false;
   };
-  if (std::ranges::any_of(change.affected, directMatch) ||
-      std::ranges::any_of(change.removed, directMatch))
+  if (std::ranges::any_of(change.removed, removedDirectMatch))
+    return true;
+  if (tab == 3 && std::ranges::any_of(change.affected, [](const auto &node) {
+        return node && (node->id().kind == nodegraph::NodeKind::Runtime ||
+                        node->id().kind == nodegraph::NodeKind::Connection ||
+                        node->id().kind == nodegraph::NodeKind::Interaction);
+      }))
     return true;
 
   // Parent links are graph-owned, so inspect ancestry only behind a
@@ -1774,10 +1946,25 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
     if (!belowSelectedThread && !belowActiveDependency)
       continue;
 
-    if (node->id().kind == nodegraph::NodeKind::Thread)
-      return belowActiveDependency || node == thread;
+    if (node->id().kind == nodegraph::NodeKind::Thread) {
+      if (read->structureChangedRevision(node) == change.revision)
+        return true;
+      if (tab == 1 && knownDependency(node))
+        return read->statusChangedRevision(node) == change.revision ||
+               read->fieldsChangedAt(node, change.revision);
+      if (tab == 2)
+        return read->fieldChangedRevision(node, "cwd") == change.revision ||
+               read->fieldChangedRevision(node, "workspace") ==
+                   change.revision;
+      if (tab == 3)
+        return read->fieldChangedRevision(node,
+                                          "pendingInteractionCount") ==
+               change.revision;
+      return false;
+    }
     if (node->id().kind == nodegraph::NodeKind::Turn)
-      return tab == 0 || tab == 2 || (tab == 1 && knownDependency(node));
+      return read->structureChangedRevision(node) == change.revision ||
+             read->statusChangedRevision(node) == change.revision;
     if (node->id().kind != nodegraph::NodeKind::Item)
       continue;
 
@@ -1795,6 +1982,11 @@ bool InspectorPane::graphChangeAffectsCurrentTab(
       return true;
   }
   return false;
+}
+
+bool InspectorPane::graphChangeAffectsVisibleTab(
+    const nodegraph::GraphChanged &change) {
+  return !graphRefreshSuspended && graphChangeAffectsCurrentTab(change);
 }
 
 bool InspectorPane::protocolSelectedStructureAffected(
@@ -1909,6 +2101,9 @@ void InspectorPane::scheduleGraphRefresh(bool lockRetry) {
 void InspectorPane::runGraphRefresh() {
   if (!graph)
     return;
+  ++inspectorScanPasses;
+  setProperty("inspectorScanPasses",
+              static_cast<qulonglong>(inspectorScanPasses));
 
   const int tab = inspectorTabs->currentIndex();
   const int infoPage = tab == 4 ? infoStack->currentIndex() : InfoChoicePage;
@@ -3125,6 +3320,7 @@ void InspectorPane::runProtocolGraphScan() {
   }
   std::unique_ptr<ProtocolGraphScan> finished = std::move(protocolGraphScan);
   const bool needsFreshSample = finished->dirty;
+  protocolInsertionFrontier = finished->maximumInsertionOrder;
   setProperty("protocolScanCompletions",
               property("protocolScanCompletions").toULongLong() + 1);
   activeGraphDependencies = std::move(finished->dependencies);
@@ -3143,6 +3339,8 @@ void InspectorPane::runProtocolGraphScan() {
 }
 
 void InspectorPane::renderGraphPlan(InspectorPlanData snapshot) {
+  if (renderedPlanSnapshot && *renderedPlanSnapshot == snapshot)
+    return;
   if (pendingPlanSnapshot && *pendingPlanSnapshot == snapshot) {
     scheduleGraphPlanRender();
     return;
@@ -3154,6 +3352,9 @@ void InspectorPane::renderGraphPlan(InspectorPlanData snapshot) {
       planRenderFirst + renderedPlanComponentCount(*pendingPlanSnapshot);
   planRenderCursor = planRenderFirst;
   planRenderClearing = true;
+  ++inspectorFullRebuilds;
+  setProperty("inspectorFullRebuilds",
+              static_cast<qulonglong>(inspectorFullRebuilds));
   QScrollBar *planScrollBar = planScroll->verticalScrollBar();
   planScrollValue = planScrollBar->value();
   planScrollFollowsTail = planScrollBar->maximum() > 0 &&
@@ -3162,6 +3363,10 @@ void InspectorPane::renderGraphPlan(InspectorPlanData snapshot) {
 }
 
 void InspectorPane::renderGraphAgents(InspectorAgentsData snapshot) {
+  if (renderedAgentsSnapshot && *renderedAgentsSnapshot == snapshot)
+    return;
+  if (patchGraphAgents(snapshot))
+    return;
   if (pendingAgentsSnapshot && *pendingAgentsSnapshot == snapshot) {
     scheduleGraphAgentsRender();
     return;
@@ -3173,6 +3378,9 @@ void InspectorPane::renderGraphAgents(InspectorAgentsData snapshot) {
       agentsRenderFirst + renderedAgentsComponentCount(*pendingAgentsSnapshot);
   agentsRenderCursor = agentsRenderFirst;
   agentsRenderClearing = true;
+  ++inspectorFullRebuilds;
+  setProperty("inspectorFullRebuilds",
+              static_cast<qulonglong>(inspectorFullRebuilds));
   QScrollBar *agentsScrollBar = agentsScroll->verticalScrollBar();
   agentsScrollValue = agentsScrollBar->value();
   agentsScrollFollowsTail = agentsScrollBar->maximum() > 0 &&
@@ -3181,6 +3389,8 @@ void InspectorPane::renderGraphAgents(InspectorAgentsData snapshot) {
 }
 
 void InspectorPane::renderGraphRequests(InspectorRequestsData snapshot) {
+  if (renderedRequestsSnapshot && *renderedRequestsSnapshot == snapshot)
+    return;
   if (pendingRequestsSnapshot && *pendingRequestsSnapshot == snapshot) {
     scheduleGraphRequestsRender();
     return;
@@ -3192,6 +3402,9 @@ void InspectorPane::renderGraphRequests(InspectorRequestsData snapshot) {
                       renderedRequestsComponentCount(*pendingRequestsSnapshot);
   requestsRenderCursor = requestsRenderFirst;
   requestsRenderClearing = true;
+  ++inspectorFullRebuilds;
+  setProperty("inspectorFullRebuilds",
+              static_cast<qulonglong>(inspectorFullRebuilds));
   QScrollBar *requestsScrollBar = requestsScroll->verticalScrollBar();
   requestsScrollValue = requestsScrollBar->value();
   requestsScrollFollowsTail =
@@ -3364,6 +3577,7 @@ void InspectorPane::runGraphPlanRender() {
   planMaterializedFirst = planRenderFirst;
   planMaterializedEnd = planRenderEnd;
   planRowsMaterialized = true;
+  renderedPlanSnapshot = snapshot;
   pendingPlanSnapshot.reset();
   QTimer::singleShot(
       0, planScroll,
@@ -3429,6 +3643,7 @@ void InspectorPane::runGraphAgentsRender() {
   agentsMaterializedFirst = agentsRenderFirst;
   agentsMaterializedEnd = agentsRenderEnd;
   agentsRowsMaterialized = true;
+  renderedAgentsSnapshot = snapshot;
   pendingAgentsSnapshot.reset();
   QTimer::singleShot(
       0, agentsScroll,
@@ -3490,6 +3705,7 @@ void InspectorPane::runGraphRequestsRender() {
   requestsMaterializedFirst = requestsRenderFirst;
   requestsMaterializedEnd = requestsRenderEnd;
   requestsRowsMaterialized = true;
+  renderedRequestsSnapshot = snapshot;
   pendingRequestsSnapshot.reset();
   QTimer::singleShot(
       0, requestsScroll,
@@ -3529,6 +3745,9 @@ void InspectorPane::showProtocolTail() {
   mutatingProtocolLog = true;
   protocolLog->setPlainText(value);
   protocolLogSynchronized = true;
+  ++protocolFullSynchronizations;
+  setProperty("protocolFullSynchronizations",
+              static_cast<qulonglong>(protocolFullSynchronizations));
   restoreProtocolScroll(position.followsTail, position.value);
 }
 

@@ -124,7 +124,8 @@ private:
   void stopFollowingAnimation();
   void restoreRequestedGraphHistoryLimit();
   void animateToBottom(int previousValue);
-  void recomputeGeometry();
+  void recomputeGeometry(
+      const std::vector<TurnSectionWidget *> *affectedSections = nullptr);
   void arrangeSection(TurnSectionWidget *section);
   void clearGraph();
   void scheduleGraphRefresh();
@@ -200,6 +201,9 @@ private:
   bool retiredGeometryCleanupScheduled_ = false;
   std::size_t graphPassCardOperations_ = 0;
   std::uint64_t graphBindingEpoch_ = 0;
+  std::uint64_t graphRefreshPasses_ = 0;
+  std::uint64_t geometryPasses_ = 0;
+  std::uint64_t fullGeometryPasses_ = 0;
 };
 
 } // namespace codexui::codex::middle

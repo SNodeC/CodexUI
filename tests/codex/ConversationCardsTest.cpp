@@ -86,6 +86,14 @@ private:
 };
 
 void spin(int milliseconds = 0) {
+  if (milliseconds == 0) {
+    // One selected/load-more page is admitted in eight-card slices. Drain a
+    // bounded page worth of zero-delay continuations without turning every
+    // test settle into an arbitrary wall-clock delay.
+    for (int pass = 0; pass < 16; ++pass)
+      QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+    return;
+  }
   QElapsedTimer timer;
   timer.start();
   do {
@@ -973,8 +981,10 @@ bool testStructuralOrderAndIdentity() {
   result &= expect(visualCardKeys(view) == expectedKeys,
                    "section and card order follows the projection exactly");
   bool retainedIdentity = true;
-  for (const auto &[key, identity] : identities)
-    retainedIdentity = retainedIdentity && card(view, key) == identity;
+  for (const auto &[key, identity] : identities) {
+    ConversationCard *current = card(view, key);
+    retainedIdentity = retainedIdentity && current == identity;
+  }
   result &= expect(retainedIdentity,
                    "structural moves preserve same-kind card identity");
 
@@ -1383,17 +1393,17 @@ bool testPromptAdmissionFollowOwnership() {
   snapshot.sections.back().cards.push_back(pending);
   applyConversation(view, snapshot);
   view.setTrailingSpaceHeight(0);
-  QElapsedTimer follow;
-  follow.start();
-  while (follow.elapsed() < 400 && !view.isAtBottom())
-    spin(8);
-  ConversationCard *pendingCard = card(view, stableKey(pending.key));
+  ConversationCard *pendingCard = nullptr;
+  const bool admittedPromptReady = spinUntil([&] {
+    pendingCard = card(view, stableKey(pending.key));
+    return view.isAtBottom() && pendingCard &&
+           pendingCard->mapTo(view.viewport(), QPoint{}).y() +
+                   pendingCard->height() <=
+               view.viewport()->height();
+  }, 512);
   result &= expect(
-      view.mode() == ConversationView::Mode::Following && view.isAtBottom() &&
-          pendingCard &&
-          pendingCard->mapTo(view.viewport(), QPoint{}).y() +
-                  pendingCard->height() <=
-              view.viewport()->height(),
+      admittedPromptReady &&
+          view.mode() == ConversationView::Mode::Following,
       "composer-owned pause resumes and reveals the complete admitted prompt");
 
   wheel(view, 180);
@@ -1829,6 +1839,13 @@ bool testMutableCardsAndCommandOutput() {
     result &= expect(card(view, stableKey(value.key)) ==
                          identities[stableKey(value.key)],
                      "same-key same-kind card updates in place");
+  // The graph update above deliberately does no QWidget projection for this
+  // offscreen card. Bringing the already-materialized card into view applies
+  // its latest canonical state without reconstructing it.
+  view.verticalScrollBar()->setValue(
+      view.verticalScrollBar()->value() +
+      agentCardWidget->mapTo(view.viewport(), QPoint{}).y() - 8);
+  spin(40);
   result &= expect(
       titleText(agentCardWidget) == QStringLiteral("Codex") && agentPhase &&
           agentPhase->text() == QStringLiteral("final answer") &&
@@ -2985,7 +3002,7 @@ bool testCommandOutputStateAcrossNavigation() {
   return result;
 }
 
-bool testViewportLazyMaterialization() {
+bool testLoadedWindowMaterializesOnce() {
   const std::string thread = "viewport-lazy";
   ConversationGraphSpec snapshot = conversation(thread, 240);
   ConversationView view;
@@ -2995,20 +3012,23 @@ bool testViewportLazyMaterialization() {
   bool result = expect(applyConversation(view, snapshot),
                        "a large conversation creates its lazy geometry");
   const int immediateCards = liveConversationWidgetCounts(view).cards;
-  result &= expect(
-      immediateCards <= 8 &&
-          card(view, stableKey(snapshot.sections.back().cards.back().key)),
-      "the initial pass materializes at most eight bottom-visible "
-      "cards");
-  QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+  result &= expect(immediateCards <= 8,
+                   "the first loaded-window pass remains card-budgeted");
+  const bool loadedWindowReady = spinUntil([&] {
+    const LiveConversationWidgetCounts widgets =
+        liveConversationWidgetCounts(view);
+    return widgets.cards == static_cast<int>(AuthoritativeHistoryPageSize) &&
+           widgets.itemPlaceholders == 0;
+  }, 512);
   const LiveConversationWidgetCounts settled =
       liveConversationWidgetCounts(view);
   result &= expect(
-      settled.cards < static_cast<int>(graphLiveRecordBound(view)) &&
-          settled.turnSections <= 2 && graphViewportWidgetsAreBounded(view) &&
-          view.isAtBottom() && historyButton(view)->isVisible(),
-      "event-loop continuations retain only viewport-plus-overscan widgets "
-      "while aggregate spacers represent older graph history");
+      loadedWindowReady &&
+          settled.cards == static_cast<int>(AuthoritativeHistoryPageSize) &&
+          settled.turnSections <= 2 && view.isAtBottom() &&
+          historyButton(view)->isVisible(),
+      "thread selection materializes exactly the loaded 80-card window in "
+      "bounded continuations");
 
   const std::string firstKey =
       stableKey(snapshot.sections.back().cards[40].key);
@@ -3016,25 +3036,29 @@ bool testViewportLazyMaterialization() {
       stableKey(snapshot.sections.back().cards.back().key);
   const QVariant firstRetainedScroll =
       view.property("graphFirstRetainedScrollValue");
+  QPointer<ConversationCard> firstIdentity = card(view, firstKey);
+  QPointer<ConversationCard> lastIdentity = card(view, lastKey);
+  const qulonglong geometryBeforeScroll =
+      view.property("conversationGeometryPasses").toULongLong();
   view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
   if (firstRetainedScroll.isValid())
     view.verticalScrollBar()->setValue(firstRetainedScroll.toInt());
   spin(100);
   result &= expect(view.mode() == ConversationView::Mode::Paused,
                    "scrolling a large conversation pauses following");
-  result &= expect(card(view, firstKey),
-                   "scrolling materializes the retained graph viewport");
-  result &=
-      expect(!card(view, lastKey), "scrolling releases the distant viewport");
+  result &= expect(card(view, firstKey) == firstIdentity &&
+                       card(view, lastKey) == lastIdentity,
+                   "scrolling retains both ends of the loaded card window");
   const LiveConversationWidgetCounts scrolled =
       liveConversationWidgetCounts(view);
   result &= expect(
       firstRetainedScroll.isValid() &&
-          scrolled.cards < static_cast<int>(graphLiveRecordBound(view)) &&
-          scrolled.turnSections <= 2 && graphViewportWidgetsAreBounded(view) &&
+          scrolled.cards == settled.cards && scrolled.turnSections <= 2 &&
+          view.property("conversationGeometryPasses").toULongLong() ==
+              geometryBeforeScroll &&
           graphPassBudgetsWereRespected(view),
-      "viewport movement keeps widget, geometry, structure, and "
-      "card-operation work within their fixed pass budgets");
+      "viewport movement performs no card construction, destruction, or "
+      "geometry pass while initial materialization remains pass-budgeted");
   return result;
 }
 
@@ -3058,12 +3082,24 @@ bool testGraphBackedLazyRenderingAndLifetime() {
       materializedCount() <= 8 && graphAttachment(fixture.reasoning) == nullptr,
       "graph binding performs at most eight immediate renders and leaves a "
       "filtered item unmaterialized");
-  spin(80);
+  const bool loadedWindowReady = spinUntil([&] {
+    return view.property("graphStructureScanComplete").toBool() &&
+           view.property("graphLiveRecordCount").toULongLong() ==
+               fixture.messages.size();
+  }, 1024);
+  spin();
 
   nodegraph::NodeRef offscreen = fixture.messages.front();
   nodegraph::NodeRef visible = fixture.messages.back();
-  result &= expect(graphAttachment(offscreen) == nullptr,
-                   "an off-screen graph node has no widget attachment");
+  ui::QtNodeAttachment *offscreenInitialAttachment =
+      graphAttachment(offscreen);
+  const std::uint64_t offscreenInitialRevision =
+      offscreenInitialAttachment
+          ? offscreenInitialAttachment->renderedRevision
+          : 0;
+  result &= expect(loadedWindowReady && offscreenInitialAttachment,
+                   "every card in the selected loaded window materializes "
+                   "once, including its initially off-screen cards");
   ui::QtNodeAttachment *visibleAttachment = graphAttachment(visible);
   QPointer<QWidget> visibleIdentity =
       visibleAttachment ? visibleAttachment->widget : nullptr;
@@ -3102,10 +3138,13 @@ bool testGraphBackedLazyRenderingAndLifetime() {
   }
   view.graphChanged(deferredChange.removed);
   spin(40);
-  result &= expect(graphAttachment(offscreen) == nullptr &&
-                       graphAttachment(fixture.reasoning) == nullptr,
-                   "off-screen and filtered node updates perform no widget "
-                   "rendering");
+  result &= expect(
+      graphAttachment(offscreen) == offscreenInitialAttachment &&
+          graphAttachment(offscreen)->renderedRevision ==
+              offscreenInitialRevision &&
+          graphAttachment(fixture.reasoning) == nullptr,
+      "off-screen loaded and filtered node updates perform no QWidget "
+      "projection while retaining existing card identity");
 
   options.showReasoning = true;
   view.setPresentationOptions(options);
@@ -3291,7 +3330,6 @@ bool testGraphStructureScanSurvivesUnrelatedRevisionChurn() {
               ExpectedScanTarget &&
           view.property("graphRetainedGeometryRecordCount").toULongLong() >=
               ExpectedScanTarget &&
-          graphViewportWidgetsAreBounded(view) &&
           graphPassBudgetsWereRespected(view),
       "continuous unrelated Item field revisions cannot restart or starve the "
       "bounded selected-history structure scan");
@@ -3504,10 +3542,11 @@ bool testFocusedGraphCardSurvivesViewportReconciliation() {
 
   output->clearFocus();
   view.graphChangedDeferred();
-  const bool releasedAfterFocus =
-      dispatchUntil([&] { return graphAttachment(command) == nullptr; });
-  result &= expect(releasedAfterFocus,
-                   "the distant card becomes evictable after focus leaves");
+  dispatchPasses(16);
+  result &= expect(graphAttachment(command) &&
+                       graphAttachment(command)->widget == commandCard,
+                   "a loaded card retains its QWidget and local output state "
+                   "after focus leaves and it becomes off-screen");
   return result;
 }
 
@@ -3979,7 +4018,7 @@ bool testGraphStreamTruncationNotices() {
 
 bool testGraphBoundedHistoryAndExplicitRoot() {
   constexpr std::size_t ItemCount = 5000;
-  constexpr std::size_t RevealedPages = 24;
+  constexpr std::size_t RevealedPages = 2;
   constexpr std::size_t FirstRevealedIndex =
       ItemCount - (RevealedPages + 1) * AuthoritativeHistoryPageSize;
   nodegraph::NodeGraph graph;
@@ -4038,6 +4077,17 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
   view.resize(620, 420);
   view.show();
   view.bindGraph(graph, thread);
+  const bool initialLoadedWindowReady = spinUntil([&] {
+    const LiveConversationWidgetCounts widgets =
+        liveConversationWidgetCounts(view);
+    return view.property("graphLiveRecordCount").toULongLong() ==
+               AuthoritativeHistoryPageSize + 1 &&
+           widgets.cards ==
+               static_cast<int>(AuthoritativeHistoryPageSize + 1) &&
+           widgets.itemPlaceholders == 0 &&
+           graphAttachment(root) && graphAttachment(steering) &&
+           graphAttachment(tail);
+  }, 2048);
 
   const auto representationCount = [&view] {
     return static_cast<int>(std::ranges::count_if(
@@ -4059,16 +4109,15 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
   const QVariant retainedGeometry =
       view.property("graphRetainedGeometryRecordCount");
   bool result = expect(
-      representationCount() <= static_cast<int>(graphLiveRecordBound(view)) &&
-          graphViewportWidgetsAreBounded(view) && retainedGeometry.isValid() &&
-          retainedGeometry.toULongLong() >
-              view.property("graphLiveRecordCount").toULongLong() &&
-          view.findChildren<QWidget *>().size() < 256 && loadMore &&
+      initialLoadedWindowReady &&
+          representationCount() ==
+              static_cast<int>(AuthoritativeHistoryPageSize + 1) &&
+          retainedGeometry.isValid() && loadMore &&
           loadMore->isVisible() &&
           loadMore->text() == QStringLiteral("Load 80 more activities") &&
           hiddenItemCount() == ItemCount - AuthoritativeHistoryPageSize - 1,
-      "five thousand graph items retain compact geometry separately while "
-      "creating only viewport-plus-overscan QWidgets");
+      "five thousand graph items retain compact graph geometry while thread "
+      "selection materializes the loaded 80-card window plus its root once");
 
   int heartbeatCount = 0;
   qint64 longestHeartbeatGap = 0;
@@ -4092,13 +4141,25 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
           ? qobject_cast<ConversationCard *>(steeringAttachment->widget.data())
           : nullptr;
   result &=
-      expect(steeringCard && !steeringCard->property("turnContainer").toBool(),
-             "a loaded steering message is never inferred to be the turn root");
+      expect(steeringCard && !steeringCard->property("turnContainer").toBool() &&
+                 qobject_cast<ConversationCard *>(
+                     graphAttachment(root)->widget.data())
+                     ->isAncestorOf(steeringCard),
+             "a loaded steering message remains a child of the canonical "
+             "Turn/You card and is never inferred to be the root");
 
   const qulonglong hiddenBeforePaging = hiddenItemCount();
   for (std::size_t page = 0; page < RevealedPages; ++page) {
     loadMore->click();
-    spin(20);
+    spinUntil([&] {
+      const std::size_t expected =
+          (page + 2) * AuthoritativeHistoryPageSize + 1;
+      const LiveConversationWidgetCounts widgets =
+          liveConversationWidgetCounts(view);
+      return view.property("graphLiveRecordCount").toULongLong() == expected &&
+             widgets.cards == static_cast<int>(expected) &&
+             widgets.itemPlaceholders == 0;
+    }, 2048);
   }
   const QVariant retainedAfterPaging =
       view.property("graphRetainedGeometryRecordCount");
@@ -4109,18 +4170,19 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
           retainedAfterPaging.isValid() &&
           retainedAfterPaging.toULongLong() >=
               RevealedPages * AuthoritativeHistoryPageSize &&
-          retainedAfterPaging.toULongLong() >
-              view.property("graphLiveRecordCount").toULongLong() &&
-          graphViewportWidgetsAreBounded(view) &&
+          view.property("graphLiveRecordCount").toULongLong() ==
+              (RevealedPages + 1) * AuthoritativeHistoryPageSize + 1 &&
           graphPassBudgetsWereRespected(view),
-      "repeated Load More retains thousands of compact geometry records but "
-      "keeps live QWidgets and every event-loop pass viewport bounded");
+      "each Load 80 more action materializes that admitted batch exactly once "
+      "while every construction pass remains budgeted");
 
   ui::QtNodeAttachment *tailAttachment = graphAttachment(tail);
   QPointer<QWidget> tailIdentity =
       tailAttachment ? tailAttachment->widget : nullptr;
   const LiveConversationWidgetCounts beforeVisibleDelta =
       liveConversationWidgetCounts(view);
+  const qulonglong fullGeometryBeforeVisibleDelta =
+      view.property("conversationFullGeometryPasses").toULongLong();
   nodegraph::GraphChange visibleDelta;
   {
     auto write = graph.write();
@@ -4145,16 +4207,21 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
           tailMessage->text == "Targeted visible revision after many pages" &&
           liveConversationWidgetCounts(view).itemRepresentations() ==
               beforeVisibleDelta.itemRepresentations() &&
-          graphViewportWidgetsAreBounded(view) &&
+          view.property("conversationFullGeometryPasses").toULongLong() ==
+              fullGeometryBeforeVisibleDelta &&
+          view.property("conversationSectionsLaidOutLastPass").toULongLong() ==
+              1 &&
           graphRefreshWasConstantBounded(view) &&
           graphPassBudgetsWereRespected(view),
       "a visible targeted delta after many revealed pages updates the stable "
-      "card with constant bounded graph and QWidget work");
+      "card inside only its TurnSection with constant bounded graph and "
+      "QWidget work");
 
   const LiveConversationWidgetCounts beforeOffscreenDelta =
       liveConversationWidgetCounts(view);
   result &= expect(graphAttachment(distant) == nullptr,
-                   "a distant revealed graph item has no QWidget attachment");
+                   "an item outside the loaded history window has no QWidget "
+                   "attachment");
   nodegraph::GraphChange offscreenDelta;
   {
     auto write = graph.write();
@@ -4172,28 +4239,34 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
               beforeOffscreenDelta.itemPlaceholders &&
           afterOffscreenDelta.turnSections ==
               beforeOffscreenDelta.turnSections &&
-          graphViewportWidgetsAreBounded(view) &&
           graphRefreshWasConstantBounded(view) &&
           graphPassBudgetsWereRespected(view),
-      "an off-screen delta after many revealed pages creates no QWidget and "
-      "keeps all work bounded");
+      "a delta outside the loaded history window creates no QWidget and keeps "
+      "all work bounded");
 
-  const QVariant firstRetainedScroll =
-      view.property("graphFirstRetainedScrollValue");
-  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
-  if (firstRetainedScroll.isValid())
-    view.verticalScrollBar()->setValue(firstRetainedScroll.toInt());
-  spin(160);
   ui::QtNodeAttachment *firstAttachment = graphAttachment(firstRevealed);
   auto *firstCard =
       firstAttachment
           ? qobject_cast<ConversationCard *>(firstAttachment->widget.data())
           : nullptr;
+  ui::QtNodeAttachment *rootAttachment = graphAttachment(root);
+  auto *rootCard =
+      rootAttachment
+          ? qobject_cast<ConversationCard *>(rootAttachment->widget.data())
+          : nullptr;
   result &= expect(
-      firstRetainedScroll.isValid() && graphAttachment(root) == nullptr &&
-          firstCard && firstCard->property("nestedConversationCard").toBool(),
-      "the exact leading extent materializes the first retained child with "
-      "nested presentation but no far-offscreen root QWidget");
+      rootCard && firstCard &&
+          rootCard->property("turnContainer").toBool() &&
+          rootCard->isAncestorOf(firstCard) &&
+          firstCard->property("nestedConversationCard").toBool(),
+      "every loaded child is materialized once under its actual canonical "
+      "Turn/You card even when both are initially offscreen");
+
+  view.verticalScrollBar()->setValue(
+      view.verticalScrollBar()->value() +
+      firstCard->mapTo(view.viewport(), QPoint{}).y() - 8);
+  spin(80);
+  const int firstScrollValue = view.verticalScrollBar()->value();
 
   std::string tallText;
   for (int line = 0; line < 18; ++line)
@@ -4211,7 +4284,7 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
       firstAttachment
           ? qobject_cast<ConversationCard *>(firstAttachment->widget.data())
           : nullptr;
-  QPointer<QWidget> evictedFirst = firstCard;
+  QPointer<QWidget> retainedFirst = firstCard;
   const int retainedHeight = firstCard ? firstCard->height() : 0;
   const int retainedViewportTop =
       firstCard ? firstCard->mapTo(view.viewport(), QPoint{}).y() : 0;
@@ -4225,48 +4298,139 @@ bool testGraphBoundedHistoryAndExplicitRoot() {
 
   view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMaximum);
   spin(160);
+  rootAttachment = graphAttachment(root);
+  rootCard =
+      rootAttachment
+          ? qobject_cast<ConversationCard *>(rootAttachment->widget.data())
+          : nullptr;
   result &= expect(
-      graphAttachment(root) == nullptr &&
-          graphAttachment(firstRevealed) == nullptr && evictedFirst.isNull() &&
+      rootCard && graphAttachment(firstRevealed) == firstAttachment &&
+          retainedFirst == firstCard && rootCard->isAncestorOf(firstCard) &&
           std::abs(view.verticalScrollBar()->maximum() -
                    maximumWithMeasuredHeight) <= 2,
-      "scroll eviction releases the distant root and child QWidgets while "
-      "their measured geometry keeps the scroll extent stable");
+      "scrolling retains the loaded child, its canonical owner, and its "
+      "measured scroll extent without reconstruction");
   steeringAttachment = graphAttachment(steering);
   steeringCard =
       steeringAttachment
           ? qobject_cast<ConversationCard *>(steeringAttachment->widget.data())
           : nullptr;
   result &= expect(
-      steeringCard &&
+      rootCard && steeringCard && rootCard->isAncestorOf(steeringCard) &&
           steeringCard->property("nestedConversationCard").toBool() &&
           steeringCard->mapTo(view.viewport(), QPoint{}).x() ==
-              nestedViewportX &&
-          graphViewportWidgetsAreBounded(view),
-      "a child remains visually nested and identically indented while its "
-      "far-offscreen root has no QWidget");
+              nestedViewportX && retainedFirst == firstCard,
+      "a retained child remains owned by its canonical Turn/You card and "
+      "identically indented after scrolling");
 
-  const QVariant restoredFirstScroll =
-      view.property("graphFirstRetainedScrollValue");
-  if (restoredFirstScroll.isValid())
-    view.verticalScrollBar()->setValue(restoredFirstScroll.toInt());
+  view.verticalScrollBar()->setValue(firstScrollValue);
   spin(160);
   firstAttachment = graphAttachment(firstRevealed);
   firstCard =
       firstAttachment
           ? qobject_cast<ConversationCard *>(firstAttachment->widget.data())
           : nullptr;
+  rootAttachment = graphAttachment(root);
+  rootCard =
+      rootAttachment
+          ? qobject_cast<ConversationCard *>(rootAttachment->widget.data())
+          : nullptr;
   result &= expect(
-      restoredFirstScroll.isValid() && graphAttachment(root) == nullptr &&
-          firstCard && firstCard->property("nestedConversationCard").toBool() &&
+      rootCard && firstCard && retainedFirst == firstCard &&
+          rootCard->isAncestorOf(firstCard) &&
+          firstCard->property("nestedConversationCard").toBool() &&
           firstCard->height() == retainedHeight &&
           std::abs(firstCard->mapTo(view.viewport(), QPoint{}).y() -
                    retainedViewportTop) <= 2 &&
-          graphViewportWidgetsAreBounded(view) &&
+          liveConversationWidgetCounts(view).cards ==
+              static_cast<int>((RevealedPages + 1) *
+                                   AuthoritativeHistoryPageSize +
+                               1) &&
           graphPassBudgetsWereRespected(view),
-      "returning to an evicted child restores nested presentation, measured "
-      "height, and the exact scroll anchor without a root QWidget");
+      "returning to a retained child preserves identity, canonical ownership, "
+      "nested presentation, measured height, and exact scroll anchor");
   return result;
+}
+
+bool testLoadedCardsMaterializeOnceWithoutScrollChurn() {
+  constexpr std::size_t LoadedCount = 80;
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  std::vector<nodegraph::NodeRef> items;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", LoadedCount);
+    thread = write.upsert({nodegraph::NodeKind::Thread, "once-thread"},
+                          std::move(threadState));
+    turn = write.upsert({nodegraph::NodeKind::Turn, "once-turn"});
+    write.setParent(thread, turn);
+    items.reserve(LoadedCount);
+    for (std::size_t index = 0; index < LoadedCount; ++index) {
+      nodegraph::NodeState state = graphMessageState(
+          index == 0 ? "userMessage" : "agentMessage",
+          "Retained card " + std::to_string(index));
+      if (index != 0)
+        state.fields.emplace("phase", "final_answer");
+      nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item,
+           "once-item-" + std::to_string(index)},
+          std::move(state));
+      write.setParent(turn, item);
+      items.push_back(item);
+    }
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, items.front());
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 420);
+  view.show();
+  view.bindGraph(graph, thread);
+  const bool allMaterialized = spinUntil(
+      [&items] {
+        return std::ranges::all_of(items, [](const nodegraph::NodeRef &item) {
+          ui::QtNodeAttachment *attachment = graphAttachment(item);
+          return attachment && attachment->widget;
+        });
+      },
+      1024);
+
+  std::vector<QPointer<QWidget>> identities;
+  identities.reserve(items.size());
+  for (const nodegraph::NodeRef &item : items) {
+    ui::QtNodeAttachment *attachment = graphAttachment(item);
+    identities.push_back(attachment ? attachment->widget : nullptr);
+  }
+  const qulonglong geometryBefore =
+      view.property("conversationGeometryPasses").toULongLong();
+  const int maximumBefore = view.verticalScrollBar()->maximum();
+  for (int pass = 0; pass < 4; ++pass) {
+    view.verticalScrollBar()->setValue(0);
+    spin(10);
+    view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum());
+    spin(10);
+  }
+
+  bool sameCards = allMaterialized;
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    ui::QtNodeAttachment *attachment = graphAttachment(items[index]);
+    sameCards = sameCards && attachment && attachment->widget == identities[index];
+  }
+  ConversationCard *rootCard =
+      qobject_cast<ConversationCard *>(identities.front().data());
+  bool owned = rootCard && rootCard->property("turnContainer").toBool();
+  for (std::size_t index = 1; owned && index < identities.size(); ++index)
+    owned = identities[index] && rootCard->isAncestorOf(identities[index]);
+  return expect(
+      allMaterialized && sameCards && owned &&
+          view.verticalScrollBar()->maximum() == maximumBefore &&
+          view.property("conversationGeometryPasses").toULongLong() ==
+              geometryBefore,
+      "the selected 80-card loaded window materializes once, retains exact "
+      "Turn/You ownership, and performs no reconstruction or relayout while "
+      "scrolling");
 }
 
 bool testGraphHistoryPagingAndPausedTailGrowth() {
@@ -4564,10 +4728,11 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
   nodegraph::NodeRef thread;
   nodegraph::NodeRef turn;
   nodegraph::NodeRef localPrompt;
+  nodegraph::NodeRef activity;
   {
     auto write = graph.write();
     nodegraph::NodeState threadState;
-    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{1});
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{2});
     thread = write.upsert({nodegraph::NodeKind::Thread, "prompt-thread"},
                           std::move(threadState));
     turn = write.upsert({nodegraph::NodeKind::Turn, "prompt-turn"});
@@ -4585,8 +4750,13 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
                                      {"mimeType", "image/png"}})});
     localPrompt = write.upsert({nodegraph::NodeKind::Item, "local-prompt:42"},
                                std::move(promptState));
+    activity = write.upsert(
+        {nodegraph::NodeKind::Item, "prompt-activity"},
+        graphMessageState("agentMessage", "Nested turn activity"));
     write.setParent(thread, turn);
     write.setParent(turn, localPrompt);
+    write.setParent(turn, activity);
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, localPrompt);
     static_cast<void>(write.finish());
   }
 
@@ -4617,13 +4787,21 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
           ? qobject_cast<ConversationCard *>(localAttachment->widget.data())
           : nullptr;
   QPointer<ConversationCard> stableCard(localCard);
+  ui::QtNodeAttachment *activityAttachment = graphAttachment(activity);
+  auto *activityCard = activityAttachment
+                           ? qobject_cast<ConversationCard *>(
+                                 activityAttachment->widget.data())
+                           : nullptr;
   bool result = expect(
       localCard && localCard->data().kind == CardKind::LocalPrompt &&
+          localCard->property("turnContainer").toBool() && activityCard &&
+          localCard->isAncestorOf(activityCard) &&
           std::get<LocalPromptData>(localCard->data().payload).prompt ==
               "Exact authored prompt" &&
           std::get<LocalPromptData>(localCard->data().payload).imagePaths ==
               std::vector<std::string>{"/tmp/prompt.png"},
-      "a graph local prompt renders its exact authored text and attachment");
+      "a starting graph prompt is the owning You card for its nested turn "
+      "activity while rendering exact authored content");
 
   nodegraph::NodeRef authoritative;
   nodegraph::GraphChange materialized;
@@ -4635,7 +4813,9 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
     write.setParent(turn, authoritative);
     write.relate(authoritative, nodegraph::RelationKind::PromptMaterialization,
                  localPrompt);
-    write.setField(thread, "historyLoadedItemCount", std::uint64_t{2});
+    write.replaceRelated(turn, nodegraph::RelationKind::TurnRootItem,
+                         std::array<nodegraph::NodeRef, 1>{authoritative});
+    write.setField(thread, "historyLoadedItemCount", std::uint64_t{3});
     materialized = write.finish();
   }
   view.graphChanged(materialized.removed);
@@ -4694,13 +4874,19 @@ bool testGraphLocalPromptMorphsWithoutReplacingItsWidget() {
           callbackGraphWriteCompleted &&
           acknowledgements == std::vector<nodegraph::NodeRef>{localPrompt},
       "correlation plus exact result acknowledgement runs after releasing "
-      "the graph read guard, then transfers and morphs the same card");
+      "the graph read guard, then transfers and morphs the same You card");
+  result &= expect(
+      authoritativeCard &&
+          authoritativeCard->property("turnContainer").toBool() &&
+          activityCard && authoritativeCard->isAncestorOf(activityCard),
+      "authoritative root transfer keeps nested activity owned by the same "
+      "morphed You card");
 
   nodegraph::GraphChange removed;
   {
     auto write = graph.write();
     write.remove(localPrompt);
-    write.setField(thread, "historyLoadedItemCount", std::uint64_t{1});
+    write.setField(thread, "historyLoadedItemCount", std::uint64_t{2});
     removed = write.finish();
   }
   view.graphChanged(removed.removed);
@@ -5295,7 +5481,7 @@ int main(int argc, char **argv) {
   result &= testRetainedNestedFinalAnswerGeometrySettlement();
   result &= testBottomAnchoredCommandOutputGrowth();
   result &= testCommandOutputStateAcrossNavigation();
-  result &= testViewportLazyMaterialization();
+  result &= testLoadedWindowMaterializesOnce();
   result &= testGraphBackedLazyRenderingAndLifetime();
   result &= testGraphStructureScanSurvivesUnrelatedRevisionChurn();
   result &= testGraphGeometryScanSurvivesVisibleHeightChurn();
@@ -5306,6 +5492,7 @@ int main(int argc, char **argv) {
   result &= testAffectedNodeRequeuedAfterCursorConsumption();
   result &= testGraphStreamTruncationNotices();
   result &= testGraphBoundedHistoryAndExplicitRoot();
+  result &= testLoadedCardsMaterializeOnceWithoutScrollChurn();
   result &= testGraphHistoryPagingAndPausedTailGrowth();
   result &= testGraphRootReplacementAndAttachmentRecovery();
   result &= testGraphLastItemRemovalUpdatesChromeSynchronously();

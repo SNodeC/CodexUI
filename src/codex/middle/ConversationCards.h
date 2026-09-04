@@ -21,6 +21,8 @@ class QWheelEvent;
 
 namespace codexui::codex::middle {
 
+enum class PresentationImpact { None, PaintOnly, GeometryChanged };
+
 class ContentSizedTextView : public QTextEdit {
 public:
   explicit ContentSizedTextView(int maximumContentHeight,
@@ -114,6 +116,7 @@ public:
   // kinds in place and also performs the one supported semantic transition
   // from an admitted local prompt to its authoritative user message.
   bool apply(const VisibleCardData &data);
+  PresentationImpact applyPresentation(const VisibleCardData &data);
 
 signals:
   void foldRequested(bool collapsed);

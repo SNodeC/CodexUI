@@ -154,6 +154,10 @@ private:
   std::uint64_t completedTopologies = 0;
   std::uint64_t topologyValidationPasses = 0;
   std::uint64_t discardedTopologies = 0;
+  std::uint64_t rowPresentationUpdates = 0;
+  std::uint64_t topologyScansStarted = 0;
+  std::uint64_t wholePaneUpdateSuppressions = 0;
+  bool topologyCommitUpdatesSuppressed = false;
   std::uint64_t graphReadRetries = 0;
   std::uint64_t contextMenuReadRetries = 0;
 };
