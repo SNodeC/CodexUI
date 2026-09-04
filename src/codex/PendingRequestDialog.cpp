@@ -121,6 +121,16 @@ void addChoice(QComboBox *combo, const QString &label, const char *value) {
     combo->addItem(label, QString::fromLatin1(value));
 }
 
+void showValidationWarning(QWidget *parent, QString title, QString message) {
+  QMessageBox warning(QMessageBox::Warning, std::move(title),
+                      std::move(message), QMessageBox::Ok, parent);
+  // Validation keeps the parent request dialog and its authored controls
+  // alive. An explicit Qt-owned dialog also avoids platform-native teardown
+  // reentrancy when the warning is dismissed from the nested modal loop.
+  warning.setOption(QMessageBox::Option::DontUseNativeDialog, true);
+  warning.exec();
+}
+
 struct QuestionEditor {
   std::string id;
   std::vector<std::pair<std::string, QCheckBox *>> choices;
@@ -377,9 +387,9 @@ PendingRequestDialog::present(const PendingRequestDescriptor &request,
         if (question.other && !question.other->text().trimmed().isEmpty())
           values.push_back(question.other->text().toStdString());
         if (values.empty()) {
-          QMessageBox::warning(&dialog, QStringLiteral("Incomplete response"),
-                               QStringLiteral("Answer every question before "
-                                              "submitting."));
+          showValidationWarning(
+              &dialog, QStringLiteral("Incomplete response"),
+              QStringLiteral("Answer every question before submitting."));
           return;
         }
         answers[question.id] = {{"answers", std::move(values)}};
@@ -390,9 +400,9 @@ PendingRequestDialog::present(const PendingRequestDescriptor &request,
       nlohmann::json content = nlohmann::json::parse(
           structuredContent->toPlainText().toStdString(), nullptr, false);
       if (content.is_discarded() || !content.is_object()) {
-        QMessageBox::warning(&dialog, QStringLiteral("Invalid response"),
-                             QStringLiteral("The MCP response must be a valid "
-                                            "JSON object."));
+        showValidationWarning(
+            &dialog, QStringLiteral("Invalid response"),
+            QStringLiteral("The MCP response must be a valid JSON object."));
         return;
       }
       acceptedStructuredContent = std::move(content);

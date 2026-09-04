@@ -128,7 +128,7 @@ private:
   void recomputeGeometry(
       const std::vector<TurnSectionWidget *> *affectedSections = nullptr);
   void arrangeSection(TurnSectionWidget *section);
-  void clearGraph();
+  void clearGraph(bool preserveAtomicTransition = false);
   void scheduleGraphRefresh();
   void scheduleGraphContentionRetry();
   void scheduleVisibilityContentionRetry();
@@ -142,7 +142,8 @@ private:
   void resetGraphVisibilityScan();
   [[nodiscard]] bool runVisibilityPass();
   [[nodiscard]] bool runGraphVisibilityPass();
-  void beginAtomicMaterialization(bool fullCommit);
+  void beginAtomicMaterialization(bool fullCommit,
+                                  bool preservePaintedFrame = false);
   void finishBulkMaterializationIfReady();
   void positionContent();
   void handleUserScrollValue(int value);
@@ -152,6 +153,7 @@ private:
   [[nodiscard]] QWidget *itemForStableKey(const std::string &stableKey) const;
 
   QWidget *content_ = nullptr;
+  QLabel *atomicTransitionOverlay_ = nullptr;
   QVBoxLayout *contentLayout_ = nullptr;
   QPushButton *loadMore_ = nullptr;
   QWidget *graphLeadingPlaceholder_ = nullptr;
@@ -207,6 +209,7 @@ private:
   bool retiredGeometryCleanupScheduled_ = false;
   bool bulkMaterializationUpdatesSuppressed_ = false;
   bool atomicMaterializationFullCommit_ = false;
+  bool graphHydrationSettled_ = true;
   bool graphViewportReconciliationPending_ = false;
   std::optional<Anchor> atomicMaterializationAnchor_;
   std::vector<TurnSectionWidget *> atomicMaterializationSections_;

@@ -729,7 +729,7 @@ CardCopyContent cardCopyContent(const VisibleCardData &card) {
 
 bool presentationEquals(const VisibleCardData &left,
                         const VisibleCardData &right) {
-  if (left.kind != right.kind)
+  if (left.kind != right.kind || left.activeWork != right.activeWork)
     return false;
   const auto *first = std::get_if<LocalPromptData>(&left.payload);
   const auto *second = std::get_if<LocalPromptData>(&right.payload);
@@ -1071,6 +1071,8 @@ public:
     owner->setProperty("kind", "raised");
     std::visit([this](const auto &payload) { createComposition(payload); },
                initial.payload);
+    if (initial.activeWork)
+      setActiveWork(*initial.activeWork);
     refreshCopyPresentation();
     refreshFoldPresentation();
   }
@@ -1099,6 +1101,8 @@ public:
       return PresentationImpact::None;
     std::visit([this](const auto &payload) { updateComposition(payload); },
                next.payload);
+    if (next.activeWork)
+      setActiveWork(*next.activeWork);
     refreshCopyPresentation();
     refreshFoldPresentation();
     owner->updateGeometry();
@@ -1124,6 +1128,15 @@ public:
     if (metadata) {
       metadata->clear();
       metadata->hide();
+    }
+    if (phase) {
+      if (owner->property("nestedConversationCard").toBool()) {
+        showPhase(QStringLiteral("steering"),
+                  QStringLiteral("steeringMessagePhase"));
+        setPhaseTone(QStringLiteral("steering"));
+      } else {
+        phase->hide();
+      }
     }
     if (recovery)
       recovery->hide();
@@ -1571,6 +1584,22 @@ public:
     const QString style =
         QStringLiteral("background:transparent;color:%1;").arg(foreground);
     bool changed = false;
+    const QString lifecycle =
+        waiting ? steering ? QStringLiteral("steering · pending")
+                           : QStringLiteral("pending")
+                : steering ? QStringLiteral("steering") : QString{};
+    const bool phaseWasVisible = phase && phase->isVisible();
+    const QString previousPhase = phase ? phase->text() : QString{};
+    if (!lifecycle.isEmpty()) {
+      showPhase(lifecycle, steering ? QStringLiteral("steeringMessagePhase")
+                                    : QStringLiteral("pendingPromptStatus"));
+      setPhaseTone(steering ? QStringLiteral("steering")
+                            : QStringLiteral("active"));
+    } else if (phase) {
+      phase->hide();
+    }
+    changed = changed || previousPhase != lifecycle ||
+              phaseWasVisible != !lifecycle.isEmpty();
     for (QLabel *label : {title, body, metadata}) {
       if (label->styleSheet() != style) {
         label->setStyleSheet(style);

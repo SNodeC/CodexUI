@@ -719,6 +719,22 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
     break;
   }
   }
+  switch (result.kind) {
+  case CardKind::CommandExecution:
+  case CardKind::AgentActivity:
+  case CardKind::Reasoning:
+  case CardKind::FileChanges:
+  case CardKind::ImageGeneration:
+  case CardKind::Plan:
+  case CardKind::GenericActivity:
+    result.activeWork = state.status == nodegraph::NodeStatus::Pending ||
+                        state.status == nodegraph::NodeStatus::Running;
+    break;
+  case CardKind::UserMessage:
+  case CardKind::AgentMessage:
+  case CardKind::LocalPrompt:
+    break;
+  }
   return result;
 }
 
@@ -1074,6 +1090,17 @@ ConversationView::ConversationView(QWidget *parent)
   content_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   content_->installEventFilter(this);
 
+  // A thread switch builds the incoming retained history behind this
+  // short-lived frozen frame. It is deliberately only a paint bridge: the
+  // graph remains canonical and the outgoing widgets are still detached
+  // immediately.
+  atomicTransitionOverlay_ = new QLabel(this);
+  atomicTransitionOverlay_->setObjectName(
+      QStringLiteral("conversationAtomicTransitionOverlay"));
+  atomicTransitionOverlay_->setAttribute(Qt::WA_TransparentForMouseEvents);
+  atomicTransitionOverlay_->setScaledContents(true);
+  atomicTransitionOverlay_->hide();
+
   contentLayout_ = new QVBoxLayout(content_);
   contentLayout_->setContentsMargins(0, 0, 0, 0);
   contentLayout_->setSpacing(CardSpacing);
@@ -1191,6 +1218,12 @@ void ConversationView::bindGraph(const nodegraph::NodeGraph &graph,
     graphChanged();
     return;
   }
+  // Freeze the outgoing painted viewport before setThread/clearGraph detach
+  // it. Materialization of the incoming thread then remains invisible until
+  // its final geometry and every retained card are ready.
+  if (graph_)
+    beginAtomicMaterialization(true, true);
+
   // Capture the outgoing graph's painted anchor before detaching its widgets.
   // setThread also restores the incoming thread's independent follow mode.
   const std::string nextThreadId =
@@ -1202,16 +1235,18 @@ void ConversationView::bindGraph(const nodegraph::NodeGraph &graph,
           ? std::nullopt
           : std::optional<ThreadScrollState>{saved->second};
   if (graph_)
-    clearGraph();
+    clearGraph(true);
 
   graph_ = &graph;
   graphThread_ = std::move(selectedThread);
-  if (graphThread_)
+  graphHydrationSettled_ = !graphThread_;
+  if (graphThread_ && !bulkMaterializationUpdatesSuppressed_)
     beginAtomicMaterialization(true);
   pendingGraphAnchorRestore_.reset();
   if (restored && restored->mode == Mode::Paused &&
       !restored->anchor.stableKey.empty())
     pendingGraphAnchorRestore_ = restored->anchor;
+  atomicMaterializationAnchor_ = pendingGraphAnchorRestore_;
   graphHiddenItemCount_ = 0;
   graphWindowItemCount_ = 0;
   graphProviderHasMore_ = false;
@@ -1321,9 +1356,9 @@ void ConversationView::detachRemovedNodes(
   detachGraphWidgets(removed);
 }
 
-void ConversationView::clearGraph() {
+void ConversationView::clearGraph(bool preserveAtomicTransition) {
   if (!graph_ && graphSections_.empty() && graphGeometry_->turns.empty()) {
-    if (bulkMaterializationUpdatesSuppressed_) {
+    if (bulkMaterializationUpdatesSuppressed_ && !preserveAtomicTransition) {
       bulkMaterializationUpdatesSuppressed_ = false;
       atomicMaterializationFullCommit_ = false;
       graphViewportReconciliationPending_ = false;
@@ -1331,6 +1366,8 @@ void ConversationView::clearGraph() {
       atomicMaterializationSections_.clear();
       setProperty("bulkMaterializationUpdatesSuppressed", false);
       viewport()->setUpdatesEnabled(true);
+      atomicTransitionOverlay_->hide();
+      atomicTransitionOverlay_->clear();
     }
     return;
   }
@@ -1398,6 +1435,7 @@ void ConversationView::clearGraph() {
   graphHiddenItemCount_ = 0;
   graphWindowItemCount_ = 0;
   graphProviderHasMore_ = false;
+  graphHydrationSettled_ = true;
   visibilitySectionCursor_ = 0;
   visibilitySlotCursor_ = 0;
   visibilitySlotsRemaining_ = 0;
@@ -1407,9 +1445,11 @@ void ConversationView::clearGraph() {
   visibilityScanContentHeight_ = -1;
   immediateVisibilityStart_.reset();
   immediateMaterializationNodes_.clear();
-  atomicMaterializationAnchor_.reset();
-  atomicMaterializationSections_.clear();
-  atomicMaterializationFullCommit_ = false;
+  if (!preserveAtomicTransition) {
+    atomicMaterializationAnchor_.reset();
+    atomicMaterializationSections_.clear();
+    atomicMaterializationFullCommit_ = false;
+  }
   graphViewportReconciliationPending_ = false;
   graphRefreshScheduled_ = false;
   visibilityPassScheduled_ = false;
@@ -1433,10 +1473,12 @@ void ConversationView::clearGraph() {
   setProperty("graphContentionRetryCount", 0);
   publishRetiredGeometryCleanupMetrics();
   scheduleRetiredGeometryCleanup();
-  if (bulkMaterializationUpdatesSuppressed_) {
+  if (bulkMaterializationUpdatesSuppressed_ && !preserveAtomicTransition) {
     bulkMaterializationUpdatesSuppressed_ = false;
     setProperty("bulkMaterializationUpdatesSuppressed", false);
     viewport()->setUpdatesEnabled(true);
+    atomicTransitionOverlay_->hide();
+    atomicTransitionOverlay_->clear();
   }
 }
 
@@ -1552,17 +1594,33 @@ void ConversationView::runGraphRefresh() {
         threadState
             ? graphSize(graphField(*threadState, "historyLoadedItemCount"))
             : std::nullopt;
+    const std::string hydrationState =
+        threadState
+            ? graphString(graphField(*threadState, "hydrationState"))
+            : std::string{};
+    const bool localThread =
+        threadState && graphBool(graphField(*threadState, "local"));
+    // A provider thread selected from thread/list is intentionally incomplete
+    // until its one thread/read hydration settles. Keep the selection's
+    // backing frame intact even if the list happened to include a live tail;
+    // otherwise that tail is exposed first and retained history appears in
+    // later construction waves. Synthetic/current graph bindings that already
+    // carry an authoritative loaded count remain independently usable.
+    if (hydrationState == "loading" || hydrationState == "notLoaded") {
+      graphHydrationSettled_ = false;
+    } else {
+      graphHydrationSettled_ =
+          localThread || loadedItemCount.has_value() ||
+          hydrationState == "ready" || hydrationState == "failed";
+    }
     graphProviderHasMore_ =
         threadState && graphProviderHasMoreHistory(*threadState);
 
     const std::size_t childCount = read->childCount(graphThread_);
     const std::uint64_t threadStructure =
         read->structureChangedRevision(graphThread_);
-    // Selection may initially bind the lightweight thread-list node before
-    // thread/read supplies its retained turns. That empty transaction can
-    // legitimately finish, but the first real history must then use the same
-    // full atomic gate as selection itself instead of appearing in eight-card
-    // construction slices.
+    // A synthetic ready binding can still acquire its history after the first
+    // pass. Provider hydration remains held by graphHydrationSettled_ above.
     freezeFullMaterialization =
         !bulkMaterializationUpdatesSuppressed_ && graphSections_.empty() &&
         graphGeometry_->retainedHistoryItems == 0 && childCount != 0 &&
@@ -3612,12 +3670,20 @@ bool ConversationView::runVisibilityPass() {
   return remaining;
 }
 
-void ConversationView::beginAtomicMaterialization(bool fullCommit) {
+void ConversationView::beginAtomicMaterialization(bool fullCommit,
+                                                  bool preservePaintedFrame) {
   atomicMaterializationFullCommit_ =
       atomicMaterializationFullCommit_ || fullCommit;
   if (bulkMaterializationUpdatesSuppressed_ || !viewport())
     return;
   atomicMaterializationAnchor_ = captureAnchor();
+  if (preservePaintedFrame && viewport()->isVisible()) {
+    atomicTransitionOverlay_->setGeometry(viewport()->geometry());
+    atomicTransitionOverlay_->setPixmap(viewport()->grab());
+    atomicTransitionOverlay_->show();
+    atomicTransitionOverlay_->raise();
+    atomicTransitionOverlay_->repaint();
+  }
   bulkMaterializationUpdatesSuppressed_ = true;
   viewport()->setUpdatesEnabled(false);
   setProperty("bulkMaterializationUpdatesSuppressed", true);
@@ -3628,6 +3694,10 @@ void ConversationView::finishBulkMaterializationIfReady() {
     return;
   setProperty("bulkMaterializationCommitAttempts",
               property("bulkMaterializationCommitAttempts").toULongLong() + 1);
+  if (atomicMaterializationFullCommit_ && !graphHydrationSettled_) {
+    setProperty("bulkMaterializationBlocker", QStringLiteral("hydration"));
+    return;
+  }
   if (atomicMaterializationFullCommit_ && !graphGeometry_->scan.complete &&
       graphGeometry_->retainedHistoryItems <
           graphGeometry_->targetHistoryItems) {
@@ -3664,6 +3734,22 @@ void ConversationView::finishBulkMaterializationIfReady() {
     setScrollValue(verticalScrollBar()->maximum());
   else
     restoreAnchor(anchor);
+  // Candidates were chosen from placeholder geometry. Finish the viewport
+  // state from the one committed selection/Load-80 layout before enabling its
+  // first paint. This complete scan is confined to the explicit bulk action;
+  // ordinary graph passes remain bounded.
+  for (TurnSectionWidget *section : graphSections_) {
+    for (TurnSectionWidget::CardSlot &slot : section->cardSlots) {
+      if (!slot.attachment)
+        continue;
+      QWidget *widget = slot.attachment->widget.data();
+      const bool visible =
+          widget && widget->isVisibleTo(viewport()) &&
+          QRect(widget->mapTo(viewport(), QPoint{}), widget->size())
+              .intersects(viewport()->rect());
+      setAttachmentViewportVisibility(*slot.attachment, visible);
+    }
+  }
   applying_ = false;
   bulkMaterializationUpdatesSuppressed_ = false;
   atomicMaterializationFullCommit_ = false;
@@ -3671,7 +3757,16 @@ void ConversationView::finishBulkMaterializationIfReady() {
   atomicMaterializationSections_.clear();
   setProperty("bulkMaterializationUpdatesSuppressed", false);
   setProperty("bulkMaterializationBlocker", QString{});
+  if (atomicTransitionOverlay_->isVisible()) {
+    // QWidget::grab renders the final child tree even while ordinary updates
+    // remain suppressed. Swap the frozen frame to that completed image first;
+    // uncovering the equivalent backing store cannot expose an empty frame.
+    atomicTransitionOverlay_->setPixmap(viewport()->grab());
+    atomicTransitionOverlay_->repaint();
+  }
   viewport()->setUpdatesEnabled(true);
+  atomicTransitionOverlay_->hide();
+  atomicTransitionOverlay_->clear();
   viewport()->update();
 }
 
@@ -4447,6 +4542,10 @@ void ConversationView::resizeEvent(QResizeEvent *event) {
     viewport()->setUpdatesEnabled(false);
   const QSignalBlocker scrollSignals(verticalScrollBar());
   QAbstractScrollArea::resizeEvent(event);
+  if (atomicTransitionOverlay_->isVisible()) {
+    atomicTransitionOverlay_->setGeometry(viewport()->geometry());
+    atomicTransitionOverlay_->raise();
+  }
   for (TurnSectionWidget *section : graphSections_) {
     section->geometryDirty = true;
     for (TurnSectionWidget::CardSlot &slot : section->cardSlots)

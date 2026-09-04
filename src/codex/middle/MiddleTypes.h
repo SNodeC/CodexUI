@@ -189,6 +189,10 @@ struct VisibleCardData {
   std::string turnId;
   std::string itemId;
   CardPayload payload = GenericActivityData{};
+  // Graph-backed cards receive the current canonical node lifecycle here.
+  // Direct standalone cards may leave it unset and derive presentation from
+  // their typed payload status as before.
+  std::optional<bool> activeWork;
 
   bool operator==(const VisibleCardData &) const = default;
 };

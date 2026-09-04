@@ -415,6 +415,8 @@ void populateLongConversation(nodegraph::NodeGraph &graph,
   auto write = graph.write();
   thread =
       addThread(write, std::move(threadId), "Long conversation", "completed");
+  write.setField(thread, "historyLoadedItemCount", std::uint64_t{30});
+  write.setField(thread, "hydrationState", "ready");
   const nodegraph::NodeRef firstTurn =
       write.upsert({nodegraph::NodeKind::Turn, "turn-1"});
   const nodegraph::NodeRef secondTurn =
@@ -479,6 +481,8 @@ bool testOverlayGeometryAndRegionRouting() {
              "composer construction reports no pre-canonical trailing space");
   region.resize(1500, 820);
   region.show();
+  region.raise();
+  region.activateWindow();
   region.setThreadHeading(
       QStringLiteral("Thread title"), QStringLiteral("/workspace"),
       QStringLiteral("Last activity: 14:15:51"), QStringLiteral("completed"),

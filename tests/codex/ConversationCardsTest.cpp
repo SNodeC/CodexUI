@@ -560,7 +560,11 @@ struct GraphConversationFixture final {
 
   GraphConversationFixture() {
     auto write = graph.write();
-    thread = write.upsert({nodegraph::NodeKind::Thread, "graph-thread"});
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{65});
+    threadState.fields.emplace("hydrationState", "ready");
+    thread = write.upsert({nodegraph::NodeKind::Thread, "graph-thread"},
+                          std::move(threadState));
     turn = write.upsert({nodegraph::NodeKind::Turn, "graph-turn"});
     write.setParent(thread, turn);
 
@@ -2224,7 +2228,7 @@ bool testCardFoldingGeometryAndRetention() {
       steeringCard && userCard->isAncestorOf(steeringCard) &&
           steeringCard->property("nestedConversationCard").toBool() &&
           cardTitle(steeringCard) == QStringLiteral("You") && steeringPhase &&
-          steeringPhase->text() == QStringLiteral("steering") &&
+          steeringPhase->text() == QStringLiteral("steering · pending") &&
           steeringPhase->font().weight() == QFont::Normal &&
           steeringPhase->parentWidget()->layout()->indexOf(steeringPhase) <
               steeringPhase->parentWidget()->layout()->indexOf(
@@ -3689,6 +3693,8 @@ bool testFocusedGraphCardSurvivesViewportReconciliation() {
                   : nullptr;
   if (!commandCard || !output)
     return false;
+  view.raise();
+  view.activateWindow();
   output->setFocus(Qt::OtherFocusReason);
   dispatchPasses(2);
   const bool focusEstablished =
@@ -3709,6 +3715,20 @@ bool testFocusedGraphCardSurvivesViewportReconciliation() {
       pinnedAttachment->widget == commandCard &&
       (QApplication::focusWidget() == output ||
        commandCard->isAncestorOf(QApplication::focusWidget()));
+  if (!(focusEstablished && distantViewportReady && retainedWhileFocused)) {
+    std::cerr << "focus pin: established=" << focusEstablished
+              << " distant=" << distantViewportReady
+              << " retained=" << retainedWhileFocused
+              << " command=" << static_cast<bool>(commandCard)
+              << " attachment=" << static_cast<bool>(pinnedAttachment)
+              << " same="
+              << (pinnedAttachment && pinnedAttachment->widget == commandCard)
+              << " focus="
+              << (QApplication::focusWidget()
+                      ? QApplication::focusWidget()->metaObject()->className()
+                      : "null")
+              << '\n';
+  }
   result &= expect(
       focusEstablished && distantViewportReady && retainedWhileFocused,
       "viewport reconciliation pins a focused card while materializing a "
@@ -4688,14 +4708,17 @@ bool testDelayedInitialHistoryMaterializesAtomically() {
   ConversationView view;
   view.resize(620, 420);
   view.show();
-  view.bindGraph(graph, thread);
-  const bool emptyBindingSettled = spinUntil([&] {
-    return view.viewport()->updatesEnabled() &&
-           !view.property("bulkMaterializationUpdatesSuppressed").toBool();
-  });
-
+  spin(20);
   PaintAnchorProbe paints(view);
   paints.start();
+  view.bindGraph(graph, thread);
+  const bool emptyBindingHeld = spinUntil([&] {
+    return !view.viewport()->updatesEnabled() &&
+           view.property("bulkMaterializationUpdatesSuppressed").toBool() &&
+           view.property("bulkMaterializationBlocker").toString() ==
+               QStringLiteral("hydration");
+  });
+
   std::vector<nodegraph::NodeRef> items;
   nodegraph::GraphChange hydrated;
   {
@@ -4767,10 +4790,203 @@ bool testDelayedInitialHistoryMaterializesAtomically() {
           geometryPasses;
 
   return expect(
-      emptyBindingSettled && hydratedWindowReady && noPartialHistoryFrame &&
+      emptyBindingHeld && hydratedWindowReady && noPartialHistoryFrame &&
           finalLayoutStable,
       "history arriving after an empty selection remains invisible until all "
       "retained cards have their stable final old-UI layout");
+}
+
+bool testPartialLiveTailWaitsForAuthoritativeInitialHistory() {
+  constexpr std::size_t LoadedCount = AuthoritativeHistoryPageSize;
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  nodegraph::NodeRef turn;
+  std::vector<nodegraph::NodeRef> items;
+  {
+    auto write = graph.write();
+    thread = write.upsert(
+        {nodegraph::NodeKind::Thread, "partial-live-tail-thread"});
+    turn =
+        write.upsert({nodegraph::NodeKind::Turn, "partial-live-tail-turn"});
+    write.setParent(thread, turn);
+    items.reserve(LoadedCount);
+    for (std::size_t index = 0; index < 2; ++index) {
+      nodegraph::NodeState state = graphMessageState(
+          index == 0 ? "userMessage" : "agentMessage",
+          "Partial live tail " + std::to_string(index));
+      nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item,
+           "partial-live-tail-item-" + std::to_string(index)},
+          std::move(state));
+      write.setParent(turn, item);
+      items.push_back(item);
+    }
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, items.front());
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 420);
+  view.show();
+  spin(20);
+  PaintAnchorProbe paints(view);
+  paints.start();
+  view.bindGraph(graph, thread);
+  const bool partialTailHeld = spinUntil([&] {
+    return !view.viewport()->updatesEnabled() &&
+           view.property("bulkMaterializationUpdatesSuppressed").toBool() &&
+           view.property("bulkMaterializationBlocker").toString() ==
+               QStringLiteral("hydration");
+  });
+
+  nodegraph::GraphChange loading;
+  {
+    auto write = graph.write();
+    write.setField(thread, "hydrationState", "loading");
+    loading = write.finish();
+  }
+  view.graphChangedDeferred(loading.affected, loading.removed);
+  spin(20);
+
+  nodegraph::GraphChange hydrated;
+  {
+    auto write = graph.write();
+    for (std::size_t index = items.size(); index < LoadedCount; ++index) {
+      nodegraph::NodeState state = graphMessageState(
+          "agentMessage", "Hydrated retained card " + std::to_string(index));
+      state.fields.emplace("phase", "final_answer");
+      nodegraph::NodeRef item = write.upsert(
+          {nodegraph::NodeKind::Item,
+           "partial-live-tail-item-" + std::to_string(index)},
+          std::move(state));
+      write.setParent(turn, item);
+      items.push_back(item);
+    }
+    write.setField(thread, "historyLoadedItemCount", LoadedCount);
+    write.setField(thread, "hydrationState", "ready");
+    hydrated = write.finish();
+  }
+  view.graphChangedDeferred(hydrated.affected, hydrated.removed);
+  const bool hydratedWindowReady = spinUntil(
+      [&] {
+        return std::ranges::all_of(
+                   items, [](const nodegraph::NodeRef &item) {
+                     const auto *attachment = graphAttachment(item);
+                     return attachment && attachment->widget;
+                   }) &&
+               view.viewport()->updatesEnabled() &&
+               !view.property("bulkMaterializationUpdatesSuppressed")
+                    .toBool();
+      },
+      1024);
+  paints.active = false;
+
+  const bool noPartialTailFrame =
+      std::ranges::all_of(paints.representationCounts, [](int count) {
+        return count == 0 || count == static_cast<int>(LoadedCount);
+      }) &&
+      std::ranges::find(paints.representationCounts,
+                        static_cast<int>(LoadedCount)) !=
+          paints.representationCounts.end();
+  auto *rootCard = graphAttachment(items.front())
+                       ? qobject_cast<ConversationCard *>(
+                             graphAttachment(items.front())->widget.data())
+                       : nullptr;
+  bool allOwned = rootCard && rootCard->property("turnContainer").toBool();
+  for (std::size_t index = 1; allOwned && index < items.size(); ++index) {
+    const auto *attachment = graphAttachment(items[index]);
+    allOwned = attachment && attachment->widget &&
+               rootCard->isAncestorOf(attachment->widget);
+  }
+
+  return expect(
+      partialTailHeld && hydratedWindowReady && noPartialTailFrame && allOwned,
+      "a thread-list live tail never paints before authoritative history and "
+      "the first exposed frame has the complete canonically owned window");
+}
+
+bool testThreadSwitchKeepsPreviousFrameUntilAtomicCommit() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef sourceThread;
+  nodegraph::NodeRef sourceItem;
+  nodegraph::NodeRef targetThread;
+  {
+    auto write = graph.write();
+    nodegraph::NodeState ready;
+    ready.fields.emplace("historyLoadedItemCount", std::uint64_t{1});
+    ready.fields.emplace("hydrationState", "ready");
+    sourceThread = write.upsert(
+        {nodegraph::NodeKind::Thread, "atomic-frame-source"},
+        std::move(ready));
+    const auto sourceTurn =
+        write.upsert({nodegraph::NodeKind::Turn, "atomic-frame-source-turn"});
+    sourceItem = write.upsert(
+        {nodegraph::NodeKind::Item, "atomic-frame-source-item"},
+        graphMessageState("userMessage", "Previous painted conversation"));
+    write.setParent(sourceThread, sourceTurn);
+    write.setParent(sourceTurn, sourceItem);
+    write.relate(sourceTurn, nodegraph::RelationKind::TurnRootItem,
+                 sourceItem);
+
+    nodegraph::NodeState loading;
+    loading.fields.emplace("historyLoadedItemCount", std::uint64_t{0});
+    loading.fields.emplace("hydrationState", "loading");
+    targetThread = write.upsert(
+        {nodegraph::NodeKind::Thread, "atomic-frame-target"},
+        std::move(loading));
+    static_cast<void>(write.finish());
+  }
+
+  ConversationView view;
+  view.resize(620, 420);
+  view.show();
+  view.bindGraph(graph, sourceThread);
+  const bool sourceReady = spinUntil([&] {
+    const auto *attachment = graphAttachment(sourceItem);
+    return attachment && attachment->widget && view.viewport()->updatesEnabled();
+  });
+  const QImage previousFrame = view.viewport()->grab().toImage();
+
+  view.bindGraph(graph, targetThread);
+  const bool targetHeld = spinUntil([&] {
+    return !view.viewport()->updatesEnabled() &&
+           view.property("bulkMaterializationBlocker").toString() ==
+               QStringLiteral("hydration");
+  });
+  auto *overlay = view.findChild<QLabel *>(
+      QStringLiteral("conversationAtomicTransitionOverlay"));
+  const bool previousFrameStillVisible =
+      overlay && overlay->isVisible() && !overlay->pixmap().isNull() &&
+      overlay->pixmap().toImage() == previousFrame;
+
+  nodegraph::NodeRef targetItem;
+  nodegraph::GraphChange hydrated;
+  {
+    auto write = graph.write();
+    const auto targetTurn =
+        write.upsert({nodegraph::NodeKind::Turn, "atomic-frame-target-turn"});
+    targetItem = write.upsert(
+        {nodegraph::NodeKind::Item, "atomic-frame-target-item"},
+        graphMessageState("userMessage", "Complete incoming conversation"));
+    write.setParent(targetThread, targetTurn);
+    write.setParent(targetTurn, targetItem);
+    write.relate(targetTurn, nodegraph::RelationKind::TurnRootItem,
+                 targetItem);
+    write.setField(targetThread, "historyLoadedItemCount", std::uint64_t{1});
+    write.setField(targetThread, "hydrationState", "ready");
+    hydrated = write.finish();
+  }
+  view.graphChangedDeferred(hydrated.affected, hydrated.removed);
+  const bool targetReady = spinUntil([&] {
+    const auto *attachment = graphAttachment(targetItem);
+    return attachment && attachment->widget && view.viewport()->updatesEnabled() &&
+           overlay && !overlay->isVisible();
+  });
+
+  return expect(sourceReady && targetHeld && previousFrameStillVisible &&
+                    targetReady,
+                "thread switching retains the previous painted viewport until "
+                "the incoming history can be exposed in one atomic commit");
 }
 
 bool testPausedIncomingCardMaterializesWithoutAnchorJump() {
@@ -5051,6 +5267,16 @@ bool testPausedMixedCardBurstKeepsLeafAnchorAndParents() {
           ? qobject_cast<ConversationCard *>(
                 graphAttachment(incoming[2])->widget.data())
           : nullptr;
+  const bool everyDelayedWorkCardEmphasized = std::ranges::all_of(
+      incoming.begin() + 2, incoming.begin() + 10,
+      [](const nodegraph::NodeRef &item) {
+        const auto *attachment = graphAttachment(item);
+        const auto *card =
+            attachment
+                ? qobject_cast<ConversationCard *>(attachment->widget.data())
+                : nullptr;
+        return card && card->property("activeWork").toBool();
+      });
   const int anchorTopAfter =
       anchorWidget ? anchorWidget->mapTo(view.viewport(), QPoint{}).y() : 0;
   const bool paintedStable = std::ranges::all_of(
@@ -5074,10 +5300,11 @@ bool testPausedMixedCardBurstKeepsLeafAnchorAndParents() {
   view.graphChangedDeferred(completed.affected, completed.removed);
   spin(64);
 
-  return expect(
+  const bool pausedViewportContract =
       initialReady && anchorWidget && burstReady && allNested &&
           runningCommandCard &&
           runningCommandCard->property("activeWork").toBool() &&
+          everyDelayedWorkCardEmphasized &&
           rootIdentity == graphAttachment(root)->widget &&
           reviewIdentity && graphAttachment(review) &&
           graphAttachment(review)->widget == reviewIdentity &&
@@ -5086,10 +5313,24 @@ bool testPausedMixedCardBurstKeepsLeafAnchorAndParents() {
           anchorTopAfter == anchorTopBefore && paintedStable &&
           anchorWidget->mapTo(view.viewport(), QPoint{}).y() ==
               anchorTopBefore &&
-          graphPassBudgetsWereRespected(view),
+          graphPassBudgetsWereRespected(view);
+  if (reviewIdentity)
+    view.verticalScrollBar()->setValue(std::clamp(
+        view.verticalScrollBar()->value() +
+            reviewIdentity->mapTo(view.viewport(), QPoint{}).y() - 24,
+        view.verticalScrollBar()->minimum(),
+        view.verticalScrollBar()->maximum()));
+  const bool terminalReviewSettled = spinUntil([&] {
+    return reviewIdentity &&
+           !reviewIdentity->property("activeWork").toBool();
+  });
+
+  return expect(
+      pausedViewportContract && terminalReviewSettled,
       "a coalesced burst covering every conversation card kind, including "
       "approval review and optimistic steering, materializes atomically under "
-      "the canonical You parent without moving a scrolled-up leaf anchor");
+      "the canonical You parent without moving a scrolled-up leaf anchor, "
+      "and every delayed-work border follows canonical lifecycle state");
 }
 
 bool testPausedNormalPromptTurnMaterializesWithoutAnchorJump() {
@@ -5194,6 +5435,11 @@ bool testPausedNormalPromptTurnMaterializesWithoutAnchorJump() {
           ? qobject_cast<ConversationCard *>(
                 graphAttachment(prompt)->widget.data())
           : nullptr;
+  auto *promptStatus =
+      promptCard
+          ? promptCard->findChild<QLabel *>(
+                QStringLiteral("pendingPromptStatus"))
+          : nullptr;
   const bool paintedStable = std::ranges::all_of(
       paints.anchors, [&anchorBefore](const auto &anchor) {
         return anchor.first.empty() ||
@@ -5245,6 +5491,7 @@ bool testPausedNormalPromptTurnMaterializesWithoutAnchorJump() {
       initialReady && !anchorBefore.first.empty() && promptReady && retained &&
           promptCard &&
           promptCard->property("authoritativeTurnActive").toBool() &&
+          promptStatus && promptStatus->text() == QStringLiteral("pending") &&
           view.property("bulkMaterializationCommitAttempts").toULongLong() >
               atomicAttemptsBefore &&
           paints.anchors.size() <= 1 && view.viewport()->updatesEnabled() &&
@@ -5937,7 +6184,11 @@ bool testStructuredTurnPlanRemainsInspectorOnly() {
   nodegraph::NodeRef turn;
   {
     auto write = graph.write();
-    thread = write.upsert({nodegraph::NodeKind::Thread, "plan-thread"});
+    nodegraph::NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{0});
+    threadState.fields.emplace("hydrationState", "ready");
+    thread = write.upsert({nodegraph::NodeKind::Thread, "plan-thread"},
+                          std::move(threadState));
     nodegraph::NodeState planState;
     planState.status = nodegraph::NodeStatus::Running;
     planState.fields.emplace("planExplanation", "Current graph plan");
@@ -6016,7 +6267,6 @@ bool testOverduePromptStartsOnlyWhenVisible() {
   view.resize(620, 240);
   view.show();
   applyConversation(view, snapshot);
-  spin(120);
 
   std::vector<nodegraph::NodeRef> prompts;
   prompts.reserve(promptCount);
@@ -6030,12 +6280,27 @@ bool testOverduePromptStartsOnlyWhenVisible() {
       }
     }
   }
+  const bool loadedWindowReady = spinUntil([&] {
+    return prompts.size() == promptCount &&
+           std::ranges::all_of(prompts, [](const nodegraph::NodeRef &prompt) {
+             const auto *attachment = graphAttachment(prompt);
+             return attachment && attachment->widget;
+           }) &&
+           view.viewport()->updatesEnabled() &&
+           !view.property("bulkMaterializationUpdatesSuppressed").toBool();
+  });
 
   bool foundDormantOverscan = false;
+  int attachedPrompts = 0;
+  int viewportPrompts = 0;
+  int activeAnimations = 0;
+  int activeDelays = 0;
   for (const nodegraph::NodeRef &prompt : prompts) {
     ui::QtNodeAttachment *attachment = graphAttachment(prompt);
-    if (!attachment || attachment->viewportVisible || !attachment->widget)
+    if (!attachment || !attachment->widget)
       continue;
+    ++attachedPrompts;
+    viewportPrompts += attachment->viewportVisible ? 1 : 0;
     auto *promptCard =
         qobject_cast<ConversationCard *>(attachment->widget.data());
     QTimer *animation = promptCard
@@ -6045,14 +6310,30 @@ bool testOverduePromptStartsOnlyWhenVisible() {
     QTimer *delay = promptCard ? promptCard->findChild<QTimer *>(
                                      QStringLiteral("pendingDelayTimer"))
                                : nullptr;
-    if (promptCard && animation && delay && !animation->isActive() &&
+    activeAnimations += animation && animation->isActive() ? 1 : 0;
+    activeDelays += delay && delay->isActive() ? 1 : 0;
+    if (!attachment->viewportVisible && promptCard && animation && delay &&
+        !animation->isActive() &&
         !delay->isActive()) {
       foundDormantOverscan = true;
       break;
     }
   }
+  if (!(loadedWindowReady && foundDormantOverscan)) {
+    std::cerr << "overdue visibility: ready=" << loadedWindowReady
+              << " prompts=" << prompts.size()
+              << " attached=" << attachedPrompts
+              << " viewport=" << viewportPrompts
+              << " animations=" << activeAnimations
+              << " delays=" << activeDelays
+              << " scroll=" << view.verticalScrollBar()->value() << '/'
+              << view.verticalScrollBar()->maximum()
+              << " blocked="
+              << view.property("bulkMaterializationUpdatesSuppressed").toBool()
+              << '\n';
+  }
   bool result = expect(
-      foundDormantOverscan,
+      loadedWindowReady && foundDormantOverscan,
       "an overdue materialized overscan prompt performs no timer work while "
       "its node attachment is outside the viewport");
 
@@ -6121,9 +6402,13 @@ bool testPendingPromptAnimation() {
   card.show();
   spin(40);
   const QImage first = card.grab().toImage();
+  auto *pendingStatus =
+      card.findChild<QLabel *>(QStringLiteral("pendingPromptStatus"));
   spin(110);
   const QImage second = card.grab().toImage();
-  bool result = expect(first == second,
+  bool result = expect(pendingStatus &&
+                           pendingStatus->text() == QStringLiteral("pending") &&
+                           first == second,
                        "a newly admitted prompt begins as a calm static card");
   result &= expect(first.pixelColor(10, first.height() - 10).blue() >
                            first.pixelColor(10, first.height() - 10).red() &&
@@ -6189,6 +6474,12 @@ bool testPendingPromptAnimation() {
   steeringPrompt.showPendingAnimation = true;
   result &= expect(steeringCard.apply(steering),
                    "overdue steering starts its teal feedback sweep");
+  auto *steeringStatus = steeringCard.findChild<QLabel *>(
+      QStringLiteral("steeringMessagePhase"));
+  result &= expect(
+      steeringStatus &&
+          steeringStatus->text() == QStringLiteral("steering · pending"),
+      "pending steering retains its identity and shows its lifecycle state");
   const QImage steeringAnimated = steeringCard.grab().toImage();
   spin(110);
   result &= expect(steeringAnimated != steeringCard.grab().toImage(),
@@ -6201,6 +6492,10 @@ bool testPendingPromptAnimation() {
   steeringPrompt.showPendingAnimation = false;
   result &= expect(steeringCard.apply(steering),
                    "steering acknowledgement stops its feedback sweep");
+  result &= expect(steeringStatus &&
+                       steeringStatus->text() == QStringLiteral("steering"),
+                   "acknowledgement clears pending from the steering header");
+  spin(40);
   const QImage steeringSettled = steeringCard.grab().toImage();
   spin(100);
   result &= expect(steeringSettled == steeringCard.grab().toImage(),
@@ -6522,8 +6817,14 @@ int main(int argc, char **argv) {
     return testMutableCardsAndCommandOutput() ? 0 : 1;
   if (qEnvironmentVariableIsSet("CODEXUI_FOLLOW_TESTS"))
     return testFollowPauseAndStableAnchor() ? 0 : 1;
+  if (qEnvironmentVariableIsSet("CODEXUI_FOCUS_TESTS"))
+    return testFocusedGraphCardSurvivesViewportReconciliation() ? 0 : 1;
+  if (qEnvironmentVariableIsSet("CODEXUI_OVERDUE_PROMPT_TESTS"))
+    return testOverduePromptStartsOnlyWhenVisible() ? 0 : 1;
   if (qEnvironmentVariableIsSet("CODEXUI_BORDER_TESTS"))
-    return testActiveWorkBordersFollowStatus() ? 0 : 1;
+    return testActiveWorkBordersFollowStatus() && testPendingPromptAnimation()
+               ? 0
+               : 1;
   if (qEnvironmentVariableIsSet("CODEXUI_SETTLEMENT_TESTS")) {
     bool focused = testRetainedNestedFinalAnswerGeometrySettlement();
     focused &= testBottomAnchoredCommandOutputGrowth();
@@ -6533,7 +6834,10 @@ int main(int argc, char **argv) {
     return focused ? 0 : 1;
   }
   if (qEnvironmentVariableIsSet("CODEXUI_ATOMIC_MATERIALIZATION_TESTS")) {
-    bool focused = testPausedIncomingCardMaterializesWithoutAnchorJump();
+    bool focused = testDelayedInitialHistoryMaterializesAtomically();
+    focused &= testPartialLiveTailWaitsForAuthoritativeInitialHistory();
+    focused &= testThreadSwitchKeepsPreviousFrameUntilAtomicCommit();
+    focused &= testPausedIncomingCardMaterializesWithoutAnchorJump();
     focused &= testPausedMixedCardBurstKeepsLeafAnchorAndParents();
     focused &= testPausedNormalPromptTurnMaterializesWithoutAnchorJump();
     focused &= testGraphLocalPromptMorphsWithoutReplacingItsWidget();
@@ -6546,6 +6850,8 @@ int main(int argc, char **argv) {
     bool focused = testGraphBoundedHistoryAndExplicitRoot();
     focused &= testLoadedCardsMaterializeOnceWithoutScrollChurn();
     focused &= testDelayedInitialHistoryMaterializesAtomically();
+    focused &= testPartialLiveTailWaitsForAuthoritativeInitialHistory();
+    focused &= testThreadSwitchKeepsPreviousFrameUntilAtomicCommit();
     if (focused)
       std::cout << "Long conversation materialization tests passed\n";
     return focused ? 0 : 1;
@@ -6579,6 +6885,8 @@ int main(int argc, char **argv) {
   result &= testGraphBoundedHistoryAndExplicitRoot();
   result &= testLoadedCardsMaterializeOnceWithoutScrollChurn();
   result &= testDelayedInitialHistoryMaterializesAtomically();
+  result &= testPartialLiveTailWaitsForAuthoritativeInitialHistory();
+  result &= testThreadSwitchKeepsPreviousFrameUntilAtomicCommit();
   result &= testPausedIncomingCardMaterializesWithoutAnchorJump();
   result &= testPausedMixedCardBurstKeepsLeafAnchorAndParents();
   result &= testPausedNormalPromptTurnMaterializesWithoutAnchorJump();
