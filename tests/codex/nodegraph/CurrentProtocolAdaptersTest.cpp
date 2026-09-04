@@ -70,6 +70,74 @@ constexpr std::array CompatibilityServerNotifications{
     notifications::ThreadRealtimeItemCompleted::method,
 };
 
+// The installed generated header is older than the verified app-server schema
+// recorded for this migration.  Keep its client-request delta explicit so the
+// catalog is checked by method name rather than only by a self-reported count.
+constexpr std::array<std::string_view, 62> VerifiedNewerClientRequests{
+    "account/bedrock/discover",
+    "account/bedrock/setup",
+    "collaborationMode/list",
+    "environment/add",
+    "environment/info",
+    "environment/status",
+    "fuzzyFileSearch/sessionStart",
+    "fuzzyFileSearch/sessionStop",
+    "fuzzyFileSearch/sessionUpdate",
+    "getAuthStatus",
+    "getConversationSummary",
+    "gitDiffToRemote",
+    "mcpServer/event/stream/start",
+    "mcpServer/event/stream/stop",
+    "memory/reset",
+    "mock/experimentalMethod",
+    "plugin/search",
+    "process/kill",
+    "process/resizePty",
+    "process/spawn",
+    "process/writeStdin",
+    "project/create",
+    "project/delete",
+    "project/import",
+    "project/list",
+    "project/move",
+    "project/read",
+    "project/update",
+    "remoteControl/client/list",
+    "remoteControl/client/revoke",
+    "remoteControl/disable",
+    "remoteControl/enable",
+    "remoteControl/pairing/start",
+    "remoteControl/pairing/status",
+    "remoteControl/status/read",
+    "server/diagnostics",
+    "thread/backgroundTerminals/clean",
+    "thread/backgroundTerminals/list",
+    "thread/backgroundTerminals/terminate",
+    "thread/decrement_elicitation",
+    "thread/increment_elicitation",
+    "thread/items/list",
+    "thread/memoryMode/set",
+    "thread/queue/add",
+    "thread/queue/delete",
+    "thread/queue/list",
+    "thread/queue/reorder",
+    "thread/queue/start",
+    "thread/queue/update",
+    "thread/realtime/appendAudio",
+    "thread/realtime/appendSpeech",
+    "thread/realtime/appendText",
+    "thread/realtime/listVoices",
+    "thread/realtime/start",
+    "thread/realtime/stop",
+    "thread/revert",
+    "thread/search",
+    "thread/searchOccurrences",
+    "thread/settings/update",
+    "thread/timeline/list",
+    "thread/turns/list",
+    "turn/settings/update",
+};
+
 // These assertions deliberately couple this integration test to the installed
 // generated schema.  An AISuite protocol update must therefore be reconciled
 // with the explicit CodexUI compatibility surface and the graph catalog.
@@ -80,6 +148,7 @@ static_assert(GeneratedClientNotifications.size() == 1);
 static_assert(CompatibilityClientRequests.size() == 1);
 static_assert(CompatibilityServerRequests.size() == 1);
 static_assert(CompatibilityServerNotifications.size() == 7);
+static_assert(VerifiedNewerClientRequests.size() == 62);
 
 template <typename Operation>
 concept BridgeServerRequest =
@@ -220,13 +289,23 @@ bool testGeneratedSchemaCatalogCoverage() {
       hasUniqueMethods(CompatibilityClientRequests) &&
           hasUniqueMethods(CompatibilityServerRequests) &&
           hasUniqueMethods(CompatibilityServerNotifications) &&
+          hasUniqueMethods(VerifiedNewerClientRequests) &&
           hasDisjointMethods(GeneratedClientRequests,
-                             CompatibilityClientRequests) &&
+                             VerifiedNewerClientRequests) &&
           hasDisjointMethods(GeneratedServerRequests,
                              CompatibilityServerRequests) &&
           hasDisjointMethods(GeneratedServerNotifications,
                              CompatibilityServerNotifications),
       "compatibility adapters are unique additions to generated ProtocolTypes");
+
+  passed &=
+      expect(std::ranges::all_of(CompatibilityClientRequests,
+                                 [](std::string_view method) {
+                                   return contains(VerifiedNewerClientRequests,
+                                                   method);
+                                 }),
+             "typed client compatibility adapters belong to the verified "
+             "schema delta");
 
   passed &= expect(
       catalogContainsAll(GeneratedClientRequests, ClientRequest,
@@ -238,6 +317,10 @@ bool testGeneratedSchemaCatalogCoverage() {
           catalogContainsAll(GeneratedClientNotifications, ClientNotification,
                              "generated client notification"),
       "catalog classifies every method in generated ProtocolTypes");
+  passed &=
+      expect(catalogContainsAll(VerifiedNewerClientRequests, ClientRequest,
+                                "verified newer client request"),
+             "catalog classifies every newer-schema client request");
   passed &=
       expect(catalogContainsAll(CompatibilityClientRequests, ClientRequest,
                                 "compatibility client request") &&
@@ -253,6 +336,10 @@ bool testGeneratedSchemaCatalogCoverage() {
                                          CompatibilityServerRequests),
              "11 server requests exactly match generated types plus adapters");
   passed &= expect(
+      catalogDirectionEqualsUnion(ClientRequest, GeneratedClientRequests,
+                                  VerifiedNewerClientRequests),
+      "157 client requests exactly match generated types plus verified delta");
+  passed &= expect(
       catalogDirectionEqualsUnion(ServerNotification,
                                   GeneratedServerNotifications,
                                   CompatibilityServerNotifications),
@@ -262,12 +349,6 @@ bool testGeneratedSchemaCatalogCoverage() {
                                          GeneratedClientNotifications, {}),
              "one client notification exactly matches generated ProtocolTypes");
 
-  constexpr std::size_t NewerClientRequestsWithoutLocalTypedAdapters = 61;
-  passed &= expect(
-      nodegraph::protocolMethodCount(ClientRequest) ==
-          GeneratedClientRequests.size() + CompatibilityClientRequests.size() +
-              NewerClientRequestsWithoutLocalTypedAdapters,
-      "157 client requests retain the verified newer-schema extension set");
   return passed;
 }
 
