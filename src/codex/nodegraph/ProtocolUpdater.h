@@ -45,6 +45,10 @@ struct DecodedMessage final {
   // Supplying it prevents a late response from mutating a newer node after a
   // provider reuses the same JSON-RPC id.
   NodeRef expectedNode;
+  // Supplied by the CodexUI worker for meaningful thread-scoped traffic.
+  // Tests and other headless users need no clock; absence leaves activity
+  // unchanged. Hydration, global, and catalog traffic deliberately omit it.
+  std::optional<std::int64_t> activityAt;
 };
 
 struct ApplyResult final {
@@ -55,6 +59,19 @@ struct ApplyResult final {
   // The exact newly-created Operation or Interaction, when applicable.
   NodeRef primary;
 };
+
+// Provider turn and item identifiers are only unique inside their protocol
+// owners. These helpers are the one canonical encoding used at graph lookup
+// boundaries. Locally-created provisional nodes keep their existing IDs.
+[[nodiscard]] NodeId scopedTurnNodeId(std::string_view threadId,
+                                      std::string_view turnId);
+[[nodiscard]] NodeId scopedItemNodeId(const NodeId &turnNodeId,
+                                      std::string_view itemId);
+
+// Returns the raw provider identifier retained in node state, falling back to
+// the node's canonical ID for globally-addressed and local nodes.
+[[nodiscard]] std::string protocolCanonicalId(const NodeState &state,
+                                              const NodeRef &node);
 
 class ProtocolUpdater final {
 public:
@@ -80,8 +97,12 @@ private:
                                          const DecodedMessage &message);
   void applyGraphUpdate(NodeGraph::WriteAccess &write,
                         const DecodedMessage &message);
+  [[nodiscard]] bool applyRealtimeUpdate(NodeGraph::WriteAccess &write,
+                                         const DecodedMessage &message);
   void applyUnknown(NodeGraph::WriteAccess &write,
                     const DecodedMessage &message);
+  void applyThreadActivity(NodeGraph::WriteAccess &write,
+                           const DecodedMessage &message);
 
   [[nodiscard]] NodeRef ingestThread(NodeGraph::WriteAccess &write,
                                      const Value::Object &object,

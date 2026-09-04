@@ -52,6 +52,19 @@ std::string firstId(const Value::Object &object,
   return {};
 }
 
+std::string scopedCanonical(std::string_view owner,
+                            std::string_view protocolId) {
+  std::string result = "scope:";
+  result += std::to_string(owner.size());
+  result += ':';
+  result += owner;
+  result += ':';
+  result += std::to_string(protocolId.size());
+  result += ':';
+  result += protocolId;
+  return result;
+}
+
 NodeStatus statusFromValue(const Value *value) {
   const std::string *status = value ? value->asString() : nullptr;
   if (!status)
@@ -88,6 +101,42 @@ void mergeObject(NodeGraph::WriteAccess &write, const NodeRef &node,
   if (status != NodeStatus::Unknown)
     next.status = status;
   write.replaceState(node, std::move(next));
+}
+
+std::string retainedProtocolId(NodeGraph::WriteAccess &write,
+                               const NodeRef &node) {
+  if (!node)
+    return {};
+  const std::shared_ptr<const NodeState> state = write.state(node);
+  const auto found = state->fields.find("protocolId");
+  return found == state->fields.end() ? node->id().canonical
+                                      : canonicalValue(&found->second);
+}
+
+NodeRef ensureTurn(NodeGraph::WriteAccess &write, const NodeRef &thread,
+                   std::string_view rawTurnId) {
+  if (!thread || thread->id().kind != NodeKind::Thread || rawTurnId.empty())
+    return {};
+  NodeRef turn =
+      write.upsert(scopedTurnNodeId(thread->id().canonical, rawTurnId));
+  write.setField(turn, "protocolId", Value(rawTurnId));
+  write.setField(turn, "protocolThreadId", Value(thread->id().canonical));
+  write.setParent(thread, turn);
+  return turn;
+}
+
+NodeRef ensureItem(NodeGraph::WriteAccess &write, const NodeRef &turn,
+                   std::string_view rawItemId) {
+  if (!turn || turn->id().kind != NodeKind::Turn || rawItemId.empty())
+    return {};
+  NodeRef item = write.upsert(scopedItemNodeId(turn->id(), rawItemId));
+  write.setField(item, "protocolId", Value(rawItemId));
+  write.setField(item, "protocolTurnId",
+                 Value(retainedProtocolId(write, turn)));
+  if (NodeRef thread = write.parent(turn))
+    write.setField(item, "protocolThreadId", Value(thread->id().canonical));
+  write.setParent(turn, item);
+  return item;
 }
 
 std::optional<std::size_t> indexValue(const Value *value) {
@@ -173,6 +222,7 @@ std::string addressedId(const Value::Object &payload, NodeKind kind) {
   }
   case NodeKind::Process: {
     constexpr std::array names{std::string_view("processId"),
+                               std::string_view("processHandle"),
                                std::string_view("commandId")};
     return firstId(payload, names);
   }
@@ -334,14 +384,63 @@ void assignThreadOwner(NodeGraph::WriteAccess &write, const NodeRef &owner,
   }
 }
 
-std::string agentChildId(const Value::Object &item) {
+void replaceSingleRelation(NodeGraph::WriteAccess &write, const NodeRef &source,
+                           RelationKind kind, const NodeRef &target) {
+  if (target) {
+    std::array<NodeRef, 1> only{target};
+    write.replaceRelated(source, kind, only);
+  } else {
+    write.replaceRelated(source, kind, std::span<const NodeRef>{});
+  }
+}
+
+void assignProject(NodeGraph::WriteAccess &write, const NodeRef &thread,
+                   const Value *projectId) {
+  const std::string id = canonicalValue(projectId);
+  NodeRef project;
+  if (!id.empty())
+    project = write.upsert({NodeKind::Project, id});
+  replaceSingleRelation(write, thread, RelationKind::ProjectMembership,
+                        project);
+  write.setField(thread, "projectId", projectId ? *projectId : Value(nullptr));
+}
+
+void assignSection(NodeGraph::WriteAccess &write, const NodeRef &thread,
+                   const Value *sectionValue) {
+  NodeRef section;
+  if (const Value::Object *object =
+          sectionValue ? sectionValue->asObject() : nullptr) {
+    const std::string id = nestedId(*object);
+    if (!id.empty()) {
+      section = write.upsert({NodeKind::ThreadSection, id});
+      mergeObject(write, section, *object);
+    }
+  } else {
+    const std::string id = canonicalValue(sectionValue);
+    if (!id.empty())
+      section = write.upsert({NodeKind::ThreadSection, id});
+  }
+  replaceSingleRelation(write, thread, RelationKind::SectionMembership,
+                        section);
+  write.setField(thread, "section",
+                 sectionValue ? *sectionValue : Value(nullptr));
+}
+
+std::vector<std::string> agentChildIds(const Value::Object &item) {
+  std::vector<std::string> children;
   std::string child = canonicalValue(member(item, "agentThreadId"));
   if (!child.empty())
-    return child;
+    children.emplace_back(std::move(child));
   const Value::Array *receivers = arrayMember(item, "receiverThreadIds");
-  if (!receivers || receivers->size() != 1)
-    return {};
-  return canonicalValue(&receivers->front());
+  if (!receivers)
+    return children;
+  for (const Value &receiver : *receivers) {
+    child = canonicalValue(&receiver);
+    if (!child.empty() &&
+        std::find(children.begin(), children.end(), child) == children.end())
+      children.emplace_back(std::move(child));
+  }
+  return children;
 }
 
 bool isUserMessage(const Value::Object &item) {
@@ -371,8 +470,6 @@ void correlateLocalPrompt(NodeGraph::WriteAccess &write,
     std::array<NodeRef, 1> alias{local};
     write.replaceRelated(authoritative, RelationKind::PromptMaterialization,
                          alias);
-    write.setField(local, "dispatchState", Value("materialized"));
-    write.setStatus(local, NodeStatus::Completed);
     break;
   }
 }
@@ -399,7 +496,169 @@ void updateLoadedHistoryItemCount(NodeGraph::WriteAccess &write,
                  Value(static_cast<std::uint64_t>(loaded.size())));
 }
 
+NodeId realtimeSessionNodeId(std::string_view threadId) {
+  return NodeId{NodeKind::RealtimeSession,
+                scopedCanonical(threadId, "current")};
+}
+
+NodeId realtimeItemNodeId(const NodeRef &session, std::string_view itemId) {
+  return NodeId{NodeKind::Item,
+                scopedCanonical(session->id().canonical, itemId)};
+}
+
+void removeContained(NodeGraph::WriteAccess &write, const NodeRef &node) {
+  for (const NodeRef &child : write.children(node)) {
+    removeContained(write, child);
+    write.remove(child);
+  }
+}
+
+NodeRef ensureRealtimeSession(NodeGraph::WriteAccess &write,
+                              const NodeRef &thread) {
+  if (!thread)
+    return {};
+  NodeRef session = write.upsert(realtimeSessionNodeId(thread->id().canonical));
+  write.setField(session, "protocolThreadId", Value(thread->id().canonical));
+  write.setParent(thread, session);
+  if (write.state(session)->status == NodeStatus::Unknown) {
+    write.setStatus(session, NodeStatus::Running);
+    write.setField(session, "active", Value(true));
+    write.setField(session, "lifecycle", Value("running"));
+  }
+  return session;
+}
+
+NodeRef ensureRealtimeItem(NodeGraph::WriteAccess &write,
+                           const NodeRef &session, std::string_view itemId) {
+  if (!session || itemId.empty())
+    return {};
+  NodeRef item = write.upsert(realtimeItemNodeId(session, itemId));
+  write.setField(item, "protocolId", Value(itemId));
+  const std::shared_ptr<const NodeState> sessionState = write.state(session);
+  if (const Value *threadId = member(sessionState->fields, "protocolThreadId"))
+    write.setField(item, "protocolThreadId", *threadId);
+  if (const Value *sessionId = member(sessionState->fields, "protocolId"))
+    write.setField(item, "realtimeSessionId", *sessionId);
+  write.setField(item, "realtime", Value(true));
+  write.setParent(session, item);
+  return item;
+}
+
+void appendArrayValue(NodeGraph::WriteAccess &write, const NodeRef &node,
+                      std::string key, Value value) {
+  NodeState next = *write.state(node);
+  Value &stored = next.fields[std::move(key)];
+  if (!stored.isArray())
+    stored = Value::Array{};
+  stored.asArray()->emplace_back(std::move(value));
+  write.replaceState(node, std::move(next));
+}
+
+void updateRoleTranscript(NodeGraph::WriteAccess &write, const NodeRef &session,
+                          std::string_view role, std::string_view text,
+                          bool append, bool completed) {
+  NodeState next = *write.state(session);
+  Value &stored = next.fields["transcripts"];
+  if (!stored.isObject())
+    stored = Value::Object{};
+  Value::Object &transcripts = *stored.asObject();
+  Value &roleText = transcripts[std::string(role)];
+  std::string combined;
+  if (append) {
+    if (const std::string *current = roleText.asString())
+      combined = *current;
+    combined.append(text);
+  } else {
+    combined = std::string(text);
+  }
+  roleText = Value(std::move(combined));
+
+  if (completed) {
+    Value &completion = next.fields["transcriptCompleted"];
+    if (!completion.isObject())
+      completion = Value::Object{};
+    completion.asObject()->insert_or_assign(std::string(role), Value(true));
+  }
+  write.replaceState(session, std::move(next));
+}
+
+std::uint64_t unsignedField(const NodeState &state, std::string_view name) {
+  const Value *value = member(state.fields, name);
+  if (const std::uint64_t *number = value ? value->asUInt64() : nullptr)
+    return *number;
+  if (const std::int64_t *number = value ? value->asInt64() : nullptr;
+      number && *number >= 0)
+    return static_cast<std::uint64_t>(*number);
+  return 0;
+}
+
+NodeRef currentConnection(NodeGraph::WriteAccess &write) {
+  return write.upsert({NodeKind::Connection, "connection"});
+}
+
+std::string connectionIncarnation(NodeGraph::WriteAccess &write,
+                                  const NodeRef &connection) {
+  const std::shared_ptr<const NodeState> state = write.state(connection);
+  return "connection:" +
+         std::to_string(unsignedField(*state, "connectionGeneration")) +
+         ":provider:" +
+         std::to_string(unsignedField(*state, "providerGeneration"));
+}
+
+NodeRef ensureConnectionScopedNode(NodeGraph::WriteAccess &write, NodeKind kind,
+                                   std::string_view rawId) {
+  if (rawId.empty())
+    return {};
+  NodeRef connection = currentConnection(write);
+  const std::shared_ptr<const NodeState> connectionState =
+      write.state(connection);
+  NodeRef node = write.upsert(
+      {kind, scopedCanonical(connectionIncarnation(write, connection), rawId)});
+  write.setField(node, "protocolId", Value(rawId));
+  write.setField(
+      node, "connectionGeneration",
+      Value(unsignedField(*connectionState, "connectionGeneration")));
+  write.setField(node, "providerGeneration",
+                 Value(unsignedField(*connectionState, "providerGeneration")));
+  if (kind == NodeKind::Process)
+    write.relate(connection, RelationKind::ProcessOwner, node);
+  return node;
+}
+
+NodeRef ensureProcess(NodeGraph::WriteAccess &write,
+                      const Value::Object &payload) {
+  constexpr std::array names{std::string_view("processId"),
+                             std::string_view("processHandle"),
+                             std::string_view("commandId")};
+  return ensureConnectionScopedNode(write, NodeKind::Process,
+                                    firstId(payload, names));
+}
+
+NodeRef ensureWatch(NodeGraph::WriteAccess &write,
+                    const Value::Object &payload) {
+  return ensureConnectionScopedNode(write, NodeKind::FilesystemWatch,
+                                    canonicalValue(member(payload, "watchId")));
+}
+
 } // namespace
+
+NodeId scopedTurnNodeId(std::string_view threadId, std::string_view turnId) {
+  return NodeId{NodeKind::Turn, scopedCanonical(threadId, turnId)};
+}
+
+NodeId scopedItemNodeId(const NodeId &turnNodeId, std::string_view itemId) {
+  return NodeId{NodeKind::Item, scopedCanonical(turnNodeId.canonical, itemId)};
+}
+
+std::string protocolCanonicalId(const NodeState &state, const NodeRef &node) {
+  const auto found = state.fields.find("protocolId");
+  if (found != state.fields.end()) {
+    const std::string retained = canonicalValue(&found->second);
+    if (!retained.empty())
+      return retained;
+  }
+  return node ? node->id().canonical : std::string{};
+}
 
 std::string ProtocolRequestId::canonical() const {
   if (const std::int64_t *number = std::get_if<std::int64_t>(&value))
@@ -415,6 +674,7 @@ ApplyResult ProtocolUpdater::apply(DecodedMessage message) {
   if (!descriptor) {
     auto write = graph_->write();
     applyUnknown(write, message);
+    applyThreadActivity(write, message);
     return ApplyResult{
         false, MessageDisposition::GraphUpdate, write.finish(), {}};
   }
@@ -443,8 +703,63 @@ ApplyResult ProtocolUpdater::apply(DecodedMessage message) {
   case MessageDisposition::IntentionallyStateNeutral:
     break;
   }
+  applyThreadActivity(write, message);
   return ApplyResult{true, descriptor->get().disposition, write.finish(),
                      std::move(primary)};
+}
+
+void ProtocolUpdater::applyThreadActivity(NodeGraph::WriteAccess &write,
+                                          const DecodedMessage &message) {
+  if (!message.activityAt)
+    return;
+
+  NodeRef thread;
+  std::string threadId = addressedId(message.payload, NodeKind::Thread);
+  if (threadId.empty()) {
+    if (const Value::Object *object = objectMember(message.payload, "thread"))
+      threadId = nestedId(*object);
+  }
+  if (!threadId.empty())
+    thread = write.find({NodeKind::Thread, threadId});
+
+  if (!thread)
+    return;
+
+  std::unordered_set<const Node *> visited;
+  while (thread && visited.insert(thread.get()).second) {
+    const std::shared_ptr<const NodeState> state = write.state(thread);
+    const Value *existing = member(state->fields, "localActivityAt");
+    const std::int64_t *signedValue = existing ? existing->asInt64() : nullptr;
+    const std::uint64_t *unsignedValue =
+        existing ? existing->asUInt64() : nullptr;
+    const bool newer =
+        (!signedValue && !unsignedValue) ||
+        (signedValue && *message.activityAt > *signedValue) ||
+        (unsignedValue && *message.activityAt >= 0 &&
+         static_cast<std::uint64_t>(*message.activityAt) > *unsignedValue);
+    if (newer)
+      write.setField(thread, "localActivityAt", Value(*message.activityAt));
+
+    NodeRef owner;
+    for (const NodeRef &candidate : write.orderedNodes()) {
+      if (!candidate || candidate->id().kind != NodeKind::Thread ||
+          candidate == thread)
+        continue;
+      for (const RelationKind relation : {RelationKind::StructuralChildThread,
+                                          RelationKind::AgentChildThread}) {
+        const std::vector<NodeRef> children =
+            write.related(candidate, relation);
+        if (std::find(children.begin(), children.end(), thread) !=
+            children.end()) {
+          owner = candidate;
+          break;
+        }
+      }
+      if (owner)
+        break;
+    }
+    thread = std::move(owner);
+  }
 }
 
 GraphChange
@@ -521,13 +836,35 @@ NodeRef ProtocolUpdater::applyOperation(NodeGraph::WriteAccess &write,
     const std::string threadId = addressedId(message.payload, NodeKind::Thread);
     const std::string turnId = addressedId(message.payload, NodeKind::Turn);
     const std::string itemId = addressedId(message.payload, NodeKind::Item);
+    NodeRef thread;
+    if (!threadId.empty())
+      thread = write.upsert({NodeKind::Thread, threadId});
+    NodeRef turn;
+    if (!turnId.empty())
+      turn = ensureTurn(write, thread, turnId);
     NodeRef target;
-    if (!itemId.empty())
-      target = write.upsert({NodeKind::Item, itemId});
-    else if (!turnId.empty())
-      target = write.upsert({NodeKind::Turn, turnId});
-    else if (!threadId.empty())
-      target = write.upsert({NodeKind::Thread, threadId});
+    if (beginsWith(message.method, "command/exec") ||
+        beginsWith(message.method, "process/")) {
+      target = ensureProcess(write, message.payload);
+      if (target) {
+        mergeObject(write, target, message.payload);
+        if (message.method == "command/exec" ||
+            message.method == "process/spawn")
+          write.setStatus(target, NodeStatus::Running);
+      }
+    } else if (message.method == "fs/watch" || message.method == "fs/unwatch") {
+      target = ensureWatch(write, message.payload);
+      if (target) {
+        mergeObject(write, target, message.payload);
+        if (message.method == "fs/watch")
+          write.setStatus(target, NodeStatus::Pending);
+      }
+    } else if (!itemId.empty())
+      target = ensureItem(write, turn, itemId);
+    if (!target && turn)
+      target = turn;
+    if (!target && thread)
+      target = thread;
     if (target)
       write.relate(operation, RelationKind::OperationTarget, target);
     return operation;
@@ -602,16 +939,10 @@ NodeRef ProtocolUpdater::applyInteraction(NodeGraph::WriteAccess &write,
   NodeRef item;
   if (!threadId.empty())
     thread = write.upsert({NodeKind::Thread, threadId});
-  if (!turnId.empty()) {
-    turn = write.upsert({NodeKind::Turn, turnId});
-    if (thread)
-      write.setParent(thread, turn);
-  }
-  if (!itemId.empty()) {
-    item = write.upsert({NodeKind::Item, itemId});
-    if (turn)
-      write.setParent(turn, item);
-  }
+  if (!turnId.empty())
+    turn = ensureTurn(write, thread, turnId);
+  if (!itemId.empty())
+    item = ensureItem(write, turn, itemId);
   NodeRef target;
   if (item)
     target = item;
@@ -629,9 +960,226 @@ NodeRef ProtocolUpdater::applyInteraction(NodeGraph::WriteAccess &write,
   return interaction;
 }
 
+bool ProtocolUpdater::applyRealtimeUpdate(NodeGraph::WriteAccess &write,
+                                          const DecodedMessage &message) {
+  const std::string_view method = message.method;
+  if (!beginsWith(method, "thread/realtime/"))
+    return false;
+
+  const std::string threadId = addressedId(message.payload, NodeKind::Thread);
+  if (threadId.empty())
+    return true;
+  NodeRef thread = write.upsert({NodeKind::Thread, threadId});
+  NodeRef session = ensureRealtimeSession(write, thread);
+
+  if (method == "thread/realtime/started") {
+    const std::string sessionId =
+        canonicalValue(member(message.payload, "realtimeSessionId"));
+    const std::shared_ptr<const NodeState> previous = write.state(session);
+    const std::string previousId =
+        canonicalValue(member(previous->fields, "protocolId"));
+    if (previous->status != NodeStatus::Running || previousId != sessionId) {
+      removeContained(write, session);
+      NodeState next;
+      next.status = NodeStatus::Running;
+      next.fields.emplace("protocolThreadId", Value(threadId));
+      next.fields.emplace("active", Value(true));
+      next.fields.emplace("lifecycle", Value("running"));
+      if (!sessionId.empty())
+        next.fields.emplace("protocolId", Value(sessionId));
+      for (const auto &[key, value] : message.payload)
+        next.fields.insert_or_assign(key, value);
+      write.replaceState(session, std::move(next));
+    } else {
+      mergeObject(write, session, message.payload);
+      write.setField(session, "active", Value(true));
+      write.setField(session, "lifecycle", Value("running"));
+      write.setStatus(session, NodeStatus::Running);
+    }
+    return true;
+  }
+
+  if (method == "thread/realtime/itemAdded") {
+    const Value *value = member(message.payload, "item");
+    const Value::Object *object = value ? value->asObject() : nullptr;
+    const std::string itemSessionId =
+        object ? canonicalValue(member(*object, "realtimeSessionId"))
+               : std::string{};
+    const std::string currentSessionId =
+        canonicalValue(member(write.state(session)->fields, "protocolId"));
+    if (!itemSessionId.empty() && !currentSessionId.empty() &&
+        itemSessionId != currentSessionId)
+      return true;
+    const std::string itemId = object ? nestedId(*object) : std::string{};
+    if (NodeRef realtimeItem = ensureRealtimeItem(write, session, itemId)) {
+      mergeObject(write, realtimeItem, *object);
+    } else if (value) {
+      appendArrayValue(write, session, "unaddressedItems", *value);
+    }
+    return true;
+  }
+
+  if (method == "thread/realtime/item/started" ||
+      method == "thread/realtime/item/completed") {
+    const Value::Object *object = objectMember(message.payload, "item");
+    const std::string itemSessionId =
+        object ? canonicalValue(member(*object, "realtimeSessionId"))
+               : std::string{};
+    const std::string currentSessionId =
+        canonicalValue(member(write.state(session)->fields, "protocolId"));
+    if (!itemSessionId.empty() && !currentSessionId.empty() &&
+        itemSessionId != currentSessionId)
+      return true;
+    std::string itemId = object ? nestedId(*object) : std::string{};
+    if (itemId.empty())
+      itemId = addressedId(message.payload, NodeKind::Item);
+    if (NodeRef realtimeItem = ensureRealtimeItem(write, session, itemId)) {
+      if (object)
+        mergeObject(write, realtimeItem, *object);
+      const NodeStatus supplied =
+          object ? statusFromValue(member(*object, "status"))
+                 : NodeStatus::Unknown;
+      if (method == "thread/realtime/item/started") {
+        if (supplied == NodeStatus::Unknown)
+          write.setStatus(realtimeItem, NodeStatus::Running);
+      } else if (supplied == NodeStatus::Unknown) {
+        write.setStatus(realtimeItem, NodeStatus::Completed);
+      }
+    }
+    return true;
+  }
+
+  if (method == "thread/realtime/item/transcript/delta") {
+    const std::string itemId = addressedId(message.payload, NodeKind::Item);
+    if (NodeRef realtimeItem = ensureRealtimeItem(write, session, itemId)) {
+      const std::string delta =
+          canonicalValue(member(message.payload, "delta"));
+      if (!delta.empty())
+        write.appendStringField(realtimeItem, "transcript", delta);
+    }
+    return true;
+  }
+
+  if (method == "thread/realtime/transcript/delta" ||
+      method == "thread/realtime/transcript/done") {
+    const std::string role = canonicalValue(member(message.payload, "role"));
+    const bool done = method == "thread/realtime/transcript/done";
+    const std::string text =
+        canonicalValue(member(message.payload, done ? "text" : "delta"));
+    updateRoleTranscript(write, session, role.empty() ? "unknown" : role, text,
+                         !done, done);
+    return true;
+  }
+
+  if (method == "thread/realtime/outputAudio/delta") {
+    const Value *audio = member(message.payload, "audio");
+    const Value::Object *audioObject = audio ? audio->asObject() : nullptr;
+    const std::string itemId =
+        audioObject ? canonicalValue(member(*audioObject, "itemId"))
+                    : std::string{};
+    NodeRef target = ensureRealtimeItem(write, session, itemId);
+    if (!target)
+      target = session;
+    if (audio)
+      appendArrayValue(write, target, "outputAudioChunks", *audio);
+    return true;
+  }
+
+  if (method == "thread/realtime/sdp") {
+    if (const Value *sdp = member(message.payload, "sdp"))
+      write.setField(session, "sdp", *sdp);
+    return true;
+  }
+
+  if (method == "thread/realtime/error") {
+    if (const Value *error = member(message.payload, "message"))
+      appendArrayValue(write, session, "errors", *error);
+    write.setStatus(session, NodeStatus::Failed);
+    write.setField(session, "active", Value(false));
+    write.setField(session, "lifecycle", Value("failed"));
+    return true;
+  }
+
+  if (method == "thread/realtime/closed") {
+    if (const Value *reason = member(message.payload, "reason"))
+      write.setField(session, "closedReason", *reason);
+    if (write.state(session)->status != NodeStatus::Failed)
+      write.setStatus(session, NodeStatus::Completed);
+    write.setField(session, "active", Value(false));
+    write.setField(session, "lifecycle", Value("closed"));
+    return true;
+  }
+
+  return true;
+}
+
 void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
                                        const DecodedMessage &message) {
   const std::string_view method = message.method;
+
+  if (applyRealtimeUpdate(write, message))
+    return;
+
+  if (method == "command/exec/outputDelta" || method == "process/outputDelta") {
+    NodeRef process = ensureProcess(write, message.payload);
+    if (!process)
+      return;
+    const std::string stream =
+        canonicalValue(member(message.payload, "stream"));
+    const std::string delta =
+        canonicalValue(member(message.payload, "deltaBase64"));
+    if (!delta.empty())
+      write.appendStringField(
+          process, (stream.empty() ? "output" : stream) + "Base64", delta);
+    if (const Value *capReached = member(message.payload, "capReached"))
+      write.setField(process,
+                     (stream.empty() ? "output" : stream) + "CapReached",
+                     *capReached);
+    write.setStatus(process, NodeStatus::Running);
+    return;
+  }
+
+  if (method == "process/exited") {
+    if (NodeRef process = ensureProcess(write, message.payload)) {
+      mergeObject(write, process, message.payload);
+      write.setStatus(process, NodeStatus::Completed);
+    }
+    return;
+  }
+
+  if (method == "fs/changed") {
+    if (NodeRef watch = ensureWatch(write, message.payload)) {
+      mergeObject(write, watch, message.payload);
+      write.setStatus(watch, NodeStatus::Running);
+    }
+    return;
+  }
+
+  if (message.kind == DecodedMessageKind::ClientResult &&
+      (beginsWith(method, "command/exec") || beginsWith(method, "process/") ||
+       method == "fs/watch" || method == "fs/unwatch")) {
+    if (method == "fs/watch" || method == "fs/unwatch") {
+      if (NodeRef watch = ensureWatch(write, message.payload)) {
+        if (method == "fs/unwatch")
+          write.remove(watch);
+        else {
+          mergeObject(write, watch, message.payload);
+          write.setStatus(watch, NodeStatus::Running);
+        }
+      }
+      return;
+    }
+    if (NodeRef process = ensureProcess(write, message.payload)) {
+      mergeObject(write, process, message.payload);
+      if (method == "command/exec")
+        write.setStatus(process, NodeStatus::Completed);
+      else if (method == "process/spawn")
+        write.setStatus(process, NodeStatus::Running);
+      else if (method == "command/exec/terminate" || method == "process/kill")
+        write.setStatus(process, NodeStatus::Interrupted);
+    }
+    return;
+  }
 
   if (method == "serverRequest/resolved") {
     const Value *requestId = member(message.payload, "requestId");
@@ -682,6 +1230,75 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
     return;
   }
 
+  if (method == "thread/goal/updated" || method == "thread/goal/cleared") {
+    const std::string id = addressedId(message.payload, NodeKind::Thread);
+    if (!id.empty()) {
+      NodeRef thread = write.upsert({NodeKind::Thread, id});
+      if (method == "thread/goal/cleared") {
+        write.setField(thread, "goal", Value(nullptr));
+        write.setField(thread, "goalTurnId", Value(nullptr));
+      } else {
+        if (const Value *goal = member(message.payload, "goal"))
+          write.setField(thread, "goal", *goal);
+        if (const Value *turnId = member(message.payload, "turnId"))
+          write.setField(thread, "goalTurnId", *turnId);
+      }
+    }
+    return;
+  }
+
+  if (method == "thread/queue/changed" || method == "thread/reverted") {
+    const std::string id = addressedId(message.payload, NodeKind::Thread);
+    if (!id.empty()) {
+      NodeRef thread = write.upsert({NodeKind::Thread, id});
+      write.setField(thread,
+                     method == "thread/queue/changed" ? "queueStale"
+                                                      : "historyStale",
+                     Value(true));
+    }
+    return;
+  }
+
+  if (method == "skills/changed" || method == "app/list/updated") {
+    NodeRef catalog = write.upsert(
+        {NodeKind::Catalog, method == "skills/changed" ? "skills" : "app"});
+    write.setField(catalog, "stale", Value(true));
+    write.setField(catalog, "invalidatedBy", Value(method));
+    mergeObject(write, catalog, message.payload);
+    return;
+  }
+
+  if (method == "project/changed") {
+    const std::string id = addressedId(message.payload, NodeKind::Project);
+    if (!id.empty()) {
+      NodeRef project = write.upsert({NodeKind::Project, id});
+      mergeObject(write, project, message.payload);
+      write.setField(project, "stale", Value(true));
+    }
+    return;
+  }
+
+  if (method == "thread/project/updated") {
+    const std::string id = addressedId(message.payload, NodeKind::Thread);
+    if (!id.empty()) {
+      NodeRef thread = write.upsert({NodeKind::Thread, id});
+      assignProject(write, thread, member(message.payload, "projectId"));
+    }
+    return;
+  }
+
+  if (message.kind == DecodedMessageKind::ClientResult &&
+      method == "thread/section/move") {
+    const std::string id = addressedId(message.payload, NodeKind::Thread);
+    if (!id.empty()) {
+      NodeRef thread = write.upsert({NodeKind::Thread, id});
+      assignSection(write, thread, member(message.payload, "sectionId"));
+      if (const Value *enteredAt = member(message.payload, "sectionEnteredAt"))
+        write.setField(thread, "sectionEnteredAt", *enteredAt);
+    }
+    return;
+  }
+
   if (method == "thread/status/changed") {
     const std::string id = addressedId(message.payload, NodeKind::Thread);
     if (!id.empty()) {
@@ -703,6 +1320,78 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
       if (const Value *name = member(message.payload, "threadName"))
         write.setField(thread, "name", *name);
     }
+    return;
+  }
+
+  if (message.kind == DecodedMessageKind::ClientResult &&
+      beginsWith(method, "project/")) {
+    if (method == "project/list") {
+      if (const Value::Array *projects = arrayMember(message.payload, "data")) {
+        for (const Value &value : *projects) {
+          const Value::Object *object = value.asObject();
+          const std::string id = object ? nestedId(*object) : std::string{};
+          if (!id.empty()) {
+            NodeRef project = write.upsert({NodeKind::Project, id});
+            mergeObject(write, project, *object);
+          }
+        }
+      }
+      return;
+    }
+    std::string id;
+    const Value::Object *object = objectMember(message.payload, "project");
+    if (object)
+      id = nestedId(*object);
+    if (id.empty())
+      id = addressedId(message.payload, NodeKind::Project);
+    if (id.empty())
+      return;
+    if (method == "project/delete") {
+      if (NodeRef project = write.find({NodeKind::Project, id}))
+        write.remove(project);
+      return;
+    }
+    NodeRef project = write.upsert({NodeKind::Project, id});
+    if (object)
+      mergeObject(write, project, *object);
+    else
+      mergeObject(write, project, message.payload);
+    return;
+  }
+
+  if (message.kind == DecodedMessageKind::ClientResult &&
+      beginsWith(method, "threadSection/")) {
+    if (method == "threadSection/list") {
+      if (const Value::Array *sections = arrayMember(message.payload, "data")) {
+        for (const Value &value : *sections) {
+          const Value::Object *object = value.asObject();
+          const std::string id = object ? nestedId(*object) : std::string{};
+          if (!id.empty()) {
+            NodeRef section = write.upsert({NodeKind::ThreadSection, id});
+            mergeObject(write, section, *object);
+          }
+        }
+      }
+      return;
+    }
+    std::string id;
+    const Value::Object *object = objectMember(message.payload, "section");
+    if (object)
+      id = nestedId(*object);
+    if (id.empty())
+      id = addressedId(message.payload, NodeKind::ThreadSection);
+    if (id.empty())
+      return;
+    if (method == "threadSection/delete") {
+      if (NodeRef section = write.find({NodeKind::ThreadSection, id}))
+        write.remove(section);
+      return;
+    }
+    NodeRef section = write.upsert({NodeKind::ThreadSection, id});
+    if (object)
+      mergeObject(write, section, *object);
+    else
+      mergeObject(write, section, message.payload);
     return;
   }
 
@@ -763,25 +1452,26 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
     if (!threadId.empty())
       thread = write.upsert({NodeKind::Thread, threadId});
     if (!turnId.empty()) {
-      const NodeRef previousTurn = write.find({NodeKind::Turn, turnId});
+      const NodeId turnNodeId = scopedTurnNodeId(threadId, turnId);
+      const NodeRef previousTurn = thread ? write.find(turnNodeId) : NodeRef{};
       const NodeRef previousParent =
           previousTurn ? write.parent(previousTurn) : NodeRef{};
-      turn = write.upsert({NodeKind::Turn, turnId});
-      if (thread) {
+      turn = ensureTurn(write, thread, turnId);
+      if (turn) {
         historyMembershipMayChange |= previousParent != thread;
-        write.setParent(thread, turn);
       }
     }
     if (!itemId.empty()) {
-      const NodeRef previousItem = write.find({NodeKind::Item, itemId});
+      const NodeId itemNodeId = turn ? scopedItemNodeId(turn->id(), itemId)
+                                     : NodeId{NodeKind::Item, {}};
+      const NodeRef previousItem = turn ? write.find(itemNodeId) : NodeRef{};
       const NodeRef previousParent =
           previousItem ? write.parent(previousItem) : NodeRef{};
-      item = write.upsert({NodeKind::Item, itemId});
-      if (turn) {
+      item = ensureItem(write, turn, itemId);
+      if (item) {
         historyMembershipMayChange |= previousParent != turn;
-        write.setParent(turn, item);
+        appendSemanticDelta(write, item, method, message.payload);
       }
-      appendSemanticDelta(write, item, method, message.payload);
     }
     if (historyMembershipMayChange)
       updateLoadedHistoryItemCount(write, thread);
@@ -813,7 +1503,9 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
   if (const Value::Object *turnObject = objectMember(message.payload, "turn")) {
     const std::string id = nestedId(*turnObject);
     const NodeRef previousTurn =
-        id.empty() ? NodeRef{} : write.find({NodeKind::Turn, id});
+        id.empty() || !thread
+            ? NodeRef{}
+            : write.find(scopedTurnNodeId(thread->id().canonical, id));
     const NodeRef previousParent =
         previousTurn ? write.parent(previousTurn) : NodeRef{};
     historyMembershipMayChange |=
@@ -824,18 +1516,19 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
         write.state(turn)->status == NodeStatus::Unknown)
       write.setStatus(turn, NodeStatus::Running);
     if (turn && method == "turn/completed" &&
-        write.state(turn)->status == NodeStatus::Unknown)
+        statusFromValue(member(*turnObject, "status")) == NodeStatus::Unknown)
       write.setStatus(turn, NodeStatus::Completed);
   } else {
     const std::string id = addressedId(message.payload, NodeKind::Turn);
     if (!id.empty()) {
-      const NodeRef previousTurn = write.find({NodeKind::Turn, id});
+      const NodeRef previousTurn =
+          thread ? write.find(scopedTurnNodeId(thread->id().canonical, id))
+                 : NodeRef{};
       const NodeRef previousParent =
           previousTurn ? write.parent(previousTurn) : NodeRef{};
-      turn = write.upsert({NodeKind::Turn, id});
-      if (thread) {
+      turn = ensureTurn(write, thread, id);
+      if (turn) {
         historyMembershipMayChange |= previousParent != thread;
-        write.setParent(thread, turn);
       }
     }
   }
@@ -843,31 +1536,34 @@ void ProtocolUpdater::applyGraphUpdate(NodeGraph::WriteAccess &write,
   if (const Value::Object *itemObject = objectMember(message.payload, "item")) {
     const std::string id = nestedId(*itemObject);
     const NodeRef previousItem =
-        id.empty() ? NodeRef{} : write.find({NodeKind::Item, id});
+        id.empty() || !turn ? NodeRef{}
+                            : write.find(scopedItemNodeId(turn->id(), id));
     const NodeRef previousParent =
         previousItem ? write.parent(previousItem) : NodeRef{};
     historyMembershipMayChange |= turn && previousParent != turn;
     item = ingestItem(write, *itemObject, turn);
-    if (const Value *startedAt = member(message.payload, "startedAtMs"))
-      write.setField(item, "startedAtMs", *startedAt);
-    if (const Value *completedAt = member(message.payload, "completedAtMs"))
-      write.setField(item, "completedAtMs", *completedAt);
-    if (method == "item/started" &&
+    if (item) {
+      if (const Value *startedAt = member(message.payload, "startedAtMs"))
+        write.setField(item, "startedAtMs", *startedAt);
+      if (const Value *completedAt = member(message.payload, "completedAtMs"))
+        write.setField(item, "completedAtMs", *completedAt);
+    }
+    if (item && method == "item/started" &&
         write.state(item)->status == NodeStatus::Unknown)
       write.setStatus(item, NodeStatus::Running);
-    if (method == "item/completed" &&
-        write.state(item)->status == NodeStatus::Unknown)
+    if (item && method == "item/completed" &&
+        statusFromValue(member(*itemObject, "status")) == NodeStatus::Unknown)
       write.setStatus(item, NodeStatus::Completed);
   } else {
     const std::string id = addressedId(message.payload, NodeKind::Item);
     if (!id.empty()) {
-      const NodeRef previousItem = write.find({NodeKind::Item, id});
+      const NodeRef previousItem =
+          turn ? write.find(scopedItemNodeId(turn->id(), id)) : NodeRef{};
       const NodeRef previousParent =
           previousItem ? write.parent(previousItem) : NodeRef{};
-      item = write.upsert({NodeKind::Item, id});
-      if (turn) {
+      item = ensureItem(write, turn, id);
+      if (item) {
         historyMembershipMayChange |= previousParent != turn;
-        write.setParent(turn, item);
       }
     }
   }
@@ -947,6 +1643,11 @@ NodeRef ProtocolUpdater::ingestThread(NodeGraph::WriteAccess &write,
   NodeRef thread = write.upsert({NodeKind::Thread, id});
   mergeObject(write, thread, object, "turns");
 
+  if (const Value *projectId = member(object, "projectId"))
+    assignProject(write, thread, projectId);
+  if (const Value *section = member(object, "section"))
+    assignSection(write, thread, section);
+
   if (const Value *parentValue = member(object, "parentThreadId")) {
     const std::string parentId = canonicalValue(parentValue);
     if (!parentId.empty() && parentId != id) {
@@ -998,12 +1699,10 @@ NodeRef ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess &write,
                                     std::string_view fallbackId,
                                     bool replaceItems) {
   const std::string id = nestedId(object, fallbackId);
-  if (id.empty())
+  if (id.empty() || !thread)
     return {};
-  NodeRef turn = write.upsert({NodeKind::Turn, id});
+  NodeRef turn = ensureTurn(write, thread, id);
   mergeObject(write, turn, object, "items");
-  if (thread)
-    write.setParent(thread, turn);
   if (const Value::Array *items = arrayMember(object, "items")) {
     std::vector<NodeRef> order;
     order.reserve(items->size());
@@ -1029,30 +1728,34 @@ NodeRef ProtocolUpdater::ingestItem(NodeGraph::WriteAccess &write,
                                     const NodeRef &turn,
                                     std::string_view fallbackId) {
   const std::string id = nestedId(object, fallbackId);
-  if (id.empty())
+  if (id.empty() || !turn)
     return {};
-  NodeRef item = write.upsert({NodeKind::Item, id});
+  NodeRef item = ensureItem(write, turn, id);
   mergeObject(write, item, object);
   correlateLocalPrompt(write, item, object);
-  if (turn) {
-    write.setParent(turn, item);
-    if (isUserMessage(object) &&
-        write.related(turn, RelationKind::TurnRootItem).empty())
-      write.relate(turn, RelationKind::TurnRootItem, item);
-  }
+  if (isUserMessage(object) &&
+      write.related(turn, RelationKind::TurnRootItem).empty())
+    write.relate(turn, RelationKind::TurnRootItem, item);
 
-  const std::string childThreadId = agentChildId(object);
-  if (!childThreadId.empty()) {
-    NodeRef child = write.upsert({NodeKind::Thread, childThreadId});
+  const bool hasAgentChildren =
+      member(object, "agentThreadId") || member(object, "receiverThreadIds");
+  if (hasAgentChildren) {
+    const std::vector<std::string> childThreadIds = agentChildIds(object);
     const std::vector<NodeRef> previous =
         write.related(item, RelationKind::AgentChildThread);
-    std::array<NodeRef, 1> onlyChild{child};
-    write.replaceRelated(item, RelationKind::AgentChildThread, onlyChild);
+    std::vector<NodeRef> children;
+    children.reserve(childThreadIds.size());
+    for (const std::string &childThreadId : childThreadIds)
+      children.emplace_back(write.upsert({NodeKind::Thread, childThreadId}));
+    write.replaceRelated(item, RelationKind::AgentChildThread, children);
     NodeRef owner = turn ? write.parent(turn) : NodeRef{};
-    if (owner)
-      assignThreadOwner(write, owner, RelationKind::AgentChildThread, child);
+    if (owner) {
+      for (const NodeRef &child : children)
+        assignThreadOwner(write, owner, RelationKind::AgentChildThread, child);
+    }
     for (const NodeRef &released : previous) {
-      if (released != child) {
+      if (std::find(children.begin(), children.end(), released) ==
+          children.end()) {
         clearThreadOwnerKind(write, released, RelationKind::AgentChildThread);
         if (!hasThreadOwner(write, released))
           admitRootThread(write, released, false);
