@@ -3459,6 +3459,52 @@ void lifecycleFactsAndRemovalPreserveThreadHierarchy() {
   }
 }
 
+void childReadCannotEraseSpawnOwnershipOrDisplaceRoot() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  for (const std::string_view id : {"selected-root", "selected-child"})
+    static_cast<void>(updater.apply(
+        {DecodedMessageKind::ServerNotification, "thread/started",
+         std::nullopt,
+         Value::Object{{"thread", Value(Value::Object{{"id", Value(id)}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{
+           {"threadId", Value("selected-root")},
+           {"turnId", Value("selected-root-turn")},
+           {"item", Value(Value::Object{
+                        {"id", Value("selected-spawn")},
+                        {"type", Value("subAgentActivity")},
+                        {"agentThreadId", Value("selected-child")}})}}}));
+
+  const ProtocolRequestId readId("selected-child-read");
+  const ApplyResult request = updater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/read", readId,
+       Value::Object{{"threadId", Value("selected-child")}}});
+  Value::Object childSnapshot{
+      {"id", Value("selected-child")},
+      {"parentThreadId", Value(nullptr)},
+      {"turns", Value(Value::Array{})}};
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ClientResult, "thread/read", readId,
+       Value::Object{{"thread", Value(std::move(childSnapshot))}},
+       request.primary}));
+
+  auto read = graph.tryRead();
+  const NodeRef runtime = read->find({NodeKind::Runtime, "runtime"});
+  const NodeRef root = read->find({NodeKind::Thread, "selected-root"});
+  const NodeRef child = read->find({NodeKind::Thread, "selected-child"});
+  require(runtime && root && child &&
+              read->related(runtime, RelationKind::RootThread) ==
+                  std::vector<NodeRef>{root} &&
+              read->related(root, RelationKind::AgentChildThread) ==
+                  std::vector<NodeRef>{child} &&
+              read->related(child, RelationKind::ThreadOwner) ==
+                  std::vector<NodeRef>{root},
+          "hydrating a selected spawned child cannot erase its agent owner, "
+          "promote it to root, or displace the visible root thread");
+}
+
 void deletionUnlinksWholeGraph() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -3945,6 +3991,7 @@ int main() {
   interactionsAndRemovalKeepLifetime();
   unknownAndNeutralAreIsolated();
   lifecycleFactsAndRemovalPreserveThreadHierarchy();
+  childReadCannotEraseSpawnOwnershipOrDisplaceRoot();
   deletionUnlinksWholeGraph();
   largeThreadDeletionIsNearLinear();
   correlatedThreadReadsPreserveOnlyInterveningLiveState();

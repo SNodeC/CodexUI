@@ -1169,6 +1169,23 @@ void clearThreadOwners(NodeGraph::WriteAccess &write, const NodeRef &child) {
   }
 }
 
+void clearStructuralThreadOwners(NodeGraph::WriteAccess &write,
+                                 const NodeRef &child) {
+  const std::vector<NodeRef> owners =
+      write.related(child, RelationKind::ThreadOwner);
+  for (const NodeRef &owner : owners) {
+    const std::vector<NodeRef> structural =
+        write.related(owner, RelationKind::StructuralChildThread);
+    if (std::ranges::find(structural, child) == structural.end())
+      continue;
+    write.unrelate(owner, RelationKind::StructuralChildThread, child);
+    const std::vector<NodeRef> agentChildren =
+        write.related(owner, RelationKind::AgentChildThread);
+    if (std::ranges::find(agentChildren, child) == agentChildren.end())
+      write.unrelate(child, RelationKind::ThreadOwner, owner);
+  }
+}
+
 void assignThreadOwner(NodeGraph::WriteAccess &write, const NodeRef &owner,
                        RelationKind kind, const NodeRef &child) {
   if (!owner || !child || owner == child)
@@ -3090,7 +3107,11 @@ NodeRef ProtocolUpdater::ingestThread(
       assignThreadOwner(write, parent, RelationKind::StructuralChildThread,
                         thread);
     } else if (parentValue->isNull() || parentId.empty()) {
-      clearThreadOwners(write, thread);
+      // A provider-null structural parent does not contradict the direct
+      // spawn relation retained from the owning thread's agent activity.
+      // Clearing every owner here promoted a selected child to a new root and
+      // displaced its real root thread in ThreadPane after thread/read.
+      clearStructuralThreadOwners(write, thread);
     }
   }
 
