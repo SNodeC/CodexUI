@@ -824,7 +824,7 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
                                         "(file:///tmp/report%20%23%3F.txt)") &&
             dispatch && dispatch->asString() &&
             *dispatch->asString() == "dispatching" &&
-            boolFieldEquals(state, "showPendingAnimation", true) &&
+            boolFieldEquals(state, "showPendingAnimation", false) &&
             read->related(runtime, RelationKind::PendingPrompt) ==
                 std::vector<NodeRef>{firstPrompt} &&
             read->related(thread, RelationKind::PendingPrompt) ==
@@ -905,11 +905,10 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
             stringFieldEquals(read->state(firstPrompt), "dispatchState",
                               "awaitingMaterialization") &&
             boolFieldEquals(read->state(firstPrompt),
-                            "showPendingAnimation", true),
+                            "showPendingAnimation", false),
         "matching authoritative clientId directly relates the user item "
         "to its active local visual identity and transfers canonical "
-        "turn-root ownership without stopping feedback before UI "
-        "materialization");
+        "turn-root ownership without overriding the retained UI deadline");
   }
 
   const ChannelSendStatus removed = logic.promptMaterialized(firstPrompt);

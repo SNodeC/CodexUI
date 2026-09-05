@@ -2549,8 +2549,14 @@ bool testCardFoldingGeometryAndRetention() {
       thread,
       "turn",
       {},
-      LocalPromptData{
-          4343, "A steering prompt", PromptState::InFlight, true, {}, {}}};
+      LocalPromptData{4343,
+                      "A steering prompt",
+                      PromptState::InFlight,
+                      false,
+                      {},
+                      {},
+                      QDateTime::currentMSecsSinceEpoch() - 1500,
+                      false}};
   snapshot.sections.front().cards.push_back(steering);
   result &= expect(applyConversation(view, snapshot),
                    "a steering prompt joins the active turn");
@@ -5703,7 +5709,7 @@ bool testPausedMixedCardBurstKeepsLeafAnchorAndParents() {
                     {"submissionId", std::uint64_t{4100}},
                     {"text", "Optimistic steering card"},
                     {"dispatchState", "inFlight"},
-                    {"showPendingAnimation", true},
+                    {"showPendingAnimation", false},
                     {"startsTurn", false}};
     states.push_back(std::move(local));
 
@@ -6897,10 +6903,6 @@ bool testPendingPromptAnimation() {
                    "pending feedback starts locally after one second without "
                    "a worker or graph timer update");
 
-  auto &prompt = std::get<LocalPromptData>(pending.payload);
-  prompt.showPendingAnimation = true;
-  result &= expect(card.apply(pending),
-                   "the delayed pending state starts the feedback sweep");
   const QImage animatedFirst = card.grab().toImage();
   spin(110);
   result &= expect(animatedFirst != card.grab().toImage(),
@@ -6918,10 +6920,11 @@ bool testPendingPromptAnimation() {
                      "pending feedback never weakens the active border");
   }
 
-  prompt.state = PromptState::Accepted;
-  prompt.showPendingAnimation = false;
-  result &= expect(card.apply(pending),
-                   "the correlated acknowledgement stops pending feedback");
+  VisibleCardData materialized{
+      LocalPromptKey{901}, CardKind::UserMessage, "prompt-thread", "turn",
+      "user", UserMessageData{"pending prompt", {}}};
+  result &= expect(card.apply(materialized),
+                   "authoritative materialization stops pending feedback");
   const QImage settled = card.grab().toImage();
   spin(100);
   result &= expect(settled == card.grab().toImage(),
@@ -6936,7 +6939,7 @@ bool testPendingPromptAnimation() {
       LocalPromptData{
           902, "steering prompt", PromptState::InFlight, false, {}, {}}};
   ConversationCard steeringCard(steering);
-  steeringCard.setProperty("nestedConversationCard", true);
+  steeringCard.setNestedPresentation(true);
   steeringCard.resize(520, 92);
   steeringCard.show();
   spin(40);
@@ -6944,10 +6947,7 @@ bool testPendingPromptAnimation() {
   spin(100);
   result &= expect(steeringStatic == steeringCard.grab().toImage(),
                    "steering uses the same calm initial timing");
-  auto &steeringPrompt = std::get<LocalPromptData>(steering.payload);
-  steeringPrompt.showPendingAnimation = true;
-  result &= expect(steeringCard.apply(steering),
-                   "overdue steering starts its teal feedback sweep");
+  spin(900);
   auto *steeringStatus = steeringCard.findChild<QLabel *>(
       QStringLiteral("steeringMessagePhase"));
   result &= expect(
@@ -6962,10 +6962,12 @@ bool testPendingPromptAnimation() {
       steeringAnimated.pixelColor(10, steeringAnimated.height() - 10).green() >
           steeringAnimated.pixelColor(10, steeringAnimated.height() - 10).red(),
       "the steering feedback stays in the teal identity family");
-  steeringPrompt.state = PromptState::Accepted;
-  steeringPrompt.showPendingAnimation = false;
-  result &= expect(steeringCard.apply(steering),
-                   "steering acknowledgement stops its feedback sweep");
+  VisibleCardData materializedSteering{
+      LocalPromptKey{902}, CardKind::UserMessage, "prompt-thread", "turn",
+      "steering-user", UserMessageData{"steering prompt", {}}};
+  result &= expect(
+      steeringCard.apply(materializedSteering),
+      "authoritative steering materialization stops its feedback sweep");
   result &= expect(steeringStatus &&
                        steeringStatus->text() == QStringLiteral("steering"),
                    "acknowledgement clears pending from the steering header");
@@ -6975,13 +6977,7 @@ bool testPendingPromptAnimation() {
   result &= expect(steeringSettled == steeringCard.grab().toImage(),
                    "acknowledged steering remains visually stable");
 
-  pending = {LocalPromptKey{901},
-             CardKind::UserMessage,
-             "prompt-thread",
-             "turn",
-             "user",
-             UserMessageData{"pending prompt", {}}};
-  result &= expect(card.apply(pending) && activeBorderVisible(),
+  result &= expect(activeBorderVisible(),
                    "authoritative promotion retains the same active border");
   return result;
 }

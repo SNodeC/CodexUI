@@ -714,7 +714,6 @@ bool presentationEquals(const VisibleCardData &left,
     return first->prompt == second->prompt &&
            first->imagePaths == second->imagePaths &&
            first->state == second->state &&
-           first->showPendingAnimation == second->showPendingAnimation &&
            first->error == second->error &&
            first->admittedAtMs == second->admittedAtMs &&
            first->requiresExplicitRecovery == second->requiresExplicitRecovery;
@@ -1706,8 +1705,7 @@ public:
         pendingFeedbackDeadlineMs = now + PendingAnimationDelayMilliseconds;
       }
       pendingFeedbackVisible =
-          prompt->showPendingAnimation ||
-          (pendingFeedbackDeadlineMs && now >= *pendingFeedbackDeadlineMs);
+          pendingFeedbackDeadlineMs && now >= *pendingFeedbackDeadlineMs;
     } else {
       pendingFeedbackVisible = false;
       pendingFeedbackDeadlineMs.reset();

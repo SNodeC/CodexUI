@@ -5,6 +5,7 @@
 #include "codex/ui/NodeGraphUiAdapter.h"
 
 #include <QApplication>
+#include <QDateTime>
 #include <QScrollBar>
 #include <QTimer>
 
@@ -302,6 +303,9 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
     NodeState local = state("local-steering", "localPrompt", "Steer here");
     local.fields.emplace("submissionId", std::uint64_t{72});
     local.fields.emplace("dispatchState", "inFlight");
+    local.fields.emplace("admittedAtMs",
+                         QDateTime::currentMSecsSinceEpoch() - 1500);
+    local.fields.emplace("showPendingAnimation", false);
     local.fields.emplace("startsTurn", false);
     steering = write.upsert({NodeKind::Item, "local-steering"},
                             std::move(local));
@@ -351,7 +355,7 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
   {
     auto write = graph.write();
     write.setField(steering, "dispatchState", "awaitingMaterialization");
-    write.setField(steering, "showPendingAnimation", true);
+    write.setField(steering, "showPendingAnimation", false);
     static_cast<void>(write.finish());
   }
   snapshot = adapter.conversation(thread, 80, {true, true});

@@ -644,8 +644,9 @@ derived from current graph state; they never become application authority.
 5. Unrelated items may arrive without changing that ownership or anchor.
 6. When the authoritative user item arrives, keep the visual key/widget and
    send one prompt-materialized acknowledgement for the exact prompt node.
-7. Stop pending feedback on acceptance/failure; never dual-send or infer
-   acknowledgement from matching text.
+7. Stop pending feedback on authoritative item materialization or definitive
+   failure; request acceptance alone preserves the original local deadline.
+   Never dual-send or infer acknowledgement from matching text.
 
 ## Compatibility evidence
 

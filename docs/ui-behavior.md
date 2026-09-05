@@ -141,9 +141,9 @@ trimmed prompt remain unchanged.
 
 Submitting a prompt creates a client-local pending prompt card at the bottom of
 the destination thread immediately. The card begins with the calm blue
-user-card treatment and an emphasized border. If the correlated app-server
-result has not arrived after one second, a brighter blue highlight begins
-sweeping left and right.
+user-card treatment and an emphasized border. If its authoritative app-server
+user item has not materialized after one second, a brighter blue highlight
+begins sweeping left and right.
 Ordinary attached files appear as local Markdown links at the bottom of that
 card from its first frame. The same composed Markdown is sent to app-server and
 retained by the authoritative user message, so acknowledgment does not reflow
@@ -152,12 +152,15 @@ encoded as path content rather than being misread as a fragment or query.
 
 Each pending prompt has a process-wide client-local submission ID and remains
 associated with its destination thread. It therefore remains visible when the
-user switches threads and returns. Successful acknowledgment or definitive
-failure stops delayed feedback immediately. The one-second timer controls only
-whether pending feedback is visible; it never acknowledges or promotes the
-prompt. If the authoritative app-server item arrives before or after the
-result, it inherits the pending card's stable visual anchor and replaces it as
-soon as both correlation and acknowledgment are complete. Only the correlated
+user switches threads and returns. Authoritative item materialization or
+definitive failure stops delayed feedback immediately; request acceptance alone
+does not. The retained widget's fixed one-second admission deadline is the sole
+animation trigger, so worker updates cannot start, stop, or restart the sweep.
+The timer controls only whether pending feedback is visible; it never
+acknowledges or promotes the prompt. If the authoritative app-server item
+arrives before or after the result, it inherits the pending card's stable visual
+anchor and replaces it as soon as both correlation and acknowledgment are
+complete. Only the correlated
 `turn/start` or `turn/steer` completion callback acknowledges a prompt;
 conversation events never infer acknowledgment. Each operation carries a
 unique `clientUserMessageId`, which binds the authoritative user item without

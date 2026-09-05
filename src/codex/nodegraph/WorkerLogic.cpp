@@ -731,7 +731,7 @@ PromptTransition WorkerLogic::admit(PendingPrompt pending,
                                                pending.attachments))},
           {"attachments", attachmentSummaries(pending.attachments)},
           {"dispatchState", Value(invalidTarget ? "failed" : "queued")},
-          {"showPendingAnimation", Value(!invalidTarget)},
+          {"showPendingAnimation", Value(false)},
           {"startsTurn", Value(startsTurn)},
           {"createsThread", Value(pending.createsThread)},
           {"threadId", Value(pending.thread->id().canonical)}};
@@ -1120,10 +1120,10 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
   } else if (accepted) {
     write.setField(localPrompt, "dispatchState",
                    Value("awaitingMaterialization"));
-    // Request acceptance is not yet visible completion. Keep the optimistic
-    // card active until the correlated authoritative user item is projected
-    // into that exact card.
-    write.setField(localPrompt, "showPendingAnimation", Value(true));
+    // Request acceptance is not yet visible completion. The retained Qt card
+    // keeps its original admission deadline and decides locally when delayed
+    // feedback begins; worker traffic must not force or restart animation.
+    write.setField(localPrompt, "showPendingAnimation", Value(false));
     write.eraseField(localPrompt, "error");
     write.eraseField(localPrompt, "requiresExplicitRecovery");
     write.setStatus(localPrompt, NodeStatus::Running);
