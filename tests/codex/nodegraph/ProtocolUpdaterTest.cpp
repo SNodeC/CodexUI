@@ -3744,6 +3744,55 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
             "an unrelated thread mutation does not prevent the correlated "
             "read from retiring omitted addressed-thread history");
   }
+
+  NodeGraph omittedDeltaGraph;
+  ProtocolUpdater omittedDeltaUpdater(omittedDeltaGraph);
+  static_cast<void>(omittedDeltaUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{{"thread", Value(Value::Object{
+                                          {"id", Value("omitted-delta")}})}}}));
+  const ProtocolRequestId omittedDeltaReadId("omitted-delta-read");
+  const ApplyResult omittedDeltaRequest = omittedDeltaUpdater.apply(
+      {DecodedMessageKind::ClientRequest, "thread/read", omittedDeltaReadId,
+       Value::Object{{"threadId", Value("omitted-delta")}}});
+  static_cast<void>(omittedDeltaUpdater.apply(
+      {DecodedMessageKind::ServerNotification, "item/plan/delta", std::nullopt,
+       Value::Object{{"threadId", Value("omitted-delta")},
+                     {"turnId", Value("omitted-delta-turn")},
+                     {"itemId", Value("omitted-delta-item")},
+                     {"delta", Value("post-request delta")}}}));
+  NodeRef omittedDeltaTurn;
+  NodeRef omittedDeltaItem;
+  {
+    auto read = omittedDeltaGraph.tryRead();
+    omittedDeltaTurn =
+        findTurn(*read, "omitted-delta", "omitted-delta-turn");
+    omittedDeltaItem = findItem(*read, "omitted-delta", "omitted-delta-turn",
+                                "omitted-delta-item");
+  }
+  const ApplyResult omittedDeltaResult = omittedDeltaUpdater.apply(
+      {DecodedMessageKind::ClientResult,
+       "thread/read",
+       omittedDeltaReadId,
+       Value::Object{{"thread",
+                      Value(Value::Object{
+                          {"id", Value("omitted-delta")},
+                          {"turns", Value(Value::Array{})}})}},
+       omittedDeltaRequest.primary});
+  {
+    auto read = omittedDeltaGraph.tryRead();
+    require(omittedDeltaTurn && omittedDeltaItem &&
+                !read->find(omittedDeltaTurn->id()) &&
+                !read->find(omittedDeltaItem->id()) &&
+                read->removed(omittedDeltaTurn) &&
+                read->removed(omittedDeltaItem) &&
+                std::ranges::find(omittedDeltaResult.change.removed,
+                                  omittedDeltaItem) !=
+                    omittedDeltaResult.change.removed.end(),
+            "an authoritative replacement retires an omitted provider delta "
+            "created after the request instead of retaining a detached "
+            "untyped node");
+  }
 }
 
 void authoritativeReplacementRetiresItemsAndPreservesLocalTail() {

@@ -1042,30 +1042,6 @@ bool isExplicitLocalOptimistic(NodeGraph::WriteAccess &write,
          type == "localRecoveryThread";
 }
 
-bool omittedSubtreeChangedAfter(NodeGraph::WriteAccess &write,
-                                const NodeRef &node,
-                                std::uint64_t preserveChangesAfter,
-                                std::unordered_set<const Node *> &visited) {
-  if (!node || !visited.insert(node.get()).second)
-    return false;
-  if (!isExplicitLocalOptimistic(write, node) &&
-      write.changedRevision(node) > preserveChangesAfter)
-    return true;
-  for (const NodeRef &child : write.children(node)) {
-    if (omittedSubtreeChangedAfter(write, child, preserveChangesAfter, visited))
-      return true;
-  }
-  if (node->id().kind == NodeKind::Turn) {
-    for (const NodeRef &root :
-         write.related(node, RelationKind::TurnRootItem)) {
-      if (omittedSubtreeChangedAfter(write, root, preserveChangesAfter,
-                                     visited))
-        return true;
-    }
-  }
-  return false;
-}
-
 void collectLocalOptimisticItems(NodeGraph::WriteAccess &write,
                                  const NodeRef &node,
                                  std::vector<NodeRef> &items,
@@ -1118,8 +1094,7 @@ NodeRef preserveLocalOptimisticTail(NodeGraph::WriteAccess &write,
 
 std::vector<NodeRef> replaceAuthoritativeChildren(
     NodeGraph::WriteAccess &write, const NodeRef &parent,
-    std::vector<NodeRef> authoritative, const std::vector<NodeRef> &existing,
-    std::optional<std::uint64_t> preserveChangesAfter) {
+    std::vector<NodeRef> authoritative, const std::vector<NodeRef> &existing) {
   std::unordered_set<const Node *> retained;
   retained.reserve(authoritative.size() + existing.size());
   for (const NodeRef &node : authoritative)
@@ -1134,15 +1109,6 @@ std::vector<NodeRef> replaceAuthoritativeChildren(
       retained.insert(node.get());
       authoritative.emplace_back(node);
       continue;
-    }
-    if (preserveChangesAfter) {
-      std::unordered_set<const Node *> visited;
-      if (omittedSubtreeChangedAfter(write, node, *preserveChangesAfter,
-                                     visited)) {
-        retained.insert(node.get());
-        authoritative.emplace_back(node);
-        continue;
-      }
     }
     if (NodeRef carrier = preserveLocalOptimisticTail(write, parent, node)) {
       retained.insert(carrier.get());
@@ -1330,12 +1296,14 @@ void updateLoadedHistoryItemCount(NodeGraph::WriteAccess &write,
     if (!turn || turn->id().kind != NodeKind::Turn)
       continue;
     for (const NodeRef &item : write.children(turn)) {
-      if (item && item->id().kind == NodeKind::Item)
+      if (item && item->id().kind == NodeKind::Item &&
+          !isLocalPrompt(write, item))
         loaded.insert(item.get());
     }
     for (const NodeRef &root :
          write.related(turn, RelationKind::TurnRootItem)) {
-      if (root && root->id().kind == NodeKind::Item)
+      if (root && root->id().kind == NodeKind::Item &&
+          !isLocalPrompt(write, root))
         loaded.insert(root.get());
     }
   }
@@ -3146,8 +3114,7 @@ NodeRef ProtocolUpdater::ingestThread(
     if (replaceTurns)
       write.replaceChildren(
           thread, replaceAuthoritativeChildren(write, thread, std::move(order),
-                                               write.children(thread),
-                                               preserveChangesAfter));
+                                               write.children(thread)));
     else if (!order.empty())
       write.replaceChildren(
           thread, mergeExistingTail(std::move(order), write.children(thread)));
@@ -3189,7 +3156,7 @@ ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess &write,
                             write.related(turn, RelationKind::TurnRootItem));
       write.replaceChildren(
           turn, replaceAuthoritativeChildren(write, turn, std::move(order),
-                                             existing, preserveChangesAfter));
+                                             existing));
     } else if (!order.empty())
       write.replaceChildren(
           turn, mergeExistingTail(std::move(order), write.children(turn)));

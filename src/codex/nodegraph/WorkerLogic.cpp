@@ -962,6 +962,10 @@ bool WorkerLogic::attachCreatedThread(NodeGraph::WriteAccess &write,
   if (!authoritative)
     authoritative = write.upsert({NodeKind::Thread, std::move(threadId)},
                                  std::move(providerState));
+  // A successful thread/start result is the complete initial authority for a
+  // newly created thread.  Treat it as display-ready so the admitted prompt
+  // is not hidden behind a redundant thread/read gate.
+  updateThreadHydration(write, authoritative, "ready", {});
   for (const std::string_view key :
        {std::string_view("localActivityAt"),
         std::string_view("localPromptActivityAt")}) {
