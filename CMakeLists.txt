@@ -410,13 +410,17 @@ if(BUILD_TESTING)
 
     qt_add_executable(
         codexui-inspector-graph-test
-        tests/codex/InspectorGraphTest.cpp
+        tests/codex/NodeGraphInspectorUiTest.cpp
         src/codex/DiffViewer.cpp
         src/codex/DiffViewer.h
         src/codex/GitDiffProvider.cpp
         src/codex/GitDiffProvider.h
         src/codex/middle/InspectorPane.cpp
         src/codex/middle/InspectorPane.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+        src/codex/ui/NodeGraphUiAdapter.cpp
+        src/codex/ui/NodeGraphUiAdapter.h
         src/codex/ui/UiStyle.cpp
         src/codex/ui/UiStyle.h
     )

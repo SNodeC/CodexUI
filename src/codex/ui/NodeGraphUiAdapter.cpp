@@ -2,14 +2,18 @@
 
 #include "codex/ui/NodeGraphUiAdapter.h"
 
+#include "codex/UiStatus.h"
 #include "codex/nodegraph/ProtocolUpdater.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -630,6 +634,197 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
   return result;
 }
 
+bool terminalStatus(std::string_view status) {
+  const StatusKind kind = classifyStatus(status).kind;
+  return kind == StatusKind::Completed || kind == StatusKind::Failed ||
+         kind == StatusKind::Interrupted;
+}
+
+void updateAgentStatus(std::string &current, std::string candidate) {
+  if (candidate.empty() ||
+      (terminalStatus(current) && isActiveStatus(candidate)))
+    return;
+  current = std::move(candidate);
+}
+
+bool spawnAgentTool(std::string_view tool) {
+  return tool == "spawn_agent" || tool == "spawnAgent" ||
+         tool == "spawn_agents_on_csv" || tool == "spawnAgentsOnCsv";
+}
+
+std::string agentActivityStatus(const nodegraph::NodeState &state) {
+  const std::string kind = graphString(graphField(state, "kind"));
+  if (kind == "completed" || kind == "interrupted" || kind == "failed")
+    return kind;
+  if (kind == "interacted")
+    return {};
+  if (std::string status = graphString(graphField(state, "status"));
+      !status.empty())
+    return status;
+  const std::string published = graphStatus(state);
+  if (terminalStatus(published))
+    return published;
+  if (kind == "started" || kind == "progress")
+    return "inProgress";
+  return published;
+}
+
+std::string effectivePlanStepStatus(const std::string &stepStatus,
+                                    const std::string &turnStatus,
+                                    const std::string &threadStatus) {
+  if (!isActiveStatus(stepStatus))
+    return stepStatus;
+  StatusKind outcome = classifyStatus(turnStatus).kind;
+  if (outcome != StatusKind::Completed && outcome != StatusKind::Failed &&
+      outcome != StatusKind::Interrupted)
+    outcome = classifyStatus(threadStatus).kind;
+  if (outcome == StatusKind::Completed)
+    return "completed";
+  if (outcome == StatusKind::Failed)
+    return "failed";
+  if (outcome == StatusKind::Interrupted)
+    return "interrupted";
+  return stepStatus;
+}
+
+std::string requestKind(std::string_view method) {
+  if (method == "item/commandExecution/requestApproval")
+    return "command-approval";
+  if (method == "item/fileChange/requestApproval")
+    return "file-change-approval";
+  if (method == "item/tool/requestUserInput")
+    return "user-input";
+  if (method == "mcpServer/elicitation/request")
+    return "mcp-elicitation";
+  if (method == "item/permissions/requestApproval")
+    return "permissions-approval";
+  if (method == "item/tool/call")
+    return "dynamic-tool-call";
+  if (method == "account/chatgptAuthTokens/refresh")
+    return "authentication-refresh";
+  if (method == "attestation/generate")
+    return "attestation";
+  if (method == "applyPatchApproval")
+    return "legacy-patch-approval";
+  if (method == "execCommandApproval")
+    return "legacy-command-approval";
+  return "unsupported";
+}
+
+void appendUniqueBounded(std::vector<std::string> &values, std::string value,
+                         std::size_t maximum) {
+  if (value.empty() ||
+      std::ranges::find(values, value) != values.end())
+    return;
+  if (values.size() == maximum)
+    values.erase(values.begin());
+  values.emplace_back(std::move(value));
+}
+
+std::string_view nodeKindName(nodegraph::NodeKind kind) {
+  using nodegraph::NodeKind;
+  switch (kind) {
+  case NodeKind::Runtime: return "Runtime";
+  case NodeKind::Connection: return "Connection";
+  case NodeKind::Thread: return "Thread";
+  case NodeKind::Turn: return "Turn";
+  case NodeKind::Item: return "Item";
+  case NodeKind::Interaction: return "Interaction";
+  case NodeKind::Operation: return "Operation";
+  case NodeKind::Catalog: return "Catalog";
+  case NodeKind::CatalogEntry: return "CatalogEntry";
+  case NodeKind::Account: return "Account";
+  case NodeKind::Configuration: return "Configuration";
+  case NodeKind::PermissionProfile: return "PermissionProfile";
+  case NodeKind::Skill: return "Skill";
+  case NodeKind::Hook: return "Hook";
+  case NodeKind::Plugin: return "Plugin";
+  case NodeKind::App: return "App";
+  case NodeKind::McpServer: return "McpServer";
+  case NodeKind::Project: return "Project";
+  case NodeKind::ThreadSection: return "ThreadSection";
+  case NodeKind::Process: return "Process";
+  case NodeKind::RealtimeSession: return "RealtimeSession";
+  case NodeKind::FilesystemWatch: return "FilesystemWatch";
+  case NodeKind::ExternalAgentImport: return "ExternalAgentImport";
+  case NodeKind::FuzzyFileSearchSession: return "FuzzyFileSearchSession";
+  case NodeKind::LoginAttempt: return "LoginAttempt";
+  case NodeKind::Notice: return "Notice";
+  case NodeKind::UnknownProtocol: return "UnknownProtocol";
+  }
+  return "Unknown";
+}
+
+bool sensitiveStateField(std::string_view key) {
+  std::string normalized;
+  normalized.reserve(key.size());
+  for (const unsigned char character : key)
+    if (std::isalnum(character))
+      normalized.push_back(static_cast<char>(std::tolower(character)));
+  return normalized == "payload" || normalized == "requestpayload" ||
+         normalized == "responsepayload" ||
+         normalized == "retainedresponsepayload" || normalized == "raw" ||
+         normalized == "private" || normalized == "bytes" ||
+         normalized == "command" || normalized == "prompt" ||
+         normalized == "input" || normalized == "output" ||
+         normalized == "delta" || normalized == "error" ||
+         normalized == "message" || normalized == "token" ||
+         normalized.ends_with("token") ||
+         normalized.find("password") != std::string::npos ||
+         normalized.find("secret") != std::string::npos ||
+         normalized.find("credential") != std::string::npos ||
+         normalized.find("authorization") != std::string::npos ||
+         normalized.find("cookie") != std::string::npos ||
+         normalized.find("apikey") != std::string::npos ||
+         normalized.find("privatekey") != std::string::npos;
+}
+
+nlohmann::json safeStateValue(const nodegraph::Value &value, int depth = 0) {
+  if (depth > 8)
+    return "<nested value>";
+  if (value.isNull())
+    return nullptr;
+  if (const auto *boolean = value.asBool())
+    return *boolean;
+  if (const auto *number = value.asInt64())
+    return *number;
+  if (const auto *number = value.asUInt64())
+    return *number;
+  if (const auto *number = value.asDouble())
+    return *number;
+  if (const auto *string = value.asString()) {
+    if (string->size() > 1024)
+      return string->substr(0, 1024) + "...";
+    return *string;
+  }
+  if (const auto *array = value.asArray()) {
+    nlohmann::json result = nlohmann::json::array();
+    const std::size_t retained = std::min<std::size_t>(array->size(), 32);
+    for (std::size_t index = 0; index < retained; ++index)
+      result.push_back(safeStateValue(array->at(index), depth + 1));
+    if (array->size() > retained)
+      result.push_back("<more entries omitted>");
+    return result;
+  }
+  nlohmann::json result = nlohmann::json::object();
+  const auto *object = value.asObject();
+  std::size_t retained = 0;
+  for (const auto &[key, entry] : *object) {
+    if (retained++ == 64) {
+      result["<more fields>"] = "omitted";
+      break;
+    }
+    result[key] = sensitiveStateField(key)
+                      ? nlohmann::json("<redacted>")
+                      : safeStateValue(entry, depth + 1);
+  }
+  return result;
+}
+
+nlohmann::json safeStateObject(const nodegraph::Value::Object &fields) {
+  return safeStateValue(nodegraph::Value(fields));
+}
+
 
 } // namespace
 
@@ -757,6 +952,461 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread) const {
     if (!row.id.empty())
       result.roots.push_back(std::move(row));
   }
+  return result;
+}
+
+std::optional<InspectorSnapshot>
+NodeGraphUiAdapter::inspector(
+    const nodegraph::NodeRef &selectedThread) const {
+  if (!graph_)
+    return std::nullopt;
+  auto read = graph_->tryRead();
+  if (!read)
+    return std::nullopt;
+
+  nodegraph::NodeRef thread;
+  if (selectedThread &&
+      selectedThread->id().kind == nodegraph::NodeKind::Thread &&
+      read->contains(selectedThread) && !read->removed(selectedThread))
+    thread = selectedThread;
+
+  InspectorSnapshot result;
+  result.plan.threadId = thread ? thread->id().canonical : std::string{};
+  result.plan.threadPresent = static_cast<bool>(thread);
+  result.agents.threadId = result.plan.threadId;
+  result.agents.threadPresent = result.plan.threadPresent;
+  result.changes.threadId = result.plan.threadId;
+
+  const nodegraph::NodeRef connection =
+      read->find({nodegraph::NodeKind::Connection, "connection"});
+  bool canControl = false;
+  std::uint64_t generation = 0;
+  if (connection) {
+    const auto state = read->state(connection);
+    const std::string transport =
+        graphString(graphField(*state, "transportState"));
+    const std::string provider =
+        graphString(graphField(*state, "providerState"));
+    canControl =
+        (transport == "connected" ||
+         state->status == nodegraph::NodeStatus::Connected) &&
+        provider == "ready" &&
+        graphString(graphField(*state, "role")) == "controller";
+    generation = graphInteger(graphField(*state, "connectionGeneration"))
+                     .value_or(graphInteger(
+                                   graphField(*state, "providerGeneration"))
+                                   .value_or(0));
+  }
+
+  std::map<std::string, std::size_t, std::less<>> kindCounts;
+  nlohmann::json domains = nlohmann::json::array();
+  std::size_t omittedDomains = 0;
+  for (const nodegraph::NodeRef &node : read->orderedNodes()) {
+    if (!node || read->removed(node))
+      continue;
+    ++kindCounts[std::string(nodeKindName(node->id().kind))];
+    if (node->id().kind == nodegraph::NodeKind::Thread)
+      ++result.state.threadCount;
+    else if (node->id().kind == nodegraph::NodeKind::UnknownProtocol)
+      ++result.state.telemetryCount;
+    else if (node->id().kind == nodegraph::NodeKind::Catalog &&
+             node->id().canonical == "model") {
+      const auto state = read->state(node);
+      const nodegraph::Value *data = graphField(*state, "data");
+      if (const auto *models = data ? data->asArray() : nullptr)
+        result.state.modelCount = models->size();
+    }
+
+    const bool domain = node->id().kind != nodegraph::NodeKind::Thread &&
+                        node->id().kind != nodegraph::NodeKind::Turn &&
+                        node->id().kind != nodegraph::NodeKind::Item &&
+                        node->id().kind != nodegraph::NodeKind::Interaction &&
+                        node->id().kind != nodegraph::NodeKind::Operation &&
+                        node->id().kind !=
+                            nodegraph::NodeKind::UnknownProtocol;
+    if (!domain)
+      continue;
+    if (domains.size() >= 96) {
+      ++omittedDomains;
+      continue;
+    }
+    const auto state = read->state(node);
+    domains.push_back({{"kind", nodeKindName(node->id().kind)},
+                       {"id", node->id().canonical},
+                       {"status", graphStatus(*state)},
+                       {"changedRevision", read->changedRevision(node)},
+                       {"fields", safeStateObject(state->fields)}});
+  }
+
+  const nodegraph::NodeRef runtime =
+      read->find({nodegraph::NodeKind::Runtime, "runtime"});
+  nlohmann::json pendingMetadata = nlohmann::json::array();
+  if (runtime) {
+    for (const nodegraph::NodeRef &interaction :
+         read->related(runtime,
+                       nodegraph::RelationKind::PendingInteraction)) {
+      if (!interaction || read->removed(interaction) ||
+          interaction->id().kind != nodegraph::NodeKind::Interaction)
+        continue;
+      const auto state = read->state(interaction);
+      if (state->status != nodegraph::NodeStatus::Pending &&
+          state->status != nodegraph::NodeStatus::Failed)
+        continue;
+
+      InspectorRequestRow row;
+      row.id = interaction->id().canonical;
+      const std::string method = graphString(graphField(*state, "method"));
+      row.kind = requestKind(method);
+      row.generation = generation;
+      const bool recoveryOnly = graphBool(graphField(*state, "recoveryOnly"));
+      row.actionable = canControl && !recoveryOnly;
+      const nodegraph::Value *payloadValue = graphField(*state, "payload");
+      const auto *payload = payloadValue ? payloadValue->asObject() : nullptr;
+      if (payload) {
+        row.command = graphString(graphMember(*payload, "command"));
+        row.reason = graphString(graphMember(*payload, "reason"));
+        row.message = graphString(graphMember(*payload, "message"));
+        row.threadContext = graphString(graphMember(*payload, "threadId"));
+        if (const nodegraph::Value *questions =
+                graphMember(*payload, "questions");
+            questions && questions->asArray())
+          row.questionCount = questions->asArray()->size();
+      }
+      if (row.message.empty())
+        row.message = graphString(graphField(*state, "error"));
+      if (row.threadContext.empty()) {
+        for (nodegraph::NodeRef target : read->related(
+                 interaction, nodegraph::RelationKind::InteractionTarget)) {
+          for (std::size_t depth = 0; target && depth < 16;
+               ++depth, target = read->parent(target)) {
+            if (target->id().kind != nodegraph::NodeKind::Thread)
+              continue;
+            row.threadContext = target->id().canonical;
+            const auto targetState = read->state(target);
+            if (std::string title =
+                    graphString(graphField(*targetState, "name"));
+                !title.empty())
+              row.threadContext = std::move(title);
+            break;
+          }
+          if (!row.threadContext.empty())
+            break;
+        }
+      }
+      result.requests.requests.push_back(row);
+      ++result.state.pendingRequestCount;
+      if (pendingMetadata.size() < 64)
+        pendingMetadata.push_back(
+            {{"id", interaction->id().canonical},
+             {"method", method},
+             {"category", row.kind},
+             {"thread", row.threadContext},
+             {"status", graphStatus(*state)}});
+    }
+  }
+
+  if (thread) {
+    const auto threadState = read->state(thread);
+    result.changes.cwd = graphString(graphField(*threadState, "cwd"));
+    result.state.selectedThreadTurnCount = read->childCount(thread);
+    for (std::size_t turnIndex = 0; turnIndex < read->childCount(thread);
+         ++turnIndex) {
+      const nodegraph::NodeRef turn = read->childAt(thread, turnIndex);
+      if (!turn || turn->id().kind != nodegraph::NodeKind::Turn)
+        continue;
+      result.state.selectedThreadItemCount += read->childCount(turn);
+      for (std::size_t itemIndex = 0; itemIndex < read->childCount(turn);
+           ++itemIndex) {
+        const nodegraph::NodeRef item = read->childAt(turn, itemIndex);
+        if (!item || item->id().kind != nodegraph::NodeKind::Item)
+          continue;
+        const auto state = read->state(item);
+        const std::string type = graphString(graphField(*state, "type"));
+        if (type == "commandExecution") {
+          appendUniqueBounded(result.changes.commandCwds,
+                              graphString(graphField(*state, "cwd")), 64);
+        } else if (type == "fileChange") {
+          const nodegraph::Value *changes = graphField(*state, "changes");
+          if (const auto *array = changes ? changes->asArray() : nullptr)
+            for (const nodegraph::Value &change : *array)
+              if (const auto *object = change.asObject())
+                appendUniqueBounded(
+                    result.changes.changedPaths,
+                    graphString(graphMember(*object, "path")), 512);
+        }
+      }
+    }
+
+    const std::string threadStatus = graphStatus(*threadState);
+    for (std::size_t offset = 0;
+         offset < read->childCount(thread) && !result.plan.plan &&
+         !result.plan.planItem;
+         ++offset) {
+      const nodegraph::NodeRef turn = read->childAt(
+          thread, read->childCount(thread) - offset - 1);
+      if (!turn || turn->id().kind != nodegraph::NodeKind::Turn)
+        continue;
+      const auto turnState = read->state(turn);
+      const nodegraph::Value *planValue = graphField(*turnState, "plan");
+      const nodegraph::Value::Array *steps =
+          planValue ? planValue->asArray() : nullptr;
+      const nodegraph::Value *explanation =
+          graphField(*turnState, "planExplanation");
+      bool structured = steps != nullptr;
+      if (const auto *object = planValue ? planValue->asObject() : nullptr) {
+        const nodegraph::Value *nested = graphMember(*object, "steps");
+        structured = nested != nullptr;
+        steps = nested ? nested->asArray() : nullptr;
+        if (graphString(explanation).empty())
+          explanation = graphMember(*object, "explanation");
+      }
+      if (structured) {
+        InspectorPlan plan;
+        plan.explanation = graphString(explanation);
+        if (steps) {
+          plan.steps.reserve(steps->size());
+          for (const nodegraph::Value &entry : *steps) {
+            const auto *object = entry.asObject();
+            if (!object) {
+              plan.steps.emplace_back();
+              continue;
+            }
+            const std::string status =
+                graphString(graphMember(*object, "status"));
+            plan.steps.push_back(
+                {graphString(graphMember(*object, "step")),
+                 effectivePlanStepStatus(status, graphStatus(*turnState),
+                                         threadStatus)});
+          }
+        }
+        result.plan.plan = std::move(plan);
+        break;
+      }
+      for (std::size_t itemOffset = 0;
+           itemOffset < read->childCount(turn); ++itemOffset) {
+        const nodegraph::NodeRef item = read->childAt(
+            turn, read->childCount(turn) - itemOffset - 1);
+        if (!item || item->id().kind != nodegraph::NodeKind::Item)
+          continue;
+        const auto state = read->state(item);
+        if (graphString(graphField(*state, "type")) == "plan") {
+          result.plan.planItem = graphString(graphField(*state, "text"));
+          break;
+        }
+      }
+    }
+
+    struct LogicalAgent final {
+      InspectorAgentRow row;
+      std::string status;
+    };
+    std::vector<LogicalAgent> logicalAgents;
+    std::unordered_map<std::string, std::size_t> logicalIndexes;
+    for (std::size_t turnIndex = 0; turnIndex < read->childCount(thread);
+         ++turnIndex) {
+      const nodegraph::NodeRef turn = read->childAt(thread, turnIndex);
+      if (!turn || turn->id().kind != nodegraph::NodeKind::Turn)
+        continue;
+      const auto turnState = read->state(turn);
+      for (std::size_t itemIndex = 0; itemIndex < read->childCount(turn);
+           ++itemIndex) {
+        const nodegraph::NodeRef item = read->childAt(turn, itemIndex);
+        if (!item || item->id().kind != nodegraph::NodeKind::Item)
+          continue;
+        const auto state = read->state(item);
+        const std::string type = graphString(graphField(*state, "type"));
+        if (type != "subAgentActivity" && type != "collabAgentToolCall")
+          continue;
+        const std::string activityKind =
+            graphString(graphField(*state, "kind"));
+        const bool canCreate =
+            type == "subAgentActivity"
+                ? (activityKind.empty() || activityKind == "started")
+                : spawnAgentTool(graphString(graphField(*state, "tool")));
+
+        struct SourceChild final {
+          std::string key;
+          std::string id;
+          nodegraph::NodeRef thread;
+          std::string status;
+          std::string result;
+          bool canonical = true;
+        };
+        std::vector<SourceChild> children;
+        std::unordered_map<std::string, std::size_t> childIndexes;
+        const auto addChild = [&](std::string id,
+                                  nodegraph::NodeRef childThread = {},
+                                  std::string status = {},
+                                  std::string childResult = {}) {
+          if (id.empty())
+            return;
+          const std::string key = "child\n" + id;
+          const auto [found, inserted] =
+              childIndexes.try_emplace(key, children.size());
+          if (inserted) {
+            children.push_back({key, std::move(id), std::move(childThread),
+                                std::move(status), std::move(childResult),
+                                true});
+            return;
+          }
+          SourceChild &child = children.at(found->second);
+          if (childThread)
+            child.thread = std::move(childThread);
+          updateAgentStatus(child.status, std::move(status));
+          if (!childResult.empty())
+            child.result = std::move(childResult);
+        };
+
+        for (const nodegraph::NodeRef &child : read->related(
+                 item, nodegraph::RelationKind::AgentChildThread))
+          if (child && child->id().kind == nodegraph::NodeKind::Thread)
+            addChild(child->id().canonical, child);
+        addChild(graphString(graphField(*state, "agentThreadId")));
+        const std::vector<std::string> receivers =
+            graphStrings(graphField(*state, "receiverThreadIds"));
+        for (const std::string &receiver : receivers)
+          addChild(receiver);
+        if (const nodegraph::Value *statesValue =
+                graphField(*state, "agentsStates")) {
+          if (const auto *states = statesValue->asObject()) {
+            for (const auto &[id, value] : *states) {
+              const auto *childState = value.asObject();
+              addChild(id, {},
+                       childState
+                           ? graphString(graphMember(*childState, "status"))
+                           : std::string{},
+                       childState
+                           ? graphString(graphMember(*childState, "message"))
+                           : std::string{});
+            }
+          }
+        }
+        if (children.empty() && canCreate) {
+          std::string id = nodegraph::protocolCanonicalId(*state, item);
+          if (id.empty())
+            id = item->id().canonical;
+          children.push_back({"source\n" + item->id().canonical,
+                              std::move(id), {}, {}, {}, false});
+        }
+
+        for (SourceChild &child : children) {
+          auto found = logicalIndexes.find(child.key);
+          if (found == logicalIndexes.end()) {
+            if (!canCreate)
+              continue;
+            LogicalAgent logical;
+            logical.row.id = child.id;
+            if (child.canonical)
+              logical.row.childThreadId = child.id;
+            found = logicalIndexes
+                        .emplace(child.key, logicalAgents.size())
+                        .first;
+            logicalAgents.push_back(std::move(logical));
+          }
+          LogicalAgent &logical = logicalAgents.at(found->second);
+          const bool carriesFields = type == "subAgentActivity" || canCreate;
+          if (carriesFields) {
+            const auto update = [](std::string &target, std::string value) {
+              if (!value.empty())
+                target = std::move(value);
+            };
+            update(logical.row.agentPath,
+                   graphString(graphField(*state, "agentPath")));
+            update(logical.row.tool,
+                   graphString(graphField(*state, "tool")));
+            update(logical.row.model,
+                   graphString(graphField(*state, "model")));
+            update(logical.row.reasoningEffort,
+                   graphString(graphField(*state, "reasoningEffort")));
+            update(logical.row.prompt,
+                   graphString(graphField(*state, "prompt")));
+            update(logical.row.resultText,
+                   graphString(graphField(*state, "resultText")));
+            update(logical.row.senderThreadId,
+                   graphString(graphField(*state, "senderThreadId")));
+            if (!receivers.empty())
+              logical.row.receiverThreadIds = receivers;
+            std::string activityStatus = agentActivityStatus(*state);
+            if (child.canonical && terminalStatus(graphStatus(*turnState)) &&
+                isActiveStatus(activityStatus) && child.status.empty())
+              activityStatus = "notLoaded";
+            updateAgentStatus(logical.status, std::move(activityStatus));
+          }
+          updateAgentStatus(logical.status, child.status);
+
+          nodegraph::NodeRef childThread = child.thread;
+          if (!childThread && child.canonical)
+            childThread = read->find(
+                {nodegraph::NodeKind::Thread, child.id});
+          if (childThread && read->contains(childThread) &&
+              !read->removed(childThread)) {
+            const auto childState = read->state(childThread);
+            updateAgentStatus(logical.status, graphStatus(*childState));
+            for (std::size_t childTurnOffset = 0;
+                 childTurnOffset < read->childCount(childThread) &&
+                 logical.row.resultText.empty();
+                 ++childTurnOffset) {
+              const nodegraph::NodeRef childTurn = read->childAt(
+                  childThread,
+                  read->childCount(childThread) - childTurnOffset - 1);
+              if (!childTurn)
+                continue;
+              for (std::size_t childItemOffset = 0;
+                   childItemOffset < read->childCount(childTurn);
+                   ++childItemOffset) {
+                const nodegraph::NodeRef childItem = read->childAt(
+                    childTurn,
+                    read->childCount(childTurn) - childItemOffset - 1);
+                if (!childItem)
+                  continue;
+                const auto childItemState = read->state(childItem);
+                if (graphString(graphField(*childItemState, "type")) !=
+                    "agentMessage")
+                  continue;
+                const std::string value =
+                    graphString(graphField(*childItemState, "text"));
+                if (!value.empty()) {
+                  logical.row.resultText = value;
+                  break;
+                }
+              }
+            }
+          }
+          if (!child.result.empty())
+            logical.row.resultText = child.result;
+          logical.row.status = logical.status;
+        }
+      }
+    }
+    result.agents.agents.reserve(logicalAgents.size());
+    for (LogicalAgent &logical : logicalAgents)
+      result.agents.agents.push_back(std::move(logical.row));
+  }
+
+  nlohmann::json selected = nullptr;
+  if (thread) {
+    const auto state = read->state(thread);
+    selected = {{"id", thread->id().canonical},
+                {"status", graphStatus(*state)},
+                {"changedRevision", read->changedRevision(thread)},
+                {"turns", result.state.selectedThreadTurnCount},
+                {"items", result.state.selectedThreadItemCount},
+                {"fields", safeStateObject(state->fields)}};
+    if (const nodegraph::NodeRef parent = read->parent(thread))
+      selected["parent"] = parent->id().canonical;
+  }
+  nlohmann::json counts = nlohmann::json::object();
+  for (const auto &[kind, count] : kindCounts)
+    counts[kind] = count;
+  result.state.state =
+      {{"sharedNodeGraph",
+        {{"revision", read->revision()},
+         {"nodes", read->orderedNodes().size()},
+         {"nodeKinds", std::move(counts)},
+         {"selectedThread", std::move(selected)},
+         {"currentDomains", std::move(domains)},
+         {"omittedDomainCount", omittedDomains},
+         {"pendingInteractions", std::move(pendingMetadata)}}}};
   return result;
 }
 

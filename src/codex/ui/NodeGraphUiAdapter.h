@@ -36,6 +36,9 @@ public:
   [[nodiscard]] std::optional<ThreadListSnapshot>
   threads(const nodegraph::NodeRef &selectedThread) const;
 
+  [[nodiscard]] std::optional<InspectorSnapshot>
+  inspector(const nodegraph::NodeRef &selectedThread) const;
+
 private:
   const nodegraph::NodeGraph *graph_;
 };

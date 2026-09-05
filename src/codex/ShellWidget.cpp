@@ -233,6 +233,80 @@ bool conversationAffected(const nodegraph::GraphChanged &change,
          std::ranges::any_of(change.removed, belongsToSelection);
 }
 
+bool inspectorAffected(const nodegraph::GraphChanged &change,
+                       const nodegraph::NodeGraph &graph,
+                       const nodegraph::NodeRef &selectedThread) {
+  if (change.rescanRequired)
+    return true;
+  if (containsKind(change,
+                   {nodegraph::NodeKind::Runtime,
+                    nodegraph::NodeKind::Connection,
+                    nodegraph::NodeKind::Interaction,
+                    nodegraph::NodeKind::Catalog,
+                    nodegraph::NodeKind::CatalogEntry,
+                    nodegraph::NodeKind::Account,
+                    nodegraph::NodeKind::Configuration,
+                    nodegraph::NodeKind::PermissionProfile,
+                    nodegraph::NodeKind::Skill,
+                    nodegraph::NodeKind::Hook,
+                    nodegraph::NodeKind::Plugin,
+                    nodegraph::NodeKind::App,
+                    nodegraph::NodeKind::McpServer,
+                    nodegraph::NodeKind::Project,
+                    nodegraph::NodeKind::Notice,
+                    nodegraph::NodeKind::UnknownProtocol}))
+    return true;
+  if (!selectedThread)
+    return false;
+  if (change.affected.size() + change.removed.size() > 64)
+    return true;
+  const auto read = graph.tryRead();
+  if (!read)
+    return true;
+  if (!read->contains(selectedThread) || read->removed(selectedThread))
+    return true;
+  const std::vector<nodegraph::NodeRef> agentChildren =
+      read->related(selectedThread,
+                    nodegraph::RelationKind::AgentChildThread);
+  const auto relevant = [&](const nodegraph::NodeRef &node) {
+    if (!node)
+      return false;
+    if (!read->contains(node))
+      return node->id().kind == nodegraph::NodeKind::Thread ||
+             node->id().kind == nodegraph::NodeKind::Turn ||
+             node->id().kind == nodegraph::NodeKind::Item;
+    if (node == selectedThread)
+      return true;
+    if (node->id().kind == nodegraph::NodeKind::Thread)
+      return std::ranges::find(agentChildren, node) != agentChildren.end();
+    if (node->id().kind != nodegraph::NodeKind::Turn &&
+        node->id().kind != nodegraph::NodeKind::Item)
+      return false;
+
+    nodegraph::NodeRef containingThread = node;
+    while (containingThread &&
+           containingThread->id().kind != nodegraph::NodeKind::Thread)
+      containingThread = read->parent(containingThread);
+    if (containingThread != selectedThread &&
+        std::ranges::find(agentChildren, containingThread) ==
+            agentChildren.end())
+      return false;
+    if (node->id().kind == nodegraph::NodeKind::Turn)
+      return read->statusChangedRevision(node) == change.revision ||
+             read->structureChangedRevision(node) == change.revision ||
+             fieldChanged(*read, node, "plan", change.revision) ||
+             fieldChanged(*read, node, "planExplanation", change.revision);
+    const auto state = read->state(node);
+    const std::string type = graphString(graphField(*state, "type"));
+    return type == "plan" || type == "subAgentActivity" ||
+           type == "collabAgentToolCall" || type == "commandExecution" ||
+           type == "fileChange" ||
+           (type == "agentMessage" && containingThread != selectedThread);
+  };
+  return std::ranges::any_of(change.affected, relevant) ||
+         std::ranges::any_of(change.removed, relevant);
+}
+
 bool shellChromeAffected(const nodegraph::GraphChanged &change,
                          const nodegraph::NodeGraph &graph,
                          const nodegraph::NodeRef &selectedThread) {
@@ -827,6 +901,7 @@ struct ShellWidget::Impl final {
   void scheduleGraphBinding(bool immediate = true);
   void runGraphBinding();
   void bindGraphPanes(nodegraph::NodeRef selectedThread);
+  void refreshInspector();
   void handleGraphChanged(const nodegraph::GraphChanged &change);
   void handleUiEffect(const nodegraph::UiEffect &effect);
   void reconcileOptimisticCreation(const nodegraph::GraphChanged &change);
@@ -875,6 +950,7 @@ struct ShellWidget::Impl final {
   bool renderScheduled = false;
   bool graphPanesBound = false;
   bool graphBindingScheduled = false;
+  bool inspectorRefreshScheduled = false;
   bool draftSelectionScheduled = false;
   bool graphFallbackScheduled = false;
   unsigned draftSelectionRetriesRemaining = 0;
@@ -1295,7 +1371,25 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
   } else {
     static_cast<void>(middleRegion->conversation().reconcile({}));
   }
-  middleRegion->inspector().refresh(graph, boundGraphThread);
+  refreshInspector();
+}
+
+void ShellWidget::Impl::refreshInspector() {
+  if (auto snapshot = uiAdapter.inspector(boundGraphThread)) {
+    inspectorRefreshScheduled = false;
+    middleRegion->inspector().refresh(*snapshot);
+    return;
+  }
+  if (inspectorRefreshScheduled)
+    return;
+  inspectorRefreshScheduled = true;
+  const auto token = alive;
+  QTimer::singleShot(GraphRetryDelayMilliseconds, owner, [this, token] {
+    if (!*token)
+      return;
+    inspectorRefreshScheduled = false;
+    refreshInspector();
+  });
 }
 
 void ShellWidget::Impl::handleGraphChanged(
@@ -1350,11 +1444,11 @@ void ShellWidget::Impl::handleGraphChanged(
         static_cast<void>(middleRegion->conversation().reconcile(*snapshot));
     }
   }
-  if (middleRegion->inspector().graphChangeAffectsVisibleTab(change)) {
+  if (inspectorAffected(change, session.nodeGraph(), boundGraphThread)) {
     ++inspectorRoutes;
     owner->setProperty("inspectorRoutes",
                        static_cast<qulonglong>(inspectorRoutes));
-    middleRegion->inspector().graphChanged(change);
+    refreshInspector();
   }
   if (change.rescanRequired ||
       containsKind(change, {nodegraph::NodeKind::Thread}))
