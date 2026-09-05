@@ -1218,6 +1218,12 @@ bool testPausedExpandedCommandStaysPainted() {
     const QRect commandBefore(commandCard->mapTo(view.viewport(), QPoint{}),
                               commandCard->size());
     const auto outputStateBefore = commandCard->commandOutputScrollState();
+    const qulonglong fullGeometryBefore =
+        view.property("conversationGeometryPasses").toULongLong();
+    const qulonglong localGeometryBefore =
+        view.property("conversationLocalGeometryPasses").toULongLong();
+    const qulonglong structuralCommitsBefore =
+        view.property("incrementalStructuralCommits").toULongLong();
     snapshot.sections.back().cards.push_back(cardForAppearanceAudit(
         thread, incomingKinds[index], 100 + static_cast<int>(index)));
     paintProbe.start(commandCard);
@@ -1263,16 +1269,122 @@ bool testPausedExpandedCommandStaysPainted() {
         stableAgainst(anchorBefore, settledAnchor) &&
         immediateCommand == commandBefore && settledCommand == commandBefore &&
         paintedAnchorStable && paintedStable && incomingWidgetStable &&
-        commandCard->commandOutputScrollState() == outputStateBefore;
+        commandCard->commandOutputScrollState() == outputStateBefore &&
+        view.property("conversationGeometryPasses").toULongLong() ==
+            fullGeometryBefore &&
+        view.property("conversationLocalGeometryPasses").toULongLong() ==
+            localGeometryBefore + 1 &&
+        view.property("incrementalStructuralCommits").toULongLong() ==
+            structuralCommitsBefore + 1;
     result &= expect(
         auditPass,
-        "incoming card preserves a visible expanded command in every paint");
+        "incoming card preserves a visible expanded command in every paint "
+        "and settles only its affected Turn");
   }
   result &= expect(allIncomingCardsMaterialized,
                    "selected-thread incoming cards materialize immediately");
 
   qApp->setStyleSheet(originalStyleSheet);
   spin();
+  return result;
+}
+
+bool testStreamingAgentBecomesVisibleWithoutReselection() {
+  const std::string thread = "streaming-final-visibility";
+  VisibleCardData prompt{
+      AuthoritativeItemKey{thread, "turn", "prompt"}, CardKind::UserMessage,
+      thread, "turn", "prompt", UserMessageData{"Prompt", {}}};
+  VisibleCardData response{
+      AuthoritativeItemKey{thread, "turn", "streaming-response"},
+      CardKind::AgentMessage,
+      thread,
+      "turn",
+      "streaming-response",
+      AgentMessageData{"The completed response must appear immediately.",
+                       false}};
+  ConversationSnapshot snapshot;
+  snapshot.threadId = thread;
+  snapshot.sections.push_back(
+      {"turn-section", "turn", {prompt, response}, prompt.key});
+
+  ConversationView view;
+  view.setPresentationOptions({true, false, false, false});
+  view.resize(620, 420);
+  view.show();
+  bool result = expect(view.reconcile(snapshot),
+                       "a filtered streaming response is retained");
+  spin();
+  QPointer<ConversationCard> responseCard =
+      card(view, stableKey(response.key));
+  ConversationCard *rootCard =
+      card(view, stableKey(*snapshot.sections.front().rootCardKey));
+  result &= expect(responseCard && responseCard->isHidden() && rootCard &&
+                       rootCard->isAncestorOf(responseCard),
+                   "the streaming response performs no visible work while "
+                   "updates are filtered");
+
+  std::get<AgentMessageData>(snapshot.sections.front().cards.back().payload)
+      .finalAnswer = true;
+  result &= expect(view.reconcile(snapshot),
+                   "completion makes the retained response visible");
+  spin();
+  responseCard = card(view, stableKey(response.key));
+  rootCard = card(view, stableKey(*snapshot.sections.front().rootCardKey));
+  result &= expect(responseCard && !responseCard->isHidden() && rootCard &&
+                       rootCard->isAncestorOf(responseCard) &&
+                       responseCard->height() > 0 &&
+                       rootCard->contentsRect().contains(
+                           responseCard->mapTo(rootCard, QPoint{})) &&
+                       responseCard
+                               ->mapTo(rootCard,
+                                       QPoint(0, responseCard->height()))
+                               .y() <= rootCard->contentsRect().bottom() + 1,
+                   "the final response and its settled owner appear without "
+                   "thread reselection");
+
+  ConversationView optimisticView;
+  optimisticView.setPresentationOptions({true, false, false, false});
+  optimisticView.resize(620, 420);
+  optimisticView.show();
+  ConversationSnapshot liveSnapshot;
+  liveSnapshot.threadId = "optimistic-live-final";
+  static_cast<void>(optimisticView.reconcile(liveSnapshot));
+  VisibleCardData localPrompt{
+      LocalPromptKey{1}, CardKind::LocalPrompt, liveSnapshot.threadId,
+      "live-turn", {},
+      LocalPromptData{1, "Live prompt", PromptState::InFlight, 0, {}, {}}};
+  liveSnapshot.sections.push_back(
+      {"live-turn-section", "live-turn", {localPrompt}, localPrompt.key});
+  result &= expect(optimisticView.reconcile(liveSnapshot),
+                   "an optimistic Turn/You owner inserts immediately");
+  liveSnapshot.sections.front().cards.front().kind = CardKind::UserMessage;
+  liveSnapshot.sections.front().cards.front().payload =
+      UserMessageData{"Live prompt", {}};
+  result &= expect(optimisticView.reconcile(liveSnapshot),
+                   "the optimistic Turn/You owner acknowledges in place");
+  VisibleCardData liveResponse{
+      AuthoritativeItemKey{liveSnapshot.threadId, "live-turn", "live-answer"},
+      CardKind::AgentMessage,
+      liveSnapshot.threadId,
+      "live-turn",
+      "live-answer",
+      AgentMessageData{"Live final answer", true}};
+  liveSnapshot.sections.front().cards.push_back(liveResponse);
+  result &= expect(optimisticView.reconcile(liveSnapshot),
+                   "the final response inserts into the acknowledged Turn");
+  spin();
+  ConversationCard *liveRoot =
+      card(optimisticView, stableKey(localPrompt.key));
+  ConversationCard *liveAnswer =
+      card(optimisticView, stableKey(liveResponse.key));
+  result &= expect(liveRoot && liveAnswer && !liveAnswer->isHidden() &&
+                       liveRoot->isAncestorOf(liveAnswer) &&
+                       liveAnswer
+                               ->mapTo(liveRoot,
+                                       QPoint(0, liveAnswer->height()))
+                               .y() <= liveRoot->contentsRect().bottom() + 1,
+                   "the optimistic live sequence exposes the final answer in "
+                   "its settled Turn without reselection");
   return result;
 }
 
@@ -6852,6 +6964,7 @@ int main(int argc, char **argv) {
   result &= testStructuralOrderAndIdentity();
   result &= testFollowPauseAndStableAnchor();
   result &= testPausedExpandedCommandStaysPainted();
+  result &= testStreamingAgentBecomesVisibleWithoutReselection();
   result &= testThreadLocalScrollAndComposerExtent();
   result &= testPromptAdmissionFollowOwnership();
   result &= testCardCopyControls();

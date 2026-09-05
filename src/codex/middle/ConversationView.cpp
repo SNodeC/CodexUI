@@ -462,6 +462,271 @@ ConversationCard *ConversationView::createRetainedCard(
   return card;
 }
 
+bool ConversationView::tryReconcileSingleInsertion(
+    const ConversationSnapshot &snapshot, bool settleFollowImmediately) {
+  if (snapshot.threadId != snapshot_.threadId ||
+      snapshot.threadId != threadId_ || snapshot.hasMore != snapshot_.hasMore ||
+      snapshot.hiddenAuthoritativeItemCount !=
+          snapshot_.hiddenAuthoritativeItemCount ||
+      snapshot.sections.size() < snapshot_.sections.size() ||
+      snapshot.sections.size() > snapshot_.sections.size() + 1)
+    return false;
+
+  struct Insertion {
+    std::size_t section = 0;
+    std::size_t card = 0;
+    bool newSection = false;
+  };
+  std::optional<Insertion> insertion;
+  std::unordered_map<std::string, const VisibleCardData *> previousCards;
+  for (const TurnSection &section : snapshot_.sections)
+    for (const VisibleCardData &card : section.cards)
+      previousCards.emplace(stableKey(card.key), &card);
+
+  std::size_t previousSection = 0;
+  for (std::size_t sectionIndex = 0; sectionIndex < snapshot.sections.size();
+       ++sectionIndex) {
+    const TurnSection &nextSection = snapshot.sections[sectionIndex];
+    if (previousSection >= snapshot_.sections.size() ||
+        snapshot_.sections[previousSection].key != nextSection.key) {
+      if (insertion || nextSection.cards.size() != 1 ||
+          (nextSection.rootCardKey &&
+           stableKey(*nextSection.rootCardKey) !=
+               stableKey(nextSection.cards.front().key)))
+        return false;
+      insertion = Insertion{sectionIndex, 0, true};
+      continue;
+    }
+
+    const TurnSection &oldSection = snapshot_.sections[previousSection++];
+    if (oldSection.turnId != nextSection.turnId ||
+        oldSection.rootCardKey != nextSection.rootCardKey ||
+        nextSection.cards.size() < oldSection.cards.size() ||
+        nextSection.cards.size() > oldSection.cards.size() + 1)
+      return false;
+
+    std::size_t oldCardIndex = 0;
+    for (std::size_t cardIndex = 0; cardIndex < nextSection.cards.size();
+         ++cardIndex) {
+      const VisibleCardData &nextCard = nextSection.cards[cardIndex];
+      if (oldCardIndex < oldSection.cards.size() &&
+          stableKey(oldSection.cards[oldCardIndex].key) ==
+              stableKey(nextCard.key)) {
+        const VisibleCardData &oldCard = oldSection.cards[oldCardIndex++];
+        const auto retained = cards_.find(stableKey(nextCard.key));
+        if (retained == cards_.end() ||
+            !retained->second->canApply(nextCard) ||
+            cardVisible(oldCard) != cardVisible(nextCard))
+          return false;
+        continue;
+      }
+      if (insertion || cards_.contains(stableKey(nextCard.key)))
+        return false;
+      insertion = Insertion{sectionIndex, cardIndex, false};
+    }
+    if (oldCardIndex != oldSection.cards.size())
+      return false;
+  }
+  if (previousSection != snapshot_.sections.size() || !insertion)
+    return false;
+
+  const TurnSection &insertedSectionData =
+      snapshot.sections[insertion->section];
+  const VisibleCardData &insertedData =
+      insertedSectionData.cards[insertion->card];
+  const std::string insertedKey = stableKey(insertedData.key);
+  if (previousCards.contains(insertedKey))
+    return false;
+
+  TurnSectionWidget *retainedSection = nullptr;
+  if (!insertion->newSection) {
+    const auto found = sections_.find(insertedSectionData.key);
+    if (found == sections_.end())
+      return false;
+    retainedSection = found->second;
+  }
+  for (const VisibleCardData &cardData : insertedSectionData.cards) {
+    const std::string key = stableKey(cardData.key);
+    if (key != insertedKey && !cards_.contains(key))
+      return false;
+  }
+  if (insertedSectionData.rootCardKey) {
+    const std::string rootKey = stableKey(*insertedSectionData.rootCardKey);
+    if (rootKey != insertedKey && !cards_.contains(rootKey))
+      return false;
+  }
+
+  // QWidget construction is indivisible and must stay on Qt-main. Build the
+  // one new rich subtree outside the visible hierarchy, then expose only its
+  // final parented geometry in the structural commit below.
+  ConversationCard *insertedCard =
+      createRetainedCard(insertedData, stagingHost_, insertedKey);
+  insertedCard->hide();
+
+  const Anchor anchor = captureAnchor();
+  const bool follow = mode_ == Mode::Following;
+  std::vector<std::string> nextDisplayedKeys;
+  for (const TurnSection &section : snapshot.sections)
+    for (const VisibleCardData &card : section.cards)
+      if (cardVisible(card))
+        nextDisplayedKeys.push_back(stableKey(card.key));
+  const bool appendedVisibleCard =
+      nextDisplayedKeys.size() == displayedCardKeys_.size() + 1 &&
+      std::equal(displayedCardKeys_.begin(), displayedCardKeys_.end(),
+                 nextDisplayedKeys.begin());
+
+  stopFollowingAnimation();
+  std::vector<ConversationCard *> geometryCards;
+  std::vector<nodegraph::NodeRef> materializedPrompts;
+  if (std::holds_alternative<LocalPromptKey>(insertedData.key) &&
+      insertedData.kind == CardKind::UserMessage && insertedData.target)
+    materializedPrompts.push_back(insertedData.target);
+
+  {
+    const QScopedValueRollback applying(applying_, true);
+    const QSignalBlocker scrollSignals(verticalScrollBar());
+
+    // A coalesced notification may pair the insertion with field changes to
+    // retained cards. Apply those through their normal local path.
+    for (const TurnSection &section : snapshot.sections) {
+      for (const VisibleCardData &cardData : section.cards) {
+        const std::string key = stableKey(cardData.key);
+        if (key == insertedKey)
+          continue;
+        const auto before = previousCards.find(key);
+        if (before == previousCards.end() || *before->second == cardData)
+          continue;
+        ConversationCard *card = cards_.at(key);
+        if (before->second->kind == CardKind::LocalPrompt &&
+            cardData.kind == CardKind::UserMessage && cardData.target)
+          materializedPrompts.push_back(cardData.target);
+        if (card->applyPresentation(cardData) ==
+            PresentationImpact::GeometryChanged)
+          geometryCards.push_back(card);
+      }
+    }
+
+    TurnSectionWidget *section = retainedSection;
+    if (insertion->newSection) {
+      section = new TurnSectionWidget(content_);
+      section->setProperty("turnSectionKey",
+                           QString::fromStdString(insertedSectionData.key));
+      section->setProperty("turnId",
+                           QString::fromStdString(insertedSectionData.turnId));
+      section->resize(std::max(0, content_->width()), 0);
+      sections_.emplace(insertedSectionData.key, section);
+      contentLayout_->insertWidget(1 + static_cast<int>(insertion->section),
+                                   section);
+    }
+    cards_.emplace(insertedKey, insertedCard);
+    insertedCard->setParent(section);
+    // Nested-card visibility is part of the owner's fold presentation.
+    // Establish it before setNestedCards() computes whether the container is
+    // visible; changing only the child afterward leaves the owner collapsed.
+    insertedCard->setVisible(cardVisible(insertedData));
+
+    std::vector<ConversationCard *> orderedCards;
+    orderedCards.reserve(insertedSectionData.cards.size());
+    for (const VisibleCardData &cardData : insertedSectionData.cards)
+      orderedCards.push_back(cards_.at(stableKey(cardData.key)));
+    ConversationCard *root = nullptr;
+    if (insertedSectionData.rootCardKey)
+      root = cards_.at(stableKey(*insertedSectionData.rootCardKey));
+    if (root) {
+      std::vector<ConversationCard *> nestedCards;
+      nestedCards.reserve(orderedCards.size() - 1);
+      for (ConversationCard *card : orderedCards) {
+        card->setProperty("turnContainer", card == root);
+        if (card == root) {
+          card->setNestedPresentation(false);
+        } else {
+          card->setAuthoritativeTurnActive(false);
+          nestedCards.push_back(card);
+        }
+      }
+      root->setNestedCards(nestedCards);
+      if (section->cards->indexOf(root) != 0)
+        section->cards->insertWidget(0, root);
+    } else {
+      for (std::size_t index = 0; index < orderedCards.size(); ++index) {
+        ConversationCard *card = orderedCards[index];
+        card->setProperty("turnContainer", false);
+        card->setNestedPresentation(false);
+        card->setAuthoritativeTurnActive(false);
+        if (section->cards->indexOf(card) != static_cast<int>(index))
+          section->cards->insertWidget(static_cast<int>(index), card);
+      }
+    }
+    section->cardKeys.clear();
+    section->cardKeys.reserve(insertedSectionData.cards.size());
+    for (const VisibleCardData &cardData : insertedSectionData.cards)
+      section->cardKeys.push_back(stableKey(cardData.key));
+
+    const bool sectionVisible = std::ranges::any_of(
+        insertedSectionData.cards,
+        [this](const VisibleCardData &card) { return cardVisible(card); });
+    section->setVisible(sectionVisible);
+    if (empty_->isVisible())
+      empty_->hide();
+
+    if (snapshot.activeTurnId != snapshot_.activeTurnId) {
+      const auto updateActiveRoot = [this](const ConversationSnapshot &state,
+                                           bool active) {
+        if (!state.activeTurnId)
+          return;
+        const auto found = std::ranges::find_if(
+            state.sections, [&](const TurnSection &candidate) {
+              return candidate.turnId == *state.activeTurnId &&
+                     candidate.rootCardKey.has_value();
+            });
+        if (found == state.sections.end())
+          return;
+        const auto retained = cards_.find(stableKey(*found->rootCardKey));
+        if (retained != cards_.end())
+          retained->second->setAuthoritativeTurnActive(active);
+      };
+      updateActiveRoot(snapshot_, false);
+      updateActiveRoot(snapshot, true);
+    } else if (root) {
+      root->setAuthoritativeTurnActive(
+          snapshot.activeTurnId &&
+          insertedSectionData.turnId == *snapshot.activeTurnId);
+    }
+
+    geometryCards.push_back(insertedCard);
+    displayedSectionKeys_.clear();
+    displayedSectionKeys_.reserve(snapshot.sections.size());
+    for (const TurnSection &candidate : snapshot.sections)
+      displayedSectionKeys_.push_back(candidate.key);
+    displayedCardKeys_ = std::move(nextDisplayedKeys);
+    snapshot_ = snapshot;
+    recomputeCardGeometries(geometryCards);
+
+    if (follow && (appendedVisibleCard || settleFollowImmediately))
+      setScrollValue(verticalScrollBar()->maximum());
+    else
+      restoreAnchor(anchor);
+  }
+
+  if (follow && !appendedVisibleCard && !settleFollowImmediately) {
+    const int stableValue = verticalScrollBar()->value();
+    if (verticalScrollBar()->maximum() > stableValue + 3)
+      animateToBottom(stableValue);
+    else
+      setScrollValue(verticalScrollBar()->maximum());
+  }
+  storeCurrentThreadState();
+  for (nodegraph::NodeRef &prompt : materializedPrompts)
+    if (promptMaterializedAction_ &&
+        !promptMaterializedAction_(std::move(prompt)))
+      break;
+  setProperty("graphRefreshPasses",
+              property("graphRefreshPasses").toULongLong() + 1);
+  setProperty("incrementalStructuralCommits",
+              property("incrementalStructuralCommits").toULongLong() + 1);
+  return true;
+}
+
 bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
                                  bool force, bool settleFollowImmediately) {
   if (!force && snapshot == snapshot_ && snapshot.threadId == threadId_)
@@ -565,6 +830,10 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
                   property("graphRefreshPasses").toULongLong() + 1);
     return impact != PresentationImpact::None;
   }
+
+  if (!force && !switchedThread &&
+      tryReconcileSingleInsertion(snapshot, settleFollowImmediately))
+    return true;
 
   if (switchedThread)
     setThread(snapshot.threadId);

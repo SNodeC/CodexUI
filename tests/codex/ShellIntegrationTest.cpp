@@ -1065,6 +1065,80 @@ void initialHydrationUsesTheEstablishedBoundedWindow(
           "history remains");
 }
 
+void completedLiveAgentAppearsWithoutThreadReselection(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  makeReady(worker);
+  applyThread(worker, "live-final", "Live final");
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification, "turn/started", std::nullopt,
+       {{"threadId", Value("live-final")},
+        {"turn", Value(Value::Object{
+                     {"id", Value("live-turn")},
+                     {"items", Value(Value::Array{Value(Value::Object{
+                                   {"id", Value("live-prompt")},
+                                   {"type", Value("userMessage")},
+                                   {"text", Value("Prompt")}})})}})}}}));
+  markThreadReady(session, worker, "live-final");
+
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(spinUntil([&] { return threadItem(list, "live-final"); }) &&
+              selectThread(list, "live-final"),
+          "the live completion fixture selects its hydrated thread");
+  auto *conversation = dynamic_cast<middle::ConversationView *>(
+      shell.findChild<QAbstractScrollArea *>(
+          QStringLiteral("conversationScroll")));
+  require(conversation, "the live completion fixture owns a conversation");
+  if (!conversation)
+    return;
+  auto options = conversation->presentationOptions();
+  options.showCodexUpdates = false;
+  conversation->setPresentationOptions(options);
+
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       {{"threadId", Value("live-final")},
+        {"turnId", Value("live-turn")},
+        {"item", Value(Value::Object{{"id", Value("live-response")},
+                                     {"type", Value("agentMessage")},
+                                     {"phase", Value("final_answer")}})}}}));
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification, "item/agentMessage/delta",
+       std::nullopt,
+       {{"threadId", Value("live-final")},
+        {"turnId", Value("live-turn")},
+        {"itemId", Value("live-response")},
+        {"delta", Value("Visible immediately")}}}));
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification, "item/completed", std::nullopt,
+       {{"threadId", Value("live-final")},
+        {"turnId", Value("live-turn")},
+        {"item", Value(Value::Object{{"id", Value("live-response")},
+                                     {"type", Value("agentMessage")},
+                                     {"phase", Value("final_answer")},
+                                     {"text", Value("Visible immediately")}})}}}));
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification, "turn/completed", std::nullopt,
+       {{"threadId", Value("live-final")},
+        {"turn", Value(Value::Object{{"id", Value("live-turn")}})}}}));
+
+  require(spinUntil(
+              [&] {
+                middle::ConversationCard *card =
+                    agentMessageCard(shell, "Visible immediately");
+                return card && !card->isHidden();
+              },
+              1000),
+          "a completed live response becomes visible without thread "
+          "reselection");
+}
+
 void threadSwitchStagesTheCompleteReplacement(Configuration &configuration) {
   FrontendSession session(configuration);
   ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
@@ -2779,6 +2853,7 @@ int main(int argc, char **argv) {
   qtHeartbeatSurvivesLargeInboundTraffic(*configuration);
   graphBackedShellPreservesDraftsAndPrompts(*configuration);
   initialHydrationUsesTheEstablishedBoundedWindow(*configuration);
+  completedLiveAgentAppearsWithoutThreadReselection(*configuration);
   threadSwitchStagesTheCompleteReplacement(*configuration);
   inactiveThreadNeverReactivatesAStaleTurn(*configuration);
   reloadAndReconnectHydrationStayExplicit(*configuration);
