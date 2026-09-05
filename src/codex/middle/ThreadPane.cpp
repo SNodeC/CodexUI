@@ -339,8 +339,8 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   hide->setProperty("kind", "subtle");
   hide->setFixedSize(52, 24);
   connect(hide, &QPushButton::clicked, this, [this] {
-    if (controls.hide)
-      controls.hide();
+    if (actions.hide)
+      actions.hide();
   });
   header->addWidget(hide);
   layout->addLayout(header);
@@ -361,8 +361,8 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
       "QPushButton:disabled{background:#f6f8fb;color:#98a2b3;"
       "border-color:#d7dee8;}"));
   connect(create, &QPushButton::clicked, this, [this] {
-    if (controls.newThread)
-      controls.newThread();
+    if (actions.newThread)
+      actions.newThread();
   });
   layout->addWidget(create);
   layout->addSpacing(8);
@@ -373,8 +373,8 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   refresh->setProperty("kind", "subtle");
   refresh->setFixedHeight(28);
   connect(refresh, &QPushButton::clicked, this, [this] {
-    if (controls.refresh)
-      controls.refresh();
+    if (actions.refresh)
+      actions.refresh();
   });
   toolbar->addWidget(refresh);
   toolbar->addStretch();
@@ -440,43 +440,18 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
       "QListWidget#threadList::item:selected{background:#e5eeff;"
       "border-color:#bfd3f9;color:#1d2633;font-weight:600;}"));
   connect(list, &QListWidget::itemSelectionChanged, this, [this] {
-    if (nodeActions.select)
-      if (nodegraph::NodeRef target = visiblySelectedThread())
-        nodeActions.select(target);
+    if (actions.select) {
+      const std::string id = visiblySelectedThreadId();
+      if (!id.empty())
+        actions.select(id);
+    }
   });
   connect(list, &QListWidget::customContextMenuRequested, this,
           [this](const QPoint &position) { showContextMenu(position); });
   layout->addWidget(list);
 }
 
-void ThreadPane::setControls(Controls next) { controls = std::move(next); }
-
-void ThreadPane::setNodeActions(NodeActions next) {
-  nodeActions = std::move(next);
-}
-
-void ThreadPane::detachRemovedNodes(
-    std::span<const nodegraph::NodeRef> removed) {
-  if (!currentSnapshot || removed.empty())
-    return;
-  const auto isRemoved = [&removed](const ui::ThreadListRow &row) {
-    return row.target &&
-           std::ranges::find(removed, row.target) != removed.end();
-  };
-  const auto prune = [&](const auto &self,
-                         std::vector<ui::ThreadListRow> &rows) -> void {
-    for (ui::ThreadListRow &row : rows)
-      self(self, row.children);
-    std::erase_if(rows, isRemoved);
-  };
-  ui::ThreadListSnapshot next = *currentSnapshot;
-  prune(prune, next.roots);
-  if (std::ranges::any_of(removed, [&next](const nodegraph::NodeRef &node) {
-        return node && node->id().canonical == next.selectedThreadId;
-      }))
-    next.selectedThreadId.clear();
-  refresh(next);
-}
+void ThreadPane::setActions(Actions next) { actions = std::move(next); }
 
 void ThreadPane::beginOptimisticThread(std::string id, std::string title,
                                        std::string cwd) {
@@ -629,7 +604,7 @@ void ThreadPane::appendVisibleThread(
   const bool hasChildren = !thread.children.empty();
   const bool expanded = hasChildren && expandedThreads.contains(thread.id);
   snapshot.rows.push_back(
-      {thread.id, thread.target, thread.title, thread.cwd, thread.status,
+      {thread.id, thread.title, thread.cwd, thread.status,
        thread.lastActivityAt, parentId,
        thread.pending, depth, hasChildren, expanded});
   if (!expanded)
@@ -713,7 +688,6 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
     if (const ui::ThreadListRow *thread =
             findThread(view.roots, optimisticThread.id)) {
       next.rows.push_back({thread->id,
-                           thread->target,
                            thread->title,
                            thread->cwd,
                            thread->status,
@@ -727,7 +701,6 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
                            optimisticThread.failed});
     } else {
       next.rows.push_back({optimisticThread.id,
-                           {},
                            optimisticThread.title,
                            optimisticThread.cwd,
                            {},
@@ -855,14 +828,6 @@ std::string ThreadPane::visiblySelectedThreadId() const {
              : std::string{};
 }
 
-nodegraph::NodeRef ThreadPane::visiblySelectedThread() const {
-  if (!currentSnapshot)
-    return {};
-  const std::string id = visiblySelectedThreadId();
-  const ui::ThreadListRow *thread = findThread(currentSnapshot->roots, id);
-  return thread ? thread->target : nodegraph::NodeRef{};
-}
-
 void ThreadPane::showContextMenu(const QPoint &position) {
   QListWidgetItem *item = list->itemAt(position);
   if (!item || !currentSnapshot)
@@ -871,8 +836,6 @@ void ThreadPane::showContextMenu(const QPoint &position) {
   const ui::ThreadListRow *thread = findThread(currentSnapshot->roots, id);
   if (!thread)
     return;
-  const nodegraph::NodeRef target = thread->target;
-  const bool archived = thread->archived;
   if (contextMenu)
     contextMenu->close();
   contextThreadId = id;
@@ -887,39 +850,31 @@ void ThreadPane::showContextMenu(const QPoint &position) {
     }
     menu->deleteLater();
   });
-  QAction *reload = menu->addAction(QStringLiteral("Reload"), this,
-                                    [this, target] {
-    if (nodeActions.reload)
-      nodeActions.reload(target);
+  QAction *reload = menu->addAction(QStringLiteral("Reload"), this, [this, id] {
+    if (actions.reload)
+      actions.reload(id);
   });
   const bool providerReady = currentSnapshot->providerReady;
   const bool canControl = currentSnapshot->canControl;
-  QAction *rename = menu->addAction(QStringLiteral("Rename"), this,
-                                    [this, target] {
-    if (nodeActions.rename)
-      nodeActions.rename(target);
+  QAction *rename = menu->addAction(QStringLiteral("Rename"), this, [this, id] {
+    if (actions.rename)
+      actions.rename(id);
   });
-  QAction *fork = menu->addAction(QStringLiteral("Fork"), this,
-                                  [this, target] {
-    if (nodeActions.fork)
-      nodeActions.fork(target);
+  QAction *fork = menu->addAction(QStringLiteral("Fork"), this, [this, id] {
+    if (actions.fork)
+      actions.fork(id);
   });
   QAction *archive =
-      menu->addAction(archived ? QStringLiteral("Unarchive")
-                               : QStringLiteral("Archive"),
-                      this, [this, target, archived] {
-                        if (archived) {
-                          if (nodeActions.unarchive)
-                            nodeActions.unarchive(target);
-                        } else if (nodeActions.archive) {
-                          nodeActions.archive(target);
-                        }
+      menu->addAction(thread->archived ? QStringLiteral("Unarchive")
+                                       : QStringLiteral("Archive"),
+                      this, [this, id] {
+                        if (actions.toggleArchive)
+                          actions.toggleArchive(id);
                       });
   menu->addSeparator();
-  QAction *remove = menu->addAction(QStringLiteral("Delete"), this,
-                                    [this, target] {
-    if (nodeActions.remove)
-      nodeActions.remove(target);
+  QAction *remove = menu->addAction(QStringLiteral("Delete"), this, [this, id] {
+    if (actions.remove)
+      actions.remove(id);
   });
   reload->setEnabled(providerReady);
   rename->setEnabled(canControl);

@@ -596,6 +596,9 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
     for (nodegraph::NodeRef &prompt : materializedPrompts)
       if (!promptMaterializedAction_(std::move(prompt)))
         break;
+  if (visualChange)
+    setProperty("graphRefreshPasses",
+                property("graphRefreshPasses").toULongLong() + 1);
   return visualChange;
 }
 

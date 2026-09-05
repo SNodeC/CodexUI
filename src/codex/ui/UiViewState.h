@@ -19,7 +19,6 @@ namespace codexui::codex::ui {
 // sorting, and optimistic rows deliberately remain local to that renderer.
 struct ThreadListRow {
   std::string id;
-  nodegraph::NodeRef target;
   std::string title;
   std::string cwd;
   std::string status;

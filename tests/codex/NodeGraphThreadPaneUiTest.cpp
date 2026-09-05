@@ -19,7 +19,7 @@ bool require(bool condition, const char *message) {
   return false;
 }
 
-bool selectedChildRetainsRootAndExactTarget() {
+bool selectedChildRetainsRootAndCanonicalIdentity() {
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef root;
   nodegraph::NodeRef child;
@@ -47,10 +47,10 @@ bool selectedChildRetainsRootAndExactTarget() {
 
   middle::ThreadPane pane;
   pane.resize(300, 500);
-  nodegraph::NodeRef selected;
-  middle::ThreadPane::NodeActions actions;
-  actions.select = [&](const nodegraph::NodeRef &target) { selected = target; };
-  pane.setNodeActions(std::move(actions));
+  std::string selected;
+  middle::ThreadPane::Actions actions;
+  actions.select = [&](const std::string &id) { selected = id; };
+  pane.setActions(std::move(actions));
   pane.refresh(*snapshot);
   pane.show();
   QApplication::processEvents();
@@ -62,11 +62,11 @@ bool selectedChildRetainsRootAndExactTarget() {
     return false;
   list->setCurrentRow(0);
   QApplication::processEvents();
-  selected.reset();
+  selected.clear();
   list->setCurrentRow(1);
   QApplication::processEvents();
-  return require(selected == child,
-                 "thread UI reconstructed or discarded the exact NodeRef") &&
+  return require(selected == child->id().canonical,
+                 "thread UI changed the canonical action identity") &&
          require(list->item(0)->data(Qt::UserRole).toString() ==
                      QStringLiteral("root"),
                  "selecting a child removed its root row");
@@ -77,7 +77,7 @@ bool selectedChildRetainsRootAndExactTarget() {
 
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
-  if (!codexui::codex::selectedChildRetainsRootAndExactTarget())
+  if (!codexui::codex::selectedChildRetainsRootAndCanonicalIdentity())
     return EXIT_FAILURE;
   std::cout << "NodeGraph ThreadPane UI tests passed\n";
   return EXIT_SUCCESS;

@@ -359,7 +359,7 @@ if(BUILD_TESTING)
 
     qt_add_executable(
         codexui-application-layout-test
-        tests/codex/ApplicationLayoutTest.cpp
+        tests/codex/EstablishedUiUxTest.cpp
         src/codex/DiffViewer.cpp
         src/codex/DiffViewer.h
         src/codex/GitDiffProvider.cpp

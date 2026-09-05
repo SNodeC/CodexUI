@@ -177,13 +177,13 @@ bool preservesThreadRootsAndExactChildTargets() {
                  "selected child identity was lost") &&
          require(result->roots.size() == 2,
                  "root or unreachable paged thread disappeared") &&
-         require(result->roots[0].target == root,
-                 "canonical root NodeRef changed") &&
+         require(result->roots[0].id == root->id().canonical,
+                 "canonical root identity changed") &&
          require(result->roots[0].children.size() == 1,
                  "child hierarchy was flattened") &&
-         require(result->roots[0].children[0].target == child,
-                 "child action target was reconstructed") &&
-         require(result->roots[1].target == orphan,
+         require(result->roots[0].children[0].id == child->id().canonical,
+                 "canonical child identity changed") &&
+         require(result->roots[1].id == orphan->id().canonical,
                  "unreachable canonical thread was hidden");
 }
 

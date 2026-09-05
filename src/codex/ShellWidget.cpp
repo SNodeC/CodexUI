@@ -176,6 +176,14 @@ bool conversationAffected(const nodegraph::GraphChanged &change,
     return true;
   if (!selectedThread)
     return false;
+  // Removal intentionally erases ancestry and addressing fields before Qt is
+  // notified. Conservatively reconcile the selected conversation so no
+  // retired card reference can survive acknowledgement.
+  if (std::ranges::any_of(change.removed, [](const auto &node) {
+        return node && (node->id().kind == nodegraph::NodeKind::Turn ||
+                        node->id().kind == nodegraph::NodeKind::Item);
+      }))
+    return true;
   constexpr std::size_t MaximumFilteredNodes = 64;
   if (change.affected.size() + change.removed.size() > MaximumFilteredNodes)
     return true;
@@ -902,6 +910,8 @@ struct ShellWidget::Impl final {
   void runGraphBinding();
   void bindGraphPanes(nodegraph::NodeRef selectedThread);
   void refreshInspector();
+  void schedulePaneCommit(bool immediate = false);
+  void commitPendingPanes();
   void handleGraphChanged(const nodegraph::GraphChanged &change);
   void handleUiEffect(const nodegraph::UiEffect &effect);
   void reconcileOptimisticCreation(const nodegraph::GraphChanged &change);
@@ -916,6 +926,8 @@ struct ShellWidget::Impl final {
   [[nodiscard]] bool sendRuntimeAction(nodegraph::RuntimeAction action,
                                        QString rejection);
   [[nodiscard]] nodegraph::NodeRef activeTurn() const;
+  [[nodiscard]] nodegraph::NodeRef
+  threadById(const std::string &id, bool *busy = nullptr) const;
   [[nodiscard]] std::optional<PendingGraphRequest>
   pendingRequest(const std::string &requestKey = {}, bool *busy = nullptr);
   void hydrateSelectedThreadIfNeeded(nodegraph::NodeRef thread);
@@ -951,6 +963,11 @@ struct ShellWidget::Impl final {
   bool graphPanesBound = false;
   bool graphBindingScheduled = false;
   bool inspectorRefreshScheduled = false;
+  bool paneCommitScheduled = false;
+  bool pendingThreadPane = false;
+  bool pendingConversation = false;
+  bool pendingInspector = false;
+  bool pendingChrome = false;
   bool draftSelectionScheduled = false;
   bool graphFallbackScheduled = false;
   unsigned draftSelectionRetriesRemaining = 0;
@@ -1150,19 +1167,21 @@ void ShellWidget::Impl::buildUi() {
 }
 
 void ShellWidget::Impl::connectUi() {
-  middle::ThreadPane::Controls threadControls;
-  threadControls.newThread = [this] { beginNewThreadDialog(); };
-  threadControls.refresh = [this] {
+  middle::ThreadPane::Actions threadActions;
+  threadActions.newThread = [this] { beginNewThreadDialog(); };
+  threadActions.refresh = [this] {
     static_cast<void>(sendRuntimeAction(
         {nodegraph::RuntimeActionKind::RefreshThreads},
         QStringLiteral("Thread refresh was not admitted; try again.")));
   };
-  threadControls.hide = [this] { middleRegion->showSidebar(false); };
-  middleRegion->threads().setControls(std::move(threadControls));
-
-  middle::ThreadPane::NodeActions threadNodeActions;
-  threadNodeActions.select = [this](const nodegraph::NodeRef &thread) {
-    if (!thread || thread->id().kind != nodegraph::NodeKind::Thread)
+  threadActions.hide = [this] { middleRegion->showSidebar(false); };
+  threadActions.select = [this](const std::string &id) {
+    if (id == DraftThreadId && newThreadDraft) {
+      render();
+      return;
+    }
+    const nodegraph::NodeRef thread = threadById(id);
+    if (!thread)
       return;
     if (!creationInFlight && !optimisticCreationThreadId.empty()) {
       middleRegion->threads().confirmOptimisticThread(
@@ -1176,37 +1195,52 @@ void ShellWidget::Impl::connectUi() {
     hydrateSelectedThreadIfNeeded(thread);
     render();
   };
-  threadNodeActions.reload = [this](const nodegraph::NodeRef &thread) {
+  threadActions.reload = [this](const std::string &id) {
+    const nodegraph::NodeRef thread = threadById(id);
+    if (!thread)
+      return;
     nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Reload};
     static_cast<void>(sendNodeAction(
         std::move(action),
         QStringLiteral("Thread reload was not admitted; try again.")));
   };
-  threadNodeActions.rename = [this](const nodegraph::NodeRef &thread) {
-    renameThreadDialog(thread);
+  threadActions.rename = [this](const std::string &id) {
+    if (const nodegraph::NodeRef thread = threadById(id))
+      renameThreadDialog(thread);
   };
-  threadNodeActions.fork = [this](const nodegraph::NodeRef &thread) {
+  threadActions.fork = [this](const std::string &id) {
+    const nodegraph::NodeRef thread = threadById(id);
+    if (!thread)
+      return;
     nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Fork};
     static_cast<void>(sendNodeAction(
         std::move(action),
         QStringLiteral("Thread fork was not admitted; try again.")));
   };
-  threadNodeActions.archive = [this](const nodegraph::NodeRef &thread) {
-    nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Archive};
+  threadActions.toggleArchive = [this](const std::string &id) {
+    const nodegraph::NodeRef thread = threadById(id);
+    if (!thread)
+      return;
+    bool archived = false;
+    if (auto read = session.nodeGraph().tryRead())
+      archived = graphBool(graphField(*read->state(thread), "archived"));
+    else {
+      showNotice(QStringLiteral(
+          "Thread state is busy; no archive action was sent."));
+      return;
+    }
+    nodegraph::NodeAction action{
+        thread, archived ? nodegraph::NodeActionKind::Unarchive
+                         : nodegraph::NodeActionKind::Archive};
     static_cast<void>(sendNodeAction(
         std::move(action),
         QStringLiteral("Archive request was not admitted; try again.")));
   };
-  threadNodeActions.unarchive = [this](const nodegraph::NodeRef &thread) {
-    nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Unarchive};
-    static_cast<void>(sendNodeAction(
-        std::move(action),
-        QStringLiteral("Unarchive request was not admitted; try again.")));
+  threadActions.remove = [this](const std::string &id) {
+    if (const nodegraph::NodeRef thread = threadById(id))
+      confirmDeleteThread(thread);
   };
-  threadNodeActions.remove = [this](const nodegraph::NodeRef &thread) {
-    confirmDeleteThread(thread);
-  };
-  middleRegion->threads().setNodeActions(std::move(threadNodeActions));
+  middleRegion->threads().setActions(std::move(threadActions));
 
   middle::ComposerPane::Actions composerActions;
   composerActions.submit = [this](QString prompt,
@@ -1372,6 +1406,11 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
     static_cast<void>(middleRegion->conversation().reconcile({}));
   }
   refreshInspector();
+  // The immediate atomic bind already represents the newest graph state.
+  // Any frame-coalesced work queued for the previous selection is obsolete.
+  pendingThreadPane = false;
+  pendingConversation = false;
+  pendingInspector = false;
 }
 
 void ShellWidget::Impl::refreshInspector() {
@@ -1390,6 +1429,77 @@ void ShellWidget::Impl::refreshInspector() {
     inspectorRefreshScheduled = false;
     refreshInspector();
   });
+}
+
+void ShellWidget::Impl::schedulePaneCommit(bool immediate) {
+  if (paneCommitScheduled)
+    return;
+  paneCommitScheduled = true;
+  const auto token = alive;
+  QTimer::singleShot(immediate ? 0 : 16, Qt::PreciseTimer, owner,
+                     [this, token] {
+                       if (!*token)
+                         return;
+                       paneCommitScheduled = false;
+                       commitPendingPanes();
+                     });
+}
+
+void ShellWidget::Impl::commitPendingPanes() {
+  bool retry = false;
+  if (pendingThreadPane) {
+    if (auto threads = uiAdapter.threads(boundGraphThread)) {
+      pendingThreadPane = false;
+      ++threadPaneRoutes;
+      owner->setProperty("threadPaneRoutes",
+                         static_cast<qulonglong>(threadPaneRoutes));
+      middleRegion->threads().refresh(*threads);
+      if (newThreadDraft)
+        scheduleDraftSelection();
+    } else {
+      retry = true;
+    }
+  }
+  if (pendingConversation) {
+    if (!boundGraphThread) {
+      pendingConversation = false;
+      static_cast<void>(middleRegion->conversation().reconcile({}));
+    } else if (auto snapshot = uiAdapter.conversation(
+                   boundGraphThread,
+                   std::numeric_limits<std::size_t>::max(),
+                   {middleRegion->conversation()
+                        .presentationOptions()
+                        .showReasoning,
+                    middleRegion->conversation()
+                        .presentationOptions()
+                        .showCodexUpdates})) {
+      pendingConversation = false;
+      ++conversationRoutes;
+      owner->setProperty("conversationRoutes",
+                         static_cast<qulonglong>(conversationRoutes));
+      static_cast<void>(middleRegion->conversation().reconcile(*snapshot));
+    } else {
+      retry = true;
+    }
+  }
+  if (pendingInspector) {
+    if (auto snapshot = uiAdapter.inspector(boundGraphThread)) {
+      pendingInspector = false;
+      ++inspectorRoutes;
+      owner->setProperty("inspectorRoutes",
+                         static_cast<qulonglong>(inspectorRoutes));
+      middleRegion->inspector().refresh(*snapshot);
+    } else {
+      retry = true;
+    }
+  }
+  if (pendingChrome) {
+    pendingChrome = false;
+    render();
+  }
+  if (retry || pendingThreadPane || pendingConversation || pendingInspector ||
+      pendingChrome)
+    schedulePaneCommit();
 }
 
 void ShellWidget::Impl::handleGraphChanged(
@@ -1414,42 +1524,15 @@ void ShellWidget::Impl::handleGraphChanged(
       std::ranges::any_of(change.affected, [](const auto &node) {
         return node && node->id().kind == nodegraph::NodeKind::Connection;
       });
-  // These calls synchronously release every removed node's QWidget
-  // attachment before FrontendSession acknowledges the notification.
   const bool updateThreads = threadPaneAffected(change, session.nodeGraph());
-  if (updateThreads) {
-    ++threadPaneRoutes;
-    owner->setProperty("threadPaneRoutes",
-                       static_cast<qulonglong>(threadPaneRoutes));
-    if (auto threads = uiAdapter.threads(boundGraphThread))
-      middleRegion->threads().refresh(*threads);
-    else
-      middleRegion->threads().detachRemovedNodes(change.removed);
-  } else {
-    middleRegion->threads().detachRemovedNodes(change.removed);
-  }
-  if (conversationAffected(change, session.nodeGraph(), boundGraphThread)) {
-    ++conversationRoutes;
-    owner->setProperty("conversationRoutes",
-                       static_cast<qulonglong>(conversationRoutes));
-    if (boundGraphThread) {
-      if (auto snapshot = uiAdapter.conversation(
-              boundGraphThread, std::numeric_limits<std::size_t>::max(),
-              {middleRegion->conversation()
-                   .presentationOptions()
-                   .showReasoning,
-               middleRegion->conversation()
-                   .presentationOptions()
-                   .showCodexUpdates}))
-        static_cast<void>(middleRegion->conversation().reconcile(*snapshot));
-    }
-  }
-  if (inspectorAffected(change, session.nodeGraph(), boundGraphThread)) {
-    ++inspectorRoutes;
-    owner->setProperty("inspectorRoutes",
-                       static_cast<qulonglong>(inspectorRoutes));
-    refreshInspector();
-  }
+  pendingThreadPane = pendingThreadPane || updateThreads;
+  pendingConversation =
+      pendingConversation ||
+      conversationAffected(change, session.nodeGraph(), boundGraphThread);
+  pendingInspector =
+      pendingInspector ||
+      inspectorAffected(change, session.nodeGraph(), boundGraphThread);
+  pendingChrome = pendingChrome || updateChrome;
   if (change.rescanRequired ||
       containsKind(change, {nodegraph::NodeKind::Thread}))
     reconcileOptimisticCreation(change);
@@ -1466,6 +1549,14 @@ void ShellWidget::Impl::handleGraphChanged(
     bindGraphPanes({});
   }
 
+  // Retirement must not outlive presentation references. Ordinary state
+  // traffic is merged to one old-UI reconciliation per display interval.
+  if (!change.removed.empty())
+    commitPendingPanes();
+  else if (pendingThreadPane || pendingConversation || pendingInspector ||
+           pendingChrome)
+    schedulePaneCommit();
+
   const bool selectedChanged = !graphPanesBound || change.rescanRequired ||
       (!boundGraphThread && !selectedGraphThreadId.empty() &&
        std::ranges::any_of(change.affected, [this](const auto &node) {
@@ -1478,9 +1569,7 @@ void ShellWidget::Impl::handleGraphChanged(
       });
   if (selectedChanged)
     scheduleGraphBinding();
-  if (updateThreads && newThreadDraft)
-    scheduleDraftSelection();
-  if (updateChrome || removedBoundThread || optimisticCreationWasActive ||
+  if (removedBoundThread || optimisticCreationWasActive ||
       !optimisticCreationThreadId.empty())
     scheduleRender();
 }
@@ -1837,6 +1926,23 @@ nodegraph::NodeRef ShellWidget::Impl::activeTurn() const {
       activeStatus(*read->state(indexed)))
     return indexed;
   return {};
+}
+
+nodegraph::NodeRef
+ShellWidget::Impl::threadById(const std::string &id, bool *busy) const {
+  if (busy)
+    *busy = false;
+  if (id.empty() || id == DraftThreadId)
+    return {};
+  auto read = session.nodeGraph().tryRead();
+  if (!read) {
+    if (busy)
+      *busy = true;
+    return {};
+  }
+  const nodegraph::NodeRef thread =
+      read->find({nodegraph::NodeKind::Thread, id});
+  return thread && !read->removed(thread) ? thread : nodegraph::NodeRef{};
 }
 
 std::optional<PendingGraphRequest>
@@ -2225,6 +2331,8 @@ void ShellWidget::Impl::beginNewThreadDialog() {
       draft.name.trimmed().isEmpty() ? "New thread"
                                      : utf8(draft.name.trimmed()),
       utf8(draft.workspace));
+  if (auto threads = uiAdapter.threads({}))
+    middleRegion->threads().refresh(*threads);
   scheduleDraftSelection();
   middleRegion->composer().clearDraft();
   middleRegion->composer().promptEditor()->setFocus();
@@ -2302,8 +2410,9 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
   }
 
   bool admitted = false;
-  if (nodegraph::NodeRef target =
-          middleRegion->threads().visiblySelectedThread()) {
+  const std::string visibleThreadId =
+      middleRegion->threads().visiblySelectedThreadId();
+  if (nodegraph::NodeRef target = threadById(visibleThreadId)) {
     QString graphRejection;
     if (auto read = session.nodeGraph().tryRead()) {
       if (read->removed(target)) {
@@ -2350,8 +2459,7 @@ bool ShellWidget::Impl::submitPrompt(QString prompt,
     admitted = sendNodeAction(
         std::move(action),
         QStringLiteral("Your message was not sent; the worker queue is full."));
-  } else if (middleRegion->threads().visiblySelectedThreadId() ==
-                 DraftThreadId &&
+  } else if (visibleThreadId == DraftThreadId &&
              newThreadDraft) {
     nodegraph::RuntimeAction action;
     action.kind = nodegraph::RuntimeActionKind::CreateThread;

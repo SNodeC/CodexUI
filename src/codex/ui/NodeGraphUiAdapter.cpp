@@ -894,7 +894,6 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread) const {
     if (!state)
       return row;
     row.id = node->id().canonical;
-    row.target = node;
     row.title = graphString(graphField(*state, "name"));
     if (row.title.empty())
       row.title = graphString(graphField(*state, "preview"));
