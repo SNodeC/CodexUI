@@ -11,6 +11,7 @@
 #include <QColor>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFont>
@@ -31,6 +32,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QToolTip>
+#include <QUrl>
 #include <QVariantAnimation>
 #include <QWheelEvent>
 
@@ -55,6 +57,27 @@ bool expect(bool condition, const char *message) {
 }
 
 std::string utf8(const QString &value) { return value.toUtf8().toStdString(); }
+
+class DesktopUrlCapture final : public QObject {
+  Q_OBJECT
+
+public:
+  std::vector<QUrl> urls;
+
+public slots:
+  void open(const QUrl &url) { urls.push_back(url); }
+};
+
+class ScopedFileUrlHandler final {
+public:
+  explicit ScopedFileUrlHandler(DesktopUrlCapture &capture) {
+    QDesktopServices::setUrlHandler(QStringLiteral("file"), &capture, "open");
+  }
+
+  ~ScopedFileUrlHandler() {
+    QDesktopServices::unsetUrlHandler(QStringLiteral("file"));
+  }
+};
 
 class LayoutRequestProbe final : public QObject {
 public:
@@ -1946,6 +1969,8 @@ bool testCardCopyControls() {
 bool testMutableCardsAndCommandOutput() {
   const QString originalStyleSheet = qApp->styleSheet();
   qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
+  DesktopUrlCapture openedFiles;
+  ScopedFileUrlHandler fileUrlHandler(openedFiles);
   const std::string thread = "card-thread";
   TurnGraphSpec section{"turn:cards", "turn", {}};
   section.cards = {
@@ -1967,7 +1992,9 @@ bool testMutableCardsAndCommandOutput() {
        thread, "turn", "reasoning", ReasoningData{"summary"}},
       {AuthoritativeItemKey{thread, "turn", "files"}, CardKind::FileChanges,
        thread, "turn", "files",
-       FileChangesData{"inProgress", {{"src/card.cpp", "update", 2, 1}}}},
+       FileChangesData{"inProgress",
+                       {{"src/card.cpp", "update", 2, 1}},
+                       "/workspace"}},
       {AuthoritativeItemKey{thread, "turn", "plan"}, CardKind::Plan, thread,
        "turn", "plan",
        PlanData{"Keep the card compact",
@@ -2096,11 +2123,13 @@ bool testMutableCardsAndCommandOutput() {
       CardKey{AuthoritativeItemKey{thread, "turn", "files"}})];
   auto *filesStatus =
       filesCard->findChild<QLabel *>(QStringLiteral("fileChangesStatus"));
+  auto *filesList =
+      filesCard->findChild<QLabel *>(QStringLiteral("fileChangesList"));
   auto *planCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "plan"}})];
   result &= expect(
       containsLabelText(filesCard,
-                        QStringLiteral("src/card.cpp  ·  Update  +2 −1")) &&
+                        QStringLiteral("src/card.cpp")) &&
           containsLabelText(filesCard, QStringLiteral("+2 −1")) &&
           filesStatus &&
           filesStatus->font().capitalization() == QFont::MixedCase &&
@@ -2108,6 +2137,14 @@ bool testMutableCardsAndCommandOutput() {
           filesStatus->property("tone").toString() == QStringLiteral("active"),
       "file-change cards keep counts below and expose status in the "
       "header");
+  if (filesList)
+    QMetaObject::invokeMethod(filesList, "linkActivated", Qt::DirectConnection,
+                              Q_ARG(QString, QStringLiteral("codexui-file:0")));
+  result &= expect(
+      openedFiles.urls.size() == 1 && openedFiles.urls.back().isLocalFile() &&
+          openedFiles.urls.back().toLocalFile() ==
+              QStringLiteral("/workspace/src/card.cpp"),
+      "a relative changed-file link opens from the canonical thread workspace");
   result &= expect(
       containsLabelText(planCard, QStringLiteral("Keep the card compact")) &&
           containsLabelText(planCard, QStringLiteral("✓ Inspect data")) &&
@@ -2912,6 +2949,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
   const AuthoritativeItemKey reasoningKey{thread, "turn", "reasoning"};
   const AuthoritativeItemKey firstCommandKey{thread, "turn", "command-1"};
   const AuthoritativeItemKey firstImageKey{thread, "turn", "image-1"};
+  const AuthoritativeItemKey firstFileChangesKey{thread, "turn", "files-1"};
   ConversationGraphSpec snapshot;
   snapshot.threadId = thread;
   snapshot.sections.push_back(
@@ -2928,7 +2966,11 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
          CommandExecutionData{"printf first", {}, "completed", {}, 0}},
         {firstImageKey, CardKind::ImageGeneration, thread, "turn", "image-1",
          ImageGenerationData{"/missing/image-1.png", "completed",
-                             "First image"}}}});
+                             "First image"}},
+        {firstFileChangesKey, CardKind::FileChanges, thread, "turn", "files-1",
+         FileChangesData{"completed",
+                         {{"src/first.cpp", "update", 2, 1}},
+                         "/workspace"}}}});
   const auto containsText = [](QWidget *widget, const QString &needle) {
     return std::ranges::any_of(
         widget->findChildren<QLabel *>(),
@@ -2936,7 +2978,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
   };
 
   ConversationView view;
-  view.setPresentationOptions({false, true, true, true});
+  view.setPresentationOptions({false, true, true, true, true});
   view.resize(700, 700);
   view.show();
   bool result = expect(applyConversation(view, snapshot),
@@ -2945,7 +2987,8 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
     return card(view, stableKey(updateKey)) &&
            card(view, stableKey(finalKey)) &&
            card(view, stableKey(firstCommandKey)) &&
-           card(view, stableKey(firstImageKey));
+           card(view, stableKey(firstImageKey)) &&
+           card(view, stableKey(firstFileChangesKey));
   });
   QPointer<ConversationCard> update = card(view, stableKey(updateKey));
   QPointer<ConversationCard> final = card(view, stableKey(finalKey));
@@ -2953,17 +2996,20 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
   QPointer<ConversationCard> firstCommand =
       card(view, stableKey(firstCommandKey));
   QPointer<ConversationCard> firstImage = card(view, stableKey(firstImageKey));
+  QPointer<ConversationCard> firstFileChanges =
+      card(view, stableKey(firstFileChangesKey));
   result &= expect(update && final && reasoning && firstCommand && firstImage &&
-                       !update->isHidden() && !final->isHidden() &&
-                       reasoning->isHidden() &&
+                       firstFileChanges && !update->isHidden() &&
+                       !final->isHidden() && reasoning->isHidden() &&
                        !firstCommand->isCollapsed() &&
-                       !firstImage->isCollapsed(),
+                       !firstImage->isCollapsed() &&
+                       !firstFileChanges->isCollapsed(),
                    "default presentation retains hidden reasoning and opens "
-                   "commands and images");
-  if (!update || !final || !firstCommand || !firstImage)
+                   "commands, images, and file changes");
+  if (!update || !final || !firstCommand || !firstImage || !firstFileChanges)
     return false;
 
-  view.setPresentationOptions({false, false, false, false});
+  view.setPresentationOptions({false, false, false, false, false});
   spin();
   result &= expect(update && update->isHidden() && reasoning &&
                        reasoning->isHidden() && final && !final->isHidden() &&
@@ -2977,6 +3023,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
       "Reasoning updated while hidden";
   const AuthoritativeItemKey secondCommandKey{thread, "turn", "command-2"};
   const AuthoritativeItemKey secondImageKey{thread, "turn", "image-2"};
+  const AuthoritativeItemKey secondFileChangesKey{thread, "turn", "files-2"};
   snapshot.sections.front().cards.push_back(
       {secondCommandKey, CardKind::CommandExecution, thread, "turn",
        "command-2",
@@ -2985,26 +3032,35 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
       {secondImageKey, CardKind::ImageGeneration, thread, "turn", "image-2",
        ImageGenerationData{"/missing/image-2.png", "completed",
                            "Second image"}});
+  snapshot.sections.front().cards.push_back(
+      {secondFileChangesKey, CardKind::FileChanges, thread, "turn", "files-2",
+       FileChangesData{"completed",
+                       {{"src/second.cpp", "add", 1, 0}},
+                       "/workspace"}});
   result &= expect(applyConversation(view, snapshot),
                    "hidden cards and a new command accept updates");
   result &= spinUntil([&] {
     return card(view, stableKey(secondCommandKey)) &&
-           card(view, stableKey(secondImageKey));
+           card(view, stableKey(secondImageKey)) &&
+           card(view, stableKey(secondFileChangesKey));
   });
   QPointer<ConversationCard> secondCommand =
       card(view, stableKey(secondCommandKey));
   QPointer<ConversationCard> secondImage =
       card(view, stableKey(secondImageKey));
+  QPointer<ConversationCard> secondFileChanges =
+      card(view, stableKey(secondFileChangesKey));
   result &= expect(update && update->isHidden() && reasoning &&
                        reasoning->isHidden() && secondCommand &&
                        secondCommand->isCollapsed() && secondImage &&
-                       secondImage->isCollapsed(),
-                   "filtered nodes remain hidden while new commands and images "
-                   "use current initial preferences");
+                       secondImage->isCollapsed() && secondFileChanges &&
+                       secondFileChanges->isCollapsed(),
+                   "filtered nodes remain hidden while new commands, images, "
+                   "and file changes use current initial preferences");
 
   result &= expect(setFolded(firstCommand, true),
                    "an existing command records a user-owned collapsed state");
-  view.setPresentationOptions({true, true, true, true});
+  view.setPresentationOptions({true, true, true, true, true});
   result &= spinUntil([&] {
     return card(view, stableKey(updateKey)) &&
            card(view, stableKey(reasoningKey));
@@ -3019,26 +3075,42 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
           firstCommand && firstCommand->isCollapsed() && secondCommand &&
           secondCommand->isCollapsed() && firstImage &&
           !firstImage->isCollapsed() && secondImage &&
-          secondImage->isCollapsed(),
+          secondImage->isCollapsed() && firstFileChanges &&
+          !firstFileChanges->isCollapsed() && secondFileChanges &&
+          secondFileChanges->isCollapsed(),
       "restoring visibility reveals latest content and preserves existing "
       "folds");
 
   const AuthoritativeItemKey thirdCommandKey{thread, "turn", "command-3"};
+  const AuthoritativeItemKey thirdFileChangesKey{thread, "turn", "files-3"};
   snapshot.sections.front().cards.push_back(
       {thirdCommandKey, CardKind::CommandExecution, thread, "turn", "command-3",
        CommandExecutionData{"printf third", {}, "completed", {}, 0}});
+  snapshot.sections.front().cards.push_back(
+      {thirdFileChangesKey, CardKind::FileChanges, thread, "turn", "files-3",
+       FileChangesData{"completed",
+                       {{"src/third.cpp", "update", 1, 1}},
+                       "/workspace"}});
   result &= expect(applyConversation(view, snapshot),
                    "a command arrives after restoring expanded-by-default");
   result &= spinUntil(
-      [&] { return card(view, stableKey(thirdCommandKey)) != nullptr; });
+      [&] {
+        return card(view, stableKey(thirdCommandKey)) != nullptr &&
+               card(view, stableKey(thirdFileChangesKey)) != nullptr;
+      });
   QPointer<ConversationCard> thirdCommand =
       card(view, stableKey(thirdCommandKey));
+  QPointer<ConversationCard> thirdFileChanges =
+      card(view, stableKey(thirdFileChangesKey));
   result &=
       expect(thirdCommand && !thirdCommand->isCollapsed() && firstCommand &&
                  firstCommand->isCollapsed() && secondCommand &&
-                 secondCommand->isCollapsed(),
-             "only newly appearing commands use the changed initial folding "
-             "preference");
+                 secondCommand->isCollapsed() && thirdFileChanges &&
+                 !thirdFileChanges->isCollapsed() && firstFileChanges &&
+                 !firstFileChanges->isCollapsed() && secondFileChanges &&
+                 secondFileChanges->isCollapsed(),
+             "only newly appearing commands and file changes use the changed "
+             "initial folding preference");
   return result;
 }
 
@@ -6915,6 +6987,8 @@ bool testPendingPromptAnimation() {
 }
 
 bool testMessageImagePresentation() {
+  DesktopUrlCapture openedImages;
+  ScopedFileUrlHandler fileUrlHandler(openedImages);
   QTemporaryDir directory;
   const QString path = directory.filePath(QStringLiteral("sample.png"));
   const QString portraitPath =
@@ -7007,20 +7081,10 @@ bool testMessageImagePresentation() {
     QApplication::sendEvent(thumbnail, &activate);
     spin();
   }
-  QWidget *viewer = nullptr;
-  for (QWidget *candidate : QApplication::topLevelWidgets())
-    if (candidate->objectName() == QStringLiteral("messageImageViewer"))
-      viewer = candidate;
-  result &= expect(viewer && viewer->isVisible(),
-                   "keyboard activation opens the non-modal image viewer");
-  const auto *viewerImage = viewer ? viewer->findChild<QLabel *>(QStringLiteral(
-                                         "messageImageViewerImage"))
-                                   : nullptr;
-  result &= expect(viewerImage && !viewerImage->pixmap().isNull(),
-                   "the shown viewer contains a fitted image pixmap");
-  if (viewer)
-    viewer->close();
-  spin();
+  result &= expect(
+      openedImages.urls.size() == 1 &&
+          openedImages.urls.back() == QUrl::fromLocalFile(path),
+      "keyboard activation opens the image with the desktop file handler");
 
   const QString missingPath = directory.filePath(QStringLiteral("missing.png"));
   QPointer<QLabel> retainedGuard(retainedThumbnail);
@@ -7063,6 +7127,7 @@ bool testMessageImagePresentation() {
   card->apply(message);
   thumbnail =
       card->findChild<QLabel *>(QStringLiteral("messageImageThumbnail"));
+  const std::size_t openedBeforeMouse = openedImages.urls.size();
   if (thumbnail) {
     const QPointF local(thumbnail->rect().center());
     QMouseEvent press(QEvent::MouseButtonPress, local, local,
@@ -7071,12 +7136,8 @@ bool testMessageImagePresentation() {
     QApplication::sendEvent(thumbnail, &press);
     spin();
   }
-  viewer = nullptr;
-  for (QWidget *candidate : QApplication::topLevelWidgets())
-    if (candidate->objectName() == QStringLiteral("messageImageViewer") &&
-        candidate->isVisible())
-      viewer = candidate;
-  result &= expect(!viewer, "mouse-down does not open the image viewer");
+  result &= expect(openedImages.urls.size() == openedBeforeMouse,
+                   "mouse-down does not invoke the desktop image viewer");
   if (thumbnail) {
     const QPointF local(thumbnail->rect().center());
     QMouseEvent release(QEvent::MouseButtonRelease, local, local,
@@ -7085,22 +7146,18 @@ bool testMessageImagePresentation() {
     QApplication::sendEvent(thumbnail, &release);
     spin();
   }
-  for (QWidget *candidate : QApplication::topLevelWidgets())
-    if (candidate->objectName() == QStringLiteral("messageImageViewer") &&
-        candidate->isVisible())
-      viewer = candidate;
   delete card;
   spin();
-  result &= expect(viewer && viewer->isVisible(),
-                   "mouse-up opens a viewer that remains independent of its "
-                   "originating card");
-  if (viewer)
-    viewer->close();
-  spin();
+  result &= expect(
+      openedImages.urls.size() == openedBeforeMouse + 1 &&
+          openedImages.urls.back() == QUrl::fromLocalFile(path),
+      "mouse-up invokes the independent desktop image viewer exactly once");
   return result;
 }
 
 bool testGeneratedImagePresentationAndGenericBound() {
+  DesktopUrlCapture openedImages;
+  ScopedFileUrlHandler fileUrlHandler(openedImages);
   QTemporaryDir directory;
   const QString path = directory.filePath(QStringLiteral("generated.png"));
   QImage source(800, 450, QImage::Format_ARGB32_Premultiplied);
@@ -7134,15 +7191,10 @@ bool testGeneratedImagePresentationAndGenericBound() {
     QApplication::sendEvent(thumbnail, &release);
     spin();
   }
-  QWidget *viewer = nullptr;
-  for (QWidget *candidate : QApplication::topLevelWidgets())
-    if (candidate->objectName() == QStringLiteral("messageImageViewer"))
-      viewer = candidate;
-  result &= expect(viewer && viewer->isVisible(),
-                   "generated-image thumbnail opens the shared image viewer");
-  if (viewer)
-    viewer->close();
-  spin();
+  result &= expect(
+      openedImages.urls.size() == 1 &&
+          openedImages.urls.back() == QUrl::fromLocalFile(path),
+      "generated-image thumbnail opens the system-default image viewer");
 
   VisibleCardData viewed{AuthoritativeItemKey{"generated", "turn", "view"},
                          CardKind::ImageGeneration,
@@ -7255,3 +7307,5 @@ int main(int argc, char **argv) {
     std::cout << "Conversation card tests passed\n";
   return result ? 0 : 1;
 }
+
+#include "ConversationCardsTest.moc"

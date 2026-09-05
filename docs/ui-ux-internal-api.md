@@ -58,7 +58,7 @@ concrete graph-cutover requirement.
 | prompt materialization | An admitted local card keeps its `LocalPromptKey` while the authoritative user item arrives; the same widget changes type in place and preserves owner, anchor, focus, and local fold state. | Compatible through a narrow additive callback carrying the exact prompt `NodeRef`; widgets do not inspect graph state. |
 | prompt recovery | A definite/uncertain failed prompt remains visible and restores text/attachments only by explicit user action, without overwriting an existing draft. | Compatible through a narrow additive recovery callback carrying the exact prompt `NodeRef`. |
 | `setEmptyMessage` | Changes only the empty-state text and preserves the current anchor/follow behavior. It does not authorize clearing an existing conversation. | Compatible. Hydration staging decides whether an empty snapshot may be reconciled. |
-| presentation options | Reasoning/Codex-update visibility and initial command/image folding remain local UI preferences; changing them reuses current card widgets and state. | Compatible. The adapter does not reinterpret these preferences. |
+| presentation options | Reasoning/Codex-update visibility and initial command/image/file-change folding remain local UI preferences; changing them reuses current card widgets and state. | Compatible. The adapter does not reinterpret these preferences. |
 | scroll/follow API | `modeForThread`, `isAtBottom`, wheel forwarding, trailing composer space, and local-prompt preparation remain owned by `ConversationView`; each thread retains mode and anchor. | Compatible; old widget implementation is retained. Full mixed-history movie qualification is pending. |
 | `ComposerPane::Actions` | Submit returns admission success; only success clears the draft. Stop, Attach, Accept, Review, and Deny are exact one-shot intentions. | Compatible. Submit/Steer selects the operation from canonical active-turn state and targets the visibly selected thread. |
 | composer state setters | Attention, active turn, submit eligibility, settings eligibility, attachments, and overlay height are effective visible state; repeated values must not rebuild the composer. | Compatible. `setAttentionEnabled(bool)` keeps its original meaning; `setAttentionActionEnabled` is an additive split needed for recoverable review versus provider-actionable buttons. |
@@ -238,9 +238,11 @@ the widget transaction and after every graph guard has been released.
   scroll-state queries used to calculate the history window and action UX.
 - `dispatchingNativeWheel()` prevents recursive event-filter forwarding.
 - `trailingSpaceHeight()` reports the current overlay compensation.
-- `PresentationOptions` has four independent local values:
-  `showReasoning`, `showCodexUpdates`, `commandsInitiallyExpanded`, and
-  `imagesInitiallyExpanded`.
+- `PresentationOptions` has five independent local values:
+  `showReasoning`, `showCodexUpdates`, `commandsInitiallyExpanded`,
+  `imagesInitiallyExpanded`, and `fileChangesInitiallyExpanded`. Initial-fold
+  values are consulted only while materializing a new matching card; retained
+  card-local disclosure state always wins.
 
 | Method | Parameters / return | Preconditions and observable effect |
 | --- | --- | --- |
@@ -263,6 +265,12 @@ the widget transaction and after every graph guard has been released.
 Cards remain the established specialized renderers. They do not read the
 graph. Their `VisibleCardData` is the entire canonical presentation input.
 
+- `ConversationCard(data, parent, commandInitiallyCollapsed,
+  imageInitiallyCollapsed, fileChangesInitiallyCollapsed)` creates exactly
+  one specialized existing card widget. The three initial-fold values are
+  consulted only for their matching kinds; QObject parentage owns the widget.
+- `createConversationCard(...)` is the equivalent allocation helper used by
+  `ConversationView`; it introduces no registry or alternate ownership.
 - `data()` returns the last applied DTO for identity/action comparison.
 - `canApply(data)` reports whether the existing concrete card can represent a
   new DTO. It permits the intentional local-prompt to user-message handoff.
@@ -287,6 +295,12 @@ graph. Their `VisibleCardData` is the entire canonical presentation input.
   compatible card reconstruction.
 - `foldRequested` reports a local fold gesture. `recoveryRequested` reports
   explicit recovery; neither signal performs graph work directly.
+
+`FileChangesData::cwd` carries the owning thread workspace solely for resolving
+a relative displayed path after an explicit link gesture. It is presentation
+input, not another workspace authority. File links and `ImageThumbnail`
+activation call the platform desktop URL handler after all graph access; no
+internal image dialog, callback registry, or file-opening cache is retained.
 
 `ContentSizedTextView::setContent` and `CommandOutputView::setOutput` return
 whether effective content/geometry changed. `CommandOutputView` alone owns its
@@ -709,7 +723,7 @@ exact retained-card path and do not traverse the loaded history.
 The later append/completion correction is qualified separately under
 `../../build/codexui-adapter-qualification/capture/scroll-lag-live/`.
 `final-two-pass-all-card-live.mp4` records the complete application at 60 fps
-with all four presentation controls checked. It repeatedly sweeps the outer
+with the then-current four presentation controls checked. It repeatedly sweeps the outer
 conversation viewport across the Turn/You card, reasoning/update content,
 Agent activity, expanded command output, and final cards while a new command
 arrives, streams, and completes. The exact prompt/command/completion interval

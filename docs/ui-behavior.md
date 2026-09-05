@@ -266,8 +266,10 @@ disclosure chevron: down when expanded and left when collapsed. Title-only
 cards, including Reasoning without a public summary, omit the chevron until
 detail arrives.
 You, Codex, temporary You, Command execution, and Image cards initially render
-expanded; Reasoning, File changes, Agent activity, Plan, and fallback activity
-cards initially render collapsed. A user-selected state survives
+expanded; Reasoning, Agent activity, Plan, and fallback activity cards
+initially render collapsed. File changes default to collapsed, while their
+header preference can make newly materialized cards start expanded. A
+user-selected state survives
 streaming updates, authoritative prompt replacement, and thread switching for
 the lifetime of the CodexUI process.
 
@@ -291,6 +293,13 @@ failure keeps the copy glyph and uses the same local overlay with canonical
 error styling; reduced-motion mode makes the icon transitions immediate
 without suppressing the result.
 
+Each path in a File changes card is a keyboard- and mouse-activatable internal
+link. Absolute paths remain absolute; relative paths are resolved against the
+owning thread's canonical workspace and then handed to the desktop's default
+application. Image-ribbon thumbnails likewise hand their local file URL to the
+desktop's default image viewer. CodexUI does not construct a parallel viewer or
+retain an additional file-opening model.
+
 Message specializations (`steering`, `update`, and `final answer`) use normal
 font weight and sit at the right of the header immediately before Copy. The
 title remains at the left; no separator glyph is rendered.
@@ -303,9 +312,11 @@ mailbox but before the worker can send it, no automatic retry occurs. The
 interaction node retains the authored response and its error so reopening
 Review restores the entered decision, answers, or structured content.
 
-The native and web Conversation headers expose persistent, matching icon-only
-controls for Reasoning visibility, interim Codex-update visibility, and the
-initial folding state of newly appearing Command execution and Image cards. Final Codex
+The native Conversation header exposes persistent icon-only controls for
+Reasoning visibility, interim Codex-update visibility, and the initial folding
+state of newly appearing Command execution, Image, and File changes cards. The
+web header retains its matching controls for the presentation options it
+supports. Final Codex
 answers are never filtered. Visibility is a presentation choice only: filtered
 cards remain as retained graph nodes, continue accepting updates, and reappear
 with their latest content and user-owned folding state. Changing the Command
@@ -328,7 +339,7 @@ independently reviewable change.
 5. **Complete:** inventory card kinds suitable for an initial
    expanded/collapsed control.
 6. **Complete:** inventory card kinds suitable for a show/hide control.
-7. **Pending:** update focused regression coverage and the internal UI API
+7. **Complete:** update focused regression coverage and the internal UI API
    contract for the completed card-polish behavior. Final integration
    qualification is performed separately by the user.
 

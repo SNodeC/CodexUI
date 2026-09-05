@@ -415,6 +415,57 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
       "steering retirement recreated, moved, or reordered its stable card");
 }
 
+bool fileChangesUseCanonicalWorkspace() {
+  nodegraph::NodeGraph graph;
+  NodeRef thread;
+  NodeRef turn;
+  NodeRef changes;
+  {
+    auto write = graph.write();
+    NodeState threadState = state("thread-files");
+    threadState.fields.emplace("cwd", "/workspace/thread");
+    thread = write.upsert({NodeKind::Thread, "thread-files"},
+                          std::move(threadState));
+    turn = write.upsert({NodeKind::Turn, "turn-files"}, state("turn-files"));
+    NodeState changesState = state("files", "fileChange");
+    changesState.fields.emplace(
+        "changes",
+        nodegraph::Value::Array{nodegraph::Value(nodegraph::Value::Object{
+            {"path", "src/file.cpp"}, {"kind", "update"}})});
+    changes = write.upsert({NodeKind::Item, "files"},
+                           std::move(changesState));
+    write.setParent(thread, turn);
+    write.setParent(turn, changes);
+    static_cast<void>(write.finish());
+  }
+
+  ui::NodeGraphUiAdapter adapter(graph);
+  auto snapshot = adapter.conversation(thread, 80, {true, true});
+  if (!require(snapshot && snapshot->sections.size() == 1 &&
+                   snapshot->sections.front().cards.size() == 1,
+               "file changes were not projected from the owning thread"))
+    return false;
+  const auto *inherited = std::get_if<middle::FileChangesData>(
+      &snapshot->sections.front().cards.front().payload);
+  if (!require(inherited && inherited->cwd == "/workspace/thread",
+               "relative file changes did not inherit the thread workspace"))
+    return false;
+
+  {
+    auto write = graph.write();
+    write.setField(changes, "cwd", "/workspace/item");
+    static_cast<void>(write.finish());
+  }
+  auto projected = adapter.card(thread, changes, {true, true});
+  const auto *specific =
+      projected
+          ? std::get_if<middle::FileChangesData>(&projected->payload)
+          : nullptr;
+  return require(specific && specific->cwd == "/workspace/item",
+                 "an item-specific file workspace did not override the "
+                 "thread workspace");
+}
+
 } // namespace
 } // namespace codexui::codex
 
@@ -424,7 +475,8 @@ int main(int argc, char **argv) {
   if (!oldUiConsumesAdapterSnapshotsAtomically() ||
       !pausedViewportKeepsItsPaintedAnchor() ||
       !promptMorphPreservesExactTargetAndWidget() ||
-      !steeringMorphKeepsItsSlotThroughRetirement())
+      !steeringMorphKeepsItsSlotThroughRetirement() ||
+      !fileChangesUseCanonicalWorkspace())
     return EXIT_FAILURE;
   std::cout << "NodeGraph conversation UI tests passed\n";
   return EXIT_SUCCESS;

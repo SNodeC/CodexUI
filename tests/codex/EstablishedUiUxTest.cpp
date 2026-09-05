@@ -13,6 +13,7 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QTextCursor>
+#include <QToolButton>
 
 #include <iostream>
 #include <string>
@@ -185,6 +186,16 @@ bool completeMiddleSurfaceRetainsPaneAndHeadingBehavior() {
   result &= expect(region.findChild<QLabel *>(
                            QStringLiteral("conversationTitle")) != nullptr,
                    "the established conversation heading remains present");
+  auto *fileChangesFolding = region.findChild<QToolButton *>(
+      QStringLiteral("conversationFileChangesFoldingToggle"));
+  result &= expect(
+      fileChangesFolding && fileChangesFolding->isCheckable() &&
+          fileChangesFolding->toolTip().startsWith(
+              QStringLiteral("New file changes cards start ")) &&
+          fileChangesFolding->accessibleName() ==
+              fileChangesFolding->toolTip(),
+      "the Files Changed folding preference matches established header "
+      "control semantics");
   region.showSidebar(false);
   region.showInspector(false);
   QCoreApplication::processEvents();
