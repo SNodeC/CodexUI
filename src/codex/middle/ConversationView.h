@@ -38,6 +38,7 @@ public:
     bool showCodexUpdates = true;
     bool commandsInitiallyExpanded = false;
     bool imagesInitiallyExpanded = false;
+    bool fileChangesInitiallyExpanded = false;
 
     bool operator==(const PresentationOptions &) const = default;
   };

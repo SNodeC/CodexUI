@@ -65,6 +65,7 @@ private:
   QToolButton *updateVisibility = nullptr;
   QToolButton *commandInitialFolding = nullptr;
   QToolButton *imageInitialFolding = nullptr;
+  QToolButton *fileChangesInitialFolding = nullptr;
   QFrame *noticeBar = nullptr;
   QLabel *noticeLabel = nullptr;
   QTimer *noticeTimer = nullptr;

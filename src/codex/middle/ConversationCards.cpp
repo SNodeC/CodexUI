@@ -9,7 +9,7 @@
 #include <QClipboard>
 #include <QColor>
 #include <QDateTime>
-#include <QDialog>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -27,7 +27,6 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
-#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QTextCursor>
@@ -35,6 +34,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QToolTip>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QVariant>
 #include <QVariantAnimation>
@@ -58,7 +58,6 @@ constexpr int PendingAnimationIntervalMilliseconds = 32;
 constexpr qint64 PendingHalfCycleMilliseconds = 850;
 constexpr int ThumbnailMaximumWidth = 280;
 constexpr int ThumbnailMaximumHeight = 180;
-constexpr int ViewerMaximumImageExtent = 4096;
 constexpr qsizetype MaximumGenericActivityCharacters = 4096;
 constexpr int CardHeaderActionSpacing = 4;
 constexpr int CopyMorphDurationMilliseconds = 160;
@@ -84,11 +83,14 @@ QString trimmedTrailingLines(const QString &value) {
 }
 
 bool initiallyCollapsed(CardKind kind, bool commandInitiallyCollapsed,
-                        bool imageInitiallyCollapsed) {
+                        bool imageInitiallyCollapsed,
+                        bool fileChangesInitiallyCollapsed) {
   if (kind == CardKind::CommandExecution)
     return commandInitiallyCollapsed;
   if (kind == CardKind::ImageGeneration)
     return imageInitiallyCollapsed;
+  if (kind == CardKind::FileChanges)
+    return fileChangesInitiallyCollapsed;
   return kind != CardKind::UserMessage && kind != CardKind::AgentMessage &&
          kind != CardKind::LocalPrompt;
 }
@@ -246,7 +248,12 @@ private:
   bool returningToCopy_ = false;
 };
 
-void openImageViewer(const QString &path);
+bool openLocalFile(const QString &path) {
+  if (path.isEmpty())
+    return false;
+  return QDesktopServices::openUrl(
+      QUrl::fromLocalFile(QFileInfo(path).absoluteFilePath()));
+}
 
 class ImageThumbnail final : public QLabel {
 public:
@@ -330,7 +337,7 @@ private:
   bool activate() {
     if (!property("imageAvailable").toBool())
       return false;
-    openImageViewer(path_);
+    openLocalFile(path_);
     return true;
   }
 
@@ -412,70 +419,6 @@ private:
   QHBoxLayout *layout_ = nullptr;
   QSize naturalSize_;
 };
-
-class ImageViewer final : public QDialog {
-public:
-  explicit ImageViewer(const QString &path) : QDialog(nullptr, Qt::Window) {
-    setObjectName(QStringLiteral("messageImageViewer"));
-    setAttribute(Qt::WA_DeleteOnClose);
-    setWindowModality(Qt::NonModal);
-    setWindowTitle(QFileInfo(path).fileName());
-    auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(8, 8, 8, 8);
-    scroll_ = new QScrollArea(this);
-    scroll_->setWidgetResizable(true);
-    imageLabel_ = new QLabel(scroll_);
-    imageLabel_->setObjectName(QStringLiteral("messageImageViewerImage"));
-    imageLabel_->setAlignment(Qt::AlignCenter);
-
-    QImageReader reader(path);
-    reader.setAutoTransform(true);
-    const QSize source = reader.size();
-    if (source.isValid() && (source.width() > ViewerMaximumImageExtent ||
-                             source.height() > ViewerMaximumImageExtent))
-      reader.setScaledSize(source.scaled(ViewerMaximumImageExtent,
-                                         ViewerMaximumImageExtent,
-                                         Qt::KeepAspectRatio));
-    image_ = reader.read();
-    if (image_.isNull())
-      imageLabel_->setText(QStringLiteral("Image unavailable"));
-    scroll_->setWidget(imageLabel_);
-    layout->addWidget(scroll_);
-    resize(900, 650);
-    updatePixmap();
-  }
-
-protected:
-  void showEvent(QShowEvent *event) override {
-    QDialog::showEvent(event);
-    updatePixmap();
-  }
-
-  void resizeEvent(QResizeEvent *event) override {
-    QDialog::resizeEvent(event);
-    updatePixmap();
-  }
-
-private:
-  void updatePixmap() {
-    if (image_.isNull() || !scroll_)
-      return;
-    const QSize available = scroll_->viewport()->size() - QSize(8, 8);
-    if (available.isEmpty())
-      return;
-    imageLabel_->setPixmap(QPixmap::fromImage(image_.scaled(
-        available, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
-  }
-
-  QImage image_;
-  QScrollArea *scroll_ = nullptr;
-  QLabel *imageLabel_ = nullptr;
-};
-
-void openImageViewer(const QString &path) {
-  auto *viewer = new ImageViewer(path);
-  viewer->show();
-}
 
 QLabel *makeLabel(const QString &value, const char *kind = "body",
                   QWidget *parent = nullptr) {
@@ -638,6 +581,35 @@ QString fileChangesText(const FileChangesData &data) {
     rows << row;
   }
   return rows.join(QLatin1Char('\n'));
+}
+
+QString fileChangesHtml(const FileChangesData &data, QStringList &openPaths) {
+  openPaths.clear();
+  QStringList rows;
+  for (const FileChangeData &change : data.changes) {
+    if (change.path.empty())
+      continue;
+    const QString displayPath = text(change.path);
+    QFileInfo resolved(displayPath);
+    if (resolved.isRelative() && !data.cwd.empty())
+      resolved = QFileInfo(QDir(text(data.cwd)), displayPath);
+    const int targetIndex = openPaths.size();
+    openPaths.push_back(QDir::cleanPath(resolved.absoluteFilePath()));
+
+    QString detail = displayChangeKind(change.kind);
+    if (change.additions && change.deletions)
+      detail += QStringLiteral("  +%1 −%2")
+                    .arg(*change.additions)
+                    .arg(*change.deletions);
+    rows.push_back(
+        QStringLiteral("<a href=\"codexui-file:%1\" "
+                       "style=\"color:%2;text-decoration:none;\">%3</a>"
+                       "&nbsp;&nbsp;·&nbsp;&nbsp;%4")
+            .arg(targetIndex)
+            .arg(QString::fromLatin1(UiStyle::blue),
+                 displayPath.toHtmlEscaped(), detail.toHtmlEscaped()));
+  }
+  return rows.join(QStringLiteral("<br/>"));
 }
 
 std::optional<DiffCounts> totalDiffCounts(const FileChangesData &data) {
@@ -1029,10 +1001,12 @@ bool CommandOutputView::isAtBottom() const {
 class ConversationCard::Impl final {
 public:
   Impl(ConversationCard *owner, const VisibleCardData &initial,
-       bool commandInitiallyCollapsed, bool imageInitiallyCollapsed)
+       bool commandInitiallyCollapsed, bool imageInitiallyCollapsed,
+       bool fileChangesInitiallyCollapsed)
       : owner(owner), current(initial),
         collapsed(initiallyCollapsed(initial.kind, commandInitiallyCollapsed,
-                                     imageInitiallyCollapsed)) {
+                                     imageInitiallyCollapsed,
+                                     fileChangesInitiallyCollapsed)) {
     owner->setObjectName(QStringLiteral("conversationCard"));
     owner->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     owner->setProperty("conversationCardKey",
@@ -1534,13 +1508,34 @@ public:
     title->setText(QStringLiteral("File changes"));
     metadata = makeLabel({}, "meta", content);
     body = makeLabel({}, "body", content);
+    body->setObjectName(QStringLiteral("fileChangesList"));
+    body->setTextFormat(Qt::RichText);
+    body->setOpenExternalLinks(false);
+    body->setTextInteractionFlags(Qt::TextSelectableByMouse |
+                                  Qt::LinksAccessibleByMouse |
+                                  Qt::LinksAccessibleByKeyboard);
+    QObject::connect(body, &QLabel::linkActivated, owner,
+                     [this](const QString &link) {
+                       constexpr QLatin1StringView prefix("codexui-file:");
+                       if (!link.startsWith(prefix))
+                         return;
+                       bool valid = false;
+                       const int index = link.sliced(prefix.size()).toInt(&valid);
+                       if (valid && index >= 0 &&
+                           index < fileChangeOpenPaths.size())
+                         static_cast<void>(
+                             openLocalFile(fileChangeOpenPaths.at(index)));
+                     });
     contentLayout->addWidget(body);
     contentLayout->addWidget(metadata);
     updateComposition(changes);
   }
 
   void updateComposition(const FileChangesData &changes) {
-    setVisibleText(body, fileChangesText(changes));
+    const QString html = fileChangesHtml(changes, fileChangeOpenPaths);
+    if (body->text() != html)
+      body->setText(html);
+    body->setVisible(!html.isEmpty());
     showStatus(text(changes.status), QStringLiteral("fileChangesStatus"));
     QStringList values{QStringLiteral("%1 paths").arg(changes.changes.size())};
     if (const auto counts = totalDiffCounts(changes))
@@ -1764,6 +1759,7 @@ public:
   bool viewportVisible = true;
   std::optional<qint64> pendingFeedbackDeadlineMs;
   ImageRibbon *images = nullptr;
+  QStringList fileChangeOpenPaths;
   QWidget *nestedCards = nullptr;
   QVBoxLayout *nestedLayout = nullptr;
   bool hasVisibleNestedCards = false;
@@ -1772,10 +1768,12 @@ public:
 
 ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent,
                                    bool commandInitiallyCollapsed,
-                                   bool imageInitiallyCollapsed)
+                                   bool imageInitiallyCollapsed,
+                                   bool fileChangesInitiallyCollapsed)
     : QFrame(parent),
       impl_(std::make_unique<Impl>(this, data, commandInitiallyCollapsed,
-                                   imageInitiallyCollapsed)) {}
+                                   imageInitiallyCollapsed,
+                                   fileChangesInitiallyCollapsed)) {}
 
 ConversationCard::~ConversationCard() = default;
 
@@ -1930,9 +1928,11 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
 ConversationCard *createConversationCard(const VisibleCardData &data,
                                          QWidget *parent,
                                          bool commandInitiallyCollapsed,
-                                         bool imageInitiallyCollapsed) {
+                                         bool imageInitiallyCollapsed,
+                                         bool fileChangesInitiallyCollapsed) {
   return new ConversationCard(data, parent, commandInitiallyCollapsed,
-                              imageInitiallyCollapsed);
+                              imageInitiallyCollapsed,
+                              fileChangesInitiallyCollapsed);
 }
 
 } // namespace codexui::codex::middle

@@ -125,6 +125,9 @@ struct FileChangeData {
 struct FileChangesData {
   std::string status;
   std::vector<FileChangeData> changes;
+  // Relative provider paths are resolved against the owning thread's current
+  // workspace only when the user explicitly asks the desktop to open them.
+  std::string cwd;
 
   bool operator==(const FileChangesData &) const = default;
 };

@@ -89,7 +89,8 @@ public:
   explicit ConversationCard(const VisibleCardData &data,
                             QWidget *parent = nullptr,
                             bool commandInitiallyCollapsed = true,
-                            bool imageInitiallyCollapsed = true);
+                            bool imageInitiallyCollapsed = true,
+                            bool fileChangesInitiallyCollapsed = true);
   ~ConversationCard() override;
 
   [[nodiscard]] CardKind cardKind() const noexcept;
@@ -135,7 +136,8 @@ private:
 [[nodiscard]] ConversationCard *
 createConversationCard(const VisibleCardData &data, QWidget *parent = nullptr,
                        bool commandInitiallyCollapsed = true,
-                       bool imageInitiallyCollapsed = true);
+                       bool imageInitiallyCollapsed = true,
+                       bool fileChangesInitiallyCollapsed = true);
 
 } // namespace codexui::codex::middle
 
