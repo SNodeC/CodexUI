@@ -325,11 +325,34 @@ independently reviewable change.
    workspace and open them with the system-default application.
 4. **Complete:** open image-ribbon images with the system-default image viewer;
    CodexUI does not create or retain a separate image-viewer window.
-5. **Pending:** inventory card kinds suitable for an initial
+5. **Complete:** inventory card kinds suitable for an initial
    expanded/collapsed control.
 6. **Pending:** inventory card kinds suitable for a show/hide control.
 7. **Pending:** update focused regression coverage and the internal UI API
-   contract, then run the final integration qualification.
+   contract for the completed card-polish behavior. Final integration
+   qualification is performed separately by the user.
+
+#### Initial expanded/collapsed control inventory
+
+Every content-bearing conversation card retains its own disclosure state for
+the selected thread. A header-level preference is justified only when the
+content is routinely large and users commonly want the same initial treatment
+for each newly arriving card. It never retroactively refolds an existing card.
+
+| Card kind | Current initial behavior | Header preference decision | UX rationale |
+|---|---|---|---|
+| User message | Expanded | Do not add | The authored prompt is the turn anchor and should remain immediately legible. |
+| Pending local prompt / steering | Expanded | Do not add | Admission, animation, failure recovery, and acknowledgement must remain visible. |
+| Final Codex answer | Expanded | Do not add | It is the primary result of the turn. |
+| Interim Codex update | Expanded when shown | Do not add | The existing visibility control is the useful choice; a second folding preference would be ambiguous. |
+| Command execution | User preference, expanded by default | Existing control | Commands and outputs vary greatly in height and recur frequently. |
+| Image generation | User preference, expanded by default | Existing control | Generated-image ribbons can consume substantial vertical space. |
+| File changes | User preference, collapsed by default | Added control | File lists can be long, but users reviewing code often want every new list opened. |
+| Agent activity | Collapsed | Candidate, not added | Results can be verbose, but a fifth folding control would crowd the header; retain per-card disclosure until explicit demand outweighs that cost. |
+| Reasoning | Collapsed when shown | Do not add | Show/hide already expresses the durable preference and avoids two controls for one content class. |
+| Plan | Collapsed | Candidate, not added | Plans are often useful expanded, but the Inspector already provides the persistent plan surface. |
+| Generic/unknown activity | Collapsed | Do not add | Diagnostic fallback content should be available without dominating the primary conversation. |
+| Outer turn/You section | Expanded | Do not add | Its disclosure is local navigation state governing the complete turn, not a repeated content-type default. |
 
 Browser persistence is an optional convenience: unavailable or denied local
 storage falls back to canonical defaults and never prevents the UI from
