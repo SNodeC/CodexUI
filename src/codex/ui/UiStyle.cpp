@@ -248,9 +248,8 @@ QString applicationStyleSheet() {
         QFrame[messageRole="user"][nestedConversationCard="true"] QLabel[kind="title"] { color: #146f73; }
         QFrame[messageRole="agent"][messagePhase="final"] { background: #f4f0ff; border: 1px solid #d4c5f2; border-radius: 8px; }
         QFrame[messageRole="agent"][messagePhase="final"] QLabel[kind="title"] { color: #53389e; }
-        QFrame[messageRole="agent"][messagePhase="update"] { background: #fff6cf; border: 1px solid #dfc45a; border-radius: 8px; }
-        QFrame[messageRole="agent"][messagePhase="update"] QLabel[kind="title"],
-        QFrame[messageRole="agent"][messagePhase="update"] QLabel[kind="messagePhase"] { color: #765c00; }
+        QFrame[messageRole="agent"][messagePhase="update"] { background: #fff9db; border: 1px solid #e4ca62; border-radius: 8px; }
+        QFrame[messageRole="agent"][messagePhase="update"] QLabel[kind="title"] { color: #765c00; }
         QFrame[kind="summary"] { background: #f8fafc; border: 1px solid #d7dee8; border-radius: 7px; }
         QFrame[kind="standardDivider"] { background: #d7dee8; border: none; }
         QFrame[kind="greenBadge"] { background: #e9f7f0; border: 1px solid #a9d8c1; border-radius: 6px; }
