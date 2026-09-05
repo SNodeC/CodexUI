@@ -63,6 +63,7 @@ constexpr qsizetype MaximumGenericActivityCharacters = 4096;
 constexpr int CardHeaderActionSpacing = 4;
 constexpr int CopyMorphDurationMilliseconds = 160;
 constexpr int CopyCheckHoldMilliseconds = 500;
+constexpr int MarkdownBottomPaintGuard = 4;
 
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -502,6 +503,10 @@ QLabel *makeMarkdownLabel(const QString &value, QWidget *parent = nullptr) {
   label->setTextFormat(Qt::RichText);
   label->setWordWrap(true);
   label->setMinimumWidth(0);
+  // QTextDocument and QLabel round rich-text line geometry independently.
+  // Keep one descent of paint space below the measured document so the final
+  // baseline cannot be clipped when a nested card is fixed to heightForWidth.
+  label->setContentsMargins(0, 0, 0, MarkdownBottomPaintGuard);
   label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   label->setOpenExternalLinks(true);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse |

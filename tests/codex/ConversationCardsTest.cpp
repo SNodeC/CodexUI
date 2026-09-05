@@ -2800,12 +2800,18 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
       "The retained report contains enough Markdown to require its final "
       "nested width before height calculation.\n\n"
       "Its complete list must remain inside the final-answer border:\n\n");
-  for (int index = 1; index <= 14; ++index)
+  for (int index = 1; index <= 48; ++index)
     markdown += QStringLiteral(
                     "- Retained result %1 with explanatory text, **emphasis**, "
                     "and enough detail to wrap naturally at the nested card "
                     "width.\n")
                     .arg(index);
+  markdown += QStringLiteral(
+      "\nRenamed:\n\n"
+      "- `src/codex/PresentationStatus.h` → `src/codex/UiStatus.h`\n\n"
+      "</details>\n\n"
+      "No remote operation was performed; the final line must remain fully "
+      "visible.\n");
   const VisibleCardData answer{
       AuthoritativeItemKey{thread, "turn", "answer"},
       CardKind::AgentMessage,
@@ -2838,6 +2844,7 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
     return view.viewport()->updatesEnabled() &&
            !view.property("bulkMaterializationUpdatesSuppressed").toBool();
   });
+  spin(160);
   ConversationCard *promptCard = card(view, stableKey(prompt.key));
   ConversationCard *answerCard = card(view, stableKey(answer.key));
   QLabel *answerBody = nullptr;
@@ -2858,7 +2865,8 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
   }
   if (!(promptCard && answerCard && answerBody &&
         promptCard->isAncestorOf(answerCard) &&
-        answerBody->height() >= documentHeight &&
+        answerBody->height() >=
+            documentHeight + answerBody->fontMetrics().descent() &&
         answerBody->mapTo(answerCard, QPoint(0, answerBody->height())).y() <=
             answerCard->contentsRect().bottom() + 1))
     std::cerr << "nested final settle: prompt=" << bool(promptCard)
@@ -2876,14 +2884,78 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
               << " frozen="
               << view.property("bulkMaterializationUpdatesSuppressed").toBool()
               << '\n';
+  const int answerBottomInPrompt =
+      promptCard && answerCard
+          ? answerCard->mapTo(promptCard, QPoint(0, answerCard->height())).y()
+          : -1;
   result &= expect(
       promptCard && answerCard && answerBody &&
           promptCard->isAncestorOf(answerCard) &&
-          answerBody->height() >= documentHeight &&
+          answerBody->height() >=
+              documentHeight + answerBody->fontMetrics().descent() &&
           answerBody->mapTo(answerCard, QPoint(0, answerBody->height())).y() <=
-              answerCard->contentsRect().bottom() + 1,
+              answerCard->contentsRect().bottom() + 1 &&
+          answerBottomInPrompt <= promptCard->contentsRect().bottom() + 1,
       "an initially retained nested final answer fully fits its rendered "
-      "document and settled card");
+      "document, inner card, and canonical Turn/You owner");
+
+  QPointer<ConversationCard> retainedPrompt = promptCard;
+  QPointer<ConversationCard> retainedAnswer = answerCard;
+  const VisibleCardData laterPrompt{
+      AuthoritativeItemKey{thread, "later-turn", "later-prompt"},
+      CardKind::UserMessage,
+      thread,
+      "later-turn",
+      "later-prompt",
+      UserMessageData{"A later prompt arrives after the long answer.", {}}};
+  const VisibleCardData laterAnswer{
+      AuthoritativeItemKey{thread, "later-turn", "later-answer"},
+      CardKind::AgentMessage,
+      thread,
+      "later-turn",
+      "later-answer",
+      AgentMessageData{"The later result is complete.", true}};
+  snapshot.sections.push_back(
+      {"turn:later", "later-turn", {laterPrompt, laterAnswer}, laterPrompt.key});
+  result &= expect(applyConversation(view, snapshot),
+                   "a later completed Turn is appended after the long answer");
+  spin(160);
+  promptCard = card(view, stableKey(prompt.key));
+  answerCard = card(view, stableKey(answer.key));
+  ConversationCard *laterPromptCard = card(view, stableKey(laterPrompt.key));
+  QWidget *retainedSection = promptCard ? promptCard->parentWidget() : nullptr;
+  while (retainedSection &&
+         retainedSection->property("turnSectionKey").toString().isEmpty())
+    retainedSection = retainedSection->parentWidget();
+  const int retainedAnswerBottom =
+      promptCard && answerCard
+          ? answerCard->mapTo(promptCard, QPoint(0, answerCard->height())).y()
+          : -1;
+  const int promptBottomInSection =
+      retainedSection && promptCard
+          ? promptCard->mapTo(retainedSection,
+                              QPoint(0, promptCard->height()))
+                .y()
+          : -1;
+  const int promptBottomInViewport =
+      promptCard
+          ? promptCard->mapTo(view.viewport(),
+                              QPoint(0, promptCard->height()))
+                .y()
+          : -1;
+  const int laterTopInViewport =
+      laterPromptCard
+          ? laterPromptCard->mapTo(view.viewport(), QPoint()).y()
+          : -1;
+  result &= expect(
+      promptCard && answerCard && laterPromptCard && retainedSection &&
+          retainedPrompt == promptCard &&
+          retainedAnswer == answerCard && promptCard->isAncestorOf(answerCard) &&
+          retainedAnswerBottom <= promptCard->contentsRect().bottom() + 1 &&
+          promptBottomInSection <= retainedSection->contentsRect().bottom() + 1 &&
+          laterTopInViewport >= promptBottomInViewport + 8,
+      "appending a later conversation card cannot clip the retained long "
+      "answer through its Turn/You owner or section boundary");
   spin();
   qApp->setStyleSheet(originalStyleSheet);
   return result;
