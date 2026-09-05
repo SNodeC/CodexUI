@@ -321,7 +321,7 @@ independently reviewable change.
    surface, border, title, and phase identity; final answers remain violet.
 2. **Complete:** expose and persist a Files Changed “new cards start expanded”
    control, applying it only when a new card is materialized.
-3. **Pending:** resolve changed-file paths against the canonical thread
+3. **Complete:** resolve changed-file paths against the canonical thread
    workspace and open them with the system-default application.
 4. **Pending:** open image-ribbon images with the system-default image viewer.
 5. **Pending:** inventory card kinds suitable for an initial

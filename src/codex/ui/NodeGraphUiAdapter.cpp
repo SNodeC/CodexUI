@@ -456,7 +456,8 @@ bool graphCardVisible(const nodegraph::NodeState &state,
 
 VisibleCardData graphCardData(const nodegraph::NodeRef &item,
                               std::string threadId, std::string turnId,
-                              const nodegraph::NodeState &state) {
+                              const nodegraph::NodeState &state,
+                              std::string_view threadCwd = {}) {
   const std::string itemId =
       item ? nodegraph::protocolCanonicalId(state, item) : std::string{};
   const std::string type = graphString(graphField(state, "type"));
@@ -534,7 +535,10 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
         graphOmittedTextBytes(state, "summary"), "reasoning", true)};
     break;
   case CardKind::FileChanges: {
-    FileChangesData projected{graphStatus(state), {}};
+    std::string cwd = graphString(graphField(state, "cwd"));
+    if (cwd.empty())
+      cwd = threadCwd;
+    FileChangesData projected{graphStatus(state), {}, std::move(cwd)};
     const auto *changes = graphField(state, "changes");
     const auto *array = changes ? changes->asArray() : nullptr;
     if (array) {
@@ -1566,10 +1570,12 @@ NodeGraphUiAdapter::card(const nodegraph::NodeRef &thread,
     return std::nullopt;
   const auto state = read->state(item);
   const auto turnState = read->state(turn);
-  if (!state || !turnState)
+  const auto threadState = read->state(thread);
+  if (!state || !turnState || !threadState)
     return std::nullopt;
   return graphCardData(item, thread->id().canonical,
-                       nodegraph::protocolCanonicalId(*turnState, turn), *state);
+                       nodegraph::protocolCanonicalId(*turnState, turn), *state,
+                       graphString(graphField(*threadState, "cwd")));
 }
 
 std::optional<ConversationSnapshot>
@@ -1595,6 +1601,7 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
   const auto threadState = read->state(thread);
   if (!threadState)
     return std::nullopt;
+  const std::string threadCwd = graphString(graphField(*threadState, "cwd"));
   itemLimit = std::max<std::size_t>(1, itemLimit);
   const std::optional<std::size_t> retainedAuthoritativeCount =
       graphSize(graphField(*threadState, "historyLoadedItemCount"));
@@ -1797,7 +1804,8 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
       }
 
       VisibleCardData card = graphCardData(projectedNode, result.threadId,
-                                           input.id, *projectedState);
+                                           input.id, *projectedState,
+                                           threadCwd);
       if (promptVisualId)
         card.key = LocalPromptKey{*promptVisualId};
       card.target = std::move(actionTarget);
