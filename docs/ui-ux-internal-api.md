@@ -644,4 +644,19 @@ new content is materialized below it. Automated black-frame analysis of the
 conversation region found no blank interval. This evidence verifies the
 contract; it does not weaken or redefine it.
 
+A second 30-fps full-application recording validates authored input against
+the isolated workspace bridge using the small `GPT-5.6-Sol` model and Low
+reasoning. It records a normal prompt from editable draft through admission,
+optimistic/authoritative You-card materialization, active Turn state, running
+command output, and final response. During that active Turn it records a
+steering draft, enabled Steer action, admission, one steering You card under
+the same Turn, draft clearing only after admission, and exactly one final
+`STEERING ACKNOWLEDGED` response. The active Turn and delayed command retain
+their emphasized borders, Stop/Send/Steer eligibility follows canonical state,
+and no empty or unparented intermediate conversation frame appears. The proof
+artifact is `prompt-and-steering-proof.mp4` in the qualification capture
+directory. The official bridge was also tried first, but correctly withheld
+controller authority from the second UI; no prompt was sent through that
+uncontrolled connection.
+
 No remote or GitHub operation is used to maintain this document.
