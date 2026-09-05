@@ -310,6 +310,26 @@ answers are never filtered. Visibility is a presentation choice only: filtered
 cards remain as retained graph nodes, continue accepting updates, and reappear
 with their latest content and user-owned folding state. Changing the Command
 preference never refolds an existing card.
+
+### Native conversation-card polish register
+
+This ordered register is the authoritative completion sequence for the current
+native card-polish pass. Each behavior is implemented and committed as a narrow,
+independently reviewable change.
+
+1. **Complete:** interim Codex update cards use a clearly perceptible yellow
+   surface, border, title, and phase identity; final answers remain violet.
+2. **Pending:** expose and persist a Files Changed “new cards start expanded”
+   control, applying it only when a new card is materialized.
+3. **Pending:** resolve changed-file paths against the canonical thread
+   workspace and open them with the system-default application.
+4. **Pending:** open image-ribbon images with the system-default image viewer.
+5. **Pending:** inventory card kinds suitable for an initial
+   expanded/collapsed control.
+6. **Pending:** inventory card kinds suitable for a show/hide control.
+7. **Pending:** update focused regression coverage and the internal UI API
+   contract, then run the final integration qualification.
+
 Browser persistence is an optional convenience: unavailable or denied local
 storage falls back to canonical defaults and never prevents the UI from
 starting or accepting preference changes.
