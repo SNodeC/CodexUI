@@ -973,6 +973,30 @@ void initialHydrationUsesTheEstablishedBoundedWindow(
           "partial pre-hydration history creates no conversation QWidget");
 
   markThreadReady(session, worker, "bounded-history");
+  auto *conversation = dynamic_cast<middle::ConversationView *>(
+      shell.findChild<QAbstractScrollArea *>(
+          QStringLiteral("conversationScroll")));
+  require(conversation && spinUntil([&] {
+            return conversation->structuralStagingActive();
+          }),
+          "large initial history enters bounded hidden Qt staging");
+  require(shell.findChildren<middle::ConversationCard *>().empty(),
+          "hidden preparation exposes no partial card tree");
+  const qulonglong stageStarts =
+      conversation->property("structuralStageStarts").toULongLong();
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "item/agentMessage/delta",
+       std::nullopt,
+       {{"threadId", Value("bounded-history")},
+        {"turnId", Value("bounded-turn")},
+        {"itemId", Value("bounded-item-99")},
+        {"delta", Value(" latest")}}}));
+  int responsiveHeartbeats = 0;
+  QTimer heartbeat;
+  QObject::connect(&heartbeat, &QTimer::timeout,
+                   [&responsiveHeartbeats] { ++responsiveHeartbeats; });
+  heartbeat.start(0);
   require(spinUntil(
               [&] {
                 return shell.findChildren<middle::ConversationCard *>().size() ==
@@ -981,6 +1005,23 @@ void initialHydrationUsesTheEstablishedBoundedWindow(
               2000),
           "the first atomic frame contains the retained 80 activities and "
           "their pinned owning prompt");
+  heartbeat.stop();
+  require(responsiveHeartbeats > 2 && conversation &&
+              conversation->property("structuralStageCardPasses")
+                      .toULongLong() >=
+                  middle::AuthoritativeHistoryPageSize,
+          "initial rich-card construction yields repeatedly to the Qt event "
+          "loop before its single visible commit");
+  require(conversation->property("structuralStageStarts").toULongLong() ==
+                  stageStarts &&
+              agentMessageCard(shell, "bounded-item-99 latest"),
+          "a live canonical update patches the hidden target without "
+          "restarting or starving structural staging");
+  require(conversation &&
+              conversation->property("structuralStageCommitMillis").toLongLong() <
+                  100,
+          "the atomic reveal does not move bulk widget construction back into "
+          "one perceptible final-frame stall");
 
   QPushButton *loadMore = nullptr;
   for (QPushButton *button : shell.findChildren<QPushButton *>()) {
@@ -995,6 +1036,14 @@ void initialHydrationUsesTheEstablishedBoundedWindow(
           "activities after pinning the structural root");
   if (loadMore)
     loadMore->click();
+  require(conversation && spinUntil([&] {
+            return conversation->structuralStagingActive();
+          }),
+          "Load More prepares missing retained cards off-surface");
+  require(shell.findChildren<middle::ConversationCard *>().size() ==
+              middle::AuthoritativeHistoryPageSize + 1,
+          "Load More keeps the complete old surface visible until the new "
+          "surface is ready");
   require(spinUntil(
               [&] {
                 return shell.findChildren<middle::ConversationCard *>().size() ==

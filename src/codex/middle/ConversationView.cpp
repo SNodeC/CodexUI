@@ -7,6 +7,7 @@
 #include <QAbstractSlider>
 #include <QApplication>
 #include <QEasingCurve>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QLabel>
 #include <QPushButton>
@@ -16,6 +17,7 @@
 #include <QSignalBlocker>
 #include <QSpacerItem>
 #include <QTextEdit>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QVariantAnimation>
 #include <QWheelEvent>
@@ -71,6 +73,20 @@ ConversationView::ConversationView(QWidget *parent)
   content_->setAttribute(Qt::WA_StyledBackground, false);
   content_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   content_->installEventFilter(this);
+
+  // Keep preparatory widgets outside the visible QObject subtree as well as
+  // outside its layouts. Tests, accessibility walks, and presentation code
+  // must observe only the atomically committed surface.
+  stagingHost_ = new QWidget;
+  stagingHost_->setObjectName(QStringLiteral("conversationStagingHost"));
+  stagingHost_->hide();
+
+  stagingOverlay_ = new QLabel(QStringLiteral("Loading conversation…"),
+                               viewport());
+  stagingOverlay_->setObjectName(QStringLiteral("conversationStagingOverlay"));
+  stagingOverlay_->setAlignment(Qt::AlignCenter);
+  stagingOverlay_->setAutoFillBackground(true);
+  stagingOverlay_->hide();
 
   contentLayout_ = new QVBoxLayout(content_);
   contentLayout_->setContentsMargins(0, 0, 0, 0);
@@ -147,6 +163,11 @@ ConversationView::ConversationView(QWidget *parent)
   recomputeGeometry();
 }
 
+ConversationView::~ConversationView() {
+  cancelStructuralStaging();
+  delete stagingHost_;
+}
+
 void ConversationView::setLoadMoreAction(std::function<void()> action) {
   loadMoreAction_ = std::move(action);
 }
@@ -217,14 +238,155 @@ void ConversationView::setThread(const std::string &threadId) {
 }
 
 bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
+  if (!committingStructuralStage_ && pendingStructuralSnapshot_)
+    cancelStructuralStaging();
   return reconcile(snapshot, false, false);
+}
+
+void ConversationView::reconcileStaged(ConversationSnapshot snapshot) {
+  if (snapshot == snapshot_ && snapshot.threadId == threadId_) {
+    cancelStructuralStaging();
+    return;
+  }
+
+  std::vector<std::string> missing;
+  for (const TurnSection &section : snapshot.sections) {
+    for (const VisibleCardData &data : section.cards) {
+      const std::string key = stableKey(data.key);
+      const auto retained = cards_.find(key);
+      if (retained == cards_.end() || !retained->second->canApply(data))
+        missing.push_back(key);
+    }
+  }
+
+  // An individual arriving card is already hidden by reconcile's short
+  // visible transaction. Staging is for the costly selected-history and
+  // Load-more cases where yielding between rich-widget constructors matters.
+  if (missing.size() <= 1) {
+    cancelStructuralStaging();
+    static_cast<void>(reconcile(snapshot));
+    return;
+  }
+
+  cancelStructuralStaging();
+  pendingStructuralSnapshot_ = std::move(snapshot);
+  pendingStructuralCardKeys_ = std::move(missing);
+  pendingStructuralCardIndex_ = 0;
+  stagingHost_->resize(std::max(0, viewport()->width()),
+                       std::max(0, viewport()->height()));
+  if (pendingStructuralSnapshot_->threadId != threadId_) {
+    stagingOverlay_->setGeometry(viewport()->rect());
+    stagingOverlay_->show();
+    stagingOverlay_->raise();
+  }
+  setProperty("structuralStageStarts",
+              property("structuralStageStarts").toULongLong() + 1);
+  scheduleStructuralStagePass();
+}
+
+void ConversationView::scheduleStructuralStagePass() {
+  if (structuralStagePassScheduled_ || !pendingStructuralSnapshot_)
+    return;
+  structuralStagePassScheduled_ = true;
+  QTimer::singleShot(1, Qt::PreciseTimer, this, [this] {
+    structuralStagePassScheduled_ = false;
+    runStructuralStagePass();
+  });
+}
+
+VisibleCardData *ConversationView::pendingCard(const std::string &key) {
+  if (!pendingStructuralSnapshot_)
+    return nullptr;
+  for (TurnSection &section : pendingStructuralSnapshot_->sections) {
+    const auto found = std::ranges::find_if(section.cards, [&](const auto &card) {
+      return stableKey(card.key) == key;
+    });
+    if (found != section.cards.end())
+      return &*found;
+  }
+  return nullptr;
+}
+
+void ConversationView::runStructuralStagePass() {
+  if (!pendingStructuralSnapshot_)
+    return;
+
+  // One rich card is the indivisible Qt unit. Yield after each constructor so
+  // input and already-painted surfaces remain responsive during an 80-item
+  // history expansion.
+  while (pendingStructuralCardIndex_ < pendingStructuralCardKeys_.size()) {
+    const std::string key =
+        pendingStructuralCardKeys_[pendingStructuralCardIndex_++];
+    VisibleCardData *data = pendingCard(key);
+    if (!data)
+      continue;
+    const auto retained = cards_.find(key);
+    if (retained != cards_.end() && retained->second->canApply(*data))
+      continue;
+    ConversationCard *card = createRetainedCard(*data, stagingHost_, key);
+    stagedCards_.insert_or_assign(key, card);
+    setProperty("structuralStageCardPasses",
+                property("structuralStageCardPasses").toULongLong() + 1);
+    scheduleStructuralStagePass();
+    return;
+  }
+
+  ConversationSnapshot completed = std::move(*pendingStructuralSnapshot_);
+  pendingStructuralSnapshot_.reset();
+  pendingStructuralCardKeys_.clear();
+  pendingStructuralCardIndex_ = 0;
+  const QScopedValueRollback committing(committingStructuralStage_, true);
+  QElapsedTimer elapsed;
+  elapsed.start();
+  static_cast<void>(reconcile(completed, false, false));
+  setProperty("structuralStageCommitMillis", elapsed.elapsed());
+  for (auto &[key, card] : stagedCards_) {
+    static_cast<void>(key);
+    delete card;
+  }
+  stagedCards_.clear();
+  stagingOverlay_->hide();
+  setProperty("structuralStageCommits",
+              property("structuralStageCommits").toULongLong() + 1);
+}
+
+void ConversationView::cancelStructuralStaging() {
+  pendingStructuralSnapshot_.reset();
+  pendingStructuralCardKeys_.clear();
+  pendingStructuralCardIndex_ = 0;
+  for (auto &[key, card] : stagedCards_) {
+    static_cast<void>(key);
+    delete card;
+  }
+  stagedCards_.clear();
+  stagingOverlay_->hide();
 }
 
 std::optional<PresentationImpact>
 ConversationView::applyCardPresentation(const VisibleCardData &data) {
+  const std::string key = stableKey(data.key);
+  VisibleCardData *stagedData = pendingCard(key);
+  if (stagedData && data.threadId == pendingStructuralSnapshot_->threadId) {
+    if (*stagedData != data) {
+      const auto staged = stagedCards_.find(key);
+      if (staged != stagedCards_.end()) {
+        if (staged->second->canApply(data)) {
+          static_cast<void>(staged->second->applyPresentation(data));
+        } else {
+          delete staged->second;
+          stagedCards_.erase(staged);
+        }
+      }
+      *stagedData = data;
+    }
+    // A not-yet-committed card has no visible Qt presentation to invalidate.
+    // Its newest canonical fields will appear in the atomic stage commit.
+    if (!cards_.contains(key))
+      return PresentationImpact::None;
+  }
+
   if (data.threadId != threadId_)
     return std::nullopt;
-  const std::string key = stableKey(data.key);
   const auto retained = cards_.find(key);
   if (retained == cards_.end() || !retained->second->canApply(data))
     return std::nullopt;
@@ -272,6 +434,32 @@ ConversationView::applyCardPresentation(const VisibleCardData &data) {
                 property("targetedCardCommits").toULongLong() + 1);
   }
   return impact;
+}
+
+ConversationCard *ConversationView::createRetainedCard(
+    const VisibleCardData &data, QWidget *parent, const std::string &key) {
+  ConversationCard *card = createConversationCard(
+      data, parent, !presentationOptions_.commandsInitiallyExpanded,
+      !presentationOptions_.imagesInitiallyExpanded);
+  card->setProperty("conversationAnchorKey", QString::fromStdString(key));
+  if (const auto collapsed = cardCollapsedStates_.find(key);
+      collapsed != cardCollapsedStates_.end())
+    card->setCollapsed(collapsed->second);
+  connect(card, &ConversationCard::foldRequested, this,
+          [this, key, card](bool collapsed) {
+            const auto retained = cards_.find(key);
+            if (retained != cards_.end() && retained->second == card)
+              setCardCollapsed(key, card, collapsed);
+          });
+  connect(card, &ConversationCard::recoveryRequested, this,
+          [this, key, card] {
+            const auto retained = cards_.find(key);
+            if (retained == cards_.end() || retained->second != card ||
+                !promptRecoveryAction_ || !card->data().target)
+              return;
+            promptRecoveryAction_(card->data().target);
+          });
+  return card;
 }
 
 bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
@@ -578,27 +766,20 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
           materializedPrompts.push_back(cardData.target);
         visualChange = card->apply(cardData) || visualChange;
       } else {
-        card = createConversationCard(
-            cardData, section, !presentationOptions_.commandsInitiallyExpanded,
-            !presentationOptions_.imagesInitiallyExpanded);
-        card->setProperty("conversationAnchorKey", QString::fromStdString(key));
-        if (const auto collapsed = cardCollapsedStates_.find(key);
-            collapsed != cardCollapsedStates_.end())
-          card->setCollapsed(collapsed->second);
-        connect(card, &ConversationCard::foldRequested, this,
-                [this, key, card](bool collapsed) {
-                  const auto retained = cards_.find(key);
-                  if (retained != cards_.end() && retained->second == card)
-                    setCardCollapsed(key, card, collapsed);
-                });
-        connect(card, &ConversationCard::recoveryRequested, this,
-                [this, key, card] {
-                  const auto retained = cards_.find(key);
-                  if (retained == cards_.end() || retained->second != card ||
-                      !promptRecoveryAction_ || !card->data().target)
-                    return;
-                  promptRecoveryAction_(card->data().target);
-                });
+        const auto staged = stagedCards_.find(key);
+        if (staged != stagedCards_.end() &&
+            staged->second->canApply(cardData)) {
+          card = staged->second;
+          stagedCards_.erase(staged);
+          card->setParent(section);
+          static_cast<void>(card->apply(cardData));
+        } else {
+          if (staged != stagedCards_.end()) {
+            delete staged->second;
+            stagedCards_.erase(staged);
+          }
+          card = createRetainedCard(cardData, section, key);
+        }
         if (std::holds_alternative<LocalPromptKey>(cardData.key) &&
             cardData.kind == CardKind::UserMessage && cardData.target)
           materializedPrompts.push_back(cardData.target);
@@ -892,6 +1073,8 @@ void ConversationView::resizeEvent(QResizeEvent *event) {
   viewport()->setUpdatesEnabled(false);
   const QSignalBlocker scrollSignals(verticalScrollBar());
   QAbstractScrollArea::resizeEvent(event);
+  stagingHost_->resize(viewport()->size());
+  stagingOverlay_->setGeometry(viewport()->rect());
   recomputeGeometry();
   if (follow)
     setScrollValue(verticalScrollBar()->maximum());

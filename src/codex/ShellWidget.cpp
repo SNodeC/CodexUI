@@ -1553,7 +1553,7 @@ bool ShellWidget::Impl::refreshConversation() {
     return false;
   middleRegion->conversation().setEmptyMessage(
       QStringLiteral("No materialized activity."));
-  static_cast<void>(middleRegion->conversation().reconcile(*snapshot));
+  middleRegion->conversation().reconcileStaged(std::move(*snapshot));
   if (presentedGraphThread != boundGraphThread) {
     presentedGraphThread = boundGraphThread;
     renderedChrome.reset();

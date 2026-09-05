@@ -18,6 +18,7 @@ class QLabel;
 class QEvent;
 class QPushButton;
 class QSpacerItem;
+class QTimer;
 class QVariantAnimation;
 class QVBoxLayout;
 class QWheelEvent;
@@ -42,6 +43,7 @@ public:
   };
 
   explicit ConversationView(QWidget *parent = nullptr);
+  ~ConversationView() override;
 
   void setLoadMoreAction(std::function<void()> action);
   void
@@ -56,6 +58,15 @@ public:
   // Returns false for a typed projection no-op.  Existing cards are mutated by
   // key; first render and later updates use this same reconciliation path.
   bool reconcile(const ConversationSnapshot &snapshot);
+
+  // Structural changes which introduce many rich cards are prepared under a
+  // hidden Qt parent in bounded event-loop slices, then committed through the
+  // ordinary reconcile contract in one visible transaction. Existing cards
+  // remain retained throughout Load-more staging.
+  void reconcileStaged(ConversationSnapshot snapshot);
+  [[nodiscard]] bool structuralStagingActive() const noexcept {
+    return pendingStructuralSnapshot_.has_value();
+  }
 
   // Applies one already-materialized card without constructing or traversing
   // a complete conversation snapshot. A disengaged result requests the
@@ -120,6 +131,12 @@ private:
   void animateToBottom(int previousValue);
   void recomputeCardGeometries(
       const std::vector<ConversationCard *> &changedCards);
+  void scheduleStructuralStagePass();
+  void runStructuralStagePass();
+  void cancelStructuralStaging();
+  [[nodiscard]] ConversationCard *createRetainedCard(
+      const VisibleCardData &data, QWidget *parent, const std::string &key);
+  [[nodiscard]] VisibleCardData *pendingCard(const std::string &key);
   void recomputeGeometry();
   void positionContent();
   void handleUserScrollValue(int value);
@@ -128,6 +145,8 @@ private:
   cardForStableKey(const std::string &stableKey) const;
 
   QWidget *content_ = nullptr;
+  QWidget *stagingHost_ = nullptr;
+  QLabel *stagingOverlay_ = nullptr;
   QVBoxLayout *contentLayout_ = nullptr;
   QPushButton *loadMore_ = nullptr;
   QSpacerItem *trailingSpace_ = nullptr;
@@ -141,6 +160,7 @@ private:
   std::string threadId_;
   std::unordered_map<std::string, TurnSectionWidget *> sections_;
   std::unordered_map<std::string, ConversationCard *> cards_;
+  std::unordered_map<std::string, ConversationCard *> stagedCards_;
   std::vector<std::string> displayedSectionKeys_;
   std::vector<std::string> displayedCardKeys_;
   std::unordered_map<std::string, ThreadScrollState> threadStates_;
@@ -148,6 +168,9 @@ private:
       commandOutputStates_;
   std::unordered_map<std::string, bool> cardCollapsedStates_;
   PresentationOptions presentationOptions_;
+  std::optional<ConversationSnapshot> pendingStructuralSnapshot_;
+  std::vector<std::string> pendingStructuralCardKeys_;
+  std::size_t pendingStructuralCardIndex_ = 0;
 
   Mode mode_ = Mode::Following;
   int trailingSpaceHeight_ = 0;
@@ -160,6 +183,8 @@ private:
   bool userActionPending_ = false;
   bool pausedByComposerGrowth_ = false;
   bool dispatchingNativeWheel_ = false;
+  bool structuralStagePassScheduled_ = false;
+  bool committingStructuralStage_ = false;
 };
 
 } // namespace codexui::codex::middle

@@ -285,12 +285,13 @@ QString agentCopyText(const ui::InspectorAgentRow &agent) {
 
 void clearLayout(QLayout *layout) {
   while (QLayoutItem *item = layout->takeAt(0)) {
-    if (QWidget *widget = item->widget())
-      delete widget;
     if (QLayout *child = item->layout()) {
       clearLayout(child);
       delete child;
+      continue;
     }
+    if (QWidget *widget = item->widget())
+      delete widget;
     delete item;
   }
 }
@@ -371,13 +372,53 @@ void restoreScrollPosition(QPlainTextEdit *view,
 
 } // namespace
 
+QFrame *InspectorPane::planStepFrame(const ui::InspectorPlanStep &step) {
+  auto *frame = new QFrame;
+  patchPlanStepFrame(frame, step);
+  setProperty("planRowConstructions",
+              property("planRowConstructions").toULongLong() + 1);
+  return frame;
+}
+
+void InspectorPane::patchPlanStepFrame(QFrame *frame,
+                                       const ui::InspectorPlanStep &step) {
+  frame->setObjectName(QStringLiteral("inspectorPlanStepFrame"));
+  frame->setProperty("planStep", text(step.step));
+  frame->setProperty("kind", "raised");
+  auto *layout = qobject_cast<QVBoxLayout *>(frame->layout());
+  if (layout)
+    clearLayout(layout);
+  else
+    layout = new QVBoxLayout(frame);
+  layout->setContentsMargins(12, 10, 12, 10);
+  layout->setSpacing(6);
+  layout->addWidget(makeLabel(text(step.step)));
+  layout->addWidget(statusLabel(step.status));
+  setProperty("planRowPatches",
+              property("planRowPatches").toULongLong() + 1);
+}
+
 QFrame *InspectorPane::agentFrame(const ui::InspectorAgentRow &agent) {
   auto *frame = new QFrame;
+  patchAgentFrame(frame, agent);
+  setProperty("agentRowConstructions",
+              property("agentRowConstructions").toULongLong() + 1);
+  return frame;
+}
+
+void InspectorPane::patchAgentFrame(QFrame *frame,
+                                    const ui::InspectorAgentRow &agent) {
+  if (!frame)
+    return;
   frame->setObjectName(QStringLiteral("inspectorAgentFrame"));
   frame->setProperty("logicalAgentId", text(agent.id));
   frame->setProperty("kind", "raised");
   frame->setMinimumWidth(0);
-  auto *layout = new QVBoxLayout(frame);
+  auto *layout = qobject_cast<QVBoxLayout *>(frame->layout());
+  if (layout)
+    clearLayout(layout);
+  else
+    layout = new QVBoxLayout(frame);
   layout->setContentsMargins(12, 10, 12, 10);
   layout->setSpacing(6);
   const QString agentPath = text(agent.agentPath);
@@ -477,7 +518,97 @@ QFrame *InspectorPane::agentFrame(const ui::InspectorAgentRow &agent) {
     QApplication::clipboard()->setMimeData(mime);
     copy->showCopiedFeedback();
   });
+  setProperty("agentRowPatches",
+              property("agentRowPatches").toULongLong() + 1);
+}
+
+QFrame *InspectorPane::requestFrame(
+    const ui::InspectorRequestRow &request) {
+  auto *frame = new QFrame;
+  patchRequestFrame(frame, request);
+  setProperty("requestRowConstructions",
+              property("requestRowConstructions").toULongLong() + 1);
   return frame;
+}
+
+void InspectorPane::patchRequestFrame(
+    QFrame *frame, const ui::InspectorRequestRow &request) {
+  frame->setObjectName(QStringLiteral("inspectorRequestFrame"));
+  frame->setProperty("requestId", text(request.id));
+  frame->setProperty("kind", "raised");
+  frame->setProperty("tone", "warning");
+  auto *layout = qobject_cast<QVBoxLayout *>(frame->layout());
+  if (layout)
+    clearLayout(layout);
+  else
+    layout = new QVBoxLayout(frame);
+  layout->setContentsMargins(12, 10, 12, 10);
+  layout->setSpacing(6);
+  layout->addWidget(
+      makeLabel(UiStyle::humanizeLabel(text(request.kind)), "title"));
+  layout->addWidget(
+      makeLabel(QStringLiteral("thread %1  |  generation %2  |  request %3")
+                    .arg(text(request.threadContext))
+                    .arg(static_cast<qulonglong>(request.generation))
+                    .arg(text(request.id)),
+                "meta"));
+  const auto addMetadata = [layout](const std::string &value,
+                                    const char *prefix) {
+    const QString displayed = text(value);
+    if (!displayed.isEmpty())
+      layout->addWidget(
+          makeLabel(QString::fromLatin1(prefix) + displayed, "meta"));
+  };
+  addMetadata(request.command, "Command: ");
+  addMetadata(request.reason, "Reason: ");
+  addMetadata(request.message, "");
+  if (request.questionCount)
+    layout->addWidget(
+        makeLabel(QStringLiteral("%1 questions")
+                      .arg(static_cast<qulonglong>(*request.questionCount)),
+                  "meta"));
+  if (request.command.empty() && request.reason.empty() &&
+      request.message.empty() && !request.questionCount)
+    layout->addWidget(
+        makeLabel(QStringLiteral("Request %1 needs a decision.")
+                      .arg(text(request.id)),
+                  "meta"));
+  auto *actions = new QHBoxLayout;
+  actions->setContentsMargins(0, 2, 0, 0);
+  auto *reject = new QPushButton(QStringLiteral("Reject"));
+  reject->setProperty("kind", "destructive");
+  reject->setFixedHeight(28);
+  reject->setEnabled(request.actionable);
+  connect(reject, &QPushButton::clicked, frame, [this, id = request.id] {
+    if (rejectRequest)
+      rejectRequest(id);
+  });
+  actions->addStretch();
+  actions->addWidget(reject);
+  if (supportsDirectAccept(request.kind)) {
+    auto *accept = new QPushButton(directAcceptText(request.kind));
+    accept->setProperty("kind", "request");
+    accept->setFixedHeight(28);
+    accept->setEnabled(request.actionable);
+    connect(accept, &QPushButton::clicked, frame, [this, id = request.id] {
+      if (acceptRequest)
+        acceptRequest(id);
+    });
+    actions->addWidget(accept);
+  } else {
+    auto *review = new QPushButton(QStringLiteral("Review"));
+    review->setProperty("kind", "request");
+    review->setFixedHeight(28);
+    review->setEnabled(request.actionable);
+    connect(review, &QPushButton::clicked, frame, [this, id = request.id] {
+      if (reviewRequest)
+        reviewRequest(id);
+    });
+    actions->addWidget(review);
+  }
+  layout->addLayout(actions);
+  setProperty("requestRowPatches",
+              property("requestRowPatches").toULongLong() + 1);
 }
 
 InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
@@ -516,14 +647,17 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   planLayout = new QVBoxLayout(planContent);
   planLayout->setContentsMargins(12, 12, 12, 12);
   planLayout->setSpacing(8);
+  planLayout->addStretch();
   agentsContent = new QWidget;
   agentsLayout = new QVBoxLayout(agentsContent);
   agentsLayout->setContentsMargins(12, 12, 12, 12);
   agentsLayout->setSpacing(8);
+  agentsLayout->addStretch();
   requestsContent = new QWidget;
   requestsLayout = new QVBoxLayout(requestsContent);
   requestsLayout->setContentsMargins(12, 12, 12, 12);
   requestsLayout->setSpacing(8);
+  requestsLayout->addStretch();
   diffViewer = new DiffViewer;
 
   const auto makeScroll = [](QWidget *content) {
@@ -690,60 +824,164 @@ void InspectorPane::refreshPlan() {
   const ui::InspectorPlanSnapshot &next = currentSnapshot->plan;
   if (planSnapshot && *planSnapshot == next)
     return;
+  const std::optional<ui::InspectorPlanSnapshot> previous = planSnapshot;
   planSnapshot = next;
   const ui::InspectorPlanSnapshot &snapshot = *planSnapshot;
-  setUpdatesEnabled(false);
-  clearLayout(planLayout);
-  if (!snapshot.threadPresent) {
-    planLayout->addWidget(
-        makeLabel(QStringLiteral("No selected thread."), "muted"));
-  } else if (snapshot.plan) {
-    const QString explanation = text(snapshot.plan->explanation);
-    if (!explanation.isEmpty())
-      planLayout->addWidget(makeMarkdownLabel(explanation));
-    for (const ui::InspectorPlanStep &step : snapshot.plan->steps) {
-      auto *row = new QFrame;
-      row->setProperty("kind", "raised");
-      auto *layout = new QVBoxLayout(row);
-      layout->setContentsMargins(12, 10, 12, 10);
-      layout->setSpacing(6);
-      layout->addWidget(makeLabel(text(step.step)));
-      layout->addWidget(statusLabel(step.status));
-      planLayout->addWidget(row);
+  const std::string beforeExplanation =
+      previous && previous->plan ? previous->plan->explanation : std::string{};
+  const std::string nextExplanation =
+      snapshot.plan ? snapshot.plan->explanation : std::string{};
+  if (beforeExplanation != nextExplanation ||
+      static_cast<bool>(planExplanation) != !nextExplanation.empty()) {
+    if (planExplanation) {
+      planLayout->removeWidget(planExplanation);
+      delete planExplanation;
+      planExplanation = nullptr;
     }
-  } else if (snapshot.planItem) {
-    const QString value = text(*snapshot.planItem);
-    planLayout->addWidget(
-        value.isEmpty()
-            ? makeLabel(QStringLiteral("Plan is being prepared."), "muted")
-            : makeMarkdownLabel(value));
-  } else {
-    planLayout->addWidget(
-        makeLabel(QStringLiteral("No plan for this thread."), "muted"));
+    if (!nextExplanation.empty()) {
+      planExplanation = makeMarkdownLabel(text(nextExplanation));
+      planLayout->insertWidget(0, planExplanation);
+    }
   }
-  planLayout->addStretch();
-  setUpdatesEnabled(true);
+
+  std::vector<std::pair<std::string, const ui::InspectorPlanStep *>> rows;
+  if (snapshot.plan) {
+    std::unordered_map<std::string, std::size_t> occurrences;
+    rows.reserve(snapshot.plan->steps.size());
+    for (const ui::InspectorPlanStep &step : snapshot.plan->steps) {
+      const std::size_t occurrence = occurrences[step.step]++;
+      rows.emplace_back(step.step + '\n' + std::to_string(occurrence), &step);
+    }
+  }
+  std::unordered_set<std::string> desired;
+  for (const auto &[key, step] : rows) {
+    static_cast<void>(step);
+    desired.insert(key);
+  }
+  for (auto iterator = planFrames.begin(); iterator != planFrames.end();) {
+    if (desired.contains(iterator->first)) {
+      ++iterator;
+      continue;
+    }
+    planLayout->removeWidget(iterator->second);
+    delete iterator->second;
+    renderedPlanSteps.erase(iterator->first);
+    iterator = planFrames.erase(iterator);
+  }
+
+  if (planMessage) {
+    planLayout->removeWidget(planMessage);
+    delete planMessage;
+    planMessage = nullptr;
+  }
+  if (!snapshot.plan) {
+    if (!snapshot.threadPresent) {
+      planMessage = makeLabel(QStringLiteral("No selected thread."), "muted");
+    } else if (snapshot.planItem) {
+      const QString value = text(*snapshot.planItem);
+      planMessage = value.isEmpty()
+                        ? static_cast<QWidget *>(makeLabel(
+                              QStringLiteral("Plan is being prepared."),
+                              "muted"))
+                        : static_cast<QWidget *>(makeMarkdownLabel(value));
+    } else {
+      planMessage =
+          makeLabel(QStringLiteral("No plan for this thread."), "muted");
+    }
+    planLayout->insertWidget(0, planMessage);
+  }
+
+  const int firstRow = planExplanation ? 1 : 0;
+  for (std::size_t index = 0; index < rows.size(); ++index) {
+    const auto &[key, step] = rows[index];
+    QFrame *frame = nullptr;
+    const auto retained = planFrames.find(key);
+    if (retained == planFrames.end()) {
+      frame = planStepFrame(*step);
+      planFrames.emplace(key, frame);
+    } else {
+      frame = retained->second;
+      const auto rendered = renderedPlanSteps.find(key);
+      if (rendered == renderedPlanSteps.end() || rendered->second != *step)
+        patchPlanStepFrame(frame, *step);
+    }
+    renderedPlanSteps.insert_or_assign(key, *step);
+    const int position = firstRow + static_cast<int>(index);
+    if (planLayout->indexOf(frame) != position)
+      planLayout->insertWidget(position, frame);
+  }
+  setProperty("planTabCommits",
+              property("planTabCommits").toULongLong() + 1);
 }
 
 void InspectorPane::refreshAgents() {
   const ui::InspectorAgentsSnapshot &next = currentSnapshot->agents;
   if (agentsSnapshot && *agentsSnapshot == next)
     return;
+  const bool changedThread =
+      agentsSnapshot && agentsSnapshot->threadId != next.threadId;
   agentsSnapshot = next;
   const ui::InspectorAgentsSnapshot &snapshot = *agentsSnapshot;
-  setUpdatesEnabled(false);
-  clearLayout(agentsLayout);
-  if (!snapshot.threadPresent)
-    agentsLayout->addWidget(
-        makeLabel(QStringLiteral("No selected thread."), "muted"));
-  else if (snapshot.agents.empty())
-    agentsLayout->addWidget(makeLabel(
-        QStringLiteral("No agent activity for this thread."), "muted"));
-  else
-    for (const ui::InspectorAgentRow &agent : snapshot.agents)
-      agentsLayout->addWidget(agentFrame(agent));
-  agentsLayout->addStretch();
-  setUpdatesEnabled(true);
+  if (changedThread) {
+    for (auto &[id, frame] : agentFrames) {
+      static_cast<void>(id);
+      agentsLayout->removeWidget(frame);
+      delete frame;
+    }
+    agentFrames.clear();
+    renderedAgentRows.clear();
+  }
+
+  std::unordered_set<std::string> desired;
+  desired.reserve(snapshot.agents.size());
+  for (const ui::InspectorAgentRow &agent : snapshot.agents)
+    desired.insert(agent.id);
+  for (auto iterator = agentFrames.begin(); iterator != agentFrames.end();) {
+    if (desired.contains(iterator->first)) {
+      ++iterator;
+      continue;
+    }
+    agentsLayout->removeWidget(iterator->second);
+    delete iterator->second;
+    renderedAgentRows.erase(iterator->first);
+    iterator = agentFrames.erase(iterator);
+    setProperty("agentRowRemovals",
+                property("agentRowRemovals").toULongLong() + 1);
+  }
+
+  if (agentsMessage) {
+    agentsLayout->removeWidget(agentsMessage);
+    delete agentsMessage;
+    agentsMessage = nullptr;
+  }
+  if (!snapshot.threadPresent) {
+    agentsMessage = makeLabel(QStringLiteral("No selected thread."), "muted");
+  } else if (snapshot.agents.empty()) {
+    agentsMessage = makeLabel(
+        QStringLiteral("No agent activity for this thread."), "muted");
+  }
+  if (agentsMessage)
+    agentsLayout->insertWidget(0, agentsMessage);
+
+  for (std::size_t index = 0; index < snapshot.agents.size(); ++index) {
+    const ui::InspectorAgentRow &agent = snapshot.agents[index];
+    QFrame *frame = nullptr;
+    const auto retained = agentFrames.find(agent.id);
+    if (retained == agentFrames.end()) {
+      frame = agentFrame(agent);
+      agentFrames.emplace(agent.id, frame);
+    } else {
+      frame = retained->second;
+      const auto rendered = renderedAgentRows.find(agent.id);
+      if (rendered == renderedAgentRows.end() || rendered->second != agent)
+        patchAgentFrame(frame, agent);
+    }
+    renderedAgentRows.insert_or_assign(agent.id, agent);
+    if (agentsLayout->indexOf(frame) != static_cast<int>(index))
+      agentsLayout->insertWidget(static_cast<int>(index), frame);
+  }
+  setProperty("agentsTabCommits",
+              property("agentsTabCommits").toULongLong() + 1);
 }
 
 void InspectorPane::refreshChanges() {
@@ -761,85 +999,48 @@ void InspectorPane::refreshRequests() {
   requestsSnapshot = next;
   const std::vector<ui::InspectorRequestRow> &snapshot =
       requestsSnapshot->requests;
-  setUpdatesEnabled(false);
-  clearLayout(requestsLayout);
-  for (const ui::InspectorRequestRow &request : snapshot) {
-    auto *frame = new QFrame;
-    frame->setProperty("kind", "raised");
-    frame->setProperty("tone", "warning");
-    auto *layout = new QVBoxLayout(frame);
-    layout->setContentsMargins(12, 10, 12, 10);
-    layout->setSpacing(6);
-    layout->addWidget(
-        makeLabel(UiStyle::humanizeLabel(text(request.kind)), "title"));
-    layout->addWidget(
-        makeLabel(QStringLiteral("thread %1  |  generation %2  |  request %3")
-                      .arg(text(request.threadContext))
-                      .arg(static_cast<qulonglong>(request.generation))
-                      .arg(text(request.id)),
-                  "meta"));
-    const auto addMetadata = [layout](const std::string &value,
-                                      const char *prefix) {
-      const QString displayed = text(value);
-      if (!displayed.isEmpty())
-        layout->addWidget(
-            makeLabel(QString::fromLatin1(prefix) + displayed, "meta"));
-    };
-    addMetadata(request.command, "Command: ");
-    addMetadata(request.reason, "Reason: ");
-    addMetadata(request.message, "");
-    if (request.questionCount)
-      layout->addWidget(
-          makeLabel(QStringLiteral("%1 questions")
-                        .arg(static_cast<qulonglong>(*request.questionCount)),
-                    "meta"));
-    if (request.command.empty() && request.reason.empty() &&
-        request.message.empty() && !request.questionCount)
-      layout->addWidget(
-          makeLabel(QStringLiteral("Request %1 needs a decision.")
-                        .arg(text(request.id)),
-                    "meta"));
-    auto *actions = new QHBoxLayout;
-    actions->setContentsMargins(0, 2, 0, 0);
-    auto *reject = new QPushButton(QStringLiteral("Reject"));
-    reject->setProperty("kind", "destructive");
-    reject->setFixedHeight(28);
-    reject->setEnabled(request.actionable);
-    connect(reject, &QPushButton::clicked, this, [this, id = request.id] {
-      if (rejectRequest)
-        rejectRequest(id);
-    });
-    actions->addStretch();
-    actions->addWidget(reject);
-    if (supportsDirectAccept(request.kind)) {
-      auto *accept = new QPushButton(directAcceptText(request.kind));
-      accept->setProperty("kind", "request");
-      accept->setFixedHeight(28);
-      accept->setEnabled(request.actionable);
-      connect(accept, &QPushButton::clicked, this, [this, id = request.id] {
-        if (acceptRequest)
-          acceptRequest(id);
-      });
-      actions->addWidget(accept);
-    } else {
-      auto *review = new QPushButton(QStringLiteral("Review"));
-      review->setProperty("kind", "request");
-      review->setFixedHeight(28);
-      review->setEnabled(request.actionable);
-      connect(review, &QPushButton::clicked, this, [this, id = request.id] {
-        if (reviewRequest)
-          reviewRequest(id);
-      });
-      actions->addWidget(review);
+  std::unordered_set<std::string> desired;
+  for (const ui::InspectorRequestRow &request : snapshot)
+    desired.insert(request.id);
+  for (auto iterator = requestFrames.begin(); iterator != requestFrames.end();) {
+    if (desired.contains(iterator->first)) {
+      ++iterator;
+      continue;
     }
-    layout->addLayout(actions);
-    requestsLayout->addWidget(frame);
+    requestsLayout->removeWidget(iterator->second);
+    delete iterator->second;
+    renderedRequests.erase(iterator->first);
+    iterator = requestFrames.erase(iterator);
   }
-  if (snapshot.empty())
-    requestsLayout->addWidget(
-        makeLabel(QStringLiteral("No pending requests."), "muted"));
-  requestsLayout->addStretch();
-  setUpdatesEnabled(true);
+  if (requestsMessage) {
+    requestsLayout->removeWidget(requestsMessage);
+    delete requestsMessage;
+    requestsMessage = nullptr;
+  }
+  if (snapshot.empty()) {
+    requestsMessage =
+        makeLabel(QStringLiteral("No pending requests."), "muted");
+    requestsLayout->insertWidget(0, requestsMessage);
+  }
+  for (std::size_t index = 0; index < snapshot.size(); ++index) {
+    const ui::InspectorRequestRow &request = snapshot[index];
+    QFrame *frame = nullptr;
+    const auto retained = requestFrames.find(request.id);
+    if (retained == requestFrames.end()) {
+      frame = requestFrame(request);
+      requestFrames.emplace(request.id, frame);
+    } else {
+      frame = retained->second;
+      const auto rendered = renderedRequests.find(request.id);
+      if (rendered == renderedRequests.end() || rendered->second != request)
+        patchRequestFrame(frame, request);
+    }
+    renderedRequests.insert_or_assign(request.id, request);
+    if (requestsLayout->indexOf(frame) != static_cast<int>(index))
+      requestsLayout->insertWidget(static_cast<int>(index), frame);
+  }
+  setProperty("requestsTabCommits",
+              property("requestsTabCommits").toULongLong() + 1);
 }
 
 void InspectorPane::refreshState() {

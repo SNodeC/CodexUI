@@ -18,6 +18,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -58,6 +59,13 @@ protected:
 
 private:
   QFrame *agentFrame(const ui::InspectorAgentRow &agent);
+  void patchAgentFrame(QFrame *frame, const ui::InspectorAgentRow &agent);
+  QFrame *planStepFrame(const ui::InspectorPlanStep &step);
+  void patchPlanStepFrame(QFrame *frame,
+                          const ui::InspectorPlanStep &step);
+  QFrame *requestFrame(const ui::InspectorRequestRow &request);
+  void patchRequestFrame(QFrame *frame,
+                         const ui::InspectorRequestRow &request);
   void refreshCurrentTab();
   void refreshPlan();
   void refreshAgents();
@@ -89,9 +97,19 @@ private:
   QLabel *protocolStats = nullptr;
 
   std::optional<ui::InspectorPlanSnapshot> planSnapshot;
+  std::unordered_map<std::string, QFrame *> planFrames;
+  std::unordered_map<std::string, ui::InspectorPlanStep> renderedPlanSteps;
+  QWidget *planExplanation = nullptr;
+  QWidget *planMessage = nullptr;
   std::optional<ui::InspectorAgentsSnapshot> agentsSnapshot;
+  std::unordered_map<std::string, QFrame *> agentFrames;
+  std::unordered_map<std::string, ui::InspectorAgentRow> renderedAgentRows;
+  QWidget *agentsMessage = nullptr;
   std::unordered_set<std::string> expandedAgents;
   std::optional<ui::InspectorRequestsSnapshot> requestsSnapshot;
+  std::unordered_map<std::string, QFrame *> requestFrames;
+  std::unordered_map<std::string, ui::InspectorRequestRow> renderedRequests;
+  QWidget *requestsMessage = nullptr;
   QByteArray stateSnapshot;
   QByteArray protocolStatsSnapshot;
   std::deque<QString> protocolLines;

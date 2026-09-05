@@ -197,6 +197,7 @@ bool establishedAgentsWidgetContractIsRetained() {
   result &= expect(frames.size() == 1,
                    "activating Agents materializes the current logical row");
   if (!frames.empty()) {
+    QFrame *stableFrame = frames.front();
     auto *content = frames.front()->findChild<QWidget *>(
         QStringLiteral("agentCardContent"));
     auto *disclosure = frames.front()->findChild<QToolButton *>(
@@ -208,7 +209,107 @@ bool establishedAgentsWidgetContractIsRetained() {
     QCoreApplication::processEvents();
     result &= expect(content && content->isVisible(),
                      "the established disclosure behavior is retained");
+    const qulonglong constructions =
+        pane.property("agentRowConstructions").toULongLong();
+    ui::InspectorSnapshot updated = *snapshot;
+    updated.agents.agents.front().status = "completed";
+    pane.refresh(updated);
+    QCoreApplication::processEvents();
+    const auto updatedFrames =
+        pane.findChildren<QFrame *>(QStringLiteral("inspectorAgentFrame"));
+    auto *updatedContent = stableFrame->findChild<QWidget *>(
+        QStringLiteral("agentCardContent"));
+    result &= expect(updatedFrames.size() == 1 &&
+                         updatedFrames.front() == stableFrame &&
+                         updatedContent && updatedContent->isVisible() &&
+                         pane.property("agentRowConstructions").toULongLong() ==
+                             constructions,
+                     "an Agent state change patches the stable expanded row "
+                     "without rebuilding the Agents surface");
+    const qulonglong patches =
+        pane.property("agentRowPatches").toULongLong();
+    pane.refresh(updated);
+    QCoreApplication::processEvents();
+    result &= expect(pane.property("agentRowPatches").toULongLong() == patches,
+                     "repeating identical Agent state performs zero row work");
   }
+  return result;
+}
+
+bool planAndRequestUpdatesRetainUnaffectedRows() {
+  ui::InspectorSnapshot snapshot;
+  snapshot.plan.threadId = "stable-inspector";
+  snapshot.plan.threadPresent = true;
+  snapshot.plan.plan = ui::InspectorPlan{
+      "Stable explanation",
+      {{"first stable step", "in_progress"},
+       {"second stable step", "pending"}}};
+  snapshot.agents.threadId = "stable-inspector";
+  snapshot.agents.threadPresent = true;
+  snapshot.requests.requests = {
+      {"request-one", "command-approval", "stable-inspector", 1,
+       "one", {}, {}, std::nullopt, true},
+      {"request-two", "command-approval", "stable-inspector", 1,
+       "two", {}, {}, std::nullopt, true}};
+
+  middle::InspectorPane pane;
+  pane.resize(440, 700);
+  pane.show();
+  pane.refresh(snapshot);
+  QCoreApplication::processEvents();
+  auto planFrames = pane.findChildren<QFrame *>(
+      QStringLiteral("inspectorPlanStepFrame"));
+  QFrame *firstPlan = nullptr;
+  QFrame *secondPlan = nullptr;
+  for (QFrame *frame : planFrames) {
+    if (frame->property("planStep").toString() ==
+        QStringLiteral("first stable step"))
+      firstPlan = frame;
+    if (frame->property("planStep").toString() ==
+        QStringLiteral("second stable step"))
+      secondPlan = frame;
+  }
+  const qulonglong planConstructions =
+      pane.property("planRowConstructions").toULongLong();
+  snapshot.plan.plan->steps.front().status = "completed";
+  pane.refresh(snapshot);
+  QCoreApplication::processEvents();
+  planFrames = pane.findChildren<QFrame *>(
+      QStringLiteral("inspectorPlanStepFrame"));
+  bool result = expect(
+      planFrames.contains(firstPlan) && planFrames.contains(secondPlan) &&
+          pane.property("planRowConstructions").toULongLong() ==
+              planConstructions,
+      "a Plan status update retains both stable rows and patches only the "
+      "changed presentation");
+
+  pane.tabs()->setCurrentIndex(3);
+  QCoreApplication::processEvents();
+  auto requestFrames = pane.findChildren<QFrame *>(
+      QStringLiteral("inspectorRequestFrame"));
+  QFrame *requestOne = nullptr;
+  QFrame *requestTwo = nullptr;
+  for (QFrame *frame : requestFrames) {
+    if (frame->property("requestId").toString() ==
+        QStringLiteral("request-one"))
+      requestOne = frame;
+    if (frame->property("requestId").toString() ==
+        QStringLiteral("request-two"))
+      requestTwo = frame;
+  }
+  const qulonglong requestConstructions =
+      pane.property("requestRowConstructions").toULongLong();
+  snapshot.requests.requests.front().actionable = false;
+  pane.refresh(snapshot);
+  QCoreApplication::processEvents();
+  requestFrames = pane.findChildren<QFrame *>(
+      QStringLiteral("inspectorRequestFrame"));
+  result &= expect(
+      requestFrames.contains(requestOne) && requestFrames.contains(requestTwo) &&
+          pane.property("requestRowConstructions").toULongLong() ==
+              requestConstructions,
+      "a Request state update retains both stable request rows without a "
+      "whole-tab rebuild");
   return result;
 }
 
@@ -304,6 +405,7 @@ int main(int argc, char **argv) {
   const bool passed =
       codexui::codex::logicalAgentsRemainDeduplicated() &&
       codexui::codex::establishedAgentsWidgetContractIsRetained() &&
+      codexui::codex::planAndRequestUpdatesRetainUnaffectedRows() &&
       codexui::codex::stateAndProtocolRemainUsefulBoundedAndRedacted();
   if (passed)
     std::cout << "NodeGraph Inspector UI adapter tests passed\n";
