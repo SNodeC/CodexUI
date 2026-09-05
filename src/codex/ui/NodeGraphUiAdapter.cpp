@@ -473,10 +473,15 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
 
   result.kind = graphCardKind(state);
   switch (result.kind) {
-  case CardKind::UserMessage:
+  case CardKind::UserMessage: {
     result.payload =
         UserMessageData{graphMessageText(state), graphImagePaths(state)};
+    if (const auto submission =
+            graphInteger(graphField(state, "localSubmissionId"));
+        submission && *submission >= 0)
+      result.key = LocalPromptKey{static_cast<std::uint64_t>(*submission)};
     break;
+  }
   case CardKind::AgentMessage:
     result.payload = AgentMessageData{
         withTruncationNotice(graphMessageText(state),
@@ -591,7 +596,7 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
     if (dispatch == "dispatching" || dispatch == "inFlight")
       promptState = PromptState::InFlight;
     else if (dispatch == "awaitingMaterialization")
-      promptState = PromptState::Accepted;
+      promptState = PromptState::InFlight;
     else if (dispatch == "failed" || dispatch == "uncertain")
       promptState = PromptState::Failed;
     const std::int64_t rawId =

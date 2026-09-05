@@ -1280,9 +1280,27 @@ void correlateLocalPrompt(NodeGraph::WriteAccess &write,
     if (found == state->fields.end() || !found->second.asString() ||
         *found->second.asString() != clientId)
       continue;
+    if (const auto submission = state->fields.find("submissionId");
+        submission != state->fields.end())
+      write.setField(authoritative, "localSubmissionId", submission->second);
     std::array<NodeRef, 1> alias{local};
     write.replaceRelated(authoritative, RelationKind::PromptMaterialization,
                          alias);
+    // A steering prompt and its provider item share one Turn. The provider
+    // item may arrive after activity caused by that prompt, but the visible
+    // You card must retain the exact slot where the user submitted it.
+    const NodeRef localTurn = write.parent(local);
+    if (localTurn && write.parent(authoritative) == localTurn) {
+      std::vector<NodeRef> ordered = write.children(localTurn);
+      ordered.erase(std::remove(ordered.begin(), ordered.end(), authoritative),
+                    ordered.end());
+      if (const auto position = std::ranges::find(ordered, local);
+          position != ordered.end())
+        ordered.insert(std::next(position), authoritative);
+      else
+        ordered.push_back(authoritative);
+      write.replaceChildren(localTurn, ordered);
+    }
     break;
   }
 }

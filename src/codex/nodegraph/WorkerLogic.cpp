@@ -1120,7 +1120,10 @@ std::optional<PromptCommand> WorkerLogic::completePrompt(
   } else if (accepted) {
     write.setField(localPrompt, "dispatchState",
                    Value("awaitingMaterialization"));
-    write.setField(localPrompt, "showPendingAnimation", Value(false));
+    // Request acceptance is not yet visible completion. Keep the optimistic
+    // card active until the correlated authoritative user item is projected
+    // into that exact card.
+    write.setField(localPrompt, "showPendingAnimation", Value(true));
     write.eraseField(localPrompt, "error");
     write.eraseField(localPrompt, "requiresExplicitRecovery");
     write.setStatus(localPrompt, NodeStatus::Running);

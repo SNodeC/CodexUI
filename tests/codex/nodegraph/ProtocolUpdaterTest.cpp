@@ -1881,6 +1881,75 @@ void promptMaterializationDoesNotAcknowledgeDelivery() {
           "inbound materialization alone never acknowledges outbound delivery");
 }
 
+void steeringMaterializationKeepsTheSubmittedSlot() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  NodeRef local;
+  NodeRef intervening;
+  {
+    auto write = graph.write();
+    NodeRef runtime = write.upsert({NodeKind::Runtime, "runtime"});
+    NodeRef thread = write.upsert({NodeKind::Thread, "steering-thread"});
+    NodeRef turn = write.upsert(
+        scopedTurnNodeId("steering-thread", "steering-turn"));
+    write.setField(turn, "protocolId", Value("steering-turn"));
+    write.setField(turn, "protocolThreadId", Value("steering-thread"));
+    NodeRef root = write.upsert(
+        scopedItemNodeId(turn->id(), "opening-prompt"));
+    write.setField(root, "protocolId", Value("opening-prompt"));
+    write.setField(root, "type", Value("userMessage"));
+    local = write.upsert({NodeKind::Item, "local-steering"});
+    write.setField(local, "type", Value("localPrompt"));
+    write.setField(local, "submissionId", Value(std::uint64_t{77}));
+    write.setField(local, "clientUserMessageId", Value("steering-client"));
+    write.setField(local, "startsTurn", Value(false));
+    intervening = write.upsert(
+        scopedItemNodeId(turn->id(), "intervening-activity"));
+    write.setField(intervening, "protocolId", Value("intervening-activity"));
+    write.setField(intervening, "type", Value("agentMessage"));
+    write.setParent(thread, turn);
+    write.setParent(turn, root);
+    write.setParent(turn, local);
+    write.setParent(turn, intervening);
+    write.relate(turn, RelationKind::TurnRootItem, root);
+    write.relate(runtime, RelationKind::PendingPrompt, local);
+    static_cast<void>(write.finish());
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       Value::Object{{"threadId", Value("steering-thread")},
+                     {"turnId", Value("steering-turn")},
+                     {"item", Value(Value::Object{
+                                  {"id", Value("provider-steering")},
+                                  {"type", Value("userMessage")},
+                                  {"clientId", Value("steering-client")},
+                                  {"text", Value("Steer here")}})}}}));
+
+  auto read = graph.tryRead();
+  const NodeRef turn =
+      findTurn(*read, "steering-thread", "steering-turn");
+  const NodeRef authoritative =
+      findItem(*read, "steering-thread", "steering-turn",
+               "provider-steering");
+  const auto ordered = read->children(turn);
+  const auto localPosition = std::ranges::find(ordered, local);
+  const auto authoritativePosition =
+      std::ranges::find(ordered, authoritative);
+  const auto interveningPosition = std::ranges::find(ordered, intervening);
+  const auto authoritativeState = read->state(authoritative);
+  const Value *submission =
+      field(authoritativeState, "localSubmissionId");
+  require(authoritative && submission && submission->asUInt64() &&
+              *submission->asUInt64() == 77 &&
+              localPosition != ordered.end() &&
+              authoritativePosition == std::next(localPosition) &&
+              interveningPosition != ordered.end() &&
+              authoritativePosition < interveningPosition,
+          "a correlated steering item retains the submitted local slot and "
+          "its stable visual identity ahead of later activity");
+}
+
 void turnRootsAndPagedHistoryStayExplicit() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -4025,6 +4094,7 @@ int main() {
   hookRunsKeepNestedIdentityAndCurrentOwnership();
   graphRelationsInvalidationAndIncarnationsAreExplicit();
   promptMaterializationDoesNotAcknowledgeDelivery();
+  steeringMaterializationKeepsTheSubmittedSlot();
   turnRootsAndPagedHistoryStayExplicit();
   resultsAndListsCorrelate();
   lateResultsCannotRecreateDeletedTargets();

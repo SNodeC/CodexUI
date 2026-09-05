@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QScrollBar>
+#include <QTimer>
 
 #include <cstdlib>
 #include <iostream>
@@ -223,12 +224,14 @@ bool promptMorphPreservesExactTargetAndWidget() {
     return false;
   middle::ConversationCard *stable = before.front();
 
+  NodeRef authoritative;
   {
     auto write = graph.write();
     write.setField(prompt, "dispatchState", "awaitingMaterialization");
-    NodeRef authoritative = write.upsert(
+    authoritative = write.upsert(
         {NodeKind::Item, "authoritative-prompt"},
         state("authoritative-prompt", "userMessage", "hello"));
+    write.setField(authoritative, "localSubmissionId", std::uint64_t{41});
     write.setParent(turn, authoritative);
     write.relate(authoritative,
                  nodegraph::RelationKind::PromptMaterialization, prompt);
@@ -249,8 +252,167 @@ bool promptMorphPreservesExactTargetAndWidget() {
     return false;
 
   static_cast<void>(view.reconcile(*snapshot));
-  return require(acknowledgements == 1,
-                 "unchanged prompt projection acknowledged twice");
+  if (!require(acknowledgements == 1,
+               "unchanged prompt projection acknowledged twice"))
+    return false;
+
+  const int promotedTop = stable->mapTo(view.viewport(), QPoint{}).y();
+  {
+    auto write = graph.write();
+    write.remove(prompt);
+    static_cast<void>(write.finish());
+  }
+  snapshot = adapter.conversation(thread, 80, {true, true});
+  if (!require(snapshot.has_value(),
+               "local retirement did not project the authoritative card"))
+    return false;
+  static_cast<void>(view.reconcile(*snapshot));
+  QApplication::processEvents();
+  const auto retired = view.findChildren<middle::ConversationCard *>();
+  bool result = require(retired.size() == 1 && retired.front() == stable,
+                        "local retirement replaced the promoted QWidget");
+  result &= require(retired.size() == 1 &&
+                        retired.front()->data().target == authoritative,
+                    "local retirement did not transfer the action target");
+  result &= require(retired.size() == 1 &&
+                        retired.front()
+                                ->mapTo(view.viewport(), QPoint{})
+                                .y() == promotedTop,
+                    "local retirement moved the promoted card");
+  result &= require(acknowledgements == 1,
+                    "local retirement acknowledged the prompt again");
+  return result;
+}
+
+bool steeringMorphKeepsItsSlotThroughRetirement() {
+  nodegraph::NodeGraph graph;
+  NodeRef thread;
+  NodeRef turn;
+  NodeRef root;
+  NodeRef steering;
+  NodeRef progress;
+  {
+    auto write = graph.write();
+    thread = write.upsert({NodeKind::Thread, "thread-steering"},
+                          state("thread-steering"));
+    turn = write.upsert({NodeKind::Turn, "turn-steering"},
+                        state("turn-steering"));
+    root = write.upsert({NodeKind::Item, "root-steering"},
+                        state("root-steering", "userMessage", "Start"));
+    NodeState local = state("local-steering", "localPrompt", "Steer here");
+    local.fields.emplace("submissionId", std::uint64_t{72});
+    local.fields.emplace("dispatchState", "inFlight");
+    local.fields.emplace("startsTurn", false);
+    steering = write.upsert({NodeKind::Item, "local-steering"},
+                            std::move(local));
+    progress = write.upsert(
+        {NodeKind::Item, "later-progress"},
+        state("later-progress", "agentMessage", "Later progress"));
+    write.setParent(thread, turn);
+    write.setParent(turn, root);
+    write.setParent(turn, steering);
+    write.setParent(turn, progress);
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, root);
+    static_cast<void>(write.finish());
+  }
+
+  ui::NodeGraphUiAdapter adapter(graph);
+  middle::ConversationView view;
+  view.resize(700, 520);
+  view.show();
+  int acknowledgements = 0;
+  view.setPromptMaterializedAction([&](NodeRef target) {
+    ++acknowledgements;
+    return target == steering;
+  });
+  auto snapshot = adapter.conversation(thread, 80, {true, true});
+  if (!snapshot || !view.reconcile(*snapshot))
+    return false;
+  QApplication::processEvents();
+  const auto findCard = [&view](const std::string &key) {
+    for (middle::ConversationCard *card :
+         view.findChildren<middle::ConversationCard *>())
+      if (card->property("conversationAnchorKey").toString().toStdString() ==
+          key)
+        return card;
+    return static_cast<middle::ConversationCard *>(nullptr);
+  };
+  middle::ConversationCard *stable =
+      findCard(middle::stableKey(middle::LocalPromptKey{72}));
+  middle::ConversationCard *progressCard = findCard(middle::stableKey(
+      middle::AuthoritativeItemKey{"thread-steering", "turn-steering",
+                                   "later-progress"}));
+  if (!require(stable && progressCard &&
+                   stable->mapTo(view.viewport(), QPoint{}).y() <
+                       progressCard->mapTo(view.viewport(), QPoint{}).y(),
+               "steering did not begin ahead of its later activity"))
+    return false;
+
+  {
+    auto write = graph.write();
+    write.setField(steering, "dispatchState", "awaitingMaterialization");
+    write.setField(steering, "showPendingAnimation", true);
+    static_cast<void>(write.finish());
+  }
+  snapshot = adapter.conversation(thread, 80, {true, true});
+  if (!snapshot)
+    return false;
+  static_cast<void>(view.reconcile(*snapshot));
+  QApplication::processEvents();
+  QTimer *animation = stable->findChild<QTimer *>(
+      QStringLiteral("pendingAnimationTimer"));
+  if (!require(animation && animation->isActive() &&
+                   stable->data().kind == middle::CardKind::LocalPrompt &&
+                   acknowledgements == 0,
+               "accepted steering stopped while awaiting its authoritative "
+               "user item"))
+    return false;
+
+  NodeRef authoritative;
+  {
+    auto write = graph.write();
+    authoritative = write.upsert(
+        {NodeKind::Item, "provider-steering"},
+        state("provider-steering", "userMessage", "Steer here"));
+    write.setField(authoritative, "localSubmissionId", std::uint64_t{72});
+    write.setParent(turn, authoritative);
+    write.relate(authoritative,
+                 nodegraph::RelationKind::PromptMaterialization, steering);
+    write.replaceChildren(
+        turn, std::array<NodeRef, 4>{root, steering, authoritative, progress});
+    static_cast<void>(write.finish());
+  }
+  snapshot = adapter.conversation(thread, 80, {true, true});
+  if (!snapshot)
+    return false;
+  static_cast<void>(view.reconcile(*snapshot));
+  QApplication::processEvents();
+  const int promotedTop = stable->mapTo(view.viewport(), QPoint{}).y();
+  if (!require(stable->data().kind == middle::CardKind::UserMessage &&
+                   animation && !animation->isActive() &&
+                   acknowledgements == 1 && promotedTop <
+                       progressCard->mapTo(view.viewport(), QPoint{}).y(),
+               "authoritative steering materialization did not stop its "
+               "animation in the original submitted slot"))
+    return false;
+
+  {
+    auto write = graph.write();
+    write.remove(steering);
+    static_cast<void>(write.finish());
+  }
+  snapshot = adapter.conversation(thread, 80, {true, true});
+  if (!snapshot)
+    return false;
+  static_cast<void>(view.reconcile(*snapshot));
+  QApplication::processEvents();
+  return require(
+      findCard(middle::stableKey(middle::LocalPromptKey{72})) == stable &&
+          stable->data().target == authoritative &&
+          stable->mapTo(view.viewport(), QPoint{}).y() == promotedTop &&
+          promotedTop < progressCard->mapTo(view.viewport(), QPoint{}).y() &&
+          acknowledgements == 1,
+      "steering retirement recreated, moved, or reordered its stable card");
 }
 
 } // namespace
@@ -261,7 +423,8 @@ int main(int argc, char **argv) {
   using namespace codexui::codex;
   if (!oldUiConsumesAdapterSnapshotsAtomically() ||
       !pausedViewportKeepsItsPaintedAnchor() ||
-      !promptMorphPreservesExactTargetAndWidget())
+      !promptMorphPreservesExactTargetAndWidget() ||
+      !steeringMorphKeepsItsSlotThroughRetirement())
     return EXIT_FAILURE;
   std::cout << "NodeGraph conversation UI tests passed\n";
   return EXIT_SUCCESS;

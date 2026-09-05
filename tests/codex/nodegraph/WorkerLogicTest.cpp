@@ -905,11 +905,11 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
             stringFieldEquals(read->state(firstPrompt), "dispatchState",
                               "awaitingMaterialization") &&
             boolFieldEquals(read->state(firstPrompt),
-                            "showPendingAnimation", false),
+                            "showPendingAnimation", true),
         "matching authoritative clientId directly relates the user item "
-        "to its acknowledged local visual identity and transfers canonical "
-        "turn-root ownership without replacing the exact request-result "
-        "lifecycle");
+        "to its active local visual identity and transfers canonical "
+        "turn-root ownership without stopping feedback before UI "
+        "materialization");
   }
 
   const ChannelSendStatus removed = logic.promptMaterialized(firstPrompt);
