@@ -660,3 +660,47 @@ controller authority from the second UI; no prompt was sent through that
 uncontrolled connection.
 
 No remote or GitHub operation is used to maintain this document.
+
+### Final smoothness qualification (2026-09-05)
+
+The final correction was exercised through the complete Debug application on
+Xvfb `:98`, connected to the workspace-isolated bridge and app-server that
+remained alive across the scenarios. The retained proof artifacts are under
+`../../build/codexui-adapter-qualification/capture/final-smoothness/`:
+
+- `atomic-thread-selection.mp4` switches from a populated control thread to a
+  longer mixed thread. The old surface remains complete, a single stable
+  loading cover is shown while rich cards are staged, and the incoming thread
+  appears in one committed frame. No card-by-card reveal or reserved blank
+  extent is exposed.
+- `sustained-command-streaming.mp4` records normal prompt admission and an
+  1,800-line command with 10 ms output intervals through completion. The exact
+  command card updates in place with its running border. Of 1,680 captured
+  frames, 1,204 contain conversation-region motion. Interior pixel-difference
+  analysis found no visible motion in ThreadPane, Inspector, or shell chrome;
+  their maximum mean luminance deltas were respectively 0.021, 0.005, and
+  0.043.
+- `steering-while-scrolled-up.mp4` records a second 1,800-line command, pauses
+  the outer conversation above the active tail, and admits steering. The
+  steering You card remains under the same Turn and resolves with the final
+  answer below the viewport. Frames sampled before and after steering have the
+  same visible card positions and horizontal coordinates; the full-region
+  normalized pixel difference is approximately `1.0e-5`, attributable to
+  capture encoding rather than displacement.
+
+The deterministic 81-card staging test additionally verifies repeated event
+loop heartbeats during hidden construction, no visible partial card tree, a
+live delta applied without restarting the stage, one final reveal, and an
+unchanged old surface during Load 80. Three consecutive normal offscreen runs
+measured the indivisible final geometry commit at 81, 82, and 82 ms, below the
+existing 100 ms selection/load boundary. This bounded delay applies only to an
+explicit thread selection or Load 80 operation; ordinary card deltas use the
+exact retained-card path and do not traverse the loaded history.
+
+The final Debug suite passes 17/17 native tests and the WebUI compatibility
+suite passes 83/83. ASan/UBSan executes every suite without a sanitizer
+diagnostic; 16/17 pass their functional criteria, while the shell suite's same
+strict 100 ms wall-clock assertion measures 163 ms offscreen and 189 ms on
+Xvfb under sanitizer instrumentation. The unsanitized criterion and real-app
+movie pass; the sanitizer-only timing overrun is not used to relax the product
+limit.

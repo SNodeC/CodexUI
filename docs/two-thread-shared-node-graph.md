@@ -372,16 +372,35 @@ targets and correlations, decoded success/error results, and absence of a
 second wire send.
 
 Focused performance qualification on the final Debug build measured the
-1,024/2,048-delta long stream at 41.1/82.2 ms, 1,500/3,000-item thread deletion
-at 4.4/8.9 ms, and 3,000/6,000-node graph batch removal at 7.2/8.9 ms. The
+1,024/2,048-delta long stream at 40.1/80.2 ms, 1,500/3,000-item thread deletion
+at 4.5/9.1 ms, and 3,000/6,000-node graph batch removal at 4.4/9.2 ms. The
 large-render tests keep full history in NodeGraph while exposing only the
 requested 80-item (or explicitly expanded) conversation window. Continuous
 unrelated graph revisions do not restart selected-pane work, identical DTOs are
 presentation no-ops, and contention retries use a bounded nonzero delay.
+
+Qt smoothness qualification uses the established widgets as one retained,
+virtualized selected-thread surface. Multi-card selection and Load 80 create
+rich cards one at a time under a hidden staging parent, then reparent the
+already-current widgets and commit final geometry once. The final commit does
+not reapply presentation to staged card subtrees. Ordinary graph changes route
+to the exact card, thread row, visible Inspector dependency, or effective
+chrome value; they do not treat a graph or Thread revision as repaint authority.
+The 81-card final commit measured 81--82 ms in three normal Debug runs. A
+28-second, 60-fps full-application capture of a 1,800-line command showed
+sustained in-place conversation motion while the interiors of ThreadPane,
+Inspector, and shell chrome remained visually unchanged. A separate steering
+capture preserved the paused viewport across optimistic admission and
+authoritative completion. Artifact names and the complete protocol for those
+movies are recorded in `ui-ux-internal-api.md`.
 
 The final clean qualification ran the independently configured nodegraph-only
 suite in Debug, AddressSanitizer, and ThreadSanitizer builds (5/5 tests in each,
 with no sanitizer findings and no Qt libraries linked), the integrated native
 suite (17/17), three consecutive passes of the mailbox, graph-concurrency,
 runtime-dispatch, and shell-integration tests, and the WebUI compatibility suite
-(83/83).
+(83/83). The newest complete ASan/UBSan integrated run produced no sanitizer
+diagnostic; 16/17 suites passed, and only the shell suite's unchanged 100 ms
+wall-clock performance assertion exceeded its unsanitized budget under
+instrumentation (163 ms offscreen, 189 ms on Xvfb). The normal Debug suite and
+full-application Xvfb evidence satisfy that product timing boundary.

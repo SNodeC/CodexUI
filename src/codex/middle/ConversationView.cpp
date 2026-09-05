@@ -772,7 +772,12 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
           card = staged->second;
           stagedCards_.erase(staged);
           card->setParent(section);
-          static_cast<void>(card->apply(cardData));
+          // The staging pass created this card from the same presentation and
+          // applyCardPresentation keeps it current while the hidden batch is
+          // being prepared. Reapplying every rich subtree here makes the
+          // atomic reveal proportional to presentation work already done.
+          // Reparent only; the final geometry transaction below establishes
+          // its committed width and height.
         } else {
           if (staged != stagedCards_.end()) {
             delete staged->second;

@@ -1017,6 +1017,10 @@ void initialHydrationUsesTheEstablishedBoundedWindow(
               agentMessageCard(shell, "bounded-item-99 latest"),
           "a live canonical update patches the hidden target without "
           "restarting or starving structural staging");
+  std::cout << "atomic structural commit ms: "
+            << conversation->property("structuralStageCommitMillis")
+                   .toLongLong()
+            << '\n';
   require(conversation &&
               conversation->property("structuralStageCommitMillis").toLongLong() <
                   100,
