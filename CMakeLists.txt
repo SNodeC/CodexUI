@@ -6,6 +6,22 @@ project(CodexUI VERSION 1.0.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CTest)
+find_package(Threads REQUIRED)
+
+option(
+    CODEXUI_NODEGRAPH_ONLY
+    "Configure only the standalone codexui-nodegraph library and tests"
+    OFF
+)
+
+add_subdirectory(src/codex/nodegraph)
+if(BUILD_TESTING)
+    add_subdirectory(tests/codex/nodegraph)
+endif()
+
+if(CODEXUI_NODEGRAPH_ONLY)
+    return()
+endif()
 
 set(CMAKE_AUTOMOC ON)
 
@@ -25,7 +41,6 @@ find_package(
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBGIT2 REQUIRED IMPORTED_TARGET libgit2)
-find_package(Threads REQUIRED)
 
 set(
     CODEXUI_CODEX_COMMON_SOURCES
@@ -34,6 +49,7 @@ set(
     src/codex/ClientRuntime.h
     src/codex/Configuration.cpp
     src/codex/Configuration.h
+    src/codex/CurrentProtocolAdapters.h
     src/codex/ConnectionDialog.cpp
     src/codex/ConnectionDialog.h
     src/codex/DiffViewer.cpp
@@ -48,34 +64,21 @@ set(
     src/codex/MainWindow.h
     src/codex/NewThreadDialog.cpp
     src/codex/NewThreadDialog.h
+    src/codex/NodeGraphJson.cpp
+    src/codex/NodeGraphJson.h
     src/codex/PendingRequestPolicy.cpp
     src/codex/PendingRequestPolicy.h
-    src/codex/PresentationModel.cpp
-    src/codex/PresentationModel.h
-    src/codex/PresentationClient.h
-    src/codex/PresentationStatus.h
-    src/codex/PresentationProtocol.cpp
-    src/codex/PresentationProtocol.h
-    src/codex/ProtocolNormalizer.cpp
-    src/codex/ProtocolNormalizer.h
-    src/codex/UiSession.cpp
-    src/codex/UiSession.h
-    src/codex/ipc/QtSocketPairEndpoint.cpp
-    src/codex/ipc/QtSocketPairEndpoint.h
-    src/codex/ipc/SNodeSocketPairEndpoint.cpp
-    src/codex/ipc/SNodeSocketPairEndpoint.h
-    src/codex/ipc/SocketPair.cpp
-    src/codex/ipc/SocketPair.h
+    src/codex/UiStatus.h
+    src/codex/WorkerMailboxReceiver.cpp
+    src/codex/WorkerMailboxReceiver.h
     src/codex/main.cpp
     src/codex/ui/ExpandingPromptEditor.cpp
     src/codex/ui/ExpandingPromptEditor.h
     src/codex/ui/BrandMark.cpp
     src/codex/ui/BrandMark.h
+    src/codex/ui/QtNodeAttachment.h
     src/codex/ui/UiStyle.cpp
     src/codex/ui/UiStyle.h
-    src/codex/ui/UiViewProjection.cpp
-    src/codex/ui/UiViewProjection.h
-    src/codex/ui/UiViewState.h
 )
 
 set(
@@ -86,8 +89,6 @@ set(
     src/codex/middle/ComposerPane.h
     src/codex/middle/ConversationCards.cpp
     src/codex/middle/ConversationCards.h
-    src/codex/middle/ConversationProjection.cpp
-    src/codex/middle/ConversationProjection.h
     src/codex/middle/ConversationView.cpp
     src/codex/middle/ConversationView.h
     src/codex/middle/InspectorPane.cpp
@@ -96,10 +97,11 @@ set(
     src/codex/middle/MiddleRegionWidget.h
     src/codex/middle/MiddleTypes.cpp
     src/codex/middle/MiddleTypes.h
-    src/codex/middle/PromptCoordinator.cpp
-    src/codex/middle/PromptCoordinator.h
     src/codex/middle/ThreadPane.cpp
     src/codex/middle/ThreadPane.h
+    src/codex/ui/NodeGraphUiAdapter.cpp
+    src/codex/ui/NodeGraphUiAdapter.h
+    src/codex/ui/UiViewState.h
 )
 
 qt_add_executable(
@@ -118,6 +120,7 @@ function(configure_codexui_target target)
         ${target}
         PRIVATE
             AISuite::OpenAICodex
+            codexui-nodegraph
             PkgConfig::LIBGIT2
             Qt6::Widgets
             Threads::Threads
@@ -157,59 +160,153 @@ endif()
 
 if(BUILD_TESTING)
     add_executable(
-        codexui-socketpair-contract-test
-        tests/codex/SocketPairContractTest.cpp
-        src/codex/ipc/QtSocketPairEndpoint.cpp
-        src/codex/ipc/QtSocketPairEndpoint.h
-        src/codex/ipc/SNodeSocketPairEndpoint.cpp
-        src/codex/ipc/SNodeSocketPairEndpoint.h
-        src/codex/ipc/SocketPair.cpp
-        src/codex/ipc/SocketPair.h
+        codexui-nodegraph-ui-adapter-test
+        tests/codex/NodeGraphUiAdapterTest.cpp
+        src/codex/ui/NodeGraphUiAdapter.cpp
+        src/codex/ui/NodeGraphUiAdapter.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
     )
     target_compile_features(
-        codexui-socketpair-contract-test PRIVATE cxx_std_20
+        codexui-nodegraph-ui-adapter-test PRIVATE cxx_std_20
     )
     target_include_directories(
-        codexui-socketpair-contract-test PRIVATE src
+        codexui-nodegraph-ui-adapter-test PRIVATE src
     )
     target_link_libraries(
-        codexui-socketpair-contract-test
-        PRIVATE Qt6::Core Threads::Threads snodec::net-un-stream-legacy
+        codexui-nodegraph-ui-adapter-test PRIVATE codexui-nodegraph
     )
     add_test(
-        NAME codexui-socketpair-contract
-        COMMAND codexui-socketpair-contract-test
+        NAME codexui-nodegraph-ui-adapter
+        COMMAND codexui-nodegraph-ui-adapter-test
     )
     set_tests_properties(
-        codexui-socketpair-contract PROPERTIES TIMEOUT 10
+        codexui-nodegraph-ui-adapter PROPERTIES TIMEOUT 10
+    )
+
+    qt_add_executable(
+        codexui-nodegraph-conversation-ui-test
+        tests/codex/NodeGraphConversationUiTest.cpp
+        src/codex/ui/NodeGraphUiAdapter.cpp
+        src/codex/ui/NodeGraphUiAdapter.h
+        src/codex/middle/ConversationCards.cpp
+        src/codex/middle/ConversationCards.h
+        src/codex/middle/ConversationView.cpp
+        src/codex/middle/ConversationView.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
+    )
+    target_compile_features(
+        codexui-nodegraph-conversation-ui-test PRIVATE cxx_std_20
+    )
+    target_include_directories(
+        codexui-nodegraph-conversation-ui-test PRIVATE src
+    )
+    target_link_libraries(
+        codexui-nodegraph-conversation-ui-test
+        PRIVATE codexui-nodegraph Qt6::Widgets
+    )
+    add_test(
+        NAME codexui-nodegraph-conversation-ui
+        COMMAND codexui-nodegraph-conversation-ui-test
+    )
+    set_tests_properties(
+        codexui-nodegraph-conversation-ui
+        PROPERTIES TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+
+    qt_add_executable(
+        codexui-nodegraph-thread-pane-ui-test
+        tests/codex/NodeGraphThreadPaneUiTest.cpp
+        src/codex/ui/NodeGraphUiAdapter.cpp
+        src/codex/ui/NodeGraphUiAdapter.h
+        src/codex/ui/UiViewState.h
+        src/codex/middle/ThreadPane.cpp
+        src/codex/middle/ThreadPane.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
+    )
+    target_compile_features(
+        codexui-nodegraph-thread-pane-ui-test PRIVATE cxx_std_20
+    )
+    target_include_directories(
+        codexui-nodegraph-thread-pane-ui-test PRIVATE src
+    )
+    target_link_libraries(
+        codexui-nodegraph-thread-pane-ui-test
+        PRIVATE codexui-nodegraph Qt6::Widgets
+    )
+    add_test(
+        NAME codexui-nodegraph-thread-pane-ui
+        COMMAND codexui-nodegraph-thread-pane-ui-test
+    )
+    set_tests_properties(
+        codexui-nodegraph-thread-pane-ui
+        PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 
     add_executable(
-        codexui-presentation-pipeline-test
-        tests/codex/PresentationPipelineTest.cpp
-        src/codex/PresentationModel.cpp
-        src/codex/PresentationModel.h
-        src/codex/PresentationProtocol.cpp
-        src/codex/PresentationProtocol.h
-        src/codex/ProtocolNormalizer.cpp
-        src/codex/ProtocolNormalizer.h
+        codexui-nodegraph-json-test
+        tests/codex/nodegraph/NodeGraphJsonTest.cpp
+        src/codex/NodeGraphJson.cpp
+        src/codex/NodeGraphJson.h
+    )
+    target_compile_features(codexui-nodegraph-json-test PRIVATE cxx_std_20)
+    target_include_directories(codexui-nodegraph-json-test PRIVATE src)
+    target_link_libraries(
+        codexui-nodegraph-json-test PRIVATE AISuite::OpenAICodex codexui-nodegraph
+    )
+    add_test(NAME codexui-nodegraph-json COMMAND codexui-nodegraph-json-test)
+    set_tests_properties(codexui-nodegraph-json PROPERTIES TIMEOUT 10)
+
+    add_executable(
+        codexui-current-protocol-adapters-test
+        tests/codex/nodegraph/CurrentProtocolAdaptersTest.cpp
+        src/codex/CurrentProtocolAdapters.h
     )
     target_compile_features(
-        codexui-presentation-pipeline-test PRIVATE cxx_std_20
+        codexui-current-protocol-adapters-test PRIVATE cxx_std_20
     )
     target_include_directories(
-        codexui-presentation-pipeline-test PRIVATE src
+        codexui-current-protocol-adapters-test PRIVATE src
     )
     target_link_libraries(
-        codexui-presentation-pipeline-test
-        PRIVATE AISuite::OpenAICodex
+        codexui-current-protocol-adapters-test
+        PRIVATE AISuite::OpenAICodex codexui-nodegraph
     )
     add_test(
-        NAME codexui-presentation-pipeline
-        COMMAND codexui-presentation-pipeline-test
+        NAME codexui-current-protocol-adapters
+        COMMAND codexui-current-protocol-adapters-test
     )
     set_tests_properties(
-        codexui-presentation-pipeline PROPERTIES TIMEOUT 10
+        codexui-current-protocol-adapters PROPERTIES TIMEOUT 10
+    )
+
+    add_executable(
+        codexui-client-runtime-dispatch-test
+        tests/codex/ClientRuntimeDispatchTest.cpp
+        src/codex/ClientRuntime.cpp
+        src/codex/ClientRuntime.h
+        src/codex/Configuration.cpp
+        src/codex/Configuration.h
+        src/codex/CurrentProtocolAdapters.h
+        src/codex/NodeGraphJson.cpp
+        src/codex/NodeGraphJson.h
+        src/codex/WorkerMailboxReceiver.cpp
+        src/codex/WorkerMailboxReceiver.h
+    )
+    configure_codexui_target(codexui-client-runtime-dispatch-test)
+    add_test(
+        NAME codexui-client-runtime-dispatch
+        COMMAND codexui-client-runtime-dispatch-test
+    )
+    set_tests_properties(
+        codexui-client-runtime-dispatch
+        PROPERTIES TIMEOUT 20
     )
 
     add_executable(
@@ -232,58 +329,6 @@ if(BUILD_TESTING)
         codexui-pending-request-policy PROPERTIES TIMEOUT 10
     )
 
-    add_executable(
-        codexui-ui-session-test
-        tests/codex/UiSessionTest.cpp
-        src/codex/UiSession.cpp
-        src/codex/UiSession.h
-        src/codex/PendingRequestPolicy.cpp
-        src/codex/PendingRequestPolicy.h
-        src/codex/PresentationClient.h
-        src/codex/PresentationModel.cpp
-        src/codex/PresentationModel.h
-        src/codex/PresentationProtocol.cpp
-        src/codex/PresentationProtocol.h
-        src/codex/PresentationStatus.h
-        src/codex/AttachmentDraft.h
-        src/codex/ui/UiViewProjection.cpp
-        src/codex/ui/UiViewProjection.h
-        src/codex/ui/UiViewState.h
-        src/codex/middle/ConversationProjection.cpp
-        src/codex/middle/ConversationProjection.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
-        src/codex/middle/PromptCoordinator.cpp
-        src/codex/middle/PromptCoordinator.h
-    )
-    target_compile_features(codexui-ui-session-test PRIVATE cxx_std_20)
-    target_include_directories(codexui-ui-session-test PRIVATE src)
-    add_test(NAME codexui-ui-session COMMAND codexui-ui-session-test)
-    set_tests_properties(codexui-ui-session PROPERTIES TIMEOUT 10)
-
-    add_executable(
-        codexui-conversation-projection-test
-        tests/codex/ConversationProjectionTest.cpp
-        src/codex/middle/ConversationProjection.cpp
-        src/codex/middle/ConversationProjection.h
-        src/codex/middle/MiddleTypes.cpp
-        src/codex/middle/MiddleTypes.h
-        src/codex/middle/PromptCoordinator.cpp
-        src/codex/middle/PromptCoordinator.h
-        src/codex/AttachmentDraft.h
-    )
-    target_compile_features(
-        codexui-conversation-projection-test PRIVATE cxx_std_20
-    )
-    target_include_directories(codexui-conversation-projection-test PRIVATE src)
-    add_test(
-        NAME codexui-conversation-projection
-        COMMAND codexui-conversation-projection-test
-    )
-    set_tests_properties(
-        codexui-conversation-projection PROPERTIES TIMEOUT 10
-    )
-
     qt_add_executable(
         codexui-conversation-cards-test
         tests/codex/ConversationCardsTest.cpp
@@ -301,7 +346,7 @@ if(BUILD_TESTING)
     )
     target_include_directories(codexui-conversation-cards-test PRIVATE src)
     target_link_libraries(
-        codexui-conversation-cards-test PRIVATE Qt6::Widgets
+        codexui-conversation-cards-test PRIVATE codexui-nodegraph Qt6::Widgets
     )
     add_test(
         NAME codexui-conversation-cards
@@ -309,31 +354,24 @@ if(BUILD_TESTING)
     )
     set_tests_properties(
         codexui-conversation-cards
-        PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        PROPERTIES TIMEOUT 35 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 
     qt_add_executable(
         codexui-application-layout-test
-        tests/codex/ApplicationLayoutTest.cpp
+        tests/codex/EstablishedUiUxTest.cpp
         src/codex/DiffViewer.cpp
         src/codex/DiffViewer.h
         src/codex/GitDiffProvider.cpp
         src/codex/GitDiffProvider.h
         src/codex/FileSelectionDialog.cpp
         src/codex/FileSelectionDialog.h
-        src/codex/PresentationModel.cpp
-        src/codex/PresentationModel.h
-        src/codex/PresentationProtocol.cpp
-        src/codex/PresentationProtocol.h
         src/codex/TurnSettingsWidget.cpp
         src/codex/TurnSettingsWidget.h
         src/codex/ui/ExpandingPromptEditor.cpp
         src/codex/ui/ExpandingPromptEditor.h
         src/codex/ui/UiStyle.cpp
         src/codex/ui/UiStyle.h
-        src/codex/ui/UiViewProjection.cpp
-        src/codex/ui/UiViewProjection.h
-        src/codex/ui/UiViewState.h
         src/codex/middle/ComposerPane.cpp
         src/codex/middle/ComposerPane.h
         src/codex/middle/ConversationCards.cpp
@@ -355,7 +393,11 @@ if(BUILD_TESTING)
     target_include_directories(codexui-application-layout-test PRIVATE src)
     target_link_libraries(
         codexui-application-layout-test
-        PRIVATE AISuite::OpenAICodex PkgConfig::LIBGIT2 Qt6::Widgets
+        PRIVATE
+            AISuite::OpenAICodex
+            codexui-nodegraph
+            PkgConfig::LIBGIT2
+            Qt6::Widgets
     )
     add_test(
         NAME codexui-application-layout
@@ -363,6 +405,37 @@ if(BUILD_TESTING)
     )
     set_tests_properties(
         codexui-application-layout
+        PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+
+    qt_add_executable(
+        codexui-inspector-graph-test
+        tests/codex/NodeGraphInspectorUiTest.cpp
+        src/codex/DiffViewer.cpp
+        src/codex/DiffViewer.h
+        src/codex/GitDiffProvider.cpp
+        src/codex/GitDiffProvider.h
+        src/codex/middle/InspectorPane.cpp
+        src/codex/middle/InspectorPane.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+        src/codex/ui/NodeGraphUiAdapter.cpp
+        src/codex/ui/NodeGraphUiAdapter.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
+    )
+    target_compile_features(codexui-inspector-graph-test PRIVATE cxx_std_20)
+    target_include_directories(codexui-inspector-graph-test PRIVATE src)
+    target_link_libraries(
+        codexui-inspector-graph-test
+        PRIVATE codexui-nodegraph PkgConfig::LIBGIT2 Qt6::Widgets
+    )
+    add_test(
+        NAME codexui-inspector-graph
+        COMMAND codexui-inspector-graph-test
+    )
+    set_tests_properties(
+        codexui-inspector-graph
         PROPERTIES TIMEOUT 15 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 

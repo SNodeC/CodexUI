@@ -3,36 +3,35 @@
 #ifndef CODEXUI_CODEX_FRONTENDSESSION_H
 #define CODEXUI_CODEX_FRONTENDSESSION_H
 
-#include "codex/PresentationClient.h"
+#include "codex/nodegraph/Messages.h"
+#include "codex/nodegraph/NodeGraph.h"
+#include "codex/nodegraph/ThreadChannels.h"
 
-#include <nlohmann/json.hpp>
-
-#include <cstdint>
+#include <atomic>
 #include <functional>
 #include <memory>
-#include <string>
+#include <span>
 #include <thread>
-#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
-namespace ai::openai::codex::protocol {
-class JsonLineFramer;
-}
-
-namespace codexui::codex::ipc {
-class QtSocketPairEndpoint;
-}
+class QSocketNotifier;
+class QTimer;
 
 namespace codexui::codex {
 
 class Configuration;
 class FrontendSessionTestPeer;
 
+// Owns the one SNode.C worker and the two typed eventfd-backed mailboxes. This
+// object lives on Qt-main; only the worker passed to runClientRuntime writes
+// the shared graph.
 class FrontendSession final {
 public:
-  using EventHandler = std::function<void(const nlohmann::json &)>;
-  using ActivityHandler = std::function<void(const std::string &)>;
-  using ResponseHandler = std::function<void(const nlohmann::json &)>;
   using RuntimeStoppedHandler = std::function<void()>;
+  using GraphChangedHandler =
+      std::function<void(const nodegraph::GraphChanged &)>;
+  using GraphUiEffectHandler = std::function<void(const nodegraph::UiEffect &)>;
 
   explicit FrontendSession(Configuration &configuration);
   ~FrontendSession();
@@ -43,112 +42,53 @@ public:
   void start(bool connectBridge = true);
   void wait();
   void shutdown();
-  void setEventHandler(EventHandler handler);
-  void setActivityHandler(ActivityHandler handler);
+
   void setRuntimeStoppedHandler(RuntimeStoppedHandler handler);
+  void setGraphChangedHandler(GraphChangedHandler handler);
+  void setGraphUiEffectHandler(GraphUiEffectHandler handler);
 
-  // Returns the slim, toolkit-neutral command API consumed by UI logic.
-  // FrontendSession continues to own the current Qt endpoint, socketpair, and
-  // SNode.C thread exactly as before.
-  [[nodiscard]] PresentationClient presentationClient();
+  // Qt receives read-only access and must use NodeGraph::tryRead().
+  [[nodiscard]] const nodegraph::NodeGraph &nodeGraph() const noexcept;
 
-  std::string request(std::string operation, nlohmann::json parameters,
-                      ResponseHandler handler = {});
-  std::string listThreads(nlohmann::json options = nlohmann::json::object(),
-                          ResponseHandler handler = {});
-  std::string readThread(std::string threadId, ResponseHandler handler = {});
-  std::string createThread(nlohmann::json options,
-                           ResponseHandler handler = {});
-  std::string resumeThread(std::string threadId,
-                           nlohmann::json options = nlohmann::json::object(),
-                           ResponseHandler handler = {});
-  std::string forkThread(std::string threadId,
-                         nlohmann::json options = nlohmann::json::object(),
-                         ResponseHandler handler = {});
-  std::string renameThread(std::string threadId, std::string name,
-                           ResponseHandler handler = {});
-  std::string archiveThread(std::string threadId, ResponseHandler handler = {});
-  std::string unarchiveThread(std::string threadId,
-                              ResponseHandler handler = {});
-  std::string deleteThread(std::string threadId, ResponseHandler handler = {});
-  std::string listModels(nlohmann::json options = nlohmann::json::object(),
-                         ResponseHandler handler = {});
-  std::string readModelProviderCapabilities(
-      nlohmann::json options = nlohmann::json::object(),
-      ResponseHandler handler = {});
-  std::string readAccount(nlohmann::json options = nlohmann::json::object(),
-                          ResponseHandler handler = {});
-  std::string readAccountRateLimits(ResponseHandler handler = {});
-  std::string readAccountTokenUsage(ResponseHandler handler = {});
-  std::string readConfig(nlohmann::json options = nlohmann::json::object(),
-                         ResponseHandler handler = {});
-  std::string
-  listPermissionProfiles(nlohmann::json options = nlohmann::json::object(),
-                         ResponseHandler handler = {});
-  std::string
-  listExperimentalFeatures(nlohmann::json options = nlohmann::json::object(),
-                           ResponseHandler handler = {});
-  std::string listSkills(nlohmann::json options = nlohmann::json::object(),
-                         ResponseHandler handler = {});
-  std::string listHooks(nlohmann::json options = nlohmann::json::object(),
-                        ResponseHandler handler = {});
-  std::string listPlugins(nlohmann::json options = nlohmann::json::object(),
-                          ResponseHandler handler = {});
-  std::string listApps(nlohmann::json options = nlohmann::json::object(),
-                       ResponseHandler handler = {});
-  std::string listMcpServers(nlohmann::json options = nlohmann::json::object(),
-                             ResponseHandler handler = {});
-  std::string startTurn(std::string threadId, nlohmann::json input,
-                        nlohmann::json options = nlohmann::json::object(),
-                        ResponseHandler handler = {});
-  std::string steerTurn(std::string threadId, std::string expectedTurnId,
-                        nlohmann::json input, ResponseHandler handler = {});
-  std::string interruptTurn(std::string threadId, std::string turnId,
-                            ResponseHandler handler = {});
-  bool respondToServerRequest(nlohmann::json requestId, nlohmann::json result,
-                              nlohmann::json error = nullptr);
-  bool sendRaw(nlohmann::json appServerMessage);
-  bool reconnect();
-  bool connectTransport();
-  bool disconnectTransport();
-  std::string configureConnection(nlohmann::json settings,
-                                  ResponseHandler handler = {});
-  bool claimController();
-  bool releaseController();
+  // On QueueFull the action is untouched, so newly authored input remains in
+  // the widget and can be rejected visibly by its caller.
+  [[nodiscard]] nodegraph::ChannelSendStatus
+  sendNodeAction(nodegraph::NodeAction &action);
+  [[nodiscard]] nodegraph::ChannelSendStatus
+  sendRuntimeAction(nodegraph::RuntimeAction &action);
 
 private:
   friend class FrontendSessionTestPeer;
 
-  struct OutstandingRequest {
-    std::string action;
-    std::string threadId;
-    ResponseHandler completion;
-  };
-
-  bool sendMessage(const nlohmann::json &message);
-  void receiveMessage(nlohmann::json message);
-  void reportLocalError(std::string message);
-  void terminalFailure(std::string message);
-  void failAllPending(int code, std::string message,
-                      bool transient = false) noexcept;
+  void drainWorkerMessages();
+  void scheduleWorkerMessageDrain();
+  void requireRescanRetirementCollection();
+  void collectRescanRetirements();
+  void collectDetachedNodes(std::span<const nodegraph::NodeRef> nodes);
+  void flushDetachAcknowledgements();
   void notifyRuntimeStopped() noexcept;
 
-  std::unique_ptr<ipc::QtSocketPairEndpoint> endpoint;
-  std::unique_ptr<ai::openai::codex::protocol::JsonLineFramer> framer;
+  nodegraph::NodeGraph graph;
+  nodegraph::ThreadChannels channels;
+  std::unique_ptr<QSocketNotifier> workerNotifier;
+  std::unique_ptr<QTimer> workerWakeRecoveryTimer;
   std::thread clientThread;
-  int clientDescriptor = -1;
-  std::uint64_t nextOperation = 1;
-  std::unordered_map<std::string, OutstandingRequest> outstanding;
-  EventHandler eventHandler;
-  ActivityHandler activityHandler;
   RuntimeStoppedHandler runtimeStoppedHandler;
+  GraphChangedHandler graphChangedHandler;
+  GraphUiEffectHandler graphUiEffectHandler;
+  std::vector<nodegraph::NodeRef> pendingDetachAcknowledgements;
+  std::unordered_set<nodegraph::Node *> pendingDetachAcknowledgementIndex;
+  std::size_t retirementScanOffset = 0;
+  std::uint64_t retirementScanOrderGeneration = 0;
+  std::atomic_bool workerFinished{false};
   bool started = false;
   bool stopping = false;
-  bool terminal = false;
   bool runtimeStopReported = false;
-  std::uint64_t activeGeneration = 0;
-  std::uint64_t providerGeneration = 0;
-  std::uint64_t lastSequenceReceived = 0;
+  bool workerDrainScheduled = false;
+  bool rescanRetirementPending = false;
+  bool retirementScanGenerationKnown = false;
+  bool retirementRetryNeeded = false;
+  std::uint64_t nextUiActionCorrelation = 1;
   Configuration &configuration;
 };
 

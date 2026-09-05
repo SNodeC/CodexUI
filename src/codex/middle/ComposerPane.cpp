@@ -279,9 +279,9 @@ void ComposerPane::setAttentionRequest(QString title, QString detail,
     acceptLabel = QStringLiteral("Accept");
   const bool unchanged = attentionTitle_->text() == title &&
                          attentionDetail_->text() == detail &&
-      attentionAcceptButton_->isVisible() == directAccept &&
-      attentionReviewButton_->isVisible() != directAccept &&
-      attentionAcceptButton_->text() == acceptLabel;
+                         attentionAcceptButton_->isVisible() == directAccept &&
+                         attentionReviewButton_->isVisible() != directAccept &&
+                         attentionAcceptButton_->text() == acceptLabel;
   if (unchanged)
     return;
   attentionTitle_->setText(std::move(title));
@@ -293,9 +293,14 @@ void ComposerPane::setAttentionRequest(QString title, QString detail,
 }
 
 void ComposerPane::setAttentionEnabled(bool enabled) {
+  setAttentionActionEnabled(enabled, false);
+}
+
+void ComposerPane::setAttentionActionEnabled(bool enabled,
+                                             bool reviewEnabled) {
   attentionRejectButton_->setEnabled(enabled);
   attentionAcceptButton_->setEnabled(enabled);
-  attentionReviewButton_->setEnabled(enabled);
+  attentionReviewButton_->setEnabled(enabled || reviewEnabled);
 }
 
 void ComposerPane::setActiveTurn(bool active) {
@@ -513,8 +518,8 @@ void ComposerPane::refreshActionStyle() {
 }
 
 void ComposerPane::refreshSubmissionEnabled() {
-  sendButton_->setEnabled(
-      canSubmit_ && !promptEditor_->toPlainText().trimmed().isEmpty());
+  sendButton_->setEnabled(canSubmit_ &&
+                          !promptEditor_->toPlainText().trimmed().isEmpty());
 }
 
 } // namespace codexui::codex::middle

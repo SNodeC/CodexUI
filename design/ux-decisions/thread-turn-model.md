@@ -18,8 +18,9 @@ Thread
 ```
 
 AISuite and the app-server are authoritative for thread, turn, item, and
-configuration semantics. CodexUI retains only bounded presentation state and
-client-local interaction state.
+configuration semantics. CodexUI keeps their current local representation in
+one shared `NodeGraph`; Qt retains only bounded widget mechanics, drafts, and
+other genuinely local interaction state.
 
 ## Thread selection and routing
 
@@ -77,28 +78,34 @@ ensures that a later prompt observes the active-turn state published by the
 preceding acknowledgment. Queues belonging to different threads are
 independent.
 
-Only the correlated `turn.start` or `turn.steer` completion callback can
-acknowledge a prompt. A successful callback begins a 500-millisecond accepted
-transition. Every submission carries a unique `clientUserMessageId`, allowing
+Only the correlated `turn/start` or `turn/steer` completion callback can
+acknowledge a prompt. A successful callback immediately ends pending feedback.
+Every submission carries a unique `clientUserMessageId`, allowing
 the authoritative user item to inherit the local card's stable visual key even
 when multiple prompts have identical text. Failure stops the animation and
 leaves an explicit error card.
 
 Prompt dispatch waits for once-per-connection-generation thread hydration. A
-provider-marked `notLoaded` thread is resumed first. A transient
-thread-not-found submission result triggers one resume-and-retry; a repeated
-failure becomes the card's terminal error. Failed hydration leaves the composer
-draft intact and requires an explicit reload before admission. Dispatch
-rechecks connection and recovery ownership at its queued execution boundary, so
-a disconnect cannot send and an in-flight resume cannot overlap a hydration
-read or another turn operation.
+provider-marked `notLoaded` thread is resumed first. Failed hydration leaves
+the composer draft intact and requires an explicit reload before admission.
+Dispatch rechecks connection and recovery ownership at its queued execution
+boundary, so a disconnect cannot send and an in-flight resume cannot overlap a
+hydration read or another turn operation.
+
+Once admitted, a non-idempotent prompt is never sent again automatically. A
+thread-not-found result is terminal for that dispatch. If thread deletion or a
+provider-generation reset races queued or in-flight work, the local prompt is
+reparented to explicit recovery state with its exact admitted text and
+attachment links retained. Its state records whether failure is definite or
+the provider outcome is uncertain; reconnect, reload, and hydration never
+resend it. A later attempt requires deliberate user action.
 
 ## Start, steer, and interrupt
 
-- An idle loaded thread uses `turn.start`.
-- An active thread uses `turn.steer` with the stable active turn ID.
+- An idle loaded thread uses `turn/start`.
+- An active thread uses `turn/steer` with the stable active turn ID.
 - A not-loaded thread is resumed before starting its turn.
-- Stop uses `turn.interrupt` for the stable active turn ID.
+- Stop uses `turn/interrupt` for the stable active turn ID.
 
 CodexUI does not fabricate turns or infer active identity from row position.
 
@@ -113,13 +120,13 @@ window, while Steer adds input to an existing turn.
 
 Operational items remain individual cards inside their turn; there is no
 second Activity batch or arbitrary visible grouping. Pending prompts remain
-thread-local presentation cards until acknowledgment supplies their
+thread-local graph nodes until acknowledgment supplies their
 authoritative turn and item position.
 
-`PresentationModel` is the retained normalized source. A pure projection adds
-local prompt admissions and emits stable keyed turn sections and cards. Initial
-display and all updates use the same reconcile path; retained card widgets are
-mutated in place, and a visually identical projection performs no layout work.
+The shared `NodeGraph` is the current native source. Local prompt admissions
+are nodes in that same graph. Initial display and all updates use stable keyed
+turn sections and cards; retained visible widgets are mutated in place, while
+an invisible or visually unchanged node performs no widget layout work.
 
 ## Thread lifecycle actions
 

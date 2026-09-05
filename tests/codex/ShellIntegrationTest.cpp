@@ -6,303 +6,173 @@
 #include "codex/Configuration.h"
 #include "codex/FrontendSession.h"
 #include "codex/PendingRequestDialog.h"
-#include "codex/PresentationProtocol.h"
 #include "codex/ShellWidget.h"
+#include "codex/middle/ComposerPane.h"
 #include "codex/middle/ConversationCards.h"
+#include "codex/middle/ConversationView.h"
+#include "codex/middle/InspectorPane.h"
+#include "codex/middle/ThreadPane.h"
+#include "codex/nodegraph/WorkerLogic.h"
 #include "codex/ui/ExpandingPromptEditor.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFrame>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
-#include <QTabWidget>
 #include <QThread>
 #include <QTimer>
 
 #include <algorithm>
-#include <cerrno>
-#include <cstring>
-#include <deque>
+#include <atomic>
+#include <cstdint>
+#include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <ranges>
 #include <string>
 #include <string_view>
-#include <unistd.h>
+#include <thread>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
 
 namespace codexui::codex {
 
+// The production API intentionally exposes no graph writer or mailbox
+// consumer to Qt. This friend is confined to this integration test and acts
+// as the worker side of that boundary without adding a third execution path.
 class FrontendSessionTestPeer final {
 public:
-  static int takeClientDescriptor(FrontendSession &session) {
-    return std::exchange(session.clientDescriptor, -1);
+  static nodegraph::NodeGraph &graph(FrontendSession &session) {
+    return session.graph;
   }
 
-  static void receive(FrontendSession &session, nlohmann::json frame) {
-    session.receiveMessage(std::move(frame));
+  static nodegraph::ThreadChannels &channels(FrontendSession &session) {
+    return session.channels;
   }
 
-  static void failOutstanding(FrontendSession &session, int code,
-                              std::string message) {
-    session.failAllPending(code, std::move(message));
+  static void drainWorkerMessages(FrontendSession &session) {
+    session.drainWorkerMessages();
   }
 };
 
 namespace {
 
-using presentation::Authority;
+using namespace codexui::nodegraph;
 
-bool expect(bool condition, const char *message) {
+int failures = 0;
+
+void require(bool condition, std::string_view message) {
   if (condition)
-    return true;
+    return;
+  ++failures;
   std::cerr << "FAILED: " << message << '\n';
-  return false;
 }
 
-bool verifyFrontendBoundaryOrdering(Configuration &configuration) {
-  FrontendSession session(configuration);
-  std::vector<std::string> order;
-  std::vector<std::string> activity;
-  nlohmann::json completed;
-  session.setEventHandler(
-      [&order](const nlohmann::json &) { order.emplace_back("event"); });
-  session.setActivityHandler([&activity](const std::string &threadId) {
-    activity.push_back(threadId);
-  });
-  const std::string correlation =
-      session.request("thread.read", {{"threadId", "ordering"}},
-                      [&order, &completed](const nlohmann::json &result) {
-                        order.emplace_back("completion");
-                        completed = result;
-                      });
-  FrontendSessionTestPeer::receive(
-      session,
-      presentation::result(1, 1, "thread.read", correlation, true,
-                           {{"thread", {{"id", "ordering"}}}},
-                           Authority::Replace, {{"threadId", "ordering"}}));
-  bool result = expect(
-      order == std::vector<std::string>{"completion", "event"},
-      "a correlated completion remains ordered before global frame delivery");
-  result &=
-      expect(presentation::isPresentationFrame(completed) &&
-                 completed.value("action", std::string{}) == "thread.read",
-             "a successful completion receives a complete presentation result");
-  result &=
-      expect(activity.empty(),
-             "selection hydration requests and results do not report activity");
-
-  const std::string renameCorrelation = session.request(
-      "thread.rename", {{"threadId", "ordering"}, {"name", "Renamed"}});
-  FrontendSessionTestPeer::receive(
-      session,
-      presentation::result(2, 1, "thread.rename", renameCorrelation, true,
-                           nlohmann::json::object(), Authority::Merge,
-                           {{"threadId", "ordering"}}));
-  result &=
-      expect(activity == std::vector<std::string>{"ordering", "ordering"},
-             "meaningful thread requests and results both report activity");
-
-  nlohmann::json failed;
-  const std::string failedCorrelation = session.request(
-      "thread.resume", {{"threadId", "ordering"}},
-      [&failed](const nlohmann::json &response) { failed = response; });
-  FrontendSessionTestPeer::failOutstanding(session, -32020,
-                                           "test connection loss");
-  result &= expect(
-      presentation::isPresentationFrame(failed) &&
-          failed.value("action", std::string{}) == "thread.resume" &&
-          failed.value("correlationId", std::string{}) == failedCorrelation &&
-          !failed.value("ok", true),
-      "locally failed operations preserve the complete result contract");
-  return result;
-}
-
-void spin(int milliseconds = 0) {
-  milliseconds = std::max(milliseconds, 20);
+void spin(int milliseconds = 20) {
   QElapsedTimer timer;
   timer.start();
   do {
     QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-    if (milliseconds > 0)
-      QThread::msleep(1);
-  } while (timer.elapsed() < milliseconds);
+    QThread::msleep(1);
+  } while (timer.elapsed() < std::max(milliseconds, 1));
 }
 
-class PresentationPeer final {
-public:
-  explicit PresentationPeer(int descriptor) : descriptor_(descriptor) {}
-  ~PresentationPeer() {
-    if (descriptor_ >= 0)
-      ::close(descriptor_);
-  }
-
-  PresentationPeer(const PresentationPeer &) = delete;
-  PresentationPeer &operator=(const PresentationPeer &) = delete;
-
-  bool send(const nlohmann::json &frame) {
-    std::string encoded = frame.dump();
-    encoded.push_back('\n');
-    std::size_t offset = 0;
-    QElapsedTimer timer;
-    timer.start();
-    while (offset < encoded.size() && timer.elapsed() < 1000) {
-      const ssize_t written = ::write(descriptor_, encoded.data() + offset,
-                                      encoded.size() - offset);
-      if (written > 0) {
-        offset += static_cast<std::size_t>(written);
-      } else if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        spin(1);
-      } else {
-        return false;
-      }
-    }
+bool spinUntil(const std::function<bool()> &predicate,
+               int timeoutMilliseconds = 1000) {
+  QElapsedTimer timer;
+  timer.start();
+  while (!predicate() && timer.elapsed() < timeoutMilliseconds)
     spin(2);
-    return offset == encoded.size();
-  }
-
-  std::optional<nlohmann::json> waitFor(std::string_view action,
-                                        std::string_view threadId = {},
-                                        int timeoutMilliseconds = 1000) {
-    QElapsedTimer timer;
-    timer.start();
-    while (timer.elapsed() < timeoutMilliseconds) {
-      pump();
-      const auto found = std::find_if(
-          frames_.begin(), frames_.end(), [&](const nlohmann::json &frame) {
-            if (frame.value("action", std::string{}) != action)
-              return false;
-            if (threadId.empty())
-              return true;
-            const nlohmann::json data =
-                frame.value("data", nlohmann::json::object());
-            return data.value("threadId", std::string{}) == threadId;
-          });
-      if (found != frames_.end()) {
-        nlohmann::json result = std::move(*found);
-        frames_.erase(found);
-        return result;
-      }
-      spin(1);
-    }
-    return std::nullopt;
-  }
-
-  bool has(std::string_view action) {
-    pump();
-    return std::ranges::any_of(frames_, [&](const nlohmann::json &frame) {
-      return frame.value("action", std::string{}) == action;
-    });
-  }
-
-  void discard() {
-    pump();
-    frames_.clear();
-  }
-
-private:
-  void pump() {
-    char buffer[8192];
-    for (;;) {
-      const ssize_t count = ::read(descriptor_, buffer, sizeof(buffer));
-      if (count > 0) {
-        incoming_.append(buffer, static_cast<std::size_t>(count));
-        continue;
-      }
-      if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-        std::cerr << "peer read failed: " << std::strerror(errno) << '\n';
-      break;
-    }
-    for (;;) {
-      const std::size_t newline = incoming_.find('\n');
-      if (newline == std::string::npos)
-        break;
-      const std::string line = incoming_.substr(0, newline);
-      incoming_.erase(0, newline + 1);
-      if (!line.empty())
-        frames_.push_back(nlohmann::json::parse(line));
-    }
-  }
-
-  int descriptor_ = -1;
-  std::string incoming_;
-  std::deque<nlohmann::json> frames_;
-};
-
-nlohmann::json thread(std::string id, std::string name,
-                      std::string status = "idle",
-                      std::string activeTurnId = {}) {
-  nlohmann::json turns = nlohmann::json::array();
-  if (status == "active") {
-    if (activeTurnId.empty())
-      activeTurnId = id + "-turn";
-    turns.push_back({{"id", std::move(activeTurnId)},
-                     {"status", "inProgress"},
-                     {"items", nlohmann::json::array()}});
-  }
-  return {{"id", std::move(id)},
-          {"name", std::move(name)},
-          {"cwd", "/tmp/codexui-shell-test"},
-          {"status", std::move(status)},
-          {"turns", std::move(turns)}};
+  return predicate();
 }
 
-nlohmann::json threadWithAgentMessage(std::string id, std::string name,
-                                      std::string message) {
-  const std::string turnId = id + "-turn";
-  const std::string messageId = id + "-message";
-  nlohmann::json value = thread(std::move(id), std::move(name));
-  value["turns"] = nlohmann::json::array(
-      {{{"id", turnId},
-        {"status", "completed"},
-        {"items", nlohmann::json::array({{{"id", messageId},
-                                          {"type", "agentMessage"},
-                                          {"phase", "final_answer"},
-                                          {"text", std::move(message)}}})}}});
-  return value;
+const Value *field(const std::shared_ptr<const NodeState> &state,
+                   std::string_view name) {
+  if (!state)
+    return nullptr;
+  const auto found = state->fields.find(name);
+  return found == state->fields.end() ? nullptr : &found->second;
 }
 
-nlohmann::json threadWithPlanAndAgent(std::string id, std::string name) {
-  const std::string turnId = id + "-turn";
-  const std::string planId = id + "-plan";
-  const std::string agentId = id + "-agent";
-  nlohmann::json value = thread(std::move(id), std::move(name));
-  value["turns"] = nlohmann::json::array(
-      {{{"id", turnId},
-        {"status", "completed"},
-        {"items",
-         nlohmann::json::array({{{"id", planId},
-                                 {"type", "plan"},
-                                 {"text", "retained plan marker"}},
-                                {{"id", agentId},
-                                 {"type", "subAgentActivity"},
-                                 {"status", "completed"},
-                                 {"prompt", "retained agent marker"}}})}}});
-  return value;
+bool stringFieldEquals(const std::shared_ptr<const NodeState> &state,
+                       std::string_view name, std::string_view expected) {
+  const Value *value = field(state, name);
+  return value && value->asString() && *value->asString() == expected;
+}
+
+std::vector<QtToWorkerMessage> takeQtMessages(ThreadChannels &channels) {
+  static_cast<void>(channels.drainQtToWorkerWake());
+  std::vector<QtToWorkerMessage> messages;
+  QtToWorkerMessage message;
+  while (channels.tryReceiveForWorker(message)) {
+    messages.emplace_back(std::move(message));
+    message = ShutdownRequest{};
+  }
+  return messages;
+}
+
+void applyThread(WorkerLogic &worker, std::string id,
+                 std::string name = "Graph thread") {
+  static_cast<void>(worker.apply(DecodedMessage{
+      DecodedMessageKind::ServerNotification,
+      "thread/started",
+      std::nullopt,
+      {{"thread", Value(Value::Object{{"id", Value(std::move(id))},
+                                      {"name", Value(std::move(name))},
+                                      {"cwd", Value("/tmp")}})}}}));
+}
+
+void makeReady(WorkerLogic &worker) {
+  static_cast<void>(worker.transportEvent("connected"));
+  static_cast<void>(worker.bridgeState("test-controller", "controller",
+                                       "test-controller", 1, "ready"));
+}
+
+void markThreadReady(FrontendSession &session, WorkerLogic &worker,
+                     std::string_view id) {
+  NodeRef thread;
+  {
+    auto read = FrontendSessionTestPeer::graph(session).tryRead();
+    thread = read ? read->find({NodeKind::Thread, std::string(id)}) : NodeRef{};
+  }
+  if (thread)
+    static_cast<void>(worker.threadHydration(thread, "ready"));
+}
+
+QListWidgetItem *threadItem(QListWidget *list, std::string_view id) {
+  if (!list)
+    return nullptr;
+  for (int row = 0; row < list->count(); ++row) {
+    QListWidgetItem *item = list->item(row);
+    if (item && item->data(Qt::UserRole).toString().toStdString() == id)
+      return item;
+  }
+  return nullptr;
 }
 
 bool selectThread(QListWidget *list, std::string_view id) {
-  if (!list)
+  QListWidgetItem *item = threadItem(list, id);
+  if (!item)
     return false;
-  for (int row = 0; row < list->count(); ++row) {
-    QListWidgetItem *item = list->item(row);
-    if (item && item->data(Qt::UserRole).toString().toStdString() == id) {
-      list->setCurrentRow(row);
-      spin(2);
-      return true;
-    }
-  }
-  return false;
+  list->setCurrentItem(item);
+  spin();
+  return list->currentItem() == item;
 }
 
 bool submit(codexui::ExpandingPromptEditor *editor, const QString &prompt) {
@@ -313,8 +183,8 @@ bool submit(codexui::ExpandingPromptEditor *editor, const QString &prompt) {
                                    Qt::DirectConnection);
 }
 
-const middle::LocalPromptData *localPrompt(ShellWidget &shell,
-                                           const QString &prompt) {
+middle::ConversationCard *localPromptCard(ShellWidget &shell,
+                                          std::string_view prompt) {
   for (QWidget *widget : shell.findChildren<QWidget *>()) {
     auto *card = dynamic_cast<middle::ConversationCard *>(widget);
     if (!card)
@@ -322,26 +192,13 @@ const middle::LocalPromptData *localPrompt(ShellWidget &shell,
     const auto *local =
         std::get_if<middle::LocalPromptData>(&card->data().payload);
     if (local && local->prompt == prompt)
-      return local;
-  }
-  return nullptr;
-}
-
-middle::ConversationCard *userMessage(ShellWidget &shell,
-                                      const std::string &message) {
-  for (QWidget *widget : shell.findChildren<QWidget *>()) {
-    auto *card = dynamic_cast<middle::ConversationCard *>(widget);
-    if (!card)
-      continue;
-    const auto *user =
-        std::get_if<middle::UserMessageData>(&card->data().payload);
-    if (user && user->text == message)
       return card;
   }
   return nullptr;
 }
 
-bool hasAgentMessage(ShellWidget &shell, const QString &message) {
+middle::ConversationCard *agentMessageCard(ShellWidget &shell,
+                                           std::string_view message) {
   for (QWidget *widget : shell.findChildren<QWidget *>()) {
     auto *card = dynamic_cast<middle::ConversationCard *>(widget);
     if (!card)
@@ -349,770 +206,2445 @@ bool hasAgentMessage(ShellWidget &shell, const QString &message) {
     const auto *agent =
         std::get_if<middle::AgentMessageData>(&card->data().payload);
     if (agent && agent->text == message)
-      return true;
+      return card;
   }
-  return false;
+  return nullptr;
 }
 
-bool hasPresentedText(QWidget &root, const QString &marker) {
-  return std::ranges::any_of(
-      root.findChildren<QLabel *>(), [&marker](QLabel *label) {
-        return label &&
-               (label->text().contains(marker) ||
-                label->property("markdownSource").toString().contains(marker));
-      });
-}
+void graphNotificationsDetachBeforeRetirement(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
 
-struct ShellFlow {
-  PresentationPeer &peer;
-  ShellWidget shell;
-  QListWidget *list;
-  codexui::ExpandingPromptEditor *editor;
-  std::uint64_t sequence = 1;
-  std::uint64_t generation = 1;
-  std::string startBCorrelation;
+  std::size_t notifications = 0;
+  bool ordinaryDetached = false;
+  bool detachedDuringRescan = false;
+  NodeRef ordinaryRemoved;
+  NodeRef coalescedRemoved;
+  int ordinaryAttachment = 1;
+  int coalescedAttachment = 2;
+  session.setGraphChangedHandler([&](const GraphChanged &changed) {
+    ++notifications;
+    for (const NodeRef &node : changed.removed) {
+      if (!node)
+        continue;
+      if (node->uiAttachment() == &ordinaryAttachment) {
+        ordinaryRemoved = node;
+        node->setUiAttachment(nullptr);
+        ordinaryDetached = true;
+      } else if (node->uiAttachment() == &coalescedAttachment) {
+        coalescedRemoved = node;
+        node->setUiAttachment(nullptr);
+        detachedDuringRescan = changed.rescanRequired;
+      }
+    }
+  });
 
-  ShellFlow(FrontendSession &session, PresentationPeer &peer)
-      : peer(peer), shell(session) {
-    shell.resize(1500, 850);
-    shell.show();
-    spin(10);
-    list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
-    editor = shell.findChild<codexui::ExpandingPromptEditor *>(
-        QStringLiteral("upcomingPromptEditor"));
+  applyThread(worker, "ordinary-removal");
+  spin();
+  NodeRef ordinary;
+  {
+    auto read = session.nodeGraph().tryRead();
+    ordinary =
+        read ? read->find({NodeKind::Thread, "ordinary-removal"}) : NodeRef{};
+  }
+  require(ordinary != nullptr,
+          "worker update is visible through the shared graph");
+  if (ordinary)
+    ordinary->setUiAttachment(&ordinaryAttachment);
+  static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                  "thread/deleted",
+                                  std::nullopt,
+                                  {{"threadId", Value("ordinary-removal")}}}));
+  require(
+      spinUntil([&] { return channels.qtToWorkerSizeApprox() != 0; }),
+      "Qt receives removal and queues its typed detachment acknowledgement");
+
+  std::vector<QtToWorkerMessage> commands = takeQtMessages(channels);
+  NodeRef ordinaryAcknowledgement;
+  for (QtToWorkerMessage &command : commands) {
+    if (auto *action = std::get_if<NodeAction>(&command);
+        action && action->kind == NodeActionKind::UiDetached)
+      ordinaryAcknowledgement = std::move(action->target);
+  }
+  require(ordinaryDetached && ordinaryRemoved == ordinary &&
+              ordinaryAcknowledgement == ordinary,
+          "Qt clears a removed node attachment before acknowledging it");
+  static_cast<void>(
+      worker.acknowledgeUiDetached(std::move(ordinaryAcknowledgement)));
+  {
+    auto read = session.nodeGraph().tryRead();
+    require(read && read->retiredNodes().empty(),
+            "the worker releases ordinary retirement only after UiDetached");
   }
 
-  bool completeSettingsRefresh(const std::string &threadId) {
-    const auto request = peer.waitFor("thread.resume", threadId);
-    const std::string message =
-        threadId + " receives its metadata-only settings refresh";
-    if (!expect(request.has_value(), message.c_str()) || !request)
-      return false;
-    return peer.send(
-        presentation::result(sequence++, generation, "thread.resume",
-                             request->value("correlationId", std::string{}),
-                             true, {{"thread", {{"id", threadId}}}},
-                             Authority::Merge, {{"threadId", threadId}}));
+  applyThread(worker, "coalesced-removal");
+  spin();
+  NodeRef coalesced;
+  {
+    auto read = session.nodeGraph().tryRead();
+    coalesced =
+        read ? read->find({NodeKind::Thread, "coalesced-removal"}) : NodeRef{};
+  }
+  require(coalesced != nullptr, "coalescing fixture has a live shared node");
+  if (coalesced)
+    coalesced->setUiAttachment(&coalescedAttachment);
+
+  std::size_t fillerCount = 0;
+  for (;;) {
+    UiEffect filler;
+    filler.text = "fill-" + std::to_string(fillerCount);
+    const ChannelSendStatus status = channels.sendUiEffect(filler);
+    if (status == ChannelSendStatus::QueueFull)
+      break;
+    require(status == ChannelSendStatus::Accepted,
+            "ordinary worker-to-Qt filler is admitted normally");
+    ++fillerCount;
+  }
+  require(fillerCount + ThreadChannels::WorkerToQtReservedSlots ==
+              ThreadChannels::WorkerToQtCapacity,
+          "worker mailbox saturation preserves critical and terminal slots");
+
+  const ChannelSendStatus coalescedStatus =
+      worker.apply({DecodedMessageKind::ServerNotification,
+                    "thread/deleted",
+                    std::nullopt,
+                    {{"threadId", Value("coalesced-removal")}}});
+  require(coalescedStatus == ChannelSendStatus::CoalescedRescan,
+          "a saturated graph notification becomes an explicit rescan");
+  FrontendSessionTestPeer::drainWorkerMessages(session);
+  require(detachedDuringRescan && channels.qtToWorkerSizeApprox() == 0 &&
+              channels.workerToQtSizeApprox() != 0,
+          "Qt detaches a rescan retirement but defers its acknowledgement "
+          "until every older queued notification has drained");
+  while (channels.workerToQtSizeApprox() != 0 || channels.rescanPending())
+    FrontendSessionTestPeer::drainWorkerMessages(session);
+  require(channels.qtToWorkerSizeApprox() != 0,
+          "Qt acknowledges the detached retirement after the stale backlog");
+
+  commands = takeQtMessages(channels);
+  NodeRef coalescedAcknowledgement;
+  for (QtToWorkerMessage &command : commands) {
+    if (auto *action = std::get_if<NodeAction>(&command);
+        action && action->kind == NodeActionKind::UiDetached &&
+        action->target == coalesced)
+      coalescedAcknowledgement = std::move(action->target);
+  }
+  require(coalescedRemoved == coalesced &&
+              coalescedAcknowledgement == coalesced,
+          "rescan retirement carries the stable NodeRef through UiDetached");
+  static_cast<void>(
+      worker.acknowledgeUiDetached(std::move(coalescedAcknowledgement)));
+  {
+    auto read = session.nodeGraph().tryRead();
+    require(read && read->retiredNodes().empty(),
+            "coalesced retirement is released after Qt detachment");
+  }
+  require(notifications >= 4,
+          "eventfd delivery exposes committed changes and synthesized rescan");
+}
+
+void massRetirementIsSliced(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  NodeGraph &graph = FrontendSessionTestPeer::graph(session);
+  WorkerLogic worker(graph, channels);
+
+  constexpr std::size_t NodeCount = 640;
+  std::vector<NodeRef> nodes;
+  nodes.reserve(NodeCount);
+  {
+    auto write = graph.write();
+    for (std::size_t index = 0; index < NodeCount; ++index) {
+      nodes.emplace_back(write.upsert(
+          {NodeKind::Item, "mass-retired-" + std::to_string(index)}));
+    }
+    static_cast<void>(write.finish());
   }
 
-  bool verifyHydrationAndNavigation();
-  bool verifyPromptLifecycle();
-  bool verifyReconnectHydration();
-  bool verifyTerminalCallback();
-  bool verifyBoundedChildHydration();
-  bool verifyNotFoundRecovery();
-  bool verifyFailedHydration();
-  bool verifyOptimisticNewThread();
-  bool verifyPendingResolutionBoundary();
+  int attachment = 1;
+  for (const NodeRef &node : nodes)
+    node->setUiAttachment(&attachment);
 
-  bool run() {
-    return verifyHydrationAndNavigation() && verifyPromptLifecycle() &&
-           verifyReconnectHydration() && verifyTerminalCallback() &&
-           verifyBoundedChildHydration() && verifyNotFoundRecovery() &&
-           verifyFailedHydration() && verifyOptimisticNewThread() &&
-           verifyPendingResolutionBoundary();
+  std::unordered_set<Node *> detached;
+  std::size_t largestBatch = 0;
+  session.setGraphChangedHandler([&](const GraphChanged &changed) {
+    if (!changed.rescanRequired)
+      return;
+    largestBatch = std::max(largestBatch, changed.removed.size());
+    for (const NodeRef &node : changed.removed) {
+      if (node && node->uiAttachment() != nullptr) {
+        node->setUiAttachment(nullptr);
+        detached.insert(node.get());
+      }
+    }
+  });
+
+  GraphChange removal;
+  {
+    auto write = graph.write();
+    for (const NodeRef &node : nodes)
+      write.remove(node);
+    removal = write.finish();
   }
-};
+  require(channels.sendGraphChanged(std::move(removal)) ==
+              ChannelSendStatus::CoalescedRescan,
+          "an oversized mass removal requests an explicit graph rescan even "
+          "when the worker mailbox has space");
 
-bool ShellFlow::verifyHydrationAndNavigation() {
-  bool result = true;
+  FrontendSessionTestPeer::drainWorkerMessages(session);
+  require(!detached.empty() && detached.size() <= 64 && largestBatch <= 64,
+          "one Qt pass detaches only a bounded retirement batch");
 
-  result &= peer.send(presentation::event(sequence++, 1, "connection.lifecycle",
-                                          {{"state", "connected"}},
-                                          Authority::Merge));
-  result &= peer.send(presentation::event(sequence++, 1, "connection.bridge",
-                                          {{"state", "opened"},
-                                           {"connectionId", "test-controller"},
-                                           {"role", "controller"}},
-                                          Authority::Merge));
-  result &= peer.send(presentation::event(
-      sequence++, 1, "connection.provider",
-      {{"generation", std::uint64_t{1}}, {"state", "ready"}},
-      Authority::Replace));
-  result &= peer.send(presentation::event(
-      sequence++, 1, "thread.upsert", {{"thread", thread("thread-a", "A")}},
-      Authority::Merge, {{"threadId", "thread-a"}}));
-  result &= peer.send(presentation::event(
-      sequence++, 1, "thread.upsert", {{"thread", thread("thread-b", "B")}},
-      Authority::Merge, {{"threadId", "thread-b"}}));
-  spin(10);
-  peer.discard(); // bridge bootstrap operations are outside this scenario.
-
-  result &= expect(selectThread(list, "thread-a"),
-                   "the visible A row becomes the prompt destination");
-  const auto readA = peer.waitFor("thread.read", "thread-a");
-  result &= expect(readA.has_value(), "selecting A requests hydration");
-  if (!readA)
-    return false;
-  result &= expect(selectThread(list, "thread-b"),
-                   "B can be selected while A is still hydrating");
-  const auto readB = peer.waitFor("thread.read", "thread-b");
-  result &= expect(readB.has_value(), "selecting B requests its own hydration");
-  if (!readB)
-    return false;
-  result &= peer.send(
-      presentation::event(sequence++, 1, "thread.upsert",
-                          {{"thread", thread("thread-a", "A", "notLoaded")}},
-                          Authority::Merge, {{"threadId", "thread-a"}}));
-  result &= peer.send(presentation::result(
-      sequence++, 1, "thread.read",
-      readA->value("correlationId", std::string{}), true,
-      {{"thread", threadWithPlanAndAgent("thread-a", "A")}}, Authority::Replace,
-      {{"threadId", "thread-a"}}));
-  result &= completeSettingsRefresh("thread-a");
-  result &= peer.send(
-      presentation::result(sequence++, 1, "thread.read",
-                           readB->value("correlationId", std::string{}), true,
-                           {{"thread", thread("thread-b", "B")}},
-                           Authority::Replace, {{"threadId", "thread-b"}}));
-  result &= completeSettingsRefresh("thread-b");
-  spin(10);
-  result &= expect(selectThread(list, "thread-a"),
-                   "A can be selected again after background hydration");
-  spin(10);
-  auto *inspector = shell.findChild<QFrame *>(QStringLiteral("inspector"));
-  auto *inspectorTabs = inspector ? inspector->findChild<QTabWidget *>(
-                                        QString{}, Qt::FindDirectChildrenOnly)
-                                  : nullptr;
-  result &= expect(
-      inspector && inspectorTabs &&
-          hasPresentedText(*inspector, QStringLiteral("retained plan marker")),
-      "A's retained plan survives background hydration and navigation");
-  if (inspectorTabs) {
-    inspectorTabs->setCurrentIndex(1);
-    spin();
+  std::size_t acknowledgements = 0;
+  for (std::size_t pass = 0; pass < 128; ++pass) {
+    FrontendSessionTestPeer::drainWorkerMessages(session);
+    std::vector<QtToWorkerMessage> commands = takeQtMessages(channels);
+    for (QtToWorkerMessage &command : commands) {
+      auto *action = std::get_if<NodeAction>(&command);
+      if (!action || action->kind != NodeActionKind::UiDetached)
+        continue;
+      ++acknowledgements;
+      static_cast<void>(
+          worker.acknowledgeUiDetached(std::move(action->target)));
+    }
+    auto read = graph.tryRead();
+    if (read && read->retiredCount() == 0 &&
+        channels.workerToQtSizeApprox() == 0 &&
+        channels.qtToWorkerSizeApprox() == 0)
+      break;
   }
-  result &= expect(
-      inspector &&
-          hasPresentedText(*inspector, QStringLiteral("retained agent marker")),
-      "A's retained agent detail survives background hydration and navigation");
-  return result;
+
+  auto read = graph.tryRead();
+  require(detached.size() == NodeCount && acknowledgements == NodeCount &&
+              largestBatch <= 64 && read && read->retiredCount() == 0,
+          "sliced mass retirement detaches and acknowledges every NodeRef "
+          "exactly once without an unbounded Qt graph read");
 }
 
-bool ShellFlow::verifyPromptLifecycle() {
-  bool result = true;
+void selectedRemovalUnbindsBeforeWorkerRetirement(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  NodeGraph &graph = FrontendSessionTestPeer::graph(session);
+  WorkerLogic worker(graph, channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "removed-selected", "Removed selected");
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "item/started",
+       std::nullopt,
+       {{"threadId", Value("removed-selected")},
+        {"turnId", Value("removed-turn")},
+        {"item", Value(Value::Object{{"id", Value("removed-item")},
+                                     {"type", Value("agentMessage")},
+                                     {"text", Value("remove this card")}})}}}));
+  markThreadReady(session, worker, "removed-selected");
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(
+      spinUntil(
+          [&] { return threadItem(list, "removed-selected") != nullptr; }) &&
+          selectThread(list, "removed-selected") && spinUntil([&] {
+            return agentMessageCard(shell, "remove this card") != nullptr;
+          }),
+      "selected-removal fixture materializes a graph-attached row and card");
+  static_cast<void>(takeQtMessages(channels)); // discard hydration
 
-  result &= expect(submit(editor, QStringLiteral("prompt A1")),
-                   "A1 is admitted through the real composer");
-  const auto startA = peer.waitFor("turn.start", "thread-a");
-  result &= expect(startA.has_value() && !peer.has("thread.create"),
-                   "A1 starts on selected A and never creates a new thread");
-  if (!startA)
-    return false;
-  const nlohmann::json startAData =
-      startA->value("data", nlohmann::json::object());
-  const std::string clientId =
-      startAData.value("clientUserMessageId", std::string{});
-  result &= expect(!clientId.empty(),
-                   "turn.start carries the prompt correlation identity");
-
-  result &= expect(submit(editor, QStringLiteral("prompt A2")),
-                   "A2 remains independently editable while A1 awaits ack");
-  spin(20);
-  result &= expect(!peer.has("turn.steer"),
-                   "A2 waits behind the one in-flight operation for A");
-
-  result &= peer.send(presentation::event(
-      sequence++, 1, "conversation.item.upsert",
-      {{"item",
-        {{"id", "user-a1"},
-         {"type", "userMessage"},
-         {"clientId", clientId},
-         {"content", {{{"type", "text"}, {"text", "prompt A1"}}}}}}},
-      Authority::Merge,
-      {{"threadId", "thread-a"},
-       {"turnId", "turn-a-live"},
-       {"itemId", "user-a1"}}));
-  spin(10);
-  const middle::LocalPromptData *beforeAck =
-      localPrompt(shell, QStringLiteral("prompt A1"));
-  result &=
-      expect(beforeAck && beforeAck->state == middle::PromptState::InFlight,
-             "materialization alone cannot acknowledge A1");
-
-  editor->setPlainText(QStringLiteral("unsent shared draft"));
-  result &= expect(selectThread(list, "thread-b"),
-                   "B can be selected while A remains active");
-  result &=
-      expect(editor->toPlainText() == QStringLiteral("unsent shared draft"),
-             "thread navigation retains the shared composer draft");
-  result &= expect(!peer.waitFor("thread.read", "thread-b", 100).has_value(),
-                   "returning to hydrated B does not reread its history");
-  result &= expect(submit(editor, QStringLiteral("prompt B1")),
-                   "B1 is admitted while A1 is in flight");
-  spin(20);
-  result &=
-      expect(list && list->item(0) &&
-                 list->item(0)->data(Qt::UserRole).toString().toStdString() ==
-                     "thread-b" &&
-                 list->currentItem() == list->item(0),
-             "real prompt admission immediately promotes B under Recent");
-  const auto startB = peer.waitFor("turn.start", "thread-b");
-  result &=
-      expect(startB.has_value(), "different threads dispatch independently");
-  if (startB)
-    startBCorrelation = startB->value("correlationId", std::string{});
-
-  result &= peer.send(presentation::result(
-      sequence++, 1, "turn.start",
-      startA->value("correlationId", std::string{}), true,
-      {{"turn", {{"id", "turn-a-live"}}}}, Authority::Merge,
-      {{"threadId", "thread-a"}, {"turnId", "turn-a-live"}}));
-  const auto steerA = peer.waitFor("turn.steer", "thread-a");
-  result &=
-      expect(steerA.has_value(), "A1's real background ack releases queued A2");
-  result &= expect(
-      list && list->currentItem() &&
-          list->currentItem()->data(Qt::UserRole).toString().toStdString() ==
-              "thread-b",
-      "a background acknowledgment does not change selection");
-
-  peer.discard();
-  result &= expect(selectThread(list, "thread-a"),
-                   "switching back restores A's retained prompt state");
-  spin(10);
-  result &= expect(
-      !peer.waitFor("thread.read", "thread-a", 100).has_value(),
-      "switching back to hydrated A does not issue a destructive reread");
-  middle::ConversationCard *promoted = userMessage(shell, "prompt A1");
-  result &= expect(
-      promoted && promoted->property("authoritativeTurnActive").toBool(),
-      "the correlated result promotes A1 immediately and keeps its emphasized "
-      "border while the separate "
-      "active-turn event is delayed");
-  result &= peer.send(presentation::event(
-      sequence++, 1, "turn.upsert",
-      {{"turn", {{"id", "turn-a-live"}, {"status", "inProgress"}}}},
-      Authority::Merge, {{"threadId", "thread-a"}, {"turnId", "turn-a-live"}}));
-  spin(10);
-  result &= expect(
-      promoted && promoted->property("authoritativeTurnActive").toBool(),
-      "authoritative active-turn ownership replaces the provisional handoff "
-      "without a neutral border state");
-  return result;
-}
-
-bool ShellFlow::verifyReconnectHydration() {
-  bool result = true;
-
-  result &= peer.send(presentation::event(
-      sequence++, 1, "thread.upsert", {{"thread", thread("thread-c", "C")}},
-      Authority::Merge, {{"threadId", "thread-c"}}));
-  spin(5);
-  result &= expect(selectThread(list, "thread-c"),
-                   "C is selected for hydration supersession coverage");
-  const auto readC1 = peer.waitFor("thread.read", "thread-c");
-  result &= expect(readC1.has_value(), "C issues its first hydration read");
-  if (!readC1)
-    return false;
-  result &=
-      expect(submit(editor, QStringLiteral("prompt C queued across restart")),
-             "a prompt can queue behind C's in-flight hydration");
-  result &= expect(!peer.waitFor("turn.start", "thread-c", 100).has_value(),
-                   "the queued prompt waits for authoritative hydration");
-
-  result &= peer.send(presentation::event(
-      sequence++, 1, "connection.provider",
-      {{"generation", std::uint64_t{1}}, {"state", "disconnected"}},
-      Authority::Replace));
-  spin(10);
-  const auto *status =
-      shell.findChild<QLabel *>(QStringLiteral("globalStatusLabel"));
-  result &=
-      expect(status && status->text() == QStringLiteral("Provider unavailable"),
-             "provider loss cannot leave the shell visibly Ready");
-  peer.discard();
-  result &=
-      expect(submit(editor, QStringLiteral("provider unavailable")),
-             "the editable composer reaches the guarded admission boundary");
-  spin(5);
-  result &=
-      expect(editor->toPlainText() == QStringLiteral("provider unavailable") &&
-                 !peer.has("turn.start") && !peer.has("turn.steer"),
-             "provider loss rejects a stale hidden-thread destination without "
-             "clearing the draft");
-
-  generation = 2;
-  result &= peer.send(presentation::event(sequence++, 2, "connection.lifecycle",
-                                          {{"state", "disconnected"}},
-                                          Authority::Merge));
-  result &= peer.send(presentation::event(sequence++, 2, "connection.lifecycle",
-                                          {{"state", "connected"}},
-                                          Authority::Merge));
-  result &=
-      peer.send(presentation::event(sequence++, 2, "connection.bridge",
-                                    {{"state", "opened"},
-                                     {"connectionId", "test-controller-2"},
-                                     {"role", "controller"}},
-                                    Authority::Merge));
-  result &= peer.send(presentation::event(
-      sequence++, 2, "connection.provider",
-      {{"generation", std::uint64_t{2}}, {"state", "ready"}},
-      Authority::Replace));
-  const auto reconnectedList = peer.waitFor("threads.list");
-  result &= expect(reconnectedList.has_value(),
-                   "the ready provider requests a fresh authoritative list");
-  if (!reconnectedList)
-    return false;
-  result &= peer.send(presentation::result(
-      sequence++, 2, "threads.list",
-      reconnectedList->value("correlationId", std::string{}), true,
-      {{"threads",
-        nlohmann::json::array({thread("thread-a", "A"), thread("thread-b", "B"),
-                               thread("thread-c", "C")})}},
-      Authority::Merge));
-  const auto readC2 = peer.waitFor("thread.read", "thread-c");
-  result &= expect(readC2.has_value(),
-                   "the new connection owns a fresh hydration read");
-  if (!readC2)
-    return false;
-  const auto readB2 = peer.waitFor("thread.read", "thread-b");
-  result &= expect(readB2.has_value(),
-                   "the restart also rehydrates B's interrupted prompt queue");
-  if (!readB2)
-    return false;
-  result &= peer.send(
-      presentation::result(sequence++, 2, "thread.read",
-                           readB2->value("correlationId", std::string{}), true,
-                           {{"thread", thread("thread-b", "B")}},
-                           Authority::Replace, {{"threadId", "thread-b"}}));
-  const auto resumedStartB = peer.waitFor("turn.start", "thread-b");
-  result &=
-      expect(resumedStartB.has_value(),
-             "B's interrupted in-flight prompt is reissued after hydration");
-  if (!resumedStartB)
-    return false;
-  startBCorrelation = resumedStartB->value("correlationId", std::string{});
-  result &= peer.send(presentation::result(
-      sequence++, 2, "thread.read",
-      readC2->value("correlationId", std::string{}), true,
-      {{"thread", threadWithAgentMessage("thread-c", "C", "current C marker")}},
-      Authority::Replace, {{"threadId", "thread-c"}}));
-  result &= peer.send(
-      presentation::result(sequence++, 2, "thread.read",
-                           readC1->value("correlationId", std::string{}), true,
-                           {{"thread", thread("thread-c", "stale C")}},
-                           Authority::Replace, {{"threadId", "thread-c"}}));
-  result &= completeSettingsRefresh("thread-c");
-  const auto resumedStartC = peer.waitFor("turn.start", "thread-c");
-  result &= expect(resumedStartC.has_value(),
-                   "a transient provider restart preserves and dispatches C's "
-                   "queued prompt");
-  if (!resumedStartC)
-    return false;
-  result &= peer.send(presentation::result(
-      sequence++, 2, "turn.start",
-      resumedStartC->value("correlationId", std::string{}), true,
-      {{"turn", {{"id", "turn-c-reconnected"}, {"status", "completed"}}}},
-      Authority::Replace,
-      {{"threadId", "thread-c"}, {"turnId", "turn-c-reconnected"}}));
-  spin(10);
-  const middle::LocalPromptData *preserved =
-      localPrompt(shell, QStringLiteral("prompt C queued across restart"));
-  result &=
-      expect(preserved && preserved->state == middle::PromptState::Accepted,
-             "the reconnected turn result acknowledges the preserved prompt");
-  result &= expect(hasAgentMessage(shell, QStringLiteral("current C marker")),
-                   "a late successful stale read cannot replace newer cards");
-  peer.discard();
-  result &= expect(submit(editor, QStringLiteral("prompt C1")),
-                   "C remains hydrated after the stale read callback");
-  const auto startC = peer.waitFor("turn.start", "thread-c");
-  result &= expect(startC.has_value() && !peer.has("thread.read"),
-                   "a stale read cannot overwrite newer hydration state");
-  return result;
-}
-
-bool ShellFlow::verifyTerminalCallback() {
-  bool result = true;
-  result &= peer.send(presentation::result(
-      sequence++, 2, "turn.start", startBCorrelation, false,
-      {{"code", -32001}, {"message", "transport cancelled"}}, Authority::None,
-      {{"threadId", "thread-b"}}));
-  spin(10);
-  result &= expect(selectThread(list, "thread-b"),
-                   "B remains selectable after reconnection");
-  const middle::LocalPromptData *cancelled =
-      localPrompt(shell, QStringLiteral("prompt B1"));
-  result &= expect(cancelled && cancelled->state == middle::PromptState::Failed,
-                   "a real failure of the reissued request remains terminal");
-  return result;
-}
-
-bool ShellFlow::verifyBoundedChildHydration() {
-  bool result = true;
-
-  peer.discard();
-  result &=
-      peer.send(presentation::event(sequence++, 2, "agents.activity.upsert",
-                                    {{"activity",
-                                      {{"id", "child-failure"},
-                                       {"type", "subAgentActivity"},
-                                       {"status", "started"},
-                                       {"agentThreadId", "child-failure"}}}},
-                                    Authority::Merge,
-                                    {{"threadId", "thread-b"},
-                                     {"turnId", "turn-b"},
-                                     {"itemId", "child-failure"}}));
-  const auto childRead = peer.waitFor("thread.read", "child-failure");
-  result &= expect(childRead.has_value(),
-                   "a started historical child is hydrated once");
-  if (!childRead)
-    return false;
-  result &= peer.send(presentation::result(
-      sequence++, 2, "thread.read",
-      childRead->value("correlationId", std::string{}), false,
-      {{"code", -32002}, {"message", "child hydration failed"}},
-      Authority::None, {{"threadId", "child-failure"}}));
-  spin(10);
-  result &=
-      expect(!peer.waitFor("thread.read", "child-failure", 100).has_value(),
-             "a failed child hydration does not enter an automatic retry loop");
-
-  result &=
-      expect(selectThread(list, "thread-a") && selectThread(list, "thread-b"),
-             "explicit navigation returns to the failed child's parent");
-  const auto retriedChildRead = peer.waitFor("thread.read", "child-failure");
-  result &= expect(retriedChildRead.has_value(),
-                   "explicit parent navigation retries one failed child read");
-  if (!retriedChildRead)
-    return false;
-  result &= peer.send(presentation::result(
-      sequence++, 2, "thread.read",
-      retriedChildRead->value("correlationId", std::string{}), true,
-      {{"thread", threadWithAgentMessage("child-failure", "Child",
-                                         "completed child result")}},
-      Authority::Replace, {{"threadId", "child-failure"}}));
-  spin(10);
-
-  auto *inspector = shell.findChild<QFrame *>(QStringLiteral("inspector"));
-  auto *tabs = inspector ? inspector->findChild<QTabWidget *>(
-                               QString{}, Qt::FindDirectChildrenOnly)
-                         : nullptr;
-  if (tabs) {
-    tabs->setCurrentIndex(1);
-    spin();
+  static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                  "thread/deleted",
+                                  std::nullopt,
+                                  {{"threadId", Value("removed-selected")}}}));
+  require(
+      spinUntil([&] { return channels.qtToWorkerSizeApprox() != 0; }),
+      "selected removal detaches Qt and queues retirement acknowledgements");
+  std::vector<QtToWorkerMessage> acknowledgements = takeQtMessages(channels);
+  std::size_t released = 0;
+  for (QtToWorkerMessage &message : acknowledgements) {
+    auto *action = std::get_if<NodeAction>(&message);
+    if (!action || action->kind != NodeActionKind::UiDetached)
+      continue;
+    static_cast<void>(worker.acknowledgeUiDetached(std::move(action->target)));
+    ++released;
   }
-  result &=
-      expect(inspector && tabs &&
-                 hasPresentedText(*inspector, QStringLiteral("completed")) &&
-                 !hasPresentedText(*inspector, QStringLiteral("running")),
-             "retried child completion replaces the stale running badge");
-  return result;
+  spin(60); // exercises every deferred binding/render after releaseRetired()
+
+  auto read = graph.tryRead();
+  require(released != 0 && read && read->retiredNodes().empty() &&
+              !threadItem(list, "removed-selected") &&
+              !agentMessageCard(shell, "remove this card"),
+          "deferred Qt work retains no released selected-thread NodeRef");
 }
 
-bool ShellFlow::verifyNotFoundRecovery() {
-  bool result = true;
-
-  peer.discard();
-  result &= peer.send(presentation::event(
-      sequence++, 2, "thread.upsert", {{"thread", thread("thread-d", "D")}},
-      Authority::Merge, {{"threadId", "thread-d"}}));
-  spin(5);
-  result &= expect(selectThread(list, "thread-d"),
-                   "D is selected for thread-not-found recovery coverage");
-  const auto readD = peer.waitFor("thread.read", "thread-d");
-  result &= expect(readD.has_value(), "D is hydrated before its first prompt");
-  if (!readD)
-    return false;
-  result &= peer.send(
-      presentation::result(sequence++, 2, "thread.read",
-                           readD->value("correlationId", std::string{}), true,
-                           {{"thread", thread("thread-d", "D")}},
-                           Authority::Replace, {{"threadId", "thread-d"}}));
-  result &= completeSettingsRefresh("thread-d");
-  spin(5);
-  result &= expect(submit(editor, QStringLiteral("prompt D1")),
-                   "D1 is admitted before recovery");
-  const auto firstStartD = peer.waitFor("turn.start", "thread-d");
-  result &= expect(firstStartD.has_value(), "D1 begins with turn.start");
-  if (!firstStartD)
-    return false;
-  const std::string firstDClientId =
-      firstStartD->value("data", nlohmann::json::object())
-          .value("clientUserMessageId", std::string{});
-  result &= peer.send(presentation::result(
-      sequence++, 2, "turn.start",
-      firstStartD->value("correlationId", std::string{}), false,
-      {{"code", -32004}, {"message", "thread thread-d not found"}},
-      Authority::None, {{"threadId", "thread-d"}}));
-  const auto firstResumeD = peer.waitFor("thread.resume", "thread-d");
-  result &= expect(firstResumeD.has_value(),
-                   "thread-not-found triggers one explicit resume");
-  if (!firstResumeD)
-    return false;
-  result &= peer.send(
-      presentation::result(sequence++, 2, "thread.resume",
-                           firstResumeD->value("correlationId", std::string{}),
-                           true, {{"thread", thread("thread-d", "D")}},
-                           Authority::Merge, {{"threadId", "thread-d"}}));
-  const auto retriedStartD = peer.waitFor("turn.start", "thread-d");
-  result &= expect(retriedStartD.has_value() &&
-                       retriedStartD->value("data", nlohmann::json::object())
-                               .value("clientUserMessageId", std::string{}) ==
-                           firstDClientId,
-                   "D1 retries once with the same client message identity");
-  if (!retriedStartD)
-    return false;
-  result &= peer.send(presentation::result(
-      sequence++, 2, "turn.start",
-      retriedStartD->value("correlationId", std::string{}), true,
-      {{"turn", {{"id", "turn-d"}, {"status", "inProgress"}}}},
-      Authority::Merge, {{"threadId", "thread-d"}, {"turnId", "turn-d"}}));
-  spin(5);
-
-  result &= expect(submit(editor, QStringLiteral("prompt D2")),
-                   "the prompt after recovery remains dispatchable");
-  const auto firstSteerD = peer.waitFor("turn.steer", "thread-d");
-  result &= expect(firstSteerD.has_value(),
-                   "the next prompt steers the recovered active turn");
-  if (!firstSteerD)
-    return false;
-  const std::string secondDClientId =
-      firstSteerD->value("data", nlohmann::json::object())
-          .value("clientUserMessageId", std::string{});
-  result &= peer.send(presentation::result(
-      sequence++, 2, "turn.steer",
-      firstSteerD->value("correlationId", std::string{}), false,
-      {{"code", -32004}, {"message", "thread thread-d not found"}},
-      Authority::None, {{"threadId", "thread-d"}}));
-  const auto secondResumeD = peer.waitFor("thread.resume", "thread-d");
-  result &= expect(secondResumeD.has_value(),
-                   "D2 receives its single bounded recovery attempt");
-  if (!secondResumeD)
-    return false;
-  result &= expect(submit(editor, QStringLiteral("prompt D during recovery")),
-                   "another prompt remains admissible during recovery");
-  spin(10);
-  result &= expect(!peer.waitFor("turn.steer", "thread-d", 100).has_value(),
-                   "an in-flight resume gates dispatch");
-  result &= peer.send(presentation::result(
-      sequence++, 2, "thread.resume",
-      secondResumeD->value("correlationId", std::string{}), true,
-      {{"thread", thread("thread-d", "D", "active", "turn-d")}},
-      Authority::Merge, {{"threadId", "thread-d"}}));
-  const auto retriedSteerD = peer.waitFor("turn.steer", "thread-d");
-  result &= expect(retriedSteerD.has_value() &&
-                       retriedSteerD->value("data", nlohmann::json::object())
-                               .value("clientUserMessageId", std::string{}) ==
-                           secondDClientId,
-                   "D2 retry also preserves its exact identity");
-  if (!retriedSteerD)
-    return false;
-  result &= peer.send(presentation::result(
-      sequence++, 2, "turn.steer",
-      retriedSteerD->value("correlationId", std::string{}), false,
-      {{"code", -32004}, {"message", "thread thread-d not found again"}},
-      Authority::None, {{"threadId", "thread-d"}}));
-  spin(10);
-  const middle::LocalPromptData *failedD2 =
-      localPrompt(shell, QStringLiteral("prompt D2"));
-  result &= expect(
-      failedD2 && failedD2->state == middle::PromptState::Failed &&
-          !peer.waitFor("thread.resume", "thread-d", 100).has_value(),
-      "a repeated not-found is terminal and cannot start a second recovery");
-  const auto postRecoverySteerD = peer.waitFor("turn.steer", "thread-d");
-  result &= expect(postRecoverySteerD.has_value(),
-                   "the queued prompt dispatches after recovery finishes");
-  if (!postRecoverySteerD)
-    return false;
-  result &= peer.send(presentation::result(
-      sequence++, 2, "turn.steer",
-      postRecoverySteerD->value("correlationId", std::string{}), true,
-      {{"turn", {{"id", "turn-d"}, {"status", "inProgress"}}}},
-      Authority::Merge, {{"threadId", "thread-d"}, {"turnId", "turn-d"}}));
-  return result;
-}
-
-bool ShellFlow::verifyFailedHydration() {
-  bool result = true;
-
-  peer.discard();
-  result &= peer.send(presentation::event(
-      sequence++, 2, "thread.upsert", {{"thread", thread("thread-e", "E")}},
-      Authority::Merge, {{"threadId", "thread-e"}}));
-  spin(5);
-  result &= expect(selectThread(list, "thread-e"),
-                   "E is selected for failed-hydration admission coverage");
-  const auto readE = peer.waitFor("thread.read", "thread-e");
-  result &= expect(readE.has_value(), "E requests its first hydration read");
-  if (!readE)
-    return false;
-  result &= peer.send(presentation::result(
-      sequence++, 2, "thread.read",
-      readE->value("correlationId", std::string{}), false,
-      {{"code", -32005}, {"message", "thread hydration failed"}},
-      Authority::None, {{"threadId", "thread-e"}}));
-  spin(10);
-  result &= expect(submit(editor, QStringLiteral("prompt E1")),
-                   "the composer delivers E1 to the admission boundary");
-  spin(10);
-  result &=
-      expect(editor && editor->toPlainText() == QStringLiteral("prompt E1"),
-             "failed hydration rejects admission without clearing the draft");
-  result &=
-      expect(!peer.waitFor("turn.start", "thread-e", 100).has_value() &&
-                 !peer.waitFor("thread.read", "thread-e", 100).has_value(),
-             "failed hydration cannot send or enter an automatic read loop");
-  return result;
-}
-
-bool ShellFlow::verifyOptimisticNewThread() {
-  bool result = true;
-  peer.discard();
+void removedAffectedOptimisticRetryDoesNotReadReleasedNode(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  NodeGraph &graph = FrontendSessionTestPeer::graph(session);
+  WorkerLogic worker(graph, channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  spin(30);
 
   auto *newThread =
       shell.findChild<QPushButton *>(QStringLiteral("threadNewButton"));
-  bool dialogOpened = false;
-  QTimer::singleShot(0, &shell, [&dialogOpened] {
+  QTimer::singleShot(0, &shell, [] {
+    if (auto *dialog =
+            qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+      dialog->accept();
+  });
+  if (newThread)
+    newThread->click();
+  spin(30);
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
+      QStringLiteral("upcomingPromptEditor"));
+  require(newThread && threadItem(list, "draft:new-thread") && editor &&
+              submit(editor, QStringLiteral("retain optimistic selection")),
+          "same-transaction removal fixture starts an optimistic creation");
+  static_cast<void>(takeQtMessages(channels));
+
+  GraphChange affectedAndRemoved;
+  NodeRef removedPrompt;
+  {
+    auto write = graph.write();
+    NodeRef thread = write.upsert({NodeKind::Thread, "transient-thread"});
+    NodeRef turn = write.upsert({NodeKind::Turn, "transient-turn"});
+    NodeState state;
+    state.status = NodeStatus::Pending;
+    state.fields = {{"type", Value("localPrompt")},
+                    {"local", Value(true)},
+                    {"createsThread", Value(true)},
+                    {"submissionId", Value(std::uint64_t{99})},
+                    {"dispatchState", Value("queued")}};
+    removedPrompt = write.upsert({NodeKind::Item, "transient-local-prompt"},
+                                 std::move(state));
+    write.setParent(thread, turn);
+    write.setParent(turn, removedPrompt);
+    write.remove(removedPrompt);
+    affectedAndRemoved = write.finish();
+  }
+  require(std::ranges::find(affectedAndRemoved.affected, removedPrompt) !=
+                  affectedAndRemoved.affected.end() &&
+              std::ranges::find(affectedAndRemoved.removed, removedPrompt) !=
+                  affectedAndRemoved.removed.end() &&
+              messageAdmitted(
+                  channels.sendGraphChanged(std::move(affectedAndRemoved))),
+          "one notification may carry the same stable ref as affected and "
+          "removed");
+
+  // Force every graph-reading handler onto its non-blocking Qt retry path.
+  // FrontendSession can still collect the stable removed ref and defer graph
+  // membership release until its typed acknowledgement reaches the worker.
+  auto contended = graph.write();
+  FrontendSessionTestPeer::drainWorkerMessages(session);
+  static_cast<void>(contended.finish());
+
+  std::vector<QtToWorkerMessage> acknowledgements = takeQtMessages(channels);
+  bool released = false;
+  for (QtToWorkerMessage &message : acknowledgements) {
+    auto *action = std::get_if<NodeAction>(&message);
+    if (!action || action->kind != NodeActionKind::UiDetached ||
+        action->target != removedPrompt)
+      continue;
+    static_cast<void>(worker.acknowledgeUiDetached(std::move(action->target)));
+    released = true;
+  }
+  spin(80); // executes the delayed reconciliation after releaseRetired()
+
+  auto read = graph.tryRead();
+  require(released && read && read->retiredNodes().empty() &&
+              !read->find(removedPrompt->id()) &&
+              threadItem(list, "draft:new-thread") == list->currentItem(),
+          "delayed optimistic reconciliation validates graph membership "
+          "before reading a released affected-and-removed ref");
+}
+
+void typedActionsAreExactOnceAndBounded(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  applyThread(worker, "typed-action-target");
+  spin();
+
+  NodeRef target;
+  {
+    auto read = session.nodeGraph().tryRead();
+    target = read ? read->find({NodeKind::Thread, "typed-action-target"})
+                  : NodeRef{};
+  }
+
+  NodeAction authored;
+  authored.target = target;
+  authored.kind = NodeActionKind::SubmitPrompt;
+  authored.promptText = "  exact authored prompt  ";
+  authored.attachments.push_back(
+      {"/tmp/exact.bin", "exact.bin", "application/octet-stream",
+       std::vector<std::uint8_t>{0, 1, 2, 127, 254, 255}});
+  authored.payload.emplace("model", Value("current-model"));
+  authored.correlation = "typed-once";
+  const char *promptStorage = authored.promptText.data();
+  const std::uint8_t *attachmentStorage =
+      authored.attachments.front().bytes->data();
+  require(session.sendNodeAction(authored) == ChannelSendStatus::Accepted &&
+              !authored.target && authored.promptText.empty() &&
+              authored.attachments.empty(),
+          "typed admission moves newly-authored data out of Qt exactly once");
+
+  const EventFd::DrainResult exactWake = channels.drainQtToWorkerWake();
+  QtToWorkerMessage received;
+  const bool gotOne = channels.tryReceiveForWorker(received);
+  const NodeAction *receivedAction =
+      gotOne ? std::get_if<NodeAction>(&received) : nullptr;
+  require(exactWake.status == EventFd::DrainStatus::Drained &&
+              exactWake.count == 1 && receivedAction &&
+              receivedAction->target == target &&
+              receivedAction->kind == NodeActionKind::SubmitPrompt &&
+              receivedAction->promptText == "  exact authored prompt  " &&
+              receivedAction->promptText.data() == promptStorage &&
+              receivedAction->attachments.front().bytes->data() ==
+                  attachmentStorage &&
+              receivedAction->correlation == "typed-once" &&
+              !channels.tryReceiveForWorker(received),
+          "one Qt action produces one FIFO payload and one wake");
+
+  RuntimeAction naturallyAuthored{RuntimeActionKind::ConfigureConnection};
+  naturallyAuthored.payload = {{"transport", Value("invalid-for-fixture")}};
+  require(session.sendRuntimeAction(naturallyAuthored) ==
+              ChannelSendStatus::Accepted,
+          "the frontend admits a naturally authored action without requiring "
+          "widgets to manufacture protocol correlation");
+  const EventFd::DrainResult correlatedWake = channels.drainQtToWorkerWake();
+  const bool gotCorrelated = channels.tryReceiveForWorker(received);
+  const RuntimeAction *correlatedAction =
+      gotCorrelated ? std::get_if<RuntimeAction>(&received) : nullptr;
+  require(correlatedWake.status == EventFd::DrainStatus::Drained &&
+              correlatedWake.count == 1 && correlatedAction &&
+              correlatedAction->correlation.starts_with("ui-action-") &&
+              !channels.tryReceiveForWorker(received),
+          "FrontendSession assigns one bounded correlation before enqueueing "
+          "a real UI action");
+
+  std::size_t admissions = 0;
+  for (;;) {
+    RuntimeAction filler;
+    filler.kind = RuntimeActionKind::RefreshThreads;
+    filler.correlation = "filler-" + std::to_string(admissions);
+    const ChannelSendStatus status = session.sendRuntimeAction(filler);
+    if (status == ChannelSendStatus::QueueFull)
+      break;
+    require(status == ChannelSendStatus::Accepted,
+            "ordinary typed filler is admitted normally");
+    ++admissions;
+  }
+  require(admissions + 1 == ThreadChannels::QtToWorkerCapacity,
+          "Qt mailbox reserves one bounded slot for shutdown");
+
+  NodeAction rejected;
+  rejected.target = target;
+  rejected.kind = NodeActionKind::SubmitPrompt;
+  rejected.promptText = "retain this input";
+  rejected.attachments.push_back(
+      {"/tmp/retained.txt", "retained.txt", "text/plain", std::nullopt});
+  const NodeAction unchanged = rejected;
+  require(session.sendNodeAction(rejected) == ChannelSendStatus::QueueFull &&
+              rejected == unchanged,
+          "queue saturation rejects visibly without consuming user input");
+
+  const EventFd::DrainResult saturatedWake = channels.drainQtToWorkerWake();
+  std::size_t drained = 0;
+  bool onlyFillers = true;
+  while (channels.tryReceiveForWorker(received)) {
+    const RuntimeAction *filler = std::get_if<RuntimeAction>(&received);
+    onlyFillers = onlyFillers && filler &&
+                  filler->correlation == "filler-" + std::to_string(drained);
+    ++drained;
+  }
+  require(saturatedWake.status == EventFd::DrainStatus::Drained &&
+              saturatedWake.count == admissions && drained == admissions &&
+              onlyFillers,
+          "a rejected non-idempotent action adds no payload and no wake");
+}
+
+void qtHeartbeatSurvivesLargeInboundTraffic(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  makeReady(worker);
+  applyThread(worker, "traffic-thread", "Traffic thread");
+  markThreadReady(session, worker, "traffic-thread");
+  auto *threadList =
+      shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(spinUntil([&] {
+            return threadItem(threadList, "traffic-thread") != nullptr;
+          }),
+          "large-traffic fixture materializes the existing thread list");
+  require(selectThread(threadList, "traffic-thread"),
+          "large-traffic fixture binds the real conversation view");
+  static_cast<void>(takeQtMessages(channels)); // discard the hydration action
+
+  std::atomic_bool producerFinished = false;
+  std::atomic_bool midpointReady = false;
+  std::atomic_bool abortWait = false;
+  std::atomic_bool heartbeatObservedAtMidpoint = false;
+  std::atomic_size_t coalescedNotifications = 0;
+  std::atomic_uint64_t heartbeatCount = 0;
+  std::uint64_t heartbeatsWithBacklog = 0;
+
+  QTimer heartbeat;
+  heartbeat.setInterval(0);
+  QObject::connect(&heartbeat, &QTimer::timeout, &heartbeat, [&] {
+    heartbeatCount.fetch_add(1, std::memory_order_relaxed);
+    if (channels.workerToQtSizeApprox() != 0 || channels.rescanPending())
+      ++heartbeatsWithBacklog;
+  });
+  heartbeat.start();
+
+  constexpr std::size_t DeltaCount = 4096;
+  std::thread producer([&] {
+    const auto publish = [&](DecodedMessage message) {
+      const ChannelSendStatus status = worker.apply(std::move(message));
+      if (status == ChannelSendStatus::CoalescedRescan ||
+          status == ChannelSendStatus::CoalescedRescanWakeFailed)
+        coalescedNotifications.fetch_add(1, std::memory_order_relaxed);
+    };
+    publish(
+        {DecodedMessageKind::ServerNotification,
+         "turn/started",
+         std::nullopt,
+         {{"threadId", Value("traffic-thread")},
+          {"turn", Value(Value::Object{{"id", Value("traffic-turn")},
+                                       {"status", Value("inProgress")}})}}});
+    publish({DecodedMessageKind::ServerNotification,
+             "item/started",
+             std::nullopt,
+             {{"threadId", Value("traffic-thread")},
+              {"turnId", Value("traffic-turn")},
+              {"item", Value(Value::Object{{"id", Value("traffic-item")},
+                                           {"type", Value("agentMessage")},
+                                           {"text", Value("")}})}}});
+
+    for (std::size_t index = 0; index < DeltaCount; ++index) {
+      const bool lastItem = index + 1 == DeltaCount;
+      publish({DecodedMessageKind::ServerNotification,
+               "item/started",
+               std::nullopt,
+               {{"threadId", Value("traffic-thread")},
+                {"turnId", Value("traffic-turn")},
+                {"item",
+                 Value(Value::Object{
+                     {"id", Value("background-item-" + std::to_string(index))},
+                     {"type", Value(lastItem ? "agentMessage" : "reasoning")},
+                     {"text", Value(lastItem ? "latest visible item" : "")},
+                     {"status", Value("running")}})}},
+               {},
+               static_cast<std::int64_t>(index + 1)});
+      publish({DecodedMessageKind::ServerNotification,
+               "item/agentMessage/delta",
+               std::nullopt,
+               {{"threadId", Value("traffic-thread")},
+                {"turnId", Value("traffic-turn")},
+                {"itemId", Value("traffic-item")},
+                {"delta", Value("x")}}});
+      if (index == DeltaCount / 2) {
+        midpointReady.store(true, std::memory_order_release);
+        const std::uint64_t before =
+            heartbeatCount.load(std::memory_order_acquire);
+        while (!abortWait.load(std::memory_order_acquire) &&
+               heartbeatCount.load(std::memory_order_acquire) == before)
+          std::this_thread::yield();
+        heartbeatObservedAtMidpoint.store(
+            heartbeatCount.load(std::memory_order_acquire) != before,
+            std::memory_order_release);
+      }
+    }
+    producerFinished.store(true, std::memory_order_release);
+  });
+
+  QElapsedTimer deadline;
+  deadline.start();
+  // Let the worker establish a real saturated backlog before Qt begins
+  // pumping events. The worker then pauses at the midpoint until the Qt timer
+  // proves it can run while that backlog is being drained.
+  while (!midpointReady.load(std::memory_order_acquire) &&
+         deadline.elapsed() < 5000)
+    std::this_thread::yield();
+  while (!producerFinished.load(std::memory_order_acquire) &&
+         deadline.elapsed() < 5000)
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+  abortWait.store(true, std::memory_order_release);
+  producer.join();
+  const bool drained = spinUntil(
+      [&] {
+        return channels.workerToQtSizeApprox() == 0 &&
+               !channels.rescanPending();
+      },
+      2000);
+  const bool renderedLatest = spinUntil(
+      [&] { return agentMessageCard(shell, "latest visible item") != nullptr; },
+      2000);
+  heartbeat.stop();
+
+  std::string streamedText;
+  std::uint64_t loadedItems = 0;
+  std::int64_t latestActivity = 0;
+  {
+    auto read = session.nodeGraph().tryRead();
+    const NodeRef item =
+        read ? read->find(scopedItemNodeId(
+                   scopedTurnNodeId("traffic-thread", "traffic-turn"),
+                   "traffic-item"))
+             : NodeRef{};
+    const Value *textValue = item ? field(read->state(item), "text") : nullptr;
+    if (textValue && textValue->asString())
+      streamedText = *textValue->asString();
+    const NodeRef thread =
+        read ? read->find({NodeKind::Thread, "traffic-thread"}) : NodeRef{};
+    const Value *count =
+        thread ? field(read->state(thread), "historyLoadedItemCount") : nullptr;
+    const Value *activity =
+        thread ? field(read->state(thread), "localActivityAt") : nullptr;
+    if (count && count->asUInt64())
+      loadedItems = *count->asUInt64();
+    if (activity && activity->asInt64())
+      latestActivity = *activity->asInt64();
+  }
+  require(producerFinished.load(std::memory_order_acquire),
+          "the distinct-item producer completes within the responsiveness "
+          "budget");
+  require(drained, "Qt drains the bounded graph notification backlog");
+  require(heartbeatObservedAtMidpoint.load(std::memory_order_acquire) &&
+              heartbeatCount.load(std::memory_order_acquire) > 1 &&
+              heartbeatsWithBacklog > 0,
+          "Qt heartbeat runs while the distinct-item backlog is nonempty");
+  require(renderedLatest,
+          "the visible existing widget reaches the latest streamed state");
+  require(streamedText.size() == DeltaCount && loadedItems == DeltaCount + 1 &&
+              latestActivity == static_cast<std::int64_t>(DeltaCount),
+          "large inbound traffic leaves complete distinct-item, stream, and "
+          "thread-activity state");
+  require(coalescedNotifications.load(std::memory_order_acquire) != 0,
+          "large inbound traffic uses explicit notification coalescing");
+}
+
+void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  makeReady(worker);
+  applyThread(worker, "shell-thread", "Shared graph thread");
+  markThreadReady(session, worker, "shell-thread");
+  require(spinUntil([&] {
+            auto *list =
+                shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+            return threadItem(list, "shell-thread") != nullptr;
+          }),
+          "the existing thread widget materializes from shared graph nodes");
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(selectThread(list, "shell-thread"),
+          "selecting the graph-backed row binds the existing conversation");
+  static_cast<void>(takeQtMessages(channels)); // Hydrate is tested elsewhere.
+
+  channels.failNextWorkerToQtWakeForTest();
+  const ChannelSendStatus wakeFailure = worker.apply(
+      {DecodedMessageKind::ServerNotification, "thread/name/updated",
+       std::nullopt,
+       Value::Object{{"threadId", Value("shell-thread")},
+                     {"threadName", Value("Wake-recovered thread")}}});
+  const bool wakeRecovered = spinUntil([&] {
+    QListWidgetItem *item = threadItem(list, "shell-thread");
+    QWidget *row = item ? list->itemWidget(item) : nullptr;
+    QLabel *title =
+        row ? row->findChild<QLabel *>(QStringLiteral("threadTitle")) : nullptr;
+    return channels.workerToQtSizeApprox() == 0 && title &&
+           title->text() == QStringLiteral("Wake-recovered thread");
+  });
+  require(wakeFailure == ChannelSendStatus::AcceptedWakeFailed &&
+              deliveryGuaranteed(wakeFailure) && wakeFailed(wakeFailure) &&
+              wakeRecovered,
+          "Qt's bounded recovery drain renders a graph update after a failed "
+          "worker wake");
+
+  auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
+      QStringLiteral("upcomingPromptEditor"));
+  const QString exact = QStringLiteral("  graph prompt stays exact  ");
+  const QString trimmed = exact.trimmed();
+  require(submit(editor, exact), "the real composer emits its submit action");
+  std::vector<QtToWorkerMessage> actions = takeQtMessages(channels);
+  NodeAction prompt;
+  std::size_t promptCount = 0;
+  for (QtToWorkerMessage &message : actions) {
+    if (auto *action = std::get_if<NodeAction>(&message);
+        action && action->kind == NodeActionKind::SubmitPrompt) {
+      prompt = std::move(*action);
+      ++promptCount;
+    }
+  }
+  require(promptCount == 1 && prompt.target &&
+              prompt.target->id() == NodeId{NodeKind::Thread, "shell-thread"} &&
+              prompt.promptText == trimmed.toStdString() && editor &&
+              editor->toPlainText().isEmpty(),
+          "the composer emits one typed prompt with legacy whitespace "
+          "normalization");
+
+  PromptTransition transition = worker.admitPrompt(std::move(prompt));
+  const NodeRef localPrompt =
+      transition.command ? transition.command->localPrompt : NodeRef{};
+  require(
+      localPrompt != nullptr,
+      "the worker turns an admitted action into the one shared prompt node");
+  require(spinUntil([&] {
+            return localPromptCard(shell, trimmed.toStdString()) != nullptr;
+          }),
+          "the visible existing card renders directly from the prompt node");
+  middle::ConversationCard *card =
+      localPromptCard(shell, trimmed.toStdString());
+  QTimer *pendingAnimation =
+      card ? card->findChild<QTimer *>(QStringLiteral("pendingAnimationTimer"))
+           : nullptr;
+  require(card && card->property("pendingFeedbackVisible").toBool() &&
+              pendingAnimation && pendingAnimation->isActive(),
+          "the optimistically inserted Turn/You card starts its pending "
+          "animation immediately");
+
+  editor->setPlainText(QStringLiteral("unsent editor draft"));
+  static_cast<void>(worker.apply({DecodedMessageKind::ClientResult,
+                                  "model/list",
+                                  ProtocolRequestId("catalog-refresh"),
+                                  {{"models", Value(Value::Array{})}}}));
+  spin(40);
+  require(
+      editor->toPlainText() == QStringLiteral("unsent editor draft") &&
+          localPromptCard(shell, trimmed.toStdString()) == card,
+      "unrelated graph updates preserve local editor text and card identity");
+}
+
+void initialHydrationUsesTheEstablishedBoundedWindow(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  makeReady(worker);
+  applyThread(worker, "bounded-history", "Bounded history");
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "turn/started",
+       std::nullopt,
+       {{"threadId", Value("bounded-history")},
+        {"turn", Value(Value::Object{{"id", Value("bounded-turn")},
+                                     {"status", Value("completed")}})}}}));
+  for (std::size_t index = 0; index < 100; ++index) {
+    const std::string id = "bounded-item-" + std::to_string(index);
+    const std::string type = index == 0 ? "userMessage" : "agentMessage";
+    static_cast<void>(worker.apply(
+        {DecodedMessageKind::ServerNotification,
+         "item/started",
+         std::nullopt,
+         {{"threadId", Value("bounded-history")},
+          {"turnId", Value("bounded-turn")},
+          {"item", Value(Value::Object{{"id", Value(id)},
+                                        {"type", Value(type)},
+                                        {"text", Value(id)}})}}}));
+  }
+
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(spinUntil([&] { return threadItem(list, "bounded-history"); }),
+          "bounded history appears in the established thread pane");
+  require(selectThread(list, "bounded-history"),
+          "bounded history can be selected");
+  static_cast<void>(takeQtMessages(channels));
+  require(shell.findChildren<middle::ConversationCard *>().empty(),
+          "partial pre-hydration history creates no conversation QWidget");
+
+  markThreadReady(session, worker, "bounded-history");
+  auto *conversation = dynamic_cast<middle::ConversationView *>(
+      shell.findChild<QAbstractScrollArea *>(
+          QStringLiteral("conversationScroll")));
+  require(conversation && spinUntil([&] {
+            return conversation->structuralStagingActive();
+          }),
+          "large initial history enters bounded hidden Qt staging");
+  require(shell.findChildren<middle::ConversationCard *>().empty(),
+          "hidden preparation exposes no partial card tree");
+  const qulonglong stageStarts =
+      conversation->property("structuralStageStarts").toULongLong();
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "item/agentMessage/delta",
+       std::nullopt,
+       {{"threadId", Value("bounded-history")},
+        {"turnId", Value("bounded-turn")},
+        {"itemId", Value("bounded-item-99")},
+        {"delta", Value(" latest")}}}));
+  int responsiveHeartbeats = 0;
+  QTimer heartbeat;
+  QObject::connect(&heartbeat, &QTimer::timeout,
+                   [&responsiveHeartbeats] { ++responsiveHeartbeats; });
+  heartbeat.start(0);
+  require(spinUntil(
+              [&] {
+                return shell.findChildren<middle::ConversationCard *>().size() ==
+                       middle::AuthoritativeHistoryPageSize + 1;
+              },
+              2000),
+          "the first atomic frame contains the retained 80 activities and "
+          "their pinned owning prompt");
+  heartbeat.stop();
+  require(responsiveHeartbeats > 2 && conversation &&
+              conversation->property("structuralStageCardPasses")
+                      .toULongLong() >=
+                  middle::AuthoritativeHistoryPageSize,
+          "initial rich-card construction yields repeatedly to the Qt event "
+          "loop before its single visible commit");
+  require(conversation->property("structuralStageStarts").toULongLong() ==
+                  stageStarts &&
+              agentMessageCard(shell, "bounded-item-99 latest"),
+          "a live canonical update patches the hidden target without "
+          "restarting or starving structural staging");
+  std::cout << "atomic structural commit ms: "
+            << conversation->property("structuralStageCommitMillis")
+                   .toLongLong()
+            << '\n';
+  require(conversation &&
+              conversation->property("structuralStageCommitMillis").toLongLong() <
+                  100,
+          "the atomic reveal does not move bulk widget construction back into "
+          "one perceptible final-frame stall");
+
+  QPushButton *loadMore = nullptr;
+  for (QPushButton *button : shell.findChildren<QPushButton *>()) {
+    if (button && button->text().startsWith(QStringLiteral("Load "))) {
+      loadMore = button;
+      break;
+    }
+  }
+  require(loadMore && loadMore->isVisible() &&
+              loadMore->text() == QStringLiteral("Load 19 more activities"),
+          "the old Load More surface reports only unrepresented retained "
+          "activities after pinning the structural root");
+  if (loadMore)
+    loadMore->click();
+  require(conversation && spinUntil([&] {
+            return conversation->structuralStagingActive();
+          }),
+          "Load More prepares missing retained cards off-surface");
+  require(shell.findChildren<middle::ConversationCard *>().size() ==
+              middle::AuthoritativeHistoryPageSize + 1,
+          "Load More keeps the complete old surface visible until the new "
+          "surface is ready");
+  require(spinUntil(
+              [&] {
+                return shell.findChildren<middle::ConversationCard *>().size() ==
+                       100;
+              },
+              2000),
+          "Load More materializes the retained graph page in one old-UI "
+          "reconcile");
+  const std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
+  require(std::ranges::none_of(messages, [](const QtToWorkerMessage &message) {
+            const auto *action = std::get_if<NodeAction>(&message);
+            return action && action->kind == NodeActionKind::LoadHistory;
+          }),
+          "Load More does not request the provider while retained graph "
+          "history remains");
+}
+
+void completedLiveAgentAppearsWithoutThreadReselection(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  makeReady(worker);
+  applyThread(worker, "live-final", "Live final");
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification, "turn/started", std::nullopt,
+       {{"threadId", Value("live-final")},
+        {"turn", Value(Value::Object{
+                     {"id", Value("live-turn")},
+                     {"items", Value(Value::Array{Value(Value::Object{
+                                   {"id", Value("live-prompt")},
+                                   {"type", Value("userMessage")},
+                                   {"text", Value("Prompt")}})})}})}}}));
+  markThreadReady(session, worker, "live-final");
+
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(spinUntil([&] { return threadItem(list, "live-final"); }) &&
+              selectThread(list, "live-final"),
+          "the live completion fixture selects its hydrated thread");
+  auto *conversation = dynamic_cast<middle::ConversationView *>(
+      shell.findChild<QAbstractScrollArea *>(
+          QStringLiteral("conversationScroll")));
+  require(conversation, "the live completion fixture owns a conversation");
+  if (!conversation)
+    return;
+  auto options = conversation->presentationOptions();
+  options.showCodexUpdates = false;
+  conversation->setPresentationOptions(options);
+
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification, "item/started", std::nullopt,
+       {{"threadId", Value("live-final")},
+        {"turnId", Value("live-turn")},
+        {"item", Value(Value::Object{{"id", Value("live-response")},
+                                     {"type", Value("agentMessage")},
+                                     {"phase", Value("final_answer")}})}}}));
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification, "item/agentMessage/delta",
+       std::nullopt,
+       {{"threadId", Value("live-final")},
+        {"turnId", Value("live-turn")},
+        {"itemId", Value("live-response")},
+        {"delta", Value("Visible immediately")}}}));
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification, "item/completed", std::nullopt,
+       {{"threadId", Value("live-final")},
+        {"turnId", Value("live-turn")},
+        {"item", Value(Value::Object{{"id", Value("live-response")},
+                                     {"type", Value("agentMessage")},
+                                     {"phase", Value("final_answer")},
+                                     {"text", Value("Visible immediately")}})}}}));
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification, "turn/completed", std::nullopt,
+       {{"threadId", Value("live-final")},
+        {"turn", Value(Value::Object{{"id", Value("live-turn")}})}}}));
+
+  require(spinUntil(
+              [&] {
+                middle::ConversationCard *card =
+                    agentMessageCard(shell, "Visible immediately");
+                return card && !card->isHidden();
+              },
+              1000),
+          "a completed live response becomes visible without thread "
+          "reselection");
+}
+
+void threadSwitchStagesTheCompleteReplacement(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  makeReady(worker);
+  const auto addConversation = [&worker](std::string threadId,
+                                         std::string title,
+                                         std::string itemId,
+                                         std::string text) {
+    applyThread(worker, threadId, title);
+    static_cast<void>(worker.apply(
+        {DecodedMessageKind::ServerNotification,
+         "turn/started",
+         std::nullopt,
+         {{"threadId", Value(threadId)},
+          {"turn", Value(Value::Object{{"id", Value(threadId + "-turn")},
+                                       {"status", Value("completed")}})}}}));
+    static_cast<void>(worker.apply(
+        {DecodedMessageKind::ServerNotification,
+         "item/started",
+         std::nullopt,
+         {{"threadId", Value(threadId)},
+          {"turnId", Value(threadId + "-turn")},
+          {"item", Value(Value::Object{{"id", Value(std::move(itemId))},
+                                        {"type", Value("agentMessage")},
+                                        {"text", Value(std::move(text))}})}}}));
+  };
+  addConversation("staged-a", "Complete A", "a-item", "complete A card");
+  addConversation("staged-b", "Hydrating B", "b-item", "partial B card");
+  markThreadReady(session, worker, "staged-a");
+
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  auto *heading =
+      shell.findChild<QLabel *>(QStringLiteral("conversationTitle"));
+  require(spinUntil([&] {
+            return threadItem(list, "staged-a") &&
+                   threadItem(list, "staged-b");
+          }),
+          "staged-switch fixture exposes both canonical rows");
+  require(selectThread(list, "staged-a"),
+          "staged-switch fixture selects the complete source");
+  static_cast<void>(takeQtMessages(channels));
+  middle::ConversationCard *source = nullptr;
+  require(spinUntil([&] {
+            source = agentMessageCard(shell, "complete A card");
+            return source && heading && heading->text() == "Complete A";
+          }),
+          "the source conversation is complete before switching");
+
+  require(selectThread(list, "staged-b"),
+          "the hydrating replacement becomes the visible row selection");
+  static_cast<void>(takeQtMessages(channels));
+  spin(80);
+  require(agentMessageCard(shell, "complete A card") == source &&
+              !agentMessageCard(shell, "partial B card") && heading &&
+              heading->text() == "Complete A",
+          "a hydrating replacement leaves the complete outgoing surface "
+          "unchanged and exposes no partial provider cards");
+
+  markThreadReady(session, worker, "staged-b");
+  require(spinUntil([&] {
+            return agentMessageCard(shell, "partial B card") &&
+                   !agentMessageCard(shell, "complete A card") && heading &&
+                   heading->text() == "Hydrating B";
+          }),
+          "readiness replaces the staged surface once with the complete "
+          "incoming conversation and matching heading");
+}
+
+void inactiveThreadNeverReactivatesAStaleTurn(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  makeReady(worker);
+  applyThread(worker, "inactive-thread", "Inactive lifecycle");
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "turn/started",
+       std::nullopt,
+       {{"threadId", Value("inactive-thread")},
+        {"turn", Value(Value::Object{{"id", Value("stale-turn")},
+                                     {"status", Value("inProgress")}})}}}));
+  auto *threadList =
+      shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(spinUntil([&] {
+            return threadItem(threadList, "inactive-thread") != nullptr;
+          }) &&
+              selectThread(threadList, "inactive-thread"),
+          "inactive lifecycle fixture selects its graph-backed thread");
+  static_cast<void>(takeQtMessages(channels));
+
+  QPushButton *stopButton = nullptr;
+  for (QPushButton *button : shell.findChildren<QPushButton *>()) {
+    if (button && button->text() == QStringLiteral("Stop")) {
+      stopButton = button;
+      break;
+    }
+  }
+  require(stopButton && spinUntil([&] { return stopButton->isVisible(); }),
+          "the maintained active-turn relation exposes the existing Stop "
+          "control");
+
+  NodeRef selectedThread;
+  {
+    auto read = FrontendSessionTestPeer::graph(session).tryRead();
+    selectedThread =
+        read ? read->find({NodeKind::Thread, "inactive-thread"}) : NodeRef{};
+  }
+  static_cast<void>(worker.threadHydration(selectedThread, "loading"));
+  auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
+      QStringLiteral("upcomingPromptEditor"));
+  auto *send =
+      shell.findChild<QPushButton *>(QStringLiteral("composerSendButton"));
+  if (editor)
+    editor->setPlainText(QStringLiteral("steer while history is loading"));
+  require(spinUntil([&] {
+            return send && send->text() == QStringLiteral("Steer") &&
+                   send->isEnabled();
+          }),
+          "a controller can steer a known active turn with non-empty text "
+          "while unrelated history hydration is still loading");
+  if (send)
+    send->click();
+  const auto steeringActions = takeQtMessages(channels);
+  const auto steering = std::ranges::find_if(
+      steeringActions, [](const QtToWorkerMessage &entry) {
+        const auto *action = std::get_if<NodeAction>(&entry);
+        return action && action->kind == NodeActionKind::SubmitPrompt;
+      });
+  require(steering != steeringActions.end() &&
+              std::get<NodeAction>(*steering).target == selectedThread &&
+              std::get<NodeAction>(*steering).promptText ==
+                  "steer while history is loading" &&
+              editor && editor->toPlainText().isEmpty(),
+          "clicking the enabled Steer control admits exactly one targeted "
+          "prompt while hydration is loading");
+
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "thread/status/changed",
+       std::nullopt,
+       {{"threadId", Value("inactive-thread")},
+        {"status", Value(Value::Object{{"type", Value("idle")}})}}}));
+  require(stopButton && spinUntil([&] { return !stopButton->isVisible(); }),
+          "object-shaped idle status hides Stop without rediscovering the "
+          "stale Running child");
+  if (stopButton)
+    stopButton->click();
+  const auto idleActions = takeQtMessages(channels);
+  require(std::ranges::none_of(
+              idleActions,
+              [](const QtToWorkerMessage &entry) {
+                const auto *action = std::get_if<NodeAction>(&entry);
+                return action && action->kind == NodeActionKind::InterruptTurn;
+              }),
+          "idle thread state cannot emit an interrupt for a stale turn");
+
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "turn/started",
+       std::nullopt,
+       {{"threadId", Value("inactive-thread")},
+        {"turn", Value(Value::Object{{"id", Value("closing-turn")},
+                                     {"status", Value("inProgress")}})}}}));
+  require(stopButton && spinUntil([&] { return stopButton->isVisible(); }),
+          "a later authoritative active turn restores Stop");
+  static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                  "thread/closed",
+                                  std::nullopt,
+                                  {{"threadId", Value("inactive-thread")}}}));
+  require(stopButton && spinUntil([&] { return !stopButton->isVisible(); }),
+          "closed lifecycle clears Stop despite retained Running history");
+}
+
+void reloadAndReconnectHydrationStayExplicit(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  makeReady(worker);
+  applyThread(worker, "rehydrate-thread", "Rehydrate me");
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(spinUntil([&] { return threadItem(list, "rehydrate-thread"); }),
+          "rehydration fixture appears in the real thread list");
+  require(selectThread(list, "rehydrate-thread"),
+          "rehydration fixture can be selected");
+  std::vector<QtToWorkerMessage> selection = takeQtMessages(channels);
+  const auto selectedHydrates =
+      std::ranges::count_if(selection, [](const QtToWorkerMessage &message) {
+        const auto *action = std::get_if<NodeAction>(&message);
+        return action && action->kind == NodeActionKind::Hydrate;
+      });
+  require(selectedHydrates == 1,
+          "ordinary selection emits one non-forced hydration action");
+
+  NodeRef original;
+  {
+    auto read = session.nodeGraph().tryRead();
+    original =
+        read ? read->find({NodeKind::Thread, "rehydrate-thread"}) : NodeRef{};
+  }
+  static_cast<void>(worker.threadHydration(original, "ready"));
+  spin(30);
+  static_cast<void>(takeQtMessages(channels));
+
+  const QPoint menuPoint =
+      list->visualItemRect(threadItem(list, "rehydrate-thread")).center();
+  QMetaObject::invokeMethod(list, "customContextMenuRequested",
+                            Qt::DirectConnection, Q_ARG(QPoint, menuPoint));
+  spin(20);
+  QAction *reload = nullptr;
+  for (QMenu *menu : shell.findChildren<QMenu *>()) {
+    for (QAction *action : menu->actions()) {
+      if (action && action->text() == QStringLiteral("Reload")) {
+        reload = action;
+        break;
+      }
+    }
+    if (reload)
+      break;
+  }
+  if (reload)
+    reload->trigger();
+  const std::vector<QtToWorkerMessage> reloadMessages =
+      takeQtMessages(channels);
+  require(reload &&
+              std::ranges::count_if(
+                  reloadMessages,
+                  [](const QtToWorkerMessage &message) {
+                    const auto *action = std::get_if<NodeAction>(&message);
+                    return action && action->kind == NodeActionKind::Reload;
+                  }) == 1,
+          "visible Reload emits one distinct forced-read action");
+
+  static_cast<void>(worker.bridgeState("test-controller", "controller",
+                                       "test-controller", 2, "ready",
+                                       "provider replaced"));
+  spin(40);
+  applyThread(worker, "rehydrate-thread", "Recreated thread");
+  require(spinUntil([&] {
+            auto read = session.nodeGraph().tryRead();
+            const NodeRef recreated =
+                read ? read->find({NodeKind::Thread, "rehydrate-thread"})
+                     : NodeRef{};
+            return recreated && recreated != original;
+          }),
+          "provider reset recreates selected canonical id with a fresh node");
+  spin(50);
+  const std::vector<QtToWorkerMessage> rebound = takeQtMessages(channels);
+  std::size_t automaticHydrates = 0;
+  NodeRef automaticTarget;
+  for (const QtToWorkerMessage &message : rebound) {
+    const auto *action = std::get_if<NodeAction>(&message);
+    if (!action || action->kind != NodeActionKind::Hydrate)
+      continue;
+    ++automaticHydrates;
+    automaticTarget = action->target;
+  }
+  require(automaticHydrates == 1 && automaticTarget &&
+              automaticTarget != original &&
+              automaticTarget->id() ==
+                  NodeId{NodeKind::Thread, "rehydrate-thread"},
+          "a recreated selected thread is read once without resending prompts");
+}
+
+void backgroundGraphChangesDoNotRefreshSelectedConversation(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  NodeGraph &graph = FrontendSessionTestPeer::graph(session);
+  WorkerLogic worker(graph, channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  const auto applyConversation = [&](std::string threadId, std::string turnId,
+                                     std::string itemId, std::string message) {
+    applyThread(worker, threadId, threadId);
+    static_cast<void>(worker.apply(
+        {DecodedMessageKind::ServerNotification,
+         "turn/started",
+         std::nullopt,
+         {{"threadId", Value(threadId)},
+          {"turn", Value(Value::Object{{"id", Value(turnId)},
+                                       {"status", Value("inProgress")}})}}}));
+    static_cast<void>(worker.apply(
+        {DecodedMessageKind::ServerNotification,
+         "item/started",
+         std::nullopt,
+         {{"threadId", Value(threadId)},
+          {"turnId", Value(turnId)},
+          {"item", Value(Value::Object{{"id", Value(itemId)},
+                                       {"type", Value("agentMessage")},
+                                       {"text", Value(message)}})}}}));
+    markThreadReady(session, worker, threadId);
+  };
+
+  makeReady(worker);
+  applyConversation("selected-thread", "selected-turn", "selected-item",
+                    "Selected original");
+  applyConversation("background-thread", "background-turn", "background-item",
+                    "Background original");
+  require(spinUntil([&] {
+            auto *list =
+                shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+            return threadItem(list, "selected-thread") &&
+                   threadItem(list, "background-thread");
+          }),
+          "both selected and background graph threads reach the real shell");
+
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(selectThread(list, "selected-thread"),
+          "the selected conversation is bound before filtering deltas");
+  static_cast<void>(takeQtMessages(channels));
+  require(spinUntil([&] {
+            return agentMessageCard(shell, "Selected original") != nullptr;
+          }),
+          "the selected conversation materializes its visible agent card");
+  middle::ConversationCard *selectedCard =
+      agentMessageCard(shell, "Selected original");
+  auto *conversation = dynamic_cast<middle::ConversationView *>(
+      shell.findChild<QWidget *>(QStringLiteral("conversationScroll")));
+  auto *threadPane = dynamic_cast<middle::ThreadPane *>(
+      shell.findChild<QWidget *>(QStringLiteral("sidebar")));
+  auto *inspector = dynamic_cast<middle::InspectorPane *>(
+      shell.findChild<QWidget *>(QStringLiteral("inspector")));
+
+  NodeRef selectedItem;
+  NodeRef backgroundItem;
+  NodeRef selectedThread;
+  {
+    auto read = graph.tryRead();
+    selectedThread =
+        read ? read->find({NodeKind::Thread, "selected-thread"}) : NodeRef{};
+    selectedItem =
+        read ? read->find(scopedItemNodeId(
+                   scopedTurnNodeId("selected-thread", "selected-turn"),
+                   "selected-item"))
+             : NodeRef{};
+    backgroundItem =
+        read ? read->find(scopedItemNodeId(
+                   scopedTurnNodeId("background-thread", "background-turn"),
+                   "background-item"))
+             : NodeRef{};
+  }
+  require(selectedThread && selectedItem && backgroundItem,
+          "the test resolves the selected thread and both scoped items");
+  if (!selectedThread || !selectedItem || !backgroundItem || !selectedCard)
+    return;
+
+  const qulonglong threadRoutesBefore =
+      shell.property("threadPaneRoutes").toULongLong();
+  const qulonglong conversationRoutesBefore =
+      shell.property("conversationRoutes").toULongLong();
+  const qulonglong targetedConversationRoutesBefore =
+      shell.property("targetedConversationRoutes").toULongLong();
+  const qulonglong inspectorRoutesBefore =
+      shell.property("inspectorRoutes").toULongLong();
+  const qulonglong shellCommitsBefore =
+      shell.property("shellRenderCommits").toULongLong();
+  const qulonglong topologyBefore =
+      threadPane
+          ? threadPane->property("graphTopologyScansStarted").toULongLong()
+          : 0;
+  const qulonglong rowUpdatesBefore =
+      threadPane ? threadPane->property("rowPresentationUpdates").toULongLong()
+                 : 0;
+  const qulonglong inspectorScansBefore =
+      inspector ? inspector->property("inspectorScanPasses").toULongLong() : 0;
+  const qulonglong inspectorRowsBefore =
+      inspector
+          ? inspector->property("inspectorRowConstructions").toULongLong()
+          : 0;
+  const qulonglong conversationPassesBefore =
+      conversation ? conversation->property("graphRefreshPasses").toULongLong()
+                   : 0;
+  const qulonglong conversationGeometryBefore =
+      conversation
+          ? conversation->property("conversationGeometryPasses").toULongLong()
+          : 0;
+  const qulonglong conversationLocalGeometryBefore =
+      conversation
+          ? conversation->property("conversationLocalGeometryPasses")
+                .toULongLong()
+          : 0;
+
+  GraphChange withheldSelectedChange;
+  {
+    auto write = graph.write();
+    write.setField(selectedItem, "text", Value("Selected current"));
+    withheldSelectedChange = write.finish();
+  }
+
+  static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                  "item/agentMessage/delta",
+                                  std::nullopt,
+                                  {{"threadId", Value("background-thread")},
+                                   {"turnId", Value("background-turn")},
+                                   {"itemId", Value("background-item")},
+                                   {"delta", Value(" delta")}}}));
+  spin(60);
+  const auto *afterBackground =
+      std::get_if<middle::AgentMessageData>(&selectedCard->data().payload);
+  require(afterBackground && afterBackground->text == "Selected original" &&
+              agentMessageCard(shell, "Selected current") == nullptr &&
+              shell.property("threadPaneRoutes").toULongLong() ==
+                  threadRoutesBefore &&
+              shell.property("conversationRoutes").toULongLong() ==
+                  conversationRoutesBefore &&
+              shell.property("inspectorRoutes").toULongLong() ==
+                  inspectorRoutesBefore &&
+              shell.property("shellRenderCommits").toULongLong() ==
+                  shellCommitsBefore &&
+              (!threadPane ||
+               (threadPane->property("graphTopologyScansStarted")
+                        .toULongLong() == topologyBefore &&
+                threadPane->property("rowPresentationUpdates").toULongLong() ==
+                    rowUpdatesBefore)) &&
+              (!inspector ||
+               (inspector->property("inspectorScanPasses").toULongLong() ==
+                    inspectorScansBefore &&
+                inspector->property("inspectorRowConstructions")
+                        .toULongLong() == inspectorRowsBefore)) &&
+              (!conversation ||
+               conversation->property("graphRefreshPasses").toULongLong() ==
+                   conversationPassesBefore),
+          "a background-only graph delta performs no selected conversation "
+          "refresh, pane route, scan, row update, or shell render");
+
+  require(messageAdmitted(
+              channels.sendGraphChanged(std::move(withheldSelectedChange))),
+          "the withheld selected change is admitted for comparison");
+  require(spinUntil([&] {
+            const auto *agent = std::get_if<middle::AgentMessageData>(
+                &selectedCard->data().payload);
+            return agent && agent->text == "Selected current";
+          }),
+          "a selected-item graph delta refreshes the existing card");
+  require(
+      shell.property("conversationRoutes").toULongLong() ==
+              conversationRoutesBefore + 1 &&
+          shell.property("targetedConversationRoutes").toULongLong() ==
+              targetedConversationRoutesBefore + 1 &&
+          conversation &&
+          conversation->property("graphRefreshPasses").toULongLong() >
+              conversationPassesBefore &&
+          conversation->property("conversationGeometryPasses").toULongLong() ==
+              conversationGeometryBefore &&
+          conversation->property("conversationLocalGeometryPasses")
+                  .toULongLong() ==
+              conversationLocalGeometryBefore + 1 &&
+          shell.property("threadPaneRoutes").toULongLong() ==
+              threadRoutesBefore &&
+          shell.property("inspectorRoutes").toULongLong() ==
+              inspectorRoutesBefore &&
+          shell.property("shellRenderCommits").toULongLong() ==
+              shellCommitsBefore,
+      "a selected message routes only to ConversationView and leaves thread, "
+      "Inspector, and shell-chrome boundaries untouched");
+
+  const qulonglong targetedThreadRoutesBefore =
+      shell.property("targetedThreadPaneRoutes").toULongLong();
+  const qulonglong targetedRowUpdatesBefore =
+      threadPane
+          ? threadPane->property("targetedRowPresentationUpdates").toULongLong()
+          : 0;
+  GraphChange rowChange;
+  {
+    auto write = graph.write();
+    write.setField(selectedThread, "pendingInteractionCount",
+                   Value(std::uint64_t{2}));
+    rowChange = write.finish();
+  }
+  require(messageAdmitted(channels.sendGraphChanged(std::move(rowChange))),
+          "the exact thread-row change is admitted");
+  require(spinUntil([&] {
+            QListWidgetItem *item = threadItem(list, "selected-thread");
+            QWidget *row = item ? list->itemWidget(item) : nullptr;
+            QLabel *title =
+                row ? row->findChild<QLabel *>(QStringLiteral("threadTitle"))
+                    : nullptr;
+            return title && title->text().startsWith(QStringLiteral("! "));
+          }),
+          "the exact displayed thread row receives its pending badge");
+  require(
+      shell.property("targetedThreadPaneRoutes").toULongLong() ==
+              targetedThreadRoutesBefore + 1 &&
+          threadPane &&
+          threadPane->property("targetedRowPresentationUpdates").toULongLong() ==
+              targetedRowUpdatesBefore + 1 &&
+          threadPane->property("graphTopologyScansStarted").toULongLong() ==
+              topologyBefore &&
+          conversation->property("conversationGeometryPasses").toULongLong() ==
+              conversationGeometryBefore,
+      "a non-sort thread field patches only its row without topology or "
+      "conversation geometry work");
+
+  QPointer<QWidget> removedWidget = selectedCard;
+  GraphChange removal;
+  {
+    auto write = graph.write();
+    NodeState state = *write.state(selectedItem);
+    state.fields.erase("protocolThreadId");
+    state.fields.erase("threadId");
+    write.replaceState(selectedItem, std::move(state));
+    write.remove(selectedItem);
+    removal = write.finish();
+  }
+  GraphChange backgroundWithRemoval{
+      removal.revision, {backgroundItem}, std::move(removal.removed)};
+  require(messageAdmitted(
+              channels.sendGraphChanged(std::move(backgroundWithRemoval))),
+          "the background notification carrying a removed ref is admitted");
+  require(spinUntil([&] {
+            return selectedItem->uiAttachment() == nullptr &&
+                   removedWidget.isNull();
+          }),
+          "removed refs always detach matching selected widgets even when "
+          "the change needs no structural refresh");
+}
+
+void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  spin(40);
+
+  auto *newThread =
+      shell.findChild<QPushButton *>(QStringLiteral("threadNewButton"));
+  QTimer::singleShot(0, &shell, [] {
+    if (auto *dialog =
+            qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+      dialog->accept();
+  });
+  require(newThread != nullptr, "the existing New thread control is available");
+  if (!newThread)
+    return;
+  newThread->click();
+  spin(40);
+
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  QListWidgetItem *draft = threadItem(list, "draft:new-thread");
+  QListWidgetItem *const stableDraft = draft;
+  require(draft && list->currentItem() == draft,
+          "the local optimistic draft is selected without a mirror model");
+
+  static_cast<void>(worker.connectionSettings(
+      {{"selected", Value("unix")}, {"endpoint", Value("local")}}));
+  spin(40);
+  require(draft && list->currentItem() == draft,
+          "an unrelated shared-graph change preserves draft selection");
+
+  auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
+      QStringLiteral("upcomingPromptEditor"));
+  const QString promptText = QStringLiteral("first exact draft prompt");
+  require(submit(editor, promptText),
+          "the optimistic draft submits through the real composer");
+  std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
+  RuntimeAction create;
+  std::size_t creates = 0;
+  for (QtToWorkerMessage &message : messages) {
+    if (auto *action = std::get_if<RuntimeAction>(&message);
+        action && action->kind == RuntimeActionKind::CreateThread) {
+      create = std::move(*action);
+      ++creates;
+    }
+  }
+  const auto threadStart = create.payload.find("threadStart");
+  const auto turnStart = create.payload.find("turnStart");
+  require(
+      creates == 1 && create.promptText == promptText.toStdString() &&
+          threadStart != create.payload.end() &&
+          threadStart->second.asObject() && turnStart != create.payload.end() &&
+          turnStart->second.asObject(),
+      "the draft emits one typed CreateThread with owned prompt and options");
+
+  PromptTransition transition = worker.admitFirstPrompt(std::move(create));
+  require(
+      transition.command &&
+          transition.command->kind == PromptCommandKind::CreateThread,
+      "worker admission creates the local thread/turn/prompt graph atomically");
+  spin(60);
+  const NodeRef graphDraft =
+      transition.command ? transition.command->thread : NodeRef{};
+  require(
+      graphDraft && list && list->currentItem() == stableDraft &&
+          list->currentItem()->data(Qt::UserRole).toString().toStdString() ==
+              graphDraft->id().canonical &&
+          localPromptCard(shell, promptText.toStdString()),
+      "the same optimistic row hands off to the selected shared graph draft");
+
+  if (!transition.command)
+    return;
+  const NodeRef localPrompt = transition.command->localPrompt;
+  require(worker.attachCreatedThread(*transition.command, "created-thread") ==
+              ChannelSendStatus::Accepted,
+          "the worker attaches the accepted canonical thread exactly once");
+  spin(60);
+  middle::ThreadPane *threadPane = nullptr;
+  for (QWidget *ancestor = list; ancestor && !threadPane;
+       ancestor = ancestor->parentWidget())
+    threadPane = dynamic_cast<middle::ThreadPane *>(ancestor);
+  require(threadItem(list, "created-thread") == stableDraft &&
+              list->currentItem() == stableDraft && threadPane &&
+              threadPane->isOptimisticThread("created-thread"),
+          "the same row is promoted from local to canonical identity");
+
+  static_cast<void>(
+      worker.completePrompt(localPrompt, true, {}, "created-turn"));
+  spin(60);
+  middle::ConversationCard *acceptedCard =
+      localPromptCard(shell, promptText.toStdString());
+  QTimer *acceptedAnimation = acceptedCard
+                                  ? acceptedCard->findChild<QTimer *>(
+                                        QStringLiteral("pendingAnimationTimer"))
+                                  : nullptr;
+  require(threadItem(list, "created-thread") == stableDraft && threadPane &&
+              !threadPane->isOptimisticThread("created-thread") &&
+              acceptedCard &&
+              !acceptedCard->property("pendingFeedbackVisible").toBool() &&
+              acceptedAnimation && !acceptedAnimation->isActive(),
+          "the exact prompt result confirms the canonical row without "
+          "replacing its widget item and stops optimistic feedback");
+}
+
+void emptyOptimisticDraftIsAbandonedOnThreadSelection(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "existing-after-empty-draft", "Existing thread");
+  spin(40);
+
+  auto *newThread =
+      shell.findChild<QPushButton *>(QStringLiteral("threadNewButton"));
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  QTimer::singleShot(0, &shell, [] {
+    if (auto *dialog =
+            qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+      dialog->accept();
+  });
+  require(newThread && list,
+          "empty-draft abandonment fixture exposes the thread controls");
+  if (!newThread || !list)
+    return;
+  newThread->click();
+  require(spinUntil([&] {
+            return threadItem(list, "draft:new-thread") == list->currentItem();
+          }),
+          "an empty local New Thread draft starts as the selected row");
+
+  require(selectThread(list, "existing-after-empty-draft") &&
+              spinUntil([&] { return !threadItem(list, "draft:new-thread"); }),
+          "selecting a real thread abandons and removes an unsubmitted local "
+          "draft");
+
+  QTimer::singleShot(0, &shell, [] {
+    if (auto *dialog =
+            qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+      dialog->accept();
+  });
+  newThread->click();
+  require(spinUntil([&] {
+            return threadItem(list, "draft:new-thread") == list->currentItem();
+          }),
+          "abandonment clears creation state so a later New Thread can start");
+}
+
+void secondNewThreadIsGuardedWhileCreationIsInFlight(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  spin(40);
+
+  auto *newThread =
+      shell.findChild<QPushButton *>(QStringLiteral("threadNewButton"));
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
+      QStringLiteral("upcomingPromptEditor"));
+  QTimer::singleShot(0, &shell, [] {
+    if (auto *dialog =
+            qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+      dialog->accept();
+  });
+  require(newThread && list && editor,
+          "in-flight creation fixture exposes New Thread and the composer");
+  if (!newThread || !list || !editor)
+    return;
+  newThread->click();
+  require(spinUntil([&] {
+            QListWidgetItem *draft = threadItem(list, "draft:new-thread");
+            return draft && draft == list->currentItem() && draft->isSelected();
+          }) &&
+              submit(editor, QStringLiteral("one creation in flight")),
+          "the first new-thread action is admitted from its optimistic row");
+
+  std::optional<RuntimeAction> create;
+  for (QtToWorkerMessage &message : takeQtMessages(channels)) {
+    if (auto *action = std::get_if<RuntimeAction>(&message);
+        action && action->kind == RuntimeActionKind::CreateThread)
+      create = std::move(*action);
+  }
+  require(create.has_value(),
+          "the first submission emits one worker-owned creation action");
+  if (!create)
+    return;
+
+  bool secondDialogOpened = false;
+  QTimer::singleShot(0, &shell, [&secondDialogOpened] {
     if (auto *dialog =
             qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
-      dialogOpened = true;
+      secondDialogOpened = true;
       dialog->accept();
     }
   });
-  result &= expect(newThread, "the real New thread action is available");
-  if (!newThread)
-    return false;
   newThread->click();
-  spin(10);
+  spin(30);
+  require(!secondDialogOpened &&
+              threadItem(list, "draft:new-thread") == list->currentItem(),
+          "New Thread does not replace the correlation or optimistic row "
+          "while creation is in flight");
 
-  auto findThreadItem = [this](std::string_view id) -> QListWidgetItem * {
-    if (!list)
-      return nullptr;
-    for (int row = 0; row < list->count(); ++row) {
-      QListWidgetItem *item = list->item(row);
-      if (item && item->data(Qt::UserRole).toString().toStdString() == id)
-        return item;
-    }
+  PromptTransition transition = worker.admitFirstPrompt(std::move(*create));
+  require(transition.command && spinUntil([&] {
+            return threadItem(list,
+                              transition.command->thread->id().canonical) !=
+                   nullptr;
+          }),
+          "the original in-flight correlation still promotes its exact "
+          "optimistic row after a guarded second click");
+}
+
+void optimisticCreationDoesNotOverrideLaterNavigation(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "navigation-thread", "Chosen after creation");
+  spin(40);
+
+  auto *newThread =
+      shell.findChild<QPushButton *>(QStringLiteral("threadNewButton"));
+  QTimer::singleShot(0, &shell, [] {
+    if (auto *dialog =
+            qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+      dialog->accept();
+  });
+  if (!newThread)
+    return;
+  newThread->click();
+  spin(30);
+
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  QListWidgetItem *const draft = threadItem(list, "draft:new-thread");
+  auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
+      QStringLiteral("upcomingPromptEditor"));
+  require(draft && submit(editor, QStringLiteral("create in background")),
+          "navigation race admits the selected optimistic draft");
+  std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
+  std::optional<RuntimeAction> create;
+  for (QtToWorkerMessage &message : messages) {
+    if (auto *action = std::get_if<RuntimeAction>(&message);
+        action && action->kind == RuntimeActionKind::CreateThread)
+      create = std::move(*action);
+  }
+  require(create.has_value() && selectThread(list, "navigation-thread"),
+          "the user navigates away before worker creation effects arrive");
+  if (!create)
+    return;
+
+  PromptTransition transition = worker.admitFirstPrompt(std::move(*create));
+  spin(50);
+  require(transition.command &&
+              list->currentItem() == threadItem(list, "navigation-thread") &&
+              threadItem(list, transition.command->thread->id().canonical) ==
+                  draft,
+          "the delayed local handoff promotes its row without stealing the "
+          "newer selection");
+  if (!transition.command)
+    return;
+
+  const NodeRef localPrompt = transition.command->localPrompt;
+  static_cast<void>(
+      worker.attachCreatedThread(*transition.command, "background-created"));
+  spin(50);
+  require(list->currentItem() == threadItem(list, "navigation-thread") &&
+              threadItem(list, "background-created") == draft,
+          "canonical creation completion preserves both row identity and "
+          "later navigation");
+  static_cast<void>(
+      worker.completePrompt(localPrompt, true, {}, "background-turn"));
+  spin(50);
+  require(list->currentItem() == threadItem(list, "navigation-thread") &&
+              threadItem(list, "background-created") == draft,
+          "prompt acknowledgement confirms the background row without a "
+          "selection override");
+}
+
+void optimisticCreationIgnoresAnotherCreationCorrelation(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  spin(40);
+
+  auto *newThread =
+      shell.findChild<QPushButton *>(QStringLiteral("threadNewButton"));
+  QTimer::singleShot(0, &shell, [] {
+    if (auto *dialog =
+            qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+      dialog->accept();
+  });
+  require(newThread != nullptr,
+          "the creation-correlation fixture exposes New thread");
+  if (!newThread)
+    return;
+  newThread->click();
+  spin(30);
+
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  QListWidgetItem *const foregroundDraft = threadItem(list, "draft:new-thread");
+  require(foregroundDraft && list->currentItem() == foregroundDraft,
+          "the foreground optimistic draft begins selected");
+  if (!foregroundDraft)
+    return;
+
+  RuntimeAction background;
+  background.kind = RuntimeActionKind::CreateThread;
+  background.correlation = "different-creation-correlation";
+  background.promptText = "background creation prompt";
+  background.payload.emplace(
+      "threadStart",
+      Value(Value::Object{{"cwd", Value("/tmp")},
+                          {"name", Value("Different creation")}}));
+  background.payload.emplace("turnStart", Value(Value::Object{}));
+  PromptTransition transition = worker.admitFirstPrompt(std::move(background));
+  require(transition.command.has_value(),
+          "the worker admits a distinct correlated background creation");
+  if (!transition.command)
+    return;
+
+  const std::string backgroundThreadId =
+      transition.command->thread->id().canonical;
+  require(spinUntil(
+              [&] { return threadItem(list, backgroundThreadId) != nullptr; }),
+          "the differently correlated worker draft is visible in the list");
+  require(list->currentItem() == foregroundDraft &&
+              list->currentItem()->data(Qt::UserRole).toString() ==
+                  QStringLiteral("draft:new-thread") &&
+              threadItem(list, backgroundThreadId) != foregroundDraft,
+          "a worker SelectThread for another creation correlation cannot "
+          "hijack the foreground optimistic selection");
+}
+
+void saturatedShellKeepsTheEditorDraft(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "saturated-shell", "Saturated shell");
+  require(spinUntil([&] {
+            return threadItem(shell.findChild<QListWidget *>(
+                                  QStringLiteral("threadList")),
+                              "saturated-shell") != nullptr;
+          }),
+          "saturation fixture renders its shared thread");
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(selectThread(list, "saturated-shell"),
+          "saturation fixture selects its graph thread");
+  static_cast<void>(takeQtMessages(channels));
+
+  std::size_t admissions = 0;
+  for (;;) {
+    RuntimeAction filler;
+    filler.kind = RuntimeActionKind::RefreshCatalogs;
+    filler.correlation = "shell-fill-" + std::to_string(admissions);
+    const ChannelSendStatus status = session.sendRuntimeAction(filler);
+    if (status == ChannelSendStatus::QueueFull)
+      break;
+    ++admissions;
+  }
+
+  auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
+      QStringLiteral("upcomingPromptEditor"));
+  const QString retained = QStringLiteral("retain after visible rejection");
+  require(submit(editor, retained),
+          "the enabled composer reaches the saturated typed boundary");
+  spin(20);
+  require(editor && editor->toPlainText() == retained,
+          "a rejected prompt remains editable in the existing composer");
+
+  const std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
+  const bool hasPrompt = std::ranges::any_of(messages, [](const auto &message) {
+    const auto *action = std::get_if<NodeAction>(&message);
+    return action && action->kind == NodeActionKind::SubmitPrompt;
+  });
+  require(
+      messages.size() == admissions && !hasPrompt,
+      "visible rejection neither admits nor retries the non-idempotent prompt");
+}
+
+void saturatedRenameRetainsAuthoredName(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "rename-retention", "Original name");
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(spinUntil(
+              [&] { return threadItem(list, "rename-retention") != nullptr; }),
+          "rename-retention fixture renders its shared thread");
+  static_cast<void>(takeQtMessages(channels));
+
+  std::size_t fillers = 0;
+  for (;;) {
+    RuntimeAction filler;
+    filler.kind = RuntimeActionKind::RefreshCatalogs;
+    filler.correlation = "rename-fill-" + std::to_string(fillers);
+    const ChannelSendStatus status = session.sendRuntimeAction(filler);
+    if (status == ChannelSendStatus::QueueFull)
+      break;
+    ++fillers;
+  }
+
+  const auto openRename = [&]() -> QAction * {
+    const QPoint point =
+        list->visualItemRect(threadItem(list, "rename-retention")).center();
+    QMetaObject::invokeMethod(list, "customContextMenuRequested",
+                              Qt::DirectConnection, Q_ARG(QPoint, point));
+    auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+    if (menu)
+      for (QAction *action : menu->actions())
+        if (action && action->text() == QStringLiteral("Rename"))
+          return action;
     return nullptr;
   };
-  QListWidgetItem *draft = findThreadItem("draft:new-thread");
-  result &=
-      expect(dialogOpened && draft && list->currentItem() == draft &&
-                 draft->data(Qt::UserRole + 6).toBool(),
-             "accepting the dialog immediately selects one animated draft row");
-  if (!draft)
-    return false;
 
-  result &= expect(submit(editor, QStringLiteral("first new-thread prompt")),
-                   "the selected optimistic draft admits its first prompt");
-  const auto create = peer.waitFor("thread.create");
-  result &= expect(create.has_value(),
-                   "the optimistic draft dispatches thread.create");
-  if (!create)
-    return false;
-  result &= peer.send(
-      presentation::result(sequence++, generation, "thread.create",
-                           create->value("correlationId", std::string{}), true,
-                           {{"thread",
-                             {{"id", "thread-new"},
-                              {"name", "New thread"},
-                              {"cwd", "/workspace/new"},
-                              {"status", "idle"}}}},
-                           Authority::Merge, {{"threadId", "thread-new"}}));
+  const QString exact = QStringLiteral("Exact queued rename");
+  QAction *rename = openRename();
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    auto *edit = dialog ? dialog->findChild<QLineEdit *>() : nullptr;
+    if (edit) {
+      edit->setText(exact);
+      dialog->accept();
+    }
+  });
+  if (rename)
+    rename->trigger();
+  const std::vector<QtToWorkerMessage> rejected = takeQtMessages(channels);
+  require(rename && rejected.size() == fillers &&
+              std::ranges::none_of(
+                  rejected,
+                  [](const auto &message) {
+                    const auto *action = std::get_if<NodeAction>(&message);
+                    return action && action->kind == NodeActionKind::Rename;
+                  }),
+          "a saturated rename is visibly rejected without being queued");
 
-  const auto start = peer.waitFor("turn.start", "thread-new");
-  result &= expect(start.has_value(),
-                   "thread.create promotion dispatches the retained prompt");
-  if (!start)
-    return false;
-  QListWidgetItem *promoted = findThreadItem("thread-new");
-  result &=
-      expect(promoted == draft && promoted->data(Qt::UserRole + 6).toBool(),
-             "thread.create rekeys the same visible item while acknowledgment "
-             "is pending");
-
-  result &= peer.send(presentation::result(
-      sequence++, generation, "turn.start",
-      start->value("correlationId", std::string{}), true,
-      {{"turn", {{"id", "turn-new"}, {"status", "inProgress"}}}},
-      Authority::Merge, {{"threadId", "thread-new"}, {"turnId", "turn-new"}}));
-  spin(10);
-  result &= expect(findThreadItem("thread-new") == draft &&
-                       !draft->data(Qt::UserRole + 6).toBool(),
-                   "turn acknowledgment canonicalizes the same thread item");
-  return result;
+  bool prefilled = false;
+  rename = openRename();
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    auto *edit = dialog ? dialog->findChild<QLineEdit *>() : nullptr;
+    prefilled = edit && edit->text() == exact;
+    if (dialog)
+      dialog->accept();
+  });
+  if (rename)
+    rename->trigger();
+  const std::vector<QtToWorkerMessage> admitted = takeQtMessages(channels);
+  const auto action = std::ranges::find_if(admitted, [](const auto &message) {
+    const auto *candidate = std::get_if<NodeAction>(&message);
+    return candidate && candidate->kind == NodeActionKind::Rename;
+  });
+  bool exactPayload = false;
+  if (action != admitted.end()) {
+    const auto &renameAction = std::get<NodeAction>(*action);
+    const auto name = renameAction.payload.find("name");
+    exactPayload = name != renameAction.payload.end() &&
+                   name->second.asString() &&
+                   *name->second.asString() == exact.toStdString();
+  }
+  require(rename && prefilled && admitted.size() == 1 && exactPayload,
+          "reopening Rename recovers the authored name and deliberately "
+          "admits it exactly once");
 }
 
-bool ShellFlow::verifyPendingResolutionBoundary() {
-  bool result = true;
-  peer.discard();
-  auto pending = [this](int id, const char *command) {
-    return peer.send(presentation::event(
-        sequence++, generation, "pending-request.upsert",
-        {{"requestId", id},
-         {"category", "command-approval"},
-         {"request", {{"command", command}, {"cwd", "/tmp"}}}},
-        Authority::Merge, {{"threadId", "thread-new"}, {"requestId", id}}));
+void saturatedWorkerEffectsKeepNewestUiState(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  NodeGraph &graph = FrontendSessionTestPeer::graph(session);
+  WorkerLogic worker(graph, channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "effect-first", "First selection");
+  applyThread(worker, "effect-second", "Newest selection");
+  require(spinUntil([&] {
+            auto *list =
+                shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+            return threadItem(list, "effect-first") &&
+                   threadItem(list, "effect-second") &&
+                   channels.workerToQtSizeApprox() == 0;
+          }),
+          "effect-saturation fixture renders both shared threads");
+
+  NodeRef first;
+  NodeRef second;
+  {
+    auto read = graph.tryRead();
+    first = read->find({NodeKind::Thread, "effect-first"});
+    second = read->find({NodeKind::Thread, "effect-second"});
+  }
+  std::size_t oldNotices = 0;
+  while (channels.workerToQtSizeApprox() <
+         ThreadChannels::WorkerToQtCapacity -
+             ThreadChannels::WorkerToQtReservedSlots) {
+    require(worker.showNotice("old notice " + std::to_string(oldNotices)) ==
+                ChannelSendStatus::Accepted,
+            "ordinary sequenced notice fills only ordinary queue capacity");
+    ++oldNotices;
+  }
+  require(worker.showNotice("newest visible notice") ==
+                  ChannelSendStatus::CoalescedRescan &&
+              worker.selectThread(first) == ChannelSendStatus::Accepted &&
+              worker.selectThread(second) == ChannelSendStatus::CoalescedRescan,
+          "saturated effects retain a graph fallback after the critical "
+          "selection slot is used");
+
+  require(
+      spinUntil(
+          [&] {
+            auto *list =
+                shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+            auto *bar = shell.findChild<QFrame *>(
+                QStringLiteral("conversationNoticeBar"));
+            const auto labels =
+                bar ? bar->findChildren<QLabel *>() : QList<QLabel *>{};
+            return channels.workerToQtSizeApprox() == 0 &&
+                   !channels.rescanPending() && list &&
+                   list->currentItem() == threadItem(list, "effect-second") &&
+                   !labels.empty() &&
+                   labels.front()->text() ==
+                       QStringLiteral("newest visible notice");
+          },
+          3000),
+      "Qt ignores older queued effects after reconstructing the newest "
+      "sequenced graph fallback");
+}
+
+void saturatedInteractionRetainsAuthoredInput(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "retained-input", "Retained input");
+  static_cast<void>(worker.applyDetailed(
+      {DecodedMessageKind::ServerRequest,
+       "item/tool/requestUserInput",
+       ProtocolRequestId("retained-question"),
+       {{"threadId", Value("retained-input")},
+        {"turnId", Value("retained-turn")},
+        {"itemId", Value("retained-item")},
+        {"questions", Value(Value::Array{Value(Value::Object{
+                          {"id", Value("answer")},
+                          {"question", Value("What should be retained?")},
+                          {"options", Value(Value::Array{})}})})}}}));
+
+  auto *review = shell.findChild<QPushButton *>(
+      QStringLiteral("pendingRequestReviewButton"));
+  require(spinUntil([&] {
+            return review && review->isVisible() && review->isEnabled();
+          }),
+          "user-input request exposes the existing Review action");
+  if (!review)
+    return;
+
+  std::size_t fillers = 0;
+  for (;;) {
+    RuntimeAction filler;
+    filler.kind = RuntimeActionKind::RefreshCatalogs;
+    filler.correlation = "input-fill-" + std::to_string(fillers);
+    const ChannelSendStatus status = session.sendRuntimeAction(filler);
+    if (status == ChannelSendStatus::QueueFull)
+      break;
+    ++fillers;
+  }
+
+  const QString exact = QStringLiteral("exact answer retained at saturation");
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    const auto edits = dialog->findChildren<QLineEdit *>();
+    auto *buttons = dialog->findChild<QDialogButtonBox *>();
+    if (edits.size() == 1 && buttons) {
+      edits.front()->setText(exact);
+      buttons->button(QDialogButtonBox::Ok)->click();
+    }
+  });
+  review->click();
+  spin();
+  const std::vector<QtToWorkerMessage> rejected = takeQtMessages(channels);
+  require(rejected.size() == fillers &&
+              std::ranges::none_of(
+                  rejected,
+                  [](const auto &message) {
+                    const auto *action = std::get_if<NodeAction>(&message);
+                    return action &&
+                           action->kind == NodeActionKind::ResolveInteraction;
+                  }),
+          "a saturated response is not queued or retried automatically");
+
+  bool prefilled = false;
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    const auto edits = dialog->findChildren<QLineEdit *>();
+    auto *buttons = dialog->findChild<QDialogButtonBox *>();
+    prefilled = edits.size() == 1 && edits.front()->text() == exact;
+    if (buttons)
+      buttons->button(QDialogButtonBox::Ok)->click();
+  });
+  review->click();
+  const std::vector<QtToWorkerMessage> admitted = takeQtMessages(channels);
+  const auto response = std::ranges::find_if(admitted, [](const auto &message) {
+    const auto *action = std::get_if<NodeAction>(&message);
+    return action && action->kind == NodeActionKind::ResolveInteraction;
+  });
+  bool exactPayload = false;
+  if (response != admitted.end()) {
+    const auto &action = std::get<NodeAction>(*response);
+    const auto answers = action.payload.find("answers");
+    if (answers != action.payload.end() && answers->second.asObject()) {
+      const auto answer = answers->second.asObject()->find("answer");
+      if (answer != answers->second.asObject()->end() &&
+          answer->second.asObject()) {
+        const auto values = answer->second.asObject()->find("answers");
+        exactPayload = values != answer->second.asObject()->end() &&
+                       values->second.asArray() &&
+                       values->second.asArray()->size() == 1 &&
+                       values->second.asArray()->front().asString() &&
+                       *values->second.asArray()->front().asString() ==
+                           exact.toStdString();
+      }
+    }
+  }
+  require(prefilled && admitted.size() == 1 && exactPayload,
+          "reopening Review recovers the exact authored input and a deliberate "
+          "submit admits it once");
+}
+
+void recoveryOnlyPromptRestoresToComposer(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "recovery-source", "Recovery source");
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(spinUntil(
+              [&] { return threadItem(list, "recovery-source") != nullptr; }) &&
+              selectThread(list, "recovery-source"),
+          "recovery fixture selects its original provider thread");
+  static_cast<void>(takeQtMessages(channels));
+
+  const QString exact = QStringLiteral("preserve this exact unsent prompt");
+  auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
+      QStringLiteral("upcomingPromptEditor"));
+  require(submit(editor, exact),
+          "recovery fixture admits the prompt into the typed mailbox");
+  std::vector<QtToWorkerMessage> authored = takeQtMessages(channels);
+  auto promptAction = std::ranges::find_if(authored, [](const auto &message) {
+    const auto *action = std::get_if<NodeAction>(&message);
+    return action && action->kind == NodeActionKind::SubmitPrompt;
+  });
+  if (promptAction == authored.end()) {
+    require(false, "recovery fixture receives the admitted prompt action");
+    return;
+  }
+  PromptTransition transition =
+      worker.admitPrompt(std::move(std::get<NodeAction>(*promptAction)));
+  require(transition.command.has_value(),
+          "worker starts one provider-bound prompt command");
+
+  static_cast<void>(worker.apply({DecodedMessageKind::ServerNotification,
+                                  "thread/deleted",
+                                  std::nullopt,
+                                  {{"threadId", Value("recovery-source")}}}));
+  std::string recoveryId;
+  require(spinUntil([&] {
+            for (int row = 0; list && row < list->count(); ++row) {
+              const std::string id =
+                  list->item(row)->data(Qt::UserRole).toString().toStdString();
+              if (id.starts_with("local-recovery-thread:")) {
+                recoveryId = id;
+                return true;
+              }
+            }
+            return false;
+          }),
+          "thread deletion exposes a recovery-only local thread");
+  static_cast<void>(takeQtMessages(channels));
+  require(!recoveryId.empty() && selectThread(list, recoveryId),
+          "the recovery-only thread can be inspected without hydration");
+  const std::vector<QtToWorkerMessage> inspectionActions =
+      takeQtMessages(channels);
+  const bool hydratedRecovery =
+      std::ranges::any_of(inspectionActions, [](const auto &message) {
+        const auto *action = std::get_if<NodeAction>(&message);
+        return action && action->kind == NodeActionKind::Hydrate;
+      });
+  auto *send =
+      shell.findChild<QPushButton *>(QStringLiteral("composerSendButton"));
+  QPushButton *restore = nullptr;
+  require(spinUntil([&] {
+            restore = shell.findChild<QPushButton *>(
+                QStringLiteral("promptRecoveryButton"));
+            return restore && restore->isVisible();
+          }) &&
+              send && !send->isEnabled() && !hydratedRecovery,
+          "recovery-only selection disables normal send and shows one explicit "
+          "restore action");
+  if (!restore)
+    return;
+
+  middle::ComposerPane *composer = nullptr;
+  for (QWidget *widget : shell.findChildren<QWidget *>()) {
+    composer = dynamic_cast<middle::ComposerPane *>(widget);
+    if (composer)
+      break;
+  }
+  const QString existingDraft =
+      QStringLiteral("keep this newer composer draft unchanged");
+  const std::vector<AttachmentDraft> existingAttachments{
+      {"/tmp/newer-draft.txt", "newer-draft.txt", "text/plain", 23}};
+  if (editor)
+    editor->setPlainText(existingDraft);
+  if (composer)
+    composer->setAttachments(existingAttachments);
+  restore->click();
+  spin(40);
+  const std::vector<QtToWorkerMessage> guardedRestore =
+      takeQtMessages(channels);
+  require(composer && editor && editor->toPlainText() == existingDraft &&
+              composer->attachments() == existingAttachments &&
+              list->currentItem() == threadItem(list, recoveryId) &&
+              restore->isVisible() && guardedRestore.empty(),
+          "Restore leaves a newer composer draft and its attachments intact");
+  if (!composer || !editor)
+    return;
+  editor->clear();
+  composer->setAttachments({});
+
+  restore->click();
+  spin(40);
+  const std::vector<QtToWorkerMessage> afterRestore = takeQtMessages(channels);
+  const bool sentAutomatically =
+      std::ranges::any_of(afterRestore, [](const auto &message) {
+        if (const auto *action = std::get_if<NodeAction>(&message))
+          return action->kind == NodeActionKind::SubmitPrompt;
+        if (const auto *action = std::get_if<RuntimeAction>(&message))
+          return action->kind == RuntimeActionKind::CreateThread;
+        return false;
+      });
+  require(editor && editor->toPlainText() == exact &&
+              threadItem(list, "draft:new-thread") == list->currentItem() &&
+              send && send->isEnabled() && !sentAutomatically,
+          "Restore moves the exact text into a new-thread composer draft "
+          "without sending it");
+}
+
+void providerNoticesReachTheTransientSurface(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  NodeGraph &graph = FrontendSessionTestPeer::graph(session);
+  WorkerLogic worker(graph, channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "notice-thread", "Notice thread");
+  spin(40);
+
+  auto *bar =
+      shell.findChild<QFrame *>(QStringLiteral("conversationNoticeBar"));
+  auto noticeText = [bar] {
+    const auto labels = bar ? bar->findChildren<QLabel *>() : QList<QLabel *>{};
+    return labels.empty() ? QString{} : labels.front()->text();
   };
+
+  static_cast<void>(
+      worker.apply({DecodedMessageKind::ServerNotification,
+                    "warning",
+                    std::nullopt,
+                    {{"message", Value("Provider warning is visible")}}}));
+  require(spinUntil([&] {
+            return bar && bar->isVisible() &&
+                   noticeText() ==
+                       QStringLiteral("Provider warning is visible");
+          }) &&
+              bar->property("tone").toString() == QStringLiteral("warning"),
+          "provider warnings use the canonical non-error notice surface");
+
+  static_cast<void>(
+      worker.apply({DecodedMessageKind::ServerNotification,
+                    "error",
+                    std::nullopt,
+                    {{"threadId", Value("notice-thread")},
+                     {"message", Value("Provider error is visible")}}}));
+  require(spinUntil([&] {
+            return noticeText() == QStringLiteral("Provider error is visible");
+          }) &&
+              bar->property("tone").toString() == QStringLiteral("danger"),
+          "provider errors use the canonical error notice surface");
+
+  auto read = graph.tryRead();
+  const NodeRef notice =
+      read ? read->find({NodeKind::Notice, "provider-notice"}) : NodeRef{};
+  const NodeRef thread =
+      read ? read->find({NodeKind::Thread, "notice-thread"}) : NodeRef{};
+  require(notice && thread &&
+              stringFieldEquals(read->state(notice), "method", "error") &&
+              !field(read->state(thread), "message"),
+          "provider notice state stays isolated from addressed thread facts");
+}
+
+void failedHydrationKeepsTheEditorDraft(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  NodeGraph &graph = FrontendSessionTestPeer::graph(session);
+  WorkerLogic worker(graph, channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "failed-hydration", "Needs reload");
+  require(spinUntil([&] {
+            return threadItem(shell.findChild<QListWidget *>(
+                                  QStringLiteral("threadList")),
+                              "failed-hydration") != nullptr;
+          }),
+          "failed hydration fixture renders its graph thread");
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(selectThread(list, "failed-hydration"),
+          "failed hydration fixture selects its destination");
+  static_cast<void>(takeQtMessages(channels));
+  NodeRef thread;
+  {
+    auto read = graph.tryRead();
+    thread = read->find({NodeKind::Thread, "failed-hydration"});
+  }
+  static_cast<void>(
+      worker.threadHydration(thread, "failed", "Hydration failed"));
+  spin(40);
+
+  auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
+      QStringLiteral("upcomingPromptEditor"));
+  auto *send =
+      shell.findChild<QPushButton *>(QStringLiteral("composerSendButton"));
+  const QString retained = QStringLiteral("retain until Reload succeeds");
+  editor->setPlainText(retained);
+  spin();
+  const bool invoked = QMetaObject::invokeMethod(editor, "submitRequested",
+                                                 Qt::DirectConnection);
+  const std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
+  require(invoked && send && !send->isEnabled() &&
+              editor->toPlainText() == retained && messages.empty(),
+          "failed hydration disables admission without clearing or queueing "
+          "the user-owned draft");
+}
+
+void reverseInteractionCarriesOnlyAuthoredResponse(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  makeReady(worker);
+  applyThread(worker, "approval-thread", "Approval thread");
+  require(spinUntil([&] {
+            return threadItem(shell.findChild<QListWidget *>(
+                                  QStringLiteral("threadList")),
+                              "approval-thread") != nullptr;
+          }),
+          "reverse-interaction fixture renders its target thread");
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(selectThread(list, "approval-thread"),
+          "pending interaction is scoped to the selected graph thread");
+  static_cast<void>(takeQtMessages(channels));
+
+  const WorkerApplyResult request =
+      worker.applyDetailed({DecodedMessageKind::ServerRequest,
+                            "item/commandExecution/requestApproval",
+                            ProtocolRequestId("approval-typed"),
+                            {{"threadId", Value("approval-thread")},
+                             {"turnId", Value("approval-turn")},
+                             {"itemId", Value("approval-item")},
+                             {"command", Value("echo secret protocol fact")},
+                             {"cwd", Value("/provider/cwd")}}});
+  require(request.primary != nullptr,
+          "decoded server request creates one pending interaction node");
   auto *accept = shell.findChild<QPushButton *>(
       QStringLiteral("pendingRequestAcceptButton"));
-  auto *reject = shell.findChild<QPushButton *>(
-      QStringLiteral("pendingRequestRejectButton"));
-  result &= expect(accept && reject,
-                   "the selected request exposes typed response actions");
-  if (!accept || !reject)
-    return false;
-
-  result &= pending(91, "first approval");
-  spin(30);
-  result &= expect(accept->isEnabled(),
-                   "the current controller can answer a current request");
+  require(spinUntil([&] {
+            return accept && accept->isVisible() && accept->isEnabled();
+          }),
+          "controller sees the existing actionable approval UI");
+  if (!accept)
+    return;
   accept->click();
-  accept->click();
-  const auto accepted = peer.waitFor("pending-request.resolve");
-  result &= expect(
-      accepted &&
-          accepted->value("data", nlohmann::json::object())
-                  .value("requestId", 0) == 91 &&
-          accepted->value("data", nlohmann::json::object())
-                  .value("result", nlohmann::json::object())
-                  .value("decision", std::string{}) == "accept",
-      "the first response preserves the native request identity and decision");
-  result &=
-      expect(!peer.waitFor("pending-request.resolve", {}, 100).has_value(),
-             "a repeated click cannot resolve the same request twice");
-  spin(30);
-  result &= expect(!accept->isEnabled() && !reject->isEnabled(),
-                   "a resolving request disables all response actions");
-  result &= peer.send(
-      presentation::event(sequence++, generation, "pending-request.removed",
-                          nlohmann::json::object(), Authority::Remove,
-                          {{"threadId", "thread-new"}, {"requestId", 91}}));
 
-  result &= pending(92, "observer approval");
-  result &= peer.send(
-      presentation::event(sequence++, generation, "connection.controller",
-                          {{"controllerConnectionId", "different-controller"}},
-                          Authority::Replace));
-  spin(30);
-  result &= expect(!accept->isEnabled() && !reject->isEnabled(),
-                   "an observer can inspect but cannot answer a request");
-  accept->click();
-  result &=
-      expect(!peer.waitFor("pending-request.resolve", {}, 100).has_value(),
-             "disabled observer actions emit no response");
+  const std::vector<QtToWorkerMessage> responses = takeQtMessages(channels);
+  const NodeAction *response = nullptr;
+  std::size_t responseCount = 0;
+  for (const QtToWorkerMessage &message : responses) {
+    const auto *candidate = std::get_if<NodeAction>(&message);
+    if (candidate && candidate->kind == NodeActionKind::ResolveInteraction) {
+      response = candidate;
+      ++responseCount;
+    }
+  }
+  const auto decision = response ? response->payload.find("decision")
+                                 : Value::Object::const_iterator{};
+  require(
+      responseCount == 1 && response && response->target == request.primary &&
+          response->payload.size() == 1 &&
+          decision != response->payload.end() && decision->second.asString() &&
+          *decision->second.asString() == "accept" &&
+          !response->payload.contains("command") &&
+          !response->payload.contains("cwd") && response->promptText.empty() &&
+          response->attachments.empty(),
+      "approval sends one typed action containing only authored decision data");
 
-  result &= peer.send(presentation::event(
-      sequence++, generation, "connection.controller",
-      {{"controllerConnectionId", "test-controller-2"}}, Authority::Replace));
-  spin(30);
-  result &= expect(accept->isEnabled() && reject->isEnabled(),
-                   "current controller ownership restores request actions");
-  reject->click();
-  const auto rejected = peer.waitFor("pending-request.resolve");
-  result &= expect(rejected && rejected->value("data", nlohmann::json::object())
-                                       .value("requestId", 0) == 92,
-                   "the restored controller can resolve the retained request");
-  return result;
+  static_cast<void>(worker.resolveInteraction(
+      request.primary, false, "CodexBridge rejected the response"));
+  spin(40);
+  const std::vector<QtToWorkerMessage> automaticRetry =
+      takeQtMessages(channels);
+  require(automaticRetry.empty() && accept->isVisible() && accept->isEnabled(),
+          "a rejected bridge response stays visibly actionable without an "
+          "automatic retry");
+  accept->click();
+  const std::vector<QtToWorkerMessage> deliberateRetry =
+      takeQtMessages(channels);
+  const std::size_t deliberateCount =
+      std::ranges::count_if(deliberateRetry, [&](const auto &message) {
+        const auto *candidate = std::get_if<NodeAction>(&message);
+        return candidate &&
+               candidate->kind == NodeActionKind::ResolveInteraction &&
+               candidate->target == request.primary;
+      });
+  require(deliberateCount == 1,
+          "the user can deliberately re-author one response after bridge "
+          "rejection");
 }
 
-bool runShellFlow(FrontendSession &session, PresentationPeer &peer) {
-  return ShellFlow(session, peer).run();
-}
-
-bool verifyPendingRequestTextBoundaries() {
+void pendingRequestTextBoundaries() {
   bool inspected = false;
   bool plainText = false;
   QTimer::singleShot(0, [&] {
@@ -1129,25 +2661,25 @@ bool verifyPendingRequestTextBoundaries() {
         command != labels.end() && (*command)->textFormat() == Qt::PlainText;
     dialog->reject();
   });
-  const PendingRequestDescriptor request{
+  const PendingRequestDescriptor command{
       "unsafe-command",
       "command-approval",
       "thread-a",
       1,
       {{"command", "<b>untrusted command</b>"}}};
-  static_cast<void>(PendingRequestDialog::present(request, nullptr));
+  static_cast<void>(PendingRequestDialog::present(command, nullptr));
 
   bool escapedLink = false;
   QTimer::singleShot(0, [&] {
     auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
     if (!dialog)
       return;
-    const auto labels = dialog->findChildren<QLabel *>();
-    escapedLink = std::ranges::any_of(labels, [](QLabel *label) {
-      return label && label->textFormat() == Qt::RichText &&
-             label->text().contains(QStringLiteral("&lt;img")) &&
-             !label->text().contains(QStringLiteral("<img"));
-    });
+    escapedLink = std::ranges::any_of(
+        dialog->findChildren<QLabel *>(), [](QLabel *label) {
+          return label && label->textFormat() == Qt::RichText &&
+                 label->text().contains(QStringLiteral("&lt;img")) &&
+                 !label->text().contains(QStringLiteral("<img"));
+        });
     dialog->reject();
   });
   const PendingRequestDescriptor elicitation{
@@ -1158,12 +2690,12 @@ bool verifyPendingRequestTextBoundaries() {
       {{"url", "https://example.invalid/\"><img src=x>"}}};
   static_cast<void>(PendingRequestDialog::present(elicitation, nullptr));
 
-  return expect(inspected && plainText,
-                "request text is always rendered literally") &&
-         expect(escapedLink, "the explicit MCP link escapes untrusted markup");
+  require(inspected && plainText,
+          "server-provided request text is rendered literally");
+  require(escapedLink, "the explicit MCP link escapes untrusted markup");
 }
 
-bool verifyPendingRequestValidationRetainsInput() {
+void pendingRequestValidationRetainsInput() {
   bool incompleteWarning = false;
   bool questionDialogRetained = false;
   QTimer::singleShot(0, [&] {
@@ -1172,8 +2704,9 @@ bool verifyPendingRequestValidationRetainsInput() {
       return;
     const auto edits = dialog->findChildren<QLineEdit *>();
     auto *buttons = dialog->findChild<QDialogButtonBox *>();
-    auto *submit = buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
-    if (edits.size() != 2 || !submit)
+    auto *submitButton =
+        buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
+    if (edits.size() != 2 || !submitButton)
       return;
     edits.front()->setText(QStringLiteral("Retained first answer"));
     QTimer::singleShot(0, [&] {
@@ -1184,12 +2717,12 @@ bool verifyPendingRequestValidationRetainsInput() {
       if (warning)
         warning->done(QMessageBox::Ok);
     });
-    submit->click();
+    submitButton->click();
     questionDialogRetained =
         dialog->isVisible() &&
         edits.front()->text() == QStringLiteral("Retained first answer");
     edits.back()->setText(QStringLiteral("Second answer"));
-    submit->click();
+    submitButton->click();
   });
   const PendingRequestDescriptor questions{
       "questions",
@@ -1220,8 +2753,9 @@ bool verifyPendingRequestValidationRetainsInput() {
       return;
     auto *editor = dialog->findChild<QPlainTextEdit *>();
     auto *buttons = dialog->findChild<QDialogButtonBox *>();
-    auto *submit = buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
-    if (!editor || !submit)
+    auto *submitButton =
+        buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
+    if (!editor || !submitButton)
       return;
     editor->setPlainText(QStringLiteral("["));
     QTimer::singleShot(0, [&] {
@@ -1232,11 +2766,11 @@ bool verifyPendingRequestValidationRetainsInput() {
       if (warning)
         warning->done(QMessageBox::Ok);
     });
-    submit->click();
+    submitButton->click();
     mcpDialogRetained =
         dialog->isVisible() && editor->toPlainText() == QStringLiteral("[");
     editor->setPlainText(QStringLiteral("{\"accepted\":true}"));
-    submit->click();
+    submitButton->click();
   });
   const PendingRequestDescriptor elicitation{
       "elicitation",
@@ -1251,14 +2785,14 @@ bool verifyPendingRequestValidationRetainsInput() {
       mcpResponse->result.value("action", std::string{}) == "accept" &&
       mcpResponse->result["content"] == nlohmann::json({{"accepted", true}});
 
-  return expect(incompleteWarning && questionDialogRetained && answersPreserved,
-                "incomplete questions keep the modal and prior answers open") &&
-         expect(invalidJsonWarning && mcpDialogRetained && validJsonReturned,
-                "invalid MCP JSON remains editable until a valid object is "
-                "submitted");
+  require(incompleteWarning && questionDialogRetained && answersPreserved,
+          "incomplete questions retain the modal and prior authored answers");
+  require(
+      invalidJsonWarning && mcpDialogRetained && validJsonReturned,
+      "invalid MCP JSON remains editable until valid authored input exists");
 }
 
-bool verifyPermissionRequestDisclosure() {
+void permissionRequestDisclosure() {
   const nlohmann::json permissions = {
       {"fileSystem",
        {{"write", nlohmann::json::array({"/tmp/<untrusted>"})},
@@ -1274,10 +2808,9 @@ bool verifyPermissionRequestDisclosure() {
     if (!dialog)
       return;
     QStringList displayed;
-    for (QLabel *label : dialog->findChildren<QLabel *>()) {
+    for (QLabel *label : dialog->findChildren<QLabel *>())
       if (label)
         displayed.push_back(label->text());
-    }
     const QString all = displayed.join(QLatin1Char('\n'));
     completeDisclosure =
         all.contains(QStringLiteral("File system / write / 1: "
@@ -1293,13 +2826,13 @@ bool verifyPermissionRequestDisclosure() {
       1,
       {{"permissions", permissions}, {"reason", "test disclosure"}}};
   const auto response = PendingRequestDialog::present(request, nullptr);
-  return expect(completeDisclosure,
-                "permission approval discloses known and future fields") &&
-         expect(response && response->error.is_null() &&
-                    response->result.value("permissions", nlohmann::json{}) ==
-                        permissions &&
-                    response->result.value("scope", std::string{}) == "turn",
-                "permission approval returns the exact disclosed object");
+  require(completeDisclosure,
+          "permission approval discloses known and future request fields");
+  require(response && response->error.is_null() &&
+              response->result.value("permissions", nlohmann::json{}) ==
+                  permissions &&
+              response->result.value("scope", std::string{}) == "turn",
+          "permission approval returns the exact disclosed permissions object");
 }
 
 } // namespace
@@ -1311,19 +2844,41 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   core::SNodeC::init(argc, argv);
 
-  const bool frontendBoundary =
-      codexui::codex::verifyFrontendBoundaryOrdering(*configuration);
-  codexui::codex::FrontendSession session(*configuration);
-  codexui::codex::PresentationPeer peer(
-      codexui::codex::FrontendSessionTestPeer::takeClientDescriptor(session));
-  const bool validationRetainsInput =
-      codexui::codex::verifyPendingRequestValidationRetainsInput();
-  const bool result = frontendBoundary &&
-                      codexui::codex::verifyPendingRequestTextBoundaries() &&
-                      validationRetainsInput &&
-                      codexui::codex::verifyPermissionRequestDisclosure() &&
-                      codexui::codex::runShellFlow(session, peer);
-  if (result)
-    std::cout << "Shell integration test passed\n";
-  return result ? 0 : 1;
+  using namespace codexui::codex;
+  graphNotificationsDetachBeforeRetirement(*configuration);
+  massRetirementIsSliced(*configuration);
+  selectedRemovalUnbindsBeforeWorkerRetirement(*configuration);
+  removedAffectedOptimisticRetryDoesNotReadReleasedNode(*configuration);
+  typedActionsAreExactOnceAndBounded(*configuration);
+  qtHeartbeatSurvivesLargeInboundTraffic(*configuration);
+  graphBackedShellPreservesDraftsAndPrompts(*configuration);
+  initialHydrationUsesTheEstablishedBoundedWindow(*configuration);
+  completedLiveAgentAppearsWithoutThreadReselection(*configuration);
+  threadSwitchStagesTheCompleteReplacement(*configuration);
+  inactiveThreadNeverReactivatesAStaleTurn(*configuration);
+  reloadAndReconnectHydrationStayExplicit(*configuration);
+  backgroundGraphChangesDoNotRefreshSelectedConversation(*configuration);
+  optimisticDraftUsesOneTypedCreateAction(*configuration);
+  emptyOptimisticDraftIsAbandonedOnThreadSelection(*configuration);
+  secondNewThreadIsGuardedWhileCreationIsInFlight(*configuration);
+  optimisticCreationDoesNotOverrideLaterNavigation(*configuration);
+  optimisticCreationIgnoresAnotherCreationCorrelation(*configuration);
+  saturatedShellKeepsTheEditorDraft(*configuration);
+  saturatedRenameRetainsAuthoredName(*configuration);
+  saturatedWorkerEffectsKeepNewestUiState(*configuration);
+  saturatedInteractionRetainsAuthoredInput(*configuration);
+  recoveryOnlyPromptRestoresToComposer(*configuration);
+  providerNoticesReachTheTransientSurface(*configuration);
+  failedHydrationKeepsTheEditorDraft(*configuration);
+  reverseInteractionCarriesOnlyAuthoredResponse(*configuration);
+  pendingRequestTextBoundaries();
+  pendingRequestValidationRetainsInput();
+  permissionRequestDisclosure();
+
+  if (failures != 0) {
+    std::cerr << failures << " shell integration assertion(s) failed\n";
+    return EXIT_FAILURE;
+  }
+  std::cout << "Shell typed nodegraph integration test passed\n";
+  return EXIT_SUCCESS;
 }

@@ -15,6 +15,7 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 
+#include <ranges>
 #include <string_view>
 #include <vector>
 
@@ -86,10 +87,9 @@ void addPermissionValue(QVBoxLayout *layout, const nlohmann::json &value,
     }
     for (auto iterator = value.begin(); iterator != value.end(); ++iterator) {
       const QString key = permissionKey(iterator.key());
-      addPermissionValue(layout, iterator.value(),
-                         path.isEmpty()
-                             ? key
-                             : QStringLiteral("%1 / %2").arg(path, key));
+      addPermissionValue(
+          layout, iterator.value(),
+          path.isEmpty() ? key : QStringLiteral("%1 / %2").arg(path, key));
     }
     return;
   }
@@ -105,22 +105,30 @@ void addPermissionValue(QVBoxLayout *layout, const nlohmann::json &value,
          ++index) {
       addPermissionValue(
           layout, value[static_cast<std::size_t>(index)],
-          path.isEmpty()
-              ? QStringLiteral("Permission %1").arg(index + 1)
-              : QStringLiteral("%1 / %2").arg(path).arg(index + 1));
+          path.isEmpty() ? QStringLiteral("Permission %1").arg(index + 1)
+                         : QStringLiteral("%1 / %2").arg(path).arg(index + 1));
     }
     return;
   }
-  layout->addWidget(
-      wrapped(QStringLiteral("%1: %2")
-                  .arg(path.isEmpty() ? QStringLiteral("Value") : path,
-                       permissionValue(value)),
-              "meta"));
+  layout->addWidget(wrapped(QStringLiteral("%1: %2").arg(
+                                path.isEmpty() ? QStringLiteral("Value") : path,
+                                permissionValue(value)),
+                            "meta"));
 }
 
 void addChoice(QComboBox *combo, const QString &label, const char *value) {
   if (combo->findData(QString::fromLatin1(value)) < 0)
     combo->addItem(label, QString::fromLatin1(value));
+}
+
+void showValidationWarning(QWidget *parent, QString title, QString message) {
+  QMessageBox warning(QMessageBox::Warning, std::move(title),
+                      std::move(message), QMessageBox::Ok, parent);
+  // Validation keeps the parent request dialog and its authored controls
+  // alive. An explicit Qt-owned dialog also avoids platform-native teardown
+  // reentrancy when the warning is dismissed from the nested modal loop.
+  warning.setOption(QMessageBox::Option::DontUseNativeDialog, true);
+  warning.exec();
 }
 
 struct QuestionEditor {
@@ -133,7 +141,8 @@ struct QuestionEditor {
 
 std::optional<PendingRequestResponse>
 PendingRequestDialog::present(const PendingRequestDescriptor &request,
-                              QWidget *parent) {
+                              QWidget *parent,
+                              const PendingRequestResponse *initialResponse) {
   QDialog dialog(parent);
   const QString dialogTitle =
       text(PendingRequestPolicy::dialogTitle(request.kind));
@@ -162,6 +171,8 @@ PendingRequestDialog::present(const PendingRequestDescriptor &request,
   QPlainTextEdit *structuredContent = nullptr;
   std::vector<QuestionEditor> questions;
   const nlohmann::json &raw = request.raw;
+  const nlohmann::json &initialResult =
+      initialResponse ? initialResponse->result : nlohmann::json::object();
 
   if (request.kind == "command-approval") {
     addDetail(contentLayout, QStringLiteral("Command"),
@@ -246,6 +257,31 @@ PendingRequestDialog::present(const PendingRequestDescriptor &request,
             editor.other->setEchoMode(QLineEdit::Password);
           sectionLayout->addWidget(editor.other);
         }
+        const auto initialAnswers = initialResult.find("answers");
+        if (initialAnswers != initialResult.end() &&
+            initialAnswers->is_object()) {
+          const auto savedQuestion = initialAnswers->find(editor.id);
+          if (savedQuestion != initialAnswers->end() &&
+              savedQuestion->is_object()) {
+            const auto savedValues = savedQuestion->find("answers");
+            if (savedValues != savedQuestion->end() &&
+                savedValues->is_array()) {
+              for (const auto &savedValue : *savedValues) {
+                if (!savedValue.is_string())
+                  continue;
+                const std::string saved = savedValue.get<std::string>();
+                const auto known = std::ranges::find_if(
+                    editor.choices, [&saved](const auto &choice) {
+                      return choice.first == saved;
+                    });
+                if (known != editor.choices.end())
+                  known->second->setChecked(true);
+                else if (editor.other)
+                  editor.other->setText(text(saved));
+              }
+            }
+          }
+        }
         questions.push_back(std::move(editor));
         contentLayout->addWidget(section);
       }
@@ -257,9 +293,8 @@ PendingRequestDialog::present(const PendingRequestDescriptor &request,
     const std::string url = stringValue(raw, "url");
     if (!url.empty()) {
       const QString escapedUrl = text(url).toHtmlEscaped();
-      auto *link = wrapped(QStringLiteral("<a href=\"%1\">%1</a>")
-                               .arg(escapedUrl),
-                           "body");
+      auto *link = wrapped(
+          QStringLiteral("<a href=\"%1\">%1</a>").arg(escapedUrl), "body");
       link->setTextFormat(Qt::RichText);
       contentLayout->addWidget(link);
     }
@@ -276,6 +311,9 @@ PendingRequestDialog::present(const PendingRequestDescriptor &request,
       structuredContent->setLineWrapMode(QPlainTextEdit::WidgetWidth);
       structuredContent->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
       structuredContent->setProperty("kind", "dialogEditor");
+      const auto savedContent = initialResult.find("content");
+      if (savedContent != initialResult.end() && savedContent->is_object())
+        structuredContent->setPlainText(text(savedContent->dump(2)));
       contentLayout->addWidget(structuredContent);
     }
   } else if (request.kind == "permissions-approval") {
@@ -283,11 +321,11 @@ PendingRequestDialog::present(const PendingRequestDescriptor &request,
               stringValue(raw, "reason"));
     addDetail(contentLayout, QStringLiteral("Working directory"),
               stringValue(raw, "cwd"));
-    contentLayout->addWidget(wrapped(QStringLiteral("Requested permissions"),
-                                     "title"));
-    addPermissionValue(
-        contentLayout,
-        raw.value("permissions", nlohmann::json::object()), QString{});
+    contentLayout->addWidget(
+        wrapped(QStringLiteral("Requested permissions"), "title"));
+    addPermissionValue(contentLayout,
+                       raw.value("permissions", nlohmann::json::object()),
+                       QString{});
     decision = new QComboBox;
     addChoice(decision, QStringLiteral("Approve for this turn"), "turn");
     addChoice(decision, QStringLiteral("Approve for this session"), "session");
@@ -315,6 +353,21 @@ PendingRequestDialog::present(const PendingRequestDescriptor &request,
                              "Submitting will return an explicit JSON-RPC "
                              "unsupported error.")));
   }
+  if (decision && initialResponse) {
+    std::string savedDecision;
+    if (request.kind == "mcp-elicitation")
+      savedDecision = stringValue(initialResult, "action");
+    else if (request.kind == "permissions-approval")
+      savedDecision = initialResponse->error.is_null()
+                          ? stringValue(initialResult, "scope")
+                          : "decline";
+    else
+      savedDecision = stringValue(initialResult, "decision");
+    const int savedIndex =
+        decision->findData(text(savedDecision), Qt::UserRole, Qt::MatchExactly);
+    if (savedIndex >= 0)
+      decision->setCurrentIndex(savedIndex);
+  }
   contentLayout->addStretch();
 
   auto *buttons =
@@ -334,9 +387,9 @@ PendingRequestDialog::present(const PendingRequestDescriptor &request,
         if (question.other && !question.other->text().trimmed().isEmpty())
           values.push_back(question.other->text().toStdString());
         if (values.empty()) {
-          QMessageBox::warning(&dialog, QStringLiteral("Incomplete response"),
-                               QStringLiteral("Answer every question before "
-                                              "submitting."));
+          showValidationWarning(
+              &dialog, QStringLiteral("Incomplete response"),
+              QStringLiteral("Answer every question before submitting."));
           return;
         }
         answers[question.id] = {{"answers", std::move(values)}};
@@ -347,9 +400,9 @@ PendingRequestDialog::present(const PendingRequestDescriptor &request,
       nlohmann::json content = nlohmann::json::parse(
           structuredContent->toPlainText().toStdString(), nullptr, false);
       if (content.is_discarded() || !content.is_object()) {
-        QMessageBox::warning(&dialog, QStringLiteral("Invalid response"),
-                             QStringLiteral("The MCP response must be a valid "
-                                            "JSON object."));
+        showValidationWarning(
+            &dialog, QStringLiteral("Invalid response"),
+            QStringLiteral("The MCP response must be a valid JSON object."));
         return;
       }
       acceptedStructuredContent = std::move(content);

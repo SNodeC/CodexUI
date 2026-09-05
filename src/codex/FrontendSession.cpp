@@ -3,89 +3,57 @@
 #include "codex/FrontendSession.h"
 
 #include "codex/ClientRuntime.h"
-#include "codex/PresentationProtocol.h"
-#include "codex/ipc/QtSocketPairEndpoint.h"
-#include "codex/ipc/SocketPair.h"
 
-#include <ai/openai/codex/protocol/JsonLineFramer.h>
-
-#include <QCoreApplication>
-#include <QEventLoop>
-#include <QThread>
+#include <QElapsedTimer>
+#include <QSocketNotifier>
 #include <QTimer>
 
+#include <algorithm>
 #include <cerrno>
-#include <cstring>
-#include <stdexcept>
 #include <system_error>
-#include <unistd.h>
+#include <type_traits>
 #include <utility>
+#include <variant>
 
 namespace codexui::codex {
-namespace {
-
-constexpr std::size_t MaximumFrameBytes = 64U * 1024U * 1024U;
-constexpr std::size_t MaximumWriteQueueBytes = 128U * 1024U * 1024U;
-constexpr std::size_t MaximumOutstandingRequests = 4096;
-
-} // namespace
 
 FrontendSession::FrontendSession(Configuration &configuration)
-    : framer(std::make_unique<ai::openai::codex::protocol::JsonLineFramer>(
-          MaximumFrameBytes)),
-      configuration(configuration) {
-  ipc::SocketPair pair;
-  if (!pair.isValid())
-    throw std::system_error(pair.error(), std::generic_category(),
-                            "unable to create CodexUI socketpair");
+    : configuration(configuration) {
+  if (!channels.valid()) {
+    const int error = channels.workerToQtCreationError() != 0
+                          ? channels.workerToQtCreationError()
+                          : channels.qtToWorkerCreationError();
+    throw std::system_error(error != 0 ? error : EIO, std::generic_category(),
+                            "unable to create CodexUI eventfds");
+  }
 
-  endpoint = std::make_unique<ipc::QtSocketPairEndpoint>(
-      pair.releaseFirstEndpoint(), MaximumWriteQueueBytes);
-  clientDescriptor = pair.releaseSecondEndpoint();
-  endpoint->setOnData([this](const char *data, std::size_t size) {
-    std::string framingError;
-    try {
-      const bool accepted = framer->consume(
-          std::string_view(data, size),
-          [this](nlohmann::json message) { receiveMessage(std::move(message)); },
-          [&framingError](std::string message) {
-            framingError = std::move(message);
-          });
-      if (!accepted)
-        terminalFailure(framingError.empty() ? "CodexUI IPC framing failed"
-                                             : std::move(framingError));
-    } catch (const std::exception &exception) {
-      terminalFailure(std::string("CodexUI IPC dispatch failed: ") +
-                      exception.what());
-    } catch (...) {
-      terminalFailure("CodexUI IPC dispatch failed with an unknown exception");
-    }
-  });
-  endpoint->setOnError([this](int errorNumber) {
-    terminalFailure(std::string("Qt socketpair failure: ") +
-                    std::strerror(errorNumber));
-  });
-  endpoint->setOnClosed([this] {
-    failAllPending(-32020, stopping ? "CodexUI is shutting down"
-                                    : "SNode.C client thread disconnected");
-    if (!stopping) {
-      if (!terminal)
-        reportLocalError("SNode.C client thread disconnected");
-      notifyRuntimeStopped();
-    }
-  });
+  workerNotifier = std::make_unique<QSocketNotifier>(
+      channels.workerToQtEventFd(), QSocketNotifier::Read);
+  QObject::connect(workerNotifier.get(), &QSocketNotifier::activated,
+                   workerNotifier.get(), [this] { drainWorkerMessages(); });
+  workerWakeRecoveryTimer = std::make_unique<QTimer>();
+  workerWakeRecoveryTimer->setInterval(100);
+  QObject::connect(workerWakeRecoveryTimer.get(), &QTimer::timeout,
+                   workerWakeRecoveryTimer.get(), [this] {
+                     if (!stopping &&
+                         (channels.workerToQtSizeApprox() != 0 ||
+                          channels.rescanPending() ||
+                          workerFinished.load(std::memory_order_acquire)))
+                       drainWorkerMessages();
+                   });
+  workerWakeRecoveryTimer->start();
 }
 
 FrontendSession::~FrontendSession() { shutdown(); }
 
 void FrontendSession::start(bool connectBridge) {
-  if (started)
+  if (started || stopping)
     return;
   started = true;
-  const int descriptor = std::exchange(clientDescriptor, -1);
-  clientThread = std::thread([this, descriptor, connectBridge] {
+  clientThread = std::thread([this, connectBridge] {
     static_cast<void>(
-        runClientRuntime(descriptor, configuration, connectBridge));
+        runClientRuntime(configuration, graph, channels, connectBridge));
+    workerFinished.store(true, std::memory_order_release);
   });
 }
 
@@ -97,451 +65,268 @@ void FrontendSession::wait() {
 void FrontendSession::shutdown() {
   if (stopping)
     return;
-  if (started && endpoint && endpoint->isOpen() &&
-      QCoreApplication::instance() &&
-      endpoint->thread() == QThread::currentThread()) {
-    QEventLoop acknowledgementLoop;
-    const std::string requestId =
-        request("runtime.shutdown", nlohmann::json::object(),
-                [&acknowledgementLoop](const nlohmann::json &) {
-                  acknowledgementLoop.quit();
-                });
-    QTimer::singleShot(750, &acknowledgementLoop, &QEventLoop::quit);
-    acknowledgementLoop.exec();
-    // A timeout must not leave a callback capturing the completed nested loop.
-    outstanding.erase(requestId);
-  } else if (started) {
-    static_cast<void>(sendMessage(presentation::command("runtime.shutdown")));
-  }
   stopping = true;
-  failAllPending(-32800, "CodexUI is shutting down");
-  if (endpoint)
-    endpoint->close();
-  if (clientDescriptor >= 0) {
-    ::close(clientDescriptor);
-    clientDescriptor = -1;
+
+  if (workerNotifier)
+    workerNotifier->setEnabled(false);
+  if (workerWakeRecoveryTimer)
+    workerWakeRecoveryTimer->stop();
+
+  if (started && !workerFinished.load(std::memory_order_acquire)) {
+    nodegraph::ShutdownRequest request;
+    while (!workerFinished.load(std::memory_order_acquire)) {
+      const nodegraph::ChannelSendStatus status =
+          channels.sendShutdown(request);
+      if (nodegraph::deliveryGuaranteed(status))
+        break;
+      // The bounded queue preserves FIFO ordering. The worker is its sole
+      // consumer, so yielding until it admits shutdown cannot duplicate or
+      // silently discard any already-admitted user action.
+      std::this_thread::yield();
+    }
   }
+
   wait();
-}
-
-void FrontendSession::setEventHandler(EventHandler handler) {
-  eventHandler = std::move(handler);
-}
-
-void FrontendSession::setActivityHandler(ActivityHandler handler) {
-  activityHandler = std::move(handler);
+  workerNotifier.reset();
+  workerWakeRecoveryTimer.reset();
+  channels.close();
 }
 
 void FrontendSession::setRuntimeStoppedHandler(RuntimeStoppedHandler handler) {
   runtimeStoppedHandler = std::move(handler);
 }
 
-PresentationClient FrontendSession::presentationClient() {
-  return PresentationClient{
-      [this](std::string action, nlohmann::json data,
-             PresentationClient::Completion completion) {
-        return request(std::move(action), std::move(data),
-                       std::move(completion));
-      },
-      [this](std::string action, nlohmann::json data) {
-        return sendMessage(
-            presentation::command(std::move(action), std::move(data)));
-      },
-      [this](nlohmann::json requestId, nlohmann::json result,
-             nlohmann::json error) {
-        return respondToServerRequest(std::move(requestId), std::move(result),
-                                      std::move(error));
-      }};
+void FrontendSession::setGraphChangedHandler(GraphChangedHandler handler) {
+  graphChangedHandler = std::move(handler);
 }
 
-std::string FrontendSession::request(std::string operation,
-                                     nlohmann::json parameters,
-                                     ResponseHandler handler) {
-  const std::string requestId = "ui-request-" + std::to_string(nextOperation++);
-  const std::string threadId =
-      presentation::stringMember(parameters, "threadId");
-  const std::string action = operation;
-  if (outstanding.size() >= MaximumOutstandingRequests) {
-    if (handler) {
+void FrontendSession::setGraphUiEffectHandler(GraphUiEffectHandler handler) {
+  graphUiEffectHandler = std::move(handler);
+}
+
+const nodegraph::NodeGraph &FrontendSession::nodeGraph() const noexcept {
+  return graph;
+}
+
+nodegraph::ChannelSendStatus
+FrontendSession::sendNodeAction(nodegraph::NodeAction &action) {
+  if (stopping || (started && workerFinished.load(std::memory_order_acquire)))
+    return nodegraph::ChannelSendStatus::QueueFull;
+  const bool assignedCorrelation = action.correlation.empty();
+  if (assignedCorrelation)
+    action.correlation =
+        "ui-action-" + std::to_string(nextUiActionCorrelation++);
+  const nodegraph::ChannelSendStatus status = channels.sendNodeAction(action);
+  if (status == nodegraph::ChannelSendStatus::QueueFull && assignedCorrelation)
+    action.correlation.clear();
+  return status;
+}
+
+nodegraph::ChannelSendStatus
+FrontendSession::sendRuntimeAction(nodegraph::RuntimeAction &action) {
+  if (stopping || (started && workerFinished.load(std::memory_order_acquire)))
+    return nodegraph::ChannelSendStatus::QueueFull;
+  const bool assignedCorrelation = action.correlation.empty();
+  if (assignedCorrelation)
+    action.correlation =
+        "ui-action-" + std::to_string(nextUiActionCorrelation++);
+  const nodegraph::ChannelSendStatus status =
+      channels.sendRuntimeAction(action);
+  if (status == nodegraph::ChannelSendStatus::QueueFull && assignedCorrelation)
+    action.correlation.clear();
+  return status;
+}
+
+void FrontendSession::drainWorkerMessages() {
+  if (stopping)
+    return;
+
+  const nodegraph::EventFd::DrainResult wake = channels.drainWorkerToQtWake();
+  if (!wake.accepted()) {
+    if (workerNotifier)
+      workerNotifier->setEnabled(false);
+    if (graphUiEffectHandler) {
       try {
-        handler(presentation::result(
-            0, activeGeneration, action, requestId, false,
-            {{"code", -32021},
-             {"message", "CodexUI has too many outstanding operations"}}));
+        graphUiEffectHandler(nodegraph::UiEffect{
+            nodegraph::UiEffectKind::ShowNotice,
+            std::nullopt,
+            "Worker-to-Qt wake-up failed; CodexUI is shutting down",
+            {}});
       } catch (...) {
       }
     }
-    return requestId;
-  }
-  outstanding.emplace(
-      requestId, OutstandingRequest{action, threadId, std::move(handler)});
-  const bool sent = sendMessage(presentation::command(
-      std::move(operation), std::move(parameters), requestId));
-  if (sent && !threadId.empty() &&
-      !presentation::isThreadHydrationAction(action) && activityHandler)
-    activityHandler(threadId);
-  if (!sent) {
-    const auto iterator = outstanding.find(requestId);
-    if (iterator != outstanding.end()) {
-      ResponseHandler failed = std::move(iterator->second.completion);
-      const std::string failedAction = std::move(iterator->second.action);
-      outstanding.erase(iterator);
-      if (!failed)
-        return requestId;
-      try {
-        failed(presentation::result(
-            0, activeGeneration, failedAction, requestId, false,
-            {{"code", -32020},
-             {"message", "CodexUI IPC rejected operation"}}));
-      } catch (...) {
-      }
-    }
-  }
-  return requestId;
-}
-
-std::string FrontendSession::listThreads(nlohmann::json options,
-                                         ResponseHandler handler) {
-  return request("threads.list", std::move(options), std::move(handler));
-}
-
-std::string FrontendSession::readThread(std::string threadId,
-                                        ResponseHandler handler) {
-  return request("thread.read",
-                 {{"threadId", std::move(threadId)}, {"includeTurns", true}},
-                 std::move(handler));
-}
-
-std::string FrontendSession::createThread(nlohmann::json options,
-                                          ResponseHandler handler) {
-  return request("thread.create", std::move(options), std::move(handler));
-}
-
-std::string FrontendSession::resumeThread(std::string threadId,
-                                          nlohmann::json options,
-                                          ResponseHandler handler) {
-  options["threadId"] = std::move(threadId);
-  return request("thread.resume", std::move(options), std::move(handler));
-}
-
-std::string FrontendSession::forkThread(std::string threadId,
-                                        nlohmann::json options,
-                                        ResponseHandler handler) {
-  options["threadId"] = std::move(threadId);
-  return request("thread.fork", std::move(options), std::move(handler));
-}
-
-std::string FrontendSession::renameThread(std::string threadId,
-                                          std::string name,
-                                          ResponseHandler handler) {
-  return request("thread.rename",
-                 {{"threadId", std::move(threadId)}, {"name", std::move(name)}},
-                 std::move(handler));
-}
-
-std::string FrontendSession::archiveThread(std::string threadId,
-                                           ResponseHandler handler) {
-  return request("thread.archive", {{"threadId", std::move(threadId)}},
-                 std::move(handler));
-}
-
-std::string FrontendSession::unarchiveThread(std::string threadId,
-                                             ResponseHandler handler) {
-  return request("thread.unarchive", {{"threadId", std::move(threadId)}},
-                 std::move(handler));
-}
-
-std::string FrontendSession::deleteThread(std::string threadId,
-                                          ResponseHandler handler) {
-  return request("thread.delete", {{"threadId", std::move(threadId)}},
-                 std::move(handler));
-}
-
-std::string FrontendSession::listModels(nlohmann::json options,
-                                        ResponseHandler handler) {
-  return request("models.list", std::move(options), std::move(handler));
-}
-
-std::string
-FrontendSession::readModelProviderCapabilities(nlohmann::json options,
-                                               ResponseHandler handler) {
-  return request("model-provider-capabilities.read", std::move(options),
-                 std::move(handler));
-}
-
-std::string FrontendSession::readAccount(nlohmann::json options,
-                                         ResponseHandler handler) {
-  return request("account.read", std::move(options), std::move(handler));
-}
-
-std::string FrontendSession::readAccountRateLimits(ResponseHandler handler) {
-  return request("account.rate-limits.read", nlohmann::json::object(),
-                 std::move(handler));
-}
-
-std::string FrontendSession::readAccountTokenUsage(ResponseHandler handler) {
-  return request("account.token-usage.read", nlohmann::json::object(),
-                 std::move(handler));
-}
-
-std::string FrontendSession::readConfig(nlohmann::json options,
-                                        ResponseHandler handler) {
-  return request("config.read", std::move(options), std::move(handler));
-}
-
-std::string FrontendSession::listPermissionProfiles(nlohmann::json options,
-                                                    ResponseHandler handler) {
-  return request("permission-profiles.list", std::move(options),
-                 std::move(handler));
-}
-
-std::string FrontendSession::listExperimentalFeatures(nlohmann::json options,
-                                                      ResponseHandler handler) {
-  return request("experimental-features.list", std::move(options),
-                 std::move(handler));
-}
-
-std::string FrontendSession::listSkills(nlohmann::json options,
-                                        ResponseHandler handler) {
-  return request("skills.list", std::move(options), std::move(handler));
-}
-
-std::string FrontendSession::listHooks(nlohmann::json options,
-                                       ResponseHandler handler) {
-  return request("hooks.list", std::move(options), std::move(handler));
-}
-
-std::string FrontendSession::listPlugins(nlohmann::json options,
-                                         ResponseHandler handler) {
-  return request("plugins.list", std::move(options), std::move(handler));
-}
-
-std::string FrontendSession::listApps(nlohmann::json options,
-                                      ResponseHandler handler) {
-  return request("apps.list", std::move(options), std::move(handler));
-}
-
-std::string FrontendSession::listMcpServers(nlohmann::json options,
-                                            ResponseHandler handler) {
-  return request("mcp-servers.list", std::move(options), std::move(handler));
-}
-
-std::string FrontendSession::startTurn(std::string threadId,
-                                       nlohmann::json input,
-                                       nlohmann::json options,
-                                       ResponseHandler handler) {
-  options["threadId"] = std::move(threadId);
-  options["input"] = std::move(input);
-  return request("turn.start", std::move(options), std::move(handler));
-}
-
-std::string FrontendSession::steerTurn(std::string threadId,
-                                       std::string expectedTurnId,
-                                       nlohmann::json input,
-                                       ResponseHandler handler) {
-  return request("turn.steer",
-                 {{"threadId", std::move(threadId)},
-                  {"expectedTurnId", std::move(expectedTurnId)},
-                  {"input", std::move(input)}},
-                 std::move(handler));
-}
-
-std::string FrontendSession::interruptTurn(std::string threadId,
-                                           std::string turnId,
-                                           ResponseHandler handler) {
-  return request(
-      "turn.interrupt",
-      {{"threadId", std::move(threadId)}, {"turnId", std::move(turnId)}},
-      std::move(handler));
-}
-
-bool FrontendSession::respondToServerRequest(nlohmann::json requestId,
-                                             nlohmann::json result,
-                                             nlohmann::json error) {
-  nlohmann::json data{{"requestId", std::move(requestId)}};
-  if (!error.is_null())
-    data["error"] = std::move(error);
-  else
-    data["result"] = std::move(result);
-  return sendMessage(
-      presentation::command("pending-request.resolve", std::move(data)));
-}
-
-bool FrontendSession::sendRaw(nlohmann::json appServerMessage) {
-  return sendMessage(presentation::command(
-      "diagnostic.raw.send", {{"message", std::move(appServerMessage)}}));
-}
-
-bool FrontendSession::reconnect() {
-  return sendMessage(presentation::command("connection.reconnect"));
-}
-
-bool FrontendSession::connectTransport() {
-  return sendMessage(presentation::command("connection.connect"));
-}
-
-bool FrontendSession::disconnectTransport() {
-  return sendMessage(presentation::command("connection.disconnect"));
-}
-
-std::string FrontendSession::configureConnection(nlohmann::json settings,
-                                                 ResponseHandler handler) {
-  return request("connection.configure", std::move(settings),
-                 std::move(handler));
-}
-
-bool FrontendSession::claimController() {
-  return sendMessage(presentation::command("controller.claim"));
-}
-
-bool FrontendSession::releaseController() {
-  return sendMessage(presentation::command("controller.release"));
-}
-
-bool FrontendSession::sendMessage(const nlohmann::json &message) {
-  if (!endpoint || stopping || !endpoint->isOpen())
-    return false;
-  try {
-    return endpoint->send(ai::openai::codex::protocol::JsonLineFramer::encode(
-        message, MaximumFrameBytes));
-  } catch (const std::exception &exception) {
-    reportLocalError(exception.what());
-    return false;
-  }
-}
-
-void FrontendSession::receiveMessage(nlohmann::json message) {
-  if (!presentation::isPresentationFrame(message)) {
-    reportLocalError(
-        "SNode.C client emitted an incompatible presentation frame");
+    // The application quit path calls shutdown(), which uses the independently
+    // owned Qt-to-worker eventfd before joining the worker.
+    notifyRuntimeStopped();
     return;
   }
-  const auto generation = message.find("generation");
-  if (generation != message.end()) {
-    if (!generation->is_number_unsigned()) {
-      terminalFailure("presentation frame has an invalid generation");
-      return;
-    }
-    const std::uint64_t incoming = generation->get<std::uint64_t>();
-    if (activeGeneration != 0 && incoming < activeGeneration)
-      return;
-    if (activeGeneration != 0 && incoming > activeGeneration) {
-      failAllPending(-32020, "bridge connection generation changed", true);
-      lastSequenceReceived = 0;
-    }
-    activeGeneration = incoming;
+  if (rescanRetirementPending)
+    collectRescanRetirements();
+
+  constexpr std::size_t MaximumMessagesPerPass = 128;
+  constexpr qint64 MaximumDrainMilliseconds = 2;
+  QElapsedTimer drainBudget;
+  drainBudget.start();
+  std::size_t processed = 0;
+  nodegraph::WorkerToQtMessage message;
+  while (processed < MaximumMessagesPerPass &&
+         (processed == 0 ||
+          drainBudget.elapsed() < MaximumDrainMilliseconds) &&
+         channels.tryReceiveForQt(message)) {
+    ++processed;
+    std::visit(
+        [this](auto &payload) {
+          using Message = std::decay_t<decltype(payload)>;
+          if constexpr (std::is_same_v<Message, nodegraph::GraphChanged>) {
+            if (graphChangedHandler) {
+              try {
+                graphChangedHandler(payload);
+              } catch (...) {
+              }
+            }
+            collectDetachedNodes(payload.removed);
+            if (payload.rescanRequired) {
+              requireRescanRetirementCollection();
+              collectRescanRetirements();
+            }
+          } else if constexpr (std::is_same_v<Message, nodegraph::UiEffect>) {
+            if (graphUiEffectHandler) {
+              try {
+                graphUiEffectHandler(payload);
+              } catch (...) {
+              }
+            }
+          } else {
+            notifyRuntimeStopped();
+          }
+        },
+        message);
   }
-  const auto sequence = message.find("sequence");
-  if (sequence != message.end()) {
-    if (!sequence->is_number_unsigned()) {
-      terminalFailure("presentation frame has an invalid sequence");
-      return;
-    }
-    const std::uint64_t incoming = sequence->get<std::uint64_t>();
-    if (incoming != 0 && lastSequenceReceived != 0 &&
-        incoming != lastSequenceReceived + 1) {
-      terminalFailure("presentation frame sequence gap detected");
-      return;
-    }
-    if (incoming != 0)
-      lastSequenceReceived = incoming;
+
+  // A synthesized rescan is deliberately delivered ahead of older queued
+  // notifications. Keep retired nodes graph-readable until that entire older
+  // backlog has passed Qt; queued NodeRefs alone pin lifetime but do not keep
+  // ReadAccess membership after releaseRetired().
+  const bool workerBacklogDrained =
+      channels.workerToQtSizeApprox() == 0 && !channels.rescanPending();
+  if (workerBacklogDrained && !rescanRetirementPending)
+    flushDetachAcknowledgements();
+  if (workerFinished.load(std::memory_order_acquire))
+    notifyRuntimeStopped();
+  if (!workerBacklogDrained || rescanRetirementPending ||
+      !pendingDetachAcknowledgements.empty())
+    scheduleWorkerMessageDrain();
+}
+
+void FrontendSession::scheduleWorkerMessageDrain() {
+  if (workerDrainScheduled || stopping)
+    return;
+  workerDrainScheduled = true;
+  // Yield through at least one native event-dispatch turn between backlog
+  // slices so wheel, key, paint, and socket events cannot be starved by a
+  // self-replenishing zero-delay drain loop.
+  QTimer::singleShot(1, Qt::PreciseTimer, workerNotifier.get(), [this] {
+    workerDrainScheduled = false;
+    drainWorkerMessages();
+  });
+}
+
+void FrontendSession::requireRescanRetirementCollection() {
+  if (!rescanRetirementPending) {
+    retirementScanOffset = 0;
+    retirementScanGenerationKnown = false;
+    retirementRetryNeeded = false;
   }
-  if (presentation::stringMember(message, "kind") == "result") {
-    const std::string requestId =
-        presentation::stringMember(message, "correlationId");
-    const auto iterator = outstanding.find(requestId);
-    if (iterator == outstanding.end())
-      return;
-    if (presentation::stringMember(message, "action") !=
-        iterator->second.action) {
-      terminalFailure("presentation result action does not match its request");
-      return;
-    }
-    if (!iterator->second.threadId.empty() &&
-        !presentation::isThreadHydrationAction(iterator->second.action) &&
-        activityHandler)
-      activityHandler(iterator->second.threadId);
-    ResponseHandler handler = std::move(iterator->second.completion);
-    outstanding.erase(iterator);
-    if (handler) {
-      try {
-        handler(message);
-      } catch (...) {
-      }
-    }
+  rescanRetirementPending = true;
+}
+
+void FrontendSession::collectRescanRetirements() {
+  constexpr std::size_t MaximumRetirementsPerPass = 64;
+  auto read = graph.tryRead();
+  if (!read) {
+    scheduleWorkerMessageDrain();
+    return;
   }
-  if (presentation::stringMember(message, "kind") == "event") {
-    const std::string type = presentation::stringMember(message, "type");
-    const nlohmann::json data = presentation::member(
-        message, "data", nlohmann::json::object());
-    if (type == "connection.lifecycle") {
-      const std::string state = presentation::stringMember(data, "state");
-      if (state == "disconnected" || state == "failure")
-        failAllPending(-32020, "bridge connection was lost", true);
-    } else if (type == "connection.provider") {
-      const auto provider = data.find("generation");
-      if (provider == data.end() || !provider->is_number_unsigned()) {
-        terminalFailure("provider lifecycle event has an invalid generation");
-        return;
-      }
-      const std::uint64_t incoming = provider->get<std::uint64_t>();
-      if (incoming < providerGeneration)
-        return;
-      if (providerGeneration != 0 && incoming > providerGeneration)
-        failAllPending(-32002, "app-server provider generation changed", true);
-      providerGeneration = incoming;
-      if (presentation::stringMember(data, "state") == "disconnected")
-        failAllPending(-32002, "app-server provider was restarted", true);
-    }
+
+  const std::uint64_t orderGeneration = read->retiredOrderGeneration();
+  if (!retirementScanGenerationKnown ||
+      orderGeneration != retirementScanOrderGeneration) {
+    retirementScanOffset = 0;
+    retirementScanOrderGeneration = orderGeneration;
+    retirementScanGenerationKnown = true;
+    retirementRetryNeeded = false;
   }
-  if (eventHandler) {
+
+  const std::size_t count = read->retiredCount();
+  retirementScanOffset = std::min(retirementScanOffset, count);
+  const std::size_t end =
+      std::min(count, retirementScanOffset + MaximumRetirementsPerPass);
+  std::vector<nodegraph::NodeRef> retired;
+  retired.reserve(end - retirementScanOffset);
+  for (std::size_t index = retirementScanOffset; index < end; ++index)
+    retired.emplace_back(read->retiredAt(index));
+  const std::uint64_t revision = read->revision();
+  const bool complete = end == count;
+  read.reset();
+
+  if (graphChangedHandler && !retired.empty()) {
     try {
-      eventHandler(message);
+      graphChangedHandler(nodegraph::GraphChanged{revision, {}, retired, true});
     } catch (...) {
     }
   }
-}
+  collectDetachedNodes(retired);
 
-void FrontendSession::reportLocalError(std::string message) {
-  if (eventHandler) {
-    try {
-      eventHandler(presentation::event(0, activeGeneration,
-                                       "system.local-diagnostic",
-                                       {{"source", "qt"},
-                                        {"code", "local-ipc-error"},
-                                        {"message", std::move(message)}}));
-    } catch (...) {
-    }
-  }
-}
-
-void FrontendSession::terminalFailure(std::string message) {
-  if (terminal || stopping)
+  if (!complete) {
+    retirementScanOffset = end;
     return;
-  terminal = true;
-  failAllPending(-32020, message);
-  reportLocalError(std::move(message));
-  if (endpoint && endpoint->isOpen())
-    endpoint->close();
-  notifyRuntimeStopped();
+  }
+
+  retirementScanOffset = 0;
+  if (retirementRetryNeeded) {
+    retirementRetryNeeded = false;
+    return;
+  }
+  rescanRetirementPending = false;
+  retirementScanGenerationKnown = false;
 }
 
-void FrontendSession::failAllPending(int code, std::string message,
-                                     bool transient) noexcept {
-  auto failed = std::move(outstanding);
-  outstanding.clear();
-  for (auto &[correlationId, request] : failed) {
-    ResponseHandler &handler = request.completion;
-    if (!handler)
+void FrontendSession::collectDetachedNodes(
+    std::span<const nodegraph::NodeRef> nodes) {
+  for (const nodegraph::NodeRef &node : nodes) {
+    // The graph callback above runs on Qt-main and must destroy/clear any
+    // QWidget attachment before its removal can be acknowledged to worker.
+    if (!node)
       continue;
-    try {
-      nlohmann::json error{{"code", code}, {"message", message}};
-      if (transient)
-        error["transient"] = true;
-      handler(presentation::result(0, activeGeneration, request.action,
-                                   correlationId, false, std::move(error)));
-    } catch (...) {
+    if (node->uiAttachment() != nullptr) {
+      requireRescanRetirementCollection();
+      retirementRetryNeeded = true;
+      continue;
     }
+    if (pendingDetachAcknowledgementIndex.insert(node.get()).second)
+      pendingDetachAcknowledgements.emplace_back(node);
+  }
+}
+
+void FrontendSession::flushDetachAcknowledgements() {
+  constexpr std::size_t MaximumAcknowledgementsPerPass = 64;
+  std::size_t processed = 0;
+  while (!pendingDetachAcknowledgements.empty() &&
+         processed < MaximumAcknowledgementsPerPass) {
+    if (pendingDetachAcknowledgements.back()->uiAttachment() != nullptr) {
+      requireRescanRetirementCollection();
+      return;
+    }
+    nodegraph::Node *const target = pendingDetachAcknowledgements.back().get();
+    nodegraph::NodeAction action;
+    action.target = pendingDetachAcknowledgements.back();
+    action.kind = nodegraph::NodeActionKind::UiDetached;
+    const nodegraph::ChannelSendStatus status = channels.sendNodeAction(action);
+    if (!nodegraph::deliveryGuaranteed(status))
+      return;
+    pendingDetachAcknowledgements.pop_back();
+    pendingDetachAcknowledgementIndex.erase(target);
+    ++processed;
   }
 }
 

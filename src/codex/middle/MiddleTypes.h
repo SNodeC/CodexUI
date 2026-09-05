@@ -3,6 +3,8 @@
 #ifndef CODEXUI_CODEX_MIDDLE_MIDDLETYPES_H
 #define CODEXUI_CODEX_MIDDLE_MIDDLETYPES_H
 
+#include "codex/nodegraph/NodeGraph.h"
+
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
@@ -123,6 +125,9 @@ struct FileChangeData {
 struct FileChangesData {
   std::string status;
   std::vector<FileChangeData> changes;
+  // Relative provider paths are resolved against the owning thread's current
+  // workspace only when the user explicitly asks the desktop to open them.
+  std::string cwd;
 
   bool operator==(const FileChangesData &) const = default;
 };
@@ -154,6 +159,7 @@ struct GenericActivityData {
   std::string type;
   nlohmann::json raw = nlohmann::json::object();
   std::string status;
+  std::string displayDetail;
 
   bool operator==(const GenericActivityData &) const = default;
 };
@@ -165,6 +171,8 @@ struct LocalPromptData {
   bool showPendingAnimation = false;
   std::string error;
   std::vector<std::string> imagePaths;
+  std::optional<std::int64_t> admittedAtMs;
+  bool requiresExplicitRecovery = false;
 
   bool operator==(const LocalPromptData &) const = default;
 };
@@ -181,6 +189,10 @@ struct VisibleCardData {
   std::string turnId;
   std::string itemId;
   CardPayload payload = GenericActivityData{};
+  std::optional<bool> activeWork;
+  // Stable action/lifetime identity supplied by the adapter. Widgets retain
+  // it but never inspect graph state through it.
+  nodegraph::NodeRef target;
 
   bool operator==(const VisibleCardData &) const = default;
 };

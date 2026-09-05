@@ -13,6 +13,8 @@
 
 namespace codexui::codex::ui {
 
+enum class InspectorProjection { All, Plan, Agents, Changes, Requests, State };
+
 // Toolkit-neutral inputs for the concrete thread-list renderer. Expansion,
 // sorting, and optimistic rows deliberately remain local to that renderer.
 struct ThreadListRow {

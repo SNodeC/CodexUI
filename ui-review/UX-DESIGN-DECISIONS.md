@@ -144,16 +144,22 @@ conversation.
 
 ## Conversation structure
 
-`PresentationModel` is the retained normalized presentation source. The
-conversation projects it into one transparent section per app-server turn,
+The shared `NodeGraph` is the sole current native protocol-derived state. The
+conversation renders it as one transparent section per app-server turn,
 with cards in server order. The first You card is the visible turn container;
 later process, Codex, and steering You cards are nested inside it. The outer
 turn remains foldable, and restoring it preserves every child's independent
 fold state. A pending steering card uses the animated blue identity and morphs
 in place to a softer blue authoritative steering surface. Stable turn/item and
 local-submission keys drive a single reconcile path for both first display and
-updates. Retained cards mutate in place, and identical visible projections do
+updates. Retained visible cards mutate in place, and identical node state does
 not trigger layout work.
+
+Cards materialize lazily for the viewport and one viewport of overscan; a wider
+retention margin avoids churn, and measured placeholders preserve geometry
+farther away. At most eight card operations run in one event-loop pass. Each
+materialized card uses its node's optional opaque Qt attachment, not a separate
+permanent identity registry.
 
 The active thread name and its smaller `workspace | state` metadata form one
 baseline-aligned lockup, following the application brand/titlebar pattern
@@ -174,7 +180,8 @@ The upcoming-turn settings and composer remain anchored to the bottom. The
 prompt editor starts at one line, grows upward to its maximum, and then scrolls
 internally. A draft that fits has no hidden trailing scroll offset. Send and
 Steer require non-whitespace input, prompt focus uses a geometry-neutral blue
-border, and submission preserves the exact authored text. The message view
+border, and submission trims only leading and trailing whitespace under the
+legacy input contract. The message view
 reserves the canonical composer height. Additional growth overlays, but does
 not resize, the viewport. The trailing allowance is represented as a logical
 extent equal to the overlap so the user can scroll the final card to the
@@ -195,7 +202,7 @@ Local admission creates a calm blue prompt card with an emphasized border
 immediately. A brighter blue highlight starts sweeping left and right only
 after one second without app-server acknowledgment.
 The card belongs to its destination thread and persists through navigation.
-Only the correlated `turn.start` or `turn.steer` completion callback
+Only the correlated `turn/start` or `turn/steer` completion callback
 acknowledges it. Each request carries a unique `clientUserMessageId`; the
 matching callback stops delayed feedback immediately and permits normal message
 presentation as soon as the authoritative item is correlated. Failure produces
@@ -223,14 +230,15 @@ and Info. Primary tabs use the shared full-size application typography and are
 never nested. Info presents State and Protocol as raised choice rows with
 chevrons; selecting one drills into its viewer, with an explicit back action to
 the choices. This expresses hierarchy through navigation rather than smaller
-text. Both viewers use application scrollbars. In Protocol, the log expands
-above a statistics summary placed at the bottom.
+text. Both viewers use application scrollbars. Protocol's bounded current
+operation and unknown-protocol diagnostic expands above its revision and node
+statistics summary.
 
 Plan steps, agents, and pending requests are peer records and therefore use the
 same raised card surface, border, radius, and internal spacing. Summary surfaces
 are reserved for subordinate content within a record. Inspector scroll areas
 are frameless and transparent so the panel background remains continuous.
-Plan, Agents, and Requests retain their last visible per-thread presentation
+Plan, Agents, and Requests retain their last visible per-thread widget state
 across thread and tab navigation. Agent records start collapsed, with status,
 copy, and disclosure controls aligned at the right of the title row. Expanding
 reveals the retained metadata, prompt, result, and thread identities.

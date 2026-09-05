@@ -4,6 +4,7 @@
 #define CODEXUI_CODEX_MIDDLE_INSPECTORPANE_H
 
 #include "codex/ui/UiViewState.h"
+#include "codex/nodegraph/Messages.h"
 
 #include <QByteArray>
 #include <QFrame>
@@ -17,11 +18,13 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 class QLabel;
 class QPlainTextEdit;
+class QShowEvent;
 class QStackedWidget;
 class QTabWidget;
 class QVBoxLayout;
@@ -42,15 +45,29 @@ public:
   explicit InspectorPane(QWidget *parent = nullptr);
 
   void setHideAction(std::function<void()> hide);
+  void setRefreshRequestedAction(std::function<void()> refresh);
   void setRequestActions(RequestAction review, RequestAction accept,
                          RequestAction reject);
   void refresh(const ui::InspectorSnapshot &snapshot);
+  void refresh(const ui::InspectorSnapshot &snapshot,
+               ui::InspectorProjection projection);
   void appendProtocolFrame(const nlohmann::json &frame);
+  void appendProtocolDiagnostic(const nodegraph::UiEffect &effect);
 
   [[nodiscard]] QTabWidget *tabs() const noexcept { return inspectorTabs; }
 
+protected:
+  void showEvent(QShowEvent *event) override;
+
 private:
   QFrame *agentFrame(const ui::InspectorAgentRow &agent);
+  void patchAgentFrame(QFrame *frame, const ui::InspectorAgentRow &agent);
+  QFrame *planStepFrame(const ui::InspectorPlanStep &step);
+  void patchPlanStepFrame(QFrame *frame,
+                          const ui::InspectorPlanStep &step);
+  QFrame *requestFrame(const ui::InspectorRequestRow &request);
+  void patchRequestFrame(QFrame *frame,
+                         const ui::InspectorRequestRow &request);
   void refreshCurrentTab();
   void refreshPlan();
   void refreshAgents();
@@ -66,6 +83,7 @@ private:
   RequestAction acceptRequest;
   RequestAction rejectRequest;
   std::function<void()> hideAction;
+  std::function<void()> refreshRequested;
 
   QTabWidget *inspectorTabs = nullptr;
   QStackedWidget *infoStack = nullptr;
@@ -81,13 +99,24 @@ private:
   QLabel *protocolStats = nullptr;
 
   std::optional<ui::InspectorPlanSnapshot> planSnapshot;
+  std::unordered_map<std::string, QFrame *> planFrames;
+  std::unordered_map<std::string, ui::InspectorPlanStep> renderedPlanSteps;
+  QWidget *planExplanation = nullptr;
+  QWidget *planMessage = nullptr;
   std::optional<ui::InspectorAgentsSnapshot> agentsSnapshot;
+  std::unordered_map<std::string, QFrame *> agentFrames;
+  std::unordered_map<std::string, ui::InspectorAgentRow> renderedAgentRows;
+  QWidget *agentsMessage = nullptr;
   std::unordered_set<std::string> expandedAgents;
   std::optional<ui::InspectorRequestsSnapshot> requestsSnapshot;
+  std::unordered_map<std::string, QFrame *> requestFrames;
+  std::unordered_map<std::string, ui::InspectorRequestRow> renderedRequests;
+  QWidget *requestsMessage = nullptr;
   QByteArray stateSnapshot;
   QByteArray protocolStatsSnapshot;
   std::deque<QString> protocolLines;
   std::uint64_t observedSequence = 0;
+  std::size_t protocolTelemetryCount = 0;
   bool protocolFollowsTail = true;
   bool mutatingProtocolLog = false;
   int protocolPausedScrollValue = 0;

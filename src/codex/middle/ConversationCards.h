@@ -21,6 +21,8 @@ class QWheelEvent;
 
 namespace codexui::codex::middle {
 
+enum class PresentationImpact { None, PaintOnly, GeometryChanged };
+
 class ContentSizedTextView : public QTextEdit {
 public:
   explicit ContentSizedTextView(int maximumContentHeight,
@@ -34,10 +36,12 @@ public:
 protected:
   void wheelEvent(QWheelEvent *event) override;
   void resizeEvent(QResizeEvent *event) override;
-  void measureAtCurrentWidth(bool notifyParent);
+  [[nodiscard]] bool measureAtCurrentWidth(bool notifyParent);
+  [[nodiscard]] bool contentHeightCapped() const noexcept;
 
 private:
   int preferredHeight_ = 0;
+  bool pinScrollToStart_ = false;
   bool wheelGestureActive_ = false;
   bool wheelGestureDecided_ = false;
   bool wheelGestureOwned_ = false;
@@ -56,6 +60,7 @@ public:
 
   [[nodiscard]] ScrollState scrollState() const;
   [[nodiscard]] bool followsLatest() const noexcept;
+  [[nodiscard]] bool isHeightCapped() const noexcept;
 
   // Returns false for a true no-op. Programmatic document/range changes do
   // not alter the user's follow/paused choice.
@@ -84,7 +89,8 @@ public:
   explicit ConversationCard(const VisibleCardData &data,
                             QWidget *parent = nullptr,
                             bool commandInitiallyCollapsed = true,
-                            bool imageInitiallyCollapsed = true);
+                            bool imageInitiallyCollapsed = true,
+                            bool fileChangesInitiallyCollapsed = true);
   ~ConversationCard() override;
 
   [[nodiscard]] CardKind cardKind() const noexcept;
@@ -92,7 +98,16 @@ public:
   [[nodiscard]] bool isCollapsed() const noexcept;
   void setCollapsed(bool collapsed);
   bool setAuthoritativeTurnActive(bool active);
+  // Select the established nested-card presentation for a child, or clear it
+  // when the card becomes a turn root or a standalone activity.
+  void setNestedPresentation(bool nested);
   void setNestedCards(const std::vector<ConversationCard *> &cards);
+  // ConversationView supplies the retained child widgets in canonical order.
+  // They stay in this existing nested layout while the thread is selected.
+  void setNestedItems(const std::vector<QWidget *> &items);
+  // ConversationView uses this to pause local feedback timers while a card is
+  // not painted.
+  void setViewportVisible(bool visible);
   [[nodiscard]] std::optional<CommandOutputView::ScrollState>
   commandOutputScrollState() const;
   void
@@ -104,9 +119,11 @@ public:
   // kinds in place and also performs the one supported semantic transition
   // from an admitted local prompt to its authoritative user message.
   bool apply(const VisibleCardData &data);
+  PresentationImpact applyPresentation(const VisibleCardData &data);
 
 signals:
   void foldRequested(bool collapsed);
+  void recoveryRequested();
 
 protected:
   void paintEvent(QPaintEvent *event) override;
@@ -119,7 +136,8 @@ private:
 [[nodiscard]] ConversationCard *
 createConversationCard(const VisibleCardData &data, QWidget *parent = nullptr,
                        bool commandInitiallyCollapsed = true,
-                       bool imageInitiallyCollapsed = true);
+                       bool imageInitiallyCollapsed = true,
+                       bool fileChangesInitiallyCollapsed = true);
 
 } // namespace codexui::codex::middle
 

@@ -7,8 +7,17 @@ namespace codexui::codex {
 
 class Configuration;
 
-int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
-                     bool connectBridge);
+} // namespace codexui::codex
+
+namespace codexui::nodegraph {
+class NodeGraph;
+class ThreadChannels;
+} // namespace codexui::nodegraph
+
+namespace codexui::codex {
+
+int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
+                     nodegraph::ThreadChannels &channels, bool connectBridge);
 
 } // namespace codexui::codex
 

@@ -21,12 +21,20 @@ class TurnSettingsWidget final : public QWidget {
 public:
   explicit TurnSettingsWidget(QWidget *parent = nullptr);
 
-  void setContext(std::string identity, const nlohmann::json &canonical,
-                  const nlohmann::json &models,
-                  const nlohmann::json &permissionProfiles,
-                  std::uint64_t settingsRevision = 0,
-                  const nlohmann::json &settingsUpdate =
-                      nlohmann::json::object());
+  void
+  setContext(std::string identity, const nlohmann::json &canonical,
+             const nlohmann::json &models,
+             const nlohmann::json &permissionProfiles,
+             std::uint64_t settingsRevision = 0,
+             const nlohmann::json &settingsUpdate = nlohmann::json::object());
+  // The shared-graph binding updates these independently so unrelated stream
+  // revisions never rebuild catalog-backed controls.
+  void setCanonicalContext(
+      std::string identity, const nlohmann::json &canonical,
+      std::uint64_t settingsRevision = 0,
+      const nlohmann::json &settingsUpdate = nlohmann::json::object());
+  void setModelCatalog(const nlohmann::json &models);
+  void setPermissionProfileCatalog(const nlohmann::json &permissionProfiles);
   void setControlsEnabled(bool enabled);
   void setWorkspace(QString path);
 
@@ -52,6 +60,10 @@ private:
   };
 
   void markTouched(Field field);
+  [[nodiscard]] bool
+  applyCanonicalContext(std::string identity, const nlohmann::json &canonical,
+                        std::uint64_t settingsRevision,
+                        const nlohmann::json &settingsUpdate);
   void refreshFromCanonical(
       const nlohmann::json &canonical,
       const std::array<bool, static_cast<std::size_t>(Field::Count)> &fields);

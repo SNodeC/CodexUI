@@ -1,4 +1,13 @@
-# Codex app-server protocol: complete framework-neutral C++ master data model
+# Historical Codex app-server protocol and proposed master data model
+
+> **Historical, non-normative design research.** The pinned wire-method
+> inventory and schema observations in this document remain useful protocol
+> references. Its proposed journal, ledger, reducer, outbox, snapshot/cursor,
+> persistence, replay, and adapter runtime are rejected and are not CodexUI's
+> implemented architecture. The current native contract is
+> [`../two-thread-shared-node-graph.md`](../two-thread-shared-node-graph.md): one
+> current shared `NodeGraph`, exactly two relevant threads, two typed SPSC
+> queues, and two Linux eventfds.
 
 ## Scope and reproducible baseline
 

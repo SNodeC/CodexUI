@@ -24,6 +24,7 @@
 #include <QWidgetAction>
 
 #include <algorithm>
+#include <ranges>
 
 namespace codexui::codex {
 namespace {
@@ -353,9 +354,57 @@ void TurnSettingsWidget::setContext(std::string identity,
                                     const nlohmann::json &permissionProfiles,
                                     std::uint64_t settingsRevision,
                                     const nlohmann::json &settingsUpdate) {
+  modelCatalog = models.is_array() ? models : nlohmann::json::array();
+  static_cast<void>(applyCanonicalContext(std::move(identity), canonical,
+                                          settingsRevision, settingsUpdate));
+  refreshModels(modelCatalog);
+  refreshPermissionProfiles(permissionProfiles);
+  refreshModelOptions();
+  refreshAccessCompatibility();
+  refreshMoreIndicator();
+}
+
+void TurnSettingsWidget::setCanonicalContext(
+    std::string identity, const nlohmann::json &canonical,
+    std::uint64_t settingsRevision, const nlohmann::json &settingsUpdate) {
+  const bool identityChanged = contextIdentity != identity;
+  const auto differs = [this, &canonical](const char *name) {
+    return canonicalContext.value(name, nlohmann::json(nullptr)) !=
+           canonical.value(name, nlohmann::json(nullptr));
+  };
+  const bool modelChanged = identityChanged || differs("model");
+  const bool accessChanged = identityChanged || differs("sandbox") ||
+                             differs("sandboxPolicy") ||
+                             differs("activePermissionProfile");
+  if (!applyCanonicalContext(std::move(identity), canonical, settingsRevision,
+                             settingsUpdate))
+    return;
+  if (modelChanged)
+    refreshModelOptions();
+  if (accessChanged)
+    refreshAccessCompatibility();
+  refreshMoreIndicator();
+}
+
+void TurnSettingsWidget::setModelCatalog(const nlohmann::json &models) {
+  modelCatalog = models.is_array() ? models : nlohmann::json::array();
+  refreshModels(modelCatalog);
+  refreshModelOptions();
+  refreshMoreIndicator();
+}
+
+void TurnSettingsWidget::setPermissionProfileCatalog(
+    const nlohmann::json &permissionProfiles) {
+  refreshPermissionProfiles(permissionProfiles);
+  refreshAccessCompatibility();
+  refreshMoreIndicator();
+}
+
+bool TurnSettingsWidget::applyCanonicalContext(
+    std::string identity, const nlohmann::json &canonical,
+    std::uint64_t settingsRevision, const nlohmann::json &settingsUpdate) {
   const bool changed = contextIdentity != identity;
   contextIdentity = std::move(identity);
-  modelCatalog = models.is_array() ? models : nlohmann::json::array();
   std::array<bool, static_cast<std::size_t>(Field::Count)> fields{};
   if (changed) {
     fields.fill(true);
@@ -373,14 +422,13 @@ void TurnSettingsWidget::setContext(std::string identity,
     fields[static_cast<std::size_t>(Field::Model)] =
         differs("model") || received("model");
     fields[static_cast<std::size_t>(Field::Effort)] =
-        differs("effort") || differs("reasoningEffort") ||
-        received("effort") || received("reasoningEffort");
+        differs("effort") || differs("reasoningEffort") || received("effort") ||
+        received("reasoningEffort");
     fields[static_cast<std::size_t>(Field::Personality)] =
         differs("personality") || received("personality");
-    const bool sandboxChanged = differs("sandbox") ||
-                                differs("sandboxPolicy") ||
-                                received("sandbox") ||
-                                received("sandboxPolicy");
+    const bool sandboxChanged =
+        differs("sandbox") || differs("sandboxPolicy") || received("sandbox") ||
+        received("sandboxPolicy");
     fields[static_cast<std::size_t>(Field::Sandbox)] = sandboxChanged;
     fields[static_cast<std::size_t>(Field::Network)] = sandboxChanged;
     fields[static_cast<std::size_t>(Field::Approval)] =
@@ -405,17 +453,17 @@ void TurnSettingsWidget::setContext(std::string identity,
   refreshFromCanonical(canonical, fields);
   canonicalContext = canonical;
   canonicalSettingsRevision = settingsRevision;
-  refreshModels(modelCatalog);
-  refreshPermissionProfiles(permissionProfiles);
-  refreshModelOptions();
-  refreshAccessCompatibility();
-  refreshMoreIndicator();
+  return std::ranges::any_of(fields, [](bool refresh) { return refresh; });
 }
 
 void TurnSettingsWidget::setControlsEnabled(bool enabled) {
-  setEnabled(enabled);
-  setToolTip(enabled ? QString{}
-                     : QStringLiteral("Settings apply when starting a turn"));
+  if (isEnabled() != enabled)
+    setEnabled(enabled);
+  const QString tip =
+      enabled ? QString{}
+              : QStringLiteral("Settings apply when starting a turn");
+  if (toolTip() != tip)
+    setToolTip(tip);
 }
 
 void TurnSettingsWidget::setWorkspace(QString path) {
@@ -572,8 +620,8 @@ void TurnSettingsWidget::refreshFromCanonical(
     cwd->setText(text(stringValue(canonical, "cwd")));
   if (refresh(Field::PermissionProfile)) {
     QString activeProfile = QString::fromLatin1(DefaultValue);
-    const nlohmann::json profile = canonical.value(
-        "activePermissionProfile", nlohmann::json::object());
+    const nlohmann::json profile =
+        canonical.value("activePermissionProfile", nlohmann::json::object());
     if (profile.is_object() && profile.contains("id") &&
         profile["id"].is_string())
       activeProfile = text(profile["id"].get<std::string>());
@@ -777,13 +825,12 @@ void TurnSettingsWidget::refreshAccessCompatibility() {
     selectValue(network, QString::fromLatin1(DefaultValue));
   }
   sandbox->setToolTip({});
-  network->setToolTip(value(sandbox) == "danger-full-access"
-                          ? QStringLiteral(
-                                "Full access already includes network access")
-                      : value(sandbox) == DefaultValue
-                          ? QStringLiteral(
-                                "Select an access mode before network access")
-                          : QString{});
+  network->setToolTip(
+      value(sandbox) == "danger-full-access"
+          ? QStringLiteral("Full access already includes network access")
+      : value(sandbox) == DefaultValue
+          ? QStringLiteral("Select an access mode before network access")
+          : QString{});
 }
 
 void TurnSettingsWidget::refreshMoreIndicator() {

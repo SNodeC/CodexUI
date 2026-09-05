@@ -54,6 +54,7 @@ public:
   void setAttentionRequest(QString title, QString detail, bool directAccept,
                            QString acceptLabel);
   void setAttentionEnabled(bool enabled);
+  void setAttentionActionEnabled(bool enabled, bool reviewEnabled);
   void setActiveTurn(bool active);
   void setCanSubmit(bool canSubmit);
   void setSettingsEnabled(bool enabled);

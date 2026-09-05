@@ -3,9 +3,11 @@
 #include "codex/ClientRuntime.h"
 
 #include "codex/Configuration.h"
-#include "codex/PresentationProtocol.h"
-#include "codex/ProtocolNormalizer.h"
-#include "codex/ipc/SNodeSocketPairEndpoint.h"
+#include "codex/CurrentProtocolAdapters.h"
+#include "codex/NodeGraphJson.h"
+#include "codex/WorkerMailboxReceiver.h"
+#include "codex/nodegraph/PromptText.h"
+#include "codex/nodegraph/WorkerLogic.h"
 
 #include <ai/openai/codex/frontend/CodexBridge.h>
 #include <ai/openai/codex/frontend/client/ClientConnection.h>
@@ -13,7 +15,6 @@
 #if defined(CODEXUI_CODEX_FRONTEND_WEBSOCKET)
 #include <ai/openai/codex/frontend/client/WebSocketClient.h>
 #endif
-#include <ai/openai/codex/protocol/JsonLineFramer.h>
 #include <ai/openai/codex/protocol/RuntimePaths.h>
 #include <core/EventReceiver.h>
 #include <core/SNodeC.h>
@@ -37,13 +38,23 @@
 
 #include <algorithm>
 #include <array>
-#include <cerrno>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <deque>
 #include <functional>
+#include <map>
 #include <memory>
+#include <optional>
+#include <ranges>
 #include <string>
+#include <string_view>
+#include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <variant>
 
 namespace codexui::codex {
 namespace {
@@ -51,7 +62,739 @@ namespace {
 namespace codex = ai::openai::codex;
 namespace client = ai::openai::codex::frontend::client;
 
-constexpr std::size_t MaximumIpcReadBytesPerEvent = 256U * 1024U;
+nodegraph::Value::Object decodedObject(const nlohmann::json &value) {
+  if (value.is_object())
+    return objectFromJson(value);
+  return {{"value", valueFromJson(value)}};
+}
+
+std::string jsonString(const nlohmann::json &object, std::string_view key) {
+  if (!object.is_object())
+    return {};
+  const auto found = object.find(std::string(key));
+  return found != object.end() && found->is_string() ? found->get<std::string>()
+                                                     : std::string{};
+}
+
+std::string resultError(const nlohmann::json &raw) {
+  if (!raw.is_object())
+    return "Codex operation failed";
+  const auto error = raw.find("error");
+  if (error != raw.end() && error->is_object()) {
+    const std::string message = jsonString(*error, "message");
+    if (!message.empty())
+      return message;
+  }
+  const std::string message = jsonString(raw, "message");
+  return message.empty() ? "Codex operation failed" : message;
+}
+
+std::optional<std::int64_t> threadActivityAt(std::string_view method) noexcept {
+  if (method == "thread/read" || method == "thread/resume")
+    return std::nullopt;
+  return std::chrono::duration_cast<std::chrono::seconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+std::int64_t wallClockMilliseconds() noexcept {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+nlohmann::json jsonObject(nodegraph::Value::Object object) {
+  return jsonFromValue(nodegraph::Value(std::move(object)));
+}
+
+const nodegraph::Value *valueMember(const nodegraph::Value::Object &object,
+                                    std::string_view key) {
+  const auto found = object.find(key);
+  return found == object.end() ? nullptr : &found->second;
+}
+
+std::string valueString(const nodegraph::Value::Object &object,
+                        std::string_view key) {
+  const nodegraph::Value *value = valueMember(object, key);
+  const std::string *string = value ? value->asString() : nullptr;
+  return string ? *string : std::string{};
+}
+
+std::optional<std::uint64_t>
+valueUnsigned(const nodegraph::Value::Object &object, std::string_view key) {
+  const nodegraph::Value *value = valueMember(object, key);
+  if (const std::uint64_t *number = value ? value->asUInt64() : nullptr)
+    return *number;
+  if (const std::int64_t *number = value ? value->asInt64() : nullptr;
+      number && *number >= 0)
+    return static_cast<std::uint64_t>(*number);
+  return std::nullopt;
+}
+
+std::optional<nodegraph::ProtocolRequestId>
+requestIdMember(const nlohmann::json &object, std::string_view key) {
+  if (!object.is_object())
+    return std::nullopt;
+  const auto found = object.find(std::string(key));
+  if (found == object.end() || found->is_null())
+    return std::nullopt;
+  try {
+    return requestIdFromJson(*found);
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+std::string boundedProtocolMetadata(std::string result,
+                                    std::size_t maximumBytes = 160) {
+  for (char &character : result) {
+    const unsigned char byte = static_cast<unsigned char>(character);
+    if (byte < 0x20U || byte == 0x7fU)
+      character = ' ';
+  }
+  if (result.size() > maximumBytes) {
+    result.resize(maximumBytes);
+    result += "...";
+  }
+  return result;
+}
+
+std::string boundedProtocolMetadata(const nlohmann::json &value,
+                                    std::size_t maximumBytes = 160) {
+  if (value.is_string())
+    return boundedProtocolMetadata(value.get<std::string>(), maximumBytes);
+  if (value.is_number_unsigned())
+    return boundedProtocolMetadata(std::to_string(value.get<std::uint64_t>()),
+                                   maximumBytes);
+  if (value.is_number_integer())
+    return boundedProtocolMetadata(std::to_string(value.get<std::int64_t>()),
+                                   maximumBytes);
+  return {};
+}
+
+bool credentialShapedProtocolText(std::string_view value) {
+  std::string lowered;
+  lowered.reserve(value.size());
+  for (const unsigned char character : value)
+    lowered.push_back(static_cast<char>(std::tolower(character)));
+  constexpr std::array markers{
+      std::string_view("authorization"), std::string_view("bearer "),
+      std::string_view("password"),      std::string_view("secret"),
+      std::string_view("token="),        std::string_view("token:"),
+      std::string_view("cookie"),        std::string_view("credential"),
+      std::string_view("api_key"),       std::string_view("apikey"),
+      std::string_view("-----begin"),    std::string_view("github_pat_"),
+      std::string_view("ghp_"),          std::string_view("xoxb-"),
+      std::string_view("xoxp-"),         std::string_view("xoxa-")};
+  if (std::ranges::any_of(markers, [&lowered](std::string_view marker) {
+        return lowered.find(marker) != std::string::npos;
+      }))
+    return true;
+  if (lowered.find("sk-") != std::string::npos)
+    return true;
+  const std::size_t jwt = value.find("eyJ");
+  if (jwt != std::string_view::npos) {
+    const std::size_t firstDot = value.find('.', jwt);
+    if (firstDot != std::string_view::npos &&
+        value.find('.', firstDot + 1) != std::string_view::npos)
+      return true;
+  }
+  return false;
+}
+
+std::string protocolIdentifierMetadata(const nlohmann::json &value) {
+  std::string result = boundedProtocolMetadata(value);
+  return credentialShapedProtocolText(result) ? "<redacted-id>"
+                                              : std::move(result);
+}
+
+std::string safeProtocolErrorText(std::string_view raw) {
+  if (credentialShapedProtocolText(raw) || raw.find('/') != std::string::npos ||
+      raw.find('\\') != std::string::npos ||
+      raw.find('`') != std::string::npos || raw.find('$') != std::string::npos)
+    return "[redacted error detail]";
+  return boundedProtocolMetadata(std::string(raw), 240);
+}
+
+std::string safeProtocolError(const nlohmann::json &message) {
+  const auto error = message.find("error");
+  if (error == message.end() || !error->is_object())
+    return {};
+  const auto detail = error->find("message");
+  if (detail == error->end() || !detail->is_string())
+    return {};
+  return safeProtocolErrorText(detail->get_ref<const std::string &>());
+}
+
+struct DiagnosticRequestId final {
+  std::string key;
+  std::string display;
+};
+
+std::optional<DiagnosticRequestId>
+diagnosticRequestId(const nlohmann::json &message) {
+  if (!message.is_object())
+    return std::nullopt;
+  const auto found = message.find("id");
+  if (found == message.end() || found->is_null())
+    return std::nullopt;
+  if (found->is_string()) {
+    const std::string &value = found->get_ref<const std::string &>();
+    if (value.size() <= 160 && !credentialShapedProtocolText(value))
+      return DiagnosticRequestId{"string:" + value, value};
+    // Keep the chronology visible without retaining a secret or allowing a
+    // lossy digest collision to associate a response with the wrong request.
+    return DiagnosticRequestId{{}, "<oversized-or-sensitive-id>"};
+  }
+  if (found->is_number_unsigned()) {
+    const std::string value = std::to_string(found->get<std::uint64_t>());
+    return DiagnosticRequestId{"unsigned:" + value, value};
+  }
+  if (found->is_number_integer()) {
+    const std::string value = std::to_string(found->get<std::int64_t>());
+    return DiagnosticRequestId{"signed:" + value, value};
+  }
+  return std::nullopt;
+}
+
+std::string protocolErrorCode(const nlohmann::json &message) {
+  const auto error = message.find("error");
+  if (error == message.end() || !error->is_object())
+    return {};
+  const auto code = error->find("code");
+  return code == error->end() ? std::string{}
+                              : boundedProtocolMetadata(*code, 48);
+}
+
+std::string_view nodeActionDiagnosticSubject(nodegraph::NodeActionKind kind) {
+  using enum nodegraph::NodeActionKind;
+  switch (kind) {
+  case Hydrate:
+  case Reload:
+    return "thread/read";
+  case LoadHistory:
+    return "thread/turns/list";
+  case Rename:
+    return "thread/name/set";
+  case Fork:
+    return "thread/fork";
+  case Archive:
+    return "thread/archive";
+  case Unarchive:
+    return "thread/unarchive";
+  case Delete:
+    return "thread/delete";
+  case SubmitPrompt:
+    return "turn/start";
+  case InterruptTurn:
+    return "turn/interrupt";
+  case ResolveInteraction:
+    return "serverRequest/respond";
+  case PromptMaterialized:
+    return "local/prompt/materialized";
+  case UiDetached:
+    return "local/ui/detached";
+  }
+  return "local/node-action";
+}
+
+std::string_view
+runtimeActionDiagnosticSubject(nodegraph::RuntimeActionKind kind) {
+  using enum nodegraph::RuntimeActionKind;
+  switch (kind) {
+  case RefreshThreads:
+    return "thread/list";
+  case CreateThread:
+    return "thread/start";
+  case Connect:
+    return "connection/connect";
+  case Disconnect:
+    return "connection/disconnect";
+  case Reconnect:
+    return "connection/reconnect";
+  case ConfigureConnection:
+    return "connection/configure";
+  case ClaimController:
+    return "connection/controller/claim";
+  case ReleaseController:
+    return "connection/controller/release";
+  case RefreshCatalogs:
+    return "catalog/refresh";
+  }
+  return "local/runtime-action";
+}
+
+std::string protocolMutationAuthority(std::string_view method,
+                                      bool fromAppServer, bool request,
+                                      bool notification, bool response,
+                                      bool success,
+                                      bool responseObservedInterveningFrame) {
+  if (!fromAppServer) {
+    // An outbound response resolves one retained reverse interaction. Outbound
+    // requests and initialized do not themselves publish provider facts.
+    return response ? "remove" : "none";
+  }
+  if (request)
+    return "merge";
+  if (!success)
+    return "none";
+  if (notification) {
+    constexpr std::array removedNotifications{
+        std::string_view("thread/deleted"),
+        std::string_view("serverRequest/resolved"),
+        std::string_view("thread/goal/cleared")};
+    if (std::ranges::find(removedNotifications, method) !=
+        removedNotifications.end())
+      return "remove";
+    const auto descriptor = nodegraph::findProtocolMethod(
+        nodegraph::ProtocolDirection::ServerNotification, method);
+    if (!descriptor || descriptor->get().disposition !=
+                           nodegraph::MessageDisposition::GraphUpdate)
+      return "none";
+    // These messages invalidate or report transient provider facilities, but
+    // do not themselves author current graph facts.
+    if (method == "skills/changed" ||
+        method == "mcpServer/event/stream/notification")
+      return "none";
+    if (method == "thread/name/updated" || method == "thread/goal/updated" ||
+        method == "thread/queue/changed" ||
+        method == "thread/project/updated" ||
+        method == "thread/tokenUsage/updated" ||
+        method == "turn/diff/updated" || method == "turn/plan/updated" ||
+        method == "item/fileChange/patchUpdated" ||
+        method == "account/updated" || method == "account/rateLimits/updated" ||
+        method == "app/list/updated" ||
+        method == "remoteControl/status/changed" ||
+        method == "turn/moderationMetadata" ||
+        method == "model/safetyBuffering/updated" ||
+        method == "thread/realtime/sdp")
+      return "replace";
+    return "merge";
+  }
+  if (!response)
+    return "none";
+  if (method == "thread/read")
+    return responseObservedInterveningFrame ? "merge" : "replace";
+  constexpr std::array mergedResults{
+      std::string_view("thread/list"), std::string_view("thread/start"),
+      std::string_view("thread/resume"), std::string_view("thread/fork"),
+      std::string_view("turn/start")};
+  if (std::ranges::find(mergedResults, method) != mergedResults.end())
+    return "merge";
+  constexpr std::array replacedResults{
+      std::string_view("thread/turns/list"),
+      std::string_view("thread/items/list"),
+      std::string_view("thread/queue/list"),
+      std::string_view("thread/backgroundTerminals/list"),
+      std::string_view("thread/timeline/list"),
+      std::string_view("thread/realtime/listVoices"),
+      std::string_view("project/list"),
+      std::string_view("project/read"),
+      std::string_view("threadSection/list"),
+      std::string_view("skills/list"),
+      std::string_view("hooks/list"),
+      std::string_view("plugin/list"),
+      std::string_view("plugin/read"),
+      std::string_view("plugin/installed"),
+      std::string_view("app/read"),
+      std::string_view("app/list"),
+      std::string_view("app/installed"),
+      std::string_view("model/list"),
+      std::string_view("modelProvider/capabilities/read"),
+      std::string_view("experimentalFeature/list"),
+      std::string_view("permissionProfile/list"),
+      std::string_view("collaborationMode/list"),
+      std::string_view("mcpServerStatus/list"),
+      std::string_view("config/read"),
+      std::string_view("configRequirements/read"),
+      std::string_view("account/read"),
+      std::string_view("account/rateLimits/read"),
+      std::string_view("account/usage/read"),
+      std::string_view("account/workspaceMessages/read"),
+      std::string_view("windowsSandbox/readiness")};
+  if (std::ranges::find(replacedResults, method) != replacedResults.end())
+    return "replace";
+  // The current protocol contains additional read/list/get families which do
+  // not need bespoke UI handling. Their successful results still replace the
+  // addressed current catalog or domain value, matching the original
+  // Inspector contract.
+  if (method.ends_with("/list") || method.ends_with("/read") ||
+      method.ends_with("/get"))
+    return "replace";
+  return "none";
+}
+
+class ProtocolDiagnosticEmitter final {
+public:
+  void setGenerations(nodegraph::WorkerGenerations generations) {
+    if (generationsKnown_ && generations != generations_) {
+      clientRequests_.clear();
+      serverRequests_.clear();
+      clientRequestOrder_.clear();
+      serverRequestOrder_.clear();
+    }
+    generations_ = generations;
+    generationsKnown_ = true;
+  }
+
+  void observeLifecycle(std::string_view state, std::string_view detail,
+                        nodegraph::ThreadChannels &channels) {
+    nodegraph::Value::Object fields{
+        {"direction", nodegraph::Value("transport event")},
+        {"source", nodegraph::Value("CodexBridge")},
+        {"authority", nodegraph::Value("none")},
+        {"subject", nodegraph::Value("connection.lifecycle")},
+        {"state",
+         nodegraph::Value(boundedProtocolMetadata(std::string(state)))}};
+    if (state == "failure" || state == "disconnected") {
+      fields.emplace("outcome", nodegraph::Value("ERROR"));
+      if (!detail.empty())
+        fields.emplace("error",
+                       nodegraph::Value(safeProtocolErrorText(detail)));
+    }
+    deliver(std::move(fields), channels);
+  }
+
+  void observeBridge(const nlohmann::json &message,
+                     nodegraph::ThreadChannels &channels) {
+    const std::string kind = jsonString(message, "kind");
+    std::string subject = "bridge.unknown";
+    std::string authority = "none";
+    if (kind == "bridge.connection")
+      subject = "connection.bridge";
+    else if (kind == "bridge.controller") {
+      subject = "connection.controller";
+      authority = "replace";
+    } else if (kind == "bridge.provider") {
+      subject = "connection.provider";
+      authority = "replace";
+    } else if (kind == "bridge.diagnostic") {
+      subject = "bridge.diagnostic";
+    }
+    nodegraph::Value::Object fields{
+        {"direction", nodegraph::Value("bridge event")},
+        {"source", nodegraph::Value("CodexBridge")},
+        {"authority", nodegraph::Value(std::move(authority))},
+        {"subject", nodegraph::Value(std::move(subject))}};
+    for (std::string_view key : {"connectionId", "role", "state", "event"}) {
+      const auto found = message.find(std::string(key));
+      if (found == message.end())
+        continue;
+      std::string value = protocolIdentifierMetadata(*found);
+      if (!value.empty())
+        fields.emplace(std::string(key), nodegraph::Value(std::move(value)));
+    }
+    if (kind == "bridge.diagnostic") {
+      fields.emplace("outcome", nodegraph::Value("ERROR"));
+      fields.emplace("errorCategory", nodegraph::Value("bridge"));
+      const std::string code =
+          protocolIdentifierMetadata(message.value("code", nlohmann::json{}));
+      if (!code.empty())
+        fields.emplace("errorCode", nodegraph::Value(code));
+      const std::string raw = jsonString(message, "message");
+      if (!raw.empty())
+        fields.emplace("error", nodegraph::Value(safeProtocolErrorText(raw)));
+    }
+    deliver(std::move(fields), channels);
+  }
+
+  void observeLocalRejection(std::string_view subject,
+                             std::string_view correlation,
+                             const nodegraph::NodeRef &target,
+                             std::string_view error,
+                             nodegraph::ThreadChannels &channels) {
+    nodegraph::Value::Object fields{
+        {"direction", nodegraph::Value("local result")},
+        {"source", nodegraph::Value("CodexUI")},
+        {"authority", nodegraph::Value("none")},
+        {"subject",
+         nodegraph::Value(boundedProtocolMetadata(std::string(subject), 192))},
+        {"outcome", nodegraph::Value("ERROR")},
+        {"errorCategory", nodegraph::Value("local-validation")},
+        {"error", nodegraph::Value(safeProtocolErrorText(error))}};
+    std::string displayedCorrelation = boundedProtocolMetadata(std::string(
+        correlation.empty() && target ? std::string_view(target->id().canonical)
+                                      : correlation));
+    if (credentialShapedProtocolText(displayedCorrelation))
+      displayedCorrelation = "<redacted-id>";
+    if (!displayedCorrelation.empty())
+      fields.emplace("correlation",
+                     nodegraph::Value(std::move(displayedCorrelation)));
+    if (target) {
+      std::string targetId = boundedProtocolMetadata(target->id().canonical);
+      if (credentialShapedProtocolText(targetId))
+        targetId = "<redacted-id>";
+      const std::string scope = targetId;
+      fields.emplace("targetId", nodegraph::Value(std::move(targetId)));
+      std::string_view scopeKey;
+      switch (target->id().kind) {
+      case nodegraph::NodeKind::Thread:
+        scopeKey = "threadId";
+        break;
+      case nodegraph::NodeKind::Turn:
+        scopeKey = "turnId";
+        break;
+      case nodegraph::NodeKind::Item:
+        scopeKey = "itemId";
+        break;
+      case nodegraph::NodeKind::Interaction:
+        scopeKey = "requestId";
+        break;
+      default:
+        break;
+      }
+      if (!scopeKey.empty())
+        fields.emplace(std::string(scopeKey), nodegraph::Value(scope));
+    }
+    deliver(std::move(fields), channels);
+  }
+
+  void observe(codex::protocol::AppServerDirection direction,
+               const nlohmann::json &message,
+               nodegraph::ThreadChannels &channels) {
+    const nodegraph::WorkerGenerations generations = generations_;
+    const bool fromAppServer =
+        direction == codex::protocol::AppServerDirection::FromAppServer;
+    const std::optional<std::string> wireMethod =
+        codex::protocol::jsonRpcMethod(message);
+    const std::optional<DiagnosticRequestId> requestId =
+        diagnosticRequestId(message);
+    const bool request = wireMethod && requestId;
+    const bool notification = wireMethod && !requestId;
+    const bool response = !wireMethod && requestId;
+    const bool success = message.find("error") == message.end();
+
+    nodegraph::Value::Object scopeDetails;
+    const nlohmann::json *scope = nullptr;
+    if (wireMethod) {
+      const auto parameters = message.find("params");
+      if (parameters != message.end() && parameters->is_object())
+        scope = &*parameters;
+    } else {
+      const auto result = message.find("result");
+      if (result != message.end() && result->is_object())
+        scope = &*result;
+    }
+    if (scope)
+      addScope(scopeDetails, *scope);
+
+    std::string method =
+        boundedProtocolMetadata(wireMethod.value_or(std::string{}), 192);
+    const std::string correlationKey =
+        requestId ? requestId->key : std::string{};
+    const std::string correlation =
+        requestId ? requestId->display : std::string{};
+    bool responseObservedInterveningFrame = false;
+    if (request && !correlationKey.empty()) {
+      auto &requests = fromAppServer ? serverRequests_ : clientRequests_;
+      auto &order = fromAppServer ? serverRequestOrder_ : clientRequestOrder_;
+      remember(
+          requests, order, correlationKey,
+          PendingCorrelation{method, scopeDetails, generations, sequence_ + 1});
+    } else if (response && !correlationKey.empty()) {
+      auto &requests = fromAppServer ? clientRequests_ : serverRequests_;
+      const auto correlated = requests.find(correlationKey);
+      if (correlated != requests.end()) {
+        method = correlated->second.method;
+        responseObservedInterveningFrame =
+            sequence_ != correlated->second.observedSequence;
+        if (correlated->second.generations == generations) {
+          for (const auto &[key, value] : correlated->second.scope)
+            scopeDetails.try_emplace(key, value);
+        }
+        requests.erase(correlated);
+      }
+    }
+    if (method.empty())
+      method = "<uncorrelated response>";
+
+    std::string directionName;
+    if (request)
+      directionName = fromAppServer ? "server request" : "client request";
+    else if (notification)
+      directionName =
+          fromAppServer ? "server notification" : "client notification";
+    else if (response)
+      directionName = fromAppServer
+                          ? (success ? "client result" : "client error")
+                          : (success ? "server result" : "server error");
+    else
+      directionName = fromAppServer ? "server frame" : "client frame";
+
+    nodegraph::Value::Object details{
+        {"direction", nodegraph::Value(std::move(directionName))},
+        {"source", nodegraph::Value(fromAppServer ? "app-server" : "CodexUI")},
+        {"authority",
+         nodegraph::Value(protocolMutationAuthority(
+             method, fromAppServer, request, notification, response, success,
+             responseObservedInterveningFrame))},
+        {"subject", nodegraph::Value(method)}};
+    if (!correlation.empty())
+      details.emplace("correlation", nodegraph::Value(correlation));
+    if (response)
+      details.emplace("outcome", nodegraph::Value(success ? "ok" : "ERROR"));
+    if (!success) {
+      details.emplace("errorCategory", nodegraph::Value("json-rpc"));
+      std::string code = protocolErrorCode(message);
+      if (!code.empty())
+        details.emplace("errorCode", nodegraph::Value(std::move(code)));
+      std::string error = safeProtocolError(message);
+      if (!error.empty())
+        details.emplace("error", nodegraph::Value(std::move(error)));
+    }
+    for (auto &[key, value] : scopeDetails)
+      details.try_emplace(std::move(key), std::move(value));
+    deliver(std::move(details), channels);
+  }
+
+private:
+  struct PendingCorrelation final {
+    std::string method;
+    nodegraph::Value::Object scope;
+    nodegraph::WorkerGenerations generations;
+    std::uint64_t observedSequence = 0;
+    std::uint64_t order = 0;
+  };
+
+  using CorrelationMap = std::map<std::string, PendingCorrelation, std::less<>>;
+  using CorrelationOrder = std::deque<std::pair<std::string, std::uint64_t>>;
+
+  void deliver(nodegraph::Value::Object details,
+               nodegraph::ThreadChannels &channels) {
+    details.emplace("sequence", nodegraph::Value(++sequence_));
+    details.emplace("connectionGeneration",
+                    nodegraph::Value(generations_.connection));
+    details.emplace("providerGeneration",
+                    nodegraph::Value(generations_.provider));
+    if (dropped_ != 0)
+      details.emplace("droppedBefore", nodegraph::Value(dropped_));
+    nodegraph::UiEffect effect{nodegraph::UiEffectKind::ProtocolDiagnostic,
+                               std::nullopt,
+                               {},
+                               std::move(details)};
+    const nodegraph::ChannelSendStatus status = channels.sendUiEffect(effect);
+    if (status == nodegraph::ChannelSendStatus::QueueFull) {
+      ++dropped_;
+      return;
+    }
+    dropped_ = 0;
+  }
+
+  void remember(CorrelationMap &requests, CorrelationOrder &order,
+                const std::string &key, PendingCorrelation correlation) {
+    if (order.size() >= MaximumPendingCorrelations * 2U) {
+      CorrelationOrder compacted;
+      for (const auto &[orderedKey, serial] : order) {
+        const auto current = requests.find(orderedKey);
+        if (current != requests.end() && current->second.order == serial)
+          compacted.emplace_back(orderedKey, serial);
+      }
+      order = std::move(compacted);
+    }
+    while (requests.size() >= MaximumPendingCorrelations &&
+           !requests.contains(key) && !order.empty()) {
+      const auto [oldestKey, serial] = std::move(order.front());
+      order.pop_front();
+      const auto oldest = requests.find(oldestKey);
+      if (oldest != requests.end() && oldest->second.order == serial)
+        requests.erase(oldest);
+    }
+    correlation.order = ++correlationOrder_;
+    order.emplace_back(key, correlation.order);
+    requests.insert_or_assign(key, std::move(correlation));
+  }
+
+  void addScope(nodegraph::Value::Object &details,
+                const nlohmann::json &scope) const {
+    constexpr std::array keys{
+        std::string_view("threadId"), std::string_view("turnId"),
+        std::string_view("itemId"), std::string_view("requestId"),
+        std::string_view("processId")};
+    for (std::string_view key : keys) {
+      const auto found = scope.find(std::string(key));
+      if (found == scope.end())
+        continue;
+      std::string value = protocolIdentifierMetadata(*found);
+      if (!value.empty())
+        details.emplace(std::string(key), nodegraph::Value(std::move(value)));
+    }
+    constexpr std::array nested{
+        std::pair{std::string_view("thread"), std::string_view("threadId")},
+        std::pair{std::string_view("turn"), std::string_view("turnId")},
+        std::pair{std::string_view("item"), std::string_view("itemId")}};
+    for (const auto &[objectName, idName] : nested) {
+      if (details.contains(idName))
+        continue;
+      const auto object = scope.find(std::string(objectName));
+      if (object == scope.end() || !object->is_object())
+        continue;
+      const auto id = object->find("id");
+      if (id == object->end())
+        continue;
+      std::string value = protocolIdentifierMetadata(*id);
+      if (!value.empty())
+        details.emplace(std::string(idName),
+                        nodegraph::Value(std::move(value)));
+    }
+  }
+
+  static constexpr std::size_t MaximumPendingCorrelations = 4096;
+  CorrelationMap clientRequests_;
+  CorrelationMap serverRequests_;
+  CorrelationOrder clientRequestOrder_;
+  CorrelationOrder serverRequestOrder_;
+  nodegraph::WorkerGenerations generations_;
+  std::uint64_t correlationOrder_ = 0;
+  std::uint64_t sequence_ = 0;
+  std::uint64_t dropped_ = 0;
+  bool generationsKnown_ = false;
+};
+
+nlohmann::json
+promptInput(const std::string &prompt,
+            const std::vector<nodegraph::Attachment> &attachments) {
+  nlohmann::json input = nlohmann::json::array(
+      {{{"type", "text"},
+        {"text", nodegraph::composePromptMarkdown(prompt, attachments)},
+        {"text_elements", nlohmann::json::array()}}});
+  for (const nodegraph::Attachment &attachment : attachments) {
+    if (attachment.mimeType.starts_with("image/"))
+      input.push_back({{"type", "localImage"}, {"path", attachment.path}});
+    else if (attachment.mimeType.starts_with("audio/"))
+      input.push_back({{"type", "localAudio"}, {"path", attachment.path}});
+  }
+  return input;
+}
+
+std::optional<nodegraph::ProtocolRequestId>
+decodedRequestId(const nlohmann::json &value) {
+  if (value.is_null())
+    return std::nullopt;
+  return requestIdFromJson(value);
+}
+
+void applyBridgeState(nodegraph::WorkerLogic &logic,
+                      const codex::frontend::CodexBridge &sdk,
+                      const nlohmann::json &message) {
+  const std::string kind = jsonString(message, "kind");
+  if (kind != "bridge.connection" && kind != "bridge.controller" &&
+      kind != "bridge.provider")
+    return;
+
+  const std::string connectionId = sdk.connectionId().value_or("");
+  const std::string controllerId = sdk.controllerConnectionId().value_or("");
+  const std::string role =
+      sdk.role() ? std::string(codex::protocol::toString(*sdk.role())) : "";
+  std::optional<std::string> providerState;
+  std::string detail;
+  if (kind == "bridge.provider") {
+    providerState = jsonString(message, "state");
+    detail = jsonString(message, "reason");
+  }
+  static_cast<void>(logic.bridgeState(
+      connectionId, role, controllerId, sdk.providerGeneration(),
+      std::move(providerState), std::move(detail)));
+}
 
 template <typename Client>
 void configureStreamClient(Client &configuredClient, bool disabled) {
@@ -64,112 +807,485 @@ void configureStreamClient(Client &configuredClient, bool disabled) {
       DefaultMaximumWriteQueueBytes);
 }
 
-template <typename Operation>
-void dispatchRequest(codex::frontend::CodexBridge &sdk,
-                     const nlohmann::json &parameters, std::string action,
-                     std::string correlationId,
-                     ProtocolNormalizer &normalizer) {
-  const std::uint64_t startedAtSequence = normalizer.sequence();
-  sdk.request<Operation>(
+struct RequestOutcome final {
+  bool ok = false;
+  std::optional<nodegraph::ProtocolRequestId> requestId;
+  nodegraph::Value::Object payload;
+  std::string error;
+  std::string threadId;
+  std::string turnId;
+};
+
+void identifyResultEntities(RequestOutcome &outcome) {
+  outcome.threadId = valueString(outcome.payload, "threadId");
+  outcome.turnId = valueString(outcome.payload, "turnId");
+  if (const nodegraph::Value *thread = valueMember(outcome.payload, "thread")) {
+    if (const nodegraph::Value::Object *object = thread->asObject())
+      if (outcome.threadId.empty())
+        outcome.threadId = valueString(*object, "id");
+  }
+  if (const nodegraph::Value *turn = valueMember(outcome.payload, "turn")) {
+    if (const nodegraph::Value::Object *object = turn->asObject())
+      if (outcome.turnId.empty())
+        outcome.turnId = valueString(*object, "id");
+  }
+}
+
+template <typename Operation, typename Published, typename Completed>
+std::string dispatchRequestHandled(codex::frontend::CodexBridge &sdk,
+                                   nlohmann::json parameters,
+                                   nodegraph::WorkerLogic &workerLogic,
+                                   nodegraph::NodeRef requestTarget,
+                                   Published published, Completed completed) {
+  struct RequestPublication final {
+    bool requestPublished = false;
+    nodegraph::NodeRef operation;
+    std::optional<RequestOutcome> synchronousResult;
+  };
+
+  auto publication = std::make_shared<RequestPublication>();
+  const auto expectedGenerations = workerLogic.generations();
+  auto process = [&workerLogic, expectedGenerations, publication,
+                  completed =
+                      std::move(completed)](RequestOutcome outcome) mutable {
+    if (workerLogic.generations() != expectedGenerations)
+      return;
+    nodegraph::DecodedMessage decoded{
+        outcome.ok ? nodegraph::DecodedMessageKind::ClientResult
+                   : nodegraph::DecodedMessageKind::ClientError,
+        std::string(Operation::method),
+        outcome.requestId,
+        std::move(outcome.payload),
+        publication->operation,
+        threadActivityAt(Operation::method)};
+    completed(std::move(outcome), std::move(decoded));
+  };
+  const std::string requestId = sdk.request<Operation>(
       typename Operation::Params{parameters},
-      [action = std::move(action), correlationId = std::move(correlationId),
-       context = parameters, startedAtSequence,
-       &normalizer](typename Operation::Response &response) mutable {
-        normalizer.operationResult(std::move(action), std::move(correlationId),
-                                   std::move(context), response.getRaw(),
-                                   startedAtSequence);
+      [publication, process](typename Operation::Response &response) mutable {
+        const bool ok = response.ok();
+        const nlohmann::json &raw = response.getRaw();
+        const nlohmann::json payload =
+            ok ? response.getPayload()
+               : (raw.is_object() && raw.contains("error") ? raw["error"]
+                                                           : raw);
+        RequestOutcome outcome{ok, decodedRequestId(response.jsonRpcId()),
+                               decodedObject(payload),
+                               ok ? std::string{} : resultError(raw)};
+        identifyResultEntities(outcome);
+        if (publication->requestPublished)
+          process(std::move(outcome));
+        else
+          publication->synchronousResult.emplace(std::move(outcome));
       });
+  const nodegraph::ProtocolRequestId typedRequestId(requestId);
+  nodegraph::DecodedMessage decodedRequest{
+      nodegraph::DecodedMessageKind::ClientRequest,
+      std::string(Operation::method),
+      typedRequestId,
+      decodedObject(parameters),
+      {},
+      threadActivityAt(Operation::method)};
+  decodedRequest.requestTarget = std::move(requestTarget);
+  nodegraph::WorkerApplyResult applied =
+      workerLogic.applyDetailed(std::move(decodedRequest));
+  publication->operation = std::move(applied.primary);
+  published(typedRequestId);
+  publication->requestPublished = true;
+  if (publication->synchronousResult)
+    process(std::move(*publication->synchronousResult));
+  return requestId;
+}
+
+template <typename Operation, typename Published, typename Completed>
+std::string dispatchRequest(codex::frontend::CodexBridge &sdk,
+                            nlohmann::json parameters,
+                            nodegraph::WorkerLogic &workerLogic,
+                            nodegraph::NodeRef requestTarget,
+                            Published published, Completed completed) {
+  return dispatchRequestHandled<Operation>(
+      sdk, std::move(parameters), workerLogic, std::move(requestTarget),
+      std::move(published),
+      [&workerLogic, completed = std::move(completed)](
+          RequestOutcome outcome, nodegraph::DecodedMessage decoded) mutable {
+        static_cast<void>(workerLogic.applyDetailed(std::move(decoded)));
+        completed(std::move(outcome));
+      });
+}
+
+template <typename Operation, typename Completed>
+std::string
+dispatchRequest(codex::frontend::CodexBridge &sdk, nlohmann::json parameters,
+                nodegraph::WorkerLogic &workerLogic,
+                nodegraph::NodeRef requestTarget, Completed completed) {
+  return dispatchRequest<Operation>(
+      sdk, std::move(parameters), workerLogic, std::move(requestTarget),
+      [](const nodegraph::ProtocolRequestId &) {}, std::move(completed));
+}
+
+template <typename Operation>
+std::string dispatchRequest(codex::frontend::CodexBridge &sdk,
+                            nlohmann::json parameters,
+                            nodegraph::WorkerLogic &workerLogic,
+                            nodegraph::NodeRef requestTarget = {}) {
+  return dispatchRequest<Operation>(sdk, std::move(parameters), workerLogic,
+                                    std::move(requestTarget),
+                                    [](RequestOutcome) {});
 }
 
 } // namespace
 
-int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
-                     bool connectBridge) {
+int runClientRuntime(Configuration &configuration, nodegraph::NodeGraph &graph,
+                     nodegraph::ThreadChannels &channels, bool connectBridge) {
   using StreamFactory = client::StreamSocketContextFactory;
 
   const std::size_t maximumFrameBytes = configuration.maximumFrameBytes();
+  nodegraph::WorkerLogic workerLogic(graph, channels);
 
-  auto *ipcEndpoint = ipc::SNodeSocketPairEndpoint::create(
-      socketPairDescriptor, DefaultMaximumWriteQueueBytes,
-      MaximumIpcReadBytesPerEvent);
-  if (!ipcEndpoint)
-    return 1;
-
-  codex::protocol::JsonLineFramer ipcFramer(maximumFrameBytes);
-  codex::frontend::CodexBridge sdk({});
-
-  const auto sendToQt = [&ipcEndpoint,
-                         maximumFrameBytes](const nlohmann::json &message) {
-    if (!ipcEndpoint)
-      return false;
-    try {
-      return ipcEndpoint->send(
-          codex::protocol::JsonLineFramer::encode(message, maximumFrameBytes));
-    } catch (...) {
-      return false;
-    }
+  using ServerRequestParams = std::variant<
+      codex::generated::server_requests::CommandExecutionRequestApproval::
+          Params,
+      codex::generated::server_requests::FileChangeRequestApproval::Params,
+      codex::generated::server_requests::ToolRequestUserInput::Params,
+      codex::generated::server_requests::McpServerElicitationRequest::Params,
+      codex::generated::server_requests::PermissionsRequestApproval::Params,
+      codex::generated::server_requests::DynamicToolCall::Params,
+      codex::generated::server_requests::ChatgptAuthTokensRefresh::Params,
+      codex::generated::server_requests::AttestationGenerate::Params,
+      codex::generated::server_requests::ApplyPatchApproval::Params,
+      codex::generated::server_requests::ExecCommandApproval::Params>;
+  struct PendingServerRequest final {
+    nodegraph::ProtocolRequestId requestId;
+    nodegraph::WorkerGenerations generations;
+    std::string method;
+    ServerRequestParams request;
   };
 
-  ProtocolNormalizer normalizer(sendToQt);
+  std::unordered_map<nodegraph::NodeRef, PendingServerRequest>
+      pendingServerRequests;
+  std::unordered_set<nodegraph::NodeRef> pendingHydrations;
+  std::unordered_set<nodegraph::NodeRef> interactiveHydrations;
+  std::unordered_set<nodegraph::NodeRef> pendingHistoricalHydrations;
+  std::unordered_set<nodegraph::NodeId, nodegraph::NodeIdHash>
+      historicalHydrationVisited;
+  std::deque<nodegraph::NodeRef> historicalHydrationQueue;
+  bool historicalHydrationPumpActive = false;
+  std::unordered_set<nodegraph::NodeRef> pendingHistoryLoads;
+  std::unordered_set<nodegraph::NodeRef> resumedPromptAdmissions;
+  std::unordered_map<nodegraph::NodeRef, nodegraph::PromptCommand>
+      promptsWaitingForHydration;
+  bool threadListPending = false;
+  bool modelListPending = false;
+  bool permissionProfilesPending = false;
+
+  const auto clearTransientState = [&] {
+    pendingServerRequests.clear();
+    pendingHydrations.clear();
+    interactiveHydrations.clear();
+    pendingHistoricalHydrations.clear();
+    historicalHydrationVisited.clear();
+    historicalHydrationQueue.clear();
+    historicalHydrationPumpActive = false;
+    pendingHistoryLoads.clear();
+    resumedPromptAdmissions.clear();
+    promptsWaitingForHydration.clear();
+    threadListPending = false;
+    modelListPending = false;
+    permissionProfilesPending = false;
+  };
+
+  const auto showNotice = [&workerLogic](std::string message) {
+    static_cast<void>(workerLogic.showNotice(std::move(message)));
+  };
+
+  codex::frontend::CodexBridge sdk({});
+  ProtocolDiagnosticEmitter protocolDiagnostics;
+  const auto rejectNodeAction =
+      [&channels, &protocolDiagnostics, &showNotice,
+       &workerLogic](const nodegraph::NodeAction &action, std::string message) {
+        protocolDiagnostics.setGenerations(workerLogic.generations());
+        protocolDiagnostics.observeLocalRejection(
+            nodeActionDiagnosticSubject(action.kind), action.correlation,
+            action.target, message, channels);
+        showNotice(std::move(message));
+      };
+  const auto rejectRuntimeAction =
+      [&channels, &protocolDiagnostics, &showNotice, &workerLogic](
+          const nodegraph::RuntimeAction &action, std::string message) {
+        protocolDiagnostics.setGenerations(workerLogic.generations());
+        protocolDiagnostics.observeLocalRejection(
+            runtimeActionDiagnosticSubject(action.kind), action.correlation, {},
+            message, channels);
+        showNotice(std::move(message));
+      };
 
   std::function<void()> requestReconnect;
   std::function<void()> requestShutdown;
-  normalizer.setDeliveryFailureHandler([&requestShutdown] {
-    if (requestShutdown)
-      requestShutdown();
-  });
+  std::function<void()> hydrateProvider;
+  std::function<void(std::string)> hydrateHistoricalChildren;
 
   std::string expectedDisconnectReason;
   bool desiredConnected = connectBridge;
   client::ClientConnection connection(
-      sdk, client::ClientConnectionCallbacks{
-               .onConnected =
-                   [&normalizer] { normalizer.transportEvent("connected"); },
-               .onDisconnected =
-                   [&normalizer, &expectedDisconnectReason,
-                    &desiredConnected] {
-                     std::string reason =
-                         std::exchange(expectedDisconnectReason, {});
-                     normalizer.transportEvent(
-                         desiredConnected ? "retrying" : "disconnected",
-                         std::move(reason));
-                   },
-               .onFailure =
-                   [&normalizer](std::string reason) {
-                     normalizer.transportEvent("failure", std::move(reason));
-                   }});
+      sdk,
+      client::ClientConnectionCallbacks{
+          .onConnected =
+              [&channels, &clearTransientState, &protocolDiagnostics,
+               &workerLogic] {
+                clearTransientState();
+                static_cast<void>(workerLogic.transportEvent("connected"));
+                protocolDiagnostics.setGenerations(workerLogic.generations());
+                protocolDiagnostics.observeLifecycle("connected", {}, channels);
+              },
+          .onDisconnected =
+              [&channels, &clearTransientState, &expectedDisconnectReason,
+               &desiredConnected, &protocolDiagnostics, &workerLogic] {
+                clearTransientState();
+                std::string reason =
+                    std::exchange(expectedDisconnectReason, {});
+                const std::string state =
+                    desiredConnected ? "retrying" : "disconnected";
+                static_cast<void>(workerLogic.transportEvent(state, reason));
+                protocolDiagnostics.setGenerations(workerLogic.generations());
+                protocolDiagnostics.observeLifecycle(state, reason, channels);
+              },
+          .onFailure =
+              [&channels, &clearTransientState, &protocolDiagnostics,
+               &workerLogic](std::string reason) {
+                clearTransientState();
+                const std::string diagnosticReason = reason;
+                static_cast<void>(
+                    workerLogic.transportEvent("failure", std::move(reason)));
+                protocolDiagnostics.setGenerations(workerLogic.generations());
+                protocolDiagnostics.observeLifecycle(
+                    "failure", diagnosticReason, channels);
+              }});
 
-  sdk.onRawJson([&normalizer](codex::protocol::AppServerDirection direction,
-                              const nlohmann::json &message) {
-    if (direction == codex::protocol::AppServerDirection::FromAppServer)
-      normalizer.observeRawInbound(message);
+  sdk.onRawJson([&channels, &protocolDiagnostics,
+                 &workerLogic](codex::protocol::AppServerDirection direction,
+                               const nlohmann::json &message) {
+    // Observe the already-decoded envelope once and immediately reduce it to
+    // bounded metadata. No raw payload crosses to Qt or survives this call.
+    protocolDiagnostics.observe(direction, message, channels);
+    const std::optional<std::string> method =
+        codex::protocol::jsonRpcMethod(message);
+    if (!method)
+      return;
+
+    if (direction == codex::protocol::AppServerDirection::ToAppServer &&
+        *method == "initialized") {
+      const auto parameters = message.find("params");
+      const nlohmann::json payload =
+          parameters == message.end() ? nlohmann::json::object() : *parameters;
+      static_cast<void>(workerLogic.applyDetailed(nodegraph::DecodedMessage{
+          nodegraph::DecodedMessageKind::ClientNotification,
+          *method,
+          std::nullopt,
+          decodedObject(payload),
+          {}}));
+      return;
+    }
+
+    if (direction != codex::protocol::AppServerDirection::FromAppServer)
+      return;
+
+    const std::optional<nodegraph::ProtocolRequestId> requestId =
+        requestIdMember(message, "id");
+    const nodegraph::DecodedMessageKind kind =
+        requestId ? nodegraph::DecodedMessageKind::ServerRequest
+                  : nodegraph::DecodedMessageKind::ServerNotification;
+    const nodegraph::ProtocolDirection catalogDirection =
+        requestId ? nodegraph::ProtocolDirection::ServerRequest
+                  : nodegraph::ProtocolDirection::ServerNotification;
+    if (nodegraph::findProtocolMethod(catalogDirection, *method))
+      return; // The registered typed callback is the sole known-message path.
+
+    const auto parameters = message.find("params");
+    const nlohmann::json payload =
+        parameters == message.end() ? nlohmann::json::object() : *parameters;
+    static_cast<void>(workerLogic.applyDetailed(nodegraph::DecodedMessage{
+        kind, *method, requestId, decodedObject(payload), {}}));
   });
-  sdk.onBridgeEvent([&normalizer](const nlohmann::json &message) {
-    normalizer.bridgeEvent(message);
+  sdk.onBridgeEvent([&channels, &clearTransientState, &hydrateProvider,
+                     &protocolDiagnostics, &workerLogic,
+                     &sdk](const nlohmann::json &message) {
+    const std::uint64_t before = workerLogic.generations().provider;
+    const std::string kind = jsonString(message, "kind");
+    applyBridgeState(workerLogic, sdk, message);
+    const auto after = workerLogic.generations();
+    protocolDiagnostics.setGenerations(after);
+    protocolDiagnostics.observeBridge(message, channels);
+    if (after.provider != before)
+      clearTransientState();
+    if (kind == "bridge.provider" && sdk.providerReady() && hydrateProvider)
+      hydrateProvider();
   });
 
-#define CODEXUI_REGISTER_SERVER_REQUEST(OperationName, methodName)             \
-  sdk.on##OperationName(                                                       \
-      [&normalizer](                                                           \
-          codex::generated::server_requests::OperationName::Params &request) { \
-        normalizer.serverRequest(                                              \
-            codex::generated::server_requests::OperationName::method,          \
-            request.jsonRpcId(), request.getPayload());                        \
-      });
-  AI_OPENAI_CODEX_SERVER_REQUESTS(CODEXUI_REGISTER_SERVER_REQUEST)
-#undef CODEXUI_REGISTER_SERVER_REQUEST
+  const auto registerServerRequest = [&]<typename Operation>() {
+    sdk.onServerRequest<Operation>([&pendingServerRequests, &sdk, &workerLogic](
+                                       typename Operation::Params &request) {
+      const auto requestId = decodedRequestId(request.jsonRpcId());
+      if (!requestId)
+        return;
+      for (auto entry = pendingServerRequests.begin();
+           entry != pendingServerRequests.end();) {
+        if (entry->second.requestId == *requestId)
+          entry = pendingServerRequests.erase(entry);
+        else
+          ++entry;
+      }
+      nodegraph::WorkerApplyResult applied =
+          workerLogic.applyDetailed(nodegraph::DecodedMessage{
+              nodegraph::DecodedMessageKind::ServerRequest,
+              std::string(Operation::method),
+              requestId,
+              decodedObject(request.getPayload()),
+              {},
+              threadActivityAt(Operation::method)});
+      if (!applied.primary)
+        return;
+      pendingServerRequests.emplace(
+          applied.primary,
+          PendingServerRequest{*requestId, workerLogic.generations(),
+                               std::string(Operation::method),
+                               ServerRequestParams(request)});
+    });
+  };
+
+  using namespace codex::generated::server_requests;
+  registerServerRequest.template operator()<CommandExecutionRequestApproval>();
+  registerServerRequest.template operator()<FileChangeRequestApproval>();
+  registerServerRequest.template operator()<ToolRequestUserInput>();
+  registerServerRequest.template operator()<McpServerElicitationRequest>();
+  registerServerRequest.template operator()<PermissionsRequestApproval>();
+  registerServerRequest.template operator()<DynamicToolCall>();
+  registerServerRequest.template operator()<ChatgptAuthTokensRefresh>();
+  registerServerRequest.template operator()<AttestationGenerate>();
+  registerServerRequest.template operator()<ApplyPatchApproval>();
+  registerServerRequest.template operator()<ExecCommandApproval>();
 
 #define CODEXUI_REGISTER_SERVER_NOTIFICATION(OperationName, methodName)        \
-  sdk.on##OperationName(                                                       \
-      [&normalizer](                                                           \
-          codex::generated::server_notifications::OperationName::Params        \
-              &notification) {                                                 \
-        normalizer.serverNotification(                                         \
-            codex::generated::server_notifications::OperationName::method,     \
-            notification.getPayload());                                        \
-      });
+  sdk.on##OperationName([&hydrateHistoricalChildren, &pendingServerRequests,   \
+                         &workerLogic](                                        \
+                            codex::generated::server_notifications::           \
+                                OperationName::Params &notification) {         \
+    nodegraph::NodeRef expected;                                               \
+    const bool resolved =                                                      \
+        std::string_view(                                                      \
+            codex::generated::server_notifications::OperationName::method) ==  \
+        "serverRequest/resolved";                                              \
+    if (resolved) {                                                            \
+      const auto id = requestIdMember(notification.getPayload(), "requestId"); \
+      if (id) {                                                                \
+        for (const auto &[node, pending] : pendingServerRequests) {            \
+          if (pending.requestId == *id &&                                      \
+              pending.generations == workerLogic.generations()) {              \
+            expected = node;                                                   \
+            break;                                                             \
+          }                                                                    \
+        }                                                                      \
+      }                                                                        \
+    }                                                                          \
+    if (resolved && !expected)                                                 \
+      return;                                                                  \
+    static_cast<void>(workerLogic.applyDetailed(nodegraph::DecodedMessage{     \
+        nodegraph::DecodedMessageKind::ServerNotification,                     \
+        std::string(                                                           \
+            codex::generated::server_notifications::OperationName::method),    \
+        std::nullopt, decodedObject(notification.getPayload()), expected,      \
+        threadActivityAt(                                                      \
+            codex::generated::server_notifications::OperationName::method)})); \
+    constexpr std::string_view appliedMethod =                                 \
+        codex::generated::server_notifications::OperationName::method;         \
+    if (hydrateHistoricalChildren && (appliedMethod == "item/started" ||       \
+                                      appliedMethod == "item/completed")) {    \
+      const std::string threadId =                                             \
+          jsonString(notification.getPayload(), "threadId");                   \
+      if (!threadId.empty())                                                   \
+        hydrateHistoricalChildren(threadId);                                   \
+    }                                                                          \
+    if (expected)                                                              \
+      pendingServerRequests.erase(expected);                                   \
+  });
   AI_OPENAI_CODEX_SERVER_NOTIFICATIONS(CODEXUI_REGISTER_SERVER_NOTIFICATION)
 #undef CODEXUI_REGISTER_SERVER_NOTIFICATION
+
+  using CurrentTimeRead = current_protocol::server_requests::CurrentTimeRead;
+  sdk.onServerRequest<CurrentTimeRead>([&pendingServerRequests, &showNotice,
+                                        &workerLogic, &sdk](
+                                           CurrentTimeRead::Params &request) {
+    const auto requestId = requestIdFromJson(request.jsonRpcId());
+    for (auto entry = pendingServerRequests.begin();
+         entry != pendingServerRequests.end();) {
+      if (entry->second.requestId == requestId)
+        entry = pendingServerRequests.erase(entry);
+      else
+        ++entry;
+    }
+    nodegraph::WorkerApplyResult applied = workerLogic.applyDetailed(
+        nodegraph::DecodedMessage{nodegraph::DecodedMessageKind::ServerRequest,
+                                  std::string(CurrentTimeRead::method),
+                                  requestId,
+                                  decodedObject(request.getPayload()),
+                                  {},
+                                  threadActivityAt(CurrentTimeRead::method)});
+    const std::int64_t currentTime =
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    const CurrentTimeRead::Response response(
+        nlohmann::json{{"currentTimeAt", currentTime}});
+    const bool accepted = sdk.respond<CurrentTimeRead>(request, response);
+    // This interaction is handled entirely by the worker and has no
+    // retained typed request for a later UI response.  Whether the
+    // transport accepted the automatic reply or not, it is terminal and
+    // must never remain as an apparently actionable interaction node.
+    if (applied.primary)
+      static_cast<void>(
+          workerLogic.resolveInteraction(applied.primary, true, {}));
+    if (!accepted)
+      showNotice("Current-time server response was rejected");
+  });
+
+#define CODEXUI_REGISTER_CURRENT_NOTIFICATION(OperationName)                   \
+  sdk.onServerNotification<                                                    \
+      current_protocol::server_notifications::OperationName>(                  \
+      [&workerLogic](                                                          \
+          current_protocol::server_notifications::OperationName::Params        \
+              &notification) {                                                 \
+        static_cast<void>(workerLogic.applyDetailed(nodegraph::DecodedMessage{ \
+            nodegraph::DecodedMessageKind::ServerNotification,                 \
+            std::string(current_protocol::server_notifications::               \
+                            OperationName::method),                            \
+            std::nullopt,                                                      \
+            decodedObject(notification.getPayload()),                          \
+            {},                                                                \
+            threadActivityAt(current_protocol::server_notifications::          \
+                                 OperationName::method)}));                    \
+      });
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ModelProviderAuthRecoveryStarted)
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ModelProviderAuthRecoveryCompleted)
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(RawResponseItemCompleted)
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(RawResponseCompleted)
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ThreadRealtimeItemStarted)
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ThreadRealtimeItemTranscriptDelta)
+  CODEXUI_REGISTER_CURRENT_NOTIFICATION(ThreadRealtimeItemCompleted)
+#undef CODEXUI_REGISTER_CURRENT_NOTIFICATION
+
+  const auto publishTransportEvent = [&channels, &clearTransientState,
+                                      &protocolDiagnostics,
+                                      &workerLogic](std::string state,
+                                                    std::string detail = {}) {
+    if (state == "retrying" || state == "disconnected" || state == "failure")
+      clearTransientState();
+    const std::string diagnosticState = state;
+    const std::string diagnosticDetail = detail;
+    static_cast<void>(
+        workerLogic.transportEvent(std::move(state), std::move(detail)));
+    protocolDiagnostics.setGenerations(workerLogic.generations());
+    protocolDiagnostics.observeLifecycle(diagnosticState, diagnosticDetail,
+                                         channels);
+  };
 
   net::un::stream::legacy::SocketClient<StreamFactory,
                                         client::ClientConnection &, std::size_t>
@@ -270,14 +1386,11 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   std::string selectedTransportLabel;
   bool transitionPending = false;
   bool shutdownRequested = false;
-  bool shutdownDraining = false;
   bool eventLoopRunning = false;
   std::function<void()> continueTransition;
   std::function<bool()> terminatingFlowTerminated;
   std::function<void()> pendingSelection;
   std::chrono::steady_clock::time_point transitionDeadline;
-  std::chrono::steady_clock::time_point shutdownDrainDeadline;
-  std::function<void()> finishShutdownAfterDrain;
 
   const auto selectClient = [&](auto &configuredClient, std::string transport,
                                 std::string label) {
@@ -291,8 +1404,7 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     selectedTransportLabel = std::move(label);
     const std::string connectionLabel = selectedTransportLabel;
     connectSelected = [&, clientHandle, flow, connectionLabel] {
-      normalizer.transportEvent("retrying",
-                                "Connecting using " + connectionLabel);
+      publishTransportEvent("retrying", "Connecting using " + connectionLabel);
       clientHandle->connect([&, flow, connectionLabel](
                                 const auto &, core::socket::State state) {
         if (state == core::socket::State::OK ||
@@ -302,7 +1414,7 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
             "failed to connect using " + connectionLabel + ": " + state.what();
         core::EventReceiver::atNextTick([&, flow, failure] {
           if (eventLoopRunning && !shutdownRequested && flow->isTerminated())
-            normalizer.transportEvent("failure", failure);
+            publishTransportEvent("failure", failure);
         });
       });
     };
@@ -372,7 +1484,8 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   };
 
   const auto publishConnectionSettings = [&] {
-    normalizer.connectionSettings(connectionSettings());
+    nlohmann::json settings = connectionSettings();
+    static_cast<void>(workerLogic.connectionSettings(decodedObject(settings)));
   };
 
   continueTransition = [&] {
@@ -381,7 +1494,7 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     if ((terminatingFlowTerminated && !terminatingFlowTerminated()) ||
         connection.attached()) {
       if (std::chrono::steady_clock::now() >= transitionDeadline) {
-        normalizer.transportEvent("failure", "connection transition timed out");
+        publishTransportEvent("failure", "connection transition timed out");
         requestShutdown();
         return;
       }
@@ -460,483 +1573,1013 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     connection.shutdown();
     if (terminateSelected)
       terminateSelected();
-    if (ipcEndpoint)
-      ipcEndpoint->close();
     if (eventLoopRunning)
       core::SNodeC::stop();
   };
 
-  finishShutdownAfterDrain = [&] {
-    if (shutdownRequested)
-      return;
-    if (ipcEndpoint && ipcEndpoint->queuedBytes() != 0 &&
-        std::chrono::steady_clock::now() < shutdownDrainDeadline) {
-      static_cast<void>(core::timer::Timer::singleshotTimer(
-          finishShutdownAfterDrain, utils::Timeval({0, 10000})));
-      return;
+  const auto currentThreadId =
+      [&graph](const nodegraph::NodeRef &target) -> std::optional<std::string> {
+    if (!target)
+      return std::nullopt;
+    auto write = graph.write();
+    if (write.find(target->id()) != target) {
+      static_cast<void>(write.finish());
+      return std::nullopt;
     }
-    requestShutdown();
+    nodegraph::NodeRef current = target;
+    while (current && current->id().kind != nodegraph::NodeKind::Thread)
+      current = write.parent(current);
+    const std::optional<std::string> result =
+        current ? std::optional<std::string>(current->id().canonical)
+                : std::nullopt;
+    static_cast<void>(write.finish());
+    return result;
   };
 
-  const auto dispatchCommand = [&](nlohmann::json command) {
-    if (!presentation::isPresentationFrame(command) ||
-        presentation::stringMember(command, "kind") != "command") {
-      normalizer.transportEvent("failure",
-                                "invalid CodexUI presentation command");
+  const auto currentNodeState = [&graph](const nodegraph::NodeRef &target)
+      -> std::shared_ptr<const nodegraph::NodeState> {
+    if (!target)
+      return {};
+    auto write = graph.write();
+    std::shared_ptr<const nodegraph::NodeState> result;
+    if (write.find(target->id()) == target)
+      result = write.state(target);
+    static_cast<void>(write.finish());
+    return result;
+  };
+
+  const auto currentNode = [&graph](nodegraph::NodeId id) {
+    auto write = graph.write();
+    nodegraph::NodeRef result = write.find(id);
+    static_cast<void>(write.finish());
+    return result;
+  };
+
+  const auto requestThreadList = [&](nlohmann::json parameters) {
+    if (threadListPending)
+      return;
+    threadListPending = true;
+    dispatchRequest<codex::generated::client_requests::ThreadList>(
+        sdk, std::move(parameters), workerLogic, {},
+        [&threadListPending, &showNotice](RequestOutcome outcome) {
+          threadListPending = false;
+          if (!outcome.ok)
+            showNotice(outcome.error);
+        });
+  };
+
+  const auto requestModelList = [&](nlohmann::json parameters) {
+    if (modelListPending)
+      return;
+    modelListPending = true;
+    dispatchRequest<codex::generated::client_requests::ModelList>(
+        sdk, std::move(parameters), workerLogic, {},
+        [&modelListPending, &showNotice](RequestOutcome outcome) {
+          modelListPending = false;
+          if (!outcome.ok)
+            showNotice(outcome.error);
+        });
+  };
+
+  const auto requestPermissionProfiles = [&](nlohmann::json parameters) {
+    if (permissionProfilesPending)
+      return;
+    permissionProfilesPending = true;
+    dispatchRequest<codex::generated::client_requests::PermissionProfileList>(
+        sdk, std::move(parameters), workerLogic, {},
+        [&permissionProfilesPending, &showNotice](RequestOutcome outcome) {
+          permissionProfilesPending = false;
+          if (!outcome.ok)
+            showNotice(outcome.error);
+        });
+  };
+
+  hydrateProvider = [&] {
+    requestThreadList(nlohmann::json::object());
+    requestModelList(nlohmann::json::object());
+    requestPermissionProfiles(nlohmann::json::object());
+  };
+
+  std::function<void(nodegraph::PromptCommand)> dispatchPrompt;
+  const auto failPromptAndContinue = [&](const nodegraph::NodeRef &localPrompt,
+                                         std::string error) {
+    nodegraph::PromptTransition transition =
+        workerLogic.failPrompt(localPrompt, error);
+    showNotice(std::move(error));
+    if (transition.command)
+      dispatchPrompt(std::move(*transition.command));
+  };
+  dispatchPrompt = [&](nodegraph::PromptCommand command) {
+    using nodegraph::PromptCommandKind;
+    if (!command.localPrompt)
+      return;
+    if (!sdk.providerReady() || !sdk.isController()) {
+      failPromptAndContinue(command.localPrompt,
+                            "Codex is not ready for a controlled turn");
       return;
     }
 
-    const std::string action = presentation::stringMember(command, "action");
-    const std::string correlationId =
-        presentation::stringMember(command, "correlationId");
-    const nlohmann::json parameters =
-        presentation::member(command, "data", nlohmann::json::object());
-
-    if (!parameters.is_object()) {
-      normalizer.operationRejected(action, correlationId, -32602,
-                                   "presentation command data must be an object");
+    if (command.kind == PromptCommandKind::CreateThread) {
+      auto pending =
+          std::make_shared<nodegraph::PromptCommand>(std::move(command));
+      dispatchRequestHandled<codex::generated::client_requests::ThreadStart>(
+          sdk, jsonObject(pending->options), workerLogic, pending->localPrompt,
+          [](const nodegraph::ProtocolRequestId &) {},
+          [&, pending](RequestOutcome outcome,
+                       nodegraph::DecodedMessage decoded) mutable {
+            if (!outcome.ok) {
+              const std::string error = outcome.error;
+              nodegraph::PromptTransition transition =
+                  workerLogic.completePromptResult(
+                      std::move(decoded), pending->localPrompt, false, error);
+              showNotice(error);
+              if (transition.command)
+                dispatchPrompt(std::move(*transition.command));
+              return;
+            }
+            std::string threadId = std::move(outcome.threadId);
+            if (threadId.empty()) {
+              constexpr std::string_view MissingThread =
+                  "Thread creation returned no thread identifier";
+              nodegraph::PromptTransition transition =
+                  workerLogic.completePromptResult(std::move(decoded),
+                                                   pending->localPrompt, false,
+                                                   std::string(MissingThread));
+              showNotice(std::string(MissingThread));
+              if (transition.command)
+                dispatchPrompt(std::move(*transition.command));
+              return;
+            }
+            const std::string requestedName = pending->requestedName;
+            static_cast<void>(workerLogic.completeCreatedThread(
+                std::move(decoded), *pending, threadId));
+            if (pending->kind == PromptCommandKind::CreateThread ||
+                !pending->thread) {
+              failPromptAndContinue(
+                  pending->localPrompt,
+                  "Could not attach the prompt to the created thread");
+              return;
+            }
+            if (!requestedName.empty()) {
+              dispatchRequest<codex::generated::client_requests::ThreadSetName>(
+                  sdk,
+                  nlohmann::json{{"threadId", threadId},
+                                 {"name", requestedName}},
+                  workerLogic, pending->thread,
+                  [&showNotice](RequestOutcome renameOutcome) {
+                    if (!renameOutcome.ok)
+                      showNotice(renameOutcome.error);
+                  });
+            }
+            dispatchPrompt(std::move(*pending));
+          });
       return;
     }
 
-    if (action == "runtime.shutdown") {
-      if (!shutdownDraining) {
-        shutdownDraining = true;
-        normalizer.localOperationResult(action, correlationId, true,
-                                        nlohmann::json::object());
-        shutdownDrainDeadline =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-        finishShutdownAfterDrain();
+    if (pendingHydrations.contains(command.thread)) {
+      promptsWaitingForHydration.insert_or_assign(command.thread,
+                                                  std::move(command));
+      return;
+    }
+
+    const auto threadState = currentNodeState(command.thread);
+    const std::string hydrationState =
+        threadState ? valueString(threadState->fields, "hydrationState")
+                    : std::string{};
+    if (!threadState || hydrationState == "failed") {
+      failPromptAndContinue(
+          command.localPrompt,
+          hydrationState == "failed"
+              ? "Reload this thread before sending the preserved prompt"
+              : "The destination thread is no longer available");
+      return;
+    }
+    const bool needsResume =
+        threadState &&
+        (threadState->status == nodegraph::NodeStatus::NotLoaded ||
+         valueString(threadState->fields, "status") == "notLoaded");
+    const bool explicitlyResumed =
+        resumedPromptAdmissions.erase(command.localPrompt) != 0;
+    if (needsResume && !explicitlyResumed) {
+      auto pending =
+          std::make_shared<nodegraph::PromptCommand>(std::move(command));
+      dispatchRequest<codex::generated::client_requests::ThreadResume>(
+          sdk, nlohmann::json{{"threadId", pending->thread->id().canonical}},
+          workerLogic, pending->thread,
+          [&, pending](RequestOutcome outcome) mutable {
+            if (!outcome.ok) {
+              failPromptAndContinue(pending->localPrompt,
+                                    std::move(outcome.error));
+              return;
+            }
+            resumedPromptAdmissions.insert(pending->localPrompt);
+            dispatchPrompt(std::move(*pending));
+          });
+      return;
+    }
+
+    nlohmann::json parameters = jsonObject(command.options);
+    parameters["threadId"] = command.thread->id().canonical;
+    parameters["clientUserMessageId"] = command.clientUserMessageId;
+    parameters["input"] = promptInput(command.promptText, command.attachments);
+
+    const nodegraph::NodeRef localPrompt = command.localPrompt;
+    const auto published = [&workerLogic, localPrompt](
+                               const nodegraph::ProtocolRequestId &requestId) {
+      static_cast<void>(
+          workerLogic.markPromptDispatched(localPrompt, requestId));
+    };
+    const auto completed = [&, localPrompt](RequestOutcome outcome,
+                                            nodegraph::DecodedMessage decoded) {
+      std::optional<std::string> turnId;
+      std::string id = std::move(outcome.turnId);
+      if (!id.empty())
+        turnId = std::move(id);
+      nodegraph::PromptTransition transition = workerLogic.completePromptResult(
+          std::move(decoded), localPrompt, outcome.ok, outcome.error,
+          std::move(turnId));
+      if (!outcome.ok)
+        showNotice(outcome.error);
+      if (transition.command)
+        dispatchPrompt(std::move(*transition.command));
+    };
+
+    if (command.kind == PromptCommandKind::SteerTurn) {
+      parameters["expectedTurnId"] = command.expectedTurnId;
+      dispatchRequestHandled<codex::generated::client_requests::TurnSteer>(
+          sdk, std::move(parameters), workerLogic, localPrompt, published,
+          completed);
+    } else {
+      dispatchRequestHandled<codex::generated::client_requests::TurnStart>(
+          sdk, std::move(parameters), workerLogic, localPrompt, published,
+          completed);
+    }
+  };
+
+  const auto continuePromptAfterHydration =
+      [&](const nodegraph::NodeRef &thread, std::string error,
+          bool resumed = false) {
+        auto waiting = promptsWaitingForHydration.find(thread);
+        if (waiting == promptsWaitingForHydration.end())
+          return;
+        nodegraph::PromptCommand command = std::move(waiting->second);
+        promptsWaitingForHydration.erase(waiting);
+        if (!error.empty()) {
+          failPromptAndContinue(command.localPrompt, std::move(error));
+          return;
+        }
+        if (resumed)
+          resumedPromptAdmissions.insert(command.localPrompt);
+        dispatchPrompt(std::move(command));
+      };
+
+  const auto hydrationReady = [&](const nodegraph::NodeRef &thread) {
+    const auto state = currentNodeState(thread);
+    return state && valueString(state->fields, "hydrationState") == "ready" &&
+           valueUnsigned(state->fields, "hydrationConnectionGeneration") ==
+               std::optional<std::uint64_t>(
+                   workerLogic.generations().connection);
+  };
+
+  constexpr std::size_t MaximumHistoricalHydrations = 8;
+  std::function<void()> pumpHistoricalHydrations;
+  std::function<void(const nodegraph::NodeRef &, bool, bool)>
+      startThreadHydration;
+  std::function<void(const nodegraph::NodeRef &)> queueActiveAgentChildren;
+
+  queueActiveAgentChildren = [&](const nodegraph::NodeRef &parent) {
+    for (nodegraph::NodeRef child : workerLogic.activeAgentChildren(parent)) {
+      if (!child || hydrationReady(child) ||
+          pendingHydrations.contains(child) ||
+          !historicalHydrationVisited.insert(child->id()).second)
+        continue;
+      historicalHydrationQueue.emplace_back(std::move(child));
+    }
+    if (pumpHistoricalHydrations)
+      pumpHistoricalHydrations();
+  };
+
+  startThreadHydration = [&](const nodegraph::NodeRef &thread, bool interactive,
+                             bool force) {
+    const std::optional<std::string> threadId = currentThreadId(thread);
+    if (!threadId) {
+      if (interactive)
+        showNotice("The selected thread is no longer available");
+      return;
+    }
+    if (!force && hydrationReady(thread))
+      return;
+    if (interactive)
+      interactiveHydrations.insert(thread);
+    if (!pendingHydrations.insert(thread).second)
+      return;
+    static_cast<void>(workerLogic.threadHydration(thread, "loading"));
+
+    dispatchRequestHandled<codex::generated::client_requests::ThreadRead>(
+        sdk, nlohmann::json{{"threadId", *threadId}, {"includeTurns", true}},
+        workerLogic, thread, [](const nodegraph::ProtocolRequestId &) {},
+        [&, thread, id = *threadId](RequestOutcome outcome,
+                                    nodegraph::DecodedMessage decoded) {
+          const bool wasHistorical =
+              pendingHistoricalHydrations.erase(thread) != 0;
+          const bool needsSettings = interactiveHydrations.erase(thread) != 0;
+          pendingHydrations.erase(thread);
+
+          if (!outcome.ok) {
+            const std::string error = outcome.error.empty()
+                                          ? "Thread hydration failed"
+                                          : outcome.error;
+            static_cast<void>(workerLogic.completeThreadHydration(
+                std::move(decoded), thread, "failed", error));
+            continuePromptAfterHydration(thread, error);
+            if (wasHistorical && pumpHistoricalHydrations)
+              pumpHistoricalHydrations();
+            return;
+          }
+          static_cast<void>(workerLogic.completeThreadHydration(
+              std::move(decoded), thread, "ready"));
+          if (!currentThreadId(thread)) {
+            continuePromptAfterHydration(
+                thread, "The selected thread is no longer available");
+            if (wasHistorical && pumpHistoricalHydrations)
+              pumpHistoricalHydrations();
+            return;
+          }
+          queueActiveAgentChildren(thread);
+          // Observers retain read-only thread hydration. Controller authority
+          // gates mutations and settings resume, not ordinary selection/read.
+          if (!needsSettings || !sdk.isController()) {
+            continuePromptAfterHydration(thread, {});
+            if (wasHistorical && pumpHistoricalHydrations)
+              pumpHistoricalHydrations();
+            return;
+          }
+          dispatchRequest<codex::generated::client_requests::ThreadResume>(
+              sdk, nlohmann::json{{"threadId", id}, {"excludeTurns", true}},
+              workerLogic, thread,
+              [&, thread](RequestOutcome resumeOutcome) mutable {
+                if (!resumeOutcome.ok)
+                  showNotice(resumeOutcome.error.empty()
+                                 ? "Thread settings refresh failed"
+                                 : resumeOutcome.error);
+                // A successful thread/read is hydrated even when the
+                // controller-only settings resume fails. A later prompt to a
+                // provider-notLoaded thread performs its own bounded resume.
+                continuePromptAfterHydration(thread, {}, resumeOutcome.ok);
+              });
+          if (wasHistorical && pumpHistoricalHydrations)
+            pumpHistoricalHydrations();
+        });
+  };
+
+  pumpHistoricalHydrations = [&] {
+    if (historicalHydrationPumpActive)
+      return;
+    historicalHydrationPumpActive = true;
+    while (pendingHistoricalHydrations.size() < MaximumHistoricalHydrations &&
+           !historicalHydrationQueue.empty()) {
+      nodegraph::NodeRef child = std::move(historicalHydrationQueue.front());
+      historicalHydrationQueue.pop_front();
+      if (!child || hydrationReady(child) || !currentThreadId(child) ||
+          pendingHydrations.contains(child))
+        continue;
+      pendingHistoricalHydrations.insert(child);
+      startThreadHydration(child, false, false);
+    }
+    historicalHydrationPumpActive = false;
+  };
+
+  const auto hydrateThread = [&](const nodegraph::NodeRef &thread,
+                                 bool force = false) {
+    if (!force && hydrationReady(thread))
+      return;
+    interactiveHydrations.insert(thread);
+    startThreadHydration(thread, true, force);
+  };
+
+  hydrateHistoricalChildren = [&](std::string threadId) {
+    nodegraph::NodeRef parent =
+        currentNode({nodegraph::NodeKind::Thread, std::move(threadId)});
+    if (parent)
+      queueActiveAgentChildren(parent);
+  };
+
+  const auto loadHistory = [&](nodegraph::NodeAction action) {
+    const std::optional<std::string> threadId = currentThreadId(action.target);
+    if (!threadId) {
+      rejectNodeAction(action, "The selected thread is no longer available");
+      return;
+    }
+    if (!pendingHistoryLoads.insert(action.target).second)
+      return;
+    nlohmann::json parameters = jsonObject(std::move(action.payload));
+    parameters["threadId"] = *threadId;
+    if (!parameters.contains("cursor")) {
+      if (const auto state = currentNodeState(action.target)) {
+        const std::string cursor =
+            valueString(state->fields, "historyNextCursor");
+        if (!cursor.empty())
+          parameters["cursor"] = cursor;
       }
+    }
+    if (!parameters.contains("limit"))
+      parameters["limit"] = 80;
+    if (!parameters.contains("sortDirection"))
+      parameters["sortDirection"] = "desc";
+    if (!parameters.contains("itemsView"))
+      parameters["itemsView"] = "full";
+    const nodegraph::NodeRef thread = std::move(action.target);
+    dispatchRequest<current_protocol::client_requests::ThreadTurnsList>(
+        sdk, std::move(parameters), workerLogic, thread,
+        [&, thread](RequestOutcome outcome) {
+          pendingHistoryLoads.erase(thread);
+          if (!outcome.ok)
+            showNotice(outcome.error);
+        });
+  };
+
+  const auto resolveInteraction = [&](nodegraph::NodeAction action) {
+    auto reject = [&](std::string message) {
+      static_cast<void>(workerLogic.rejectInteractionResponse(
+          action.target, std::move(action.payload), message));
+      rejectNodeAction(action, std::move(message));
+    };
+    auto found = pendingServerRequests.find(action.target);
+    if (found == pendingServerRequests.end() ||
+        found->second.generations != workerLogic.generations() ||
+        !sdk.providerReady() || !sdk.isController()) {
+      reject("The pending request is no longer actionable");
       return;
     }
-    if (action == "connection.reconnect") {
-      requestReconnect();
+    const std::shared_ptr<const nodegraph::NodeState> state =
+        currentNodeState(action.target);
+    if (!state ||
+        valueString(state->fields, "method") != found->second.method) {
+      reject("The pending request is no longer actionable");
       return;
     }
-    if (action == "connection.connect") {
-      requestConnect();
-      return;
+    // A bridge sender may synchronously feed serverRequest/resolved back into
+    // CodexBridge. Visit a local typed copy so that such reentrancy can erase
+    // the map entry without invalidating the request currently being encoded.
+    PendingServerRequest pending = found->second;
+
+    std::string decision = valueString(action.payload, "decision");
+    if (decision.empty())
+      decision = valueString(action.payload, "action");
+    const nodegraph::Value *authoredDecision =
+        valueMember(action.payload, "decision");
+    const std::string scope = valueString(action.payload, "scope");
+    const nodegraph::Value *answers = valueMember(action.payload, "answers");
+    const nodegraph::Value *content = valueMember(action.payload, "content");
+    const nodegraph::Value *meta = valueMember(action.payload, "_meta");
+    bool accepted = false;
+
+    std::visit(
+        [&](auto &request) {
+          using Request = std::decay_t<decltype(request)>;
+          if constexpr (std::is_same_v<
+                            Request, CommandExecutionRequestApproval::Params>) {
+            CommandExecutionRequestApproval::Response response(
+                nlohmann::json{{"decision", decision}});
+            accepted =
+                sdk.respond<CommandExecutionRequestApproval>(request, response);
+          } else if constexpr (std::is_same_v<
+                                   Request,
+                                   FileChangeRequestApproval::Params>) {
+            FileChangeRequestApproval::Response response(
+                nlohmann::json{{"decision", decision}});
+            accepted =
+                sdk.respond<FileChangeRequestApproval>(request, response);
+          } else if constexpr (std::is_same_v<Request,
+                                              ToolRequestUserInput::Params>) {
+            ToolRequestUserInput::Response response(nlohmann::json{
+                {"answers", answers ? jsonFromValue(*answers)
+                                    : nlohmann::json::object()}});
+            accepted = sdk.respond<ToolRequestUserInput>(request, response);
+          } else if constexpr (std::is_same_v<
+                                   Request,
+                                   McpServerElicitationRequest::Params>) {
+            const bool acceptsContent = decision == "accept";
+            McpServerElicitationRequest::Response response(
+                nlohmann::json{{"action", decision},
+                               {"content", acceptsContent && content
+                                               ? jsonFromValue(*content)
+                                               : nlohmann::json(nullptr)},
+                               {"_meta", meta ? jsonFromValue(*meta)
+                                              : nlohmann::json(nullptr)}});
+            accepted =
+                sdk.respond<McpServerElicitationRequest>(request, response);
+          } else if constexpr (std::is_same_v<
+                                   Request,
+                                   PermissionsRequestApproval::Params>) {
+            if (scope.empty() || scope == "decline" || decision == "decline") {
+              accepted = sdk.respondError<PermissionsRequestApproval>(
+                  request, -32601, "Permission request declined by user");
+            } else {
+              nlohmann::json responsePayload{
+                  {"permissions",
+                   request.getPayload().is_object() &&
+                           request.getPayload().contains("permissions")
+                       ? request.getPayload()["permissions"]
+                       : nlohmann::json::object()},
+                  {"scope", scope}};
+              PermissionsRequestApproval::Response response(
+                  std::move(responsePayload));
+              accepted =
+                  sdk.respond<PermissionsRequestApproval>(request, response);
+            }
+          } else if constexpr (std::is_same_v<Request,
+                                              DynamicToolCall::Params>) {
+            const nodegraph::Value *contentItems =
+                valueMember(action.payload, "contentItems");
+            const nodegraph::Value *success =
+                valueMember(action.payload, "success");
+            const std::string message =
+                valueString(action.payload, "message").empty()
+                    ? "CodexUI does not provide this dynamic tool"
+                    : valueString(action.payload, "message");
+            DynamicToolCall::Response response(nlohmann::json{
+                {"contentItems",
+                 contentItems ? jsonFromValue(*contentItems)
+                              : nlohmann::json::array({{{"type", "inputText"},
+                                                        {"text", message}}})},
+                {"success",
+                 success && success->asBool() ? *success->asBool() : false}});
+            accepted = sdk.respond<DynamicToolCall>(request, response);
+          } else if constexpr (std::is_same_v<
+                                   Request, ChatgptAuthTokensRefresh::Params>) {
+            accepted = sdk.respondError<ChatgptAuthTokensRefresh>(
+                request, -32601,
+                "CodexUI does not support authentication token refresh");
+          } else if constexpr (std::is_same_v<Request,
+                                              AttestationGenerate::Params>) {
+            accepted = sdk.respondError<AttestationGenerate>(
+                request, -32601,
+                "CodexUI does not support attestation generation");
+          } else if constexpr (std::is_same_v<Request,
+                                              ApplyPatchApproval::Params>) {
+            nlohmann::json reviewDecision = "abort";
+            if (authoredDecision && authoredDecision->isObject())
+              reviewDecision = jsonFromValue(*authoredDecision);
+            else if (decision == "accept" || decision == "approved")
+              reviewDecision = "approved";
+            else if (decision == "acceptForSession" ||
+                     decision == "approved_for_session")
+              reviewDecision = "approved_for_session";
+            else if (decision == "decline" || decision == "denied")
+              reviewDecision =
+                  nlohmann::json{{"denied", {{"rejection", "Denied by user"}}}};
+            ApplyPatchApproval::Response response(
+                nlohmann::json{{"decision", std::move(reviewDecision)}});
+            accepted = sdk.respond<ApplyPatchApproval>(request, response);
+          } else if constexpr (std::is_same_v<Request,
+                                              ExecCommandApproval::Params>) {
+            nlohmann::json reviewDecision = "abort";
+            if (authoredDecision && authoredDecision->isObject())
+              reviewDecision = jsonFromValue(*authoredDecision);
+            else if (decision == "accept" || decision == "approved")
+              reviewDecision = "approved";
+            else if (decision == "acceptForSession" ||
+                     decision == "approved_for_session")
+              reviewDecision = "approved_for_session";
+            else if (decision == "decline" || decision == "denied")
+              reviewDecision =
+                  nlohmann::json{{"denied", {{"rejection", "Denied by user"}}}};
+            ExecCommandApproval::Response response(
+                nlohmann::json{{"decision", std::move(reviewDecision)}});
+            accepted = sdk.respond<ExecCommandApproval>(request, response);
+          }
+        },
+        pending.request);
+
+    if (accepted) {
+      static_cast<void>(
+          workerLogic.resolveInteraction(action.target, true, {}));
+      pendingServerRequests.erase(action.target);
+    } else {
+      static_cast<void>(workerLogic.rejectInteractionResponse(
+          action.target, std::move(action.payload),
+          "CodexBridge rejected the server-request response"));
+      rejectNodeAction(action, "The pending response could not be sent");
     }
-    if (action == "connection.disconnect") {
-      requestDisconnect();
+  };
+
+  const auto dispatchNodeAction = [&](nodegraph::NodeAction action) {
+    using enum nodegraph::NodeActionKind;
+    switch (action.kind) {
+    case Hydrate:
+      hydrateThread(action.target);
       return;
-    }
-    if (action == "connection.configure") {
-      if (transitionPending) {
-        normalizer.localOperationResult(
-            action, correlationId, false,
-            {{"code", -32000},
-             {"message", "connection transition in progress"}});
+    case Reload:
+      hydrateThread(action.target, true);
+      return;
+    case LoadHistory:
+      loadHistory(std::move(action));
+      return;
+    case Rename:
+    case Fork:
+    case Archive:
+    case Unarchive:
+    case Delete: {
+      if (!sdk.providerReady() || !sdk.isController()) {
+        rejectNodeAction(
+            action, "Controller access is unavailable for this thread action");
         return;
       }
-      const std::string transport =
-          presentation::stringMember(parameters, "transport");
-      std::function<void()> selection;
-      const auto networkEndpoint =
-          [&]() -> std::optional<std::pair<std::string, std::uint16_t>> {
-        const std::string host = presentation::stringMember(parameters, "host");
-        const auto port = parameters.find("port");
-        if (host.empty() || port == parameters.end() ||
-            !port->is_number_integer())
-          return std::nullopt;
-        const std::int64_t value = port->get<std::int64_t>();
-        if (value <= 0 || value > 65535)
-          return std::nullopt;
-        return std::pair{host, static_cast<std::uint16_t>(value)};
+      if (!action.target ||
+          action.target->id().kind != nodegraph::NodeKind::Thread) {
+        rejectNodeAction(action, "The selected thread is no longer available");
+        return;
+      }
+      const std::shared_ptr<const nodegraph::NodeState> threadState =
+          currentNodeState(action.target);
+      const auto stateFlag = [&threadState](std::string_view name) {
+        if (!threadState)
+          return false;
+        const nodegraph::Value *value = valueMember(threadState->fields, name);
+        return value && value->asBool() && *value->asBool();
       };
-      if (transport == "unix") {
-        const std::string path = presentation::stringMember(parameters, "path");
-        if (!path.empty())
-          selection = [&, path] {
-            unixClient.getConfig()->Remote::setSunPath(path);
-            selectClient(unixClient, "unix", "Unix socket");
-          };
-      } else if (transport == "ipv4") {
-        if (const auto endpoint = networkEndpoint())
-          selection = [&, endpoint] {
-            ipv4Client.getConfig()
-                ->Remote::setHost(endpoint->first)
-                ->setPort(endpoint->second);
-            selectClient(ipv4Client, "ipv4", "IPv4");
-          };
-      } else if (transport == "ipv6") {
-        if (const auto endpoint = networkEndpoint())
-          selection = [&, endpoint] {
-            ipv6Client.getConfig()
-                ->Remote::setHost(endpoint->first)
-                ->setPort(endpoint->second);
-            selectClient(ipv6Client, "ipv6", "IPv6");
-          };
+      if (!threadState || stateFlag("local") || stateFlag("recoveryOnly")) {
+        rejectNodeAction(action, "The selected thread is no longer available");
+        return;
+      }
+      const bool archived = stateFlag("archived");
+      if ((action.kind == Archive && archived) ||
+          (action.kind == Unarchive && !archived)) {
+        rejectNodeAction(action, "The thread action is no longer applicable");
+        return;
+      }
+      const std::string threadId =
+          nodegraph::protocolCanonicalId(*threadState, action.target);
+      if (threadId.empty()) {
+        rejectNodeAction(action, "The selected thread is no longer available");
+        return;
+      }
+      if (action.kind == Rename) {
+        const nodegraph::Value *nameValue = valueMember(action.payload, "name");
+        const std::string *name = nameValue ? nameValue->asString() : nullptr;
+        if (!name ||
+            name->find_first_not_of(" \t\r\n\f\v") == std::string::npos) {
+          rejectNodeAction(action, "A non-empty thread name is required");
+          return;
+        }
+      }
+      nlohmann::json parameters = jsonObject(std::move(action.payload));
+      parameters["threadId"] = threadId;
+      const nodegraph::NodeRef target = std::move(action.target);
+      const auto completed = [&showNotice](RequestOutcome outcome) {
+        if (!outcome.ok)
+          showNotice(outcome.error);
+      };
+      if (action.kind == Rename)
+        dispatchRequest<codex::generated::client_requests::ThreadSetName>(
+            sdk, std::move(parameters), workerLogic, target, completed);
+      else if (action.kind == Fork)
+        dispatchRequest<codex::generated::client_requests::ThreadFork>(
+            sdk, std::move(parameters), workerLogic, target,
+            [&](RequestOutcome outcome) {
+              if (!outcome.ok) {
+                showNotice(outcome.error);
+                return;
+              }
+              std::string forkId = std::move(outcome.threadId);
+              if (forkId.empty())
+                return;
+              nodegraph::NodeRef fork =
+                  currentNode({nodegraph::NodeKind::Thread, forkId});
+              if (!fork)
+                return;
+              static_cast<void>(workerLogic.selectThread(fork));
+              hydrateThread(fork);
+            });
+      else if (action.kind == Archive)
+        dispatchRequest<codex::generated::client_requests::ThreadArchive>(
+            sdk, std::move(parameters), workerLogic, target, completed);
+      else if (action.kind == Unarchive)
+        dispatchRequest<codex::generated::client_requests::ThreadUnarchive>(
+            sdk, std::move(parameters), workerLogic, target, completed);
+      else
+        dispatchRequest<codex::generated::client_requests::ThreadDelete>(
+            sdk, std::move(parameters), workerLogic, target, completed);
+      return;
+    }
+    case SubmitPrompt: {
+      nodegraph::PromptTransition transition = workerLogic.admitPrompt(
+          std::move(action), threadActivityAt("turn/start"),
+          wallClockMilliseconds());
+      if (transition.command) {
+        if (!sdk.providerReady() || !sdk.isController()) {
+          failPromptAndContinue(transition.command->localPrompt,
+                                "Codex is not ready for a controlled turn");
+        } else {
+          dispatchPrompt(std::move(*transition.command));
+        }
+      }
+      return;
+    }
+    case InterruptTurn: {
+      if (!sdk.providerReady() || !sdk.isController() || !action.target ||
+          action.target->id().kind != nodegraph::NodeKind::Turn) {
+        rejectNodeAction(action,
+                         "No controlled active turn is available to stop");
+        return;
+      }
+      std::optional<std::pair<std::string, std::string>> currentActiveTurn;
+      {
+        auto write = graph.write();
+        if (write.find(action.target->id()) == action.target &&
+            write.state(action.target)->status ==
+                nodegraph::NodeStatus::Running) {
+          const nodegraph::NodeRef thread = write.parent(action.target);
+          if (thread && thread->id().kind == nodegraph::NodeKind::Thread) {
+            const std::shared_ptr<const nodegraph::NodeState> threadState =
+                write.state(thread);
+            const nodegraph::Value *archived =
+                valueMember(threadState->fields, "archived");
+            const nodegraph::Value *local =
+                valueMember(threadState->fields, "local");
+            const nodegraph::Value *recoveryOnly =
+                valueMember(threadState->fields, "recoveryOnly");
+            const bool threadUnavailable =
+                (archived && archived->asBool() && *archived->asBool()) ||
+                (local && local->asBool() && *local->asBool()) ||
+                (recoveryOnly && recoveryOnly->asBool() &&
+                 *recoveryOnly->asBool());
+            const std::vector<nodegraph::NodeRef> active =
+                write.related(thread, nodegraph::RelationKind::ActiveTurn);
+            if (!threadUnavailable &&
+                std::find(active.begin(), active.end(), action.target) !=
+                    active.end()) {
+              const std::shared_ptr<const nodegraph::NodeState> turnState =
+                  write.state(action.target);
+              const nodegraph::Value *turnLocal =
+                  valueMember(turnState->fields, "local");
+              if (!turnLocal || !turnLocal->asBool() || !*turnLocal->asBool()) {
+                currentActiveTurn = std::pair{
+                    nodegraph::protocolCanonicalId(*threadState, thread),
+                    nodegraph::protocolCanonicalId(*turnState, action.target)};
+              }
+            }
+          }
+        }
+        static_cast<void>(write.finish());
+      }
+      if (!currentActiveTurn || currentActiveTurn->first.empty() ||
+          currentActiveTurn->second.empty()) {
+        rejectNodeAction(action,
+                         "No controlled active turn is available to stop");
+        return;
+      }
+      nlohmann::json parameters = jsonObject(std::move(action.payload));
+      parameters["threadId"] = currentActiveTurn->first;
+      parameters["turnId"] = currentActiveTurn->second;
+      dispatchRequest<codex::generated::client_requests::TurnInterrupt>(
+          sdk, std::move(parameters), workerLogic, action.target,
+          [&showNotice](RequestOutcome outcome) {
+            if (!outcome.ok)
+              showNotice(outcome.error);
+          });
+      return;
+    }
+    case ResolveInteraction:
+      resolveInteraction(std::move(action));
+      return;
+    case PromptMaterialized: {
+      static_cast<void>(
+          workerLogic.promptMaterialized(std::move(action.target)));
+      return;
+    }
+    case UiDetached:
+      static_cast<void>(
+          workerLogic.acknowledgeUiDetached(std::move(action.target)));
+      return;
+    }
+  };
+
+  const auto configureConnection = [&](nodegraph::RuntimeAction action) {
+    if (transitionPending) {
+      rejectRuntimeAction(action,
+                          "A connection transition is already in progress");
+      return;
+    }
+    const nlohmann::json parameters = jsonObject(std::move(action.payload));
+    const std::string transport = jsonString(parameters, "transport");
+    std::function<void()> selection;
+    const auto networkEndpoint =
+        [&]() -> std::optional<std::pair<std::string, std::uint16_t>> {
+      const std::string host = jsonString(parameters, "host");
+      const auto port = parameters.find("port");
+      if (host.empty() || port == parameters.end() ||
+          !port->is_number_integer())
+        return std::nullopt;
+      const std::int64_t value = port->get<std::int64_t>();
+      if (value <= 0 || value > 65535)
+        return std::nullopt;
+      return std::pair{host, static_cast<std::uint16_t>(value)};
+    };
+
+    if (transport == "unix") {
+      const std::string path = jsonString(parameters, "path");
+      if (!path.empty())
+        selection = [&, path] {
+          unixClient.getConfig()->Remote::setSunPath(path);
+          selectClient(unixClient, "unix", "Unix socket");
+        };
+    } else if (transport == "ipv4") {
+      if (const auto endpoint = networkEndpoint())
+        selection = [&, endpoint] {
+          ipv4Client.getConfig()
+              ->Remote::setHost(endpoint->first)
+              ->setPort(endpoint->second);
+          selectClient(ipv4Client, "ipv4", "IPv4");
+        };
+    } else if (transport == "ipv6") {
+      if (const auto endpoint = networkEndpoint())
+        selection = [&, endpoint] {
+          ipv6Client.getConfig()
+              ->Remote::setHost(endpoint->first)
+              ->setPort(endpoint->second);
+          selectClient(ipv6Client, "ipv6", "IPv6");
+        };
 #if defined(CODEXUI_CODEX_FRONTEND_TLS)
-      } else if (transport == "tls-ipv4") {
-        if (const auto endpoint = networkEndpoint())
-          selection = [&, endpoint] {
-            tlsIpv4Client.getConfig()
-                ->Remote::setHost(endpoint->first)
-                ->setPort(endpoint->second);
-            selectClient(tlsIpv4Client, "tls-ipv4", "IPv4 TLS");
-          };
-      } else if (transport == "tls-ipv6") {
-        if (const auto endpoint = networkEndpoint())
-          selection = [&, endpoint] {
-            tlsIpv6Client.getConfig()
-                ->Remote::setHost(endpoint->first)
-                ->setPort(endpoint->second);
-            selectClient(tlsIpv6Client, "tls-ipv6", "IPv6 TLS");
-          };
+    } else if (transport == "tls-ipv4") {
+      if (const auto endpoint = networkEndpoint())
+        selection = [&, endpoint] {
+          tlsIpv4Client.getConfig()
+              ->Remote::setHost(endpoint->first)
+              ->setPort(endpoint->second);
+          selectClient(tlsIpv4Client, "tls-ipv4", "IPv4 TLS");
+        };
+    } else if (transport == "tls-ipv6") {
+      if (const auto endpoint = networkEndpoint())
+        selection = [&, endpoint] {
+          tlsIpv6Client.getConfig()
+              ->Remote::setHost(endpoint->first)
+              ->setPort(endpoint->second);
+          selectClient(tlsIpv6Client, "tls-ipv6", "IPv6 TLS");
+        };
 #endif
 #if defined(CODEXUI_CODEX_FRONTEND_RFCOMM)
-      } else if (transport == "rfcomm" || transport == "rfcomm-tls") {
-        const std::string address =
-            presentation::stringMember(parameters, "address");
-        const auto channel = parameters.find("channel");
-        if (!address.empty() && channel != parameters.end() &&
-            channel->is_number_integer() && channel->get<int>() > 0 &&
-            channel->get<int>() <= 30) {
-          const auto value = static_cast<std::uint8_t>(channel->get<int>());
-          if (transport == "rfcomm") {
-            selection = [&, address, value] {
-              rfcommClient.getConfig()
-                  ->Remote::setBtAddress(address)
-                  ->setChannel(value);
-              selectClient(rfcommClient, "rfcomm", "RFCOMM");
-            };
-          } else {
-            selection = [&, address, value] {
-              rfcommTlsClient.getConfig()
-                  ->Remote::setBtAddress(address)
-                  ->setChannel(value);
-              selectClient(rfcommTlsClient, "rfcomm-tls", "RFCOMM TLS");
-            };
-          }
+    } else if (transport == "rfcomm" || transport == "rfcomm-tls") {
+      const std::string address = jsonString(parameters, "address");
+      const auto channel = parameters.find("channel");
+      if (!address.empty() && channel != parameters.end() &&
+          channel->is_number_integer() && channel->get<int>() > 0 &&
+          channel->get<int>() <= 30) {
+        const auto value = static_cast<std::uint8_t>(channel->get<int>());
+        if (transport == "rfcomm") {
+          selection = [&, address, value] {
+            rfcommClient.getConfig()->Remote::setBtAddress(address)->setChannel(
+                value);
+            selectClient(rfcommClient, "rfcomm", "RFCOMM");
+          };
+        } else {
+          selection = [&, address, value] {
+            rfcommTlsClient.getConfig()
+                ->Remote::setBtAddress(address)
+                ->setChannel(value);
+            selectClient(rfcommTlsClient, "rfcomm-tls", "RFCOMM TLS");
+          };
         }
+      }
 #endif
 #if defined(CODEXUI_CODEX_FRONTEND_WEBSOCKET)
-      } else if (transport == "websocket-ipv4" || transport == "websocket-ipv6"
+    } else if (transport == "websocket-ipv4" || transport == "websocket-ipv6"
 #if defined(CODEXUI_CODEX_FRONTEND_TLS)
-                 || transport == "wss-ipv4" || transport == "wss-ipv6"
+               || transport == "wss-ipv4" || transport == "wss-ipv6"
 #endif
-      ) {
-        const auto endpoint = networkEndpoint();
-        const std::string path =
-            presentation::stringMember(parameters, "webSocketPath");
-        if (endpoint && !path.empty() && path.front() == '/') {
-          if (transport == "websocket-ipv4") {
-            selection = [&, endpoint, path] {
-              currentWebSocketEndpoint = path;
-              webSocketIpv4Client.getConfig()
-                  ->Remote::setHost(endpoint->first)
-                  ->setPort(endpoint->second);
-              selectClient(webSocketIpv4Client, "websocket-ipv4",
-                           "WebSocket IPv4");
-            };
-          } else if (transport == "websocket-ipv6") {
-            selection = [&, endpoint, path] {
-              currentWebSocketEndpoint = path;
-              webSocketIpv6Client.getConfig()
-                  ->Remote::setHost(endpoint->first)
-                  ->setPort(endpoint->second);
-              selectClient(webSocketIpv6Client, "websocket-ipv6",
-                           "WebSocket IPv6");
-            };
+    ) {
+      const auto endpoint = networkEndpoint();
+      const std::string path = jsonString(parameters, "webSocketPath");
+      if (endpoint && !path.empty() && path.front() == '/') {
+        if (transport == "websocket-ipv4") {
+          selection = [&, endpoint, path] {
+            currentWebSocketEndpoint = path;
+            webSocketIpv4Client.getConfig()
+                ->Remote::setHost(endpoint->first)
+                ->setPort(endpoint->second);
+            selectClient(webSocketIpv4Client, "websocket-ipv4",
+                         "WebSocket IPv4");
+          };
+        } else if (transport == "websocket-ipv6") {
+          selection = [&, endpoint, path] {
+            currentWebSocketEndpoint = path;
+            webSocketIpv6Client.getConfig()
+                ->Remote::setHost(endpoint->first)
+                ->setPort(endpoint->second);
+            selectClient(webSocketIpv6Client, "websocket-ipv6",
+                         "WebSocket IPv6");
+          };
 #if defined(CODEXUI_CODEX_FRONTEND_TLS)
-          } else if (transport == "wss-ipv4") {
-            selection = [&, endpoint, path] {
-              currentWebSocketEndpoint = path;
-              wssIpv4Client.getConfig()
-                  ->Remote::setHost(endpoint->first)
-                  ->setPort(endpoint->second);
-              selectClient(wssIpv4Client, "wss-ipv4", "WSS IPv4");
-            };
-          } else {
-            selection = [&, endpoint, path] {
-              currentWebSocketEndpoint = path;
-              wssIpv6Client.getConfig()
-                  ->Remote::setHost(endpoint->first)
-                  ->setPort(endpoint->second);
-              selectClient(wssIpv6Client, "wss-ipv6", "WSS IPv6");
-            };
+        } else if (transport == "wss-ipv4") {
+          selection = [&, endpoint, path] {
+            currentWebSocketEndpoint = path;
+            wssIpv4Client.getConfig()
+                ->Remote::setHost(endpoint->first)
+                ->setPort(endpoint->second);
+            selectClient(wssIpv4Client, "wss-ipv4", "WSS IPv4");
+          };
+        } else {
+          selection = [&, endpoint, path] {
+            currentWebSocketEndpoint = path;
+            wssIpv6Client.getConfig()
+                ->Remote::setHost(endpoint->first)
+                ->setPort(endpoint->second);
+            selectClient(wssIpv6Client, "wss-ipv6", "WSS IPv6");
+          };
 #endif
-          }
         }
+      }
 #endif
-      }
-      if (!selection) {
-        normalizer.localOperationResult(
-            action, correlationId, false,
-            {{"code", -32602}, {"message", "invalid connection settings"}});
-        return;
-      }
-      beginTransition(true, std::move(selection), "local-transport-switch");
-      normalizer.localOperationResult(action, correlationId, true,
-                                      {{"accepted", true}});
+    }
+    if (!selection) {
+      rejectRuntimeAction(action, "Invalid connection settings");
       return;
     }
-    if (action == "controller.claim") {
-      static_cast<void>(sdk.claimController());
-      return;
-    }
-    if (action == "controller.release") {
-      static_cast<void>(sdk.releaseController());
-      return;
-    }
-
-    if (action == "diagnostic.raw.send") {
-      const auto message = parameters.find("message");
-      if (message == parameters.end() || !sdk.sendRawJson(*message))
-        normalizer.transportEvent("failure",
-                                  "raw app-server message was rejected");
-      return;
-    }
-
-    if (action == "pending-request.resolve") {
-      const auto requestIdMember = parameters.find("requestId");
-      const nlohmann::json requestId = requestIdMember == parameters.end()
-                                           ? nlohmann::json(nullptr)
-                                           : *requestIdMember;
-      nlohmann::json response{{"jsonrpc", "2.0"}, {"id", requestId}};
-      if (parameters.contains("error"))
-        response["error"] = parameters["error"];
-      else
-        response["result"] = presentation::member(
-            parameters, "result", nlohmann::json::object());
-      if (requestId.is_null() || !sdk.sendRawJson(response))
-        normalizer.transportEvent("failure",
-                                  "server-request response was rejected");
-      return;
-    }
-
-    using namespace codex::generated::client_requests;
-    if (action == "threads.list")
-      dispatchRequest<ThreadList>(sdk, parameters, action, correlationId,
-                                  normalizer);
-    else if (action == "thread.read")
-      dispatchRequest<ThreadRead>(sdk, parameters, action, correlationId,
-                                  normalizer);
-    else if (action == "thread.create")
-      dispatchRequest<ThreadStart>(sdk, parameters, action, correlationId,
-                                   normalizer);
-    else if (action == "thread.resume")
-      dispatchRequest<ThreadResume>(sdk, parameters, action, correlationId,
-                                    normalizer);
-    else if (action == "thread.fork")
-      dispatchRequest<ThreadFork>(sdk, parameters, action, correlationId,
-                                  normalizer);
-    else if (action == "thread.rename")
-      dispatchRequest<ThreadSetName>(sdk, parameters, action, correlationId,
-                                     normalizer);
-    else if (action == "thread.archive")
-      dispatchRequest<ThreadArchive>(sdk, parameters, action, correlationId,
-                                     normalizer);
-    else if (action == "thread.unarchive")
-      dispatchRequest<ThreadUnarchive>(sdk, parameters, action, correlationId,
-                                       normalizer);
-    else if (action == "thread.delete")
-      dispatchRequest<ThreadDelete>(sdk, parameters, action, correlationId,
-                                    normalizer);
-    else if (action == "models.list")
-      dispatchRequest<ModelList>(sdk, parameters, action, correlationId,
-                                 normalizer);
-    else if (action == "model-provider-capabilities.read")
-      dispatchRequest<ModelProviderCapabilitiesRead>(sdk, parameters, action,
-                                                     correlationId, normalizer);
-    else if (action == "account.read")
-      dispatchRequest<GetAccount>(sdk, parameters, action, correlationId,
-                                  normalizer);
-    else if (action == "account.rate-limits.read")
-      dispatchRequest<GetAccountRateLimits>(sdk, parameters, action,
-                                            correlationId, normalizer);
-    else if (action == "account.token-usage.read")
-      dispatchRequest<GetAccountTokenUsage>(sdk, parameters, action,
-                                            correlationId, normalizer);
-    else if (action == "config.read")
-      dispatchRequest<ConfigRead>(sdk, parameters, action, correlationId,
-                                  normalizer);
-    else if (action == "permission-profiles.list")
-      dispatchRequest<PermissionProfileList>(sdk, parameters, action,
-                                             correlationId, normalizer);
-    else if (action == "experimental-features.list")
-      dispatchRequest<ExperimentalFeatureList>(sdk, parameters, action,
-                                               correlationId, normalizer);
-    else if (action == "skills.list")
-      dispatchRequest<SkillsList>(sdk, parameters, action, correlationId,
-                                  normalizer);
-    else if (action == "hooks.list")
-      dispatchRequest<HooksList>(sdk, parameters, action, correlationId,
-                                 normalizer);
-    else if (action == "plugins.list")
-      dispatchRequest<PluginList>(sdk, parameters, action, correlationId,
-                                  normalizer);
-    else if (action == "apps.list")
-      dispatchRequest<AppsList>(sdk, parameters, action, correlationId,
-                                normalizer);
-    else if (action == "mcp-servers.list")
-      dispatchRequest<McpServerStatusList>(sdk, parameters, action,
-                                           correlationId, normalizer);
-#define CODEXUI_DISPATCH_PRESENTATION_REQUEST(ActionName, OperationName)       \
-  else if (action == ActionName) dispatchRequest<OperationName>(               \
-      sdk, parameters, action, correlationId, normalizer);
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.unsubscribe",
-                                          ThreadUnsubscribe)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.goal.set", ThreadGoalSet)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.goal.get", ThreadGoalGet)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.goal.clear", ThreadGoalClear)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.metadata.update",
-                                          ThreadMetadataUpdate)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.section.move",
-                                          ThreadSectionMove)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.compact.start",
-                                          ThreadCompactStart)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.shell-command.start",
-                                          ThreadShellCommand)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.guardian-denial.approve",
-                                          ThreadApproveGuardianDeniedAction)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.rollback", ThreadRollback)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.sections.list",
-                                          ThreadSectionList)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.section.create",
-                                          ThreadSectionCreate)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.section.update",
-                                          ThreadSectionUpdate)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.section.delete",
-                                          ThreadSectionDelete)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("threads.loaded.list",
-                                          ThreadLoadedList)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("thread.items.inject",
-                                          ThreadInjectItems)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("skills.extra-roots.set",
-                                          SkillsExtraRootsSet)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("marketplace.add", MarketplaceAdd)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("marketplace.remove",
-                                          MarketplaceRemove)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("marketplace.upgrade",
-                                          MarketplaceUpgrade)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("plugins.installed", PluginInstalled)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("plugin.read", PluginRead)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("plugin.skill.read", PluginSkillRead)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("plugin.share.save", PluginShareSave)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("plugin.share.targets.update",
-                                          PluginShareUpdateTargets)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("plugin.shares.list", PluginShareList)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("plugin.share.checkout",
-                                          PluginShareCheckout)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("plugin.share.delete",
-                                          PluginShareDelete)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("apps.read", AppsRead)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("apps.installed", AppsInstalled)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("filesystem.file.read", FsReadFile)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("filesystem.file.write", FsWriteFile)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("filesystem.directory.create",
-                                          FsCreateDirectory)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("filesystem.metadata.read",
-                                          FsGetMetadata)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("filesystem.directory.read",
-                                          FsReadDirectory)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("filesystem.remove", FsRemove)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("filesystem.copy", FsCopy)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("filesystem.watch", FsWatch)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("filesystem.unwatch", FsUnwatch)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("skills.config.write",
-                                          SkillsConfigWrite)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("plugin.install", PluginInstall)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("plugin.uninstall", PluginUninstall)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("review.start", ReviewStart)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST(
-        "experimental-features.enablement.set",
-        ExperimentalFeatureEnablementSet)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("mcp-server.oauth-login.start",
-                                          McpServerOauthLogin)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("mcp-servers.refresh",
-                                          McpServerRefresh)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("mcp-resource.read", McpResourceRead)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("mcp-server.tool.call",
-                                          McpServerToolCall)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("windows-sandbox.setup.start",
-                                          WindowsSandboxSetupStart)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("windows-sandbox.readiness",
-                                          WindowsSandboxReadiness)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("account.login.start", LoginAccount)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("account.login.cancel",
-                                          CancelLoginAccount)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("account.logout", LogoutAccount)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST(
-        "account.rate-limit-reset-credit.consume",
-        ConsumeAccountRateLimitResetCredit)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("workspace.messages.read",
-                                          GetWorkspaceMessages)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("account.credits-nudge-email.send",
-                                          SendAddCreditsNudgeEmail)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("feedback.upload", FeedbackUpload)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("command.execute", OneOffCommandExec)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("command.stdin.write",
-                                          CommandExecWrite)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("command.terminate",
-                                          CommandExecTerminate)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("command.resize", CommandExecResize)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("external-agent-config.detect",
-                                          ExternalAgentConfigDetect)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("external-agent-config.import",
-                                          ExternalAgentConfigImport)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST(
-        "external-agent-config.import-history.record",
-        ExternalAgentConfigImportHistoryRecord)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST(
-        "external-agent-config.import-histories.read",
-        ExternalAgentConfigImportHistoriesRead)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("config.value.write",
-                                          ConfigValueWrite)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("config.batch.write",
-                                          ConfigBatchWrite)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("config.requirements.read",
-                                          ConfigRequirementsRead)
-    CODEXUI_DISPATCH_PRESENTATION_REQUEST("workspace.search.start",
-                                          FuzzyFileSearch)
-#undef CODEXUI_DISPATCH_PRESENTATION_REQUEST
-    else if (action == "turn.start") dispatchRequest<TurnStart>(
-        sdk, parameters, action, correlationId, normalizer);
-    else if (action == "turn.steer") dispatchRequest<TurnSteer>(
-        sdk, parameters, action, correlationId, normalizer);
-    else if (action == "turn.interrupt") dispatchRequest<TurnInterrupt>(
-        sdk, parameters, action, correlationId, normalizer);
-    else normalizer.operationRejected(
-        action, correlationId, -32601,
-        "unsupported CodexUI presentation action");
+    beginTransition(true, std::move(selection), "local-transport-switch");
   };
 
-  ipcEndpoint->setOnData([&](const char *data, std::size_t size) {
-    try {
-      const bool accepted = ipcFramer.consume(
-          std::string_view(data, size), dispatchCommand,
-          [&normalizer, &requestShutdown](std::string message) {
-            normalizer.transportEvent("failure", std::move(message));
-            requestShutdown();
-          });
-      if (!accepted)
-        requestShutdown();
-    } catch (const std::exception &exception) {
-      normalizer.transportEvent(
-          "failure", std::string("presentation command dispatch failed: ") +
-                         exception.what());
-      requestShutdown();
-    } catch (...) {
-      normalizer.transportEvent("failure",
-                                "presentation command dispatch failed");
-      requestShutdown();
+  const auto dispatchRuntimeAction = [&](nodegraph::RuntimeAction action) {
+    using enum nodegraph::RuntimeActionKind;
+    switch (action.kind) {
+    case RefreshThreads:
+      requestThreadList(jsonObject(std::move(action.payload)));
+      return;
+    case CreateThread: {
+      nodegraph::PromptTransition transition = workerLogic.admitFirstPrompt(
+          std::move(action), threadActivityAt("thread/start"),
+          wallClockMilliseconds());
+      if (transition.command) {
+        if (!sdk.providerReady() || !sdk.isController()) {
+          failPromptAndContinue(transition.command->localPrompt,
+                                "Codex is not ready to create a thread");
+        } else {
+          dispatchPrompt(std::move(*transition.command));
+        }
+      }
+      return;
     }
-  });
-  ipcEndpoint->setOnError([&normalizer, &requestShutdown](int errorNumber) {
-    normalizer.transportEvent("failure", std::string("socketpair failure: ") +
-                                             std::to_string(errorNumber));
-    requestShutdown();
-  });
-  ipcEndpoint->setOnClosed([&ipcEndpoint, &requestShutdown] {
-    ipcEndpoint = nullptr;
-    requestShutdown();
-  });
+    case Connect:
+      requestConnect();
+      return;
+    case Disconnect:
+      requestDisconnect();
+      return;
+    case Reconnect:
+      requestReconnect();
+      return;
+    case ConfigureConnection:
+      configureConnection(std::move(action));
+      return;
+    case ClaimController:
+      if (!sdk.claimController())
+        rejectRuntimeAction(action, "Controller claim was rejected");
+      return;
+    case ReleaseController:
+      if (!sdk.releaseController())
+        rejectRuntimeAction(action, "Controller release was rejected");
+      return;
+    case RefreshCatalogs: {
+      nlohmann::json parameters = jsonObject(std::move(action.payload));
+      requestModelList(parameters);
+      requestPermissionProfiles(std::move(parameters));
+      return;
+    }
+    }
+  };
+  const bool workerMailboxReady =
+      WorkerMailboxReceiver::create(
+          channels,
+          [&dispatchNodeAction, &dispatchRuntimeAction,
+           &requestShutdown](nodegraph::QtToWorkerMessage message) {
+            std::visit(
+                [&](auto &payload) {
+                  using Message = std::decay_t<decltype(payload)>;
+                  if constexpr (std::is_same_v<Message, nodegraph::NodeAction>)
+                    dispatchNodeAction(std::move(payload));
+                  else if constexpr (std::is_same_v<Message,
+                                                    nodegraph::RuntimeAction>)
+                    dispatchRuntimeAction(std::move(payload));
+                  else if (requestShutdown)
+                    requestShutdown();
+                },
+                message);
+          },
+          [&publishTransportEvent, &requestShutdown](std::string reason) {
+            publishTransportEvent("failure", std::move(reason));
+            if (requestShutdown)
+              requestShutdown();
+          }) != nullptr;
 
   eventLoopRunning = true;
   core::EventReceiver::atNextTick([&] {
-    normalizer.transportEvent("runtime-started");
+    publishTransportEvent("runtime-started");
+    if (!workerMailboxReady) {
+      publishTransportEvent("failure",
+                            "unable to observe the Qt-to-worker eventfd");
+      requestShutdown();
+      return;
+    }
     const std::array disabled{
         unixClient.getConfig()->Instance::getDisabled(),
         ipv4Client.getConfig()->Instance::getDisabled(),
@@ -961,7 +2604,7 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
     const std::size_t enabled = static_cast<std::size_t>(
         std::count(disabled.begin(), disabled.end(), false));
     if (enabled != 1) {
-      normalizer.transportEvent(
+      publishTransportEvent(
           "failure",
           "exactly one outgoing bridge transport must be enabled; found " +
               std::to_string(enabled));
@@ -1012,6 +2655,8 @@ int runClientRuntime(int socketPairDescriptor, Configuration &configuration,
   if (terminateSelected)
     terminateSelected();
   connection.shutdown();
+  static_cast<void>(workerLogic.sendWorkerStopped(
+      result == 0 ? "SNode.C worker stopped" : "SNode.C worker failed"));
   return result;
 }
 

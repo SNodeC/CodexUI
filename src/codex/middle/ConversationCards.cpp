@@ -2,14 +2,14 @@
 
 #include "codex/middle/ConversationCards.h"
 
-#include "codex/PresentationStatus.h"
+#include "codex/UiStatus.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QApplication>
 #include <QClipboard>
 #include <QColor>
 #include <QDateTime>
-#include <QDialog>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -23,16 +23,18 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
-#include <QShowEvent>
+#include <QSignalBlocker>
 #include <QStyle>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTimer>
 #include <QToolButton>
 #include <QToolTip>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QVariant>
 #include <QVariantAnimation>
@@ -40,6 +42,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 #include <unordered_set>
@@ -55,11 +58,11 @@ constexpr int PendingAnimationIntervalMilliseconds = 32;
 constexpr qint64 PendingHalfCycleMilliseconds = 850;
 constexpr int ThumbnailMaximumWidth = 280;
 constexpr int ThumbnailMaximumHeight = 180;
-constexpr int ViewerMaximumImageExtent = 4096;
 constexpr qsizetype MaximumGenericActivityCharacters = 4096;
 constexpr int CardHeaderActionSpacing = 4;
 constexpr int CopyMorphDurationMilliseconds = 160;
 constexpr int CopyCheckHoldMilliseconds = 500;
+constexpr int MarkdownBottomPaintGuard = 4;
 
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -80,11 +83,14 @@ QString trimmedTrailingLines(const QString &value) {
 }
 
 bool initiallyCollapsed(CardKind kind, bool commandInitiallyCollapsed,
-                        bool imageInitiallyCollapsed) {
+                        bool imageInitiallyCollapsed,
+                        bool fileChangesInitiallyCollapsed) {
   if (kind == CardKind::CommandExecution)
     return commandInitiallyCollapsed;
   if (kind == CardKind::ImageGeneration)
     return imageInitiallyCollapsed;
+  if (kind == CardKind::FileChanges)
+    return fileChangesInitiallyCollapsed;
   return kind != CardKind::UserMessage && kind != CardKind::AgentMessage &&
          kind != CardKind::LocalPrompt;
 }
@@ -145,12 +151,11 @@ public:
     morph_ = new QVariantAnimation(this);
     morph_->setDuration(CopyMorphDurationMilliseconds);
     morph_->setEasingCurve(QEasingCurve::InOutCubic);
-    QObject::connect(
-        morph_, &QVariantAnimation::valueChanged, this,
-        [this](const QVariant &value) {
-          morphProgress_ = value.toReal();
-          update();
-        });
+    QObject::connect(morph_, &QVariantAnimation::valueChanged, this,
+                     [this](const QVariant &value) {
+                       morphProgress_ = value.toReal();
+                       update();
+                     });
     QObject::connect(morph_, &QVariantAnimation::finished, this, [this] {
       if (returningToCopy_) {
         finishFeedback();
@@ -243,7 +248,12 @@ private:
   bool returningToCopy_ = false;
 };
 
-void openImageViewer(const QString &path);
+bool openLocalFile(const QString &path) {
+  if (path.isEmpty())
+    return false;
+  return QDesktopServices::openUrl(
+      QUrl::fromLocalFile(QFileInfo(path).absoluteFilePath()));
+}
 
 class ImageThumbnail final : public QLabel {
 public:
@@ -327,7 +337,7 @@ private:
   bool activate() {
     if (!property("imageAvailable").toBool())
       return false;
-    openImageViewer(path_);
+    openLocalFile(path_);
     return true;
   }
 
@@ -410,70 +420,6 @@ private:
   QSize naturalSize_;
 };
 
-class ImageViewer final : public QDialog {
-public:
-  explicit ImageViewer(const QString &path) : QDialog(nullptr, Qt::Window) {
-    setObjectName(QStringLiteral("messageImageViewer"));
-    setAttribute(Qt::WA_DeleteOnClose);
-    setWindowModality(Qt::NonModal);
-    setWindowTitle(QFileInfo(path).fileName());
-    auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(8, 8, 8, 8);
-    scroll_ = new QScrollArea(this);
-    scroll_->setWidgetResizable(true);
-    imageLabel_ = new QLabel(scroll_);
-    imageLabel_->setObjectName(QStringLiteral("messageImageViewerImage"));
-    imageLabel_->setAlignment(Qt::AlignCenter);
-
-    QImageReader reader(path);
-    reader.setAutoTransform(true);
-    const QSize source = reader.size();
-    if (source.isValid() && (source.width() > ViewerMaximumImageExtent ||
-                             source.height() > ViewerMaximumImageExtent))
-      reader.setScaledSize(source.scaled(ViewerMaximumImageExtent,
-                                         ViewerMaximumImageExtent,
-                                         Qt::KeepAspectRatio));
-    image_ = reader.read();
-    if (image_.isNull())
-      imageLabel_->setText(QStringLiteral("Image unavailable"));
-    scroll_->setWidget(imageLabel_);
-    layout->addWidget(scroll_);
-    resize(900, 650);
-    updatePixmap();
-  }
-
-protected:
-  void showEvent(QShowEvent *event) override {
-    QDialog::showEvent(event);
-    updatePixmap();
-  }
-
-  void resizeEvent(QResizeEvent *event) override {
-    QDialog::resizeEvent(event);
-    updatePixmap();
-  }
-
-private:
-  void updatePixmap() {
-    if (image_.isNull() || !scroll_)
-      return;
-    const QSize available = scroll_->viewport()->size() - QSize(8, 8);
-    if (available.isEmpty())
-      return;
-    imageLabel_->setPixmap(QPixmap::fromImage(image_.scaled(
-        available, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
-  }
-
-  QImage image_;
-  QScrollArea *scroll_ = nullptr;
-  QLabel *imageLabel_ = nullptr;
-};
-
-void openImageViewer(const QString &path) {
-  auto *viewer = new ImageViewer(path);
-  viewer->show();
-}
-
 QLabel *makeLabel(const QString &value, const char *kind = "body",
                   QWidget *parent = nullptr) {
   auto *label = new QLabel(value, parent);
@@ -500,6 +446,10 @@ QLabel *makeMarkdownLabel(const QString &value, QWidget *parent = nullptr) {
   label->setTextFormat(Qt::RichText);
   label->setWordWrap(true);
   label->setMinimumWidth(0);
+  // QTextDocument and QLabel round rich-text line geometry independently.
+  // Keep one descent of paint space below the measured document so the final
+  // baseline cannot be clipped when a nested card is fixed to heightForWidth.
+  label->setContentsMargins(0, 0, 0, MarkdownBottomPaintGuard);
   label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   label->setOpenExternalLinks(true);
   label->setTextInteractionFlags(Qt::TextSelectableByMouse |
@@ -633,6 +583,35 @@ QString fileChangesText(const FileChangesData &data) {
   return rows.join(QLatin1Char('\n'));
 }
 
+QString fileChangesHtml(const FileChangesData &data, QStringList &openPaths) {
+  openPaths.clear();
+  QStringList rows;
+  for (const FileChangeData &change : data.changes) {
+    if (change.path.empty())
+      continue;
+    const QString displayPath = text(change.path);
+    QFileInfo resolved(displayPath);
+    if (resolved.isRelative() && !data.cwd.empty())
+      resolved = QFileInfo(QDir(text(data.cwd)), displayPath);
+    const int targetIndex = openPaths.size();
+    openPaths.push_back(QDir::cleanPath(resolved.absoluteFilePath()));
+
+    QString detail = displayChangeKind(change.kind);
+    if (change.additions && change.deletions)
+      detail += QStringLiteral("  +%1 −%2")
+                    .arg(*change.additions)
+                    .arg(*change.deletions);
+    rows.push_back(
+        QStringLiteral("<a href=\"codexui-file:%1\" "
+                       "style=\"color:%2;text-decoration:none;\">%3</a>"
+                       "&nbsp;&nbsp;·&nbsp;&nbsp;%4")
+            .arg(targetIndex)
+            .arg(QString::fromLatin1(UiStyle::blue),
+                 displayPath.toHtmlEscaped(), detail.toHtmlEscaped()));
+  }
+  return rows.join(QStringLiteral("<br/>"));
+}
+
 std::optional<DiffCounts> totalDiffCounts(const FileChangesData &data) {
   DiffCounts total;
   bool available = false;
@@ -671,6 +650,16 @@ QString boundedGenericActivity(const nlohmann::json &raw) {
   return rendered + QStringLiteral("\n\n[Activity details truncated]");
 }
 
+QString boundedGenericActivity(const GenericActivityData &activity) {
+  if (activity.displayDetail.empty())
+    return boundedGenericActivity(activity.raw);
+  QString rendered = text(activity.displayDetail);
+  if (rendered.size() <= MaximumGenericActivityCharacters)
+    return rendered;
+  rendered.truncate(MaximumGenericActivityCharacters);
+  return rendered + QStringLiteral("\n\n[Activity details truncated]");
+}
+
 CardCopyContent cardCopyContent(const VisibleCardData &card) {
   return std::visit(
       [](const auto &payload) -> CardCopyContent {
@@ -703,7 +692,7 @@ CardCopyContent cardCopyContent(const VisibleCardData &card) {
               joinedCopyText({text(payload.revisedPrompt), text(payload.path)}),
               false};
         } else if constexpr (std::is_same_v<Payload, GenericActivityData>) {
-          return {boundedGenericActivity(payload.raw), false};
+          return {boundedGenericActivity(payload), false};
         } else {
           return payload.prompt.empty()
                      ? CardCopyContent{textList(payload.imagePaths)
@@ -717,7 +706,7 @@ CardCopyContent cardCopyContent(const VisibleCardData &card) {
 
 bool presentationEquals(const VisibleCardData &left,
                         const VisibleCardData &right) {
-  if (left.kind != right.kind)
+  if (left.kind != right.kind || left.activeWork != right.activeWork)
     return false;
   const auto *first = std::get_if<LocalPromptData>(&left.payload);
   const auto *second = std::get_if<LocalPromptData>(&right.payload);
@@ -726,7 +715,9 @@ bool presentationEquals(const VisibleCardData &left,
            first->imagePaths == second->imagePaths &&
            first->state == second->state &&
            first->showPendingAnimation == second->showPendingAnimation &&
-           first->error == second->error;
+           first->error == second->error &&
+           first->admittedAtMs == second->admittedAtMs &&
+           first->requiresExplicitRecovery == second->requiresExplicitRecovery;
   }
   return left.payload == right.payload;
 }
@@ -745,13 +736,38 @@ ContentSizedTextView::ContentSizedTextView(int maximumContentHeight,
   setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
   setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   document()->setDocumentMargin(CommandTextPadding);
+  connect(verticalScrollBar(), &QScrollBar::sliderPressed, this,
+          [this] { pinScrollToStart_ = false; });
+  connect(verticalScrollBar(), &QScrollBar::actionTriggered, this,
+          [this] { pinScrollToStart_ = false; });
+  connect(verticalScrollBar(), &QScrollBar::valueChanged, this,
+          [this](int value) {
+            QScrollBar *bar = verticalScrollBar();
+            if (!pinScrollToStart_ || value == bar->minimum())
+              return;
+            const QSignalBlocker blocker(bar);
+            bar->setValue(bar->minimum());
+          });
 }
 
 bool ContentSizedTextView::setContent(const QString &content) {
   if (toPlainText() == content)
     return false;
+  QScrollBar *bar = verticalScrollBar();
+  const bool hadUserScrollRange = bar->maximum() > bar->minimum();
+  const int previousScrollValue = bar->value();
+  pinScrollToStart_ = !hadUserScrollRange;
   setPlainText(content);
-  measureAtCurrentWidth(true);
+  if (hadUserScrollRange)
+    bar->setValue(previousScrollValue);
+  else {
+    QTextCursor cursor(document());
+    cursor.movePosition(QTextCursor::Start);
+    setTextCursor(cursor);
+  }
+  static_cast<void>(measureAtCurrentWidth(true));
+  if (!hadUserScrollRange)
+    bar->setValue(bar->minimum());
   return true;
 }
 
@@ -806,6 +822,7 @@ QSize ContentSizedTextView::minimumSizeHint() const {
 }
 
 void ContentSizedTextView::wheelEvent(QWheelEvent *event) {
+  pinScrollToStart_ = false;
   QScrollBar *bar = verticalScrollBar();
   const int delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
                                                   : event->angleDelta().y();
@@ -826,10 +843,10 @@ void ContentSizedTextView::resizeEvent(QResizeEvent *event) {
   // Wrapping is authoritative only after QTextEdit has assigned its
   // viewport width. Propagate a changed hint immediately so a multiline view
   // cannot remain at an earlier one-line height with a premature scrollbar.
-  measureAtCurrentWidth(true);
+  static_cast<void>(measureAtCurrentWidth(true));
 }
 
-void ContentSizedTextView::measureAtCurrentWidth(bool notifyParent) {
+bool ContentSizedTextView::measureAtCurrentWidth(bool notifyParent) {
   const QString content = toPlainText();
   int wantedHeight = 0;
   if (!content.isEmpty()) {
@@ -840,10 +857,15 @@ void ContentSizedTextView::measureAtCurrentWidth(bool notifyParent) {
   }
   wantedHeight = std::clamp(wantedHeight, 0, maximumHeight());
   if (wantedHeight == preferredHeight_)
-    return;
+    return false;
   preferredHeight_ = wantedHeight;
   if (notifyParent)
     updateGeometry();
+  return true;
+}
+
+bool ContentSizedTextView::contentHeightCapped() const noexcept {
+  return preferredHeight_ >= maximumHeight();
 }
 
 CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
@@ -870,12 +892,11 @@ CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
     preservedScrollValue_ = verticalScrollBar()->value();
     followsLatest_ = isAtBottom();
   });
-  connect(verticalScrollBar(), &QScrollBar::actionTriggered, this,
-          [this](int) {
-            preservedScrollValue_ = verticalScrollBar()->sliderPosition();
-            followsLatest_ =
-                preservedScrollValue_ >= verticalScrollBar()->maximum() - 1;
-          });
+  connect(verticalScrollBar(), &QScrollBar::actionTriggered, this, [this](int) {
+    preservedScrollValue_ = verticalScrollBar()->sliderPosition();
+    followsLatest_ =
+        preservedScrollValue_ >= verticalScrollBar()->maximum() - 1;
+  });
   connect(verticalScrollBar(), &QScrollBar::rangeChanged, this,
           [this](int, int) {
             if (!programmaticScroll_)
@@ -883,7 +904,7 @@ CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
           });
 
   setOutput(output);
-  measureAtCurrentWidth(false);
+  static_cast<void>(measureAtCurrentWidth(false));
   settleScroll();
 }
 
@@ -895,11 +916,16 @@ bool CommandOutputView::followsLatest() const noexcept {
   return followsLatest_;
 }
 
+bool CommandOutputView::isHeightCapped() const noexcept {
+  return contentHeightCapped();
+}
+
 bool CommandOutputView::setOutput(const QString &output) {
   const QString displayOutput = trimmedTrailingLines(output);
   if (currentOutput_ == displayOutput)
     return false;
 
+  const bool retainedHeightIsCapped = isHeightCapped();
   const bool retainedFollow = followsLatest_;
   const int retainedValue = preservedScrollValue_;
   const bool appendOnly =
@@ -916,10 +942,13 @@ bool CommandOutputView::setOutput(const QString &output) {
   followsLatest_ = retainedFollow;
   preservedScrollValue_ = retainedValue;
   programmaticScroll_ = false;
-  // Asking the document layout for its size here completes wrapping at the
-  // already assigned viewport width.  The enclosing conversation can then
-  // account for the final card height in the same reconciliation transaction.
-  measureAtCurrentWidth(true);
+  // Once the output has reached its bounded height, subsequent text cannot
+  // change the enclosing card's geometry. Avoid a complete QTextDocument
+  // measurement and ancestor LayoutRequest for the common streaming case.
+  if (!retainedHeightIsCapped || !appendOnly || displayOutput.isEmpty())
+    static_cast<void>(measureAtCurrentWidth(true));
+  else
+    viewport()->update();
   settleScroll();
   return true;
 }
@@ -972,10 +1001,12 @@ bool CommandOutputView::isAtBottom() const {
 class ConversationCard::Impl final {
 public:
   Impl(ConversationCard *owner, const VisibleCardData &initial,
-       bool commandInitiallyCollapsed, bool imageInitiallyCollapsed)
+       bool commandInitiallyCollapsed, bool imageInitiallyCollapsed,
+       bool fileChangesInitiallyCollapsed)
       : owner(owner), current(initial),
         collapsed(initiallyCollapsed(initial.kind, commandInitiallyCollapsed,
-                                     imageInitiallyCollapsed)) {
+                                     imageInitiallyCollapsed,
+                                     fileChangesInitiallyCollapsed)) {
     owner->setObjectName(QStringLiteral("conversationCard"));
     owner->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     owner->setProperty("conversationCardKey",
@@ -1032,6 +1063,8 @@ public:
     owner->setProperty("kind", "raised");
     std::visit([this](const auto &payload) { createComposition(payload); },
                initial.payload);
+    if (initial.activeWork)
+      setActiveWork(*initial.activeWork);
     refreshCopyPresentation();
     refreshFoldPresentation();
   }
@@ -1042,34 +1075,99 @@ public:
                                         next.kind == CardKind::UserMessage));
   }
 
-  bool apply(const VisibleCardData &next) {
+  PresentationImpact applyPresentation(const VisibleCardData &next) {
     if (!canApply(next)) {
       Q_ASSERT_X(false, "ConversationCard::apply",
                  "a persistent conversation card received an incompatible "
                  "key or kind");
-      return false;
+      return PresentationImpact::None;
     }
     const bool becomingAuthoritative = current.kind == CardKind::LocalPrompt &&
                                        next.kind == CardKind::UserMessage;
+    const bool payloadChanged = current.payload != next.payload;
     const bool presentationChanged =
         becomingAuthoritative || !presentationEquals(current, next);
+    const bool activeWorkOnly = !becomingAuthoritative && !payloadChanged &&
+                                current.activeWork != next.activeWork;
+    bool cappedCommandOutputOnly = false;
+    bool commandLifecycleOnly = false;
+    if (!becomingAuthoritative && output && output->isHeightCapped() &&
+        current.kind == CardKind::CommandExecution &&
+        next.kind == CardKind::CommandExecution) {
+      const auto *before = std::get_if<CommandExecutionData>(&current.payload);
+      const auto *after = std::get_if<CommandExecutionData>(&next.payload);
+      cappedCommandOutputOnly =
+          before && after && before->output != after->output &&
+          after->output.starts_with(before->output) &&
+          before->command == after->command &&
+          before->status == after->status && before->cwd == after->cwd &&
+          before->exitCode == after->exitCode &&
+          before->durationMilliseconds == after->durationMilliseconds &&
+          terminalOutputHasVisibleText(before->output) &&
+          terminalOutputHasVisibleText(after->output) &&
+          current.activeWork == next.activeWork;
+    }
+    if (!becomingAuthoritative &&
+        current.kind == CardKind::CommandExecution &&
+        next.kind == CardKind::CommandExecution) {
+      const auto *before = std::get_if<CommandExecutionData>(&current.payload);
+      const auto *after = std::get_if<CommandExecutionData>(&next.payload);
+      commandLifecycleOnly =
+          before && after && before->command == after->command &&
+          before->output == after->output && before->cwd == after->cwd &&
+          !before->status.empty() && !after->status.empty() &&
+          !commandMetadata(*before).isEmpty() &&
+          !commandMetadata(*after).isEmpty();
+    }
     if (becomingAuthoritative)
       promoteToAuthoritativeUserMessage();
     current = next;
     if (!presentationChanged)
-      return false;
+      return PresentationImpact::None;
+    if (activeWorkOnly) {
+      setActiveWork(next.activeWork.value_or(false));
+      return PresentationImpact::PaintOnly;
+    }
+    const int previousNaturalHeight =
+        commandLifecycleOnly ? naturalHeightForCurrentWidth() : -1;
     std::visit([this](const auto &payload) { updateComposition(payload); },
                next.payload);
+    if (next.activeWork)
+      setActiveWork(*next.activeWork);
     refreshCopyPresentation();
     refreshFoldPresentation();
-    owner->updateGeometry();
+    const int nextNaturalHeight = commandLifecycleOnly
+                                      ? naturalHeightForCurrentWidth()
+                                      : -1;
+    const bool measuredLifecyclePaintOnly =
+        commandLifecycleOnly && previousNaturalHeight >= 0 &&
+        nextNaturalHeight == previousNaturalHeight;
+    const bool geometryChanged =
+        !cappedCommandOutputOnly && !measuredLifecyclePaintOnly;
+    if (geometryChanged)
+      owner->updateGeometry();
     owner->update();
-    return true;
+    return geometryChanged ? PresentationImpact::GeometryChanged
+                           : PresentationImpact::PaintOnly;
+  }
+
+  [[nodiscard]] int naturalHeightForCurrentWidth() {
+    if (!layout || owner->width() <= 0)
+      return -1;
+    layout->invalidate();
+    const int width = owner->contentsRect().width();
+    return layout->hasHeightForWidth()
+               ? layout->heightForWidth(width) + 2 * owner->frameWidth()
+               : layout->sizeHint().height() + 2 * owner->frameWidth();
   }
 
   void promoteToAuthoritativeUserMessage() {
     if (animationTimer)
       animationTimer->stop();
+    if (pendingDelayTimer)
+      pendingDelayTimer->stop();
+    pendingFeedbackVisible = false;
+    pendingFeedbackDeadlineMs.reset();
     owner->setObjectName(QStringLiteral("conversationCard"));
     owner->setProperty("conversationCardKind",
                        static_cast<int>(CardKind::UserMessage));
@@ -1082,6 +1180,17 @@ public:
       metadata->clear();
       metadata->hide();
     }
+    if (phase) {
+      if (owner->property("nestedConversationCard").toBool()) {
+        showPhase(QStringLiteral("steering"),
+                  QStringLiteral("steeringMessagePhase"));
+        setPhaseTone(QStringLiteral("steering"));
+      } else {
+        phase->hide();
+      }
+    }
+    if (recovery)
+      recovery->hide();
   }
 
   void setCollapsed(bool next) {
@@ -1105,6 +1214,8 @@ public:
   }
 
   void setNestedConversationCard(bool nested) {
+    if (owner->property("nestedConversationCard").toBool() == nested)
+      return;
     owner->setProperty("nestedConversationCard", nested);
     if (current.kind == CardKind::UserMessage ||
         current.kind == CardKind::LocalPrompt) {
@@ -1124,36 +1235,89 @@ public:
     owner->update();
   }
 
-  void setNestedCards(const std::vector<ConversationCard *> &cards) {
-    const std::unordered_set<ConversationCard *> retained(cards.begin(),
-                                                          cards.end());
+  void setViewportVisible(bool visible) {
+    if (viewportVisible == visible)
+      return;
+    viewportVisible = visible;
+    owner->setProperty("conversationViewportVisible", visible);
+    if (refreshPendingPresentation())
+      owner->updateGeometry();
+    owner->update();
+  }
+
+  void setNestedItems(const std::vector<QWidget *> &items) {
+    std::vector<QWidget *> currentItems;
+    currentItems.reserve(static_cast<std::size_t>(nestedLayout->count()));
+    for (int index = 0; index < nestedLayout->count(); ++index)
+      if (QWidget *item = nestedLayout->itemAt(index)->widget())
+        currentItems.push_back(item);
+
+    const bool unchanged = currentItems == items;
+    const bool appendOnly =
+        currentItems.size() <= items.size() &&
+        std::equal(currentItems.begin(), currentItems.end(), items.begin());
+    if (unchanged) {
+      const bool visible = std::ranges::any_of(
+          items, [](const QWidget *item) { return item && !item->isHidden(); });
+      if (hasVisibleNestedCards != visible) {
+        hasVisibleNestedCards = visible;
+        refreshFoldPresentation();
+      }
+      return;
+    }
+    if (appendOnly) {
+      for (std::size_t index = currentItems.size(); index < items.size();
+           ++index) {
+        QWidget *item = items[index];
+        if (!item)
+          continue;
+        const bool explicitlyHidden = item->isHidden();
+        nestedLayout->addWidget(item);
+        item->setVisible(!explicitlyHidden);
+        if (auto *card = dynamic_cast<ConversationCard *>(item))
+          card->impl_->setNestedConversationCard(true);
+      }
+      hasVisibleNestedCards = std::ranges::any_of(
+          items, [](const QWidget *item) { return item && !item->isHidden(); });
+      refreshFoldPresentation();
+      return;
+    }
+
+    const std::unordered_set<QWidget *> retained(items.begin(), items.end());
     for (int index = nestedLayout->count() - 1; index >= 0; --index) {
-      auto *card = dynamic_cast<ConversationCard *>(
-          nestedLayout->itemAt(index)->widget());
-      if (!card || retained.contains(card))
+      QWidget *item = nestedLayout->itemAt(index)->widget();
+      if (!item || retained.contains(item))
         continue;
-      const bool explicitlyHidden = card->isHidden();
-      nestedLayout->removeWidget(card);
-      card->setParent(owner->parentWidget());
-      card->setVisible(!explicitlyHidden);
-      card->impl_->setNestedConversationCard(false);
+      const bool explicitlyHidden = item->isHidden();
+      nestedLayout->removeWidget(item);
+      item->setParent(owner->parentWidget());
+      item->setVisible(!explicitlyHidden);
+      if (auto *card = dynamic_cast<ConversationCard *>(item))
+        card->impl_->setNestedConversationCard(false);
     }
-    for (std::size_t index = 0; index < cards.size(); ++index) {
-      ConversationCard *card = cards[index];
-      if (!card)
+    for (std::size_t index = 0; index < items.size(); ++index) {
+      QWidget *item = items[index];
+      if (!item)
         continue;
-      const bool explicitlyHidden = card->isHidden();
+      const bool explicitlyHidden = item->isHidden();
       const int position = static_cast<int>(index);
-      if (nestedLayout->indexOf(card) != position)
-        nestedLayout->insertWidget(position, card);
-      card->setVisible(!explicitlyHidden);
-      card->impl_->setNestedConversationCard(true);
+      if (nestedLayout->indexOf(item) != position)
+        nestedLayout->insertWidget(position, item);
+      item->setVisible(!explicitlyHidden);
+      if (auto *card = dynamic_cast<ConversationCard *>(item))
+        card->impl_->setNestedConversationCard(true);
     }
-    hasVisibleNestedCards =
-        std::ranges::any_of(cards, [](const ConversationCard *card) {
-          return card && !card->isHidden();
-        });
+    hasVisibleNestedCards = std::ranges::any_of(
+        items, [](const QWidget *item) { return item && !item->isHidden(); });
     refreshFoldPresentation();
+  }
+
+  void setNestedCards(const std::vector<ConversationCard *> &cards) {
+    std::vector<QWidget *> items;
+    items.reserve(cards.size());
+    for (ConversationCard *card : cards)
+      items.push_back(card);
+    setNestedItems(items);
   }
 
   [[nodiscard]] bool hasVisibleContent() const {
@@ -1344,13 +1508,34 @@ public:
     title->setText(QStringLiteral("File changes"));
     metadata = makeLabel({}, "meta", content);
     body = makeLabel({}, "body", content);
+    body->setObjectName(QStringLiteral("fileChangesList"));
+    body->setTextFormat(Qt::RichText);
+    body->setOpenExternalLinks(false);
+    body->setTextInteractionFlags(Qt::TextSelectableByMouse |
+                                  Qt::LinksAccessibleByMouse |
+                                  Qt::LinksAccessibleByKeyboard);
+    QObject::connect(body, &QLabel::linkActivated, owner,
+                     [this](const QString &link) {
+                       constexpr QLatin1StringView prefix("codexui-file:");
+                       if (!link.startsWith(prefix))
+                         return;
+                       bool valid = false;
+                       const int index = link.sliced(prefix.size()).toInt(&valid);
+                       if (valid && index >= 0 &&
+                           index < fileChangeOpenPaths.size())
+                         static_cast<void>(
+                             openLocalFile(fileChangeOpenPaths.at(index)));
+                     });
     contentLayout->addWidget(body);
     contentLayout->addWidget(metadata);
     updateComposition(changes);
   }
 
   void updateComposition(const FileChangesData &changes) {
-    setVisibleText(body, fileChangesText(changes));
+    const QString html = fileChangesHtml(changes, fileChangeOpenPaths);
+    if (body->text() != html)
+      body->setText(html);
+    body->setVisible(!html.isEmpty());
     showStatus(text(changes.status), QStringLiteral("fileChangesStatus"));
     QStringList values{QStringLiteral("%1 paths").arg(changes.changes.size())};
     if (const auto counts = totalDiffCounts(changes))
@@ -1406,7 +1591,7 @@ public:
                        ? QStringLiteral("Activity")
                        : UiStyle::humanizeLabel(text(activity.type)));
     showStatus(text(activity.status), QStringLiteral("genericActivityStatus"));
-    metadata->setText(boundedGenericActivity(activity.raw));
+    metadata->setText(boundedGenericActivity(activity));
     metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
     metadata->show();
   }
@@ -1421,10 +1606,28 @@ public:
     metadata = makeLabel({}, "meta", content);
     contentLayout->addWidget(body);
     contentLayout->addWidget(metadata);
+    recovery = new QPushButton(QStringLiteral("Restore to composer"), content);
+    recovery->setObjectName(QStringLiteral("promptRecoveryButton"));
+    recovery->setProperty("kind", "secondary");
+    recovery->setAccessibleName(QStringLiteral("Restore prompt to composer"));
+    recovery->hide();
+    contentLayout->addWidget(recovery, 0, Qt::AlignLeft);
+    QObject::connect(recovery, &QPushButton::clicked, owner,
+                     [this] { emit owner->recoveryRequested(); });
     createImageContainer();
     animationTimer = new QTimer(owner);
+    animationTimer->setObjectName(QStringLiteral("pendingAnimationTimer"));
     animationTimer->setInterval(PendingAnimationIntervalMilliseconds);
     QObject::connect(animationTimer, &QTimer::timeout, owner, [this] {
+      if (refreshPendingPresentation())
+        owner->updateGeometry();
+      owner->update();
+    });
+    pendingDelayTimer = new QTimer(owner);
+    pendingDelayTimer->setObjectName(QStringLiteral("pendingDelayTimer"));
+    pendingDelayTimer->setSingleShot(true);
+    QObject::connect(pendingDelayTimer, &QTimer::timeout, owner, [this] {
+      pendingFeedbackVisible = true;
       if (refreshPendingPresentation())
         owner->updateGeometry();
       owner->update();
@@ -1446,14 +1649,29 @@ public:
                          prompt->state == PromptState::InFlight;
     const bool failed = prompt->state == PromptState::Failed;
     const bool steering = owner->property("nestedConversationCard").toBool();
-    const QString foreground =
-        waiting
-            ? steering ? QStringLiteral("#146f73") : QStringLiteral("#536b8f")
-        : failed ? QStringLiteral("#982f3d")
-                 : QStringLiteral("#1d2633");
+    const QString foreground = waiting  ? steering ? QStringLiteral("#146f73")
+                                                   : QStringLiteral("#536b8f")
+                                : failed ? QStringLiteral("#982f3d")
+                                        : QStringLiteral("#1d2633");
     const QString style =
         QStringLiteral("background:transparent;color:%1;").arg(foreground);
     bool changed = false;
+    const QString lifecycle =
+        waiting ? steering ? QStringLiteral("steering · pending")
+                           : QStringLiteral("pending")
+                : steering ? QStringLiteral("steering") : QString{};
+    const bool phaseWasVisible = phase && phase->isVisible();
+    const QString previousPhase = phase ? phase->text() : QString{};
+    if (!lifecycle.isEmpty()) {
+      showPhase(lifecycle, steering ? QStringLiteral("steeringMessagePhase")
+                                    : QStringLiteral("pendingPromptStatus"));
+      setPhaseTone(steering ? QStringLiteral("steering")
+                            : QStringLiteral("active"));
+    } else if (phase) {
+      phase->hide();
+    }
+    changed = changed || previousPhase != lifecycle ||
+              phaseWasVisible != !lifecycle.isEmpty();
     for (QLabel *label : {title, body, metadata}) {
       if (label->styleSheet() != style) {
         label->setStyleSheet(style);
@@ -1468,12 +1686,51 @@ public:
                    : QStringLiteral("Not sent: %1").arg(text(prompt->error));
 
     changed = setVisibleText(metadata, status) || changed;
+    const bool recoveryVisible = failed && prompt->requiresExplicitRecovery;
+    if (recovery && recovery->isVisible() != recoveryVisible) {
+      recovery->setVisible(recoveryVisible);
+      changed = true;
+    }
 
-    if (waiting && prompt->showPendingAnimation) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (waiting) {
+      if (prompt->admittedAtMs) {
+        const std::int64_t admitted = *prompt->admittedAtMs;
+        constexpr std::int64_t maximum =
+            std::numeric_limits<std::int64_t>::max();
+        pendingFeedbackDeadlineMs =
+            admitted > maximum - PendingAnimationDelayMilliseconds
+                ? maximum
+                : admitted + PendingAnimationDelayMilliseconds;
+      } else if (!pendingFeedbackDeadlineMs) {
+        pendingFeedbackDeadlineMs = now + PendingAnimationDelayMilliseconds;
+      }
+      pendingFeedbackVisible =
+          prompt->showPendingAnimation ||
+          (pendingFeedbackDeadlineMs && now >= *pendingFeedbackDeadlineMs);
+    } else {
+      pendingFeedbackVisible = false;
+      pendingFeedbackDeadlineMs.reset();
+    }
+    owner->setProperty("pendingFeedbackVisible",
+                       waiting && pendingFeedbackVisible);
+
+    if (!waiting || !viewportVisible) {
+      pendingDelayTimer->stop();
+      animationTimer->stop();
+    } else if (pendingFeedbackVisible) {
+      pendingDelayTimer->stop();
       if (!animationTimer->isActive())
         animationTimer->start();
     } else {
       animationTimer->stop();
+      const qint64 remaining =
+          std::max<qint64>(1, *pendingFeedbackDeadlineMs - now);
+      const int interval = static_cast<int>(
+          std::min<qint64>(remaining, std::numeric_limits<int>::max()));
+      if (!pendingDelayTimer->isActive() ||
+          pendingDelayTimer->remainingTime() > interval + 1)
+        pendingDelayTimer->start(interval);
     }
     return changed;
   }
@@ -1496,7 +1753,13 @@ public:
   ContentSizedTextView *command = nullptr;
   CommandOutputView *output = nullptr;
   QTimer *animationTimer = nullptr;
+  QTimer *pendingDelayTimer = nullptr;
+  QPushButton *recovery = nullptr;
+  bool pendingFeedbackVisible = false;
+  bool viewportVisible = true;
+  std::optional<qint64> pendingFeedbackDeadlineMs;
   ImageRibbon *images = nullptr;
+  QStringList fileChangeOpenPaths;
   QWidget *nestedCards = nullptr;
   QVBoxLayout *nestedLayout = nullptr;
   bool hasVisibleNestedCards = false;
@@ -1505,10 +1768,12 @@ public:
 
 ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent,
                                    bool commandInitiallyCollapsed,
-                                   bool imageInitiallyCollapsed)
+                                   bool imageInitiallyCollapsed,
+                                   bool fileChangesInitiallyCollapsed)
     : QFrame(parent),
       impl_(std::make_unique<Impl>(this, data, commandInitiallyCollapsed,
-                                   imageInitiallyCollapsed)) {}
+                                   imageInitiallyCollapsed,
+                                   fileChangesInitiallyCollapsed)) {}
 
 ConversationCard::~ConversationCard() = default;
 
@@ -1530,9 +1795,21 @@ bool ConversationCard::setAuthoritativeTurnActive(bool active) {
   return impl_->setAuthoritativeTurnActive(active);
 }
 
+void ConversationCard::setNestedPresentation(bool nested) {
+  impl_->setNestedConversationCard(nested);
+}
+
 void ConversationCard::setNestedCards(
     const std::vector<ConversationCard *> &cards) {
   impl_->setNestedCards(cards);
+}
+
+void ConversationCard::setNestedItems(const std::vector<QWidget *> &items) {
+  impl_->setNestedItems(items);
+}
+
+void ConversationCard::setViewportVisible(bool visible) {
+  impl_->setViewportVisible(visible);
 }
 
 std::optional<CommandOutputView::ScrollState>
@@ -1549,7 +1826,12 @@ void ConversationCard::restoreCommandOutputScrollState(
 }
 
 bool ConversationCard::apply(const VisibleCardData &data) {
-  return impl_->apply(data);
+  return applyPresentation(data) != PresentationImpact::None;
+}
+
+PresentationImpact
+ConversationCard::applyPresentation(const VisibleCardData &data) {
+  return impl_->applyPresentation(data);
 }
 
 bool ConversationCard::canApply(const VisibleCardData &data) const noexcept {
@@ -1562,7 +1844,7 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QColor(QStringLiteral("#98a2b3")), 1.5));
+    painter.setPen(QPen(QColor(QStringLiteral("#98a2b3")), 2.0));
     painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0), 9.0,
                             9.0);
     return;
@@ -1571,7 +1853,7 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QColor(QStringLiteral("#6f98e8")), 1.5));
+    painter.setPen(QPen(QColor(QStringLiteral("#6f98e8")), 2.0));
     painter.drawRoundedRect(QRectF(rect()).adjusted(1.0, 1.0, -1.0, -1.0), 8.0,
                             8.0);
   };
@@ -1593,13 +1875,12 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
                        prompt->state == PromptState::InFlight;
   const bool failed = prompt->state == PromptState::Failed;
   const bool steering = property("nestedConversationCard").toBool();
-  const bool animated = waiting && prompt->showPendingAnimation;
+  const bool animated = waiting && property("pendingFeedbackVisible").toBool();
   const QColor background = failed
                                 ? QColor(QStringLiteral("#fff0f2"))
                                 : QColor(steering ? QStringLiteral("#eefafa")
                                                   : QStringLiteral("#eaf2ff"));
-  const QColor border = failed
-                            ? QColor(QStringLiteral("#efb8c0"))
+  const QColor border = failed ? QColor(QStringLiteral("#efb8c0"))
                         : waiting
                             ? QColor(steering ? QStringLiteral("#5caeb1")
                                               : QStringLiteral("#79a0d7"))
@@ -1647,9 +1928,11 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
 ConversationCard *createConversationCard(const VisibleCardData &data,
                                          QWidget *parent,
                                          bool commandInitiallyCollapsed,
-                                         bool imageInitiallyCollapsed) {
+                                         bool imageInitiallyCollapsed,
+                                         bool fileChangesInitiallyCollapsed) {
   return new ConversationCard(data, parent, commandInitiallyCollapsed,
-                              imageInitiallyCollapsed);
+                              imageInitiallyCollapsed,
+                              fileChangesInitiallyCollapsed);
 }
 
 } // namespace codexui::codex::middle
