@@ -309,6 +309,17 @@ const ui::ThreadListRow *findThread(
   return nullptr;
 }
 
+ui::ThreadListRow *findThread(std::vector<ui::ThreadListRow> &roots,
+                              std::string_view id) {
+  for (ui::ThreadListRow &root : roots) {
+    if (root.id == id)
+      return &root;
+    if (ui::ThreadListRow *found = findThread(root.children, id))
+      return found;
+  }
+  return nullptr;
+}
+
 bool expandAncestors(const ui::ThreadListRow &row, std::string_view id,
                      std::unordered_set<std::string> &expanded) {
   if (row.id == id)
@@ -666,6 +677,78 @@ void ThreadPane::setContextHighlight(const std::string &threadId,
   if (found == rows.end())
     return;
   found->second->setData(ContextMenuRole, highlighted);
+}
+
+bool ThreadPane::applyRowPresentation(const ui::ThreadListRow &row) {
+  if (!currentSnapshot || !visibleSnapshot || row.id.empty())
+    return false;
+  ui::ThreadListRow *retained = findThread(currentSnapshot->roots, row.id);
+  if (!retained)
+    return false;
+  retained->title = row.title;
+  retained->cwd = row.cwd;
+  retained->status = row.status;
+  retained->createdAt = row.createdAt;
+  retained->updatedAt = row.updatedAt;
+  retained->recencyAt = row.recencyAt;
+  retained->lastActivityAt = row.lastActivityAt;
+  retained->pending = row.pending;
+  retained->archived = row.archived;
+
+  const auto visible = std::ranges::find_if(
+      visibleSnapshot->rows,
+      [&row](const RenderedThreadRow &candidate) { return candidate.id == row.id; });
+  if (visible == visibleSnapshot->rows.end())
+    return true;
+  RenderedThreadRow next = *visible;
+  next.title = row.title;
+  next.cwd = row.cwd;
+  next.status = row.status;
+  next.lastActivityAt = row.lastActivityAt;
+  next.pending = row.pending;
+  if (*visible == next)
+    return true;
+  *visible = next;
+
+  const auto found = rows.find(row.id);
+  if (found == rows.end())
+    return false;
+  QListWidgetItem *item = found->second;
+  const QString title = text(next.title);
+  const QString status = text(displayStatus(next.status));
+  QStringList accessibleParts{
+      title, status, QStringLiteral("level %1").arg(next.depth + 1)};
+  if (next.hasChildren)
+    accessibleParts.push_back(next.expanded ? QStringLiteral("expanded")
+                                            : QStringLiteral("collapsed"));
+  const QString accessible = accessibleParts.join(", ");
+  if (item->data(Qt::AccessibleTextRole).toString() != accessible)
+    item->setData(Qt::AccessibleTextRole, accessible);
+  QStringList details{title,
+                      QStringLiteral("Workspace: %1").arg(
+                          next.cwd.empty() ? QStringLiteral("Unknown")
+                                           : text(next.cwd)),
+                      QStringLiteral("Status: %1").arg(status),
+                      QStringLiteral("Last activity: %1")
+                          .arg(activityText(next.lastActivityAt))};
+  if (!next.parentId.empty()) {
+    const ui::ThreadListRow *parent =
+        findThread(currentSnapshot->roots, next.parentId);
+    details.push_back(QStringLiteral("Parent: %1").arg(
+        parent && !parent->title.empty() ? text(parent->title)
+                                         : text(next.parentId)));
+  }
+  const QString tooltip = details.join(QLatin1Char('\n'));
+  if (item->toolTip() != tooltip)
+    item->setToolTip(tooltip);
+  updateRow(list->itemWidget(item), next.id, next.title, next.status,
+            next.pending, next.depth, next.hasChildren, next.expanded,
+            next.optimistic, next.optimisticFailed);
+  if (QWidget *rowWidget = list->itemWidget(item))
+    rowWidget->update();
+  setProperty("targetedRowPresentationUpdates",
+              property("targetedRowPresentationUpdates").toULongLong() + 1);
+  return true;
 }
 
 void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {

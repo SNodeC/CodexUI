@@ -161,6 +161,15 @@ bool logicalAgentsRemainDeduplicated() {
                        snapshot->agents.agents[0].status == "interrupted" &&
                        snapshot->agents.agents[1].childThreadId == "child-two",
                    "interruption patches the existing row without reordering");
+  const auto agentsOnly =
+      adapter.inspector(owner, ui::InspectorProjection::Agents);
+  result &= expect(
+      agentsOnly && agentsOnly->agents.agents.size() == 2 &&
+          !agentsOnly->plan.plan && !agentsOnly->plan.planItem &&
+          agentsOnly->state.state.empty() &&
+          agentsOnly->requests.requests.empty(),
+      "the active Agents projection does not construct State, Plan, or "
+      "Requests presentation data");
   return result;
 }
 

@@ -847,6 +847,46 @@ NodeGraphUiAdapter::NodeGraphUiAdapter(
     const nodegraph::NodeGraph &graph) noexcept
     : graph_(&graph) {}
 
+std::optional<ThreadListRow>
+NodeGraphUiAdapter::threadRow(const nodegraph::NodeRef &thread) const {
+  if (!graph_ || !thread || thread->id().kind != nodegraph::NodeKind::Thread)
+    return std::nullopt;
+  auto read = graph_->tryRead();
+  if (!read || !read->contains(thread) || read->removed(thread))
+    return std::nullopt;
+  const auto state = read->state(thread);
+  if (!state)
+    return std::nullopt;
+  const auto timestamp = [&state](std::string_view field) {
+    return graphInteger(graphField(*state, field));
+  };
+  ThreadListRow row;
+  row.id = thread->id().canonical;
+  row.title = graphString(graphField(*state, "name"));
+  if (row.title.empty())
+    row.title = graphString(graphField(*state, "preview"));
+  if (row.title.empty())
+    row.title = row.id.substr(0, std::min<std::size_t>(12, row.id.size()));
+  row.cwd = graphString(graphField(*state, "cwd"));
+  row.status = graphStatus(*state);
+  row.createdAt = timestamp("createdAt");
+  row.updatedAt = timestamp("updatedAt");
+  row.recencyAt = timestamp("recencyAt");
+  for (const std::string_view field : {
+           std::string_view("lastActivityAt"), std::string_view("updatedAt"),
+           std::string_view("recencyAt"),
+           std::string_view("localActivityAt"),
+           std::string_view("localPromptActivityAt")}) {
+    const std::optional<std::int64_t> candidate = timestamp(field);
+    if (candidate && (!row.lastActivityAt || *candidate > *row.lastActivityAt))
+      row.lastActivityAt = candidate;
+  }
+  row.pending =
+      graphSize(graphField(*state, "pendingInteractionCount")).value_or(0);
+  row.archived = graphBool(graphField(*state, "archived"));
+  return row;
+}
+
 std::optional<ThreadListSnapshot>
 NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread) const {
   if (!graph_)
@@ -1026,7 +1066,8 @@ NodeGraphUiAdapter::conversationInfo(
 
 std::optional<InspectorSnapshot>
 NodeGraphUiAdapter::inspector(
-    const nodegraph::NodeRef &selectedThread) const {
+    const nodegraph::NodeRef &selectedThread,
+    InspectorProjection projection) const {
   if (!graph_)
     return std::nullopt;
   auto read = graph_->tryRead();
@@ -1040,6 +1081,16 @@ NodeGraphUiAdapter::inspector(
     thread = selectedThread;
 
   InspectorSnapshot result;
+  const bool wantPlan = projection == InspectorProjection::All ||
+                        projection == InspectorProjection::Plan;
+  const bool wantAgents = projection == InspectorProjection::All ||
+                          projection == InspectorProjection::Agents;
+  const bool wantChanges = projection == InspectorProjection::All ||
+                           projection == InspectorProjection::Changes;
+  const bool wantRequests = projection == InspectorProjection::All ||
+                            projection == InspectorProjection::Requests;
+  const bool wantState = projection == InspectorProjection::All ||
+                         projection == InspectorProjection::State;
   result.plan.threadId = thread ? thread->id().canonical : std::string{};
   result.plan.threadPresent = static_cast<bool>(thread);
   result.agents.threadId = result.plan.threadId;
@@ -1047,7 +1098,9 @@ NodeGraphUiAdapter::inspector(
   result.changes.threadId = result.plan.threadId;
 
   const nodegraph::NodeRef connection =
-      read->find({nodegraph::NodeKind::Connection, "connection"});
+      wantRequests || wantState
+          ? read->find({nodegraph::NodeKind::Connection, "connection"})
+          : nodegraph::NodeRef{};
   bool canControl = false;
   std::uint64_t generation = 0;
   if (connection) {
@@ -1070,7 +1123,8 @@ NodeGraphUiAdapter::inspector(
   std::map<std::string, std::size_t, std::less<>> kindCounts;
   nlohmann::json domains = nlohmann::json::array();
   std::size_t omittedDomains = 0;
-  for (const nodegraph::NodeRef &node : read->orderedNodes()) {
+  if (wantState)
+    for (const nodegraph::NodeRef &node : read->orderedNodes()) {
     if (!node || read->removed(node))
       continue;
     ++kindCounts[std::string(nodeKindName(node->id().kind))];
@@ -1105,12 +1159,12 @@ NodeGraphUiAdapter::inspector(
                        {"status", graphStatus(*state)},
                        {"changedRevision", read->changedRevision(node)},
                        {"fields", safeStateObject(state->fields)}});
-  }
+    }
 
   const nodegraph::NodeRef runtime =
       read->find({nodegraph::NodeKind::Runtime, "runtime"});
   nlohmann::json pendingMetadata = nlohmann::json::array();
-  if (runtime) {
+  if (runtime && (wantRequests || wantState)) {
     for (const nodegraph::NodeRef &interaction :
          read->related(runtime,
                        nodegraph::RelationKind::PendingInteraction)) {
@@ -1162,7 +1216,8 @@ NodeGraphUiAdapter::inspector(
             break;
         }
       }
-      result.requests.requests.push_back(row);
+      if (wantRequests)
+        result.requests.requests.push_back(row);
       ++result.state.pendingRequestCount;
       if (pendingMetadata.size() < 64)
         pendingMetadata.push_back(
@@ -1176,14 +1231,18 @@ NodeGraphUiAdapter::inspector(
 
   if (thread) {
     const auto threadState = read->state(thread);
-    result.changes.cwd = graphString(graphField(*threadState, "cwd"));
-    result.state.selectedThreadTurnCount = read->childCount(thread);
-    for (std::size_t turnIndex = 0; turnIndex < read->childCount(thread);
-         ++turnIndex) {
+    if (wantChanges)
+      result.changes.cwd = graphString(graphField(*threadState, "cwd"));
+    if (wantState)
+      result.state.selectedThreadTurnCount = read->childCount(thread);
+    if (wantChanges || wantState)
+      for (std::size_t turnIndex = 0; turnIndex < read->childCount(thread);
+           ++turnIndex) {
       const nodegraph::NodeRef turn = read->childAt(thread, turnIndex);
       if (!turn || turn->id().kind != nodegraph::NodeKind::Turn)
         continue;
-      result.state.selectedThreadItemCount += read->childCount(turn);
+      if (wantState)
+        result.state.selectedThreadItemCount += read->childCount(turn);
       for (std::size_t itemIndex = 0; itemIndex < read->childCount(turn);
            ++itemIndex) {
         const nodegraph::NodeRef item = read->childAt(turn, itemIndex);
@@ -1191,10 +1250,10 @@ NodeGraphUiAdapter::inspector(
           continue;
         const auto state = read->state(item);
         const std::string type = graphString(graphField(*state, "type"));
-        if (type == "commandExecution") {
+        if (wantChanges && type == "commandExecution") {
           appendUniqueBounded(result.changes.commandCwds,
                               graphString(graphField(*state, "cwd")), 64);
-        } else if (type == "fileChange") {
+        } else if (wantChanges && type == "fileChange") {
           const nodegraph::Value *changes = graphField(*state, "changes");
           if (const auto *array = changes ? changes->asArray() : nullptr)
             for (const nodegraph::Value &change : *array)
@@ -1207,7 +1266,8 @@ NodeGraphUiAdapter::inspector(
     }
 
     const std::string threadStatus = graphStatus(*threadState);
-    for (std::size_t offset = 0;
+    if (wantPlan)
+      for (std::size_t offset = 0;
          offset < read->childCount(thread) && !result.plan.plan &&
          !result.plan.planItem;
          ++offset) {
@@ -1265,6 +1325,7 @@ NodeGraphUiAdapter::inspector(
       }
     }
 
+    if (wantAgents) {
     struct LogicalAgent final {
       InspectorAgentRow row;
       std::string status;
@@ -1450,10 +1511,11 @@ NodeGraphUiAdapter::inspector(
     result.agents.agents.reserve(logicalAgents.size());
     for (LogicalAgent &logical : logicalAgents)
       result.agents.agents.push_back(std::move(logical.row));
+    }
   }
 
   nlohmann::json selected = nullptr;
-  if (thread) {
+  if (wantState && thread) {
     const auto state = read->state(thread);
     selected = {{"id", thread->id().canonical},
                 {"status", graphStatus(*state)},
@@ -1464,18 +1526,20 @@ NodeGraphUiAdapter::inspector(
     if (const nodegraph::NodeRef parent = read->parent(thread))
       selected["parent"] = parent->id().canonical;
   }
-  nlohmann::json counts = nlohmann::json::object();
-  for (const auto &[kind, count] : kindCounts)
-    counts[kind] = count;
-  result.state.state =
-      {{"sharedNodeGraph",
-        {{"revision", read->revision()},
-         {"nodes", read->orderedNodes().size()},
-         {"nodeKinds", std::move(counts)},
-         {"selectedThread", std::move(selected)},
-         {"currentDomains", std::move(domains)},
-         {"omittedDomainCount", omittedDomains},
-         {"pendingInteractions", std::move(pendingMetadata)}}}};
+  if (wantState) {
+    nlohmann::json counts = nlohmann::json::object();
+    for (const auto &[kind, count] : kindCounts)
+      counts[kind] = count;
+    result.state.state =
+        {{"sharedNodeGraph",
+          {{"revision", read->revision()},
+           {"nodes", read->orderedNodes().size()},
+           {"nodeKinds", std::move(counts)},
+           {"selectedThread", std::move(selected)},
+           {"currentDomains", std::move(domains)},
+           {"omittedDomainCount", omittedDomains},
+           {"pendingInteractions", std::move(pendingMetadata)}}}};
+  }
   return result;
 }
 

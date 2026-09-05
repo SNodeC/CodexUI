@@ -46,8 +46,12 @@ public:
   [[nodiscard]] std::optional<ThreadListSnapshot>
   threads(const nodegraph::NodeRef &selectedThread) const;
 
+  [[nodiscard]] std::optional<ThreadListRow>
+  threadRow(const nodegraph::NodeRef &thread) const;
+
   [[nodiscard]] std::optional<InspectorSnapshot>
-  inspector(const nodegraph::NodeRef &selectedThread) const;
+  inspector(const nodegraph::NodeRef &selectedThread,
+            InspectorProjection projection = InspectorProjection::All) const;
 
 private:
   const nodegraph::NodeGraph *graph_;

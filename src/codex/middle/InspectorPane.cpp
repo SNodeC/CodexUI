@@ -783,6 +783,35 @@ void InspectorPane::refresh(const ui::InspectorSnapshot &snapshot) {
     refreshCurrentTab();
 }
 
+void InspectorPane::refresh(const ui::InspectorSnapshot &snapshot,
+                            ui::InspectorProjection projection) {
+  if (projection == ui::InspectorProjection::All || !currentSnapshot) {
+    currentSnapshot = snapshot;
+  } else {
+    switch (projection) {
+    case ui::InspectorProjection::Plan:
+      currentSnapshot->plan = snapshot.plan;
+      break;
+    case ui::InspectorProjection::Agents:
+      currentSnapshot->agents = snapshot.agents;
+      break;
+    case ui::InspectorProjection::Changes:
+      currentSnapshot->changes = snapshot.changes;
+      break;
+    case ui::InspectorProjection::Requests:
+      currentSnapshot->requests = snapshot.requests;
+      break;
+    case ui::InspectorProjection::State:
+      currentSnapshot->state = snapshot.state;
+      break;
+    case ui::InspectorProjection::All:
+      break;
+    }
+  }
+  if (isVisible())
+    refreshCurrentTab();
+}
+
 void InspectorPane::showEvent(QShowEvent *event) {
   QFrame::showEvent(event);
   if (refreshRequested)

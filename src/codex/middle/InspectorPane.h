@@ -49,6 +49,8 @@ public:
   void setRequestActions(RequestAction review, RequestAction accept,
                          RequestAction reject);
   void refresh(const ui::InspectorSnapshot &snapshot);
+  void refresh(const ui::InspectorSnapshot &snapshot,
+               ui::InspectorProjection projection);
   void appendProtocolFrame(const nlohmann::json &frame);
   void appendProtocolDiagnostic(const nodegraph::UiEffect &effect);
 

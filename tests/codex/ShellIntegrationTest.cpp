@@ -1401,8 +1401,11 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
 
   NodeRef selectedItem;
   NodeRef backgroundItem;
+  NodeRef selectedThread;
   {
     auto read = graph.tryRead();
+    selectedThread =
+        read ? read->find({NodeKind::Thread, "selected-thread"}) : NodeRef{};
     selectedItem =
         read ? read->find(scopedItemNodeId(
                    scopedTurnNodeId("selected-thread", "selected-turn"),
@@ -1414,9 +1417,9 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
                    "background-item"))
              : NodeRef{};
   }
-  require(selectedItem && backgroundItem,
-          "the test resolves both scoped conversation items");
-  if (!selectedItem || !backgroundItem || !selectedCard)
+  require(selectedThread && selectedItem && backgroundItem,
+          "the test resolves the selected thread and both scoped items");
+  if (!selectedThread || !selectedItem || !backgroundItem || !selectedCard)
     return;
 
   const qulonglong threadRoutesBefore =
@@ -1528,6 +1531,43 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
               shellCommitsBefore,
       "a selected message routes only to ConversationView and leaves thread, "
       "Inspector, and shell-chrome boundaries untouched");
+
+  const qulonglong targetedThreadRoutesBefore =
+      shell.property("targetedThreadPaneRoutes").toULongLong();
+  const qulonglong targetedRowUpdatesBefore =
+      threadPane
+          ? threadPane->property("targetedRowPresentationUpdates").toULongLong()
+          : 0;
+  GraphChange rowChange;
+  {
+    auto write = graph.write();
+    write.setField(selectedThread, "pendingInteractionCount",
+                   Value(std::uint64_t{2}));
+    rowChange = write.finish();
+  }
+  require(messageAdmitted(channels.sendGraphChanged(std::move(rowChange))),
+          "the exact thread-row change is admitted");
+  require(spinUntil([&] {
+            QListWidgetItem *item = threadItem(list, "selected-thread");
+            QWidget *row = item ? list->itemWidget(item) : nullptr;
+            QLabel *title =
+                row ? row->findChild<QLabel *>(QStringLiteral("threadTitle"))
+                    : nullptr;
+            return title && title->text().startsWith(QStringLiteral("! "));
+          }),
+          "the exact displayed thread row receives its pending badge");
+  require(
+      shell.property("targetedThreadPaneRoutes").toULongLong() ==
+              targetedThreadRoutesBefore + 1 &&
+          threadPane &&
+          threadPane->property("targetedRowPresentationUpdates").toULongLong() ==
+              targetedRowUpdatesBefore + 1 &&
+          threadPane->property("graphTopologyScansStarted").toULongLong() ==
+              topologyBefore &&
+          conversation->property("conversationGeometryPasses").toULongLong() ==
+              conversationGeometryBefore,
+      "a non-sort thread field patches only its row without topology or "
+      "conversation geometry work");
 
   QPointer<QWidget> removedWidget = selectedCard;
   GraphChange removal;

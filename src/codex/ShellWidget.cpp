@@ -114,38 +114,71 @@ bool fieldChanged(const nodegraph::NodeGraph::ReadAccess &read,
          read.fieldChangedRevision(node, field) == revision;
 }
 
-bool threadPaneAffected(const nodegraph::GraphChanged &change,
-                        const nodegraph::NodeGraph &graph) {
+struct ThreadPaneRoute {
+  bool affected = false;
+  bool structural = false;
+  std::vector<nodegraph::NodeRef> rows;
+};
+
+ThreadPaneRoute threadPaneRoute(
+    const nodegraph::GraphChanged &change, const nodegraph::NodeGraph &graph,
+    middle::ThreadPane::SortCriterion sortCriterion) {
   if (change.rescanRequired ||
       containsKind(change, {nodegraph::NodeKind::Interaction}) ||
       std::ranges::any_of(change.removed, [](const auto &node) {
         return node && (node->id().kind == nodegraph::NodeKind::Runtime ||
                         node->id().kind == nodegraph::NodeKind::Thread);
       }))
-    return true;
+    return {true, true, {}};
   const auto read = graph.tryRead();
   if (!read)
     return containsKind(change, {nodegraph::NodeKind::Runtime,
-                                 nodegraph::NodeKind::Thread});
-  constexpr std::array<std::string_view, 13> Fields{
+                                 nodegraph::NodeKind::Thread})
+               ? ThreadPaneRoute{true, true, {}}
+               : ThreadPaneRoute{};
+  constexpr std::array<std::string_view, 14> Fields{
       "name",          "title",       "cwd",
       "workspace",     "status",      "createdAt",
       "updatedAt",     "recencyAt",   "lastActivityAt",
       "localActivityAt", "localPromptActivityAt",
-      "pendingInteractionCount", "hydrationState"};
-  return std::ranges::any_of(change.affected, [&](const auto &node) {
+      "pendingInteractionCount", "hydrationState", "archived"};
+  ThreadPaneRoute route;
+  for (const nodegraph::NodeRef &node : change.affected) {
     if (!node || !read->contains(node))
-      return false;
-    if (node->id().kind == nodegraph::NodeKind::Runtime)
-      return read->structureChangedRevision(node) == change.revision;
+      continue;
+    if (node->id().kind == nodegraph::NodeKind::Runtime) {
+      if (read->structureChangedRevision(node) == change.revision)
+        return {true, true, {}};
+      continue;
+    }
     if (node->id().kind != nodegraph::NodeKind::Thread)
-      return false;
-    return read->statusChangedRevision(node) == change.revision ||
-           read->structureChangedRevision(node) == change.revision ||
-           std::ranges::any_of(Fields, [&](std::string_view field) {
-             return fieldChanged(*read, node, field, change.revision);
-           });
-  });
+      continue;
+    const bool presentationChanged =
+        read->statusChangedRevision(node) == change.revision ||
+        std::ranges::any_of(Fields, [&](std::string_view field) {
+          return fieldChanged(*read, node, field, change.revision);
+        });
+    if (!presentationChanged &&
+        read->structureChangedRevision(node) != change.revision)
+      continue;
+    const bool sortChanged =
+        (sortCriterion == middle::ThreadPane::SortCriterion::Alphanumeric &&
+         (fieldChanged(*read, node, "name", change.revision) ||
+          fieldChanged(*read, node, "title", change.revision))) ||
+        (sortCriterion == middle::ThreadPane::SortCriterion::Created &&
+         fieldChanged(*read, node, "createdAt", change.revision)) ||
+        (sortCriterion == middle::ThreadPane::SortCriterion::LastChanged &&
+         fieldChanged(*read, node, "updatedAt", change.revision)) ||
+        (sortCriterion == middle::ThreadPane::SortCriterion::Recency &&
+         fieldChanged(*read, node, "recencyAt", change.revision));
+    if (read->structureChangedRevision(node) == change.revision || sortChanged ||
+        fieldChanged(*read, node, "archived", change.revision))
+      return {true, true, {}};
+    route.affected = true;
+    if (std::ranges::find(route.rows, node) == route.rows.end())
+      route.rows.push_back(node);
+  }
+  return route;
 }
 
 std::vector<AttachmentDraft>
@@ -1031,6 +1064,7 @@ struct ShellWidget::Impl final {
   bool graphBindingScheduled = false;
   bool paneCommitScheduled = false;
   bool pendingThreadPane = false;
+  std::vector<nodegraph::NodeRef> pendingThreadRows;
   bool pendingConversation = false;
   std::vector<nodegraph::NodeRef> pendingConversationItems;
   bool pendingInspector = false;
@@ -1492,6 +1526,7 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
   // The immediate atomic bind already represents the newest graph state.
   // Any frame-coalesced work queued for the previous selection is obsolete.
   pendingThreadPane = false;
+  pendingThreadRows.clear();
   pendingConversation = !conversationReady;
   pendingConversationItems.clear();
   pendingInspector = !inspectorReady;
@@ -1575,8 +1610,34 @@ bool ShellWidget::Impl::refreshInspector() {
     if (!info->readyForDisplay)
       inspectorThread.reset();
   }
-  if (auto snapshot = uiAdapter.inspector(inspectorThread)) {
-    middleRegion->inspector().refresh(*snapshot);
+  middle::InspectorPane &pane = middleRegion->inspector();
+  std::optional<ui::InspectorProjection> projection;
+  switch (pane.tabs()->currentIndex()) {
+  case 0:
+    projection = ui::InspectorProjection::Plan;
+    break;
+  case 1:
+    projection = ui::InspectorProjection::Agents;
+    break;
+  case 2:
+    projection = ui::InspectorProjection::Changes;
+    break;
+  case 3:
+    projection = ui::InspectorProjection::Requests;
+    break;
+  case 4:
+    if (auto *infoStack = pane.findChild<QStackedWidget *>(
+            QStringLiteral("infoStack"));
+        infoStack && infoStack->currentIndex() != 0)
+      projection = ui::InspectorProjection::State;
+    break;
+  default:
+    break;
+  }
+  if (!projection)
+    return true;
+  if (auto snapshot = uiAdapter.inspector(inspectorThread, *projection)) {
+    pane.refresh(*snapshot, *projection);
     return true;
   }
   return false;
@@ -1598,9 +1659,32 @@ void ShellWidget::Impl::schedulePaneCommit(bool immediate) {
 
 void ShellWidget::Impl::commitPendingPanes() {
   bool retry = false;
+  if (!pendingThreadPane && !pendingThreadRows.empty()) {
+    std::vector<nodegraph::NodeRef> rows = std::move(pendingThreadRows);
+    pendingThreadRows.clear();
+    bool structuralFallback = false;
+    for (const nodegraph::NodeRef &thread : rows) {
+      const auto row = uiAdapter.threadRow(thread);
+      if (!row || !middleRegion->threads().applyRowPresentation(*row)) {
+        structuralFallback = true;
+        break;
+      }
+    }
+    if (structuralFallback) {
+      pendingThreadPane = true;
+    } else {
+      ++threadPaneRoutes;
+      owner->setProperty("threadPaneRoutes",
+                         static_cast<qulonglong>(threadPaneRoutes));
+      owner->setProperty(
+          "targetedThreadPaneRoutes",
+          owner->property("targetedThreadPaneRoutes").toULongLong() + 1);
+    }
+  }
   if (pendingThreadPane) {
     if (auto threads = uiAdapter.threads(boundGraphThread)) {
       pendingThreadPane = false;
+      pendingThreadRows.clear();
       ++threadPaneRoutes;
       owner->setProperty("threadPaneRoutes",
                          static_cast<qulonglong>(threadPaneRoutes));
@@ -1663,7 +1747,8 @@ void ShellWidget::Impl::commitPendingPanes() {
     pendingChrome = false;
     render();
   }
-  if (retry || pendingThreadPane || pendingConversation ||
+  if (retry || pendingThreadPane || !pendingThreadRows.empty() ||
+      pendingConversation ||
       !pendingConversationItems.empty() || pendingInspector || pendingChrome)
     schedulePaneCommit();
 }
@@ -1726,8 +1811,17 @@ void ShellWidget::Impl::handleGraphChanged(
       break;
     }
   }
-  const bool updateThreads = threadPaneAffected(change, session.nodeGraph());
-  pendingThreadPane = pendingThreadPane || updateThreads;
+  const ThreadPaneRoute threads = threadPaneRoute(
+      change, session.nodeGraph(), middleRegion->threads().currentSortCriterion());
+  if (threads.structural) {
+    pendingThreadPane = true;
+    pendingThreadRows.clear();
+  } else if (threads.affected && !pendingThreadPane) {
+    for (const nodegraph::NodeRef &thread : threads.rows)
+      if (std::ranges::find(pendingThreadRows, thread) ==
+          pendingThreadRows.end())
+        pendingThreadRows.push_back(thread);
+  }
   if (stagedPresentationInvalidated || conversation.structural) {
     pendingConversation = true;
     pendingConversationItems.clear();
@@ -1770,7 +1864,8 @@ void ShellWidget::Impl::handleGraphChanged(
   // traffic is merged to one old-UI reconciliation per display interval.
   if (!change.removed.empty())
     commitPendingPanes();
-  else if (pendingThreadPane || pendingConversation ||
+  else if (pendingThreadPane || !pendingThreadRows.empty() ||
+           pendingConversation ||
            !pendingConversationItems.empty() || pendingInspector ||
            pendingChrome)
     schedulePaneCommit();

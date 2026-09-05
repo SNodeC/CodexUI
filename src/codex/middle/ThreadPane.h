@@ -44,6 +44,7 @@ public:
 
   void setActions(Actions actions);
   void refresh(const ui::ThreadListSnapshot &snapshot);
+  [[nodiscard]] bool applyRowPresentation(const ui::ThreadListRow &row);
   void beginOptimisticThread(std::string id, std::string title,
                              std::string cwd);
   void promoteOptimisticThread(const std::string &draftId,
