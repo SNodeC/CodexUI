@@ -600,13 +600,16 @@ bool testMessageIdentityPalette() {
       titleColor(user) ==
               QColor(QString::fromLatin1(codexui::UiStyle::blueHover)) &&
           surfaceColor(user) == QColor(QStringLiteral("#eaf2ff")) &&
-          surfaceColor(update) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::panel)) &&
+          titleColor(update) ==
+              QColor(QString::fromLatin1(codexui::UiStyle::yellowText)) &&
+          surfaceColor(update) == QColor(
+                                      QString::fromLatin1(
+                                          codexui::UiStyle::yellowSurface)) &&
           titleColor(final) ==
               QColor(QString::fromLatin1(codexui::UiStyle::purpleText)) &&
           surfaceColor(final) ==
               QColor(QString::fromLatin1(codexui::UiStyle::purpleSurface)),
-      "You is blue, interim Codex is neutral, and final Codex is violet");
+      "You is blue, interim Codex is yellow, and final Codex is violet");
   qApp->setStyleSheet(originalStyleSheet);
   return result;
 }
