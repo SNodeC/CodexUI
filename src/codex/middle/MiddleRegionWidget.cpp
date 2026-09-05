@@ -40,8 +40,10 @@ constexpr auto CommandsInitiallyExpandedKey =
     "conversation/commandsInitiallyExpanded";
 constexpr auto ImagesInitiallyExpandedKey =
     "conversation/imagesInitiallyExpanded";
+constexpr auto FileChangesInitiallyExpandedKey =
+    "conversation/fileChangesInitiallyExpanded";
 
-enum class PresentationIcon { Reasoning, Updates, Command, Image };
+enum class PresentationIcon { Reasoning, Updates, Command, FileChanges, Image };
 
 QPixmap presentationIconPixmap(PresentationIcon kind, QColor color) {
   QPixmap pixmap(16, 16);
@@ -73,6 +75,21 @@ QPixmap presentationIconPixmap(PresentationIcon kind, QColor color) {
     painter.drawLine(QPointF(4.5, 6.0), QPointF(6.5, 8.0));
     painter.drawLine(QPointF(6.5, 8.0), QPointF(4.5, 10.0));
     painter.drawLine(QPointF(8.5, 10.0), QPointF(11.5, 10.0));
+  } else if (kind == PresentationIcon::FileChanges) {
+    QPainterPath document;
+    document.moveTo(3.0, 1.5);
+    document.lineTo(9.5, 1.5);
+    document.lineTo(13.0, 5.0);
+    document.lineTo(13.0, 14.0);
+    document.lineTo(3.0, 14.0);
+    document.closeSubpath();
+    document.moveTo(9.5, 1.5);
+    document.lineTo(9.5, 5.0);
+    document.lineTo(13.0, 5.0);
+    painter.drawPath(document);
+    painter.drawLine(QPointF(5.0, 8.0), QPointF(8.0, 8.0));
+    painter.drawLine(QPointF(6.5, 6.5), QPointF(6.5, 9.5));
+    painter.drawLine(QPointF(9.5, 11.0), QPointF(11.5, 11.0));
   } else {
     painter.drawRoundedRect(QRectF(1.5, 2.5, 13.0, 11.0), 2.0, 2.0);
     painter.drawEllipse(QRectF(9.5, 4.5, 2.0, 2.0));
@@ -200,6 +217,11 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
       PresentationIcon::Image);
   imageInitialFolding->setChecked(
       settings.value(ImagesInitiallyExpandedKey, true).toBool());
+  fileChangesInitialFolding = presentationToggle(
+      QStringLiteral("conversationFileChangesFoldingToggle"),
+      PresentationIcon::FileChanges);
+  fileChangesInitialFolding->setChecked(
+      settings.value(FileChangesInitiallyExpandedKey, false).toBool());
   const auto persistPresentation = [this](const char *key, bool checked) {
     QSettings().setValue(QString::fromLatin1(key), checked);
     applyConversationPresentationOptions();
@@ -219,6 +241,10 @@ MiddleRegionWidget::MiddleRegionWidget(QWidget *parent) : QWidget(parent) {
   connect(imageInitialFolding, &QToolButton::toggled, this,
           [persistPresentation](bool checked) {
             persistPresentation(ImagesInitiallyExpandedKey, checked);
+          });
+  connect(fileChangesInitialFolding, &QToolButton::toggled, this,
+          [persistPresentation](bool checked) {
+            persistPresentation(FileChangesInitiallyExpandedKey, checked);
           });
   center->addLayout(context);
   center->addWidget(divider("conversationHeaderDivider"));
@@ -327,6 +353,7 @@ void MiddleRegionWidget::applyConversationPresentationOptions() {
   const bool showUpdates = updateVisibility->isChecked();
   const bool expandCommands = commandInitialFolding->isChecked();
   const bool expandImages = imageInitialFolding->isChecked();
+  const bool expandFileChanges = fileChangesInitialFolding->isChecked();
   reasoningVisibility->setToolTip(showReasoning
                                       ? QStringLiteral("Hide reasoning cards")
                                       : QStringLiteral("Show reasoning cards"));
@@ -339,14 +366,21 @@ void MiddleRegionWidget::applyConversationPresentationOptions() {
   imageInitialFolding->setToolTip(
       expandImages ? QStringLiteral("New image cards start expanded")
                    : QStringLiteral("New image cards start collapsed"));
+  fileChangesInitialFolding->setToolTip(
+      expandFileChanges
+          ? QStringLiteral("New file changes cards start expanded")
+          : QStringLiteral("New file changes cards start collapsed"));
   reasoningVisibility->setAccessibleName(reasoningVisibility->toolTip());
   updateVisibility->setAccessibleName(updateVisibility->toolTip());
   commandInitialFolding->setAccessibleName(
       commandInitialFolding->toolTip());
   imageInitialFolding->setAccessibleName(imageInitialFolding->toolTip());
+  fileChangesInitialFolding->setAccessibleName(
+      fileChangesInitialFolding->toolTip());
   if (conversationView)
     conversationView->setPresentationOptions(
-        {showReasoning, showUpdates, expandCommands, expandImages});
+        {showReasoning, showUpdates, expandCommands, expandImages,
+         expandFileChanges});
 }
 
 ThreadPane &MiddleRegionWidget::threads() const noexcept { return *threadPane; }

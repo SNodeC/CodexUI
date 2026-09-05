@@ -319,7 +319,7 @@ independently reviewable change.
 
 1. **Complete:** interim Codex update cards use a clearly perceptible yellow
    surface, border, title, and phase identity; final answers remain violet.
-2. **Pending:** expose and persist a Files Changed “new cards start expanded”
+2. **Complete:** expose and persist a Files Changed “new cards start expanded”
    control, applying it only when a new card is materialized.
 3. **Pending:** resolve changed-file paths against the canonical thread
    workspace and open them with the system-default application.

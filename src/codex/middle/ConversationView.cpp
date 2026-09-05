@@ -448,7 +448,8 @@ ConversationCard *ConversationView::createRetainedCard(
     const VisibleCardData &data, QWidget *parent, const std::string &key) {
   ConversationCard *card = createConversationCard(
       data, parent, !presentationOptions_.commandsInitiallyExpanded,
-      !presentationOptions_.imagesInitiallyExpanded);
+      !presentationOptions_.imagesInitiallyExpanded,
+      !presentationOptions_.fileChangesInitiallyExpanded);
   card->setProperty("conversationAnchorKey", QString::fromStdString(key));
   if (const auto collapsed = cardCollapsedStates_.find(key);
       collapsed != cardCollapsedStates_.end())
