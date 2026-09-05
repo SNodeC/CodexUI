@@ -44,6 +44,7 @@ public:
   explicit InspectorPane(QWidget *parent = nullptr);
 
   void setHideAction(std::function<void()> hide);
+  void setRefreshRequestedAction(std::function<void()> refresh);
   void setRequestActions(RequestAction review, RequestAction accept,
                          RequestAction reject);
   void refresh(const ui::InspectorSnapshot &snapshot);
@@ -72,6 +73,7 @@ private:
   RequestAction acceptRequest;
   RequestAction rejectRequest;
   std::function<void()> hideAction;
+  std::function<void()> refreshRequested;
 
   QTabWidget *inspectorTabs = nullptr;
   QStackedWidget *infoStack = nullptr;

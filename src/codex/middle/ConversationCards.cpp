@@ -788,7 +788,7 @@ bool ContentSizedTextView::setContent(const QString &content) {
     cursor.movePosition(QTextCursor::Start);
     setTextCursor(cursor);
   }
-  measureAtCurrentWidth(true);
+  static_cast<void>(measureAtCurrentWidth(true));
   if (!hadUserScrollRange)
     bar->setValue(bar->minimum());
   return true;
@@ -866,10 +866,10 @@ void ContentSizedTextView::resizeEvent(QResizeEvent *event) {
   // Wrapping is authoritative only after QTextEdit has assigned its
   // viewport width. Propagate a changed hint immediately so a multiline view
   // cannot remain at an earlier one-line height with a premature scrollbar.
-  measureAtCurrentWidth(true);
+  static_cast<void>(measureAtCurrentWidth(true));
 }
 
-void ContentSizedTextView::measureAtCurrentWidth(bool notifyParent) {
+bool ContentSizedTextView::measureAtCurrentWidth(bool notifyParent) {
   const QString content = toPlainText();
   int wantedHeight = 0;
   if (!content.isEmpty()) {
@@ -880,10 +880,15 @@ void ContentSizedTextView::measureAtCurrentWidth(bool notifyParent) {
   }
   wantedHeight = std::clamp(wantedHeight, 0, maximumHeight());
   if (wantedHeight == preferredHeight_)
-    return;
+    return false;
   preferredHeight_ = wantedHeight;
   if (notifyParent)
     updateGeometry();
+  return true;
+}
+
+bool ContentSizedTextView::contentHeightCapped() const noexcept {
+  return preferredHeight_ >= maximumHeight();
 }
 
 CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
@@ -922,7 +927,7 @@ CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
           });
 
   setOutput(output);
-  measureAtCurrentWidth(false);
+  static_cast<void>(measureAtCurrentWidth(false));
   settleScroll();
 }
 
@@ -934,11 +939,16 @@ bool CommandOutputView::followsLatest() const noexcept {
   return followsLatest_;
 }
 
+bool CommandOutputView::isHeightCapped() const noexcept {
+  return contentHeightCapped();
+}
+
 bool CommandOutputView::setOutput(const QString &output) {
   const QString displayOutput = trimmedTrailingLines(output);
   if (currentOutput_ == displayOutput)
     return false;
 
+  const bool retainedHeightIsCapped = isHeightCapped();
   const bool retainedFollow = followsLatest_;
   const int retainedValue = preservedScrollValue_;
   const bool appendOnly =
@@ -955,10 +965,13 @@ bool CommandOutputView::setOutput(const QString &output) {
   followsLatest_ = retainedFollow;
   preservedScrollValue_ = retainedValue;
   programmaticScroll_ = false;
-  // Asking the document layout for its size here completes wrapping at the
-  // already assigned viewport width.  The enclosing conversation can then
-  // account for the final card height in the same reconciliation transaction.
-  measureAtCurrentWidth(true);
+  // Once the output has reached its bounded height, subsequent text cannot
+  // change the enclosing card's geometry. Avoid a complete QTextDocument
+  // measurement and ancestor LayoutRequest for the common streaming case.
+  if (!retainedHeightIsCapped || !appendOnly || displayOutput.isEmpty())
+    static_cast<void>(measureAtCurrentWidth(true));
+  else
+    viewport()->update();
   settleScroll();
   return true;
 }
@@ -1092,22 +1105,48 @@ public:
     }
     const bool becomingAuthoritative = current.kind == CardKind::LocalPrompt &&
                                        next.kind == CardKind::UserMessage;
+    const bool payloadChanged = current.payload != next.payload;
     const bool presentationChanged =
         becomingAuthoritative || !presentationEquals(current, next);
+    const bool activeWorkOnly = !becomingAuthoritative && !payloadChanged &&
+                                current.activeWork != next.activeWork;
+    bool cappedCommandOutputOnly = false;
+    if (!becomingAuthoritative && output && output->isHeightCapped() &&
+        current.kind == CardKind::CommandExecution &&
+        next.kind == CardKind::CommandExecution) {
+      const auto *before = std::get_if<CommandExecutionData>(&current.payload);
+      const auto *after = std::get_if<CommandExecutionData>(&next.payload);
+      cappedCommandOutputOnly =
+          before && after && before->output != after->output &&
+          after->output.starts_with(before->output) &&
+          before->command == after->command &&
+          before->status == after->status && before->cwd == after->cwd &&
+          before->exitCode == after->exitCode &&
+          before->durationMilliseconds == after->durationMilliseconds &&
+          terminalOutputHasVisibleText(before->output) &&
+          terminalOutputHasVisibleText(after->output) &&
+          current.activeWork == next.activeWork;
+    }
     if (becomingAuthoritative)
       promoteToAuthoritativeUserMessage();
     current = next;
     if (!presentationChanged)
       return PresentationImpact::None;
+    if (activeWorkOnly) {
+      setActiveWork(next.activeWork.value_or(false));
+      return PresentationImpact::PaintOnly;
+    }
     std::visit([this](const auto &payload) { updateComposition(payload); },
                next.payload);
     if (next.activeWork)
       setActiveWork(*next.activeWork);
     refreshCopyPresentation();
     refreshFoldPresentation();
-    owner->updateGeometry();
+    if (!cappedCommandOutputOnly)
+      owner->updateGeometry();
     owner->update();
-    return PresentationImpact::GeometryChanged;
+    return cappedCommandOutputOnly ? PresentationImpact::PaintOnly
+                                   : PresentationImpact::GeometryChanged;
   }
 
   void promoteToAuthoritativeUserMessage() {

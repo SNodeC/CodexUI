@@ -214,14 +214,17 @@ void updateRow(QWidget *row, const std::string &threadId,
   auto *indent = row->findChild<QWidget *>(QStringLiteral("threadIndent"));
   auto *indicator = static_cast<ThreadDisclosureIndicator *>(
       row->findChild<QWidget *>(QStringLiteral("threadExpansionIndicator")));
-  indent->setFixedWidth(static_cast<int>(depth) * ChildIndent);
+  const int indentWidth = static_cast<int>(depth) * ChildIndent;
+  if (indent->width() != indentWidth)
+    indent->setFixedWidth(indentWidth);
   indicator->setState(hasChildren, expanded);
   QString titleText = text(threadTitle);
   if (titleText.isEmpty())
     titleText = text(threadId.substr(0, 12));
   if (requestCount != 0)
     titleText.prepend(QStringLiteral("! "));
-  title->setText(titleText);
+  if (title->text() != titleText)
+    title->setText(titleText);
   const UiStatus classified = classifyStatus(threadStatus);
   QString color = QString::fromLatin1(UiStyle::threadInactive);
   if (optimistic)
@@ -235,8 +238,10 @@ void updateRow(QWidget *row, const std::string &threadId,
     color = QString::fromLatin1(UiStyle::green);
   else if (classified.kind == StatusKind::Failed)
     color = QString::fromLatin1(UiStyle::red);
-  dot->setStyleSheet(
-      QStringLiteral("background:%1;border-radius:5px;").arg(color));
+  const QString style =
+      QStringLiteral("background:%1;border-radius:5px;").arg(color);
+  if (dot->styleSheet() != style)
+    dot->setStyleSheet(style);
 }
 
 QWidget *createRow() {
@@ -719,6 +724,82 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
     appendVisibleThread(next, row, {}, 0, visited);
   if (visibleSnapshot && *visibleSnapshot == next)
     return;
+
+  const bool retainedOrder =
+      visibleSnapshot && visibleSnapshot->rows.size() == next.rows.size() &&
+      std::equal(visibleSnapshot->rows.begin(), visibleSnapshot->rows.end(),
+                 next.rows.begin(), [](const RenderedThreadRow &before,
+                                       const RenderedThreadRow &after) {
+                   return before.id == after.id;
+                 });
+  if (retainedOrder) {
+    const RenderedThreadList previous = *visibleSnapshot;
+    visibleSnapshot = std::move(next);
+    const RenderedThreadList &snapshot = *visibleSnapshot;
+    list->blockSignals(true);
+    for (std::size_t index = 0; index < snapshot.rows.size(); ++index) {
+      const RenderedThreadRow &before = previous.rows[index];
+      const RenderedThreadRow &row = snapshot.rows[index];
+      if (before == row)
+        continue;
+      const auto found = rows.find(row.id);
+      if (found == rows.end())
+        continue;
+      QListWidgetItem *item = found->second;
+      const QString title = text(row.title);
+      const QString status = text(displayStatus(row.status));
+      QStringList accessibleParts{
+          title, status, QStringLiteral("level %1").arg(row.depth + 1)};
+      if (row.hasChildren)
+        accessibleParts.push_back(row.expanded ? QStringLiteral("expanded")
+                                               : QStringLiteral("collapsed"));
+      const QString accessible = accessibleParts.join(", ");
+      if (item->data(Qt::AccessibleTextRole).toString() != accessible)
+        item->setData(Qt::AccessibleTextRole, accessible);
+      QStringList details{title,
+                          QStringLiteral("Workspace: %1").arg(
+                              row.cwd.empty() ? QStringLiteral("Unknown")
+                                              : text(row.cwd)),
+                          QStringLiteral("Status: %1").arg(status),
+                          QStringLiteral("Last activity: %1").arg(
+                              activityText(row.lastActivityAt))};
+      if (!row.parentId.empty()) {
+        const ui::ThreadListRow *parent =
+            findThread(currentSnapshot->roots, row.parentId);
+        details.push_back(QStringLiteral("Parent: %1").arg(
+            parent && !parent->title.empty() ? text(parent->title)
+                                             : text(row.parentId)));
+      }
+      const QString tooltip = details.join(QLatin1Char('\n'));
+      if (item->toolTip() != tooltip)
+        item->setToolTip(tooltip);
+      item->setData(DepthRole, static_cast<qulonglong>(row.depth));
+      item->setData(HasChildrenRole, row.hasChildren);
+      item->setData(ExpandedRole, row.expanded);
+      item->setData(ParentIdRole, text(row.parentId));
+      item->setData(OptimisticRole, row.optimistic);
+      item->setData(OptimisticFailedRole, row.optimisticFailed);
+      updateRow(list->itemWidget(item), row.id, row.title, row.status,
+                row.pending, row.depth, row.hasChildren, row.expanded,
+                row.optimistic, row.optimisticFailed);
+      setProperty("rowPresentationUpdates",
+                  property("rowPresentationUpdates").toULongLong() + 1);
+    }
+    if (previous.selectedThreadId != snapshot.selectedThreadId) {
+      if (snapshot.selectedThreadId.empty()) {
+        list->clearSelection();
+        list->setCurrentRow(-1);
+      } else if (const auto selected = rows.find(snapshot.selectedThreadId);
+                 selected != rows.end()) {
+        list->setCurrentItem(selected->second);
+      }
+    }
+    list->blockSignals(false);
+    return;
+  }
+
+  setProperty("graphTopologyScansStarted",
+              property("graphTopologyScansStarted").toULongLong() + 1);
   visibleSnapshot = std::move(next);
   const RenderedThreadList &snapshot = *visibleSnapshot;
   list->blockSignals(true);

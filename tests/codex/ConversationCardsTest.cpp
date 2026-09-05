@@ -2989,6 +2989,22 @@ bool testBottomAnchoredCommandOutputGrowth() {
           commandCard->mapTo(view.viewport(), QPoint(0, commandCard->height()))
                   .y() == cardBottomBefore,
       "capped output keeps its scrollbar and fixed card bottom");
+
+  const qulonglong geometryBeforeAppend =
+      view.property("conversationGeometryPasses").toULongLong();
+  QPointer<ConversationCard> retainedCommand = commandCard;
+  live.output += "one more append-only streaming line\n";
+  result &= expect(applyConversation(view, snapshot),
+                   "capped output accepts another streaming append");
+  spin();
+  result &= expect(
+      retainedCommand == commandCard && output->height() == 220 &&
+          view.property("conversationGeometryPasses").toULongLong() ==
+              geometryBeforeAppend &&
+          commandCard->mapTo(view.viewport(), QPoint(0, commandCard->height()))
+                  .y() == cardBottomBefore,
+      "append-only capped output repaints its retained card without a "
+      "conversation geometry pass");
   return result;
 }
 

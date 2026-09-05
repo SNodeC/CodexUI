@@ -1374,6 +1374,8 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
       shell.property("threadPaneRoutes").toULongLong();
   const qulonglong conversationRoutesBefore =
       shell.property("conversationRoutes").toULongLong();
+  const qulonglong targetedConversationRoutesBefore =
+      shell.property("targetedConversationRoutes").toULongLong();
   const qulonglong inspectorRoutesBefore =
       shell.property("inspectorRoutes").toULongLong();
   const qulonglong shellCommitsBefore =
@@ -1394,6 +1396,15 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
   const qulonglong conversationPassesBefore =
       conversation ? conversation->property("graphRefreshPasses").toULongLong()
                    : 0;
+  const qulonglong conversationGeometryBefore =
+      conversation
+          ? conversation->property("conversationGeometryPasses").toULongLong()
+          : 0;
+  const qulonglong conversationLocalGeometryBefore =
+      conversation
+          ? conversation->property("conversationLocalGeometryPasses")
+                .toULongLong()
+          : 0;
 
   GraphChange withheldSelectedChange;
   {
@@ -1450,9 +1461,16 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
   require(
       shell.property("conversationRoutes").toULongLong() ==
               conversationRoutesBefore + 1 &&
+          shell.property("targetedConversationRoutes").toULongLong() ==
+              targetedConversationRoutesBefore + 1 &&
           conversation &&
           conversation->property("graphRefreshPasses").toULongLong() >
               conversationPassesBefore &&
+          conversation->property("conversationGeometryPasses").toULongLong() ==
+              conversationGeometryBefore &&
+          conversation->property("conversationLocalGeometryPasses")
+                  .toULongLong() ==
+              conversationLocalGeometryBefore + 1 &&
           shell.property("threadPaneRoutes").toULongLong() ==
               threadRoutesBefore &&
           shell.property("inspectorRoutes").toULongLong() ==

@@ -1526,9 +1526,13 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
   const auto threadState = read->state(thread);
   if (!threadState)
     return std::nullopt;
+  itemLimit = std::max<std::size_t>(1, itemLimit);
+  const std::optional<std::size_t> retainedAuthoritativeCount =
+      graphSize(graphField(*threadState, "historyLoadedItemCount"));
 
   std::vector<TurnInput> turns;
-  std::size_t itemCount = 0;
+  std::unordered_map<const nodegraph::Node *, std::size_t> turnPositions;
+  std::size_t itemCount = retainedAuthoritativeCount.value_or(0);
   const std::size_t turnCount = read->childCount(thread);
   turns.reserve(turnCount);
   for (std::size_t turnIndex = 0; turnIndex < turnCount; ++turnIndex) {
@@ -1549,53 +1553,112 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
         !read->removed(roots.front()))
       input.root = roots.front();
 
-    const std::size_t childCount = read->childCount(turn);
-    input.items.reserve(childCount);
-    for (std::size_t itemIndex = 0; itemIndex < childCount; ++itemIndex) {
-      nodegraph::NodeRef item = read->childAt(turn, itemIndex);
-      if (!item || !read->contains(item) || read->removed(item) ||
-          item->id().kind != nodegraph::NodeKind::Item)
-        continue;
-      input.items.push_back(item);
-      const auto itemState = read->state(item);
-      if (itemState &&
-          graphString(graphField(*itemState, "type")) != "localPrompt")
-        ++itemCount;
-    }
+    turnPositions.emplace(turn.get(), turns.size());
     turns.push_back(std::move(input));
   }
 
-  itemLimit = std::max<std::size_t>(1, itemLimit);
+  std::unordered_set<const nodegraph::Node *> boundedAuthoritativeItems;
+  if (retainedAuthoritativeCount) {
+    std::size_t remaining = itemLimit;
+    for (std::size_t turnOffset = turns.size(); turnOffset > 0 && remaining > 0;
+         --turnOffset) {
+      TurnInput &input = turns[turnOffset - 1];
+      const std::size_t childCount = read->childCount(input.turn);
+      for (std::size_t itemOffset = childCount;
+           itemOffset > 0 && remaining > 0; --itemOffset) {
+        nodegraph::NodeRef item = read->childAt(input.turn, itemOffset - 1);
+        if (!item || !read->contains(item) || read->removed(item) ||
+            item->id().kind != nodegraph::NodeKind::Item)
+          continue;
+        const auto state = read->state(item);
+        if (!state || graphString(graphField(*state, "type")) == "localPrompt")
+          continue;
+        input.items.push_back(item);
+        boundedAuthoritativeItems.insert(item.get());
+        --remaining;
+      }
+      std::ranges::reverse(input.items);
+    }
+
+    // User-authored optimistic/recovery prompts are explicitly protected from
+    // history paging. The worker maintains this narrow relation, so retaining
+    // them does not require scanning all historical items.
+    for (const nodegraph::NodeRef &prompt :
+         read->related(thread, nodegraph::RelationKind::PendingPrompt)) {
+      if (!prompt || !read->contains(prompt) || read->removed(prompt) ||
+          prompt->id().kind != nodegraph::NodeKind::Item)
+        continue;
+      const nodegraph::NodeRef turn = read->parent(prompt);
+      const auto position = turnPositions.find(turn.get());
+      if (position == turnPositions.end())
+        continue;
+      std::vector<nodegraph::NodeRef> &items = turns[position->second].items;
+      if (std::ranges::find(items, prompt) == items.end())
+        items.push_back(prompt);
+    }
+  } else {
+    for (TurnInput &input : turns) {
+      const std::size_t childCount = read->childCount(input.turn);
+      input.items.reserve(childCount);
+      for (std::size_t itemIndex = 0; itemIndex < childCount; ++itemIndex) {
+        nodegraph::NodeRef item = read->childAt(input.turn, itemIndex);
+        if (!item || !read->contains(item) || read->removed(item) ||
+            item->id().kind != nodegraph::NodeKind::Item)
+          continue;
+        input.items.push_back(item);
+        const auto itemState = read->state(item);
+        if (itemState && graphString(graphField(*itemState, "type")) !=
+                             "localPrompt")
+          ++itemCount;
+      }
+    }
+  }
+
   const std::size_t skip = itemCount > itemLimit ? itemCount - itemLimit : 0;
   std::size_t visited = 0;
 
   ConversationSnapshot result;
   result.threadId = thread->id().canonical;
-  std::unordered_set<const nodegraph::Node *> representedTurns;
-  std::size_t authoritativeIndex = 0;
-  for (const TurnInput &input : turns) {
-    for (const nodegraph::NodeRef &item : input.items) {
-      const auto state = read->state(item);
-      if (!state || graphString(graphField(*state, "type")) == "localPrompt")
-        continue;
-      if (authoritativeIndex++ >= skip)
-        representedTurns.insert(input.turn.get());
-    }
-  }
   std::size_t pinnedRoots = 0;
-  authoritativeIndex = 0;
-  for (const TurnInput &input : turns) {
-    for (const nodegraph::NodeRef &item : input.items) {
-      const auto state = read->state(item);
-      if (!state || graphString(graphField(*state, "type")) == "localPrompt")
+  if (retainedAuthoritativeCount) {
+    for (TurnInput &input : turns) {
+      if (input.items.empty() || !input.root ||
+          boundedAuthoritativeItems.contains(input.root.get()))
         continue;
-      if (authoritativeIndex < skip && item == input.root &&
-          representedTurns.contains(input.turn.get()))
+      if (std::ranges::find(input.items, input.root) == input.items.end())
+        input.items.insert(input.items.begin(), input.root);
+      const auto rootState = read->state(input.root);
+      if (skip != 0 && read->parent(input.root) == input.turn && rootState &&
+          graphString(graphField(*rootState, "type")) != "localPrompt")
         ++pinnedRoots;
-      ++authoritativeIndex;
+    }
+  } else {
+    std::unordered_set<const nodegraph::Node *> representedTurns;
+    std::size_t authoritativeIndex = 0;
+    for (const TurnInput &input : turns) {
+      for (const nodegraph::NodeRef &item : input.items) {
+        const auto state = read->state(item);
+        if (!state || graphString(graphField(*state, "type")) == "localPrompt")
+          continue;
+        if (authoritativeIndex++ >= skip)
+          representedTurns.insert(input.turn.get());
+      }
+    }
+    authoritativeIndex = 0;
+    for (const TurnInput &input : turns) {
+      for (const nodegraph::NodeRef &item : input.items) {
+        const auto state = read->state(item);
+        if (!state || graphString(graphField(*state, "type")) == "localPrompt")
+          continue;
+        if (authoritativeIndex < skip && item == input.root &&
+            representedTurns.contains(input.turn.get()))
+          ++pinnedRoots;
+        ++authoritativeIndex;
+      }
     }
   }
-  result.hiddenAuthoritativeItemCount = skip - pinnedRoots;
+  result.hiddenAuthoritativeItemCount =
+      pinnedRoots < skip ? skip - pinnedRoots : 0;
   result.hasMore = skip != 0 || graphProviderHasMoreHistory(*threadState);
 
   const auto activeTurns =
@@ -1684,7 +1747,8 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
       const bool localPrompt =
           itemState &&
           graphString(graphField(*itemState, "type")) == "localPrompt";
-      const bool selected = localPrompt || visited++ >= skip;
+      const bool selected = retainedAuthoritativeCount || localPrompt ||
+                            visited++ >= skip;
       const bool root = item == input.root;
       if (!selected && !root)
         continue;

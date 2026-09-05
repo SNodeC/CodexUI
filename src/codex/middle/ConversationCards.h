@@ -36,7 +36,8 @@ public:
 protected:
   void wheelEvent(QWheelEvent *event) override;
   void resizeEvent(QResizeEvent *event) override;
-  void measureAtCurrentWidth(bool notifyParent);
+  [[nodiscard]] bool measureAtCurrentWidth(bool notifyParent);
+  [[nodiscard]] bool contentHeightCapped() const noexcept;
 
 private:
   int preferredHeight_ = 0;
@@ -59,6 +60,7 @@ public:
 
   [[nodiscard]] ScrollState scrollState() const;
   [[nodiscard]] bool followsLatest() const noexcept;
+  [[nodiscard]] bool isHeightCapped() const noexcept;
 
   // Returns false for a true no-op. Programmatic document/range changes do
   // not alter the user's follow/paused choice.

@@ -595,12 +595,10 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
                                   &protocolBack));
   connect(stateChoice, &QPushButton::clicked, this, [this] {
     infoStack->setCurrentIndex(StatePage);
-    refreshCurrentTab();
   });
   connect(protocolChoice, &QPushButton::clicked, this, [this] {
     infoStack->setCurrentIndex(ProtocolPage);
     showProtocolTail();
-    refreshCurrentTab();
   });
   const auto showInfoChoices = [this] {
     infoStack->setCurrentIndex(InfoChoicePage);
@@ -616,12 +614,25 @@ InspectorPane::InspectorPane(QWidget *parent) : QFrame(parent) {
   inspectorTabs->addTab(infoStack, QStringLiteral("Info"));
   outer->addWidget(inspectorTabs, 1);
 
+  const auto requestCurrentPage = [this](int) {
+    if (refreshRequested)
+      refreshRequested();
+    else
+      refreshCurrentTab();
+  };
   connect(inspectorTabs, &QTabWidget::currentChanged, this,
-          [this](int) { refreshCurrentTab(); });
+          requestCurrentPage);
+  connect(infoStack, &QStackedWidget::currentChanged, this,
+          requestCurrentPage);
 }
 
 void InspectorPane::setHideAction(std::function<void()> hide) {
   hideAction = std::move(hide);
+}
+
+void InspectorPane::setRefreshRequestedAction(
+    std::function<void()> refresh) {
+  refreshRequested = std::move(refresh);
 }
 
 void InspectorPane::setRequestActions(RequestAction review,
@@ -640,7 +651,10 @@ void InspectorPane::refresh(const ui::InspectorSnapshot &snapshot) {
 
 void InspectorPane::showEvent(QShowEvent *event) {
   QFrame::showEvent(event);
-  refreshCurrentTab();
+  if (refreshRequested)
+    refreshRequested();
+  else
+    refreshCurrentTab();
 }
 
 void InspectorPane::refreshCurrentTab() {

@@ -4,6 +4,7 @@
 
 #include "codex/ClientRuntime.h"
 
+#include <QElapsedTimer>
 #include <QSocketNotifier>
 #include <QTimer>
 
@@ -163,9 +164,14 @@ void FrontendSession::drainWorkerMessages() {
     collectRescanRetirements();
 
   constexpr std::size_t MaximumMessagesPerPass = 128;
+  constexpr qint64 MaximumDrainMilliseconds = 2;
+  QElapsedTimer drainBudget;
+  drainBudget.start();
   std::size_t processed = 0;
   nodegraph::WorkerToQtMessage message;
   while (processed < MaximumMessagesPerPass &&
+         (processed == 0 ||
+          drainBudget.elapsed() < MaximumDrainMilliseconds) &&
          channels.tryReceiveForQt(message)) {
     ++processed;
     std::visit(
@@ -216,7 +222,10 @@ void FrontendSession::scheduleWorkerMessageDrain() {
   if (workerDrainScheduled || stopping)
     return;
   workerDrainScheduled = true;
-  QTimer::singleShot(0, workerNotifier.get(), [this] {
+  // Yield through at least one native event-dispatch turn between backlog
+  // slices so wheel, key, paint, and socket events cannot be starved by a
+  // self-replenishing zero-delay drain loop.
+  QTimer::singleShot(1, Qt::PreciseTimer, workerNotifier.get(), [this] {
     workerDrainScheduled = false;
     drainWorkerMessages();
   });

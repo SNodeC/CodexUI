@@ -9,6 +9,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -55,6 +56,13 @@ public:
   // Returns false for a typed projection no-op.  Existing cards are mutated by
   // key; first render and later updates use this same reconciliation path.
   bool reconcile(const ConversationSnapshot &snapshot);
+
+  // Applies one already-materialized card without constructing or traversing
+  // a complete conversation snapshot. A disengaged result requests the
+  // structural reconcile path because the card is absent, hidden, or changed
+  // identity/kind.
+  [[nodiscard]] std::optional<PresentationImpact>
+  applyCardPresentation(const VisibleCardData &card);
 
   // Extra composer height is represented after the final card, while the
   // viewport itself keeps its canonical geometry.
@@ -110,6 +118,8 @@ private:
   void setScrollValue(int value);
   void stopFollowingAnimation();
   void animateToBottom(int previousValue);
+  void recomputeCardGeometries(
+      const std::vector<ConversationCard *> &changedCards);
   void recomputeGeometry();
   void positionContent();
   void handleUserScrollValue(int value);
