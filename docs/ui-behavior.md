@@ -323,7 +323,8 @@ independently reviewable change.
    control, applying it only when a new card is materialized.
 3. **Complete:** resolve changed-file paths against the canonical thread
    workspace and open them with the system-default application.
-4. **Pending:** open image-ribbon images with the system-default image viewer.
+4. **Complete:** open image-ribbon images with the system-default image viewer;
+   CodexUI does not create or retain a separate image-viewer window.
 5. **Pending:** inventory card kinds suitable for an initial
    expanded/collapsed control.
 6. **Pending:** inventory card kinds suitable for a show/hide control.
