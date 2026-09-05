@@ -133,6 +133,7 @@ private:
   void animateToBottom(int previousValue);
   void recomputeCardGeometries(
       const std::vector<ConversationCard *> &changedCards);
+  void settlePaintOnlyCard(ConversationCard *card);
   void scheduleStructuralStagePass();
   void runStructuralStagePass();
   void cancelStructuralStaging();

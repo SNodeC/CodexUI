@@ -422,6 +422,8 @@ ConversationView::applyCardPresentation(const VisibleCardData &data) {
       setScrollValue(verticalScrollBar()->maximum());
     else
       restoreAnchor(anchor);
+  } else if (impact == PresentationImpact::PaintOnly) {
+    settlePaintOnlyCard(retained->second);
   }
   applying_ = false;
   storeCurrentThreadState();
@@ -1557,6 +1559,35 @@ void ConversationView::recomputeCardGeometries(
   for (TurnSectionWidget *section : sections)
     QCoreApplication::sendPostedEvents(section, QEvent::LayoutRequest);
   QCoreApplication::sendPostedEvents(content_, QEvent::LayoutRequest);
+}
+
+void ConversationView::settlePaintOnlyCard(ConversationCard *card) {
+  if (!card)
+    return;
+
+  // Text and lifecycle setters can post LayoutRequest even when the card's
+  // measured height is unchanged. Settle the card's internal layout in its
+  // existing rectangle and discard only the now-redundant requests along its
+  // retained ancestry. Letting one escape to content_ would invoke the full
+  // conversation geometry fallback for a paint-only status transition.
+  if (QWidget *cardContent = card->findChild<QWidget *>(
+          QStringLiteral("conversationCardContent"),
+          Qt::FindDirectChildrenOnly);
+      cardContent && cardContent->layout()) {
+    cardContent->layout()->setGeometry(cardContent->contentsRect());
+    cardContent->layout()->activate();
+    QCoreApplication::removePostedEvents(cardContent,
+                                         QEvent::LayoutRequest);
+  }
+  if (card->layout()) {
+    card->layout()->setGeometry(card->contentsRect());
+    card->layout()->activate();
+  }
+
+  for (QWidget *widget = card; widget && widget != content_;
+       widget = widget->parentWidget())
+    QCoreApplication::removePostedEvents(widget, QEvent::LayoutRequest);
+  QCoreApplication::removePostedEvents(content_, QEvent::LayoutRequest);
 }
 
 void ConversationView::recomputeGeometry() {

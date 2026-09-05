@@ -1116,6 +1116,7 @@ public:
     const bool activeWorkOnly = !becomingAuthoritative && !payloadChanged &&
                                 current.activeWork != next.activeWork;
     bool cappedCommandOutputOnly = false;
+    bool commandLifecycleOnly = false;
     if (!becomingAuthoritative && output && output->isHeightCapped() &&
         current.kind == CardKind::CommandExecution &&
         next.kind == CardKind::CommandExecution) {
@@ -1132,6 +1133,18 @@ public:
           terminalOutputHasVisibleText(after->output) &&
           current.activeWork == next.activeWork;
     }
+    if (!becomingAuthoritative &&
+        current.kind == CardKind::CommandExecution &&
+        next.kind == CardKind::CommandExecution) {
+      const auto *before = std::get_if<CommandExecutionData>(&current.payload);
+      const auto *after = std::get_if<CommandExecutionData>(&next.payload);
+      commandLifecycleOnly =
+          before && after && before->command == after->command &&
+          before->output == after->output && before->cwd == after->cwd &&
+          !before->status.empty() && !after->status.empty() &&
+          !commandMetadata(*before).isEmpty() &&
+          !commandMetadata(*after).isEmpty();
+    }
     if (becomingAuthoritative)
       promoteToAuthoritativeUserMessage();
     current = next;
@@ -1141,17 +1154,37 @@ public:
       setActiveWork(next.activeWork.value_or(false));
       return PresentationImpact::PaintOnly;
     }
+    const int previousNaturalHeight =
+        commandLifecycleOnly ? naturalHeightForCurrentWidth() : -1;
     std::visit([this](const auto &payload) { updateComposition(payload); },
                next.payload);
     if (next.activeWork)
       setActiveWork(*next.activeWork);
     refreshCopyPresentation();
     refreshFoldPresentation();
-    if (!cappedCommandOutputOnly)
+    const int nextNaturalHeight = commandLifecycleOnly
+                                      ? naturalHeightForCurrentWidth()
+                                      : -1;
+    const bool measuredLifecyclePaintOnly =
+        commandLifecycleOnly && previousNaturalHeight >= 0 &&
+        nextNaturalHeight == previousNaturalHeight;
+    const bool geometryChanged =
+        !cappedCommandOutputOnly && !measuredLifecyclePaintOnly;
+    if (geometryChanged)
       owner->updateGeometry();
     owner->update();
-    return cappedCommandOutputOnly ? PresentationImpact::PaintOnly
-                                   : PresentationImpact::GeometryChanged;
+    return geometryChanged ? PresentationImpact::GeometryChanged
+                           : PresentationImpact::PaintOnly;
+  }
+
+  [[nodiscard]] int naturalHeightForCurrentWidth() {
+    if (!layout || owner->width() <= 0)
+      return -1;
+    layout->invalidate();
+    const int width = owner->contentsRect().width();
+    return layout->hasHeightForWidth()
+               ? layout->heightForWidth(width) + 2 * owner->frameWidth()
+               : layout->sizeHint().height() + 2 * owner->frameWidth();
   }
 
   void promoteToAuthoritativeUserMessage() {

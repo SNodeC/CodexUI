@@ -1289,6 +1289,85 @@ bool testPausedExpandedCommandStaysPainted() {
   return result;
 }
 
+bool testCommandCompletionWithoutGeometryWork() {
+  const std::string thread = "command-completion-paint-only";
+  VisibleCardData prompt{
+      AuthoritativeItemKey{thread, "turn", "prompt"}, CardKind::UserMessage,
+      thread, "turn", "prompt", UserMessageData{"Run the command", {}}};
+  QString output;
+  for (int line = 0; line < 80; ++line)
+    output += QStringLiteral("streamed output line %1\n").arg(line);
+  VisibleCardData command{
+      AuthoritativeItemKey{thread, "turn", "command"},
+      CardKind::CommandExecution,
+      thread,
+      "turn",
+      "command",
+      CommandExecutionData{"run long command", utf8(output), "inProgress",
+                           "/workspace", {}, {}},
+      true};
+  ConversationSnapshot snapshot;
+  snapshot.threadId = thread;
+  snapshot.activeTurnId = "turn";
+  snapshot.sections.push_back(
+      {"turn-section", "turn", {prompt, command}, prompt.key});
+
+  ConversationView view;
+  view.resize(760, 420);
+  view.show();
+  bool result = expect(view.reconcile(snapshot),
+                       "running command completion audit renders");
+  spin();
+  ConversationCard *commandCard = card(view, stableKey(command.key));
+  if (!commandCard)
+    return expect(false, "running command completion audit owns its card");
+  const int heightBefore = commandCard->height();
+  const int rangeBefore = view.verticalScrollBar()->maximum();
+  const qulonglong fullGeometryBefore =
+      view.property("conversationGeometryPasses").toULongLong();
+  const qulonglong localGeometryBefore =
+      view.property("conversationLocalGeometryPasses").toULongLong();
+
+  auto &completed = std::get<CommandExecutionData>(command.payload);
+  completed.status = "completed";
+  completed.exitCode = 0;
+  completed.durationMilliseconds = 12'000;
+  command.activeWork = false;
+  const std::optional<PresentationImpact> impact =
+      view.applyCardPresentation(command);
+  spin();
+
+  auto *status = commandCard->findChild<QLabel *>(
+      QStringLiteral("commandStatus"));
+  const bool completionStayedLocal =
+      impact == PresentationImpact::PaintOnly && status &&
+          status->text() == QStringLiteral("completed") &&
+          !commandCard->property("activeWork").toBool() &&
+          commandCard->height() == heightBefore &&
+          view.verticalScrollBar()->maximum() == rangeBefore &&
+          view.property("conversationGeometryPasses").toULongLong() ==
+              fullGeometryBefore &&
+          view.property("conversationLocalGeometryPasses").toULongLong() ==
+              localGeometryBefore;
+  if (!completionStayedLocal)
+    std::cerr << "completion impact="
+              << (impact ? static_cast<int>(*impact) : -1)
+              << " height=" << heightBefore << "->" << commandCard->height()
+              << " range=" << rangeBefore << "->"
+              << view.verticalScrollBar()->maximum() << " full="
+              << fullGeometryBefore << "->"
+              << view.property("conversationGeometryPasses").toULongLong()
+              << " local=" << localGeometryBefore << "->"
+              << view.property("conversationLocalGeometryPasses")
+                     .toULongLong()
+              << '\n';
+  result &= expect(
+      completionStayedLocal,
+      "running-to-completed patches lifecycle paint without conversation "
+      "geometry or scroll-range work");
+  return result;
+}
+
 bool testStreamingAgentBecomesVisibleWithoutReselection() {
   const std::string thread = "streaming-final-visibility";
   VisibleCardData prompt{
@@ -6964,6 +7043,7 @@ int main(int argc, char **argv) {
   result &= testStructuralOrderAndIdentity();
   result &= testFollowPauseAndStableAnchor();
   result &= testPausedExpandedCommandStaysPainted();
+  result &= testCommandCompletionWithoutGeometryWork();
   result &= testStreamingAgentBecomesVisibleWithoutReselection();
   result &= testThreadLocalScrollAndComposerExtent();
   result &= testPromptAdmissionFollowOwnership();
