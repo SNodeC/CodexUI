@@ -459,8 +459,8 @@ std::unordered_map<ConversationView *, BoundFixture> &fixtureBindings() {
   return bindings;
 }
 
-bool applyConversation(ConversationView &view,
-                       const ConversationGraphSpec &snapshot) {
+ConversationSnapshot
+projectConversation(const ConversationGraphSpec &snapshot) {
   ConversationSnapshot projected;
   projected.threadId = snapshot.threadId;
   projected.hiddenAuthoritativeItemCount =
@@ -471,7 +471,12 @@ bool applyConversation(ConversationView &view,
   for (const TurnGraphSpec &section : snapshot.sections)
     projected.sections.push_back(
         {section.key, section.turnId, section.cards, section.rootCardKey});
-  return view.reconcile(projected);
+  return projected;
+}
+
+bool applyConversation(ConversationView &view,
+                       const ConversationGraphSpec &snapshot) {
+  return view.reconcile(projectConversation(snapshot));
 }
 
 ConversationGraphSpec conversation(const std::string &threadId, int count) {
@@ -1154,7 +1159,9 @@ bool testPausedExpandedCommandStaysPainted() {
   const QString originalStyleSheet = qApp->styleSheet();
   qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
   const std::string thread = "paused-expanded-command";
-  ConversationGraphSpec snapshot = conversation(thread, 24);
+  ConversationGraphSpec snapshot = conversation(
+      thread, qEnvironmentVariableIsSet("CODEXUI_CONVERSATION_TIMINGS") ? 80
+                                                                        : 24);
   QString output;
   for (int line = 0; line < 48; ++line)
     output += QStringLiteral("completed command output %1\n").arg(line);
@@ -1169,6 +1176,8 @@ bool testPausedExpandedCommandStaysPainted() {
   snapshot.sections.back().cards.insert(
       snapshot.sections.back().cards.begin(),
       cardForAppearanceAudit(thread, CardKind::UserMessage, 99));
+  snapshot.sections.back().rootCardKey =
+      snapshot.sections.back().cards.front().key;
   snapshot.sections.back().cards.push_back(completedCommand);
 
   ConversationView view;
@@ -1222,17 +1231,44 @@ bool testPausedExpandedCommandStaysPainted() {
         view.property("conversationGeometryPasses").toULongLong();
     const qulonglong localGeometryBefore =
         view.property("conversationLocalGeometryPasses").toULongLong();
+    const qulonglong cachedAppendBefore =
+        view.property("conversationCachedAppendGeometryPasses").toULongLong();
     const qulonglong structuralCommitsBefore =
         view.property("incrementalStructuralCommits").toULongLong();
+    const qulonglong stageCommitsBefore =
+        view.property("structuralStageCommits").toULongLong();
     snapshot.sections.back().cards.push_back(cardForAppearanceAudit(
         thread, incomingKinds[index], 100 + static_cast<int>(index)));
+    const std::string incomingKey =
+        stableKey(snapshot.sections.back().cards.back().key);
     paintProbe.start(commandCard);
-    const bool changed = applyConversation(view, snapshot);
+    QElapsedTimer insertionTimer;
+    insertionTimer.start();
+    view.reconcileStaged(projectConversation(snapshot));
+    const auto stagedAnchor = firstVisible(view);
+    const bool hiddenUntilCommit = card(view, incomingKey) == nullptr;
+    const bool changed = spinUntil([&] {
+      return view.property("structuralStageCommits").toULongLong() ==
+             stageCommitsBefore + 1;
+    });
+    if (qEnvironmentVariableIsSet("CODEXUI_CONVERSATION_TIMINGS"))
+      std::cerr << "single insertion kind="
+                << static_cast<int>(incomingKinds[index]) << " us="
+                << insertionTimer.nsecsElapsed() / 1000 << " construct="
+                << view.property("lastStructuralStageCardConstructionMicros")
+                       .toLongLong()
+                << " validation="
+                << view.property("lastIncrementalValidationMicros")
+                       .toLongLong()
+                << " geometry="
+                << view.property("lastIncrementalGeometryMicros").toLongLong()
+                << " structural="
+                << view.property("lastIncrementalStructuralMicros")
+                       .toLongLong()
+                << '\n';
     const auto immediateAnchor = firstVisible(view);
     const QRect immediateCommand(commandCard->mapTo(view.viewport(), QPoint{}),
                                  commandCard->size());
-    const std::string incomingKey =
-        stableKey(snapshot.sections.back().cards.back().key);
     QPointer<ConversationCard> incomingCard = card(view, incomingKey);
     const int immediateIncomingHeight =
         incomingCard ? incomingCard->height() : -1;
@@ -1263,7 +1299,9 @@ bool testPausedExpandedCommandStaysPainted() {
             ? !incomingCard
             : incomingCard && immediateIncomingHeight == settledIncomingHeight;
     const bool auditPass =
-        changed && card(view, stableKey(completedCommand.key)) == commandCard &&
+        changed && hiddenUntilCommit &&
+        stableAgainst(anchorBefore, stagedAnchor) &&
+        card(view, stableKey(completedCommand.key)) == commandCard &&
         view.mode() == ConversationView::Mode::Paused &&
         stableAgainst(anchorBefore, immediateAnchor) &&
         stableAgainst(anchorBefore, settledAnchor) &&
@@ -1273,9 +1311,41 @@ bool testPausedExpandedCommandStaysPainted() {
         view.property("conversationGeometryPasses").toULongLong() ==
             fullGeometryBefore &&
         view.property("conversationLocalGeometryPasses").toULongLong() ==
-            localGeometryBefore + 1 &&
+            localGeometryBefore &&
+        view.property("conversationCachedAppendGeometryPasses")
+                .toULongLong() ==
+            cachedAppendBefore + 1 &&
         view.property("incrementalStructuralCommits").toULongLong() ==
             structuralCommitsBefore + 1;
+    if (!auditPass)
+      std::cerr << "incoming audit kind="
+                << static_cast<int>(incomingKinds[index])
+                << " anchorImmediate="
+                << stableAgainst(anchorBefore, immediateAnchor)
+                << " anchorSettled="
+                << stableAgainst(anchorBefore, settledAnchor)
+                << " commandImmediate=" << (immediateCommand == commandBefore)
+                << " commandSettled=" << (settledCommand == commandBefore)
+                << " paintAnchor=" << paintedAnchorStable
+                << " paintGeometry=" << paintedStable
+                << " widget=" << incomingWidgetStable << " local="
+                << view.property("conversationLocalGeometryPasses")
+                       .toULongLong()
+                << '/' << localGeometryBefore << " cached="
+                << view.property("conversationCachedAppendGeometryPasses")
+                       .toULongLong()
+                << '/' << cachedAppendBefore << " outputState="
+                << (commandCard->commandOutputScrollState() ==
+                    outputStateBefore)
+                << " identity="
+                << (card(view, stableKey(completedCommand.key)) == commandCard)
+                << " mode="
+                << (view.mode() == ConversationView::Mode::Paused)
+                << " full="
+                << view.property("conversationGeometryPasses").toULongLong()
+                << '/' << fullGeometryBefore << " structural="
+                << view.property("incrementalStructuralCommits").toULongLong()
+                << '/' << structuralCommitsBefore << '\n';
     result &= expect(
         auditPass,
         "incoming card preserves a visible expanded command in every paint "
@@ -1283,6 +1353,125 @@ bool testPausedExpandedCommandStaysPainted() {
   }
   result &= expect(allIncomingCardsMaterialized,
                    "selected-thread incoming cards materialize immediately");
+
+  auto appendedCommand = std::ranges::find_if(
+      snapshot.sections.back().cards, [](const VisibleCardData &candidate) {
+        return candidate.kind == CardKind::CommandExecution &&
+               candidate.itemId == "appearance-102";
+      });
+  ConversationCard *appendedCommandCard =
+      appendedCommand == snapshot.sections.back().cards.end()
+          ? nullptr
+          : card(view, stableKey(appendedCommand->key));
+  const auto completionAnchorBefore = firstVisible(view);
+  const int appendedCommandHeightBefore =
+      appendedCommandCard ? appendedCommandCard->height() : -1;
+  const int completionRangeBefore = view.verticalScrollBar()->maximum();
+  const qulonglong completionFullGeometryBefore =
+      view.property("conversationGeometryPasses").toULongLong();
+  const qulonglong completionLocalGeometryBefore =
+      view.property("conversationLocalGeometryPasses").toULongLong();
+  if (appendedCommand != snapshot.sections.back().cards.end()) {
+    auto &data = std::get<CommandExecutionData>(appendedCommand->payload);
+    data.status = "completed";
+    data.exitCode = 0;
+    data.durationMilliseconds = 20;
+    appendedCommand->activeWork = false;
+  }
+  const bool appendedCommandCompleted = applyConversation(view, snapshot);
+  spin();
+  auto *appendedCommandStatus =
+      appendedCommandCard
+          ? appendedCommandCard->findChild<QLabel *>(
+                QStringLiteral("commandStatus"))
+          : nullptr;
+  result &= expect(
+      appendedCommandCompleted && appendedCommandCard &&
+          appendedCommandStatus &&
+          appendedCommandStatus->text() == QStringLiteral("completed") &&
+          !appendedCommandCard->property("activeWork").toBool() &&
+          appendedCommandCard->height() == appendedCommandHeightBefore &&
+          view.verticalScrollBar()->maximum() == completionRangeBefore &&
+          stableAgainst(completionAnchorBefore, firstVisible(view)) &&
+          view.property("conversationGeometryPasses").toULongLong() ==
+              completionFullGeometryBefore &&
+          view.property("conversationLocalGeometryPasses").toULongLong() ==
+              completionLocalGeometryBefore,
+      "a cached-appended running command completes locally without a retained "
+      "history traversal or paused-viewport movement");
+
+  ConversationCard *turnRoot = card(
+      view, stableKey(*snapshot.sections.back().rootCardKey));
+  QWidget *nestedSurface =
+      turnRoot ? turnRoot->findChild<QWidget *>(
+                     QStringLiteral("conversationNestedCards"),
+                     Qt::FindDirectChildrenOnly)
+               : nullptr;
+  QWidget *conversationContent =
+      view.findChild<QWidget *>(QStringLiteral("conversationContent"));
+  view.resize(view.width() - 24, view.height());
+  spin();
+  result &= expect(
+      turnRoot && nestedSurface && nestedSurface->layout() &&
+          nestedSurface->layout()->isEnabled() && conversationContent &&
+          conversationContent->layout() &&
+          conversationContent->layout()->isEnabled() &&
+          std::ranges::all_of(
+              snapshot.sections.back().cards,
+              [&](const VisibleCardData &data) {
+                ConversationCard *retained = card(view, stableKey(data.key));
+                return retained &&
+                       (retained == turnRoot ||
+                        turnRoot->isAncestorOf(retained));
+              }),
+      "a later viewport resize re-enables normal Qt layout and preserves "
+      "every retained card under its Turn/You parent");
+
+  const auto sectionAnchorBefore = firstVisible(view);
+  const qulonglong fullBeforeNewTurn =
+      view.property("conversationGeometryPasses").toULongLong();
+  const qulonglong localBeforeNewTurn =
+      view.property("conversationLocalGeometryPasses").toULongLong();
+  const qulonglong cachedSectionBefore =
+      view.property("conversationCachedSectionAppendGeometryPasses")
+          .toULongLong();
+  const qulonglong sectionStageCommitsBefore =
+      view.property("structuralStageCommits").toULongLong();
+  VisibleCardData newTurnPrompt{
+      LocalPromptKey{12'345}, CardKind::LocalPrompt, thread, "turn-3", {},
+      LocalPromptData{12'345, "A newly admitted turn", PromptState::InFlight,
+                      true, {}, {}, QDateTime::currentMSecsSinceEpoch(), false}};
+  snapshot.sections.push_back(
+      {"turn:" + thread + ":3", "turn-3", {newTurnPrompt},
+       newTurnPrompt.key});
+  snapshot.activeTurnId = "turn-3";
+  QElapsedTimer newTurnTimer;
+  newTurnTimer.start();
+  view.reconcileStaged(projectConversation(snapshot));
+  const bool newTurnHiddenUntilCommit =
+      card(view, stableKey(newTurnPrompt.key)) == nullptr &&
+      stableAgainst(sectionAnchorBefore, firstVisible(view));
+  const bool newTurnChanged = spinUntil([&] {
+    return view.property("structuralStageCommits").toULongLong() ==
+           sectionStageCommitsBefore + 1;
+  });
+  if (qEnvironmentVariableIsSet("CODEXUI_CONVERSATION_TIMINGS"))
+    std::cerr << "new turn insertion us="
+              << newTurnTimer.nsecsElapsed() / 1000 << '\n';
+  const auto sectionAnchorAfter = firstVisible(view);
+  result &= expect(
+      newTurnChanged && newTurnHiddenUntilCommit &&
+          card(view, stableKey(newTurnPrompt.key)) &&
+          stableAgainst(sectionAnchorBefore, sectionAnchorAfter) &&
+          view.property("conversationGeometryPasses").toULongLong() ==
+              fullBeforeNewTurn &&
+          view.property("conversationLocalGeometryPasses").toULongLong() ==
+              localBeforeNewTurn &&
+          view.property("conversationCachedSectionAppendGeometryPasses")
+                  .toULongLong() ==
+              cachedSectionBefore + 1,
+      "a new Turn/You card appends from cached geometry without traversing "
+      "the retained history or moving a paused viewport");
 
   qApp->setStyleSheet(originalStyleSheet);
   spin();

@@ -219,6 +219,14 @@ the widget transaction and after every graph guard has been released.
   during the existing synchronous commit, reuses compatible keyed widgets,
   establishes every Turn/You parent, restores the anchor, and exposes one
   final state before returning `true`.
+- `reconcileStaged(snapshot)` preserves that same observable contract while
+  allowing multi-card selection and Load 80 construction to yield under the
+  hidden staging owner. A strict one-card tail append bypasses staging: the
+  new card is settled off-hierarchy, then its cached card, nested-Turn,
+  section, and content height deltas are committed without traversing or
+  remeasuring retained cards. Reorder, removal, non-tail insertion, and any
+  coalesced retained-card geometry change continue through full validated
+  reconciliation.
 - `setTrailingSpaceHeight(height)` represents only the composer's overlay
   growth below conversation content and preserves current scroll semantics.
 - `prepareForLocalPromptAdmission()` resumes following only when pause was
@@ -244,6 +252,7 @@ the widget transaction and after every graph guard has been released.
 | `setPresentationOptions` | complete local options | Reconciles retained `snapshot_` with force=true; no graph query. Existing user fold choices win over initial-fold defaults. |
 | `presentationOptions` | returns value copy | Pure query. |
 | `reconcile` | complete snapshot const reference; returns changed bool | Pre: unique section/card stable keys and correct root keys. Post: complete target exposed atomically, cards parented, scroll policy applied, snapshot retained. False guarantees no presentation pass for identical input. |
+| `reconcileStaged` | owned complete snapshot | Same final-state contract as `reconcile`; multi-card construction remains hidden and sliced. A single append may commit from cached geometry only when it is the last card of the last retained Turn, or the one root of a new last Turn, and no retained card also changed geometry. |
 | `setTrailingSpaceHeight` | nonnegative effective pixels | Post: content extent/anchor reflects composer overlay without changing viewport ownership. Repeated value is a no-op. |
 | `prepareForLocalPromptAdmission` | no parameters | May change pause caused only by composer growth; never overrides explicit user pause. |
 | `forwardWheelEvent` | live `QWheelEvent*`; returns consumed bool | Event is not owned. Nested eligible control must have declined it. |
@@ -696,6 +705,29 @@ measured the indivisible final geometry commit at 81, 82, and 82 ms, below the
 existing 100 ms selection/load boundary. This bounded delay applies only to an
 explicit thread selection or Load 80 operation; ordinary card deltas use the
 exact retained-card path and do not traverse the loaded history.
+
+The later append/completion correction is qualified separately under
+`../../build/codexui-adapter-qualification/capture/scroll-lag-live/`.
+`final-two-pass-all-card-live.mp4` records the complete application at 60 fps
+with all four presentation controls checked. It repeatedly sweeps the outer
+conversation viewport across the Turn/You card, reasoning/update content,
+Agent activity, expanded command output, and final cards while a new command
+arrives, streams, and completes. The exact prompt/command/completion interval
+starts 7.8 seconds into the movie; conversation-crop freeze detection finds no
+static interval of 50 ms or longer during the following 24 seconds.
+
+One arriving card is now constructed under the hidden staging owner, yields
+to the Qt event loop, and only then commits its cached geometry. The focused
+80-card Debug benchmark measures card construction phases at approximately
+0.6--2.8 ms and cached commits at approximately 2.7--6.4 ms for the ordinary
+card kinds exercised by the live turn. The File Changes card's first local
+style/layout settlement remains a separate approximately 10--15 ms commit;
+it performs no retained-history work. The running-to-completed regression
+verifies unchanged card height, scroll range, and paused anchor with zero
+conversation geometry passes, including a command first inserted through the
+cached append path. The recording cannot exclude a shorter single-frame hitch,
+and the user still perceives one occasionally; this residual observation is
+retained rather than reported as proven zero-lag behavior.
 
 The final Debug suite passes 17/17 native tests and the WebUI compatibility
 suite passes 83/83. ASan/UBSan executes every suite without a sanitizer

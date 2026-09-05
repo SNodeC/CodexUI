@@ -117,10 +117,10 @@ private:
 
   class TurnSectionWidget;
 
-  bool reconcile(const ConversationSnapshot &snapshot, bool force,
+  bool reconcile(ConversationSnapshot snapshot, bool force,
                  bool settleFollowImmediately);
   [[nodiscard]] bool tryReconcileSingleInsertion(
-      const ConversationSnapshot &snapshot, bool settleFollowImmediately);
+      ConversationSnapshot &snapshot, bool settleFollowImmediately);
   [[nodiscard]] bool cardVisible(const VisibleCardData &card) const noexcept;
   void setThread(const std::string &threadId);
   void setCardCollapsed(const std::string &key, ConversationCard *card,
@@ -133,6 +133,15 @@ private:
   void animateToBottom(int previousValue);
   void recomputeCardGeometries(
       const std::vector<ConversationCard *> &changedCards);
+  [[nodiscard]] int settleCardGeometry(ConversationCard *card, int width);
+  void recomputeAppendedNestedCardGeometry(
+      ConversationCard *card, ConversationCard *turnContainer,
+      TurnSectionWidget *section, int previousNestedHeight,
+      bool previousNestedVisible, int previousContainerHeight,
+      int previousSectionHeight);
+  void recomputeAppendedSectionGeometry(ConversationCard *card,
+                                        TurnSectionWidget *section,
+                                        int sectionTop);
   void settlePaintOnlyCard(ConversationCard *card);
   void scheduleStructuralStagePass();
   void runStructuralStagePass();

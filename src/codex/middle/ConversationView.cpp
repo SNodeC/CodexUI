@@ -240,7 +240,7 @@ void ConversationView::setThread(const std::string &threadId) {
 bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
   if (!committingStructuralStage_ && pendingStructuralSnapshot_)
     cancelStructuralStaging();
-  return reconcile(snapshot, false, false);
+  return reconcile(ConversationSnapshot(snapshot), false, false);
 }
 
 void ConversationView::reconcileStaged(ConversationSnapshot snapshot) {
@@ -259,12 +259,14 @@ void ConversationView::reconcileStaged(ConversationSnapshot snapshot) {
     }
   }
 
-  // An individual arriving card is already hidden by reconcile's short
-  // visible transaction. Staging is for the costly selected-history and
-  // Load-more cases where yielding between rich-widget constructors matters.
-  if (missing.size() <= 1) {
+  // A structure change without construction can commit directly. Even one
+  // rich arriving card is built in a hidden pass first so an active wheel or
+  // touchpad sequence gets an event-loop boundary before the cached geometry
+  // commit. This is normally only a few milliseconds and never exposes a
+  // placeholder or partially parented Turn.
+  if (missing.empty()) {
     cancelStructuralStaging();
-    static_cast<void>(reconcile(snapshot));
+    static_cast<void>(reconcile(std::move(snapshot), false, false));
     return;
   }
 
@@ -323,8 +325,12 @@ void ConversationView::runStructuralStagePass() {
     const auto retained = cards_.find(key);
     if (retained != cards_.end() && retained->second->canApply(*data))
       continue;
+    QElapsedTimer constructionElapsed;
+    constructionElapsed.start();
     ConversationCard *card = createRetainedCard(*data, stagingHost_, key);
     stagedCards_.insert_or_assign(key, card);
+    setProperty("lastStructuralStageCardConstructionMicros",
+                constructionElapsed.nsecsElapsed() / 1000);
     setProperty("structuralStageCardPasses",
                 property("structuralStageCardPasses").toULongLong() + 1);
     scheduleStructuralStagePass();
@@ -338,7 +344,7 @@ void ConversationView::runStructuralStagePass() {
   const QScopedValueRollback committing(committingStructuralStage_, true);
   QElapsedTimer elapsed;
   elapsed.start();
-  static_cast<void>(reconcile(completed, false, false));
+  static_cast<void>(reconcile(std::move(completed), false, false));
   setProperty("structuralStageCommitMillis", elapsed.elapsed());
   for (auto &[key, card] : stagedCards_) {
     static_cast<void>(key);
@@ -465,7 +471,9 @@ ConversationCard *ConversationView::createRetainedCard(
 }
 
 bool ConversationView::tryReconcileSingleInsertion(
-    const ConversationSnapshot &snapshot, bool settleFollowImmediately) {
+    ConversationSnapshot &snapshot, bool settleFollowImmediately) {
+  QElapsedTimer insertionElapsed;
+  insertionElapsed.start();
   if (snapshot.threadId != snapshot_.threadId ||
       snapshot.threadId != threadId_ || snapshot.hasMore != snapshot_.hasMore ||
       snapshot.hiddenAuthoritativeItemCount !=
@@ -561,9 +569,26 @@ bool ConversationView::tryReconcileSingleInsertion(
   // QWidget construction is indivisible and must stay on Qt-main. Build the
   // one new rich subtree outside the visible hierarchy, then expose only its
   // final parented geometry in the structural commit below.
-  ConversationCard *insertedCard =
-      createRetainedCard(insertedData, stagingHost_, insertedKey);
+  QElapsedTimer constructionElapsed;
+  setProperty("lastIncrementalValidationMicros",
+              insertionElapsed.nsecsElapsed() / 1000);
+  constructionElapsed.start();
+  ConversationCard *insertedCard = nullptr;
+  const auto staged = stagedCards_.find(insertedKey);
+  if (staged != stagedCards_.end() &&
+      staged->second->canApply(insertedData)) {
+    insertedCard = staged->second;
+    stagedCards_.erase(staged);
+  } else {
+    if (staged != stagedCards_.end()) {
+      delete staged->second;
+      stagedCards_.erase(staged);
+    }
+    insertedCard = createRetainedCard(insertedData, stagingHost_, insertedKey);
+  }
   insertedCard->hide();
+  setProperty("lastIncrementalCardConstructionMicros",
+              constructionElapsed.nsecsElapsed() / 1000);
 
   const Anchor anchor = captureAnchor();
   const bool follow = mode_ == Mode::Following;
@@ -608,6 +633,19 @@ bool ConversationView::tryReconcileSingleInsertion(
       }
     }
 
+    const bool cachedSectionAppend =
+        insertion->newSection && insertion->section + 1 ==
+                                     snapshot.sections.size() &&
+        !displayedSectionKeys_.empty() && geometryCards.empty();
+    int appendedSectionTop = 0;
+    if (cachedSectionAppend) {
+      const auto previous = sections_.find(displayedSectionKeys_.back());
+      if (previous != sections_.end())
+        appendedSectionTop = previous->second->geometry().bottom() + 1 +
+                             contentLayout_->spacing();
+      contentLayout_->setEnabled(false);
+    }
+
     TurnSectionWidget *section = retainedSection;
     if (insertion->newSection) {
       section = new TurnSectionWidget(content_);
@@ -616,6 +654,8 @@ bool ConversationView::tryReconcileSingleInsertion(
       section->setProperty("turnId",
                            QString::fromStdString(insertedSectionData.turnId));
       section->resize(std::max(0, content_->width()), 0);
+      if (cachedSectionAppend)
+        section->layout()->setEnabled(false);
       sections_.emplace(insertedSectionData.key, section);
       contentLayout_->insertWidget(1 + static_cast<int>(insertion->section),
                                    section);
@@ -634,6 +674,26 @@ bool ConversationView::tryReconcileSingleInsertion(
     ConversationCard *root = nullptr;
     if (insertedSectionData.rootCardKey)
       root = cards_.at(stableKey(*insertedSectionData.rootCardKey));
+    QWidget *rootNested =
+        root ? root->findChild<QWidget *>(
+                   QStringLiteral("conversationNestedCards"),
+                   Qt::FindDirectChildrenOnly)
+             : nullptr;
+    const int previousNestedHeight = rootNested ? rootNested->height() : 0;
+    const bool previousNestedVisible = rootNested && !rootNested->isHidden();
+    const int previousRootHeight = root ? root->height() : 0;
+    const int previousSectionHeight = section->height();
+    const bool cachedNestedAppend =
+        root && root != insertedCard && !insertion->newSection &&
+        insertion->card + 1 == insertedSectionData.cards.size() &&
+        insertion->section + 1 == snapshot.sections.size() &&
+        geometryCards.empty() && rootNested && rootNested->layout();
+    if (cachedNestedAppend) {
+      rootNested->layout()->setEnabled(false);
+      root->layout()->setEnabled(false);
+      section->layout()->setEnabled(false);
+      contentLayout_->setEnabled(false);
+    }
     if (root) {
       std::vector<ConversationCard *> nestedCards;
       nestedCards.reserve(orderedCards.size() - 1);
@@ -701,8 +761,23 @@ bool ConversationView::tryReconcileSingleInsertion(
     for (const TurnSection &candidate : snapshot.sections)
       displayedSectionKeys_.push_back(candidate.key);
     displayedCardKeys_ = std::move(nextDisplayedKeys);
-    snapshot_ = snapshot;
-    recomputeCardGeometries(geometryCards);
+    snapshot_ = std::move(snapshot);
+    QElapsedTimer geometryElapsed;
+    geometryElapsed.start();
+    if (cachedNestedAppend) {
+      recomputeAppendedNestedCardGeometry(
+          insertedCard, root, section, previousNestedHeight,
+          previousNestedVisible, previousRootHeight, previousSectionHeight);
+    } else if (cachedSectionAppend && root == insertedCard) {
+      recomputeAppendedSectionGeometry(insertedCard, section,
+                                       appendedSectionTop);
+    } else {
+      if (cachedSectionAppend)
+        contentLayout_->setEnabled(true);
+      recomputeCardGeometries(geometryCards);
+    }
+    setProperty("lastIncrementalGeometryMicros",
+                geometryElapsed.nsecsElapsed() / 1000);
 
     if (follow && (appendedVisibleCard || settleFollowImmediately))
       setScrollValue(verticalScrollBar()->maximum());
@@ -726,10 +801,12 @@ bool ConversationView::tryReconcileSingleInsertion(
               property("graphRefreshPasses").toULongLong() + 1);
   setProperty("incrementalStructuralCommits",
               property("incrementalStructuralCommits").toULongLong() + 1);
+  setProperty("lastIncrementalStructuralMicros",
+              insertionElapsed.nsecsElapsed() / 1000);
   return true;
 }
 
-bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
+bool ConversationView::reconcile(ConversationSnapshot snapshot,
                                  bool force, bool settleFollowImmediately) {
   if (!force && snapshot == snapshot_ && snapshot.threadId == threadId_)
     return false;
@@ -813,7 +890,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
           impact = PresentationImpact::PaintOnly;
       }
     }
-    snapshot_ = snapshot;
+    snapshot_ = std::move(snapshot);
     if (impact == PresentationImpact::GeometryChanged) {
       recomputeCardGeometries(geometryCards);
       if (follow)
@@ -1155,7 +1232,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
     visualChange = true;
   }
   displayedCardKeys_ = std::move(displayedKeys);
-  snapshot_ = snapshot;
+  snapshot_ = std::move(snapshot);
   recomputeGeometry();
   const bool outputGrew = visibleOutputFootprint() > outputFootprintBefore;
   for (const auto &[card, state] : commandOutputRestorations)
@@ -1437,6 +1514,7 @@ void ConversationView::recomputeCardGeometries(
     const std::vector<ConversationCard *> &changedCards) {
   if (changedCards.empty() || !content_ || !viewport())
     return;
+  contentLayout_->setEnabled(true);
   setProperty("conversationLocalGeometryPasses",
               property("conversationLocalGeometryPasses").toULongLong() + 1);
 
@@ -1444,38 +1522,6 @@ void ConversationView::recomputeCardGeometries(
     if (value && std::ranges::find(values, value) == values.end())
       values.push_back(value);
   };
-  const auto activateCard = [](ConversationCard *card) {
-    if (!card)
-      return;
-    if (QWidget *cardContent = card->findChild<QWidget *>(
-            QStringLiteral("conversationCardContent"),
-            Qt::FindDirectChildrenOnly);
-        cardContent && cardContent->layout())
-      cardContent->layout()->activate();
-    if (card->layout())
-      card->layout()->activate();
-  };
-  const auto settleCardHeight = [&activateCard](ConversationCard *card) {
-    if (!card || !card->layout())
-      return;
-    const int width = std::max(
-        0, card->parentWidget() ? card->parentWidget()->contentsRect().width()
-                                : card->width());
-    card->setMinimumHeight(0);
-    card->resize(width, card->height());
-    card->layout()->invalidate();
-    card->layout()->setGeometry(card->contentsRect());
-    activateCard(card);
-    const int height = card->layout()->hasHeightForWidth()
-                           ? card->layout()->heightForWidth(width) +
-                                 2 * card->frameWidth()
-                           : card->sizeHint().height();
-    card->setMinimumHeight(height);
-    card->resize(width, height);
-    card->layout()->setGeometry(card->contentsRect());
-    activateCard(card);
-  };
-
   std::vector<TurnSectionWidget *> sections;
   std::vector<ConversationCard *> turnContainers;
   std::vector<ConversationCard *> directCards;
@@ -1503,13 +1549,25 @@ void ConversationView::recomputeCardGeometries(
       appendUnique(directCards, card);
   }
 
-  for (ConversationCard *card : directCards)
-    settleCardHeight(card);
+  for (TurnSectionWidget *section : sections)
+    if (section && section->layout())
+      section->layout()->setEnabled(true);
+  for (ConversationCard *container : turnContainers)
+    if (container && container->layout())
+      container->layout()->setEnabled(true);
+
+  for (ConversationCard *card : directCards) {
+    const int width = std::max(
+        0, card->parentWidget() ? card->parentWidget()->contentsRect().width()
+                                : card->width());
+    static_cast<void>(settleCardGeometry(card, width));
+  }
   for (ConversationCard *container : turnContainers) {
     QWidget *nested = container->findChild<QWidget *>(
         QStringLiteral("conversationNestedCards"),
         Qt::FindDirectChildrenOnly);
     if (nested && nested->layout()) {
+      nested->layout()->setEnabled(true);
       nested->layout()->invalidate();
       nested->layout()->activate();
       const int nestedHeight =
@@ -1518,7 +1576,11 @@ void ConversationView::recomputeCardGeometries(
       nested->layout()->setGeometry(nested->contentsRect());
       nested->layout()->activate();
     }
-    settleCardHeight(container);
+    const int width = std::max(
+        0, container->parentWidget()
+               ? container->parentWidget()->contentsRect().width()
+               : container->width());
+    static_cast<void>(settleCardGeometry(container, width));
   }
 
   int totalDelta = 0;
@@ -1561,6 +1623,151 @@ void ConversationView::recomputeCardGeometries(
   QCoreApplication::sendPostedEvents(content_, QEvent::LayoutRequest);
 }
 
+int ConversationView::settleCardGeometry(ConversationCard *card, int width) {
+  if (!card || !card->layout())
+    return 0;
+  width = std::max(0, width);
+  card->setMinimumHeight(0);
+  card->resize(width, card->height());
+  if (QWidget *cardContent = card->findChild<QWidget *>(
+          QStringLiteral("conversationCardContent"),
+          Qt::FindDirectChildrenOnly);
+      cardContent && cardContent->layout()) {
+    cardContent->layout()->invalidate();
+    cardContent->layout()->setGeometry(cardContent->contentsRect());
+    cardContent->layout()->activate();
+  }
+  card->layout()->invalidate();
+  card->layout()->setGeometry(card->contentsRect());
+  card->layout()->activate();
+  card->updateGeometry();
+  const int height = card->layout()->hasHeightForWidth()
+                         ? card->layout()->heightForWidth(width) +
+                               2 * card->frameWidth()
+                         : card->sizeHint().height();
+  card->setMinimumHeight(height);
+  card->resize(width, height);
+  card->layout()->setGeometry(card->contentsRect());
+  card->layout()->activate();
+  return height;
+}
+
+void ConversationView::recomputeAppendedNestedCardGeometry(
+    ConversationCard *card, ConversationCard *turnContainer,
+    TurnSectionWidget *section, int previousNestedHeight,
+    bool previousNestedVisible, int previousContainerHeight,
+    int previousSectionHeight) {
+  if (!card || !turnContainer || !section)
+    return;
+  setProperty("conversationCachedAppendGeometryPasses",
+              property("conversationCachedAppendGeometryPasses")
+                      .toULongLong() +
+                  1);
+
+  QWidget *nested = turnContainer->findChild<QWidget *>(
+      QStringLiteral("conversationNestedCards"),
+      Qt::FindDirectChildrenOnly);
+  if (!nested || !nested->layout() || !card->layout()) {
+    recomputeCardGeometries({card});
+    return;
+  }
+
+  const int cardWidth = std::max(0, nested->contentsRect().width());
+  const int cardHeight = settleCardGeometry(card, cardWidth);
+
+  const bool nestedVisible = !nested->isHidden();
+  int nestedHeight = previousNestedHeight;
+  if (!nestedVisible) {
+    nestedHeight = 0;
+  } else if (!card->isHidden()) {
+    if (previousNestedVisible) {
+      nestedHeight += nested->layout()->spacing() + cardHeight;
+    } else {
+      const QMargins margins = nested->layout()->contentsMargins();
+      nestedHeight = margins.top() + cardHeight + margins.bottom();
+    }
+  }
+  QLayout *nestedLayout = nested->layout();
+  nested->setFixedHeight(std::max(0, nestedHeight));
+
+  int containerDelta = nestedHeight - previousNestedHeight;
+  if (!previousNestedVisible && nestedVisible)
+    containerDelta += turnContainer->layout()->spacing();
+  else if (previousNestedVisible && !nestedVisible)
+    containerDelta -= turnContainer->layout()->spacing();
+  const int containerHeight =
+      std::max(0, previousContainerHeight + containerDelta);
+  turnContainer->setMinimumHeight(containerHeight);
+  turnContainer->resize(turnContainer->width(), containerHeight);
+
+  const int sectionHeight = std::max(0, previousSectionHeight + containerDelta);
+  section->setMinimumHeight(sectionHeight);
+  section->resize(section->width(), sectionHeight);
+
+  naturalContentHeight_ = std::max(0, naturalContentHeight_ + containerDelta);
+  contentHeight_ = std::max(viewport()->height(),
+                            naturalContentHeight_ + trailingSpaceHeight_);
+  const int width = std::max(0, viewport()->width());
+  content_->resize(width, contentHeight_);
+  verticalScrollBar()->setPageStep(viewport()->height());
+  verticalScrollBar()->setRange(
+      0, std::max(0, contentHeight_ - viewport()->height()));
+  positionContent();
+
+  if (!card->isHidden()) {
+    const QMargins margins = nestedLayout->contentsMargins();
+    const int cardTop = previousNestedVisible
+                            ? previousNestedHeight - margins.bottom() +
+                                  nestedLayout->spacing()
+                            : margins.top();
+    card->setGeometry(margins.left(), cardTop,
+                      std::max(0, nested->width() - margins.left() -
+                                      margins.right()),
+                      cardHeight);
+  }
+
+  for (QWidget *descendant : card->findChildren<QWidget *>())
+    QCoreApplication::removePostedEvents(descendant, QEvent::LayoutRequest);
+  QCoreApplication::removePostedEvents(card, QEvent::LayoutRequest);
+  QCoreApplication::removePostedEvents(nested, QEvent::LayoutRequest);
+  QCoreApplication::removePostedEvents(turnContainer, QEvent::LayoutRequest);
+  QCoreApplication::removePostedEvents(section, QEvent::LayoutRequest);
+  QCoreApplication::removePostedEvents(content_, QEvent::LayoutRequest);
+}
+
+void ConversationView::recomputeAppendedSectionGeometry(
+    ConversationCard *card, TurnSectionWidget *section, int sectionTop) {
+  if (!card || !section)
+    return;
+  setProperty("conversationCachedSectionAppendGeometryPasses",
+              property("conversationCachedSectionAppendGeometryPasses")
+                      .toULongLong() +
+                  1);
+
+  const int width = std::max(0, content_->width());
+  const int cardHeight = settleCardGeometry(card, width);
+
+  section->setMinimumHeight(cardHeight);
+  section->setGeometry(0, sectionTop, width, cardHeight);
+  card->setGeometry(0, 0, width, cardHeight);
+  naturalContentHeight_ =
+      std::max(0, naturalContentHeight_ + contentLayout_->spacing() +
+                      cardHeight);
+  contentHeight_ = std::max(viewport()->height(),
+                            naturalContentHeight_ + trailingSpaceHeight_);
+  content_->resize(width, contentHeight_);
+  verticalScrollBar()->setPageStep(viewport()->height());
+  verticalScrollBar()->setRange(
+      0, std::max(0, contentHeight_ - viewport()->height()));
+  positionContent();
+
+  for (QWidget *descendant : card->findChildren<QWidget *>())
+    QCoreApplication::removePostedEvents(descendant, QEvent::LayoutRequest);
+  for (QWidget *widget : {static_cast<QWidget *>(card),
+                          static_cast<QWidget *>(section), content_})
+    QCoreApplication::removePostedEvents(widget, QEvent::LayoutRequest);
+}
+
 void ConversationView::settlePaintOnlyCard(ConversationCard *card) {
   if (!card)
     return;
@@ -1593,6 +1800,7 @@ void ConversationView::settlePaintOnlyCard(ConversationCard *card) {
 void ConversationView::recomputeGeometry() {
   if (!content_ || !viewport())
     return;
+  contentLayout_->setEnabled(true);
   setProperty("conversationGeometryPasses",
               property("conversationGeometryPasses").toULongLong() + 1);
   const int width = std::max(0, viewport()->width());
@@ -1600,6 +1808,8 @@ void ConversationView::recomputeGeometry() {
   contentLayout_->invalidate();
   for (const auto &[key, section] : sections_) {
     static_cast<void>(key);
+    if (section->layout())
+      section->layout()->setEnabled(true);
     section->setMinimumHeight(0);
   }
 
@@ -1623,32 +1833,15 @@ void ConversationView::recomputeGeometry() {
     if (card->layout())
       card->layout()->activate();
   };
-  const auto settleCardHeight = [&activateCard](ConversationCard *card,
-                                                int cardWidth) {
-    if (!card || !card->layout())
-      return;
-    cardWidth = std::max(0, cardWidth);
-    card->setMinimumHeight(0);
-    // Retained rich text is created and nested in one transaction. Establish
-    // its real width before measuring so QLabel cannot reuse pre-nesting
-    // document geometry until a later streamed update.
-    card->resize(cardWidth, card->height());
-    card->layout()->invalidate();
-    card->layout()->setGeometry(card->contentsRect());
-    activateCard(card);
-    card->updateGeometry();
-    const int cardHeight =
-        card->layout()->hasHeightForWidth()
-            ? card->layout()->heightForWidth(cardWidth) +
-                  2 * card->frameWidth()
-            : card->sizeHint().height();
-    card->setMinimumHeight(cardHeight);
-    card->resize(cardWidth, cardHeight);
-    card->layout()->setGeometry(card->contentsRect());
-    activateCard(card);
-  };
   for (const auto &[key, card] : cards_) {
     static_cast<void>(key);
+    if (card->layout())
+      card->layout()->setEnabled(true);
+    if (QWidget *nested = card->findChild<QWidget *>(
+            QStringLiteral("conversationNestedCards"),
+            Qt::FindDirectChildrenOnly);
+        nested && nested->layout())
+      nested->layout()->setEnabled(true);
     activateCard(card);
   }
   // Child/subagent threads may have no visible You root. Their cards live
@@ -1662,7 +1855,7 @@ void ConversationView::recomputeGeometry() {
     const int cardWidth = card->parentWidget()
                               ? card->parentWidget()->contentsRect().width()
                               : card->width();
-    settleCardHeight(card, cardWidth);
+    static_cast<void>(settleCardGeometry(card, cardWidth));
   }
   // A You turn container adds one real layout depth. Settle that depth in
   // dependency order so newly nested cards reach their final height inside
@@ -1693,7 +1886,7 @@ void ConversationView::recomputeGeometry() {
       if (!nestedCard)
         continue;
       const int nestedWidth = nested->contentsRect().width();
-      settleCardHeight(nestedCard, nestedWidth);
+      static_cast<void>(settleCardGeometry(nestedCard, nestedWidth));
     }
     nested->layout()->invalidate();
     const int nestedHeight =
@@ -1703,7 +1896,7 @@ void ConversationView::recomputeGeometry() {
     nested->updateGeometry();
     nested->layout()->invalidate();
     nested->layout()->activate();
-    settleCardHeight(card, cardWidth);
+    static_cast<void>(settleCardGeometry(card, cardWidth));
   }
   for (const auto &[key, section] : sections_) {
     static_cast<void>(key);

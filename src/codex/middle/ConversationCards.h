@@ -97,13 +97,12 @@ public:
   [[nodiscard]] bool isCollapsed() const noexcept;
   void setCollapsed(bool collapsed);
   bool setAuthoritativeTurnActive(bool active);
-  // Preserve the existing steering-card presentation when a visible child is
-  // rendered without its far-offscreen turn-root widget.
+  // Select the established nested-card presentation for a child, or clear it
+  // when the card becomes a turn root or a standalone activity.
   void setNestedPresentation(bool nested);
   void setNestedCards(const std::vector<ConversationCard *> &cards);
-  // ConversationView uses lightweight measured placeholders for nested cards
-  // that are outside the viewport.  They share the existing nested layout so
-  // materializing a card does not change the turn's visual structure.
+  // ConversationView supplies the retained child widgets in canonical order.
+  // They stay in this existing nested layout while the thread is selected.
   void setNestedItems(const std::vector<QWidget *> &items);
   // ConversationView uses this to pause local feedback timers while a card is
   // not painted.

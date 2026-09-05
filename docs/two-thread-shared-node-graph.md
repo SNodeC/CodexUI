@@ -283,7 +283,12 @@ Cards are retained when scrolling offscreen; scrolling performs no destruction
 or late rematerialization. New selected-thread cards are materialized in the
 same atomic reconciliation even while the user is paused above them. Stable
 keys, retained widget-local state, and anchor restoration preserve scroll and
-horizontal position. Thread rows follow the expanded hierarchy, and Inspector
+horizontal position. A strict append to the selected history's last Turn (or
+one new last Turn root) settles only the new card and commits exact cached
+height deltas through its Turn, section, and content extent. It does not ask Qt
+to traverse retained card layouts; all non-tail or otherwise structural cases
+remain on the complete validated reconciliation path. Thread rows follow the
+expanded hierarchy, and Inspector
 constructs rows only for the active tab when its effective snapshot changes.
 There is no permanent parallel NodeId-to-widget registry. Focus, animation,
 folding, filters, drafts, editor mechanics, and scroll-following remain
