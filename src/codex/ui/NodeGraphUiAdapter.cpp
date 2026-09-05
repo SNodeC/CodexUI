@@ -825,6 +825,18 @@ nlohmann::json safeStateObject(const nodegraph::Value::Object &fields) {
   return safeStateValue(nodegraph::Value(fields));
 }
 
+std::string sectionComponent(std::string_view prefix, std::string_view threadId,
+                             std::string_view suffix) {
+  std::string result(prefix);
+  result += std::to_string(threadId.size());
+  result.push_back(':');
+  result.append(threadId);
+  result += std::to_string(suffix.size());
+  result.push_back(':');
+  result.append(suffix);
+  return result;
+}
+
 
 } // namespace
 
@@ -855,9 +867,14 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread) const {
     if (state) {
       const std::string provider =
           graphString(graphField(*state, "providerState"));
-      result.providerReady = state->status == nodegraph::NodeStatus::Connected ||
-                             provider == "ready" || provider == "connected";
+      const std::string transport =
+          graphString(graphField(*state, "transportState"));
+      const bool connected =
+          state->status == nodegraph::NodeStatus::Connected ||
+          transport == "connected";
+      result.providerReady = connected && provider == "ready";
       result.canControl =
+          result.providerReady &&
           graphString(graphField(*state, "role")) == "controller";
     }
   }
@@ -904,9 +921,16 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread) const {
     row.createdAt = timestamp(*state, "createdAt");
     row.updatedAt = timestamp(*state, "updatedAt");
     row.recencyAt = timestamp(*state, "recencyAt");
-    row.lastActivityAt = timestamp(*state, "localPromptActivityAt");
-    if (!row.lastActivityAt)
-      row.lastActivityAt = row.updatedAt;
+    for (const std::string_view field : {
+             std::string_view("lastActivityAt"),
+             std::string_view("updatedAt"), std::string_view("recencyAt"),
+             std::string_view("localActivityAt"),
+             std::string_view("localPromptActivityAt")}) {
+      const std::optional<std::int64_t> candidate = timestamp(*state, field);
+      if (candidate &&
+          (!row.lastActivityAt || *candidate > *row.lastActivityAt))
+        row.lastActivityAt = candidate;
+    }
     row.pending = graphSize(graphField(*state, "pendingInteractionCount"))
                       .value_or(0);
     row.archived = graphBool(graphField(*state, "archived"));
@@ -951,6 +975,52 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread) const {
     if (!row.id.empty())
       result.roots.push_back(std::move(row));
   }
+  return result;
+}
+
+std::optional<NodeGraphUiAdapter::ConversationInfo>
+NodeGraphUiAdapter::conversationInfo(
+    const nodegraph::NodeRef &thread) const {
+  if (!graph_ || !thread)
+    return std::nullopt;
+  auto read = graph_->tryRead();
+  if (!read || !read->contains(thread) || read->removed(thread) ||
+      thread->id().kind != nodegraph::NodeKind::Thread)
+    return std::nullopt;
+  const auto state = read->state(thread);
+  if (!state)
+    return std::nullopt;
+
+  ConversationInfo result;
+  if (const auto count =
+          graphSize(graphField(*state, "historyLoadedItemCount"))) {
+    result.authoritativeItemCount = *count;
+  } else {
+    const std::size_t turnCount = read->childCount(thread);
+    for (std::size_t turnIndex = 0; turnIndex < turnCount; ++turnIndex) {
+      const nodegraph::NodeRef turn = read->childAt(thread, turnIndex);
+      if (!turn || turn->id().kind != nodegraph::NodeKind::Turn)
+        continue;
+      const std::size_t itemCount = read->childCount(turn);
+      for (std::size_t itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
+        const nodegraph::NodeRef item = read->childAt(turn, itemIndex);
+        if (!item || item->id().kind != nodegraph::NodeKind::Item)
+          continue;
+        const auto itemState = read->state(item);
+        if (itemState &&
+            graphString(graphField(*itemState, "type")) != "localPrompt")
+          ++result.authoritativeItemCount;
+      }
+    }
+  }
+
+  const std::string hydration =
+      graphString(graphField(*state, "hydrationState"));
+  const bool local = graphBool(graphField(*state, "local"));
+  const bool recoveryOnly = graphBool(graphField(*state, "recoveryOnly"));
+  result.readyForDisplay = hydration == "ready" || local || recoveryOnly;
+  result.hydrationFailed = hydration == "failed";
+  result.providerHasMore = graphProviderHasMoreHistory(*state);
   return result;
 }
 
@@ -1487,7 +1557,10 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
           item->id().kind != nodegraph::NodeKind::Item)
         continue;
       input.items.push_back(item);
-      ++itemCount;
+      const auto itemState = read->state(item);
+      if (itemState &&
+          graphString(graphField(*itemState, "type")) != "localPrompt")
+        ++itemCount;
     }
     turns.push_back(std::move(input));
   }
@@ -1498,7 +1571,31 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
 
   ConversationSnapshot result;
   result.threadId = thread->id().canonical;
-  result.hiddenAuthoritativeItemCount = skip;
+  std::unordered_set<const nodegraph::Node *> representedTurns;
+  std::size_t authoritativeIndex = 0;
+  for (const TurnInput &input : turns) {
+    for (const nodegraph::NodeRef &item : input.items) {
+      const auto state = read->state(item);
+      if (!state || graphString(graphField(*state, "type")) == "localPrompt")
+        continue;
+      if (authoritativeIndex++ >= skip)
+        representedTurns.insert(input.turn.get());
+    }
+  }
+  std::size_t pinnedRoots = 0;
+  authoritativeIndex = 0;
+  for (const TurnInput &input : turns) {
+    for (const nodegraph::NodeRef &item : input.items) {
+      const auto state = read->state(item);
+      if (!state || graphString(graphField(*state, "type")) == "localPrompt")
+        continue;
+      if (authoritativeIndex < skip && item == input.root &&
+          representedTurns.contains(input.turn.get()))
+        ++pinnedRoots;
+      ++authoritativeIndex;
+    }
+  }
+  result.hiddenAuthoritativeItemCount = skip - pinnedRoots;
   result.hasMore = skip != 0 || graphProviderHasMoreHistory(*threadState);
 
   const auto activeTurns =
@@ -1513,7 +1610,8 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
 
   for (TurnInput &input : turns) {
     TurnSection section;
-    section.key = input.id;
+    section.key =
+        sectionComponent("turn:", result.threadId, input.id);
     section.turnId = input.id;
     bool rootAdded = false;
     std::unordered_set<const nodegraph::Node *> readyPrompts;
@@ -1582,7 +1680,11 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
       append(input.root, true);
 
     for (const nodegraph::NodeRef &item : input.items) {
-      const bool selected = visited++ >= skip;
+      const auto itemState = read->state(item);
+      const bool localPrompt =
+          itemState &&
+          graphString(graphField(*itemState, "type")) == "localPrompt";
+      const bool selected = localPrompt || visited++ >= skip;
       const bool root = item == input.root;
       if (!selected && !root)
         continue;

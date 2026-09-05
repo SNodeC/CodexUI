@@ -3,8 +3,6 @@
 #ifndef CODEXUI_CODEX_UI_UIVIEWSTATE_H
 #define CODEXUI_CODEX_UI_UIVIEWSTATE_H
 
-#include "codex/nodegraph/NodeGraph.h"
-
 #include <nlohmann/json.hpp>
 
 #include <cstddef>

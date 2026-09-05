@@ -292,7 +292,12 @@ void ComposerPane::setAttentionRequest(QString title, QString detail,
   synchronizeGeometry();
 }
 
-void ComposerPane::setAttentionEnabled(bool enabled, bool reviewEnabled) {
+void ComposerPane::setAttentionEnabled(bool enabled) {
+  setAttentionActionEnabled(enabled, false);
+}
+
+void ComposerPane::setAttentionActionEnabled(bool enabled,
+                                             bool reviewEnabled) {
   attentionRejectButton_->setEnabled(enabled);
   attentionAcceptButton_->setEnabled(enabled);
   attentionReviewButton_->setEnabled(enabled || reviewEnabled);

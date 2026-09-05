@@ -184,35 +184,8 @@ void ConversationView::setEmptyMessage(QString message) {
 void ConversationView::setPresentationOptions(PresentationOptions options) {
   if (presentationOptions_ == options)
     return;
-  const Anchor anchor = captureAnchor();
-  const bool follow = mode_ == Mode::Following;
   presentationOptions_ = options;
-  applying_ = true;
-  viewport()->setUpdatesEnabled(false);
-  content_->setUpdatesEnabled(false);
-  const QSignalBlocker scrollSignals(verticalScrollBar());
-  for (const auto &[key, card] : cards_) {
-    static_cast<void>(key);
-    card->setVisible(cardVisible(card->data()));
-  }
-  for (const auto &[key, section] : sections_) {
-    static_cast<void>(key);
-    const bool visible = std::ranges::any_of(
-        section->cardKeys, [this](const std::string &cardKey) {
-          const auto card = cards_.find(cardKey);
-          return card != cards_.end() && card->second->isVisible();
-        });
-    section->setVisible(visible);
-  }
-  recomputeGeometry();
-  if (follow)
-    setScrollValue(verticalScrollBar()->maximum());
-  else
-    restoreAnchor(anchor);
-  applying_ = false;
-  content_->setUpdatesEnabled(true);
-  viewport()->setUpdatesEnabled(true);
-  viewport()->update();
+  static_cast<void>(reconcile(snapshot_, true, true));
 }
 
 bool ConversationView::cardVisible(const VisibleCardData &card) const noexcept {
@@ -249,7 +222,8 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
 
 bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
                                  bool force, bool settleFollowImmediately) {
-  static_cast<void>(force);
+  if (!force && snapshot == snapshot_ && snapshot.threadId == threadId_)
+    return false;
 
   const bool switchedThread = snapshot.threadId != threadId_;
   if (switchedThread)
@@ -293,17 +267,27 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
     visualChange = true;
   }
   if (showLoadMore) {
-    const std::size_t page = std::min(AuthoritativeHistoryPageSize,
-                                      snapshot.hiddenAuthoritativeItemCount);
+    const std::size_t page =
+        snapshot.hiddenAuthoritativeItemCount == 0
+            ? AuthoritativeHistoryPageSize
+            : std::min(AuthoritativeHistoryPageSize,
+                       snapshot.hiddenAuthoritativeItemCount);
     const QString label = QStringLiteral("Load %1 more activities")
                               .arg(static_cast<qulonglong>(page));
     if (loadMore_->text() != label) {
       loadMore_->setText(label);
       visualChange = true;
     }
-    loadMore_->setToolTip(QStringLiteral("%1 earlier activities are retained")
-                              .arg(static_cast<qulonglong>(
-                                  snapshot.hiddenAuthoritativeItemCount)));
+    const QString tooltip = snapshot.hiddenAuthoritativeItemCount == 0
+                                ? QStringLiteral(
+                                      "Earlier activities are available")
+                                : QStringLiteral(
+                                      "%1 earlier activities are retained")
+                                      .arg(static_cast<qulonglong>(
+                                          snapshot
+                                              .hiddenAuthoritativeItemCount));
+    if (loadMore_->toolTip() != tooltip)
+      loadMore_->setToolTip(tooltip);
   }
 
   struct DesiredSection {
@@ -562,6 +546,7 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot,
     visualChange = true;
   }
   displayedCardKeys_ = std::move(displayedKeys);
+  snapshot_ = snapshot;
   recomputeGeometry();
   const bool outputGrew = visibleOutputFootprint() > outputFootprintBefore;
   for (const auto &[card, state] : commandOutputRestorations)

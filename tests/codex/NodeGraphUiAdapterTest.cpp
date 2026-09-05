@@ -84,6 +84,9 @@ bool projectsCanonicalTurnStructureAndRoot() {
                "wrong first-turn card count") ||
       !require(result->sections[1].cards.size() == 1,
                "wrong second-turn card count") ||
+      !require(result->sections[0].key ==
+                   "turn:8:thread-16:turn-1",
+               "the established stable section identity changed") ||
       !require(result->sections[0].rootCardKey.has_value(),
                "first turn lost its canonical root") ||
       !require(result->sections[0].cards[0].key ==
@@ -135,7 +138,7 @@ bool limitsHistoryButPinsTheOwningPrompt() {
   const auto result = adapter.conversation(thread, 2, {true, true});
   return require(result.has_value(), "bounded projection unavailable") &&
          require(result->hasMore, "bounded projection lost Load More") &&
-         require(result->hiddenAuthoritativeItemCount == 4,
+         require(result->hiddenAuthoritativeItemCount == 3,
                  "wrong hidden item count") &&
          require(result->sections.size() == 1,
                  "bounded projection lost its turn") &&
@@ -144,6 +147,60 @@ bool limitsHistoryButPinsTheOwningPrompt() {
          require(result->sections[0].cards.front().key ==
                      *result->sections[0].rootCardKey,
                  "pinned root does not own the turn");
+}
+
+bool preservesReadinessActivityAndAuthoritativeBudgetSemantics() {
+  nodegraph::NodeGraph graph;
+  NodeRef runtime;
+  NodeRef thread;
+  {
+    auto write = graph.write();
+    runtime = write.upsert({NodeKind::Runtime, "runtime"});
+    NodeState connection;
+    connection.status = nodegraph::NodeStatus::Disconnected;
+    connection.fields = {{"transportState", "disconnected"},
+                         {"providerState", "ready"},
+                         {"role", "controller"}};
+    static_cast<void>(write.upsert({NodeKind::Connection, "connection"},
+                                   std::move(connection)));
+    NodeState threadState;
+    threadState.fields = {{"name", "Compatibility thread"},
+                          {"updatedAt", std::int64_t{4}},
+                          {"recencyAt", std::int64_t{6}},
+                          {"lastActivityAt", std::int64_t{5}},
+                          {"localActivityAt", std::int64_t{9}},
+                          {"localPromptActivityAt", std::int64_t{8}},
+                          {"hydrationState", "loading"},
+                          {"historyHasMore", true}};
+    thread = write.upsert({NodeKind::Thread, "compatibility-thread"},
+                          std::move(threadState));
+    const NodeRef turn = write.upsert({NodeKind::Turn, "compatibility-turn"});
+    write.setParent(thread, turn);
+    const NodeRef provider = write.upsert(
+        {NodeKind::Item, "provider-item"},
+        itemState("provider-item", "agentMessage", "provider"));
+    write.setParent(turn, provider);
+    NodeState local = itemState("local-item", "localPrompt", "local");
+    const NodeRef localPrompt =
+        write.upsert({NodeKind::Item, "local-item"}, std::move(local));
+    write.setParent(turn, localPrompt);
+    write.relate(runtime, nodegraph::RelationKind::RootThread, thread);
+    static_cast<void>(write.finish());
+  }
+
+  NodeGraphUiAdapter adapter(graph);
+  const auto info = adapter.conversationInfo(thread);
+  const auto threads = adapter.threads(thread);
+  return require(info && !info->readyForDisplay &&
+                     !info->hydrationFailed && info->providerHasMore &&
+                     info->authoritativeItemCount == 1,
+                 "hydration or authoritative history budget changed") &&
+         require(threads && !threads->providerReady && !threads->canControl,
+                 "disconnected transport exposed ready thread controls") &&
+         require(threads && threads->roots.size() == 1 &&
+                     threads->roots.front().lastActivityAt ==
+                         std::optional<std::int64_t>{9},
+                 "canonical effective thread activity changed");
 }
 
 bool preservesThreadRootsAndExactChildTargets() {
@@ -194,7 +251,8 @@ int main() {
   using namespace codexui::codex::ui;
   if (!projectsCanonicalTurnStructureAndRoot() ||
       !limitsHistoryButPinsTheOwningPrompt() ||
-      !preservesThreadRootsAndExactChildTargets())
+      !preservesThreadRootsAndExactChildTargets() ||
+      !preservesReadinessActivityAndAuthoritativeBudgetSemantics())
     return EXIT_FAILURE;
   std::cout << "NodeGraph UI adapter tests passed\n";
   return EXIT_SUCCESS;

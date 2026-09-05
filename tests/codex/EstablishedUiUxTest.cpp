@@ -160,8 +160,13 @@ bool conversationOwnershipAndAtomicReconcileContract() {
     }
   bool result = expect(changed && owner && answer && nested,
                        "one reconcile exposes a complete parented turn");
-  result &= expect(!view.reconcile(snapshot),
-                   "repeating identical visible state is a no-op");
+  const qulonglong presentationPasses =
+      view.property("graphRefreshPasses").toULongLong();
+  result &= expect(!view.reconcile(snapshot) &&
+                       view.property("graphRefreshPasses").toULongLong() ==
+                           presentationPasses,
+                   "repeating identical visible state performs no Qt "
+                   "presentation pass");
   return result;
 }
 

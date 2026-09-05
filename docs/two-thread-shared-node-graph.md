@@ -263,21 +263,31 @@ is removed after cutover and is not retained as a fallback.
 
 ## Widget and UX compatibility contract
 
-Existing native widgets and styling remain the renderer. The node's one opaque
-attachment is the association for a materialized widget; there is no permanent
-parallel NodeId-to-widget registry. Conversation cards materialize within a
-one-viewport overscan, remain retained within a two-viewport margin, and render
-current state only while in the viewport or overscan. Farther cards become
-measured placeholders. Thread rows use two rows of overscan. Plan, Agents, and
-Requests materialize at most 48 Inspector rows plus a two-row overscan, with
-fixed-height spacers representing the rest. Entering any window reads and
-renders the latest node revision; nodes beyond the overscan perform no widget
-update. Conversation work is limited to eight card operations and 64 visibility
-checks per event-loop pass, thread graph work to 64 units and 32 row operations,
-and Inspector work to 64 graph reads and 12 widget changes.
-Stable keyed identity, preserved heights, and scroll anchoring keep the main
-loop responsive. Focus, animation, folding, filters, drafts, editor mechanics,
-and scroll-following remain genuinely local QWidget state.
+The complete class, method, DTO, ordering, failure, and thread-affinity
+contract is [`ui-ux-internal-api.md`](ui-ux-internal-api.md). The adapter and
+Shell integration are accepted only when they satisfy that contract as well as
+the visible behavior in `ui-behavior.md`.
+
+The normative internal boundary is `docs/ui-ux-internal-api.md`. In
+particular, a complete DTO is extracted under one short graph read, the guard
+is released, and only then is the established widget API called. The adapter
+owns no projected state. Widget-local focus, scroll, fold, draft, expansion,
+and menu state remain authoritative for UX mechanics.
+
+Existing native widgets and styling remain the renderer. Conversation history
+remains in NodeGraph, while the adapter supplies the established view with one
+bounded 80-activity DTO plus any pinned owning prompts. Selection and Load 80
+materialize the complete supplied window during the old view's shortest
+update-suppressed reconciliation and expose only its final parented layout.
+Cards are retained when scrolling offscreen; scrolling performs no destruction
+or late rematerialization. New selected-thread cards are materialized in the
+same atomic reconciliation even while the user is paused above them. Stable
+keys, retained widget-local state, and anchor restoration preserve scroll and
+horizontal position. Thread rows follow the expanded hierarchy, and Inspector
+constructs rows only for the active tab when its effective snapshot changes.
+There is no permanent parallel NodeId-to-widget registry. Focus, animation,
+folding, filters, drafts, editor mechanics, and scroll-following remain
+genuinely local QWidget state.
 
 The Inspector keeps its useful State view and a bounded chronological Protocol
 view. Protocol diagnostics retain direction, sequence/time, semantic
@@ -342,8 +352,8 @@ UTF-8-aligned 192 KiB newest tail after crossing the 256 KiB threshold and
 carry exact omitted-byte metadata that both rendering and copy disclose.
 Deleted threads and provider resets reparent affected local prompts to explicit
 recovery state; reconnection never resends a non-idempotent operation.
-Conversation widgets are materialized only for the viewport plus bounded
-overscan, and at most eight card operations run per event-loop pass.
+Conversation widgets are materialized for the bounded selected history window
+in one invisible old-view transaction and remain retained while scrolling.
 
 Qualification covers the standalone target/tests, exact source-derived
 inventory, graph atomicity, non-blocking read contention, removal lifetime,
@@ -364,15 +374,14 @@ second wire send.
 Focused performance qualification on the final Debug build measured the
 1,024/2,048-delta long stream at 41.1/82.2 ms, 1,500/3,000-item thread deletion
 at 4.4/8.9 ms, and 3,000/6,000-node graph batch removal at 7.2/8.9 ms. The
-large-render test keeps 5,000 loaded items in graph/compact geometry while live
-QWidgets remain viewport bounded; instrumentation verifies no pass exceeds 64
-structure reads, 32 geometry records, or eight card operations. Continuous
-unrelated graph revisions complete rather than restart State, Protocol, thread,
-and conversation scans, and contention retries use a bounded nonzero delay.
+large-render tests keep full history in NodeGraph while exposing only the
+requested 80-item (or explicitly expanded) conversation window. Continuous
+unrelated graph revisions do not restart selected-pane work, identical DTOs are
+presentation no-ops, and contention retries use a bounded nonzero delay.
 
 The final clean qualification ran the independently configured nodegraph-only
 suite in Debug, AddressSanitizer, and ThreadSanitizer builds (5/5 tests in each,
 with no sanitizer findings and no Qt libraries linked), the integrated native
-suite (14/14), three consecutive passes of the mailbox, graph-concurrency,
+suite (17/17), three consecutive passes of the mailbox, graph-concurrency,
 runtime-dispatch, and shell-integration tests, and the WebUI compatibility suite
 (83/83).

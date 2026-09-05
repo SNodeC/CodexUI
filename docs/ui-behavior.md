@@ -1,5 +1,10 @@
 # CodexUI Interaction and Presentation Decisions
 
+The method-level contract used to supply these behaviors is
+[`ui-ux-internal-api.md`](ui-ux-internal-api.md). That document is the
+canonical logic/UI boundary for the native shared-node-graph integration;
+this file remains the visible-product behavior oracle.
+
 This document defines the current CodexUI interaction contract. AISuite and the
 Codex app-server own protocol and domain semantics; CodexUI owns only local
 presentation, input, selection, and scroll state.
@@ -18,13 +23,16 @@ node storage needed for a render pass; they do not retain another domain or
 view model. Qt keeps only renderer mechanics such as scroll anchors, folding,
 expansion, focus, geometry, and the editable composer form.
 
-Conversation cards are materialized lazily for the viewport and its bounded
-overscan, with measured placeholders preserving height outside that window.
-Thread rows use a two-row overscan. A materialized widget is associated through
-its node's single opaque, non-owning Qt attachment; there is no permanent
-parallel NodeId-to-widget registry. Graph reads, visibility scans, and widget
-changes are sliced across event-loop passes, and every graph read ends before a
-QWidget is called.
+Conversation history is retained canonically in NodeGraph. The established
+view receives only the current 80-activity window (plus pinned owning prompts)
+and materializes that complete window invisibly inside one reconciliation.
+Clicking Load 80 expands the complete retained window in the same way. Cards
+remain materialized when merely scrolled offscreen; scrolling never replaces
+them with placeholders or exposes late construction. Thread rows materialize
+for the currently expanded hierarchy. Inspector row widgets are constructed
+only for the active tab when that tab's effective snapshot changes. Every graph
+read ends before a QWidget is called, and no permanent parallel domain model or
+NodeId-to-widget registry exists.
 
 The conversation has one semantic grouping level: an app-server turn contains
 its items in server order. When a turn has a prompt, its first You card is the

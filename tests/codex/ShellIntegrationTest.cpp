@@ -144,6 +144,17 @@ void makeReady(WorkerLogic &worker) {
                                        "test-controller", 1, "ready"));
 }
 
+void markThreadReady(FrontendSession &session, WorkerLogic &worker,
+                     std::string_view id) {
+  NodeRef thread;
+  {
+    auto read = FrontendSessionTestPeer::graph(session).tryRead();
+    thread = read ? read->find({NodeKind::Thread, std::string(id)}) : NodeRef{};
+  }
+  if (thread)
+    static_cast<void>(worker.threadHydration(thread, "ready"));
+}
+
 QListWidgetItem *threadItem(QListWidget *list, std::string_view id) {
   if (!list)
     return nullptr;
@@ -431,6 +442,7 @@ void selectedRemovalUnbindsBeforeWorkerRetirement(
         {"item", Value(Value::Object{{"id", Value("removed-item")},
                                      {"type", Value("agentMessage")},
                                      {"text", Value("remove this card")}})}}}));
+  markThreadReady(session, worker, "removed-selected");
   auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
   require(
       spinUntil(
@@ -668,6 +680,7 @@ void qtHeartbeatSurvivesLargeInboundTraffic(Configuration &configuration) {
 
   makeReady(worker);
   applyThread(worker, "traffic-thread", "Traffic thread");
+  markThreadReady(session, worker, "traffic-thread");
   auto *threadList =
       shell.findChild<QListWidget *>(QStringLiteral("threadList"));
   require(spinUntil([&] {
@@ -832,6 +845,7 @@ void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
 
   makeReady(worker);
   applyThread(worker, "shell-thread", "Shared graph thread");
+  markThreadReady(session, worker, "shell-thread");
   require(spinUntil([&] {
             auto *list =
                 shell.findChild<QListWidget *>(QStringLiteral("threadList"));
@@ -915,6 +929,160 @@ void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
       editor->toPlainText() == QStringLiteral("unsent editor draft") &&
           localPromptCard(shell, trimmed.toStdString()) == card,
       "unrelated graph updates preserve local editor text and card identity");
+}
+
+void initialHydrationUsesTheEstablishedBoundedWindow(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  makeReady(worker);
+  applyThread(worker, "bounded-history", "Bounded history");
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "turn/started",
+       std::nullopt,
+       {{"threadId", Value("bounded-history")},
+        {"turn", Value(Value::Object{{"id", Value("bounded-turn")},
+                                     {"status", Value("completed")}})}}}));
+  for (std::size_t index = 0; index < 100; ++index) {
+    const std::string id = "bounded-item-" + std::to_string(index);
+    const std::string type = index == 0 ? "userMessage" : "agentMessage";
+    static_cast<void>(worker.apply(
+        {DecodedMessageKind::ServerNotification,
+         "item/started",
+         std::nullopt,
+         {{"threadId", Value("bounded-history")},
+          {"turnId", Value("bounded-turn")},
+          {"item", Value(Value::Object{{"id", Value(id)},
+                                        {"type", Value(type)},
+                                        {"text", Value(id)}})}}}));
+  }
+
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(spinUntil([&] { return threadItem(list, "bounded-history"); }),
+          "bounded history appears in the established thread pane");
+  require(selectThread(list, "bounded-history"),
+          "bounded history can be selected");
+  static_cast<void>(takeQtMessages(channels));
+  require(shell.findChildren<middle::ConversationCard *>().empty(),
+          "partial pre-hydration history creates no conversation QWidget");
+
+  markThreadReady(session, worker, "bounded-history");
+  require(spinUntil(
+              [&] {
+                return shell.findChildren<middle::ConversationCard *>().size() ==
+                       middle::AuthoritativeHistoryPageSize + 1;
+              },
+              2000),
+          "the first atomic frame contains the retained 80 activities and "
+          "their pinned owning prompt");
+
+  QPushButton *loadMore = nullptr;
+  for (QPushButton *button : shell.findChildren<QPushButton *>()) {
+    if (button && button->text().startsWith(QStringLiteral("Load "))) {
+      loadMore = button;
+      break;
+    }
+  }
+  require(loadMore && loadMore->isVisible() &&
+              loadMore->text() == QStringLiteral("Load 19 more activities"),
+          "the old Load More surface reports only unrepresented retained "
+          "activities after pinning the structural root");
+  if (loadMore)
+    loadMore->click();
+  require(spinUntil(
+              [&] {
+                return shell.findChildren<middle::ConversationCard *>().size() ==
+                       100;
+              },
+              2000),
+          "Load More materializes the retained graph page in one old-UI "
+          "reconcile");
+  const std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
+  require(std::ranges::none_of(messages, [](const QtToWorkerMessage &message) {
+            const auto *action = std::get_if<NodeAction>(&message);
+            return action && action->kind == NodeActionKind::LoadHistory;
+          }),
+          "Load More does not request the provider while retained graph "
+          "history remains");
+}
+
+void threadSwitchStagesTheCompleteReplacement(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  makeReady(worker);
+  const auto addConversation = [&worker](std::string threadId,
+                                         std::string title,
+                                         std::string itemId,
+                                         std::string text) {
+    applyThread(worker, threadId, title);
+    static_cast<void>(worker.apply(
+        {DecodedMessageKind::ServerNotification,
+         "turn/started",
+         std::nullopt,
+         {{"threadId", Value(threadId)},
+          {"turn", Value(Value::Object{{"id", Value(threadId + "-turn")},
+                                       {"status", Value("completed")}})}}}));
+    static_cast<void>(worker.apply(
+        {DecodedMessageKind::ServerNotification,
+         "item/started",
+         std::nullopt,
+         {{"threadId", Value(threadId)},
+          {"turnId", Value(threadId + "-turn")},
+          {"item", Value(Value::Object{{"id", Value(std::move(itemId))},
+                                        {"type", Value("agentMessage")},
+                                        {"text", Value(std::move(text))}})}}}));
+  };
+  addConversation("staged-a", "Complete A", "a-item", "complete A card");
+  addConversation("staged-b", "Hydrating B", "b-item", "partial B card");
+  markThreadReady(session, worker, "staged-a");
+
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  auto *heading =
+      shell.findChild<QLabel *>(QStringLiteral("conversationTitle"));
+  require(spinUntil([&] {
+            return threadItem(list, "staged-a") &&
+                   threadItem(list, "staged-b");
+          }),
+          "staged-switch fixture exposes both canonical rows");
+  require(selectThread(list, "staged-a"),
+          "staged-switch fixture selects the complete source");
+  static_cast<void>(takeQtMessages(channels));
+  middle::ConversationCard *source = nullptr;
+  require(spinUntil([&] {
+            source = agentMessageCard(shell, "complete A card");
+            return source && heading && heading->text() == "Complete A";
+          }),
+          "the source conversation is complete before switching");
+
+  require(selectThread(list, "staged-b"),
+          "the hydrating replacement becomes the visible row selection");
+  static_cast<void>(takeQtMessages(channels));
+  spin(80);
+  require(agentMessageCard(shell, "complete A card") == source &&
+              !agentMessageCard(shell, "partial B card") && heading &&
+              heading->text() == "Complete A",
+          "a hydrating replacement leaves the complete outgoing surface "
+          "unchanged and exposes no partial provider cards");
+
+  markThreadReady(session, worker, "staged-b");
+  require(spinUntil([&] {
+            return agentMessageCard(shell, "partial B card") &&
+                   !agentMessageCard(shell, "complete A card") && heading &&
+                   heading->text() == "Hydrating B";
+          }),
+          "readiness replaces the staged surface once with the complete "
+          "incoming conversation and matching heading");
 }
 
 void inactiveThreadNeverReactivatesAStaleTurn(Configuration &configuration) {
@@ -1149,6 +1317,7 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
           {"item", Value(Value::Object{{"id", Value(itemId)},
                                        {"type", Value("agentMessage")},
                                        {"text", Value(message)}})}}}));
+    markThreadReady(session, worker, threadId);
   };
 
   makeReady(worker);
@@ -2498,6 +2667,8 @@ int main(int argc, char **argv) {
   typedActionsAreExactOnceAndBounded(*configuration);
   qtHeartbeatSurvivesLargeInboundTraffic(*configuration);
   graphBackedShellPreservesDraftsAndPrompts(*configuration);
+  initialHydrationUsesTheEstablishedBoundedWindow(*configuration);
+  threadSwitchStagesTheCompleteReplacement(*configuration);
   inactiveThreadNeverReactivatesAStaleTurn(*configuration);
   reloadAndReconnectHydrationStayExplicit(*configuration);
   backgroundGraphChangesDoNotRefreshSelectedConversation(*configuration);

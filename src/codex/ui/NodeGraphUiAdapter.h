@@ -23,11 +23,21 @@ public:
     bool showCodexUpdates = true;
   };
 
+  struct ConversationInfo {
+    std::size_t authoritativeItemCount = 0;
+    bool readyForDisplay = false;
+    bool hydrationFailed = false;
+    bool providerHasMore = false;
+  };
+
   explicit NodeGraphUiAdapter(const nodegraph::NodeGraph &graph) noexcept;
 
   [[nodiscard]] std::optional<middle::ConversationSnapshot>
   conversation(const nodegraph::NodeRef &thread, std::size_t itemLimit,
                ConversationOptions options) const;
+
+  [[nodiscard]] std::optional<ConversationInfo>
+  conversationInfo(const nodegraph::NodeRef &thread) const;
 
   [[nodiscard]] std::optional<middle::VisibleCardData>
   card(const nodegraph::NodeRef &thread, const nodegraph::NodeRef &item,

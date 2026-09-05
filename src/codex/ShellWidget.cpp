@@ -54,6 +54,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 
@@ -712,6 +713,8 @@ struct ShellChromeValues final {
   bool canControl = false;
   bool activeTurn = false;
   bool threadAdmissionReady = true;
+  bool conversationReadyForDisplay = true;
+  bool hydrationFailed = false;
   bool recoveryOnly = false;
   std::string role;
   std::string providerState;
@@ -868,6 +871,12 @@ QFrame *statusDot() {
 } // namespace
 
 struct ShellWidget::Impl final {
+  struct ConversationHistoryWindow {
+    std::size_t requested = middle::AuthoritativeHistoryPageSize;
+    std::size_t effective = middle::AuthoritativeHistoryPageSize;
+    std::size_t lastAuthoritativeCount = 0;
+  };
+
   Impl(ShellWidget *owner, FrontendSession &session)
       : owner(owner), session(session), uiAdapter(session.nodeGraph()),
         alive(std::make_shared<bool>(true)) {
@@ -909,7 +918,8 @@ struct ShellWidget::Impl final {
   void scheduleGraphBinding(bool immediate = true);
   void runGraphBinding();
   void bindGraphPanes(nodegraph::NodeRef selectedThread);
-  void refreshInspector();
+  [[nodiscard]] bool refreshConversation();
+  [[nodiscard]] bool refreshInspector();
   void schedulePaneCommit(bool immediate = false);
   void commitPendingPanes();
   void handleGraphChanged(const nodegraph::GraphChanged &change);
@@ -919,7 +929,8 @@ struct ShellWidget::Impl final {
   void selectGraphThread(nodegraph::NodeRef thread);
   void scheduleDraftSelection(bool replenishRetry = true);
   void render();
-  void renderStatus(const ShellChromeValues &values);
+  void renderStatus(const ShellChromeValues &values,
+                    bool updateWorkspace = true);
   void showNotice(QString message, bool error = true);
   [[nodiscard]] bool sendNodeAction(nodegraph::NodeAction action,
                                     QString rejection);
@@ -954,6 +965,12 @@ struct ShellWidget::Impl final {
   bool creationInFlight = false;
   std::string selectedGraphThreadId;
   nodegraph::NodeRef boundGraphThread;
+  // The established view stages a newly selected hydration behind the last
+  // complete conversation. This is UI coordination state, not another model:
+  // the actual cards and their snapshot remain owned by ConversationView.
+  nodegraph::NodeRef presentedGraphThread;
+  std::unordered_map<std::string, ConversationHistoryWindow>
+      conversationHistory;
   nodegraph::NodeRef attentionInteraction;
   std::map<const nodegraph::Node *, std::pair<nodegraph::NodeRef, QString>>
       retainedRenames;
@@ -962,7 +979,6 @@ struct ShellWidget::Impl final {
   bool renderScheduled = false;
   bool graphPanesBound = false;
   bool graphBindingScheduled = false;
-  bool inspectorRefreshScheduled = false;
   bool paneCommitScheduled = false;
   bool pendingThreadPane = false;
   bool pendingConversation = false;
@@ -1268,6 +1284,22 @@ void ShellWidget::Impl::connectUi() {
   middleRegion->conversation().setLoadMoreAction([this] {
     if (!boundGraphThread)
       return;
+    const auto info = uiAdapter.conversationInfo(boundGraphThread);
+    if (!info) {
+      showNotice(QStringLiteral(
+          "Conversation state is busy; no history request was sent."));
+      return;
+    }
+    ConversationHistoryWindow &history =
+        conversationHistory[boundGraphThread->id().canonical];
+    const bool retainedHistoryAvailable =
+        history.effective < info->authoritativeItemCount;
+    history.requested += middle::AuthoritativeHistoryPageSize;
+    history.effective += middle::AuthoritativeHistoryPageSize;
+    pendingConversation = true;
+    commitPendingPanes();
+    if (retainedHistoryAvailable || !info->providerHasMore)
+      return;
     nodegraph::NodeAction action{boundGraphThread,
                                  nodegraph::NodeActionKind::LoadHistory};
     static_cast<void>(sendNodeAction(
@@ -1391,44 +1423,100 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
     return;
   boundGraphThread = std::move(selectedThread);
   graphPanesBound = true;
-  const nodegraph::NodeGraph &graph = session.nodeGraph();
   if (auto threads = uiAdapter.threads(boundGraphThread))
     middleRegion->threads().refresh(*threads);
-  if (boundGraphThread) {
-    if (auto snapshot = uiAdapter.conversation(
-            boundGraphThread, std::numeric_limits<std::size_t>::max(),
-            {middleRegion->conversation().presentationOptions().showReasoning,
-             middleRegion->conversation()
-                 .presentationOptions()
-                 .showCodexUpdates}))
-      static_cast<void>(middleRegion->conversation().reconcile(*snapshot));
-  } else {
-    static_cast<void>(middleRegion->conversation().reconcile({}));
-  }
-  refreshInspector();
+  const bool conversationReady = refreshConversation();
+  const bool inspectorReady = refreshInspector();
   // The immediate atomic bind already represents the newest graph state.
   // Any frame-coalesced work queued for the previous selection is obsolete.
   pendingThreadPane = false;
-  pendingConversation = false;
-  pendingInspector = false;
+  pendingConversation = !conversationReady;
+  pendingInspector = !inspectorReady;
+  if (pendingConversation || pendingInspector)
+    schedulePaneCommit();
 }
 
-void ShellWidget::Impl::refreshInspector() {
-  if (auto snapshot = uiAdapter.inspector(boundGraphThread)) {
-    inspectorRefreshScheduled = false;
-    middleRegion->inspector().refresh(*snapshot);
-    return;
+bool ShellWidget::Impl::refreshConversation() {
+  if (!boundGraphThread) {
+    static_cast<void>(middleRegion->conversation().reconcile({}));
+    presentedGraphThread.reset();
+    return true;
   }
-  if (inspectorRefreshScheduled)
-    return;
-  inspectorRefreshScheduled = true;
-  const auto token = alive;
-  QTimer::singleShot(GraphRetryDelayMilliseconds, owner, [this, token] {
-    if (!*token)
-      return;
-    inspectorRefreshScheduled = false;
-    refreshInspector();
-  });
+
+  const auto info = uiAdapter.conversationInfo(boundGraphThread);
+  if (!info)
+    return false;
+  const std::string &threadId = boundGraphThread->id().canonical;
+  ConversationHistoryWindow &history = conversationHistory[threadId];
+  const bool following =
+      middleRegion->conversation().modeForThread(threadId) ==
+      middle::ConversationView::Mode::Following;
+  if (!following &&
+      info->authoritativeItemCount > history.lastAuthoritativeCount) {
+    history.effective +=
+        info->authoritativeItemCount - history.lastAuthoritativeCount;
+  } else if (following) {
+    history.effective = history.requested;
+  }
+  history.lastAuthoritativeCount = info->authoritativeItemCount;
+
+  if (!info->readyForDisplay) {
+    middleRegion->conversation().setEmptyMessage(
+        info->hydrationFailed
+            ? QStringLiteral("Thread loading failed. Select Reload to retry.")
+            : QStringLiteral("Loading conversation…"));
+    // A cold selection may show one stable loading surface. When a complete
+    // conversation is already painted, retain it until the replacement is
+    // ready so the user never sees an empty intermediate layout. A terminal
+    // hydration failure is itself the final selected-thread presentation.
+    if (!presentedGraphThread || presentedGraphThread == boundGraphThread ||
+        info->hydrationFailed) {
+      middle::ConversationSnapshot loading;
+      loading.threadId = threadId;
+      static_cast<void>(middleRegion->conversation().reconcile(loading));
+      if (presentedGraphThread != boundGraphThread) {
+        presentedGraphThread = boundGraphThread;
+        renderedChrome.reset();
+      }
+    }
+    return true;
+  }
+
+  auto snapshot = uiAdapter.conversation(
+      boundGraphThread, history.effective,
+      {middleRegion->conversation().presentationOptions().showReasoning,
+       middleRegion->conversation().presentationOptions().showCodexUpdates});
+  if (!snapshot)
+    return false;
+  middleRegion->conversation().setEmptyMessage(
+      QStringLiteral("No materialized activity."));
+  static_cast<void>(middleRegion->conversation().reconcile(*snapshot));
+  if (presentedGraphThread != boundGraphThread) {
+    presentedGraphThread = boundGraphThread;
+    renderedChrome.reset();
+    scheduleRender();
+  }
+  return true;
+}
+
+bool ShellWidget::Impl::refreshInspector() {
+  nodegraph::NodeRef inspectorThread = boundGraphThread;
+  if (inspectorThread) {
+    const auto info = uiAdapter.conversationInfo(inspectorThread);
+    if (!info)
+      return false;
+    if (!info->readyForDisplay && presentedGraphThread &&
+        presentedGraphThread != inspectorThread &&
+        !info->hydrationFailed)
+      return true;
+    if (!info->readyForDisplay)
+      inspectorThread.reset();
+  }
+  if (auto snapshot = uiAdapter.inspector(inspectorThread)) {
+    middleRegion->inspector().refresh(*snapshot);
+    return true;
+  }
+  return false;
 }
 
 void ShellWidget::Impl::schedulePaneCommit(bool immediate) {
@@ -1461,34 +1549,21 @@ void ShellWidget::Impl::commitPendingPanes() {
     }
   }
   if (pendingConversation) {
-    if (!boundGraphThread) {
-      pendingConversation = false;
-      static_cast<void>(middleRegion->conversation().reconcile({}));
-    } else if (auto snapshot = uiAdapter.conversation(
-                   boundGraphThread,
-                   std::numeric_limits<std::size_t>::max(),
-                   {middleRegion->conversation()
-                        .presentationOptions()
-                        .showReasoning,
-                    middleRegion->conversation()
-                        .presentationOptions()
-                        .showCodexUpdates})) {
+    if (refreshConversation()) {
       pendingConversation = false;
       ++conversationRoutes;
       owner->setProperty("conversationRoutes",
                          static_cast<qulonglong>(conversationRoutes));
-      static_cast<void>(middleRegion->conversation().reconcile(*snapshot));
     } else {
       retry = true;
     }
   }
   if (pendingInspector) {
-    if (auto snapshot = uiAdapter.inspector(boundGraphThread)) {
+    if (refreshInspector()) {
       pendingInspector = false;
       ++inspectorRoutes;
       owner->setProperty("inspectorRoutes",
                          static_cast<qulonglong>(inspectorRoutes));
-      middleRegion->inspector().refresh(*snapshot);
     } else {
       retry = true;
     }
@@ -1510,6 +1585,8 @@ void ShellWidget::Impl::handleGraphChanged(
   for (const nodegraph::NodeRef &removed : change.removed) {
     if (!removed)
       continue;
+    if (removed->id().kind == nodegraph::NodeKind::Thread)
+      conversationHistory.erase(removed->id().canonical);
     if (removed->id().kind == nodegraph::NodeKind::Interaction)
       retainedInteractionResponses.erase(removed->id().canonical);
     retainedRenames.erase(removed.get());
@@ -1519,6 +1596,9 @@ void ShellWidget::Impl::handleGraphChanged(
                               change.removed.end()
           ? boundGraphThread
           : nodegraph::NodeRef{};
+  const bool stagedPresentationInvalidated =
+      presentedGraphThread && presentedGraphThread != boundGraphThread &&
+      !change.removed.empty();
   const bool providerReset =
       removedBoundThread &&
       std::ranges::any_of(change.affected, [](const auto &node) {
@@ -1528,10 +1608,12 @@ void ShellWidget::Impl::handleGraphChanged(
   pendingThreadPane = pendingThreadPane || updateThreads;
   pendingConversation =
       pendingConversation ||
-      conversationAffected(change, session.nodeGraph(), boundGraphThread);
+      conversationAffected(change, session.nodeGraph(), boundGraphThread) ||
+      stagedPresentationInvalidated;
   pendingInspector =
       pendingInspector ||
-      inspectorAffected(change, session.nodeGraph(), boundGraphThread);
+      inspectorAffected(change, session.nodeGraph(), boundGraphThread) ||
+      stagedPresentationInvalidated;
   pendingChrome = pendingChrome || updateChrome;
   if (change.rescanRequired ||
       containsKind(change, {nodegraph::NodeKind::Thread}))
@@ -1547,6 +1629,13 @@ void ShellWidget::Impl::handleGraphChanged(
     if (!providerReset)
       selectedGraphThreadId.clear();
     bindGraphPanes({});
+  } else if (stagedPresentationInvalidated) {
+    // Removal notifications must release every card-held NodeRef before the
+    // worker retirement acknowledgement. Fall back to the selected thread's
+    // stable loading surface rather than retaining the outgoing snapshot.
+    presentedGraphThread.reset();
+    renderedChrome.reset();
+    pendingChrome = true;
   }
 
   // Retirement must not outlive presentation references. Ordinary state
@@ -2055,6 +2144,10 @@ void ShellWidget::Impl::render() {
       values.recoveryOnly = graphBool(graphField(*state, "recoveryOnly"));
       const std::string hydrationState =
           graphString(graphField(*state, "hydrationState"));
+      const bool local = graphBool(graphField(*state, "local"));
+      values.conversationReadyForDisplay =
+          hydrationState == "ready" || local || values.recoveryOnly;
+      values.hydrationFailed = hydrationState == "failed";
       values.threadAdmissionReady =
           !values.recoveryOnly && hydrationState != "loading" &&
           hydrationState != "failed" &&
@@ -2169,35 +2262,50 @@ void ShellWidget::Impl::render() {
   if (!chromeChanged)
     return;
 
+  const bool replacementHydrating =
+      boundGraphThread && presentedGraphThread &&
+      boundGraphThread != presentedGraphThread &&
+      !values.conversationReadyForDisplay && !values.hydrationFailed;
+
   attentionInteraction =
       values.attention ? values.attention->node : nodegraph::NodeRef{};
-  middleRegion->conversation().setEmptyMessage(
-      values.recoveryOnly
-          ? QStringLiteral(
-                "This thread preserves an unsent prompt. Restore it from the "
-                "failed prompt card before continuing.")
-          : boundGraphThread
-          ? QStringLiteral("Conversation activity appears here.")
-          : (newThreadDraft
-                 ? QStringLiteral("Send a message to create this thread.")
-                 : QStringLiteral("Conversation activity appears here.")));
-  if (boundGraphThread) {
-    const QString activity = values.lastActivityAt
-                                 ? lastActivityText(*values.lastActivityAt)
-                                 : QString{};
-    const QString status = text(values.status);
-    const QString tone = values.activeTurn ? QStringLiteral("active")
-                                           : QStringLiteral("neutral");
-    middleRegion->setThreadHeading(text(values.title), text(values.workspace),
-                                   activity, status, tone);
-  } else {
-    middleRegion->setThreadHeading(text(values.title), text(values.workspace));
+  if (!replacementHydrating) {
+    middleRegion->conversation().setEmptyMessage(
+        values.recoveryOnly
+            ? QStringLiteral(
+                  "This thread preserves an unsent prompt. Restore it from "
+                  "the failed prompt card before continuing.")
+            : boundGraphThread && values.hydrationFailed
+                ? QStringLiteral(
+                      "Thread loading failed. Select Reload to retry.")
+            : boundGraphThread && !values.conversationReadyForDisplay
+                ? QStringLiteral("Loading conversation…")
+            : boundGraphThread
+            ? QStringLiteral("Conversation activity appears here.")
+            : (newThreadDraft
+                   ? QStringLiteral("Send a message to create this thread.")
+                   : QStringLiteral("Conversation activity appears here.")));
+    if (boundGraphThread) {
+      const QString activity = values.lastActivityAt
+                                   ? lastActivityText(*values.lastActivityAt)
+                                   : QString{};
+      const QString status = text(values.status);
+      const QString tone = values.activeTurn ? QStringLiteral("active")
+                                             : QStringLiteral("neutral");
+      middleRegion->setThreadHeading(text(values.title),
+                                     text(values.workspace), activity, status,
+                                     tone);
+    } else {
+      middleRegion->setThreadHeading(text(values.title),
+                                     text(values.workspace));
+    }
+    turnSettings->setCanonicalContext(
+        boundGraphThread ? boundGraphThread->id().canonical
+                         : std::string(DraftThreadId),
+        values.canonicalSettings, values.settingsRevision,
+        values.settingsUpdate);
   }
-  turnSettings->setCanonicalContext(
-      boundGraphThread ? boundGraphThread->id().canonical
-                       : std::string(DraftThreadId),
-      values.canonicalSettings, values.settingsRevision, values.settingsUpdate);
-  renderStatus(values);
+  renderStatus(values, !replacementHydrating);
   renderedChrome = values;
   ++shellRenderCommits;
   owner->setProperty("shellRenderCommits",
@@ -2206,7 +2314,8 @@ void ShellWidget::Impl::render() {
     scheduleDraftSelection();
 }
 
-void ShellWidget::Impl::renderStatus(const ShellChromeValues &status) {
+void ShellWidget::Impl::renderStatus(const ShellChromeValues &status,
+                                     bool updateWorkspace) {
   QString dotStyle;
   QString dotTip;
   if (status.connected) {
@@ -2260,7 +2369,7 @@ void ShellWidget::Impl::renderStatus(const ShellChromeValues &status) {
         text(PendingRequestPolicy::directAcceptLabel(request.kind)));
   }
   middleRegion->composer().setAttentionVisible(status.attention.has_value());
-  middleRegion->composer().setAttentionEnabled(
+  middleRegion->composer().setAttentionActionEnabled(
       status.attention && status.attention->actionable,
       status.attention && status.attention->recoverable);
 
@@ -2285,14 +2394,16 @@ void ShellWidget::Impl::renderStatus(const ShellChromeValues &status) {
   setStatusTone(globalStatusDot, globalStatusLabel, globalTone);
   setStatusLabelText(globalStatusLabel, globalStatus);
 
-  const QString workspace = text(status.workspace);
-  if (workspaceBreadcrumb->toolTip() != workspace)
-    workspaceBreadcrumb->setToolTip(workspace);
-  const QString displayedWorkspace =
-      workspaceBreadcrumb->fontMetrics().elidedText(
-          workspace, Qt::ElideMiddle, workspaceBreadcrumb->maximumWidth());
-  if (workspaceBreadcrumb->text() != displayedWorkspace)
-    workspaceBreadcrumb->setText(displayedWorkspace);
+  if (updateWorkspace) {
+    const QString workspace = text(status.workspace);
+    if (workspaceBreadcrumb->toolTip() != workspace)
+      workspaceBreadcrumb->setToolTip(workspace);
+    const QString displayedWorkspace =
+        workspaceBreadcrumb->fontMetrics().elidedText(
+            workspace, Qt::ElideMiddle, workspaceBreadcrumb->maximumWidth());
+    if (workspaceBreadcrumb->text() != displayedWorkspace)
+      workspaceBreadcrumb->setText(displayedWorkspace);
+  }
 
   middleRegion->composer().setActiveTurn(status.activeTurn);
   middleRegion->composer().setCanSubmit(
