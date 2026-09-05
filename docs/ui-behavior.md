@@ -327,7 +327,7 @@ independently reviewable change.
    CodexUI does not create or retain a separate image-viewer window.
 5. **Complete:** inventory card kinds suitable for an initial
    expanded/collapsed control.
-6. **Pending:** inventory card kinds suitable for a show/hide control.
+6. **Complete:** inventory card kinds suitable for a show/hide control.
 7. **Pending:** update focused regression coverage and the internal UI API
    contract for the completed card-polish behavior. Final integration
    qualification is performed separately by the user.
@@ -353,6 +353,32 @@ for each newly arriving card. It never retroactively refolds an existing card.
 | Plan | Collapsed | Candidate, not added | Plans are often useful expanded, but the Inspector already provides the persistent plan surface. |
 | Generic/unknown activity | Collapsed | Do not add | Diagnostic fallback content should be available without dominating the primary conversation. |
 | Outer turn/You section | Expanded | Do not add | Its disclosure is local navigation state governing the complete turn, not a repeated content-type default. |
+
+#### Show/hide control inventory
+
+Visibility preferences filter only the Qt presentation. Canonical items remain
+in NodeGraph, continue receiving updates, and return with their latest content
+and retained local fold state. Primary authorship, results, actionable pending
+state, and side-effect records are never eligible to disappear by default.
+
+| Card kind | Could be filtered? | Header-control decision | UX rationale |
+|---|---|---|---|
+| User message | No | Never add | Removing the prompt destroys the readable turn structure. |
+| Pending local prompt / steering | No | Never add | Users must see admission, progress, failure, and recovery state. |
+| Final Codex answer | No | Never add | The requested result is primary conversation content. |
+| Interim Codex update | Yes | Existing control | Updates are useful live context but optional during review. |
+| Reasoning | Yes | Existing control | Reasoning can be verbose and is explicitly optional presentation. |
+| Agent activity | Yes | Strong future candidate | Multi-agent traces can dominate long threads; filtering is safe while the canonical child and Inspector Agent state remain available. |
+| Plan | Yes | Future candidate | The Inspector retains the current plan, so duplicate conversation plan cards may be optional. |
+| Generic/unknown activity | Yes, cautiously | Future candidate | Low-level diagnostics may be hidden, but the default must remain visible so unknown protocol content is not silently concealed. |
+| Command execution | Technically yes | Do not add now | Commands document concrete side effects; folding controls bulk without erasing the audit trail. |
+| File changes | Technically yes | Do not add now | Changed paths are important side-effect evidence; the new initial-fold preference handles density. |
+| Image generation | Technically yes | Do not add now | Generated images are requested results; initial folding already controls vertical cost. |
+| Outer turn/You section | No | Never add | It is the structural and scrolling anchor for all cards in the turn. |
+
+If another visibility control is requested, Agent activity is the first
+recommended addition. It should reuse the existing local presentation-options
+path; it must not introduce a graph-side filter or another retained model.
 
 Browser persistence is an optional convenience: unavailable or denied local
 storage falls back to canonical defaults and never prevents the UI from
