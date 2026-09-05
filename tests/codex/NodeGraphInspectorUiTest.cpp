@@ -6,12 +6,20 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
 #include <QFrame>
 #include <QLabel>
+#include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QTabWidget>
+#include <QTemporaryDir>
+#include <QThread>
 #include <QToolButton>
+
+#include <git2.h>
 
 #include <iostream>
 #include <string>
@@ -24,6 +32,17 @@ bool expect(bool condition, const char *message) {
     return true;
   std::cerr << "FAILED: " << message << '\n';
   return false;
+}
+
+template <typename Predicate>
+bool waitFor(Predicate &&predicate, int timeoutMilliseconds = 3000) {
+  QElapsedTimer elapsed;
+  elapsed.start();
+  while (!predicate() && elapsed.elapsed() < timeoutMilliseconds) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    QThread::msleep(2);
+  }
+  return predicate();
 }
 
 nodegraph::NodeRef addActivity(nodegraph::NodeGraph::WriteAccess &write,
@@ -322,6 +341,92 @@ bool planAndRequestUpdatesRetainUnaffectedRows() {
   return result;
 }
 
+bool changesTabShowsCanonicalThreadRepositoryChanges() {
+  QTemporaryDir repositoryDirectory;
+  if (!expect(repositoryDirectory.isValid(),
+              "creates a repository for the Inspector Changes proof"))
+    return false;
+
+  git_repository *repository = nullptr;
+  if (!expect(git_repository_init(
+                  &repository,
+                  repositoryDirectory.path().toUtf8().constData(), 0) == 0,
+              "initializes the Inspector Changes proof repository"))
+    return false;
+
+  const QString changedPath =
+      repositoryDirectory.filePath(QStringLiteral("changed.txt"));
+  QFile changedFile(changedPath);
+  const QByteArray contents("visible Inspector change\n");
+  const bool wrote = changedFile.open(QIODevice::WriteOnly) &&
+                     changedFile.write(contents) == contents.size();
+  changedFile.close();
+  if (!expect(wrote, "creates the real untracked Inspector change")) {
+    git_repository_free(repository);
+    return false;
+  }
+
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef thread;
+  const QString parentWorkspace =
+      QFileInfo(repositoryDirectory.path()).absolutePath();
+  {
+    auto write = graph.write();
+    nodegraph::NodeState threadState;
+    threadState.fields = {
+        {"id", nodegraph::Value("changes-thread")},
+        {"cwd", nodegraph::Value(parentWorkspace.toStdString())}};
+    thread = write.upsert({nodegraph::NodeKind::Thread, "changes-thread"},
+                          std::move(threadState));
+    const nodegraph::NodeRef turn =
+        write.upsert({nodegraph::NodeKind::Turn, "changes-turn"});
+    nodegraph::NodeState fileChanges;
+    fileChanges.fields = {
+        {"type", nodegraph::Value("fileChange")},
+        {"cwd", nodegraph::Value(repositoryDirectory.path().toStdString())},
+        {"changes",
+         nodegraph::Value(nodegraph::Value::Array{
+             nodegraph::Value(nodegraph::Value::Object{
+                 {"path", nodegraph::Value("changed.txt")},
+                 {"kind", nodegraph::Value("add")}})})}};
+    const nodegraph::NodeRef item = write.upsert(
+        {nodegraph::NodeKind::Item, "changes-item"}, std::move(fileChanges));
+    write.setParent(thread, turn);
+    write.setParent(turn, item);
+    static_cast<void>(write.finish());
+  }
+
+  ui::NodeGraphUiAdapter adapter(graph);
+  const auto snapshot =
+      adapter.inspector(thread, ui::InspectorProjection::Changes);
+  bool result = expect(
+      snapshot && snapshot->changes.cwd == parentWorkspace.toStdString() &&
+          snapshot->changes.commandCwds ==
+              std::vector<std::string>{repositoryDirectory.path().toStdString()} &&
+          snapshot->changes.changedPaths ==
+              std::vector<std::string>{"changed.txt"},
+      "Changes projection retains the parent workspace, item repository, and "
+      "changed path");
+
+  middle::InspectorPane pane;
+  pane.resize(520, 720);
+  pane.show();
+  pane.tabs()->setCurrentIndex(2);
+  if (snapshot)
+    pane.refresh(*snapshot, ui::InspectorProjection::Changes);
+  auto *files =
+      pane.findChild<QListWidget *>(QStringLiteral("codexDiffFiles"));
+  const bool visible = waitFor([&] {
+    return files && files->count() == 1 &&
+           files->item(0)->text().contains(QStringLiteral("changed.txt"));
+  });
+  result &= expect(
+      visible,
+      "the visible Inspector Changes tab renders the real changed file");
+  git_repository_free(repository);
+  return result;
+}
+
 bool stateAndProtocolRemainUsefulBoundedAndRedacted() {
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef thread;
@@ -415,6 +520,7 @@ int main(int argc, char **argv) {
       codexui::codex::logicalAgentsRemainDeduplicated() &&
       codexui::codex::establishedAgentsWidgetContractIsRetained() &&
       codexui::codex::planAndRequestUpdatesRetainUnaffectedRows() &&
+      codexui::codex::changesTabShowsCanonicalThreadRepositoryChanges() &&
       codexui::codex::stateAndProtocolRemainUsefulBoundedAndRedacted();
   if (passed)
     std::cout << "NodeGraph Inspector UI adapter tests passed\n";

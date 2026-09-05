@@ -582,6 +582,13 @@ Requests, and State. It is not another model: the adapter constructs it from a
 short current graph read and the pane retains only render-comparison values
 and local expansion/scroll state.
 
+The Changes projection carries the selected thread workspace, bounded unique
+working directories from both command and file-change items, and bounded
+changed-path hints. File-change working directories are required when the
+thread workspace is a parent of the actual repository; dropping them makes the
+existing asynchronous Git viewer incorrectly report no repository or no
+changes.
+
 Request rows carry the exact canonical interaction ID, kind, safe display
 facts, provider generation, and actionability. Review/Accept/Reject resolve
 that exact live interaction. Agents are a UI-only grouping of canonical

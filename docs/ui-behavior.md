@@ -549,9 +549,11 @@ fixed-height leading/trailing spacers; moving its viewport schedules a fresh
 non-blocking graph scan for the newly visible window. Agent cards start
 collapsed and expose status, copy, and fold actions in that order; folding
 changes presentation only and never discards agent content. Changes instead
-resolves local Git repositories upward
-from the selected thread's retained command working directories and refreshes
-them asynchronously through libgit2. When several repositories match, All
+resolves local Git repositories upward from the selected thread workspace and
+the retained working directories of both command and file-change items, then
+refreshes them asynchronously through libgit2. This preserves a nested
+repository when the thread workspace is only its parent directory. When
+several repositories match, All
 repositories is the default and a selector can narrow the view. Resolution
 considers only repositories reached through visible directory paths by
 default. The persistent Hidden option also includes paths containing

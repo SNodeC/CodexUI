@@ -1263,6 +1263,8 @@ NodeGraphUiAdapter::inspector(
           appendUniqueBounded(result.changes.commandCwds,
                               graphString(graphField(*state, "cwd")), 64);
         } else if (wantChanges && type == "fileChange") {
+          appendUniqueBounded(result.changes.commandCwds,
+                              graphString(graphField(*state, "cwd")), 64);
           const nodegraph::Value *changes = graphField(*state, "changes");
           if (const auto *array = changes ? changes->asArray() : nullptr)
             for (const nodegraph::Value &change : *array)
