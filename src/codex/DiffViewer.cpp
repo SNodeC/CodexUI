@@ -109,17 +109,17 @@ protected:
   void highlightBlock(const QString &text) override {
     QTextCharFormat format;
     if (text.startsWith(QStringLiteral("@@"))) {
-      format.setForeground(QColor(QStringLiteral("#2f6feb")));
+      format.setForeground(QColor(QString::fromLatin1(UiStyle::blue)));
       format.setBackground(QColor(QStringLiteral("#edf3ff")));
       format.setFontWeight(QFont::DemiBold);
     } else if (text.startsWith(QLatin1Char('+')) &&
                !text.startsWith(QStringLiteral("+++"))) {
-      format.setForeground(QColor(QStringLiteral("#176b45")));
-      format.setBackground(QColor(QStringLiteral("#e9f7f0")));
+      format.setForeground(QColor(QString::fromLatin1(UiStyle::greenText)));
+      format.setBackground(QColor(QString::fromLatin1(UiStyle::greenSurface)));
     } else if (text.startsWith(QLatin1Char('-')) &&
                !text.startsWith(QStringLiteral("---"))) {
-      format.setForeground(QColor(QStringLiteral("#982f3d")));
-      format.setBackground(QColor(QStringLiteral("#fff0f2")));
+      format.setForeground(QColor(QString::fromLatin1(UiStyle::redText)));
+      format.setBackground(QColor(QString::fromLatin1(UiStyle::redSurface)));
     } else if (text.startsWith(QStringLiteral("diff --git")) ||
                text.startsWith(QStringLiteral("---")) ||
                text.startsWith(QStringLiteral("+++")) ||
@@ -161,13 +161,13 @@ QPlainTextEdit *diffView(const QString &objectName) {
                        const QString text = block.text();
                        QColor color;
                        if (text.startsWith(QStringLiteral("@@")))
-                         color = QColor(QStringLiteral("#2f6feb"));
+                         color = QColor(QString::fromLatin1(UiStyle::blue));
                        else if (text.startsWith(QLatin1Char('+')) &&
                                 !text.startsWith(QStringLiteral("+++")))
-                         color = QColor(QStringLiteral("#18865e"));
+                         color = QColor(QString::fromLatin1(UiStyle::green));
                        else if (text.startsWith(QLatin1Char('-')) &&
                                 !text.startsWith(QStringLiteral("---")))
-                         color = QColor(QStringLiteral("#c43d4d"));
+                         color = QColor(QString::fromLatin1(UiStyle::red));
                        if (!color.isValid())
                          continue;
                        const qreal position =

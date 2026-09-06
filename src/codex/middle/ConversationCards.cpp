@@ -208,7 +208,7 @@ protected:
     else if (underMouse() || hasFocus())
       color = QColor(QStringLiteral("#1d2633"));
     if (property("copyFeedbackActive").toBool())
-      color = QColor(QStringLiteral("#176b45"));
+      color = QColor(QString::fromLatin1(UiStyle::greenText));
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
@@ -1648,9 +1648,9 @@ public:
                          prompt->state == PromptState::InFlight;
     const bool failed = prompt->state == PromptState::Failed;
     const bool steering = owner->property("nestedConversationCard").toBool();
-    const QString foreground = waiting  ? steering ? QStringLiteral("#146f73")
-                                                   : QStringLiteral("#536b8f")
-                                : failed ? QStringLiteral("#982f3d")
+    const QString foreground = waiting  ? steering ? QString::fromLatin1(UiStyle::tealText)
+                                                   : QString::fromLatin1(UiStyle::blueText)
+                                : failed ? QString::fromLatin1(UiStyle::redText)
                                         : QStringLiteral("#1d2633");
     const QString style =
         QStringLiteral("background:transparent;color:%1;").arg(foreground);
@@ -1874,16 +1874,16 @@ void ConversationCard::paintEvent(QPaintEvent *event) {
   const bool failed = prompt->state == PromptState::Failed;
   const bool steering = property("nestedConversationCard").toBool();
   const bool animated = waiting && property("pendingFeedbackVisible").toBool();
-  const QColor background = failed
-                                ? QColor(QStringLiteral("#fff0f2"))
-                                : QColor(steering ? QStringLiteral("#eefafa")
-                                                  : QStringLiteral("#eaf2ff"));
-  const QColor border = failed ? QColor(QStringLiteral("#efb8c0"))
+  const QColor background =
+      failed ? QColor(QString::fromLatin1(UiStyle::redSurface))
+             : QColor(steering ? QString::fromLatin1(UiStyle::tealSurface)
+                               : QString::fromLatin1(UiStyle::blueSurface));
+  const QColor border = failed ? QColor(QString::fromLatin1(UiStyle::redBorder))
                         : waiting
-                            ? QColor(steering ? QStringLiteral("#5caeb1")
-                                              : QStringLiteral("#79a0d7"))
-                            : QColor(steering ? QStringLiteral("#9fd7d8")
-                                              : QStringLiteral("#bfd3f9"));
+                            ? QColor(steering ? QString::fromLatin1(UiStyle::tealBorderStrong)
+                                              : QString::fromLatin1(UiStyle::blueBorderStrong))
+                            : QColor(steering ? QString::fromLatin1(UiStyle::tealBorder)
+                                              : QString::fromLatin1(UiStyle::blueBorder));
   painter.setBrush(background);
   painter.setPen(QPen(border, waiting ? 1.5 : 1.0));
   painter.drawRoundedRect(bounds, 8.0, 8.0);

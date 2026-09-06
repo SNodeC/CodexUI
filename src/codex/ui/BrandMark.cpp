@@ -2,6 +2,8 @@
 
 #include "codex/ui/BrandMark.h"
 
+#include "codex/ui/UiStyle.h"
+
 #include <QEvent>
 #include <QFontMetrics>
 #include <QLabel>
@@ -27,7 +29,7 @@ void paintMark(QPainter &painter, const QRectF &bounds) {
 
   const QRectF surface(1.0, 1.0, 34.0, 34.0);
   painter.setPen(Qt::NoPen);
-  painter.setBrush(QColor(QStringLiteral("#2f6feb")));
+  painter.setBrush(QColor(QString::fromLatin1(UiStyle::blue)));
   painter.drawRoundedRect(surface, 9.0, 9.0);
 
   painter.setPen(QPen(QColor(QStringLiteral("#ffffff")), 2.7, Qt::SolidLine,

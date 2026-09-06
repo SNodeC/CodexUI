@@ -365,11 +365,11 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
   QApplication::processEvents();
   QTimer *animation = stable->findChild<QTimer *>(
       QStringLiteral("pendingAnimationTimer"));
-  if (!require(animation && animation->isActive() &&
+  if (!require(animation && !animation->isActive() &&
                    stable->data().kind == middle::CardKind::LocalPrompt &&
                    acknowledgements == 0,
-               "accepted steering stopped while awaiting its authoritative "
-               "user item"))
+               "successful steering acknowledgement immediately stopped "
+               "pending animation without retiring its stable card"))
     return false;
 
   NodeRef authoritative;

@@ -113,10 +113,11 @@ public:
     const bool failed = index.data(OptimisticFailedRole).toBool();
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
-    painter->setBrush(failed ? QColor(QStringLiteral("#fff0f2"))
-                             : QColor(QStringLiteral("#fff7e8")));
-    painter->setPen(QPen(failed ? QColor(QStringLiteral("#efb8c0"))
-                                : QColor(QStringLiteral("#dca45a")),
+    painter->setBrush(
+        failed ? QColor(QString::fromLatin1(UiStyle::redSurface))
+               : QColor(QString::fromLatin1(UiStyle::orangeSurface)));
+    painter->setPen(QPen(failed ? QColor(QString::fromLatin1(UiStyle::redBorder))
+                                : QColor(QString::fromLatin1(UiStyle::orangeBorderStrong)),
                          1.0));
     painter->drawRoundedRect(bounds, 8.0, 8.0);
     if (!failed) {
@@ -228,8 +229,8 @@ void updateRow(QWidget *row, const std::string &threadId,
   const UiStatus classified = classifyStatus(threadStatus);
   QString color = QString::fromLatin1(UiStyle::threadInactive);
   if (optimistic)
-    color = optimisticFailed ? QStringLiteral("#c43d4d")
-                             : QStringLiteral("#d17b16");
+    color = optimisticFailed ? QString::fromLatin1(UiStyle::red)
+                             : QString::fromLatin1(UiStyle::orange);
   else if (requestCount != 0)
     color = QString::fromLatin1(UiStyle::orange);
   else if (classified.kind == StatusKind::Active)
@@ -371,11 +372,14 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   create->setObjectName(QStringLiteral("threadNewButton"));
   create->setFixedHeight(36);
   create->setStyleSheet(QStringLiteral(
-      "QPushButton{background:#ffffff;color:#2f6feb;border:1px solid #bfd3f9;"
+      "QPushButton{background:#ffffff;color:%1;border:1px solid %2;"
       "border-radius:8px;text-align:left;padding-left:14px;font-weight:600;}"
-      "QPushButton:hover{background:#e5eeff;border-color:#2f6feb;}"
+      "QPushButton:hover{background:%3;border-color:%1;}"
       "QPushButton:disabled{background:#f6f8fb;color:#98a2b3;"
-      "border-color:#d7dee8;}"));
+      "border-color:#d7dee8;}")
+                            .arg(QString::fromLatin1(UiStyle::blue),
+                                 QString::fromLatin1(UiStyle::blueBorder),
+                                 QString::fromLatin1(UiStyle::blueSelected)));
   connect(create, &QPushButton::clicked, this, [this] {
     if (actions.newThread)
       actions.newThread();
@@ -453,8 +457,10 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
       "padding:2px 8px;color:#344054;}"
       "QListWidget#threadList::item:hover{background:#f1f5fb;"
       "border-color:#b9c4d2;}"
-      "QListWidget#threadList::item:selected{background:#e5eeff;"
-      "border-color:#bfd3f9;color:#1d2633;font-weight:600;}"));
+      "QListWidget#threadList::item:selected{background:%1;"
+      "border-color:%2;color:#1d2633;font-weight:600;}")
+                          .arg(QString::fromLatin1(UiStyle::blueSelected),
+                               QString::fromLatin1(UiStyle::blueBorder)));
   connect(list, &QListWidget::itemSelectionChanged, this, [this] {
     if (actions.select) {
       const std::string id = visiblySelectedThreadId();

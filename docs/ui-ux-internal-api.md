@@ -556,6 +556,11 @@ must never read the graph through it. `activeWork` is a canonical presentation
 fact for delayed-result cards; it drives the established emphasized border
 without making the card infer lifecycle from display strings.
 
+`UiStyle` is the canonical semantic palette boundary. Equivalent family roles
+share the documented OKLCH lightness and chroma targets and vary only by the
+existing family hue. Code that paints semantic state or card identity consumes
+the centralized fixed-hex tokens rather than introducing local RGB variants.
+
 ### Composer and settings
 
 The composer owns draft text, attachment presentation, focus, keyboard rules,
@@ -644,9 +649,10 @@ derived from current graph state; they never become application authority.
 5. Unrelated items may arrive without changing that ownership or anchor.
 6. When the authoritative user item arrives, keep the visual key/widget and
    send one prompt-materialized acknowledgement for the exact prompt node.
-7. Stop pending feedback on authoritative item materialization or definitive
-   failure; request acceptance alone preserves the original local deadline.
-   Never dual-send or infer acknowledgement from matching text.
+7. Stop pending feedback on the correlated successful request acknowledgement
+   or definitive failure. Keep the settled optimistic card until authoritative
+   item materialization; never dual-send or infer acknowledgement from matching
+   text.
 
 ## Compatibility evidence
 

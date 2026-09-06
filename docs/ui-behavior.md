@@ -152,10 +152,12 @@ encoded as path content rather than being misread as a fragment or query.
 
 Each pending prompt has a process-wide client-local submission ID and remains
 associated with its destination thread. It therefore remains visible when the
-user switches threads and returns. Authoritative item materialization or
-definitive failure stops delayed feedback immediately; request acceptance alone
-does not. The retained widget's fixed one-second admission deadline is the sole
-animation trigger, so worker updates cannot start, stop, or restart the sweep.
+user switches threads and returns. Successful correlated request
+acknowledgement or definitive failure stops delayed feedback immediately. The
+retained widget's fixed one-second admission deadline is the sole animation
+start trigger; the correlated `turn/start` or `turn/steer` result is the
+successful stop trigger. Unrelated worker updates cannot start, stop, or restart
+the sweep.
 The timer controls only whether pending feedback is visible; it never
 acknowledges or promotes the prompt. If the authoritative app-server item
 arrives before or after the result, it inherits the pending card's stable visual
@@ -252,7 +254,8 @@ links in Conversation and Inspector content are reachable by keyboard.
 
 User messages use the canonical soft-blue identity surface. Final Codex
 messages use the canonical soft-violet identity surface, while interim Codex
-updates remain neutral and identify their phase in the header. Process cards
+updates use the canonical soft-yellow identity surface and identify their
+phase in the header. Process cards
 also remain neutral so they support rather than dominate the primary exchange.
 Their lifecycle status is a normal-weight lowercase value at the right of the
 header, immediately before Copy, and uses canonical semantic state colors.
@@ -324,6 +327,13 @@ answers are never filtered. Visibility is a presentation choice only: filtered
 cards remain as retained graph nodes, continue accepting updates, and reappear
 with their latest content and user-owned folding state. Changing the Command
 preference never refolds an existing card.
+
+Semantic color families preserve their established hues but derive equivalent
+roles from shared OKLCH lightness and chroma targets. Surfaces, hover surfaces,
+borders, strong borders, text, and interactive base/hover/pressed colors are
+therefore perceptually balanced across blue, green, yellow, orange, red,
+violet, and teal. The fixed hexadecimal Qt tokens are precomputed from those
+targets; runtime color conversion is not part of painting.
 
 ### Native conversation-card polish register
 

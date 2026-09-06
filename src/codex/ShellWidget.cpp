@@ -920,13 +920,13 @@ void setStatusLabelText(QLabel *label, QString value) {
 
 QString statusToneColor(QStringView tone) {
   if (tone == QStringLiteral("active"))
-    return QStringLiteral("#2f6feb");
+    return QString::fromLatin1(UiStyle::blue);
   if (tone == QStringLiteral("success"))
-    return QStringLiteral("#18865e");
+    return QString::fromLatin1(UiStyle::green);
   if (tone == QStringLiteral("warning"))
-    return QStringLiteral("#a85d0c");
+    return QString::fromLatin1(UiStyle::orange);
   if (tone == QStringLiteral("danger"))
-    return QStringLiteral("#c43d4d");
+    return QString::fromLatin1(UiStyle::red);
   return QStringLiteral("#98a2b3");
 }
 
@@ -2543,13 +2543,16 @@ void ShellWidget::Impl::renderStatus(const ShellChromeValues &status,
   QString dotStyle;
   QString dotTip;
   if (status.connected) {
-    dotStyle = QStringLiteral("background:#18865e;border-radius:5px;");
+    dotStyle = QStringLiteral("background:%1;border-radius:5px;")
+                   .arg(QString::fromLatin1(UiStyle::green));
     dotTip = QStringLiteral("Connected");
   } else if (status.retrying) {
-    dotStyle = QStringLiteral("background:#a85d0c;border-radius:5px;");
+    dotStyle = QStringLiteral("background:%1;border-radius:5px;")
+                   .arg(QString::fromLatin1(UiStyle::orange));
     dotTip = QStringLiteral("Disconnected, retrying");
   } else {
-    dotStyle = QStringLiteral("background:#c43d4d;border-radius:5px;");
+    dotStyle = QStringLiteral("background:%1;border-radius:5px;")
+                   .arg(QString::fromLatin1(UiStyle::red));
     dotTip = QStringLiteral("Disconnected");
   }
   if (connectionStatusDot->styleSheet() != dotStyle)

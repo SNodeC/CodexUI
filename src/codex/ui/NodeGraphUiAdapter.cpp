@@ -600,7 +600,7 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
     if (dispatch == "dispatching" || dispatch == "inFlight")
       promptState = PromptState::InFlight;
     else if (dispatch == "awaitingMaterialization")
-      promptState = PromptState::InFlight;
+      promptState = PromptState::Accepted;
     else if (dispatch == "failed" || dispatch == "uncertain")
       promptState = PromptState::Failed;
     const std::int64_t rawId =

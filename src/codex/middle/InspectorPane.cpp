@@ -232,7 +232,7 @@ public:
 protected:
   void paintEvent(QPaintEvent *event) override {
     static_cast<void>(event);
-    QColor color(copied_ ? QStringLiteral("#176b45")
+    QColor color(copied_ ? QString::fromLatin1(UiStyle::greenText)
                          : QStringLiteral("#667085"));
     if (!copied_ && (underMouse() || hasFocus()))
       color = QColor(QStringLiteral("#1d2633"));

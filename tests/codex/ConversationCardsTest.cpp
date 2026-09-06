@@ -38,7 +38,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -54,6 +56,88 @@ bool expect(bool condition, const char *message) {
     return true;
   std::cerr << "FAILED: " << message << '\n';
   return false;
+}
+
+struct PerceptualColor {
+  double lightness = 0.0;
+  double chroma = 0.0;
+};
+
+PerceptualColor perceptualColor(const char *hex) {
+  const QColor color(QString::fromLatin1(hex));
+  const auto linear = [](double channel) {
+    return channel <= 0.04045 ? channel / 12.92
+                              : std::pow((channel + 0.055) / 1.055, 2.4);
+  };
+  const double red = linear(color.redF());
+  const double green = linear(color.greenF());
+  const double blue = linear(color.blueF());
+  const double l = std::cbrt(0.4122214708 * red + 0.5363325363 * green +
+                            0.0514459929 * blue);
+  const double m = std::cbrt(0.2119034982 * red + 0.6806995451 * green +
+                            0.1073969566 * blue);
+  const double s = std::cbrt(0.0883024619 * red + 0.2817188376 * green +
+                            0.6299787005 * blue);
+  const double lightness =
+      0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s;
+  const double a = 1.9779984951 * l - 2.4285922050 * m +
+                   0.4505937099 * s;
+  const double b = 0.0259040371 * l + 0.7827717662 * m -
+                   0.8086757660 * s;
+  return {lightness, std::hypot(a, b)};
+}
+
+bool perceptuallyMatched(std::initializer_list<const char *> colors,
+                         const char *message) {
+  double minimumLightness = std::numeric_limits<double>::max();
+  double maximumLightness = 0.0;
+  double minimumChroma = std::numeric_limits<double>::max();
+  double maximumChroma = 0.0;
+  for (const char *hex : colors) {
+    const PerceptualColor color = perceptualColor(hex);
+    minimumLightness = std::min(minimumLightness, color.lightness);
+    maximumLightness = std::max(maximumLightness, color.lightness);
+    minimumChroma = std::min(minimumChroma, color.chroma);
+    maximumChroma = std::max(maximumChroma, color.chroma);
+  }
+  return expect(maximumLightness - minimumLightness < 0.0035 &&
+                    maximumChroma - minimumChroma < 0.0035,
+                message);
+}
+
+bool testPerceptuallyUniformPalette() {
+  using namespace codexui::UiStyle;
+  bool result = perceptuallyMatched(
+      {blue, green, yellow, orange, red, purple, teal},
+      "palette base colors share perceptual lightness and chroma");
+  result &= perceptuallyMatched(
+      {blueHover, greenHover, yellowHover, orangeHover, redHover, purpleHover,
+       tealHover},
+      "palette hover colors share perceptual lightness and chroma");
+  result &= perceptuallyMatched(
+      {bluePressed, greenPressed, yellowPressed, orangePressed, redPressed,
+       purplePressed, tealPressed},
+      "palette pressed colors share perceptual lightness and chroma");
+  result &= perceptuallyMatched(
+      {blueSurface, greenSurface, yellowSurface, orangeSurface, redSurface,
+       purpleSurface, tealSurface},
+      "palette surfaces share perceptual lightness and chroma");
+  result &= perceptuallyMatched(
+      {blueBorder, greenBorder, yellowBorder, orangeBorder, redBorder,
+       purpleBorder, tealBorder},
+      "palette borders share perceptual lightness and chroma");
+  result &= perceptuallyMatched(
+      {blueText, greenText, yellowText, orangeText, redText, purpleText,
+       tealText},
+      "palette text colors share perceptual lightness and chroma");
+  result &= perceptuallyMatched(
+      {blueSelected, yellowSurfaceHover, orangeSurfaceHover},
+      "palette hover surfaces share perceptual lightness and chroma");
+  result &= perceptuallyMatched(
+      {blueBorderStrong, yellowBorderStrong, orangeBorderStrong,
+       tealBorderStrong},
+      "palette strong borders share perceptual lightness and chroma");
+  return result;
 }
 
 std::string utf8(const QString &value) { return value.toUtf8().toStdString(); }
@@ -621,8 +705,10 @@ bool testMessageIdentityPalette() {
   };
   const bool result = expect(
       titleColor(user) ==
-              QColor(QString::fromLatin1(codexui::UiStyle::blueHover)) &&
-          surfaceColor(user) == QColor(QStringLiteral("#eaf2ff")) &&
+              QColor(QString::fromLatin1(codexui::UiStyle::blueText)) &&
+          surfaceColor(user) == QColor(
+                                    QString::fromLatin1(
+                                        codexui::UiStyle::blueSurface)) &&
           titleColor(update) ==
               QColor(QString::fromLatin1(codexui::UiStyle::yellowText)) &&
           surfaceColor(update) == QColor(
@@ -2579,7 +2665,9 @@ bool testCardFoldingGeometryAndRetention() {
           steeringPhase->parentWidget()->layout()->indexOf(steeringPhase) <
               steeringPhase->parentWidget()->layout()->indexOf(
                   copyButton(steeringCard)) &&
-          cardTitleColor(steeringCard) == QColor(QStringLiteral("#146f73")) &&
+          cardTitleColor(steeringCard) == QColor(
+                                                QString::fromLatin1(
+                                                    codexui::UiStyle::tealText)) &&
           steeringAnimation && steeringAnimation->isActive(),
       "a pending steering You card is nested and keeps its animation");
 
@@ -2598,7 +2686,8 @@ bool testCardFoldingGeometryAndRetention() {
                  cardTitle(authoritativeSteering) == QStringLiteral("You") &&
                  steeringPhase->text() == QStringLiteral("steering") &&
                  authoritativeSteering->palette().color(QPalette::Window) ==
-                     QColor(QStringLiteral("#eefafa")) &&
+                     QColor(QString::fromLatin1(
+                         codexui::UiStyle::tealSurface)) &&
                  steeringAnimation && !steeringAnimation->isActive(),
              "steering acknowledgement morphs the same nested card");
 
@@ -6920,11 +7009,20 @@ bool testPendingPromptAnimation() {
                      "pending feedback never weakens the active border");
   }
 
+  auto &prompt = std::get<LocalPromptData>(pending.payload);
+  prompt.state = PromptState::Accepted;
+  result &= expect(card.apply(pending),
+                   "the correlated request acknowledgement is applied");
+  const QImage accepted = card.grab().toImage();
+  spin(100);
+  result &= expect(accepted == card.grab().toImage(),
+                   "request acknowledgement immediately stops feedback");
+
   VisibleCardData materialized{
       LocalPromptKey{901}, CardKind::UserMessage, "prompt-thread", "turn",
       "user", UserMessageData{"pending prompt", {}}};
   result &= expect(card.apply(materialized),
-                   "authoritative materialization stops pending feedback");
+                   "authoritative materialization retains the settled card");
   const QImage settled = card.grab().toImage();
   spin(100);
   result &= expect(settled == card.grab().toImage(),
@@ -6962,12 +7060,26 @@ bool testPendingPromptAnimation() {
       steeringAnimated.pixelColor(10, steeringAnimated.height() - 10).green() >
           steeringAnimated.pixelColor(10, steeringAnimated.height() - 10).red(),
       "the steering feedback stays in the teal identity family");
+  auto &steeringPrompt = std::get<LocalPromptData>(steering.payload);
+  steeringPrompt.state = PromptState::Accepted;
+  result &= expect(steeringCard.apply(steering),
+                   "the steering request acknowledgement is applied");
+  auto *steeringTimer = steeringCard.findChild<QTimer *>(
+      QStringLiteral("pendingAnimationTimer"));
+  result &= expect(steeringTimer && !steeringTimer->isActive(),
+                   "steering acknowledgement synchronously stops its timer");
+  spin(40);
+  const QImage acceptedSteering = steeringCard.grab().toImage();
+  spin(100);
+  result &= expect(
+      acceptedSteering == steeringCard.grab().toImage(),
+      "steering acknowledgement immediately stops its feedback sweep");
   VisibleCardData materializedSteering{
       LocalPromptKey{902}, CardKind::UserMessage, "prompt-thread", "turn",
       "steering-user", UserMessageData{"steering prompt", {}}};
   result &= expect(
       steeringCard.apply(materializedSteering),
-      "authoritative steering materialization stops its feedback sweep");
+      "authoritative steering materialization retains the settled card");
   result &= expect(steeringStatus &&
                        steeringStatus->text() == QStringLiteral("steering"),
                    "acknowledgement clears pending from the steering header");
@@ -7278,7 +7390,8 @@ int main(int argc, char **argv) {
       std::cout << "Conversation settlement tests passed\n";
     return focused ? 0 : 1;
   }
-  bool result = testMessageIdentityPalette();
+  bool result = testPerceptuallyUniformPalette();
+  result &= testMessageIdentityPalette();
   result &= testActiveWorkBordersFollowStatus();
   result &= testStructuralOrderAndIdentity();
   result &= testFollowPauseAndStableAnchor();
