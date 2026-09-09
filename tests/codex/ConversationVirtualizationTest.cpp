@@ -81,6 +81,15 @@ ConversationCard *materializedCard(ConversationView &view,
   return nullptr;
 }
 
+void sendViewportMouse(ConversationView &view, QEvent::Type type,
+                       const QPoint &position, Qt::MouseButton button,
+                       Qt::MouseButtons buttons) {
+  QMouseEvent event(type, QPointF(position), QPointF(position),
+                    view.viewport()->mapToGlobal(position), button, buttons,
+                    Qt::NoModifier);
+  QApplication::sendEvent(view.viewport(), &event);
+}
+
 bool viewportProportionalFoundation() {
   ConversationView view;
   view.resize(820, 600);
@@ -603,6 +612,72 @@ bool selectionFocusAndOneGesturePromotion() {
   return result;
 }
 
+bool outsideTextDragDoesNotReenterTheView() {
+  ConversationSnapshot snapshot;
+  snapshot.threadId = "virtual-thread";
+  VisibleCardData update = message(0, "Selectable update text");
+  std::get<AgentMessageData>(update.payload).finalAnswer = false;
+  TurnSection section;
+  section.key = "update-section";
+  section.turnId = update.turnId;
+  section.cards.push_back(update);
+  snapshot.sections.push_back(std::move(section));
+
+  ConversationView view;
+  view.resize(820, 320);
+  view.show();
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "pointer-drag update fixture reconciles");
+  settle();
+  const QModelIndex index = view.conversationModel()->index(0);
+  const QRect row = view.visualRect(index);
+
+  // A naturally delivered press on card padding is ignored by the card and
+  // propagates to the item view. The view's one-gesture forwarding must not
+  // send that same press recursively back through the parent chain.
+  const QPoint padding(row.left() + 2, row.center().y());
+  sendViewportMouse(view, QEvent::MouseButtonPress, padding, Qt::LeftButton,
+                    Qt::LeftButton);
+  const QPoint paddingDrag(row.left() + 4, row.center().y() + 2);
+  sendViewportMouse(view, QEvent::MouseMove, paddingDrag, Qt::NoButton,
+                    Qt::LeftButton);
+  sendViewportMouse(view, QEvent::MouseButtonRelease, paddingDrag,
+                    Qt::LeftButton, Qt::NoButton);
+  settle();
+
+  ConversationCard *card = materializedCard(view, stableKey(update.key));
+  QLabel *body = nullptr;
+  if (card)
+    for (QLabel *label : card->findChildren<QLabel *>())
+      if (label->property("markdownSource").isValid()) {
+        body = label;
+        break;
+      }
+  result &= expect(card && body && view.currentIndex() == index,
+                   "padding press remains a bounded row interaction");
+  if (!body)
+    return false;
+
+  // Begin in the label's blank area after the glyphs and drag back through
+  // the text. This is the real press/move/release path, not setSelection().
+  const QPoint start = body->mapTo(
+      view.viewport(), QPoint(std::max(1, body->width() - 2),
+                              std::max(1, body->fontMetrics().height() / 2)));
+  const QPoint finish =
+      body->mapTo(view.viewport(),
+                  QPoint(1, std::max(1, body->fontMetrics().height() / 2)));
+  sendViewportMouse(view, QEvent::MouseButtonPress, start, Qt::LeftButton,
+                    Qt::LeftButton);
+  sendViewportMouse(view, QEvent::MouseMove, finish, Qt::NoButton,
+                    Qt::LeftButton);
+  sendViewportMouse(view, QEvent::MouseButtonRelease, finish, Qt::LeftButton,
+                    Qt::NoButton);
+  settle();
+  result &= expect(body->hasSelectedText(),
+                   "dragging from outside update glyphs selects text");
+  return result;
+}
+
 } // namespace
 } // namespace codexui::codex::middle
 
@@ -614,7 +689,8 @@ int main(int argc, char **argv) {
                       targetedVisibilityChangeIsLocal() &&
                       atomicPagingAndFollowingArrival() &&
                       virtualTurnSurfaceAndInteractivePromotion() &&
-                      selectionFocusAndOneGesturePromotion();
+                      selectionFocusAndOneGesturePromotion() &&
+                      outsideTextDragDoesNotReenterTheView();
   if (result)
     std::cout << "Conversation virtualization tests passed\n";
   return result ? EXIT_SUCCESS : EXIT_FAILURE;

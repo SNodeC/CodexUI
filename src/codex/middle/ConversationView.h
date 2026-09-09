@@ -287,6 +287,10 @@ private:
   bool materializing_ = false;
   bool structuralStagePassScheduled_ = false;
   bool committingStructuralStage_ = false;
+  // A synthetic event ignored by a card child can propagate back through the
+  // viewport. Stop that propagated event from entering the forwarding path a
+  // second time.
+  bool forwardingMouseEvent_ = false;
   QPointer<QWidget> forwardedMouseTarget_;
 };
 

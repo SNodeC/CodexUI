@@ -2431,14 +2431,19 @@ void ConversationView::currentChanged(const QModelIndex &current,
 }
 
 void ConversationView::mouseMoveEvent(QMouseEvent *event) {
+  if (forwardingMouseEvent_) {
+    event->accept();
+    return;
+  }
   if (forwardedMouseTarget_ && event->buttons() != Qt::NoButton) {
-    QWidget *target = forwardedMouseTarget_;
+    const QPointer<QWidget> target = forwardedMouseTarget_;
     const QPoint viewportPosition = event->position().toPoint();
     const QPoint localPosition = target->mapFrom(viewport(), viewportPosition);
     QMouseEvent forwarded(event->type(), QPointF(localPosition),
                           event->scenePosition(), event->globalPosition(),
                           event->button(), event->buttons(), event->modifiers(),
                           event->pointingDevice());
+    const QScopedValueRollback forwarding(forwardingMouseEvent_, true);
     QApplication::sendEvent(target, &forwarded);
     event->setAccepted(forwarded.isAccepted());
     return;
@@ -2466,6 +2471,10 @@ void ConversationView::mouseMoveEvent(QMouseEvent *event) {
 }
 
 void ConversationView::mousePressEvent(QMouseEvent *event) {
+  if (forwardingMouseEvent_) {
+    event->accept();
+    return;
+  }
   const QPoint viewportPosition = event->position().toPoint();
   const QModelIndex index = indexAt(viewportPosition);
   if (!index.isValid()) {
@@ -2504,17 +2513,22 @@ void ConversationView::mousePressEvent(QMouseEvent *event) {
                         event->scenePosition(), event->globalPosition(),
                         event->button(), event->buttons(), event->modifiers(),
                         event->pointingDevice());
-  QApplication::sendEvent(target, &forwarded);
   forwardedMouseTarget_ = target;
+  const QScopedValueRollback forwarding(forwardingMouseEvent_, true);
+  QApplication::sendEvent(target, &forwarded);
   event->setAccepted(forwarded.isAccepted());
 }
 
 void ConversationView::mouseReleaseEvent(QMouseEvent *event) {
+  if (forwardingMouseEvent_) {
+    event->accept();
+    return;
+  }
   if (!forwardedMouseTarget_) {
     QAbstractItemView::mouseReleaseEvent(event);
     return;
   }
-  QWidget *target = forwardedMouseTarget_;
+  const QPointer<QWidget> target = forwardedMouseTarget_;
   forwardedMouseTarget_.clear();
   const QPoint viewportPosition = event->position().toPoint();
   const QPoint localPosition = target->mapFrom(viewport(), viewportPosition);
@@ -2522,6 +2536,7 @@ void ConversationView::mouseReleaseEvent(QMouseEvent *event) {
                         event->scenePosition(), event->globalPosition(),
                         event->button(), event->buttons(), event->modifiers(),
                         event->pointingDevice());
+  const QScopedValueRollback forwarding(forwardingMouseEvent_, true);
   QApplication::sendEvent(target, &forwarded);
   event->setAccepted(forwarded.isAccepted());
 }
