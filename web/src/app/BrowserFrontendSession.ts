@@ -52,6 +52,7 @@ const actionMethods: Readonly<Record<string, string>> = {
 export interface BrowserSessionSnapshot {
     readonly revision: number;
     readonly selectedThreadId: string;
+    readonly selectedThreadLoading: boolean;
     readonly newThreadIntent: boolean;
     readonly newThreadDraft?: NewThreadDraft;
     readonly newThreadDraftRevision: number;
@@ -258,8 +259,9 @@ export class BrowserFrontendSession {
             this.optimisticThreads = this.optimisticThreads.filter(thread => thread.id !== DraftThreadId);
             this.newThreadDraft = undefined;
         }
-        this.selectedThreadId = threadId; this.newThreadIntent = false; this.publish();
+        this.selectedThreadId = threadId; this.newThreadIntent = false;
         if (threadId !== "") this.ensureThreadHydrated(threadId);
+        this.publish();
     }
     beginNewThread(draft: NewThreadDraft = {
         workspace: "", name: "", baseInstructions: "", developerInstructions: "", ephemeral: false,
@@ -488,6 +490,7 @@ export class BrowserFrontendSession {
         if (!forced && runtime.hydration !== "notHydrated") return;
         runtime.hydration = "inFlight";
         runtime.operationReady = false;
+        this.schedulePublish();
         const revision = ++runtime.readRevision;
         const epoch = this.lifecycleEpoch;
         this.requestPromise("thread.read", {threadId, includeTurns: true}, () => epoch === this.lifecycleEpoch
@@ -498,6 +501,7 @@ export class BrowserFrontendSession {
             if (response.ok && this.model.thread(threadId)) {
                 current.hydration = "hydrated";
                 current.operationReady = this.model.thread(threadId)?.status !== "notLoaded";
+                this.publish();
                 queueMicrotask(() => this.dispatchNextPrompt(threadId));
                 return;
             }
@@ -763,7 +767,10 @@ export class BrowserFrontendSession {
         this.optimisticThreads = this.optimisticThreads.filter(thread =>
             thread.state !== "confirmed" || !this.model.thread(thread.id));
         return {
-            revision: this.revision, selectedThreadId: this.selectedThreadId, newThreadIntent: this.newThreadIntent,
+            revision: this.revision, selectedThreadId: this.selectedThreadId,
+            selectedThreadLoading: this.selectedThreadId !== ""
+                && this.runtimeByThread.get(this.selectedThreadId)?.hydration === "inFlight",
+            newThreadIntent: this.newThreadIntent,
             ...(this.newThreadDraft ? {newThreadDraft: this.newThreadDraft} : {}),
             newThreadDraftRevision: this.newThreadDraftRevision,
             optimisticThreads: this.optimisticThreads,

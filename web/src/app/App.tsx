@@ -21,6 +21,7 @@ import {humanizeProtocolLabel as humanize} from "./Humanize.js";
 import {readBrowserStorage, writeBrowserStorage} from "./BrowserStorage.js";
 
 const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+export const ThreadLoadingSpinnerDelayMilliseconds = 500;
 
 export type ResponsiveMode = "desktop" | "tablet" | "mobile";
 
@@ -527,6 +528,13 @@ function restoreConversationAnchor(container: HTMLElement, anchor: ConversationV
     container.scrollTop = anchoredScrollTop(cardContentTop, anchor.pixelOffset, container.scrollHeight - container.clientHeight);
 }
 
+export function ThreadLoadingSurface({spinning}: {spinning: boolean}) {
+    return <div className="conversation-loading-surface" role="status" aria-live="polite">
+        {spinning && <span className="thread-loading-spinner" aria-hidden="true" />}
+        <span className="visually-hidden">Loading conversation</span>
+    </div>;
+}
+
 function Conversation({session, revision, paneControls}: {session: BrowserFrontendSession; revision: number; paneControls?: ReactNode}) {
     const snapshot = session.getSnapshot();
     const thread = session.model.thread(snapshot.selectedThreadId);
@@ -544,6 +552,38 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
     const pendingGeometry = useRef<PendingConversationGeometry>();
     const folding = useRef(new Map<string, boolean>());
     const [cardStateRevision, forceCardState] = useState(0);
+    const displayedProjection = useRef(projectionId);
+    const transitionGeneration = useRef(0);
+    const [spinnerProjection, setSpinnerProjection] = useState("");
+    const threadTransitionActive = snapshot.selectedThreadId !== ""
+        && (snapshot.selectedThreadLoading || displayedProjection.current !== projectionId);
+    useEffect(() => {
+        const generation = ++transitionGeneration.current;
+        if (!threadTransitionActive) {
+            displayedProjection.current = projectionId;
+            setSpinnerProjection("");
+            return;
+        }
+        let spinnerTimer: ReturnType<typeof setTimeout> | undefined;
+        let revealFrame: number | undefined;
+        if (snapshot.selectedThreadLoading) {
+            setSpinnerProjection(current => current === projectionId ? current : "");
+            spinnerTimer = setTimeout(() => {
+                if (transitionGeneration.current === generation) setSpinnerProjection(projectionId);
+            }, ThreadLoadingSpinnerDelayMilliseconds);
+        } else {
+            revealFrame = requestAnimationFrame(() => {
+                if (transitionGeneration.current !== generation) return;
+                displayedProjection.current = projectionId;
+                setSpinnerProjection("");
+                forceCardState(value => value + 1);
+            });
+        }
+        return () => {
+            if (spinnerTimer !== undefined) clearTimeout(spinnerTimer);
+            if (revealFrame !== undefined) cancelAnimationFrame(revealFrame);
+        };
+    }, [projectionId, snapshot.selectedThreadLoading, threadTransitionActive]);
     const [presentation, setPresentation] = useState(storedConversationPresentation);
     const drafts = useRef(new Map<string, string>());
     const draftRevision = useRef(snapshot.newThreadDraftRevision);
@@ -672,21 +712,24 @@ function Conversation({session, revision, paneControls}: {session: BrowserFronte
                 </div>
             </div>
         </div>
-        <div className="conversation-scroll" ref={scroll} onScroll={event => {
+        <div className={`conversation-scroll${threadTransitionActive ? " thread-loading" : ""}`} ref={scroll}
+            aria-busy={threadTransitionActive || undefined} onScroll={event => {
             const element = event.currentTarget; const following = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
             viewport.updateScroll(projectionId, element.scrollTop, following, conversationAnchor(element));
         }}>
-            {conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId); forceCardState(value => value + 1); }}>Load earlier activity</button>}
-            {visibleSections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
-            {visibleSections.map(section => {
-                const rootKey = section.rootCardKey ? stableKey(section.rootCardKey) : "";
-                const prompt = rootKey === "" ? undefined : section.cards.find(card => stableKey(card.key) === rootKey);
-                const nestedCards = prompt ? section.cards.filter(card => card !== prompt) : [];
-                const nested = nestedCards.length > 0 ? nestedCards.map(card => renderCard(card, undefined, false, true)) : undefined;
-                return <section key={section.key} className="turn-section">
-                    {prompt ? renderCard(prompt, nested, true) : section.cards.map(card => renderCard(card))}
-                </section>;
-            })}
+            {threadTransitionActive
+                ? <ThreadLoadingSurface spinning={spinnerProjection === projectionId} />
+                : <>{conversation.hasMore && <button className="load-more" onClick={() => { viewport.loadMore(projectionId); forceCardState(value => value + 1); }}>Load earlier activity</button>}
+                    {visibleSections.length === 0 && <div className="empty-state"><div className="brand-orb">C</div><h3>Conversation activity appears here</h3></div>}
+                    {visibleSections.map(section => {
+                        const rootKey = section.rootCardKey ? stableKey(section.rootCardKey) : "";
+                        const prompt = rootKey === "" ? undefined : section.cards.find(card => stableKey(card.key) === rootKey);
+                        const nestedCards = prompt ? section.cards.filter(card => card !== prompt) : [];
+                        const nested = nestedCards.length > 0 ? nestedCards.map(card => renderCard(card, undefined, false, true)) : undefined;
+                        return <section key={section.key} className="turn-section">
+                            {prompt ? renderCard(prompt, nested, true) : section.cards.map(card => renderCard(card))}
+                        </section>;
+                    })}</>}
         </div>
         <div ref={composerDock} className="composer-dock">
             <SettingsPanel key={`settings:${projectionId}`} session={session} draft={settingsDraft} onChange={(field, value) => {

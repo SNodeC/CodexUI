@@ -5,11 +5,14 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QColor>
 #include <QElapsedTimer>
+#include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QScrollBar>
+#include <QThread>
 
 #include <algorithm>
 #include <cstdlib>
@@ -57,6 +60,33 @@ ConversationSnapshot conversation(std::size_t count,
 void settle(int passes = 4) {
   while (passes-- > 0)
     QApplication::processEvents(QEventLoop::AllEvents, 20);
+}
+
+template <typename Predicate>
+bool waitUntil(Predicate &&predicate, int timeoutMilliseconds) {
+  QElapsedTimer deadline;
+  deadline.start();
+  while (!predicate() && deadline.elapsed() < timeoutMilliseconds) {
+    QApplication::processEvents(QEventLoop::AllEvents, 10);
+    QThread::msleep(1);
+  }
+  return predicate();
+}
+
+ConversationSnapshot singleMessageConversation(const std::string &threadId,
+                                                const std::string &text) {
+  VisibleCardData card{
+      AuthoritativeItemKey{threadId, "turn", "message"},
+      CardKind::AgentMessage,
+      threadId,
+      "turn",
+      "message",
+      AgentMessageData{text, true}};
+  ConversationSnapshot snapshot;
+  snapshot.threadId = threadId;
+  snapshot.sections.push_back(
+      {"section", "turn", {std::move(card)}, std::nullopt});
+  return snapshot;
 }
 
 std::pair<std::string, int> firstVisible(ConversationView &view) {
@@ -431,6 +461,125 @@ bool atomicPagingAndFollowingArrival() {
   return result;
 }
 
+bool delayedThreadSelectionSpinner() {
+  ConversationView view;
+  view.resize(820, 600);
+  view.show();
+  const ConversationSnapshot source =
+      singleMessageConversation("spinner-source", "Outgoing conversation");
+  bool result = expect(view.reconcile(source),
+                       "spinner source conversation reconciles");
+  settle();
+
+  view.beginThreadSelection("spinner-slow-target");
+  settle();
+  auto *overlay = view.findChild<QWidget *>(
+      QStringLiteral("conversationStagingOverlay"));
+  result &= expect(
+      overlay && overlay->isVisible() &&
+          view.viewport()->childAt(view.viewport()->rect().center()) == overlay &&
+          !overlay->property("spinnerVisible").toBool() &&
+          overlay->property("spinnerDelayMilliseconds").toInt() == 500 &&
+          overlay->property("spinnerDiameter").toInt() == 30 &&
+          overlay->property("spinnerStrokeWidth").toInt() == 3 &&
+          view.conversationModel()->indexForStableKey(
+                  stableKey(AuthoritativeItemKey{"spinner-source", "turn",
+                                                 "message"}))
+              .isValid(),
+      "thread selection immediately covers the outgoing message viewport "
+      "with a blank centered loading surface");
+
+  QElapsedTimer early;
+  early.start();
+  while (early.elapsed() < 350) {
+    QApplication::processEvents(QEventLoop::AllEvents, 10);
+    QThread::msleep(1);
+  }
+  result &= expect(overlay && !overlay->property("spinnerVisible").toBool(),
+                   "the first half-second of thread loading shows no spinner");
+  result &= expect(
+      overlay && waitUntil(
+                     [overlay] {
+                       return overlay->property("spinnerVisible").toBool();
+                     },
+                     350) &&
+          overlay->property("spinnerAnimationActive").toBool(),
+      "a slower thread load starts the gray spinner after its delay");
+  QRect spinnerPixels;
+  if (overlay) {
+    const QImage frame = overlay->grab().toImage();
+    const QColor background(QStringLiteral("#f6f8fb"));
+    for (int y = 0; y < frame.height(); ++y)
+      for (int x = 0; x < frame.width(); ++x)
+        if (frame.pixelColor(x, y) != background)
+          spinnerPixels |= QRect(x, y, 1, 1);
+  }
+  result &= expect(
+      spinnerPixels.width() >= 29 && spinnerPixels.width() <= 31 &&
+          spinnerPixels.height() >= 29 && spinnerPixels.height() <= 31 &&
+          overlay &&
+          (spinnerPixels.center() - overlay->rect().center()).manhattanLength() <=
+              2,
+      "the painted gray ring is 30 pixels and centered in the message view");
+  const qulonglong tick =
+      overlay ? overlay->property("spinnerAnimationTick").toULongLong() : 0;
+  result &= expect(
+      overlay && waitUntil(
+                     [overlay, tick] {
+                       return overlay->property("spinnerAnimationTick")
+                                  .toULongLong() > tick;
+                     },
+                     150),
+      "the visible spinner advances while loading");
+
+  view.reconcileStaged(singleMessageConversation("spinner-slow-target",
+                                                 "Incoming conversation"));
+  result &= expect(
+      waitUntil([&view] { return !view.structuralStagingActive(); }, 500) &&
+          overlay && !overlay->isVisible() &&
+          !overlay->property("spinnerVisible").toBool() &&
+          !overlay->property("spinnerAnimationActive").toBool() &&
+          view.conversationModel()
+              ->indexForStableKey(
+                  stableKey(AuthoritativeItemKey{
+                      "spinner-slow-target", "turn", "message"}))
+              .isValid(),
+      "the complete target frame atomically removes and stops the spinner");
+
+  view.beginThreadSelection("spinner-fast-target");
+  view.reconcileStaged(singleMessageConversation("spinner-fast-target",
+                                                 "Fast conversation"));
+  settle();
+  result &= expect(
+      overlay && !overlay->isVisible() &&
+          !overlay->property("spinnerAnimationActive").toBool(),
+      "a fast staged selection clears and reveals without spinner motion");
+
+  view.beginThreadSelection("spinner-stale-target");
+  view.beginThreadSelection("spinner-final-target");
+  const qulonglong ignoredBefore =
+      view.property("staleThreadStagesIgnored").toULongLong();
+  view.reconcileStaged(singleMessageConversation("spinner-stale-target",
+                                                 "Stale conversation"));
+  result &= expect(
+      view.property("staleThreadStagesIgnored").toULongLong() ==
+              ignoredBefore + 1 &&
+          overlay && overlay->isVisible(),
+      "a superseded thread stage cannot reveal or stop the current load");
+  view.reconcileStaged(singleMessageConversation("spinner-final-target",
+                                                 "Final conversation"));
+  settle();
+  result &= expect(
+      overlay && !overlay->isVisible() &&
+          view.conversationModel()
+              ->indexForStableKey(
+                  stableKey(AuthoritativeItemKey{
+                      "spinner-final-target", "turn", "message"}))
+              .isValid(),
+      "the newest thread identity alone completes the loading surface");
+  return result;
+}
+
 bool virtualTurnSurfaceAndInteractivePromotion() {
   ConversationSnapshot snapshot;
   snapshot.threadId = "turn-surface";
@@ -761,6 +910,7 @@ int main(int argc, char **argv) {
                       boundedTailAppendIsViewportProportional() &&
                       targetedVisibilityChangeIsLocal() &&
                       atomicPagingAndFollowingArrival() &&
+                      delayedThreadSelectionSpinner() &&
                       virtualTurnSurfaceAndInteractivePromotion() &&
                       directTailGrowsTheRetainedTurnSurface() &&
                       selectionFocusAndOneGesturePromotion() &&

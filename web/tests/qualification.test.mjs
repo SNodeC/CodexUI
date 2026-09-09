@@ -3,7 +3,7 @@ import test from "node:test";
 import {renderToStaticMarkup} from "react-dom/server";
 import {createElement} from "react";
 
-import {App, NewThreadDialog, inspectorPlainState, writeCardClipboard} from "../dist/app/App.js";
+import {App, NewThreadDialog, ThreadLoadingSpinnerDelayMilliseconds, ThreadLoadingSurface, inspectorPlainState, writeCardClipboard} from "../dist/app/App.js";
 import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
 import {readBrowserStorage, writeBrowserStorage} from "../dist/app/BrowserStorage.js";
 import {event, humanizeProtocolLabel, result} from "../dist/index.js";
@@ -61,6 +61,16 @@ test("server-rendered shell exposes keyboard and landmark semantics", () => {
     assert.match(markup, /id="composer-keyboard-hint">Enter to send · Shift\+Enter for a new line/u);
     assert.match(markup, /aria-expanded="false"/u);
     session.dispose();
+});
+
+test("thread-loading surface delays only its bounded visual spinner", () => {
+    assert.equal(ThreadLoadingSpinnerDelayMilliseconds, 500);
+    const blank = renderToStaticMarkup(createElement(ThreadLoadingSurface, {spinning: false}));
+    const spinning = renderToStaticMarkup(createElement(ThreadLoadingSurface, {spinning: true}));
+    assert.match(blank, /class="conversation-loading-surface" role="status" aria-live="polite"/u);
+    assert.match(blank, />Loading conversation</u);
+    assert.doesNotMatch(blank, /thread-loading-spinner/u);
+    assert.match(spinning, /class="thread-loading-spinner" aria-hidden="true"/u);
 });
 
 test("new-thread dialog exposes the complete native creation draft", () => {

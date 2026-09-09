@@ -122,6 +122,8 @@ test("responsive CSS keeps the desktop grid and removes the old document-width f
     assert.match(css, /\.composer-dock::before\s*\{[^}]*bottom:\s*100%[^}]*height:\s*8px[^}]*background:\s*#f2f5f9/u);
     assert.match(css, /\.composer-dock::after\s*\{[^}]*top:\s*-1px[^}]*height:\s*1px[^}]*background:\s*#d7dee8/u);
     assert.match(css, /\.conversation-scroll::-webkit-scrollbar-track\s*\{[^}]*margin-block-end:\s*calc\(var\(--composer-overlay-height\) \+ 8px\)/u);
+    assert.match(css, /\.conversation-loading-surface\s*\{[^}]*inset:\s*0 0 var\(--composer-overlay-height\)[^}]*place-items:\s*center[^}]*background:\s*#f2f5f9/u);
+    assert.match(css, /\.thread-loading-spinner\s*\{[^}]*width:\s*30px[^}]*height:\s*30px[^}]*border:\s*3px solid #d7dee8[^}]*border-top-color:\s*#667085/u);
     assert.match(css, /\.composer textarea\s*\{[^}]*overscroll-behavior:\s*contain[^}]*background:\s*#fff/u);
     assert.match(css, /@media \(max-width:\s*520px\)[\s\S]*\.composer-dock\s*\{[^}]*bottom:\s*0[^}]*padding-bottom:\s*8px/u);
 });

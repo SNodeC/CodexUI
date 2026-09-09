@@ -59,6 +59,34 @@ test("browser session defaults to the bridge's canonical WebSocket endpoint", ()
     }
 });
 
+test("selected-thread loading follows the latest hydration identity", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "thread-loading");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "thread-a", status: {type: "notLoaded"}},
+        {id: "thread-b", status: {type: "notLoaded"}},
+    ]});
+
+    session.selectThread("thread-a");
+    const readA = requests(socket, "thread/read").at(-1);
+    assert.equal(session.getSnapshot().selectedThreadLoading, true);
+    session.selectThread("thread-b");
+    const readB = requests(socket, "thread/read").at(-1);
+    assert.equal(session.getSnapshot().selectedThreadLoading, true);
+
+    respond(socket, readA, {thread: {id: "thread-a", turns: []}});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.getSnapshot().selectedThreadId, "thread-b");
+    assert.equal(session.getSnapshot().selectedThreadLoading, true,
+        "a superseded hydration cannot complete the visible loading state");
+
+    respond(socket, readB, {thread: {id: "thread-b", turns: []}});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.getSnapshot().selectedThreadLoading, false);
+    session.dispose();
+});
+
 test("user thread operations are single-flight and report failures", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);

@@ -28,6 +28,8 @@ class QWheelEvent;
 
 namespace codexui::codex::middle {
 
+class ConversationLoadingOverlay;
+
 // Canonical variable-height item view for the conversation. NodeGraph remains
 // authoritative; this class owns only Qt indexing, cached row geometry, and
 // genuinely local interaction state. QWidget count is bounded by the visible
@@ -60,6 +62,10 @@ public:
   }
 
   [[nodiscard]] bool reconcile(const ConversationSnapshot &snapshot);
+  // Covers the outgoing message viewport immediately for a different-thread
+  // selection. A delayed spinner remains presentation-only; the incoming
+  // snapshot still commits through reconcileStaged as one complete frame.
+  void beginThreadSelection(const std::string &threadId);
   void reconcileStaged(ConversationSnapshot snapshot);
   [[nodiscard]] bool structuralStagingActive() const noexcept {
     return pendingStructuralSnapshot_.has_value();
@@ -241,13 +247,14 @@ private:
   void scheduleStructuralStagePass();
   void runStructuralStagePass();
   void cancelStructuralStaging();
+  void finishThreadSelection(const std::string &threadId);
 
   ConversationItemModel *model_ = nullptr;
   ConversationHeightIndex heights_;
   QLabel *empty_ = nullptr;
   QPushButton *loadMore_ = nullptr;
   QWidget *stagingHost_ = nullptr;
-  QLabel *stagingOverlay_ = nullptr;
+  ConversationLoadingOverlay *stagingOverlay_ = nullptr;
   QVariantAnimation *followAnimation_ = nullptr;
 
   std::function<void()> loadMoreAction_;
@@ -271,6 +278,7 @@ private:
   PresentationOptions presentationOptions_;
   std::string threadId_;
   QString emptyMessage_;
+  std::string loadingThreadId_;
   std::optional<ConversationSnapshot> pendingStructuralSnapshot_;
   std::unordered_map<std::string, PendingLocation> pendingLocations_;
   std::vector<std::string> pendingStructuralCardKeys_;

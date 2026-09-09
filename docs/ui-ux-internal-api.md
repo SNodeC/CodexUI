@@ -276,6 +276,12 @@ released, and QWidget work never occurs while a graph or channel lock is held.
   model's precise signals, updates only bounded materialized editors, rebuilds
   indexed geometry only when structure genuinely requires it, restores the
   stable row/pixel anchor, and exposes one completed viewport state.
+- `beginThreadSelection(threadId)` immediately covers the outgoing message
+  viewport with the application background. If the identified selection is
+  still unresolved after 500 ms, the cover paints one centered 30 px neutral
+  gray ring with a 3 px stroke; its 33 ms animation timer exists only while
+  the ring is visible. A superseded thread identity cannot reveal or dismiss
+  the current cover.
 - `reconcileStaged(snapshot)` preserves that final-state contract for initial
   selection and Load 80. Only rich rows expected in the initial viewport and
   bounded overscan are constructed and measured one at a time beneath the
@@ -323,6 +329,7 @@ released, and QWidget work never occurs while a graph or channel lock is held.
 | `setPresentationOptions` | complete local options | Updates model presentation roles and visible/materialized rows without a graph query. Existing user fold choices win over initial-fold defaults. |
 | `presentationOptions` | returns value copy | Pure query. |
 | `reconcile` | complete snapshot const reference; returns changed bool | Pre: unique section/card stable keys and correct root keys. Post: model order, indexed geometry, bounded editors, delegate surface, and scroll policy match one complete target. False means no effective model change. |
+| `beginThreadSelection` | exact selected thread ID | Immediately covers only the message viewport and starts one 500 ms visual-delay timer. Repeating the same pending identity is a no-op; a new identity cancels superseded staging. |
 | `reconcileStaged` | owned complete snapshot | Same final-state contract as `reconcile`; only initially visible rich editors are prepared beneath the hidden host in bounded event-loop passes before one atomic reveal. |
 | `applyCardPresentation` | one exact `VisibleCardData`; returns optional local impact | Wrong thread/key/incompatible kind returns `nullopt`; identical data returns `None`; otherwise only the resolved row, its genuine section-edge geometry, and its visible editor/delegate rectangle may change. |
 | `appendTailCard` | one validated `ConversationTailCard`, activity limit; returns bool | Exact canonical tail inserts directly and optionally trims the prefix without retained-history traversal. Wrong thread, duplicate/invalid placement, active staging, or zero limit returns false for complete reconciliation. |

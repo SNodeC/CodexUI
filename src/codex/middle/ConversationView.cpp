@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/ConversationView.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QAbstractSlider>
 #include <QAbstractTextDocumentLayout>
@@ -37,6 +38,111 @@
 #include <utility>
 
 namespace codexui::codex::middle {
+
+class ConversationLoadingOverlay final : public QWidget {
+public:
+  static constexpr int SpinnerDelayMilliseconds = 500;
+  static constexpr int SpinnerAnimationMilliseconds = 33;
+  static constexpr int SpinnerDiameter = 30;
+  static constexpr int SpinnerStrokeWidth = 3;
+
+  explicit ConversationLoadingOverlay(QWidget *parent) : QWidget(parent) {
+    setObjectName(QStringLiteral("conversationStagingOverlay"));
+    setAccessibleName(QStringLiteral("Loading conversation"));
+    setFocusPolicy(Qt::NoFocus);
+    setAttribute(Qt::WA_OpaquePaintEvent);
+
+    spinnerDelay_.setSingleShot(true);
+    spinnerDelay_.setTimerType(Qt::PreciseTimer);
+    spinnerDelay_.setInterval(SpinnerDelayMilliseconds);
+    connect(&spinnerDelay_, &QTimer::timeout, this, [this] {
+      if (!isVisible())
+        return;
+      spinnerVisible_ = true;
+      setProperty("spinnerVisible", true);
+      spinnerAnimation_.start();
+      setProperty("spinnerAnimationActive", true);
+      update(spinnerRect().adjusted(-2, -2, 2, 2).toAlignedRect());
+    });
+
+    spinnerAnimation_.setTimerType(Qt::PreciseTimer);
+    spinnerAnimation_.setInterval(SpinnerAnimationMilliseconds);
+    connect(&spinnerAnimation_, &QTimer::timeout, this, [this] {
+      phaseDegrees_ = (phaseDegrees_ - 18 + 360) % 360;
+      setProperty("spinnerAnimationTick",
+                  property("spinnerAnimationTick").toULongLong() + 1);
+      update(spinnerRect().adjusted(-2, -2, 2, 2).toAlignedRect());
+    });
+
+    setProperty("spinnerDelayMilliseconds", SpinnerDelayMilliseconds);
+    setProperty("spinnerDiameter", SpinnerDiameter);
+    setProperty("spinnerStrokeWidth", SpinnerStrokeWidth);
+    setProperty("spinnerVisible", false);
+    setProperty("spinnerAnimationActive", false);
+    setProperty("spinnerAnimationTick", qulonglong{0});
+    hide();
+  }
+
+  void begin() {
+    spinnerDelay_.stop();
+    spinnerAnimation_.stop();
+    spinnerVisible_ = false;
+    phaseDegrees_ = 90;
+    setProperty("spinnerVisible", false);
+    setProperty("spinnerAnimationActive", false);
+    setProperty("spinnerAnimationTick", qulonglong{0});
+    show();
+    raise();
+    update();
+    spinnerDelay_.start();
+  }
+
+  void finish() {
+    spinnerDelay_.stop();
+    spinnerAnimation_.stop();
+    spinnerVisible_ = false;
+    setProperty("spinnerVisible", false);
+    setProperty("spinnerAnimationActive", false);
+    hide();
+  }
+
+protected:
+  void paintEvent(QPaintEvent *event) override {
+    QPainter painter(this);
+    painter.setClipRegion(event->region());
+    painter.fillRect(rect(), QColor(QString::fromLatin1(UiStyle::appBackground)));
+    if (!spinnerVisible_)
+      return;
+
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF ring = spinnerRect();
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(QString::fromLatin1(UiStyle::divider)),
+                        SpinnerStrokeWidth,
+                        Qt::SolidLine, Qt::RoundCap));
+    painter.drawEllipse(ring);
+    painter.setPen(QPen(QColor(QString::fromLatin1(UiStyle::secondary)),
+                        SpinnerStrokeWidth,
+                        Qt::SolidLine, Qt::RoundCap));
+    painter.drawArc(ring, phaseDegrees_ * 16, 105 * 16);
+  }
+
+private:
+  [[nodiscard]] QRectF spinnerRect() const {
+    const int paintedCenterlineDiameter =
+        SpinnerDiameter - SpinnerStrokeWidth;
+    QRectF ring(0.0, 0.0, paintedCenterlineDiameter,
+                paintedCenterlineDiameter);
+    ring.moveCenter(QRectF(rect()).center());
+    return ring;
+  }
+
+  QTimer spinnerDelay_;
+  QTimer spinnerAnimation_;
+  bool spinnerVisible_ = false;
+  int phaseDegrees_ = 90;
+};
+
 namespace {
 
 constexpr int CardSpacing = 8;
@@ -478,12 +584,7 @@ ConversationView::ConversationView(QWidget *parent)
   stagingHost_->setObjectName(QStringLiteral("conversationStagingHost"));
   stagingHost_->hide();
 
-  stagingOverlay_ =
-      new QLabel(QStringLiteral("Loading conversation…"), viewport());
-  stagingOverlay_->setObjectName(QStringLiteral("conversationStagingOverlay"));
-  stagingOverlay_->setAlignment(Qt::AlignCenter);
-  stagingOverlay_->setAutoFillBackground(true);
-  stagingOverlay_->hide();
+  stagingOverlay_ = new ConversationLoadingOverlay(viewport());
 
   followAnimation_ = new QVariantAnimation(this);
   followAnimation_->setEasingCurve(QEasingCurve::OutCubic);
@@ -623,7 +724,19 @@ bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
   return reconcileOwned(ConversationSnapshot(snapshot));
 }
 
+void ConversationView::beginThreadSelection(const std::string &threadId) {
+  if (threadId.empty() ||
+      (loadingThreadId_ == threadId && stagingOverlay_->isVisible()))
+    return;
+  cancelStructuralStaging();
+  loadingThreadId_ = threadId;
+  stagingOverlay_->setGeometry(viewport()->rect());
+  stagingOverlay_->begin();
+  incrementProperty(this, "threadSelectionLoadsStarted");
+}
+
 bool ConversationView::reconcileOwned(ConversationSnapshot snapshot) {
+  const std::string targetThreadId = snapshot.threadId;
   const bool switchedThread = snapshot.threadId != threadId_;
   const Anchor currentAnchor = captureAnchor();
   setThread(snapshot.threadId);
@@ -720,6 +833,7 @@ bool ConversationView::reconcileOwned(ConversationSnapshot snapshot) {
   }
 
   viewport()->setUpdatesEnabled(true);
+  finishThreadSelection(targetThreadId);
   viewport()->update();
   if (changed)
     incrementProperty(this, "graphRefreshPasses");
@@ -731,18 +845,21 @@ bool ConversationView::reconcileOwned(ConversationSnapshot snapshot) {
 }
 
 void ConversationView::reconcileStaged(ConversationSnapshot snapshot) {
-  cancelStructuralStaging();
+  if (!loadingThreadId_.empty() &&
+      snapshot.threadId != loadingThreadId_) {
+    incrementProperty(this, "staleThreadStagesIgnored");
+    return;
+  }
+  if (snapshot.threadId != threadId_ && loadingThreadId_.empty())
+    beginThreadSelection(snapshot.threadId);
+  else
+    cancelStructuralStaging();
   pendingStructuralSnapshot_ = std::move(snapshot);
   buildPendingLocations();
   choosePendingStageRows();
   pendingStructuralCardIndex_ = 0;
   stagingHost_->resize(std::max(0, viewport()->width()),
                        std::max(0, viewport()->height()));
-  if (pendingStructuralSnapshot_->threadId != threadId_) {
-    stagingOverlay_->setGeometry(viewport()->rect());
-    stagingOverlay_->show();
-    stagingOverlay_->raise();
-  }
   incrementProperty(this, "structuralStageStarts");
   if (pendingStructuralCardKeys_.empty()) {
     runStructuralStagePass();
@@ -909,7 +1026,6 @@ void ConversationView::runStructuralStagePass() {
   }
   stagedCards_.clear();
   stagedHeights_.clear();
-  stagingOverlay_->hide();
   incrementProperty(this, "structuralStageCommits");
 }
 
@@ -924,7 +1040,17 @@ void ConversationView::cancelStructuralStaging() {
   }
   stagedCards_.clear();
   stagedHeights_.clear();
-  stagingOverlay_->hide();
+}
+
+void ConversationView::finishThreadSelection(const std::string &threadId) {
+  if (!loadingThreadId_.empty() && !threadId.empty() &&
+      loadingThreadId_ != threadId)
+    return;
+  if (loadingThreadId_.empty() && !stagingOverlay_->isVisible())
+    return;
+  loadingThreadId_.clear();
+  stagingOverlay_->finish();
+  incrementProperty(this, "threadSelectionLoadsFinished");
 }
 
 std::optional<PresentationImpact>

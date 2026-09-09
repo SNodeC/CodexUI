@@ -1214,6 +1214,8 @@ void threadSwitchStagesTheCompleteReplacement(Configuration &configuration) {
   auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
   auto *heading =
       shell.findChild<QLabel *>(QStringLiteral("conversationTitle"));
+  auto *conversation = dynamic_cast<middle::ConversationView *>(
+      shell.findChild<QWidget *>(QStringLiteral("conversationScroll")));
   require(spinUntil([&] {
             return threadItem(list, "staged-a") &&
                    threadItem(list, "staged-b");
@@ -1232,21 +1234,39 @@ void threadSwitchStagesTheCompleteReplacement(Configuration &configuration) {
   require(selectThread(list, "staged-b"),
           "the hydrating replacement becomes the visible row selection");
   static_cast<void>(takeQtMessages(channels));
-  spin(80);
-  require(agentMessageCard(shell, "complete A card") == source &&
+  auto *loading = conversation ? conversation->findChild<QWidget *>(
+                                     QStringLiteral("conversationStagingOverlay"))
+                               : nullptr;
+  spin(350);
+  require(conversation && loading && loading->isVisible() &&
+              conversation->viewport()->childAt(
+                  conversation->viewport()->rect().center()) == loading &&
+              !loading->property("spinnerVisible").toBool() &&
+              agentMessageCard(shell, "complete A card") == source &&
               !agentMessageCard(shell, "partial B card") && heading &&
               heading->text() == "Complete A",
-          "a hydrating replacement leaves the complete outgoing surface "
-          "unchanged and exposes no partial provider cards");
+          "a hydrating replacement immediately covers the outgoing message "
+          "surface and exposes no partial provider cards or early spinner");
+  require(spinUntil(
+              [loading] {
+                return loading &&
+                       loading->property("spinnerVisible").toBool() &&
+                       loading->property("spinnerAnimationActive").toBool();
+              },
+              300),
+          "a thread still loading after half a second shows the centered "
+          "bounded spinner");
 
   markThreadReady(session, worker, "staged-b");
   require(spinUntil([&] {
             return agentMessageCard(shell, "partial B card") &&
                    !agentMessageCard(shell, "complete A card") && heading &&
-                   heading->text() == "Hydrating B";
+                   heading->text() == "Hydrating B" && loading &&
+                   !loading->isVisible() &&
+                   !loading->property("spinnerAnimationActive").toBool();
           }),
           "readiness replaces the staged surface once with the complete "
-          "incoming conversation and matching heading");
+          "incoming conversation, matching heading, and no running spinner");
 }
 
 void inactiveThreadNeverReactivatesAStaleTurn(Configuration &configuration) {

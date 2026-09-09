@@ -1534,6 +1534,9 @@ void ShellWidget::Impl::runGraphBinding() {
 void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
   if (graphPanesBound && boundGraphThread == selectedThread)
     return;
+  if (selectedThread && boundGraphThread != selectedThread)
+    middleRegion->conversation().beginThreadSelection(
+        selectedThread->id().canonical);
   boundGraphThread = std::move(selectedThread);
   graphPanesBound = true;
   if (auto threads = uiAdapter.threads(boundGraphThread))
@@ -1575,23 +1578,18 @@ bool ShellWidget::Impl::refreshConversation() {
   history.lastAuthoritativeCount = info->authoritativeItemCount;
 
   if (!info->readyForDisplay) {
+    if (!info->hydrationFailed) {
+      middleRegion->conversation().beginThreadSelection(threadId);
+      return true;
+    }
     middleRegion->conversation().setEmptyMessage(
-        info->hydrationFailed
-            ? QStringLiteral("Thread loading failed. Select Reload to retry.")
-            : QStringLiteral("Loading conversation…"));
-    // A cold selection may show one stable loading surface. When a complete
-    // conversation is already painted, retain it until the replacement is
-    // ready so the user never sees an empty intermediate layout. A terminal
-    // hydration failure is itself the final selected-thread presentation.
-    if (!presentedGraphThread || presentedGraphThread == boundGraphThread ||
-        info->hydrationFailed) {
-      middle::ConversationSnapshot loading;
-      loading.threadId = threadId;
-      static_cast<void>(middleRegion->conversation().reconcile(loading));
-      if (presentedGraphThread != boundGraphThread) {
-        presentedGraphThread = boundGraphThread;
-        renderedChrome.reset();
-      }
+        QStringLiteral("Thread loading failed. Select Reload to retry."));
+    middle::ConversationSnapshot failed;
+    failed.threadId = threadId;
+    static_cast<void>(middleRegion->conversation().reconcile(failed));
+    if (presentedGraphThread != boundGraphThread) {
+      presentedGraphThread = boundGraphThread;
+      renderedChrome.reset();
     }
     return true;
   }
