@@ -1781,6 +1781,14 @@ bool testStreamingAgentBecomesVisibleWithoutReselection() {
                        optimisticView.visualRect(liveAnswer).height() > 0,
                    "the optimistic live sequence exposes the final answer in "
                    "its settled Turn without reselection");
+  LayoutRequestProbe idleLayoutRequests(&optimisticView);
+  idleLayoutRequests.start();
+  spin(40);
+  idleLayoutRequests.active = false;
+  result &= expect(
+      idleLayoutRequests.count <= 4,
+      "the acknowledged prompt widget reaches layout quiescence after its "
+      "final answer arrives");
   return result;
 }
 

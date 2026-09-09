@@ -2417,8 +2417,11 @@ bool ConversationView::eventFilter(QObject *watched, QEvent *event) {
         card->property("conversationAnchorKey").toString().toStdString();
     captureCardInteractionState(key, card, false);
   }
-  if (card && event->type() == QEvent::LayoutRequest && !applying_ &&
-      !materializing_) {
+  // A row's root card is the view's geometry boundary. Measuring that root
+  // for a descendant QLabel request can change its QTextDocument width and
+  // post the same descendant request again, keeping an idle view busy.
+  if (card && widget == card && event->type() == QEvent::LayoutRequest &&
+      !applying_ && !materializing_) {
     const std::string key =
         card->property("conversationAnchorKey").toString().toStdString();
     const QModelIndex index = model_->indexForStableKey(key);
