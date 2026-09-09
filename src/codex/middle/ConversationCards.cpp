@@ -1234,6 +1234,21 @@ public:
     owner->update();
   }
 
+  void setVirtualTurnRootPresentation(bool fragmented) {
+    if (owner->property("virtualTurnRoot").toBool() == fragmented)
+      return;
+    owner->setProperty("virtualTurnRoot", fragmented);
+    const QMargins margins = layout->contentsMargins();
+    if (fragmented)
+      turnRootBottomMargin = margins.bottom();
+    layout->setContentsMargins(margins.left(), margins.top(), margins.right(),
+                               fragmented ? 0 : turnRootBottomMargin);
+    owner->style()->unpolish(owner);
+    owner->style()->polish(owner);
+    owner->updateGeometry();
+    owner->update();
+  }
+
   void setViewportVisible(bool visible) {
     if (viewportVisible == visible)
       return;
@@ -1762,6 +1777,7 @@ public:
   QVBoxLayout *nestedLayout = nullptr;
   bool hasVisibleNestedCards = false;
   bool authoritativeTurnActive = false;
+  int turnRootBottomMargin = 10;
 };
 
 ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent,
@@ -1795,6 +1811,10 @@ bool ConversationCard::setAuthoritativeTurnActive(bool active) {
 
 void ConversationCard::setNestedPresentation(bool nested) {
   impl_->setNestedConversationCard(nested);
+}
+
+void ConversationCard::setVirtualTurnRootPresentation(bool fragmented) {
+  impl_->setVirtualTurnRootPresentation(fragmented);
 }
 
 void ConversationCard::setNestedCards(

@@ -143,6 +143,47 @@ widget construction is involved. At that size, position lookup and one-row
 height update each take at most 15 Fenwick steps, and appending rows leaves the
 rebuild counter unchanged.
 
+## Item-view and passive-delegate contract
+
+`ConversationView` is a narrowly specialized `QAbstractItemView`. The model
+owns row identity and order; a Fenwick index maps content positions to
+variable-height rows; the view materializes only rows whose behavior currently
+requires a real control. It does not create placeholder widgets. Cached height
+records contain only stable key, width, and measured height and therefore
+cannot become presentation authority.
+
+Collapsed cards and text-only resting cards are painted by the item delegate.
+Its Markdown document cache is bounded to 128 visible/recent blocks. Hover,
+keyboard current-row movement, or a direct press promotes exactly that row to
+the established `ConversationCard`, so selection, copying, links, tooltips,
+focus, and controls continue to use their existing implementations. Local
+pending prompts and expanded command, file, and image surfaces remain real
+widgets because their animation, nested scrolling, file actions, and image
+controls are intrinsically interactive. Scrolling a promoted editor out of the
+bounded overscan stores only its fold and inner-command-scroll state before the
+widget is released.
+
+A canonical Turn is still flat in the model, but not visually flattened. The
+view paints the continuous outer You surface from the root row through the last
+presented nested row. Root content and nested cards remain independently
+virtualizable fragments; nested cards keep the established 12-pixel inset,
+and the outer padding, section gap, and active-Turn border are part of indexed
+row geometry. This preserves the visual ownership relationship without making
+one potentially unbounded Turn a single QWidget.
+
+The first delegate measurement in the persistent Debug/Xvfb configuration is:
+
+| Loaded rows | Initial reveal | Retained conversation widgets | Descendant QWidgets | Peak resident memory | 240-position sweep |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 320 | 9 ms | 0 | 8 | 85,488 KiB | 250.2 ms |
+| 1,280 | 16 ms | 0 | 8 | 86,332 KiB | 270.1 ms |
+
+This benchmark's rows are all in passive resting states. The 6.4% sweep-time
+increase for four times the history contrasts with the old fourfold QWidget
+population; work at each position is bounded by the viewport and the delegate's
+small document cache. Rich heterogeneous qualification adds only the real
+editors required by the visible interaction state.
+
 ## Qualification counters
 
 The final implementation reports at least these inspectable values on the

@@ -101,6 +101,9 @@ public:
   // Select the established nested-card presentation for a child, or clear it
   // when the card becomes a turn root or a standalone activity.
   void setNestedPresentation(bool nested);
+  // In a virtualized turn the view paints the continuous outer You surface;
+  // the root card keeps only its content and interaction geometry.
+  void setVirtualTurnRootPresentation(bool fragmented);
   void setNestedCards(const std::vector<ConversationCard *> &cards);
   // ConversationView supplies the retained child widgets in canonical order.
   // They stay in this existing nested layout while the thread is selected.

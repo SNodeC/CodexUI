@@ -3,6 +3,7 @@
 #include "codex/middle/ConversationView.h"
 
 #include <QAbstractSlider>
+#include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QEasingCurve>
@@ -10,7 +11,9 @@
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLayout>
+#include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScopedValueRollback>
@@ -18,6 +21,9 @@
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QStyleOptionFocusRect>
+#include <QStyleOptionViewItem>
+#include <QStyledItemDelegate>
+#include <QTextDocument>
 #include <QTimer>
 #include <QVariantAnimation>
 #include <QWheelEvent>
@@ -39,6 +45,29 @@ constexpr int NativeScrollLineStep = 20;
 constexpr int EstimatedCardHeight = 112;
 constexpr int MinimumMaterializationRows = 8;
 
+bool passiveWhenCollapsed(CardKind kind) noexcept {
+  return kind == CardKind::AgentActivity || kind == CardKind::Reasoning ||
+         kind == CardKind::Plan || kind == CardKind::GenericActivity;
+}
+
+bool eligibleForPassivePresentation(const VisibleCardData &card,
+                                    bool collapsed) noexcept {
+  if (card.kind == CardKind::LocalPrompt)
+    return false;
+  if (collapsed)
+    return true;
+  if (card.kind == CardKind::AgentMessage ||
+      card.kind == CardKind::AgentActivity ||
+      card.kind == CardKind::Reasoning || card.kind == CardKind::Plan ||
+      card.kind == CardKind::GenericActivity)
+    return true;
+  if (card.kind == CardKind::UserMessage) {
+    const auto *message = std::get_if<UserMessageData>(&card.payload);
+    return !message || message->imagePaths.empty();
+  }
+  return false;
+}
+
 QLabel *makeEmptyLabel(QWidget *parent) {
   auto *label =
       new QLabel(QStringLiteral("Conversation activity appears here."), parent);
@@ -52,6 +81,361 @@ QLabel *makeEmptyLabel(QWidget *parent) {
 void incrementProperty(QObject *object, const char *name) {
   object->setProperty(name, object->property(name).toULongLong() + 1);
 }
+
+QString text(std::string_view value) {
+  return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
+}
+
+struct PassiveBlock {
+  QString text;
+  bool markdown = false;
+  bool metadata = false;
+};
+
+struct PassivePresentation {
+  QString title;
+  QString status;
+  QColor background = QColor(QStringLiteral("#ffffff"));
+  QColor border = QColor(QStringLiteral("#d7dee8"));
+  QColor titleColor = QColor(QStringLiteral("#1d2633"));
+  std::vector<PassiveBlock> blocks;
+  int verticalMargin = 10;
+};
+
+QString planText(const PlanData &plan) {
+  if (!plan.legacyText.empty())
+    return text(plan.legacyText);
+  QStringList lines;
+  if (!plan.explanation.empty())
+    lines.push_back(text(plan.explanation));
+  if (!lines.empty() && !plan.steps.empty())
+    lines.push_back({});
+  for (const PlanStepData &step : plan.steps) {
+    const QString marker = step.status == "completed"    ? QStringLiteral("✓")
+                           : step.status == "inProgress" ? QStringLiteral("◉")
+                                                         : QStringLiteral("○");
+    lines.push_back(QStringLiteral("%1 %2").arg(marker, text(step.text)));
+  }
+  return lines.join(QLatin1Char('\n'));
+}
+
+QString genericDetail(const GenericActivityData &activity) {
+  QString value = activity.displayDetail.empty()
+                      ? QString::fromStdString(activity.raw.dump(2))
+                      : text(activity.displayDetail);
+  constexpr qsizetype MaximumCharacters = 4096;
+  if (value.size() <= MaximumCharacters)
+    return value;
+  value.truncate(MaximumCharacters);
+  return value + QStringLiteral("\n\n[Activity details truncated]");
+}
+
+PassivePresentation passivePresentation(const VisibleCardData &card) {
+  PassivePresentation result;
+  std::visit(
+      [&](const auto &payload) {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, UserMessageData>) {
+          result.title = QStringLiteral("You");
+          result.background = QColor(QStringLiteral("#eff5fe"));
+          result.border = QColor(QStringLiteral("#b7cff9"));
+          result.titleColor = QColor(QStringLiteral("#415882"));
+          result.blocks.push_back({text(payload.text), true, false});
+        } else if constexpr (std::is_same_v<Payload, AgentMessageData>) {
+          result.title = QStringLiteral("Codex");
+          result.status = payload.finalAnswer ? QStringLiteral("final answer")
+                                              : QStringLiteral("update");
+          result.background =
+              QColor(payload.finalAnswer ? QStringLiteral("#f4f3fd")
+                                         : QStringLiteral("#f9f4ea"));
+          result.border =
+              QColor(payload.finalAnswer ? QStringLiteral("#cec7f6")
+                                         : QStringLiteral("#e1cb9d"));
+          result.titleColor =
+              QColor(payload.finalAnswer ? QStringLiteral("#59507f")
+                                         : QStringLiteral("#6b5521"));
+          result.verticalMargin = payload.finalAnswer ? 10 : 8;
+          result.blocks.push_back({text(payload.text), true, false});
+        } else if constexpr (std::is_same_v<Payload, CommandExecutionData>) {
+          result.title = QStringLiteral("Command execution");
+          result.status = text(payload.status);
+          result.blocks.push_back({text(payload.command), false, false});
+          result.blocks.push_back({text(payload.output), false, false});
+        } else if constexpr (std::is_same_v<Payload, AgentActivityData>) {
+          result.title = QStringLiteral("Agent activity");
+          result.status = text(payload.status);
+          QStringList metadata;
+          if (!payload.tool.empty())
+            metadata.push_back(text(payload.tool));
+          if (!payload.receivers.empty()) {
+            QStringList receivers;
+            for (const std::string &receiver : payload.receivers)
+              receivers.push_back(text(receiver));
+            metadata.push_back(receivers.join(QStringLiteral(", ")));
+          }
+          if (!payload.model.empty())
+            metadata.push_back(text(payload.model));
+          if (!payload.childThreadId.empty())
+            metadata.push_back(
+                QStringLiteral("thread %1").arg(text(payload.childThreadId)));
+          result.blocks.push_back(
+              {metadata.join(QStringLiteral("  |  ")), false, true});
+          result.blocks.push_back({text(payload.prompt), false, false});
+          result.blocks.push_back({text(payload.resultText), true, false});
+        } else if constexpr (std::is_same_v<Payload, ReasoningData>) {
+          result.title = QStringLiteral("Reasoning");
+          result.blocks.push_back({text(payload.summary), true, false});
+        } else if constexpr (std::is_same_v<Payload, FileChangesData>) {
+          result.title = QStringLiteral("File changes");
+          result.status = text(payload.status);
+          QStringList lines;
+          for (const FileChangeData &change : payload.changes) {
+            QString line = text(change.path);
+            if (!change.kind.empty())
+              line += QStringLiteral("  ·  ") + text(change.kind);
+            if (change.additions && change.deletions)
+              line += QStringLiteral("  +%1 −%2")
+                          .arg(*change.additions)
+                          .arg(*change.deletions);
+            lines.push_back(line);
+          }
+          result.blocks.push_back(
+              {lines.join(QLatin1Char('\n')), false, false});
+        } else if constexpr (std::is_same_v<Payload, PlanData>) {
+          result.title = QStringLiteral("Plan");
+          result.blocks.push_back({planText(payload), true, false});
+        } else if constexpr (std::is_same_v<Payload, ImageGenerationData>) {
+          result.title = payload.status.empty() && payload.revisedPrompt.empty()
+                             ? QStringLiteral("Image")
+                             : QStringLiteral("Generated image");
+          result.status = text(payload.status);
+          result.blocks.push_back({text(payload.revisedPrompt), false, false});
+        } else if constexpr (std::is_same_v<Payload, GenericActivityData>) {
+          result.title = payload.type.empty() ? QStringLiteral("Activity")
+                                              : text(payload.type);
+          if (!result.title.isEmpty())
+            result.title[0] = result.title.front().toUpper();
+          result.status = text(payload.status);
+          result.blocks.push_back({genericDetail(payload), false, true});
+        } else if constexpr (std::is_same_v<Payload, LocalPromptData>) {
+          result.title = QStringLiteral("You");
+          result.blocks.push_back({text(payload.prompt), true, false});
+        }
+      },
+      card.payload);
+  std::erase_if(result.blocks,
+                [](const PassiveBlock &block) { return block.text.isEmpty(); });
+  return result;
+}
+
+class ConversationPassiveDelegate final : public QStyledItemDelegate {
+public:
+  explicit ConversationPassiveDelegate(QObject *parent)
+      : QStyledItemDelegate(parent) {}
+
+  QSize sizeHint(const QStyleOptionViewItem &option,
+                 const QModelIndex &index) const override {
+    return cardSize(option, index, true);
+  }
+
+  QSize cardSize(const QStyleOptionViewItem &option, const QModelIndex &index,
+                 bool collapsed) const {
+    const auto *conversation =
+        qobject_cast<const ConversationItemModel *>(index.model());
+    const ConversationItemModel::Row *row =
+        conversation ? conversation->row(index.row()) : nullptr;
+    if (!row)
+      return {};
+    const PassivePresentation presentation = passivePresentation(row->card);
+    int height = 24 + 2 * presentation.verticalMargin;
+    if (!collapsed) {
+      const int bodyWidth = std::max(1, option.rect.width() - 24);
+      bool first = true;
+      for (std::size_t block = 0; block < presentation.blocks.size(); ++block) {
+        const PassiveBlock &value = presentation.blocks[block];
+        QFont font = option.font;
+        if (value.metadata)
+          font.setPointSizeF(std::max(7.0, font.pointSizeF() - 1.0));
+        height += (first ? 6 : 6) +
+                  documentHeight(row->stableKey, block, value, bodyWidth, font);
+        first = false;
+      }
+    }
+    return {std::max(0, option.rect.width()), std::max(44, height)};
+  }
+
+  void paint(QPainter *painter, const QStyleOptionViewItem &option,
+             const QModelIndex &index) const override {
+    paintCard(painter, option, index, true);
+  }
+
+  void paintCard(QPainter *painter, const QStyleOptionViewItem &option,
+                 const QModelIndex &index, bool collapsed) const {
+    const auto *conversation =
+        qobject_cast<const ConversationItemModel *>(index.model());
+    const ConversationItemModel::Row *row =
+        conversation ? conversation->row(index.row()) : nullptr;
+    if (!painter || !row)
+      return;
+
+    const PassivePresentation presentation = passivePresentation(row->card);
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing);
+    const QRectF bounds = QRectF(option.rect).adjusted(0.5, 0.5, -0.5, -0.5);
+    if (option.viewItemPosition != QStyleOptionViewItem::Beginning) {
+      painter->setBrush(presentation.background);
+      painter->setPen(QPen(presentation.border, 1.0));
+      painter->drawRoundedRect(bounds, 10.0, 10.0);
+    }
+
+    QFont titleFont = option.font;
+    titleFont.setWeight(QFont::DemiBold);
+    painter->setFont(titleFont);
+    painter->setPen(presentation.titleColor);
+    const int top = option.rect.top() + presentation.verticalMargin;
+    const QRect titleRect(option.rect.left() + 12, top,
+                          std::max(0, option.rect.width() - 88), 24);
+    painter->drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter,
+                      option.fontMetrics.elidedText(presentation.title,
+                                                    Qt::ElideRight,
+                                                    titleRect.width()));
+
+    if (!presentation.status.isEmpty()) {
+      QFont statusFont = option.font;
+      statusFont.setPointSizeF(std::max(7.0, statusFont.pointSizeF() - 1.0));
+      painter->setFont(statusFont);
+      painter->setPen(QColor(QStringLiteral("#667085")));
+      const QRect statusRect(option.rect.right() - 205, top, 145, 24);
+      painter->drawText(statusRect, Qt::AlignRight | Qt::AlignVCenter,
+                        option.fontMetrics.elidedText(presentation.status,
+                                                      Qt::ElideRight,
+                                                      statusRect.width()));
+    }
+
+    if (!collapsed) {
+      int blockTop = top + 30;
+      const int bodyWidth = std::max(1, option.rect.width() - 24);
+      for (std::size_t block = 0; block < presentation.blocks.size(); ++block) {
+        const PassiveBlock &value = presentation.blocks[block];
+        QFont font = option.font;
+        if (value.metadata)
+          font.setPointSizeF(std::max(7.0, font.pointSizeF() - 1.0));
+        const int height =
+            documentHeight(row->stableKey, block, value, bodyWidth, font);
+        paintDocument(
+            painter, row->stableKey, block, value,
+            QRect(option.rect.left() + 12, blockTop, bodyWidth, height), font);
+        blockTop += height + 6;
+      }
+    }
+
+    painter->setPen(QPen(QColor(QStringLiteral("#667085")), 1.3));
+    painter->setBrush(Qt::NoBrush);
+    const qreal copyLeft = option.rect.right() - 43.0;
+    painter->drawRoundedRect(
+        QRectF(copyLeft, option.rect.top() + 14.0, 8.0, 9.0), 1.0, 1.0);
+    painter->drawRoundedRect(
+        QRectF(copyLeft + 3.0, option.rect.top() + 17.0, 8.0, 9.0), 1.0, 1.0);
+    QPainterPath chevron;
+    if (collapsed) {
+      chevron.moveTo(option.rect.right() - 15.0, top + 7.0);
+      chevron.lineTo(option.rect.right() - 19.0, top + 12.0);
+      chevron.lineTo(option.rect.right() - 15.0, top + 17.0);
+    } else {
+      chevron.moveTo(option.rect.right() - 20.0, top + 9.0);
+      chevron.lineTo(option.rect.right() - 15.0, top + 14.0);
+      chevron.lineTo(option.rect.right() - 10.0, top + 9.0);
+    }
+    painter->drawPath(chevron);
+    if (row->card.activeWork.value_or(false)) {
+      painter->setPen(QPen(QColor(QStringLiteral("#98a2b3")), 2.0));
+      painter->drawRoundedRect(bounds.adjusted(0.5, 0.5, -0.5, -0.5), 9.0, 9.0);
+    }
+    painter->restore();
+  }
+
+private:
+  struct DocumentRecord {
+    QString text;
+    int width = 0;
+    bool markdown = false;
+    QFont font;
+    std::unique_ptr<QTextDocument> document;
+    std::uint64_t used = 0;
+  };
+
+  QTextDocument *document(const std::string &stableKey, std::size_t block,
+                          const PassiveBlock &value, int width,
+                          const QFont &font) const {
+    const std::string key = stableKey + ':' + std::to_string(block);
+    auto found = documents_.find(key);
+    if (found == documents_.end() || found->second.text != value.text ||
+        found->second.width != width ||
+        found->second.markdown != value.markdown ||
+        found->second.font != font) {
+      if (found != documents_.end())
+        documents_.erase(found);
+      if (documents_.size() >= 128) {
+        const auto oldest =
+            std::ranges::min_element(documents_, {}, [](const auto &entry) {
+              return entry.second.used;
+            });
+        if (oldest != documents_.end())
+          documents_.erase(oldest);
+      }
+      DocumentRecord record;
+      record.text = value.text;
+      record.width = width;
+      record.markdown = value.markdown;
+      record.font = font;
+      record.document = std::make_unique<QTextDocument>();
+      record.document->setDocumentMargin(0);
+      record.document->setDefaultFont(font);
+      record.document->setDefaultStyleSheet(
+          QStringLiteral("a{color:#5471a6;text-decoration:none;}"));
+      if (value.markdown)
+        record.document->setMarkdown(value.text,
+                                     QTextDocument::MarkdownFeatures(
+                                         QTextDocument::MarkdownDialectGitHub) |
+                                         QTextDocument::MarkdownNoHTML);
+      else
+        record.document->setPlainText(value.text);
+      record.document->setTextWidth(width);
+      found = documents_.emplace(key, std::move(record)).first;
+    }
+    found->second.used = ++documentUse_;
+    return found->second.document.get();
+  }
+
+  int documentHeight(const std::string &stableKey, std::size_t block,
+                     const PassiveBlock &value, int width,
+                     const QFont &font) const {
+    return std::max(
+        1,
+        static_cast<int>(std::ceil(
+            document(stableKey, block, value, width, font)->size().height())) +
+            (value.markdown ? 4 : 0));
+  }
+
+  void paintDocument(QPainter *painter, const std::string &stableKey,
+                     std::size_t block, const PassiveBlock &value,
+                     const QRect &rect, const QFont &font) const {
+    QTextDocument *valueDocument =
+        document(stableKey, block, value, rect.width(), font);
+    QAbstractTextDocumentLayout::PaintContext context;
+    context.palette.setColor(
+        QPalette::Text, value.metadata ? QColor(QStringLiteral("#667085"))
+                                       : QColor(QStringLiteral("#1d2633")));
+    context.clip = QRect(QPoint{}, rect.size());
+    painter->save();
+    painter->translate(rect.topLeft());
+    valueDocument->documentLayout()->draw(painter, context);
+    painter->restore();
+  }
+
+  mutable std::unordered_map<std::string, DocumentRecord> documents_;
+  mutable std::uint64_t documentUse_ = 0;
+};
 
 } // namespace
 
@@ -67,6 +451,8 @@ ConversationView::ConversationView(QWidget *parent)
   setSelectionBehavior(QAbstractItemView::SelectRows);
   setTabKeyNavigation(true);
   setModel(model_);
+  setItemDelegate(new ConversationPassiveDelegate(this));
+  setMouseTracking(true);
   verticalScrollBar()->setSingleStep(NativeScrollLineStep);
   viewport()->setAutoFillBackground(false);
 
@@ -191,6 +577,7 @@ void ConversationView::setPresentationOptions(PresentationOptions options) {
       model_->setVisibility({options.showReasoning, options.showCodexUpdates});
   if (!visibilityChanged)
     return;
+  rebuildSectionRanges();
   rebuildHeightIndex();
   updateScrollRange();
   if (follow)
@@ -260,6 +647,7 @@ bool ConversationView::reconcileOwned(ConversationSnapshot snapshot) {
   stopFollowingAnimation();
 
   const bool changed = model_->reconcile(std::move(snapshot));
+  rebuildSectionRanges();
   loadMore_->setVisible(model_->hasMore());
   empty_->setVisible(model_->rowCount() == 0);
 
@@ -413,6 +801,23 @@ void ConversationView::choosePendingStageRows() {
     VisibleCardData *card = pendingCard(key);
     if (!card || !cardVisible(*card))
       continue;
+    bool collapsed = false;
+    if (const auto retained = cardCollapsedStates_.find(key);
+        retained != cardCollapsedStates_.end()) {
+      collapsed = retained->second;
+    } else if (card->kind == CardKind::CommandExecution) {
+      collapsed = !presentationOptions_.commandsInitiallyExpanded;
+    } else if (card->kind == CardKind::ImageGeneration) {
+      collapsed = !presentationOptions_.imagesInitiallyExpanded;
+    } else if (card->kind == CardKind::FileChanges) {
+      collapsed = !presentationOptions_.fileChangesInitiallyExpanded;
+    } else {
+      collapsed = card->kind != CardKind::UserMessage &&
+                  card->kind != CardKind::AgentMessage &&
+                  card->kind != CardKind::LocalPrompt;
+    }
+    if (eligibleForPassivePresentation(*card, collapsed))
+      continue;
     const auto retained = materializedCards_.find(key);
     if (retained != materializedCards_.end() &&
         retained->second->canApply(*card))
@@ -559,6 +964,8 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
   const bool becomingAuthoritative =
       before->card.kind == CardKind::LocalPrompt &&
       card.kind == CardKind::UserMessage && card.target;
+  const bool paintedInViewport =
+      wasPresented && rowRect(index.row()).intersects(viewport()->rect());
   nodegraph::NodeRef authoritativeTarget =
       becomingAuthoritative ? card.target : nodegraph::NodeRef{};
   ConversationCard *visibleCard = cardForStableKey(key);
@@ -581,9 +988,9 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
   const bool presentationChanged = after && after->presented != wasPresented;
   if (presentationChanged) {
     if (after->presented) {
-      static_cast<void>(
-          heights_.setHeight(static_cast<std::size_t>(index.row()),
-                             estimatedCardHeight(after->card) + CardSpacing));
+      static_cast<void>(heights_.setHeight(
+          static_cast<std::size_t>(index.row()),
+          estimatedCardHeight(after->card) + rowSpacing(index.row())));
     } else {
       static_cast<void>(
           heights_.setHeight(static_cast<std::size_t>(index.row()), 0));
@@ -593,6 +1000,7 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
         visibleCard = nullptr;
       }
     }
+    rebuildSectionRanges();
     updateScrollRange();
     updateMaterialization(true);
   } else if (visibleCard && impact == PresentationImpact::GeometryChanged) {
@@ -600,9 +1008,22 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
     static_cast<void>(updateMeasuredHeight(index.row(), height, true));
   } else if (visibleCard && impact == PresentationImpact::PaintOnly) {
     visibleCard->update();
+  } else if (after && paintedInViewport && rowUsesPassiveDelegate(*after)) {
+    heightCache_.erase(key);
+    QStyleOptionViewItem option;
+    option.initFrom(this);
+    option.rect = QRect(0, 0, rowWidth(*after), 0);
+    const auto *delegate =
+        static_cast<const ConversationPassiveDelegate *>(itemDelegate());
+    const int height =
+        delegate->cardSize(option, index, rowCollapsed(*after)).height();
+    impact = updateMeasuredHeight(index.row(), height, true)
+                 ? PresentationImpact::GeometryChanged
+                 : PresentationImpact::PaintOnly;
+    viewport()->update(rowRect(index.row()));
   }
 
-  if (visibleCard)
+  if (visibleCard || paintedInViewport)
     incrementProperty(this, "targetedVisibleCardUpdates");
   else
     incrementProperty(this, "targetedOffscreenCardUpdates");
@@ -616,6 +1037,22 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
 }
 
 int ConversationView::estimatedCardHeight(const VisibleCardData &card) const {
+  const std::string key = stableKey(card.key);
+  bool collapsed = false;
+  if (const auto retained = cardCollapsedStates_.find(key);
+      retained != cardCollapsedStates_.end()) {
+    collapsed = retained->second;
+  } else if (card.kind == CardKind::CommandExecution) {
+    collapsed = !presentationOptions_.commandsInitiallyExpanded;
+  } else if (card.kind == CardKind::ImageGeneration) {
+    collapsed = !presentationOptions_.imagesInitiallyExpanded;
+  } else if (card.kind == CardKind::FileChanges) {
+    collapsed = !presentationOptions_.fileChangesInitiallyExpanded;
+  } else {
+    collapsed = passiveWhenCollapsed(card.kind);
+  }
+  if (collapsed && card.kind != CardKind::LocalPrompt)
+    return 44;
   switch (card.kind) {
   case CardKind::CommandExecution:
     return 156;
@@ -634,6 +1071,59 @@ int ConversationView::estimatedCardHeight(const VisibleCardData &card) const {
 int ConversationView::rowWidth(const ConversationItemModel::Row &row) const {
   return std::max(0, viewport()->width() -
                          (row.nested ? 2 * NestedCardIndent : 0));
+}
+
+bool ConversationView::rowUsesPassiveDelegate(
+    const ConversationItemModel::Row &row) const {
+  return eligibleForPassivePresentation(row.card, rowCollapsed(row));
+}
+
+bool ConversationView::rowCollapsed(
+    const ConversationItemModel::Row &row) const {
+  if (const auto retained = cardCollapsedStates_.find(row.stableKey);
+      retained != cardCollapsedStates_.end())
+    return retained->second;
+  if (row.card.kind == CardKind::CommandExecution)
+    return !presentationOptions_.commandsInitiallyExpanded;
+  if (row.card.kind == CardKind::ImageGeneration)
+    return !presentationOptions_.imagesInitiallyExpanded;
+  if (row.card.kind == CardKind::FileChanges)
+    return !presentationOptions_.fileChangesInitiallyExpanded;
+  return row.card.kind != CardKind::UserMessage &&
+         row.card.kind != CardKind::AgentMessage &&
+         row.card.kind != CardKind::LocalPrompt;
+}
+
+void ConversationView::rebuildSectionRanges() {
+  sectionRanges_.clear();
+  sectionRanges_.reserve(static_cast<std::size_t>(model_->rowCount()));
+  for (int rowIndex = 0; rowIndex < model_->rowCount(); ++rowIndex) {
+    const ConversationItemModel::Row *row = model_->row(rowIndex);
+    if (!row || !row->presented)
+      continue;
+    SectionRange &range = sectionRanges_[row->sectionKey];
+    if (range.first < 0)
+      range.first = rowIndex;
+    range.last = rowIndex;
+    if (row->turnRoot)
+      range.root = rowIndex;
+    range.active = range.active || (row->turnRoot && row->activeTurn);
+  }
+}
+
+int ConversationView::rowSpacing(int rowIndex) const {
+  const ConversationItemModel::Row *row = model_->row(rowIndex);
+  if (!row)
+    return CardSpacing;
+  const auto found = sectionRanges_.find(row->sectionKey);
+  if (found == sectionRanges_.end() || found->second.root < 0 ||
+      found->second.last <= found->second.root)
+    return CardSpacing;
+  if (rowIndex == found->second.root)
+    return 14;
+  if (rowIndex == found->second.last)
+    return CardSpacing + 10;
+  return CardSpacing;
 }
 
 void ConversationView::rebuildHeightIndex() {
@@ -658,7 +1148,7 @@ void ConversationView::rebuildHeightIndex() {
     } else {
       height = estimatedCardHeight(row->card);
     }
-    extents.push_back(std::max(1, height) + CardSpacing);
+    extents.push_back(std::max(1, height) + rowSpacing(rowIndex));
   }
   heights_.assign(extents);
   setProperty("conversationHeightIndexRebuilds",
@@ -723,7 +1213,7 @@ QRect ConversationView::rowRect(int rowIndex) const {
   const int x = row->nested ? NestedCardIndent : 0;
   return {x - horizontalScrollBar()->value(),
           static_cast<int>(std::clamp<qint64>(viewportTop, INT_MIN, INT_MAX)),
-          rowWidth(*row), std::max(1, extent - CardSpacing)};
+          rowWidth(*row), std::max(1, extent - rowSpacing(rowIndex))};
 }
 
 int ConversationView::measureCard(ConversationCard *card, int width) const {
@@ -766,7 +1256,7 @@ bool ConversationView::updateMeasuredHeight(int rowIndex, int cardHeight,
   heightCache_.insert_or_assign(row->stableKey,
                                 HeightRecord{rowWidth(*row), cardHeight});
   if (!heights_.setHeight(static_cast<std::size_t>(rowIndex),
-                          std::max(1, cardHeight) + CardSpacing))
+                          std::max(1, cardHeight) + rowSpacing(rowIndex)))
     return false;
   incrementProperty(this, "conversationLocalGeometryPasses");
   setProperty("conversationHeightIndexUpdateSteps",
@@ -836,18 +1326,40 @@ void ConversationView::configureCardForRow(
     ConversationCard *card, const ConversationItemModel::Row &row) {
   if (!card)
     return;
+  const auto section = sectionRanges_.find(row.sectionKey);
+  const bool fragmentedRoot = row.turnRoot && section != sectionRanges_.end() &&
+                              section->second.last > section->second.root;
   card->setProperty("turnContainer", row.turnRoot);
   card->setNestedCards({});
   card->setNestedPresentation(row.nested);
-  card->setAuthoritativeTurnActive(row.turnRoot && row.activeTurn);
+  card->setVirtualTurnRootPresentation(fragmentedRoot);
+  card->setAuthoritativeTurnActive(row.turnRoot && row.activeTurn &&
+                                   !fragmentedRoot);
 }
 
-ConversationCard *ConversationView::materializeRow(int rowIndex) {
+ConversationCard *ConversationView::materializeRow(int rowIndex,
+                                                   bool forInteraction) {
   const ConversationItemModel::Row *row = model_->row(rowIndex);
   if (!row || !row->presented)
     return nullptr;
   if (ConversationCard *retained = cardForStableKey(row->stableKey))
     return retained;
+
+  if (!forInteraction && rowUsesPassiveDelegate(*row)) {
+    QStyleOptionViewItem option;
+    option.initFrom(this);
+    option.rect = QRect(0, 0, rowWidth(*row), 0);
+    const auto *delegate =
+        static_cast<const ConversationPassiveDelegate *>(itemDelegate());
+    const int height =
+        delegate->cardSize(option, model_->index(rowIndex), rowCollapsed(*row))
+            .height();
+    heightCache_.insert_or_assign(row->stableKey,
+                                  HeightRecord{rowWidth(*row), height});
+    static_cast<void>(heights_.setHeight(static_cast<std::size_t>(rowIndex),
+                                         height + rowSpacing(rowIndex)));
+    return nullptr;
+  }
 
   ConversationCard *card = nullptr;
   if (const auto staged = stagedCards_.find(row->stableKey);
@@ -866,7 +1378,7 @@ ConversationCard *ConversationView::materializeRow(int rowIndex) {
   heightCache_.insert_or_assign(row->stableKey,
                                 HeightRecord{rowWidth(*row), height});
   static_cast<void>(heights_.setHeight(static_cast<std::size_t>(rowIndex),
-                                       height + CardSpacing));
+                                       height + rowSpacing(rowIndex)));
   materializedCards_.emplace(row->stableKey, card);
   card->setGeometry(rowRect(rowIndex));
   card->show();
@@ -1340,9 +1852,160 @@ bool ConversationView::eventFilter(QObject *watched, QEvent *event) {
   return QAbstractItemView::eventFilter(watched, event);
 }
 
+void ConversationView::currentChanged(const QModelIndex &current,
+                                      const QModelIndex &previous) {
+  QAbstractItemView::currentChanged(current, previous);
+  if (!current.isValid() || current.model() != model_)
+    return;
+  const Anchor anchor = captureAnchor();
+  const bool follow = mode_ == Mode::Following;
+  const qint64 before = heights_.totalHeight();
+  static_cast<void>(materializeRow(current.row(), true));
+  if (before != heights_.totalHeight()) {
+    updateScrollRange();
+    if (follow)
+      setScrollValue(verticalScrollBar()->maximum());
+    else
+      restoreAnchor(anchor);
+  }
+  layoutMaterializedCards();
+  updateMaterializationProperties();
+}
+
+void ConversationView::mouseMoveEvent(QMouseEvent *event) {
+  const QModelIndex index = indexAt(event->position().toPoint());
+  if (index.isValid() &&
+      !cardForStableKey(index.data(ConversationItemModel::StableKeyRole)
+                            .toString()
+                            .toStdString())) {
+    const Anchor anchor = captureAnchor();
+    const bool follow = mode_ == Mode::Following;
+    const qint64 before = heights_.totalHeight();
+    static_cast<void>(materializeRow(index.row(), true));
+    if (before != heights_.totalHeight()) {
+      updateScrollRange();
+      if (follow)
+        setScrollValue(verticalScrollBar()->maximum());
+      else
+        restoreAnchor(anchor);
+    }
+    layoutMaterializedCards();
+    updateMaterializationProperties();
+  }
+  QAbstractItemView::mouseMoveEvent(event);
+}
+
+void ConversationView::mousePressEvent(QMouseEvent *event) {
+  const QPoint viewportPosition = event->position().toPoint();
+  const QModelIndex index = indexAt(viewportPosition);
+  if (!index.isValid()) {
+    QAbstractItemView::mousePressEvent(event);
+    return;
+  }
+  setCurrentIndex(index);
+  const ConversationItemModel::Row *row = model_->row(index.row());
+  ConversationCard *card = row ? cardForStableKey(row->stableKey) : nullptr;
+  if (!card) {
+    const Anchor anchor = captureAnchor();
+    const bool follow = mode_ == Mode::Following;
+    const qint64 before = heights_.totalHeight();
+    card = materializeRow(index.row(), true);
+    if (before != heights_.totalHeight()) {
+      updateScrollRange();
+      if (follow)
+        setScrollValue(verticalScrollBar()->maximum());
+      else
+        restoreAnchor(anchor);
+    }
+    layoutMaterializedCards();
+    updateMaterializationProperties();
+  }
+  if (!card) {
+    QAbstractItemView::mousePressEvent(event);
+    return;
+  }
+
+  const QPoint cardPosition = card->mapFrom(viewport(), viewportPosition);
+  QWidget *target = card->childAt(cardPosition);
+  if (!target)
+    target = card;
+  const QPoint localPosition = target->mapFrom(viewport(), viewportPosition);
+  QMouseEvent forwarded(event->type(), QPointF(localPosition),
+                        event->scenePosition(), event->globalPosition(),
+                        event->button(), event->buttons(), event->modifiers(),
+                        event->pointingDevice());
+  QApplication::sendEvent(target, &forwarded);
+  event->setAccepted(forwarded.isAccepted());
+}
+
 void ConversationView::paintEvent(QPaintEvent *event) {
   QPainter painter(viewport());
   painter.setClipRegion(event->region());
+  if (!heights_.empty() && heights_.totalHeight() > 0) {
+    const qint64 firstY = std::max<qint64>(0, verticalScrollBar()->value() -
+                                                  leadingChromeHeight());
+    const qint64 lastY =
+        std::min<qint64>(heights_.totalHeight() - 1,
+                         verticalScrollBar()->value() - leadingChromeHeight() +
+                             std::max(0, viewport()->height() - 1));
+    if (lastY >= firstY) {
+      const int first = static_cast<int>(heights_.rowAt(firstY));
+      const int last = static_cast<int>(heights_.rowAt(lastY));
+      std::unordered_set<std::string> paintedSections;
+      for (int rowIndex = first; rowIndex <= last; ++rowIndex) {
+        const ConversationItemModel::Row *row = model_->row(rowIndex);
+        if (!row || !row->presented ||
+            !paintedSections.insert(row->sectionKey).second)
+          continue;
+        const auto section = sectionRanges_.find(row->sectionKey);
+        if (section == sectionRanges_.end() || section->second.root < 0 ||
+            section->second.last <= section->second.root)
+          continue;
+        const SectionRange &range = section->second;
+        const qreal top = static_cast<qreal>(leadingChromeHeight()) +
+                          static_cast<qreal>(heights_.top(
+                              static_cast<std::size_t>(range.root))) -
+                          verticalScrollBar()->value();
+        const qreal bottom =
+            static_cast<qreal>(leadingChromeHeight()) +
+            static_cast<qreal>(
+                heights_.top(static_cast<std::size_t>(range.last))) +
+            heights_.height(static_cast<std::size_t>(range.last)) -
+            rowSpacing(range.last) + 10 - verticalScrollBar()->value();
+        const QRectF surface(0.5, top + 0.5,
+                             std::max(0, viewport()->width()) - 1.0,
+                             std::max<qreal>(1.0, bottom - top - 1.0));
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setBrush(QColor(QStringLiteral("#eff5fe")));
+        painter.setPen(QPen(QColor(range.active ? QStringLiteral("#6f98e8")
+                                                : QStringLiteral("#b7cff9")),
+                            range.active ? 2.0 : 1.0));
+        painter.drawRoundedRect(surface, 8.0, 8.0);
+      }
+      for (int rowIndex = first; rowIndex <= last; ++rowIndex) {
+        const ConversationItemModel::Row *row = model_->row(rowIndex);
+        if (!row || !row->presented || !rowUsesPassiveDelegate(*row) ||
+            cardForStableKey(row->stableKey))
+          continue;
+        QStyleOptionViewItem option;
+        option.initFrom(this);
+        option.rect = rowRect(rowIndex);
+        const auto section = sectionRanges_.find(row->sectionKey);
+        if (section != sectionRanges_.end() &&
+            section->second.root == rowIndex &&
+            section->second.last > section->second.root)
+          option.viewItemPosition = QStyleOptionViewItem::Beginning;
+        if (!option.rect.intersects(event->rect()))
+          continue;
+        if (selectionModel() &&
+            selectionModel()->isSelected(model_->index(rowIndex)))
+          option.state |= QStyle::State_Selected;
+        static_cast<ConversationPassiveDelegate *>(itemDelegate())
+            ->paintCard(&painter, option, model_->index(rowIndex),
+                        rowCollapsed(*row));
+      }
+    }
+  }
   if (hasFocus() && currentIndex().isValid()) {
     QStyleOptionFocusRect option;
     option.initFrom(this);
@@ -1368,7 +2031,7 @@ void ConversationView::resizeEvent(QResizeEvent *event) {
     const int height = measureCard(card, rowWidth(*row));
     heightCache_.insert_or_assign(key, HeightRecord{rowWidth(*row), height});
     static_cast<void>(heights_.setHeight(static_cast<std::size_t>(index.row()),
-                                         height + CardSpacing));
+                                         height + rowSpacing(index.row())));
   }
   updateScrollRange();
   if (follow)

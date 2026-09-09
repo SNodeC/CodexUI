@@ -23,6 +23,7 @@ class QPushButton;
 class QResizeEvent;
 class QTimer;
 class QVariantAnimation;
+class QMouseEvent;
 class QWheelEvent;
 
 namespace codexui::codex::middle {
@@ -108,6 +109,10 @@ protected:
   void updateGeometries() override;
   void scrollContentsBy(int dx, int dy) override;
   bool eventFilter(QObject *watched, QEvent *event) override;
+  void currentChanged(const QModelIndex &current,
+                      const QModelIndex &previous) override;
+  void mouseMoveEvent(QMouseEvent *event) override;
+  void mousePressEvent(QMouseEvent *event) override;
   void paintEvent(QPaintEvent *event) override;
   void resizeEvent(QResizeEvent *event) override;
   void wheelEvent(QWheelEvent *event) override;
@@ -139,6 +144,13 @@ private:
     bool activeTurn = false;
   };
 
+  struct SectionRange {
+    int first = -1;
+    int last = -1;
+    int root = -1;
+    bool active = false;
+  };
+
   [[nodiscard]] bool reconcileOwned(ConversationSnapshot snapshot);
   [[nodiscard]] std::optional<PresentationImpact>
   applyCardPresentationOwned(VisibleCardData card);
@@ -154,8 +166,13 @@ private:
   [[nodiscard]] bool applyWheel(QWheelEvent *event);
 
   void rebuildHeightIndex();
+  void rebuildSectionRanges();
   [[nodiscard]] int estimatedCardHeight(const VisibleCardData &card) const;
   [[nodiscard]] int rowWidth(const ConversationItemModel::Row &row) const;
+  [[nodiscard]] bool
+  rowUsesPassiveDelegate(const ConversationItemModel::Row &row) const;
+  [[nodiscard]] bool rowCollapsed(const ConversationItemModel::Row &row) const;
+  [[nodiscard]] int rowSpacing(int row) const;
   [[nodiscard]] QRect rowRect(int row) const;
   [[nodiscard]] int measureCard(ConversationCard *card, int width) const;
   [[nodiscard]] bool updateMeasuredHeight(int row, int cardHeight,
@@ -166,7 +183,8 @@ private:
 
   void updateMaterialization(bool preserveAnchor = true);
   [[nodiscard]] std::pair<int, int> materializationRows() const;
-  [[nodiscard]] ConversationCard *materializeRow(int row);
+  [[nodiscard]] ConversationCard *materializeRow(int row,
+                                                 bool forInteraction = false);
   void releaseUnneededCards(int firstRow, int lastRow);
   void releaseCard(const std::string &key, ConversationCard *card);
   void releaseAllCards();
@@ -207,6 +225,7 @@ private:
   std::unordered_map<std::string, ConversationCard *> stagedCards_;
   std::unordered_map<std::string, int> stagedHeights_;
   std::unordered_map<std::string, HeightRecord> heightCache_;
+  std::unordered_map<std::string, SectionRange> sectionRanges_;
   std::unordered_map<std::string, bool> cardCollapsedStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>
       commandOutputStates_;

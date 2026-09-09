@@ -5,6 +5,7 @@
 
 #include <QApplication>
 #include <QElapsedTimer>
+#include <QMouseEvent>
 #include <QScrollBar>
 
 #include <algorithm>
@@ -90,7 +91,7 @@ bool viewportProportionalFoundation() {
   const int initialWidgets = view.materializedCardCount();
   result &= expect(view.conversationModel()->rowCount() == 10'000,
                    "the item model indexes all canonical rows");
-  result &= expect(initialWidgets > 0 && initialWidgets <= 48,
+  result &= expect(initialWidgets <= 48,
                    "initial QWidget count is bounded by the viewport");
   result &= expect(view.findChildren<ConversationCard *>().size() <= 48,
                    "history has no placeholder or hidden QWidget per row");
@@ -149,7 +150,6 @@ bool viewportProportionalFoundation() {
              "offscreen delta performs no QWidget construction");
 
   const auto visibleIdentity = firstVisible(view);
-  ConversationCard *visible = materializedCard(view, visibleIdentity.first);
   const QModelIndex visibleIndex =
       view.conversationModel()->indexForStableKey(visibleIdentity.first);
   VisibleCardData visibleUpdate =
@@ -158,15 +158,19 @@ bool viewportProportionalFoundation() {
       std::string(240, 'x');
   const qulonglong offscreenBefore =
       view.property("targetedOffscreenCardUpdates").toULongLong();
+  const qulonglong visibleConstructionsBefore =
+      view.property("conversationCardConstructions").toULongLong();
   const auto visibleImpact =
       view.applyCardPresentation(std::move(visibleUpdate));
   settle();
   result &= expect(
-      visible && materializedCard(view, visibleIdentity.first) == visible &&
+      materializedCard(view, visibleIdentity.first) == nullptr &&
           visibleImpact == PresentationImpact::GeometryChanged &&
           view.property("targetedOffscreenCardUpdates").toULongLong() ==
-              offscreenBefore,
-      "one visible stream update mutates only its retained row");
+              offscreenBefore &&
+          view.property("conversationCardConstructions").toULongLong() ==
+              visibleConstructionsBefore,
+      "one visible stream update invalidates only its passive delegate row");
   result &= expect(firstVisible(view).second == visibleIdentity.second,
                    "visible height change preserves the exact painted anchor");
   return result;
@@ -218,14 +222,70 @@ bool atomicPagingAndFollowingArrival() {
   return result;
 }
 
+bool virtualTurnSurfaceAndInteractivePromotion() {
+  ConversationSnapshot snapshot;
+  snapshot.threadId = "turn-surface";
+  VisibleCardData root{AuthoritativeItemKey{"turn-surface", "turn", "root"},
+                       CardKind::UserMessage,
+                       "turn-surface",
+                       "turn",
+                       "root",
+                       UserMessageData{"Question", {}}};
+  VisibleCardData nested{AuthoritativeItemKey{"turn-surface", "turn", "answer"},
+                         CardKind::AgentMessage,
+                         "turn-surface",
+                         "turn",
+                         "answer",
+                         AgentMessageData{"Answer", true}};
+  snapshot.sections.push_back(
+      {"turn-section", "turn", {root, nested}, root.key});
+
+  ConversationView view;
+  view.resize(820, 600);
+  view.show();
+  bool result =
+      expect(view.reconcile(snapshot), "virtual Turn/You fixture reconciles");
+  settle();
+  const QModelIndex rootIndex = view.conversationModel()->index(0);
+  const QModelIndex nestedIndex = view.conversationModel()->index(1);
+  const QRect rootRect = view.visualRect(rootIndex);
+  const QRect nestedRect = view.visualRect(nestedIndex);
+  result &= expect(rootRect.left() == 0 && nestedRect.left() == 12 &&
+                       nestedRect.width() == rootRect.width() - 24 &&
+                       nestedRect.top() > rootRect.bottom(),
+                   "flat rows retain the established nested turn geometry");
+  const QImage painted = view.viewport()->grab().toImage();
+  const int sampleY =
+      std::clamp(rootRect.bottom() + 3, 0, std::max(0, painted.height() - 1));
+  const QColor turnSurface = painted.pixelColor(4, sampleY);
+  result &= expect(turnSurface.blue() > turnSurface.red(),
+                   "the view paints the continuous blue You turn enclosure");
+
+  const QPoint hover = rootRect.center();
+  QMouseEvent move(QEvent::MouseMove, QPointF(hover), QPointF(hover),
+                   view.viewport()->mapToGlobal(hover), Qt::NoButton,
+                   Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(view.viewport(), &move);
+  settle();
+  ConversationCard *promoted = materializedCard(view, stableKey(root.key));
+  result &= expect(promoted && promoted->property("virtualTurnRoot").toBool() &&
+                       promoted->parentWidget() == view.viewport(),
+                   "hover promotes only the interactive root fragment to a "
+                   "real viewport editor");
+  result &= expect(view.materializedCardCount() == 1,
+                   "interactive promotion remains row-local and bounded");
+  return result;
+}
+
 } // namespace
 } // namespace codexui::codex::middle
 
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
   using namespace codexui::codex::middle;
-  const bool result =
-      viewportProportionalFoundation() && atomicPagingAndFollowingArrival();
+  const bool result = viewportProportionalFoundation() &&
+                      atomicPagingAndFollowingArrival() &&
+                      virtualTurnSurfaceAndInteractivePromotion();
   if (result)
     std::cout << "Conversation virtualization tests passed\n";
   return result ? EXIT_SUCCESS : EXIT_FAILURE;
