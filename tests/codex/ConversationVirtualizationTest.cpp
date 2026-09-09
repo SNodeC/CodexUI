@@ -208,18 +208,19 @@ bool targetedVisibilityChangeIsLocal() {
       view.property("conversationCardConstructions").toULongLong();
   const auto impact = view.applyCardPresentation(finalAnswer);
   settle();
-  result &= expect(
+  const bool localVisibilityPass =
       impact == PresentationImpact::GeometryChanged &&
-          index.data(ConversationItemModel::PresentedRole).toBool() &&
-          view.property("conversationSectionRangeRebuilds").toULongLong() ==
-              sectionRebuilds &&
-          view.conversationModel()
-                  ->property("modelIndexRebuildCount")
-                  .toULongLong() == indexRebuilds &&
-          view.property("conversationCardConstructions").toULongLong() ==
-              constructions &&
-          view.property("conversationHeightIndexUpdateSteps").toULongLong() <=
-              15,
+      index.data(ConversationItemModel::PresentedRole).toBool() &&
+      view.property("conversationSectionRangeRebuilds").toULongLong() ==
+          sectionRebuilds &&
+      view.conversationModel()
+              ->property("modelIndexRebuildCount")
+              .toULongLong() == indexRebuilds &&
+      view.property("conversationCardConstructions").toULongLong() ==
+          constructions &&
+      view.property("conversationHeightIndexUpdateSteps").toULongLong() <= 15;
+  result &= expect(
+      localVisibilityPass,
       "final-answer visibility updates only its row and logarithmic height "
       "index");
 
@@ -342,11 +343,12 @@ bool selectionFocusAndOneGesturePromotion() {
   bool result =
       expect(view.reconcile(snapshot), "interaction-state fixture reconciles");
   settle();
-  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderPageStepSub);
   const auto identity = firstVisible(view);
   const QModelIndex index =
       view.conversationModel()->indexForStableKey(identity.first);
-  const QPoint hover = view.visualRect(index).center();
+  const QPoint hover =
+      view.visualRect(index).intersected(view.viewport()->rect()).center();
   QMouseEvent move(QEvent::MouseMove, QPointF(hover), QPointF(hover),
                    view.viewport()->mapToGlobal(hover), Qt::NoButton,
                    Qt::NoButton, Qt::NoModifier);
@@ -381,8 +383,10 @@ bool selectionFocusAndOneGesturePromotion() {
   result &= expect(QApplication::clipboard()->text() == selected,
                    "the promoted Markdown keeps native selection copying");
 
-  view.setFocus(Qt::OtherFocusReason);
-  view.verticalScrollBar()->setValue(view.verticalScrollBar()->minimum());
+  body->clearFocus();
+  if (QWidget *focused = QApplication::focusWidget())
+    focused->clearFocus();
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
   settle();
   result &= expect(materializedCard(view, identity.first) == nullptr,
                    "an unfocused editor is released outside bounded overscan");
@@ -446,6 +450,8 @@ bool selectionFocusAndOneGesturePromotion() {
   result &= expect(expanded && !expanded->isCollapsed(),
                    "a press-triggered promotion preserves one-gesture "
                    "disclosure activation");
+  foldedView.activateWindow();
+  settle();
   foldedView.setFocus(Qt::TabFocusReason);
   foldedView.setCurrentIndex(foldedView.conversationModel()->index(0));
   result &=

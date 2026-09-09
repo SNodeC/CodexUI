@@ -29,6 +29,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
@@ -199,16 +200,46 @@ middle::ConversationCard *localPromptCard(ShellWidget &shell,
 
 middle::ConversationCard *agentMessageCard(ShellWidget &shell,
                                            std::string_view message) {
-  for (QWidget *widget : shell.findChildren<QWidget *>()) {
-    auto *card = dynamic_cast<middle::ConversationCard *>(widget);
-    if (!card)
-      continue;
+  const auto findMaterialized = [&]() -> middle::ConversationCard * {
+    for (middle::ConversationCard *card :
+         shell.findChildren<middle::ConversationCard *>()) {
+      const auto *agent =
+          std::get_if<middle::AgentMessageData>(&card->data().payload);
+      if (agent && agent->text == message)
+        return card;
+    }
+    return nullptr;
+  };
+  if (middle::ConversationCard *card = findMaterialized())
+    return card;
+  auto *view = dynamic_cast<middle::ConversationView *>(shell.findChild<QWidget *>(
+      QStringLiteral("conversationScroll")));
+  if (!view)
+    return nullptr;
+  QModelIndex target;
+  for (int row = 0; row < view->conversationModel()->rowCount(); ++row) {
+    const middle::VisibleCardData *candidate =
+        view->conversationModel()->card(row);
     const auto *agent =
-        std::get_if<middle::AgentMessageData>(&card->data().payload);
-    if (agent && agent->text == message)
-      return card;
+        candidate
+            ? std::get_if<middle::AgentMessageData>(&candidate->payload)
+            : nullptr;
+    if (agent && agent->text == message) {
+      target = view->conversationModel()->index(row);
+      break;
+    }
   }
-  return nullptr;
+  const QRect visible = view->visualRect(target).intersected(
+      view->viewport()->rect());
+  if (!target.isValid() || visible.isEmpty())
+    return nullptr;
+  const QPoint position = visible.center();
+  QMouseEvent move(QEvent::MouseMove, QPointF(position), QPointF(position),
+                   view->viewport()->mapToGlobal(position), Qt::NoButton,
+                   Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(view->viewport(), &move);
+  QCoreApplication::processEvents();
+  return findMaterialized();
 }
 
 void graphNotificationsDetachBeforeRetirement(Configuration &configuration) {
@@ -983,12 +1014,17 @@ void initialHydrationUsesTheEstablishedBoundedWindow(
   auto *conversation = dynamic_cast<middle::ConversationView *>(
       shell.findChild<QAbstractScrollArea *>(
           QStringLiteral("conversationScroll")));
-  require(conversation && spinUntil([&] {
-            return conversation->structuralStagingActive();
-          }),
-          "large initial history enters bounded hidden Qt staging");
-  require(shell.findChildren<middle::ConversationCard *>().empty(),
-          "hidden preparation exposes no partial card tree");
+  require(conversation &&
+              spinUntil([&] {
+                return conversation->structuralStagingActive() ||
+                       conversation->conversationModel()->rowCount() == 81;
+              }),
+          "large initial history either stages rich visible rows or commits a "
+          "complete passive frame immediately");
+  require(!conversation || !conversation->structuralStagingActive() ||
+                               conversation->conversationModel()->rowCount() ==
+                                   0,
+          "hidden preparation leaves the prior complete model exposed");
   const qulonglong stageStarts =
       conversation->property("structuralStageStarts").toULongLong();
   static_cast<void>(worker.apply(
@@ -999,40 +1035,36 @@ void initialHydrationUsesTheEstablishedBoundedWindow(
         {"turnId", Value("bounded-turn")},
         {"itemId", Value("bounded-item-99")},
         {"delta", Value(" latest")}}}));
-  int responsiveHeartbeats = 0;
-  QTimer heartbeat;
-  QObject::connect(&heartbeat, &QTimer::timeout,
-                   [&responsiveHeartbeats] { ++responsiveHeartbeats; });
-  heartbeat.start(0);
   require(spinUntil(
               [&] {
-                return shell.findChildren<middle::ConversationCard *>().size() ==
-                       middle::AuthoritativeHistoryPageSize + 1;
+                return conversation->conversationModel()->rowCount() == 81 &&
+                       !conversation->structuralStagingActive();
               },
               2000),
-          "the first atomic frame contains the retained 80 activities and "
-          "their pinned owning prompt");
-  heartbeat.stop();
-  require(responsiveHeartbeats > 2 && conversation &&
-              conversation->property("structuralStageCardPasses")
-                      .toULongLong() >=
-                  middle::AuthoritativeHistoryPageSize,
-          "initial rich-card construction yields repeatedly to the Qt event "
-          "loop before its single visible commit");
+          "the first atomic model frame contains the retained 80 activities "
+          "and pinned owning prompt");
+  require(conversation->materializedCardCount() <= 48 &&
+              shell.findChildren<QWidget *>(
+                       QStringLiteral("conversationCardPlaceholder"))
+                  .empty(),
+          "the initial 81-row frame keeps QWidget work viewport proportional");
+  require(spinUntil([&] {
+            const middle::VisibleCardData *tail =
+                conversation->conversationModel()->card(
+                    conversation->conversationModel()->rowCount() - 1);
+            const auto *agent =
+                tail ? std::get_if<middle::AgentMessageData>(&tail->payload)
+                     : nullptr;
+            return agent && agent->text == "bounded-item-99 latest";
+          }),
+          "the live delta reaches its exact indexed tail row");
+  middle::ConversationCard *latestCard =
+      agentMessageCard(shell, "bounded-item-99 latest");
   require(conversation->property("structuralStageStarts").toULongLong() ==
                   stageStarts &&
-              agentMessageCard(shell, "bounded-item-99 latest"),
+              latestCard,
           "a live canonical update patches the hidden target without "
           "restarting or starving structural staging");
-  std::cout << "atomic structural commit ms: "
-            << conversation->property("structuralStageCommitMillis")
-                   .toLongLong()
-            << '\n';
-  require(conversation &&
-              conversation->property("structuralStageCommitMillis").toLongLong() <
-                  100,
-          "the atomic reveal does not move bulk widget construction back into "
-          "one perceptible final-frame stall");
 
   QPushButton *loadMore = nullptr;
   for (QPushButton *button : shell.findChildren<QPushButton *>()) {
@@ -1047,22 +1079,20 @@ void initialHydrationUsesTheEstablishedBoundedWindow(
           "activities after pinning the structural root");
   if (loadMore)
     loadMore->click();
-  require(conversation && spinUntil([&] {
-            return conversation->structuralStagingActive();
-          }),
-          "Load More prepares missing retained cards off-surface");
-  require(shell.findChildren<middle::ConversationCard *>().size() ==
-              middle::AuthoritativeHistoryPageSize + 1,
-          "Load More keeps the complete old surface visible until the new "
-          "surface is ready");
+  const bool pagingDeferred = conversation->structuralStagingActive();
+  require(pagingDeferred ? conversation->conversationModel()->rowCount() == 81
+                         : conversation->conversationModel()->rowCount() == 100,
+          "Load More either retains the complete old frame during preparation "
+          "or atomically commits passive rows");
   require(spinUntil(
               [&] {
-                return shell.findChildren<middle::ConversationCard *>().size() ==
-                       100;
+                return conversation->conversationModel()->rowCount() == 100 &&
+                       !conversation->structuralStagingActive();
               },
               2000),
-          "Load More materializes the retained graph page in one old-UI "
-          "reconcile");
+          "Load More exposes all retained graph rows in one complete frame");
+  require(conversation->materializedCardCount() <= 48,
+          "Load More does not create one QWidget per retained graph row");
   const std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
   require(std::ranges::none_of(messages, [](const QtToWorkerMessage &message) {
             const auto *action = std::get_if<NodeAction>(&message);
@@ -1607,7 +1637,7 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
               conversationGeometryBefore &&
           conversation->property("conversationLocalGeometryPasses")
                   .toULongLong() ==
-              conversationLocalGeometryBefore + 1 &&
+              conversationLocalGeometryBefore &&
           shell.property("threadPaneRoutes").toULongLong() ==
               threadRoutesBefore &&
           shell.property("inspectorRoutes").toULongLong() ==

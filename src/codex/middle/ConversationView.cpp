@@ -649,6 +649,21 @@ bool ConversationView::reconcileOwned(ConversationSnapshot snapshot) {
   const bool changed = model_->reconcile(std::move(snapshot));
   rebuildSectionRanges();
   loadMore_->setVisible(model_->hasMore());
+  if (model_->hasMore()) {
+    const std::size_t page =
+        model_->hiddenAuthoritativeItemCount() == 0
+            ? AuthoritativeHistoryPageSize
+            : std::min(AuthoritativeHistoryPageSize,
+                       model_->hiddenAuthoritativeItemCount());
+    loadMore_->setText(QStringLiteral("Load %1 more activities")
+                           .arg(static_cast<qulonglong>(page)));
+    loadMore_->setToolTip(
+        model_->hiddenAuthoritativeItemCount() == 0
+            ? QStringLiteral("Earlier activities are available")
+            : QStringLiteral("%1 earlier activities are retained")
+                  .arg(static_cast<qulonglong>(
+                      model_->hiddenAuthoritativeItemCount())));
+  }
   empty_->setVisible(model_->rowCount() == 0);
 
   std::vector<std::string> removeKeys;
@@ -656,17 +671,17 @@ bool ConversationView::reconcileOwned(ConversationSnapshot snapshot) {
   for (auto &[key, card] : materializedCards_) {
     const QModelIndex index = model_->indexForStableKey(key);
     const ConversationItemModel::Row *row = model_->row(index.row());
-    if (!index.isValid() || !row || !row->presented ||
+    if (!index.isValid() || !row || !rowPresented(index.row()) ||
         !card->canApply(row->card)) {
       removeKeys.push_back(key);
       continue;
     }
-    if (card->data() != row->card) {
-      if (card->applyPresentation(row->card) ==
-          PresentationImpact::GeometryChanged)
-        heightCache_.erase(key);
-    }
+    if (card->data() != row->card)
+      static_cast<void>(card->applyPresentation(row->card));
     configureCardForRow(card, *row);
+    const int measuredHeight = measureCard(card, rowWidth(*row));
+    heightCache_.insert_or_assign(
+        key, HeightRecord{rowWidth(*row), measuredHeight});
   }
   for (const std::string &key : removeKeys) {
     const auto found = materializedCards_.find(key);
@@ -960,7 +975,7 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
   if (before->card == card)
     return PresentationImpact::None;
 
-  const bool wasPresented = before->presented;
+  const bool wasPresented = rowPresented(index.row());
   const Anchor presentationAnchor = captureAnchor();
   const bool followedBefore = mode_ == Mode::Following;
   const std::string sectionKey = before->sectionKey;
@@ -998,7 +1013,8 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
     return PresentationImpact::None;
 
   const ConversationItemModel::Row *after = model_->row(index.row());
-  const bool presentationChanged = after && after->presented != wasPresented;
+  const bool presentationChanged =
+      after && rowPresented(index.row()) != wasPresented;
   if (presentationChanged) {
     heightCache_.erase(key);
     updateSectionRangeForPresentationChange(index.row(), wasPresented);
@@ -1022,7 +1038,7 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
       const ConversationItemModel::Row *affected = model_->row(affectedRow);
       if (!affected || affected->sectionKey != sectionKey)
         continue;
-      if (!affected->presented) {
+      if (!rowPresented(affectedRow)) {
         static_cast<void>(
             heights_.setHeight(static_cast<std::size_t>(affectedRow), 0));
         continue;
@@ -1048,7 +1064,7 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
           std::max(1, cardHeight) + rowSpacing(affectedRow, nextSection)));
     }
 
-    if (!after->presented && visibleCard) {
+    if (!rowPresented(index.row()) && visibleCard) {
       materializedCards_.erase(key);
       releaseCard(key, visibleCard);
       visibleCard = nullptr;
@@ -1056,7 +1072,7 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
 
     for (const int affectedRow : affectedRows) {
       const ConversationItemModel::Row *affected = model_->row(affectedRow);
-      if (!affected || !affected->presented || !affected->turnRoot)
+      if (!affected || !rowPresented(affectedRow) || !affected->turnRoot)
         continue;
       ConversationCard *rootCard = cardForStableKey(affected->stableKey);
       if (!rootCard)
@@ -1182,12 +1198,34 @@ bool ConversationView::rowCollapsed(
          row.card.kind != CardKind::LocalPrompt;
 }
 
+bool ConversationView::rowPresented(int rowIndex) const {
+  const ConversationItemModel::Row *row = model_->row(rowIndex);
+  if (!row || !row->presented)
+    return false;
+  if (!row->nested)
+    return true;
+  const auto root = sectionRootRows_.find(row->sectionKey);
+  if (root == sectionRootRows_.end())
+    return true;
+  const ConversationItemModel::Row *rootRow = model_->row(root->second);
+  return !rootRow || !rowCollapsed(*rootRow);
+}
+
 void ConversationView::rebuildSectionRanges() {
   sectionRanges_.clear();
+  sectionRootRows_.clear();
   sectionRanges_.reserve(static_cast<std::size_t>(model_->rowCount()));
+  sectionRootRows_.reserve(static_cast<std::size_t>(model_->rowCount()));
   for (int rowIndex = 0; rowIndex < model_->rowCount(); ++rowIndex) {
     const ConversationItemModel::Row *row = model_->row(rowIndex);
-    if (!row || !row->presented)
+    if (!row)
+      continue;
+    if (row->turnRoot)
+      sectionRootRows_.insert_or_assign(row->sectionKey, rowIndex);
+  }
+  for (int rowIndex = 0; rowIndex < model_->rowCount(); ++rowIndex) {
+    const ConversationItemModel::Row *row = model_->row(rowIndex);
+    if (!row || !rowPresented(rowIndex))
       continue;
     SectionRange &range = sectionRanges_[row->sectionKey];
     if (range.first < 0)
@@ -1203,10 +1241,10 @@ void ConversationView::rebuildSectionRanges() {
 void ConversationView::updateSectionRangeForPresentationChange(
     int rowIndex, bool wasPresented) {
   const ConversationItemModel::Row *changed = model_->row(rowIndex);
-  if (!changed || changed->presented == wasPresented)
+  if (!changed || rowPresented(rowIndex) == wasPresented)
     return;
 
-  if (changed->presented) {
+  if (rowPresented(rowIndex)) {
     SectionRange &range = sectionRanges_[changed->sectionKey];
     if (range.first < 0 || rowIndex < range.first)
       range.first = rowIndex;
@@ -1234,7 +1272,7 @@ void ConversationView::updateSectionRangeForPresentationChange(
     const ConversationItemModel::Row *candidate = model_->row(candidateIndex);
     if (!candidate || candidate->sectionKey != changed->sectionKey)
       break;
-    if (!candidate->presented)
+    if (!rowPresented(candidateIndex))
       continue;
     if (replacement.first < 0)
       replacement.first = candidateIndex;
@@ -1275,7 +1313,7 @@ void ConversationView::rebuildHeightIndex() {
   extents.reserve(static_cast<std::size_t>(model_->rowCount()));
   for (int rowIndex = 0; rowIndex < model_->rowCount(); ++rowIndex) {
     const ConversationItemModel::Row *row = model_->row(rowIndex);
-    if (!row || !row->presented) {
+    if (!row || !rowPresented(rowIndex)) {
       extents.push_back(0);
       continue;
     }
@@ -1345,7 +1383,7 @@ void ConversationView::updateScrollRange() {
 
 QRect ConversationView::rowRect(int rowIndex) const {
   const ConversationItemModel::Row *row = model_->row(rowIndex);
-  if (!row || !row->presented || rowIndex < 0 ||
+  if (!row || !rowPresented(rowIndex) || rowIndex < 0 ||
       static_cast<std::size_t>(rowIndex) >= heights_.size())
     return {};
   const int extent = heights_.height(static_cast<std::size_t>(rowIndex));
@@ -1393,7 +1431,7 @@ int ConversationView::measureCard(ConversationCard *card, int width) const {
 bool ConversationView::updateMeasuredHeight(int rowIndex, int cardHeight,
                                             bool preserveAnchor) {
   const ConversationItemModel::Row *row = model_->row(rowIndex);
-  if (!row || !row->presented)
+  if (!row || !rowPresented(rowIndex))
     return false;
   const Anchor anchor = preserveAnchor ? captureAnchor() : Anchor{};
   const bool follow = mode_ == Mode::Following;
@@ -1485,7 +1523,7 @@ void ConversationView::configureCardForRow(
 ConversationCard *ConversationView::materializeRow(int rowIndex,
                                                    bool forInteraction) {
   const ConversationItemModel::Row *row = model_->row(rowIndex);
-  if (!row || !row->presented)
+  if (!row || !rowPresented(rowIndex))
     return nullptr;
   if (ConversationCard *retained = cardForStableKey(row->stableKey))
     return retained;
@@ -1527,6 +1565,9 @@ ConversationCard *ConversationView::materializeRow(int rowIndex,
   materializedCards_.emplace(row->stableKey, card);
   card->setGeometry(rowRect(rowIndex));
   card->show();
+  if (const auto output = commandOutputStates_.find(row->stableKey);
+      output != commandOutputStates_.end())
+    card->restoreCommandOutputScrollState(output->second);
   restoreCardInteractionState(row->stableKey, card);
   incrementProperty(this, "conversationRowsMaterialized");
   return card;
@@ -1605,7 +1646,8 @@ void ConversationView::releaseUnneededCards(int firstRow, int lastRow) {
   if (firstRow >= 0 && lastRow >= firstRow) {
     retainedKeys.reserve(static_cast<std::size_t>(lastRow - firstRow + 1));
     for (int rowIndex = firstRow; rowIndex <= lastRow; ++rowIndex)
-      if (const auto *row = model_->row(rowIndex); row && row->presented)
+      if (const auto *row = model_->row(rowIndex);
+          row && rowPresented(rowIndex))
         retainedKeys.insert(row->stableKey);
   }
 
@@ -1710,9 +1752,89 @@ void ConversationView::setCardCollapsed(const std::string &key,
   cardCollapsedStates_.insert_or_assign(key, collapsed);
   card->setCollapsed(collapsed);
   const ConversationItemModel::Row *row = model_->row(index.row());
-  const int height = measureCard(card, rowWidth(*row));
-  static_cast<void>(updateMeasuredHeight(index.row(), height, false));
+  if (!row)
+    return;
+
+  if (row->turnRoot) {
+    SectionRange replacement;
+    int first = index.row();
+    while (first > 0) {
+      const ConversationItemModel::Row *candidate = model_->row(first - 1);
+      if (!candidate || candidate->sectionKey != row->sectionKey)
+        break;
+      --first;
+    }
+    int last = first;
+    for (; last < model_->rowCount(); ++last) {
+      const ConversationItemModel::Row *candidate = model_->row(last);
+      if (!candidate || candidate->sectionKey != row->sectionKey)
+        break;
+      if (!rowPresented(last))
+        continue;
+      if (replacement.first < 0)
+        replacement.first = last;
+      replacement.last = last;
+      if (candidate->turnRoot)
+        replacement.root = last;
+      replacement.active = replacement.active ||
+                           (candidate->turnRoot && candidate->activeTurn);
+    }
+    if (replacement.first < 0)
+      sectionRanges_.erase(row->sectionKey);
+    else
+      sectionRanges_.insert_or_assign(row->sectionKey, replacement);
+
+    const SectionRange *section = nullptr;
+    if (const auto found = sectionRanges_.find(row->sectionKey);
+        found != sectionRanges_.end())
+      section = &found->second;
+    for (int affectedRow = first; affectedRow < last; ++affectedRow) {
+      const ConversationItemModel::Row *affected = model_->row(affectedRow);
+      if (!affected)
+        continue;
+      if (!rowPresented(affectedRow)) {
+        static_cast<void>(
+            heights_.setHeight(static_cast<std::size_t>(affectedRow), 0));
+        continue;
+      }
+      int cardHeight = estimatedCardHeight(affected->card);
+      if (const auto cached = heightCache_.find(affected->stableKey);
+          cached != heightCache_.end() &&
+          cached->second.width == rowWidth(*affected))
+        cardHeight = cached->second.height;
+      static_cast<void>(heights_.setHeight(
+          static_cast<std::size_t>(affectedRow),
+          std::max(1, cardHeight) + rowSpacing(affectedRow, section)));
+    }
+    configureCardForRow(card, *row);
+    const int rootHeight = measureCard(card, rowWidth(*row));
+    heightCache_.insert_or_assign(
+        key, HeightRecord{rowWidth(*row), rootHeight});
+    static_cast<void>(heights_.setHeight(
+        static_cast<std::size_t>(index.row()),
+        rootHeight + rowSpacing(index.row(), section)));
+    incrementProperty(this, "conversationLocalGeometryPasses");
+    setProperty("conversationHeightIndexUpdateSteps",
+                static_cast<qulonglong>(heights_.lastUpdateSteps()));
+    updateScrollRange();
+    restoreAnchor(anchor);
+    updateMaterialization(false);
+    restoreAnchor(anchor);
+    layoutMaterializedCards();
+    viewport()->update();
+  } else {
+    const int height = measureCard(card, rowWidth(*row));
+    static_cast<void>(updateMeasuredHeight(index.row(), height, false));
+  }
   restoreAnchor(anchor);
+  if (!collapsed) {
+    const QRect expanded = rowRect(index.row());
+    const int availableBottom =
+        std::max(0, viewport()->height() - trailingSpaceHeight_ - 1);
+    if (!expanded.isEmpty() && expanded.bottom() > availableBottom)
+      setScrollValue(verticalScrollBar()->value() + expanded.bottom() -
+                     availableBottom);
+  }
   layoutMaterializedCards();
   storeCurrentThreadState();
 }
@@ -1982,7 +2104,7 @@ int ConversationView::verticalOffset() const {
 
 bool ConversationView::isIndexHidden(const QModelIndex &index) const {
   const ConversationItemModel::Row *row = model_->row(index.row());
-  return !row || !row->presented;
+  return !row || !rowPresented(index.row());
 }
 
 void ConversationView::setSelection(
@@ -2191,7 +2313,7 @@ void ConversationView::paintEvent(QPaintEvent *event) {
       std::unordered_set<std::string> paintedSections;
       for (int rowIndex = first; rowIndex <= last; ++rowIndex) {
         const ConversationItemModel::Row *row = model_->row(rowIndex);
-        if (!row || !row->presented ||
+        if (!row || !rowPresented(rowIndex) ||
             !paintedSections.insert(row->sectionKey).second)
           continue;
         const auto section = sectionRanges_.find(row->sectionKey);
@@ -2221,7 +2343,8 @@ void ConversationView::paintEvent(QPaintEvent *event) {
       }
       for (int rowIndex = first; rowIndex <= last; ++rowIndex) {
         const ConversationItemModel::Row *row = model_->row(rowIndex);
-        if (!row || !row->presented || !rowUsesPassiveDelegate(*row) ||
+        if (!row || !rowPresented(rowIndex) ||
+            !rowUsesPassiveDelegate(*row) ||
             cardForStableKey(row->stableKey))
           continue;
         QStyleOptionViewItem option;

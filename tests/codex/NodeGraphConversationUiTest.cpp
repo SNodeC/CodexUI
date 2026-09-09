@@ -72,20 +72,14 @@ struct Fixture {
   }
 };
 
-middle::ConversationCard *firstPaintedCard(middle::ConversationView &view) {
-  middle::ConversationCard *result = nullptr;
-  int best = std::numeric_limits<int>::max();
-  for (middle::ConversationCard *card :
-       view.findChildren<middle::ConversationCard *>()) {
-    const QPoint top = card->mapTo(view.viewport(), QPoint{});
-    if (top.y() + card->height() <= 0 || top.y() >= view.viewport()->height())
-      continue;
-    if (top.y() < best) {
-      best = top.y();
-      result = card;
-    }
+QModelIndex firstPaintedIndex(middle::ConversationView &view) {
+  for (int y = 0; y < view.viewport()->height(); ++y) {
+    const QModelIndex index =
+        view.indexAt(QPoint(view.viewport()->width() / 2, y));
+    if (index.isValid())
+      return index;
   }
-  return result;
+  return {};
 }
 
 bool oldUiConsumesAdapterSnapshotsAtomically() {
@@ -106,9 +100,8 @@ bool oldUiConsumesAdapterSnapshotsAtomically() {
     return false;
   QApplication::processEvents();
 
-  const auto cards = view.findChildren<middle::ConversationCard *>();
-  if (!require(cards.size() == 48,
-               "selected history was not materialized in one reconciliation") ||
+  if (!require(view.conversationModel()->rowCount() == 48,
+               "selected history was not indexed in one reconciliation") ||
       !require(view.findChildren<QWidget *>(
                        QStringLiteral("conversationCardPlaceholder"))
                        .empty(),
@@ -119,8 +112,11 @@ bool oldUiConsumesAdapterSnapshotsAtomically() {
     return false;
 
   int owners = 0;
-  for (middle::ConversationCard *card : cards)
-    if (card->property("turnContainer").toBool())
+  for (int row = 0; row < view.conversationModel()->rowCount(); ++row)
+    if (view.conversationModel()
+            ->index(row)
+            .data(middle::ConversationItemModel::TurnRootRole)
+            .toBool())
       ++owners;
   if (!require(owners == 24, "not every turn has exactly one owning card"))
     return false;
@@ -132,8 +128,8 @@ bool oldUiConsumesAdapterSnapshotsAtomically() {
       !require(view.reconcile(*appended), "new cards were not presented"))
     return false;
   QApplication::processEvents();
-  return require(view.findChildren<middle::ConversationCard *>().size() == 50,
-                 "new cards failed to appear immediately") &&
+  return require(view.conversationModel()->rowCount() == 50,
+                 "new cards failed to enter the item view immediately") &&
          require(view.verticalScrollBar()->value() ==
                      view.verticalScrollBar()->maximum(),
                  "following update did not settle at its final bottom");
@@ -156,12 +152,14 @@ bool pausedViewportKeepsItsPaintedAnchor() {
   view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum() / 2);
   view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
   QApplication::processEvents();
-  middle::ConversationCard *anchor = firstPaintedCard(view);
-  if (!require(anchor != nullptr, "paused viewport has no painted anchor"))
+  const QModelIndex anchor = firstPaintedIndex(view);
+  if (!require(anchor.isValid(), "paused viewport has no painted anchor"))
     return false;
   const std::string key =
-      anchor->property("conversationAnchorKey").toString().toStdString();
-  const int y = anchor->mapTo(view.viewport(), QPoint{}).y();
+      anchor.data(middle::ConversationItemModel::StableKeyRole)
+          .toString()
+          .toStdString();
+  const int y = view.visualRect(anchor).top();
 
   fixture.appendTurn("offscreen tail");
   const auto appended =
@@ -170,14 +168,9 @@ bool pausedViewportKeepsItsPaintedAnchor() {
     return false;
   QApplication::processEvents();
 
-  for (middle::ConversationCard *card :
-       view.findChildren<middle::ConversationCard *>()) {
-    if (card->property("conversationAnchorKey").toString().toStdString() != key)
-      continue;
-    return require(card->mapTo(view.viewport(), QPoint{}).y() == y,
-                   "paused incoming tail moved the painted anchor");
-  }
-  return require(false, "paused incoming tail replaced the anchor widget");
+  const QModelIndex retained = view.conversationModel()->indexForStableKey(key);
+  return require(retained.isValid() && view.visualRect(retained).top() == y,
+                 "paused incoming tail moved the painted anchor");
 }
 
 bool promptMorphPreservesExactTargetAndWidget() {
@@ -343,12 +336,13 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
   };
   middle::ConversationCard *stable =
       findCard(middle::stableKey(middle::LocalPromptKey{72}));
-  middle::ConversationCard *progressCard = findCard(middle::stableKey(
-      middle::AuthoritativeItemKey{"thread-steering", "turn-steering",
-                                   "later-progress"}));
-  if (!require(stable && progressCard &&
+  const QModelIndex progressIndex =
+      view.conversationModel()->indexForStableKey(middle::stableKey(
+          middle::AuthoritativeItemKey{"thread-steering", "turn-steering",
+                                       "later-progress"}));
+  if (!require(stable && progressIndex.isValid() &&
                    stable->mapTo(view.viewport(), QPoint{}).y() <
-                       progressCard->mapTo(view.viewport(), QPoint{}).y(),
+                       view.visualRect(progressIndex).top(),
                "steering did not begin ahead of its later activity"))
     return false;
 
@@ -395,7 +389,7 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
   if (!require(stable->data().kind == middle::CardKind::UserMessage &&
                    animation && !animation->isActive() &&
                    acknowledgements == 1 && promotedTop <
-                       progressCard->mapTo(view.viewport(), QPoint{}).y(),
+                       view.visualRect(progressIndex).top(),
                "authoritative steering materialization did not stop its "
                "animation in the original submitted slot"))
     return false;
@@ -414,7 +408,7 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
       findCard(middle::stableKey(middle::LocalPromptKey{72})) == stable &&
           stable->data().target == authoritative &&
           stable->mapTo(view.viewport(), QPoint{}).y() == promotedTop &&
-          promotedTop < progressCard->mapTo(view.viewport(), QPoint{}).y() &&
+          promotedTop < view.visualRect(progressIndex).top() &&
           acknowledgements == 1,
       "steering retirement recreated, moved, or reordered its stable card");
 }

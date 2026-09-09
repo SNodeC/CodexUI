@@ -142,25 +142,14 @@ bool conversationOwnershipAndAtomicReconcileContract() {
   const bool changed = view.reconcile(snapshot);
   QCoreApplication::processEvents();
 
-  ConversationCard *owner = nullptr;
-  ConversationCard *answer = nullptr;
-  for (ConversationCard *candidate : view.findChildren<ConversationCard *>()) {
-    if (candidate->property("turnContainer").toBool())
-      owner = candidate;
-    if (const auto *agent =
-            std::get_if<AgentMessageData>(&candidate->data().payload);
-        agent && agent->text == "Answer")
-      answer = candidate;
-  }
-  bool nested = false;
-  for (QWidget *parent = answer ? answer->parentWidget() : nullptr; parent;
-       parent = parent->parentWidget())
-    if (parent == owner) {
-      nested = true;
-      break;
-    }
-  bool result = expect(changed && owner && answer && nested,
-                       "one reconcile exposes a complete parented turn");
+  const QModelIndex owner = view.conversationModel()->index(0);
+  const QModelIndex answer = view.conversationModel()->index(1);
+  bool result = expect(
+      changed && view.conversationModel()->rowCount() == 2 &&
+          owner.data(ConversationItemModel::TurnRootRole).toBool() &&
+          answer.data(ConversationItemModel::NestedCardRole).toBool() &&
+          view.visualRect(answer).left() > view.visualRect(owner).left(),
+      "one reconcile exposes a complete virtualized turn");
   const qulonglong presentationPasses =
       view.property("graphRefreshPasses").toULongLong();
   result &= expect(!view.reconcile(snapshot) &&

@@ -191,6 +191,7 @@ private:
   [[nodiscard]] bool
   rowUsesPassiveDelegate(const ConversationItemModel::Row &row) const;
   [[nodiscard]] bool rowCollapsed(const ConversationItemModel::Row &row) const;
+  [[nodiscard]] bool rowPresented(int row) const;
   [[nodiscard]] int rowSpacing(int row) const;
   [[nodiscard]] int rowSpacing(int row, const SectionRange *section) const;
   [[nodiscard]] QRect rowRect(int row) const;
@@ -251,6 +252,7 @@ private:
   std::unordered_map<std::string, int> stagedHeights_;
   std::unordered_map<std::string, HeightRecord> heightCache_;
   std::unordered_map<std::string, SectionRange> sectionRanges_;
+  std::unordered_map<std::string, int> sectionRootRows_;
   std::unordered_map<std::string, CardInteractionState> cardInteractionStates_;
   std::unordered_map<std::string, bool> cardCollapsedStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>

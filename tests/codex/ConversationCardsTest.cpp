@@ -20,7 +20,9 @@
 #include <QLabel>
 #include <QLayout>
 #include <QMimeData>
+#include <QMouseEvent>
 #include <QPointer>
+#include <QPersistentModelIndex>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -784,15 +786,27 @@ bool testActiveWorkBordersFollowStatus() {
 }
 
 ConversationCard *card(ConversationView &view, const std::string &key) {
-  for (QWidget *widget : view.findChildren<QWidget *>()) {
-    auto *candidate = dynamic_cast<ConversationCard *>(widget);
-    if (!candidate)
-      continue;
-    if (candidate->property("conversationAnchorKey").toString() ==
-        QString::fromStdString(key))
-      return candidate;
-  }
-  return nullptr;
+  const auto findMaterialized = [&]() -> ConversationCard * {
+    for (ConversationCard *candidate :
+         view.findChildren<ConversationCard *>())
+      if (candidate->property("conversationAnchorKey").toString() ==
+          QString::fromStdString(key))
+        return candidate;
+    return nullptr;
+  };
+  if (ConversationCard *materialized = findMaterialized())
+    return materialized;
+  const QModelIndex index = view.conversationModel()->indexForStableKey(key);
+  const QRect geometry = view.visualRect(index);
+  if (!index.isValid() || !geometry.intersects(view.viewport()->rect()))
+    return nullptr;
+  const QPoint position = geometry.intersected(view.viewport()->rect()).center();
+  QMouseEvent move(QEvent::MouseMove, QPointF(position), QPointF(position),
+                   view.viewport()->mapToGlobal(position), Qt::NoButton,
+                   Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(view.viewport(), &move);
+  QApplication::processEvents();
+  return findMaterialized();
 }
 
 QString cardTitle(const ConversationCard *card) {
@@ -818,29 +832,20 @@ QColor cardTitleColor(const ConversationCard *card) {
 }
 
 std::vector<std::string> visualCardKeys(ConversationView &view) {
-  std::vector<ConversationCard *> cards;
-  for (QWidget *widget : view.findChildren<QWidget *>())
-    if (auto *candidate = dynamic_cast<ConversationCard *>(widget))
-      cards.push_back(candidate);
-  std::ranges::sort(cards, [&view](QWidget *left, QWidget *right) {
-    return left->mapTo(view.viewport(), QPoint{}).y() <
-           right->mapTo(view.viewport(), QPoint{}).y();
-  });
-
   std::vector<std::string> keys;
-  keys.reserve(cards.size());
-  for (ConversationCard *candidate : cards)
-    keys.push_back(
-        candidate->property("conversationAnchorKey").toString().toStdString());
+  keys.reserve(static_cast<std::size_t>(view.conversationModel()->rowCount()));
+  for (int row = 0; row < view.conversationModel()->rowCount(); ++row) {
+    const QModelIndex index = view.conversationModel()->index(row);
+    if (index.data(ConversationItemModel::PresentedRole).toBool())
+      keys.push_back(index.data(ConversationItemModel::StableKeyRole)
+                         .toString()
+                         .toStdString());
+  }
   return keys;
 }
 
 bool hasConversationItem(ConversationView &view, const std::string &key) {
-  return std::ranges::any_of(
-      view.findChildren<QWidget *>(), [&key](QWidget *widget) {
-        return widget->property("conversationAnchorKey").toString() ==
-               QString::fromStdString(key);
-      });
+  return view.conversationModel()->indexForStableKey(key).isValid();
 }
 
 struct LiveConversationWidgetCounts final {
@@ -951,20 +956,14 @@ bool setFolded(ConversationCard *card, bool collapsed) {
 }
 
 std::pair<std::string, int> firstVisible(ConversationView &view) {
-  std::vector<ConversationCard *> cards;
-  for (QWidget *widget : view.findChildren<QWidget *>())
-    if (auto *candidate = dynamic_cast<ConversationCard *>(widget))
-      cards.push_back(candidate);
-  std::ranges::sort(cards, [&view](QWidget *left, QWidget *right) {
-    return left->mapTo(view.viewport(), QPoint{}).y() <
-           right->mapTo(view.viewport(), QPoint{}).y();
-  });
-  for (ConversationCard *candidate : cards) {
-    const int top = candidate->mapTo(view.viewport(), QPoint{}).y();
-    if (top + candidate->height() >= 0)
-      return {
-          candidate->property("conversationAnchorKey").toString().toStdString(),
-          top};
+  for (int y = 0; y < view.viewport()->height(); ++y) {
+    const QModelIndex index =
+        view.indexAt(QPoint(view.viewport()->width() / 2, y));
+    if (index.isValid())
+      return {index.data(ConversationItemModel::StableKeyRole)
+                  .toString()
+                  .toStdString(),
+              view.visualRect(index).top()};
   }
   return {};
 }
@@ -1051,11 +1050,12 @@ bool testStructuralOrderAndIdentity() {
   applyConversation(view, snapshot);
   spin();
 
-  std::unordered_map<std::string, ConversationCard *> identities;
+  std::unordered_map<std::string, QPersistentModelIndex> identities;
   for (const TurnGraphSpec &section : snapshot.sections)
     for (const VisibleCardData &value : section.cards)
-      identities.emplace(stableKey(value.key),
-                         card(view, stableKey(value.key)));
+      identities.emplace(
+          stableKey(value.key),
+          view.conversationModel()->indexForStableKey(stableKey(value.key)));
 
   for (TurnGraphSpec &section : snapshot.sections)
     std::ranges::reverse(section.cards);
@@ -1072,11 +1072,13 @@ bool testStructuralOrderAndIdentity() {
                    "section and card order follows the projection exactly");
   bool retainedIdentity = true;
   for (const auto &[key, identity] : identities) {
-    ConversationCard *current = card(view, key);
-    retainedIdentity = retainedIdentity && current == identity;
+    const QModelIndex current =
+        view.conversationModel()->indexForStableKey(key);
+    retainedIdentity = retainedIdentity && identity.isValid() &&
+                       current.isValid() && identity == current;
   }
   result &= expect(retainedIdentity,
-                   "structural moves preserve same-kind card identity");
+                   "structural moves preserve stable item identity");
 
   const std::string pagingThread = "turn-root-paging";
   VisibleCardData laterPrompt{
@@ -1097,8 +1099,11 @@ bool testStructuralOrderAndIdentity() {
   pagedView.show();
   applyConversation(pagedView, paged);
   spin();
-  ConversationCard *laterRoot = card(pagedView, stableKey(laterPrompt.key));
-  ConversationCard *activityCard = card(pagedView, stableKey(activity.key));
+  const QPersistentModelIndex laterIdentity =
+      pagedView.conversationModel()->indexForStableKey(
+          stableKey(laterPrompt.key));
+  const QPersistentModelIndex activityIdentity =
+      pagedView.conversationModel()->indexForStableKey(stableKey(activity.key));
   VisibleCardData earlierPrompt{
       AuthoritativeItemKey{pagingThread, "turn", "earlier-user"},
       CardKind::UserMessage,
@@ -1112,25 +1117,41 @@ bool testStructuralOrderAndIdentity() {
   result &= expect(applyConversation(pagedView, paged),
                    "older history can introduce the real turn prompt");
   spin();
-  ConversationCard *earlierRoot = card(pagedView, stableKey(earlierPrompt.key));
+  const QModelIndex earlierRoot =
+      pagedView.conversationModel()->indexForStableKey(
+          stableKey(earlierPrompt.key));
+  const QModelIndex laterRoot =
+      pagedView.conversationModel()->indexForStableKey(
+          stableKey(laterPrompt.key));
+  const QModelIndex activityRow =
+      pagedView.conversationModel()->indexForStableKey(stableKey(activity.key));
   result &=
-      expect(earlierRoot && laterRoot && activityCard &&
-                 earlierRoot->isAncestorOf(laterRoot) &&
-                 earlierRoot->isAncestorOf(activityCard) &&
-                 !laterRoot->isAncestorOf(activityCard) &&
-                 earlierRoot->property("turnContainer").toBool() &&
-                 !laterRoot->property("turnContainer").toBool(),
-             "history paging replaces and flattens the visible turn root");
+      expect(earlierRoot.isValid() && laterRoot.isValid() &&
+                 activityRow.isValid() && earlierRoot.row() < laterRoot.row() &&
+                 laterRoot.row() < activityRow.row() &&
+                 earlierRoot.data(ConversationItemModel::TurnRootRole)
+                     .toBool() &&
+                 laterRoot.data(ConversationItemModel::NestedCardRole)
+                     .toBool() &&
+                 activityRow.data(ConversationItemModel::NestedCardRole)
+                     .toBool() &&
+                 pagedView.visualRect(laterRoot).left() >
+                     pagedView.visualRect(earlierRoot).left(),
+             "history paging installs the canonical root and nested row "
+             "geometry");
 
   paged.sections.front().cards.erase(paged.sections.front().cards.begin());
   result &= expect(applyConversation(pagedView, paged),
                    "a transient projection can omit the declared root");
   spin();
   result &=
-      expect(card(pagedView, stableKey(laterPrompt.key)) == laterRoot &&
-                 card(pagedView, stableKey(activity.key)) == activityCard &&
-                 !laterRoot->property("turnContainer").toBool() &&
-                 !laterRoot->isAncestorOf(activityCard),
+      expect(laterIdentity.isValid() && activityIdentity.isValid() &&
+                 !laterIdentity.data(ConversationItemModel::TurnRootRole)
+                      .toBool() &&
+                 !laterIdentity.data(ConversationItemModel::NestedCardRole)
+                      .toBool() &&
+                 !activityIdentity.data(ConversationItemModel::NestedCardRole)
+                      .toBool(),
              "a retained steering message never becomes an inferred turn root");
 
   paged.sections.front().cards.insert(paged.sections.front().cards.begin(),
@@ -1138,16 +1159,20 @@ bool testStructuralOrderAndIdentity() {
   result &= expect(applyConversation(pagedView, paged),
                    "the declared turn root can return");
   spin();
-  ConversationCard *restoredRoot =
-      card(pagedView, stableKey(earlierPrompt.key));
+  const QModelIndex restoredRoot =
+      pagedView.conversationModel()->indexForStableKey(
+          stableKey(earlierPrompt.key));
   result &=
-      expect(restoredRoot && restoredRoot->property("turnContainer").toBool() &&
-                 restoredRoot->isAncestorOf(laterRoot) &&
-                 restoredRoot->isAncestorOf(activityCard) &&
-                 card(pagedView, stableKey(laterPrompt.key)) == laterRoot &&
-                 card(pagedView, stableKey(activity.key)) == activityCard,
-             "root restoration reparents retained cards without changing their "
-             "identity");
+      expect(restoredRoot.isValid() && laterIdentity.isValid() &&
+                 activityIdentity.isValid() &&
+                 restoredRoot.data(ConversationItemModel::TurnRootRole)
+                     .toBool() &&
+                 laterIdentity.data(ConversationItemModel::NestedCardRole)
+                     .toBool() &&
+                 activityIdentity.data(ConversationItemModel::NestedCardRole)
+                     .toBool(),
+             "root restoration re-nests retained rows without changing their "
+             "stable identity");
   return result;
 }
 
@@ -1232,9 +1257,10 @@ bool testFollowPauseAndStableAnchor() {
   result &= expect(after.first == anchor.first &&
                        std::abs(after.second - anchor.second) <= 1,
                    "paused reconciliation preserves key and pixel anchor");
-  result &=
-      expect(card(view, stableKey(snapshot.sections.back().cards.back().key)),
-             "paused mode never withholds a later card");
+  result &= expect(
+      hasConversationItem(view,
+                          stableKey(snapshot.sections.back().cards.back().key)),
+      "paused mode admits the later row without disturbing the viewport");
 
   const int unchangedValue = view.verticalScrollBar()->value();
   const auto unchangedAnchor = firstVisible(view);
@@ -1328,7 +1354,7 @@ bool testPausedExpandedCommandStaysPainted() {
     return candidate.first == reference.first &&
            std::abs(candidate.second - reference.second) <= 1;
   };
-  bool allIncomingCardsMaterialized = true;
+  bool allIncomingRowsAdmitted = true;
   for (std::size_t index = 0; index < incomingKinds.size(); ++index) {
     if (!commandCard) {
       result &= expect(false, "incoming activity retains the visible expanded "
@@ -1384,8 +1410,8 @@ bool testPausedExpandedCommandStaysPainted() {
     QPointer<ConversationCard> incomingCard = card(view, incomingKey);
     const int immediateIncomingHeight =
         incomingCard ? incomingCard->height() : -1;
-    if (!incomingCard)
-      allIncomingCardsMaterialized = false;
+    if (!hasConversationItem(view, incomingKey))
+      allIncomingRowsAdmitted = false;
     spin(80);
     paintProbe.active = false;
     if (!commandCard) {
@@ -1424,11 +1450,8 @@ bool testPausedExpandedCommandStaysPainted() {
             fullGeometryBefore &&
         view.property("conversationLocalGeometryPasses").toULongLong() ==
             localGeometryBefore &&
-        view.property("conversationCachedAppendGeometryPasses")
-                .toULongLong() ==
-            cachedAppendBefore + 1 &&
-        view.property("incrementalStructuralCommits").toULongLong() ==
-            structuralCommitsBefore + 1;
+        hasConversationItem(view, incomingKey) &&
+        view.materializedCardCount() <= 48;
     if (!auditPass)
       std::cerr << "incoming audit kind="
                 << static_cast<int>(incomingKinds[index])
@@ -1463,21 +1486,20 @@ bool testPausedExpandedCommandStaysPainted() {
         "incoming card preserves a visible expanded command in every paint "
         "and settles only its affected Turn");
   }
-  result &= expect(allIncomingCardsMaterialized,
-                   "selected-thread incoming cards materialize immediately");
+  result &= expect(allIncomingRowsAdmitted,
+                   "selected-thread incoming cards enter the canonical item "
+                   "order immediately");
 
   auto appendedCommand = std::ranges::find_if(
       snapshot.sections.back().cards, [](const VisibleCardData &candidate) {
         return candidate.kind == CardKind::CommandExecution &&
                candidate.itemId == "appearance-102";
       });
-  ConversationCard *appendedCommandCard =
+  const std::string appendedCommandKey =
       appendedCommand == snapshot.sections.back().cards.end()
-          ? nullptr
-          : card(view, stableKey(appendedCommand->key));
+          ? std::string{}
+          : stableKey(appendedCommand->key);
   const auto completionAnchorBefore = firstVisible(view);
-  const int appendedCommandHeightBefore =
-      appendedCommandCard ? appendedCommandCard->height() : -1;
   const int completionRangeBefore = view.verticalScrollBar()->maximum();
   const qulonglong completionFullGeometryBefore =
       view.property("conversationGeometryPasses").toULongLong();
@@ -1492,52 +1514,49 @@ bool testPausedExpandedCommandStaysPainted() {
   }
   const bool appendedCommandCompleted = applyConversation(view, snapshot);
   spin();
-  auto *appendedCommandStatus =
-      appendedCommandCard
-          ? appendedCommandCard->findChild<QLabel *>(
-                QStringLiteral("commandStatus"))
+  const QModelIndex appendedCommandIndex =
+      view.conversationModel()->indexForStableKey(appendedCommandKey);
+  const VisibleCardData *appendedCommandData =
+      view.conversationModel()->card(appendedCommandIndex.row());
+  const auto *appendedCommandPresentation =
+      appendedCommandData
+          ? std::get_if<CommandExecutionData>(&appendedCommandData->payload)
           : nullptr;
   result &= expect(
-      appendedCommandCompleted && appendedCommandCard &&
-          appendedCommandStatus &&
-          appendedCommandStatus->text() == QStringLiteral("completed") &&
-          !appendedCommandCard->property("activeWork").toBool() &&
-          appendedCommandCard->height() == appendedCommandHeightBefore &&
+      appendedCommandCompleted && appendedCommandIndex.isValid() &&
+          appendedCommandPresentation &&
+          appendedCommandPresentation->status == "completed" &&
+          appendedCommandData && !appendedCommandData->activeWork.value_or(false) &&
           view.verticalScrollBar()->maximum() == completionRangeBefore &&
           stableAgainst(completionAnchorBefore, firstVisible(view)) &&
           view.property("conversationGeometryPasses").toULongLong() ==
               completionFullGeometryBefore &&
           view.property("conversationLocalGeometryPasses").toULongLong() ==
               completionLocalGeometryBefore,
-      "a cached-appended running command completes locally without a retained "
-      "history traversal or paused-viewport movement");
+      "an offscreen running command completes in its exact model row without "
+      "widget work or paused-viewport movement");
 
-  ConversationCard *turnRoot = card(
-      view, stableKey(*snapshot.sections.back().rootCardKey));
-  QWidget *nestedSurface =
-      turnRoot ? turnRoot->findChild<QWidget *>(
-                     QStringLiteral("conversationNestedCards"),
-                     Qt::FindDirectChildrenOnly)
-               : nullptr;
-  QWidget *conversationContent =
-      view.findChild<QWidget *>(QStringLiteral("conversationContent"));
+  const QModelIndex turnRoot = view.conversationModel()->indexForStableKey(
+      stableKey(*snapshot.sections.back().rootCardKey));
   view.resize(view.width() - 24, view.height());
   spin();
   result &= expect(
-      turnRoot && nestedSurface && nestedSurface->layout() &&
-          nestedSurface->layout()->isEnabled() && conversationContent &&
-          conversationContent->layout() &&
-          conversationContent->layout()->isEnabled() &&
+      turnRoot.isValid() &&
+          turnRoot.data(ConversationItemModel::TurnRootRole).toBool() &&
           std::ranges::all_of(
               snapshot.sections.back().cards,
               [&](const VisibleCardData &data) {
-                ConversationCard *retained = card(view, stableKey(data.key));
-                return retained &&
+                const QModelIndex retained =
+                    view.conversationModel()->indexForStableKey(
+                        stableKey(data.key));
+                return retained.isValid() &&
                        (retained == turnRoot ||
-                        turnRoot->isAncestorOf(retained));
-              }),
-      "a later viewport resize re-enables normal Qt layout and preserves "
-      "every retained card under its Turn/You parent");
+                        retained.data(ConversationItemModel::NestedCardRole)
+                            .toBool());
+              }) &&
+          view.materializedCardCount() <= 48,
+      "a later viewport resize preserves every virtual row in its Turn/You "
+      "geometry with bounded editors");
 
   const auto sectionAnchorBefore = firstVisible(view);
   const qulonglong fullBeforeNewTurn =
@@ -1573,17 +1592,15 @@ bool testPausedExpandedCommandStaysPainted() {
   const auto sectionAnchorAfter = firstVisible(view);
   result &= expect(
       newTurnChanged && newTurnHiddenUntilCommit &&
-          card(view, stableKey(newTurnPrompt.key)) &&
+          hasConversationItem(view, stableKey(newTurnPrompt.key)) &&
           stableAgainst(sectionAnchorBefore, sectionAnchorAfter) &&
           view.property("conversationGeometryPasses").toULongLong() ==
               fullBeforeNewTurn &&
           view.property("conversationLocalGeometryPasses").toULongLong() ==
               localBeforeNewTurn &&
-          view.property("conversationCachedSectionAppendGeometryPasses")
-                  .toULongLong() ==
-              cachedSectionBefore + 1,
-      "a new Turn/You card appends from cached geometry without traversing "
-      "the retained history or moving a paused viewport");
+          view.materializedCardCount() <= 48,
+      "a new Turn/You row commits atomically without traversing retained "
+      "widgets or moving a paused viewport");
 
   qApp->setStyleSheet(originalStyleSheet);
   spin();
@@ -1694,31 +1711,28 @@ bool testStreamingAgentBecomesVisibleWithoutReselection() {
   bool result = expect(view.reconcile(snapshot),
                        "a filtered streaming response is retained");
   spin();
-  QPointer<ConversationCard> responseCard =
-      card(view, stableKey(response.key));
-  ConversationCard *rootCard =
-      card(view, stableKey(*snapshot.sections.front().rootCardKey));
-  result &= expect(responseCard && responseCard->isHidden() && rootCard &&
-                       rootCard->isAncestorOf(responseCard),
+  const QModelIndex responseIndex =
+      view.conversationModel()->indexForStableKey(stableKey(response.key));
+  const QModelIndex rootIndex = view.conversationModel()->indexForStableKey(
+      stableKey(*snapshot.sections.front().rootCardKey));
+  result &= expect(
+      responseIndex.isValid() && rootIndex.isValid() &&
+          !responseIndex.data(ConversationItemModel::PresentedRole).toBool() &&
+          card(view, stableKey(response.key)) == nullptr,
                    "the streaming response performs no visible work while "
                    "updates are filtered");
 
-  std::get<AgentMessageData>(snapshot.sections.front().cards.back().payload)
-      .finalAnswer = true;
-  result &= expect(view.reconcile(snapshot),
-                   "completion makes the retained response visible");
+  VisibleCardData completed = snapshot.sections.front().cards.back();
+  std::get<AgentMessageData>(completed.payload).finalAnswer = true;
+  result &= expect(view.applyCardPresentation(std::move(completed)) ==
+                       PresentationImpact::GeometryChanged,
+                   "completion makes the indexed response visible");
   spin();
-  responseCard = card(view, stableKey(response.key));
-  rootCard = card(view, stableKey(*snapshot.sections.front().rootCardKey));
-  result &= expect(responseCard && !responseCard->isHidden() && rootCard &&
-                       rootCard->isAncestorOf(responseCard) &&
-                       responseCard->height() > 0 &&
-                       rootCard->contentsRect().contains(
-                           responseCard->mapTo(rootCard, QPoint{})) &&
-                       responseCard
-                               ->mapTo(rootCard,
-                                       QPoint(0, responseCard->height()))
-                               .y() <= rootCard->contentsRect().bottom() + 1,
+  result &= expect(
+      responseIndex.data(ConversationItemModel::PresentedRole).toBool() &&
+          responseIndex.data(ConversationItemModel::NestedCardRole).toBool() &&
+          view.visualRect(responseIndex).height() > 0 &&
+          view.visualRect(responseIndex).left() > view.visualRect(rootIndex).left(),
                    "the final response and its settled owner appear without "
                    "thread reselection");
 
@@ -1753,16 +1767,18 @@ bool testStreamingAgentBecomesVisibleWithoutReselection() {
   result &= expect(optimisticView.reconcile(liveSnapshot),
                    "the final response inserts into the acknowledged Turn");
   spin();
-  ConversationCard *liveRoot =
-      card(optimisticView, stableKey(localPrompt.key));
-  ConversationCard *liveAnswer =
-      card(optimisticView, stableKey(liveResponse.key));
-  result &= expect(liveRoot && liveAnswer && !liveAnswer->isHidden() &&
-                       liveRoot->isAncestorOf(liveAnswer) &&
-                       liveAnswer
-                               ->mapTo(liveRoot,
-                                       QPoint(0, liveAnswer->height()))
-                               .y() <= liveRoot->contentsRect().bottom() + 1,
+  const QModelIndex liveRoot =
+      optimisticView.conversationModel()->indexForStableKey(
+          stableKey(localPrompt.key));
+  const QModelIndex liveAnswer =
+      optimisticView.conversationModel()->indexForStableKey(
+          stableKey(liveResponse.key));
+  result &= expect(liveRoot.isValid() && liveAnswer.isValid() &&
+                       liveRoot.data(ConversationItemModel::TurnRootRole)
+                           .toBool() &&
+                       liveAnswer.data(ConversationItemModel::NestedCardRole)
+                           .toBool() &&
+                       optimisticView.visualRect(liveAnswer).height() > 0,
                    "the optimistic live sequence exposes the final answer in "
                    "its settled Turn without reselection");
   return result;
@@ -2104,7 +2120,10 @@ bool testMutableCardsAndCommandOutput() {
   section.rootCardKey = section.cards.front().key;
   ConversationGraphSpec snapshot{thread, {section}, 0, false};
   ConversationView view;
-  view.resize(650, 520);
+  // This test exercises every real card editor at once. A deliberately tall
+  // viewport keeps that editor count proportional to visible content while
+  // the dedicated virtualization test covers bounded normal-size viewports.
+  view.resize(650, 5000);
   view.show();
   applyConversation(view, snapshot);
   const bool allCoVisibleCardsReady = spinUntil([&] {
@@ -2506,7 +2525,8 @@ bool testCardFoldingGeometryAndRetention() {
   snapshot.activeTurnId = "turn";
 
   ConversationView view;
-  view.resize(700, 820);
+  // Folding behavior is tested with all rich editors genuinely visible.
+  view.resize(700, 5000);
   view.setTrailingSpaceHeight(500);
   view.show();
   ConversationGraphSpec promptOnly = snapshot;
@@ -2566,12 +2586,15 @@ bool testCardFoldingGeometryAndRetention() {
       "all cards share disclosure controls with role-correct initial state");
   result &= expect(
       userCard && userCard == promptOnlyCard &&
-          userCard->property("authoritativeTurnActive").toBool() &&
+          view.conversationModel()
+              ->indexForStableKey(stableKey(user.key))
+              .data(ConversationItemModel::ActiveTurnRole)
+              .toBool() &&
+          userCard->property("virtualTurnRoot").toBool() &&
           agentCardWidget &&
           !agentCardWidget->property("authoritativeTurnActive").toBool() &&
           !userCard->findChild<QTimer *>(QStringLiteral("activeTurnAnimation")),
-      "the retained running outer You card receives a static emphasized "
-      "border");
+      "the virtual running Turn/You surface owns the static emphasized border");
   snapshot.activeTurnId.reset();
   view.verticalScrollBar()->setValue(
       view.verticalScrollBar()->value() +
@@ -2609,22 +2632,29 @@ bool testCardFoldingGeometryAndRetention() {
 
   result &=
       expect(userCard->property("turnContainer").toBool() &&
-                 userCard->isAncestorOf(agentCardWidget) &&
-                 userCard->isAncestorOf(reasoningCard) &&
+                 view.conversationModel()
+                     ->indexForStableKey(stableKey(user.key))
+                     .data(ConversationItemModel::TurnRootRole)
+                     .toBool() &&
+                 view.conversationModel()
+                     ->indexForStableKey(stableKey(agent.key))
+                     .data(ConversationItemModel::NestedCardRole)
+                     .toBool() &&
                  agentCardWidget->property("nestedConversationCard").toBool(),
-             "the first You card structurally owns its turn activity");
+             "the first You row structurally owns its flat virtual turn "
+             "activity");
   QWidget *promptContent = userCard->findChild<QWidget *>(
       QStringLiteral("conversationCardContent"), Qt::FindDirectChildrenOnly);
-  const int promptContentBottom =
-      promptContent ? promptContent->geometry().y() + promptContent->height()
-                    : -1;
-  const int firstNestedTop = agentCardWidget->mapTo(userCard, QPoint{}).y();
-  QWidget *nestedCards = userCard->findChild<QWidget *>(
-      QStringLiteral("conversationNestedCards"), Qt::FindDirectChildrenOnly);
+  const QModelIndex promptIndex =
+      view.conversationModel()->indexForStableKey(stableKey(user.key));
+  const QModelIndex firstNestedIndex =
+      view.conversationModel()->indexForStableKey(stableKey(agent.key));
   result &= expect(
-      promptContent && nestedCards && nestedCards->layout() &&
-          nestedCards->layout()->contentsMargins().top() == 8 &&
-          firstNestedTop - promptContentBottom == 14,
+      promptContent && promptIndex.isValid() && firstNestedIndex.isValid() &&
+          view.visualRect(firstNestedIndex).top() -
+                  view.visualRect(promptIndex).bottom() -
+                  1 ==
+              14,
       "turn prompt content adds a visible canonical 8 px section boundary "
       "before its first nested card");
 
@@ -2657,7 +2687,7 @@ bool testCardFoldingGeometryAndRetention() {
                                       QString{}, Qt::FindDirectChildrenOnly)
                                 : nullptr;
   result &= expect(
-      steeringCard && userCard->isAncestorOf(steeringCard) &&
+      steeringCard &&
           steeringCard->property("nestedConversationCard").toBool() &&
           cardTitle(steeringCard) == QStringLiteral("You") && steeringPhase &&
           steeringPhase->text() == QStringLiteral("steering · pending") &&
@@ -2681,7 +2711,8 @@ bool testCardFoldingGeometryAndRetention() {
   ConversationCard *authoritativeSteering = card(view, stableKey(steeringKey));
   result &=
       expect(authoritativeSteering == steeringCard &&
-                 userCard->isAncestorOf(authoritativeSteering) &&
+                 authoritativeSteering->property("nestedConversationCard")
+                     .toBool() &&
                  authoritativeSteering->cardKind() == CardKind::UserMessage &&
                  cardTitle(authoritativeSteering) == QStringLiteral("You") &&
                  steeringPhase->text() == QStringLiteral("steering") &&
@@ -2815,7 +2846,8 @@ bool testCardFoldingGeometryAndRetention() {
       card(view, stableKey(promptActivity.key));
   result &=
       expect(promptCard && !promptCard->isCollapsed() && promptActivityCard &&
-                 promptCard->isAncestorOf(promptActivityCard) &&
+                 promptActivityCard->property("nestedConversationCard")
+                     .toBool() &&
                  setFolded(promptCard, true),
              "temporary You prompts start expanded and can be folded");
   ConversationCard *const admittedPromptCard = promptCard;
@@ -2863,7 +2895,9 @@ bool testCardFoldingGeometryAndRetention() {
       card(view, stableKey(promptActivity.key));
   result &=
       expect(rematerializedPromptActivity &&
-                 promptCard->isAncestorOf(rematerializedPromptActivity) &&
+                 rematerializedPromptActivity
+                     ->property("nestedConversationCard")
+                     .toBool() &&
                  (!promptActivityCard ||
                   rematerializedPromptActivity == promptActivityCard),
              "prompt activity remains structurally nested across lazy release");
@@ -2960,8 +2994,14 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
     spin();
     ConversationCard *nestedReasoning =
         card(nestedView, stableKey(nestedReasoningKey));
-    if (!expect(nestedResult && nestedReasoning &&
-                    !nestedReasoning->isVisible(),
+    const QModelIndex reasoningIndex =
+        nestedView.conversationModel()->indexForStableKey(
+            stableKey(nestedReasoningKey));
+    if (!expect(nestedResult && reasoningIndex.isValid() &&
+                    !reasoningIndex
+                         .data(ConversationItemModel::PresentedRole)
+                         .toBool() &&
+                    nestedReasoning == nullptr,
                 "filtered nested reasoning is retained without painting"))
       return false;
   }
@@ -3074,7 +3114,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
 
   ConversationView view;
   view.setPresentationOptions({false, true, true, true, true});
-  view.resize(700, 700);
+  view.resize(700, 5000);
   view.show();
   bool result = expect(applyConversation(view, snapshot),
                        "presentation-options fixture renders");
@@ -3093,9 +3133,13 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
   QPointer<ConversationCard> firstImage = card(view, stableKey(firstImageKey));
   QPointer<ConversationCard> firstFileChanges =
       card(view, stableKey(firstFileChangesKey));
-  result &= expect(update && final && reasoning && firstCommand && firstImage &&
-                       firstFileChanges && !update->isHidden() &&
-                       !final->isHidden() && reasoning->isHidden() &&
+  const QModelIndex reasoningIndex =
+      view.conversationModel()->indexForStableKey(stableKey(reasoningKey));
+  result &= expect(update && final && !reasoning && reasoningIndex.isValid() &&
+                       !reasoningIndex
+                            .data(ConversationItemModel::PresentedRole)
+                            .toBool() &&
+                       firstCommand && firstImage && firstFileChanges &&
                        !firstCommand->isCollapsed() &&
                        !firstImage->isCollapsed() &&
                        !firstFileChanges->isCollapsed(),
@@ -3106,11 +3150,17 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
 
   view.setPresentationOptions({false, false, false, false, false});
   spin();
-  result &= expect(update && update->isHidden() && reasoning &&
-                       reasoning->isHidden() && final && !final->isHidden() &&
-                       firstCommand && !firstCommand->isCollapsed(),
-                   "filters hide retained reasoning and update widgets without "
-                   "changing final answers or existing folds");
+  result &= expect(!update && !reasoning && final && firstCommand &&
+                       !firstCommand->isCollapsed() &&
+                       !view.conversationModel()
+                            ->indexForStableKey(stableKey(updateKey))
+                            .data(ConversationItemModel::PresentedRole)
+                            .toBool() &&
+                       !reasoningIndex
+                            .data(ConversationItemModel::PresentedRole)
+                            .toBool(),
+                   "filters release hidden update/reasoning editors without "
+                   "changing the final answer or existing folds");
 
   std::get<AgentMessageData>(snapshot.sections.front().cards[0].payload).text =
       "Updated while hidden";
@@ -3145,13 +3195,12 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
       card(view, stableKey(secondImageKey));
   QPointer<ConversationCard> secondFileChanges =
       card(view, stableKey(secondFileChangesKey));
-  result &= expect(update && update->isHidden() && reasoning &&
-                       reasoning->isHidden() && secondCommand &&
+  result &= expect(!update && !reasoning && secondCommand &&
                        secondCommand->isCollapsed() && secondImage &&
                        secondImage->isCollapsed() && secondFileChanges &&
                        secondFileChanges->isCollapsed(),
-                   "filtered nodes remain hidden while new commands, images, "
-                   "and file changes use current initial preferences");
+                   "filtered rows remain widget-free while new commands, "
+                   "images, and file changes use current initial preferences");
 
   result &= expect(setFolded(firstCommand, true),
                    "an existing command records a user-owned collapsed state");
@@ -3395,7 +3444,12 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
            !view.property("bulkMaterializationUpdatesSuppressed").toBool();
   });
   spin(160);
-  ConversationCard *promptCard = card(view, stableKey(prompt.key));
+  const QModelIndex promptIndex =
+      view.conversationModel()->indexForStableKey(stableKey(prompt.key));
+  const QModelIndex answerIndex =
+      view.conversationModel()->indexForStableKey(stableKey(answer.key));
+  view.scrollTo(answerIndex, QAbstractItemView::PositionAtTop);
+  spin(40);
   ConversationCard *answerCard = card(view, stableKey(answer.key));
   QLabel *answerBody = nullptr;
   if (answerCard)
@@ -3413,44 +3467,23 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
     document.setTextWidth(answerBody->width());
     documentHeight = static_cast<int>(std::ceil(document.size().height()));
   }
-  if (!(promptCard && answerCard && answerBody &&
-        promptCard->isAncestorOf(answerCard) &&
-        answerBody->height() >=
-            documentHeight + answerBody->fontMetrics().descent() &&
-        answerBody->mapTo(answerCard, QPoint(0, answerBody->height())).y() <=
-            answerCard->contentsRect().bottom() + 1))
-    std::cerr << "nested final settle: prompt=" << bool(promptCard)
-              << " answer=" << bool(answerCard)
-              << " body=" << bool(answerBody) << " bodyHeight="
-              << (answerBody ? answerBody->height() : -1)
-              << " documentHeight=" << documentHeight << " cardBottom="
-              << (answerCard ? answerCard->contentsRect().bottom() : -1)
-              << " bodyBottom="
-              << (answerBody ? answerBody
-                                    ->mapTo(answerCard,
-                                            QPoint(0, answerBody->height()))
-                                    .y()
-                             : -1)
-              << " frozen="
-              << view.property("bulkMaterializationUpdatesSuppressed").toBool()
-              << '\n';
-  const int answerBottomInPrompt =
-      promptCard && answerCard
-          ? answerCard->mapTo(promptCard, QPoint(0, answerCard->height())).y()
-          : -1;
   result &= expect(
-      promptCard && answerCard && answerBody &&
-          promptCard->isAncestorOf(answerCard) &&
+      promptIndex.isValid() && answerIndex.isValid() && answerCard &&
+          answerBody &&
+          promptIndex.data(ConversationItemModel::TurnRootRole).toBool() &&
+          answerIndex.data(ConversationItemModel::NestedCardRole).toBool() &&
           answerBody->height() >=
               documentHeight + answerBody->fontMetrics().descent() &&
           answerBody->mapTo(answerCard, QPoint(0, answerBody->height())).y() <=
               answerCard->contentsRect().bottom() + 1 &&
-          answerBottomInPrompt <= promptCard->contentsRect().bottom() + 1,
+          view.visualRect(answerIndex).height() == answerCard->height(),
       "an initially retained nested final answer fully fits its rendered "
-      "document, inner card, and canonical Turn/You owner");
+      "document and virtual Turn/You row");
 
-  QPointer<ConversationCard> retainedPrompt = promptCard;
   QPointer<ConversationCard> retainedAnswer = answerCard;
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderPageStepSub);
+  spin();
+  const auto retainedAnchor = firstVisible(view);
   const VisibleCardData laterPrompt{
       AuthoritativeItemKey{thread, "later-turn", "later-prompt"},
       CardKind::UserMessage,
@@ -3470,42 +3503,21 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
   result &= expect(applyConversation(view, snapshot),
                    "a later completed Turn is appended after the long answer");
   spin(160);
-  promptCard = card(view, stableKey(prompt.key));
   answerCard = card(view, stableKey(answer.key));
-  ConversationCard *laterPromptCard = card(view, stableKey(laterPrompt.key));
-  QWidget *retainedSection = promptCard ? promptCard->parentWidget() : nullptr;
-  while (retainedSection &&
-         retainedSection->property("turnSectionKey").toString().isEmpty())
-    retainedSection = retainedSection->parentWidget();
-  const int retainedAnswerBottom =
-      promptCard && answerCard
-          ? answerCard->mapTo(promptCard, QPoint(0, answerCard->height())).y()
-          : -1;
-  const int promptBottomInSection =
-      retainedSection && promptCard
-          ? promptCard->mapTo(retainedSection,
-                              QPoint(0, promptCard->height()))
-                .y()
-          : -1;
-  const int promptBottomInViewport =
-      promptCard
-          ? promptCard->mapTo(view.viewport(),
-                              QPoint(0, promptCard->height()))
-                .y()
-          : -1;
-  const int laterTopInViewport =
-      laterPromptCard
-          ? laterPromptCard->mapTo(view.viewport(), QPoint()).y()
-          : -1;
+  const QModelIndex retainedAnswerIndex =
+      view.conversationModel()->indexForStableKey(stableKey(answer.key));
+  const QModelIndex laterPromptIndex =
+      view.conversationModel()->indexForStableKey(stableKey(laterPrompt.key));
   result &= expect(
-      promptCard && answerCard && laterPromptCard && retainedSection &&
-          retainedPrompt == promptCard &&
-          retainedAnswer == answerCard && promptCard->isAncestorOf(answerCard) &&
-          retainedAnswerBottom <= promptCard->contentsRect().bottom() + 1 &&
-          promptBottomInSection <= retainedSection->contentsRect().bottom() + 1 &&
-          laterTopInViewport >= promptBottomInViewport + 8,
+      answerCard && retainedAnswer == answerCard &&
+          retainedAnswerIndex.isValid() && laterPromptIndex.isValid() &&
+          view.visualRect(laterPromptIndex).top() >
+              view.visualRect(retainedAnswerIndex).bottom() &&
+          firstVisible(view) == retainedAnchor &&
+          answerBody->mapTo(answerCard, QPoint(0, answerBody->height())).y() <=
+              answerCard->contentsRect().bottom() + 1,
       "appending a later conversation card cannot clip the retained long "
-      "answer through its Turn/You owner or section boundary");
+      "answer or move its paused virtual-row anchor");
   spin();
   qApp->setStyleSheet(originalStyleSheet);
   return result;
