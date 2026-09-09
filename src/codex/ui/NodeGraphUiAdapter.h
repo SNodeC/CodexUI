@@ -43,6 +43,13 @@ public:
   card(const nodegraph::NodeRef &thread, const nodegraph::NodeRef &item,
        ConversationOptions options) const;
 
+  // Projects only a canonical last item of the selected thread. It is the
+  // bounded structural fast path for ordinary append; any non-tail or prompt
+  // alias case returns nullopt and uses complete reconciliation instead.
+  [[nodiscard]] std::optional<middle::ConversationTailCard>
+  tailCard(const nodegraph::NodeRef &thread, const nodegraph::NodeRef &item,
+           ConversationOptions options) const;
+
   [[nodiscard]] std::optional<ThreadListSnapshot>
   threads(const nodegraph::NodeRef &selectedThread) const;
 

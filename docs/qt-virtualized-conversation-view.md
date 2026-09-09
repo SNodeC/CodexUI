@@ -83,16 +83,19 @@ The code follows the existing problem boundaries directly:
    Turn/root/nested metadata. Stable `NodeRef` targets are carried unchanged.
 5. The model emits the narrowest valid Qt signal for the actual ordered
    difference. An exact targeted card update resolves directly to one row.
-6. A variable-height index provides bounded prefix, row lookup, and height
+6. A canonical single-item tail delta is projected by `tailCard` under one
+   short graph read, appended with one Qt insert signal, and trims the bounded
+   history prefix without scanning or reindexing the retained suffix.
+7. A variable-height index provides bounded prefix, row lookup, and height
    update operations. Viewport anchoring is expressed as stable row identity
    plus an exact pixel offset.
-7. The item view owns only visible presentation plus small bounded overscan.
+8. The item view owns only visible presentation plus small bounded overscan.
    Passive presentation uses a delegate where established interaction permits;
    real card widgets/editors exist only for visible rich interaction.
-8. Fold, focus, selection, command inner-scroll, delayed prompt feedback, and
+9. Fold, focus, selection, command inner-scroll, delayed prompt feedback, and
    other genuinely local interaction state are keyed by stable row identity and
    survive materialization changes.
-9. Selection and Load 80 prepare the new model/geometry and initial visible
+10. Selection and Load 80 prepare the new model/geometry and initial visible
    materialization behind the existing stable surface, then reveal one complete
    frame. Ordinary streaming is coalesced within one GUI frame and affects only
    the addressed row.
@@ -126,6 +129,9 @@ Model changes have these exact meanings:
 - absent/present same-thread keys use contiguous remove/insert ranges;
 - a changed retained card or structural role emits `dataChanged` for that row
   and the affected roles only;
+- a validated canonical tail uses one `beginInsertRows/endInsertRows`; stable
+  lookup tables retain absolute deque ordinals, so dropping the bounded prefix
+  does not reindex the surviving rows;
 - an identical snapshot, card, or visibility tuple emits no signal and does
   not increment a presentation-work counter.
 
@@ -133,10 +139,12 @@ Model changes have these exact meanings:
 It stores integer row extents in a Fenwick prefix tree. `top`, `bottom`, total
 extent, position-to-row lookup, and a changed row height are logarithmic. A
 tail append extends the tree from prefix sums without traversing existing
-heights. Non-tail insertion/removal/movement is uncommon structural work and
-rebuilds the prefix tree from the already validated model order. Geometry
-values are nonnegative and accumulated as `qint64`; scrollbar conversion is a
-separate view concern.
+heights. A leading removal advances a physical Fenwick origin; the special
+pinned-Turn-root case replaces only the next prefix slot. Neither operation
+traverses the retained suffix. Non-tail insertion/removal/movement is uncommon
+structural work and rebuilds the prefix tree from the already validated model
+order. Geometry values are nonnegative and accumulated as `qint64`; scrollbar
+conversion is a separate view concern.
 
 The deterministic foundation test exercises 10,000 rows and asserts no Qt
 widget construction is involved. At that size, position lookup and one-row
@@ -197,8 +205,199 @@ correlate visible behavior with work:
 - targeted visible and offscreen update counts;
 - structural stage starts, commits, and maximum pass duration;
 - complete-view geometry/repaint fallbacks, which must remain zero during
-  ordinary scrolling and streaming.
+  ordinary scrolling and streaming;
+- targeted structural tail appends and their model/section rebuild deltas.
 
-Before/after values, interaction ownership, delegate/editor decisions,
-sanitizer results, and movie artifacts will be appended as the migration is
-qualified.
+## Final ownership and lifecycle
+
+`ConversationView` owns one `ConversationItemModel`, one
+`ConversationHeightIndex`, one bounded passive-delegate document cache, and
+only the rich card widgets intersecting the viewport plus one viewport of
+overscan. It also owns the Load More/empty controls and a hidden staging host.
+It does not own a `TurnSectionWidget`, one placeholder per row, or a mutable
+domain mirror. The SNode.C worker remains the only `NodeGraph` writer and the
+existing `NodeGraphUiAdapter` still performs the only graph-to-presentation
+projection under short nonblocking reads.
+
+The model row's `NodeRef` is an opaque action target and lifetime pin. Qt never
+dereferences it. Actions return that exact identity through the existing typed
+queue after all graph guards and QWidget work have ended. A different selected
+thread is the normal model-reset boundary; same-thread insert, remove, move,
+and value changes use the corresponding narrow Qt model operation.
+
+For the common one-item structural delta, `NodeGraphUiAdapter::tailCard`
+verifies that the exact `NodeRef` is the last child of the last canonical Turn
+and refuses prompt-materialization aliases. `ConversationView::appendTailCard`
+then changes only the old tail edge, the inserted row, an optional pinned
+leading owner, and scroll chrome. Coalesced multi-item structure, non-tail
+insertion, removal, movement, and aliases deliberately fall back to the full
+projection because only that projection can establish their complete order.
+
+On selection or Load 80, passive rows need no construction. Only initially
+visible rich rows are created and measured one per nonzero-delay staging pass
+beneath the hidden host. The old complete view or stable loading cover remains
+visible until model order, row extents, visible editors, and the restored anchor
+are ready for one commit. Ordinary deltas bypass structural staging and resolve
+directly to one stable model index.
+
+## Delegate and editor boundary
+
+| Content/state | Presentation | Reason |
+| --- | --- | --- |
+| Resting user text without images | passive delegate; promoted on hover, current-row focus, or press | Fast history scrolling while preserving selection, copy, context menu, tooltips, and keyboard interaction on demand. |
+| Resting Markdown/final answer | passive `QTextDocument` delegate with a 128-document bound; promoted on interaction | Preserves Markdown appearance while preventing document count from scaling with history. |
+| Resting reasoning, update, plan, agent activity, and generic tool/activity cards | passive delegate while their current state is noninteractive or collapsed | These rows need text, status, disclosure, and Turn hierarchy but no continuously live editor. |
+| Any collapsed completed card | passive delegate | Disclosure can promote exactly the pointed row; no hidden subtree is retained. |
+| Local optimistic prompt | real visible `ConversationCard` | Delayed sweep animation, recovery, and authoritative morph are live behavior. |
+| Expanded/running command output | real visible `ConversationCard` and `CommandOutputView` | Requires nested scrolling, tail-follow state, selection/copy, streaming output, and completion controls. |
+| Expanded file changes and images/attachments | real visible `ConversationCard` | Requires file/image activation, hover/cursor behavior, and rich child controls. |
+| Approval and user-input controls | existing real request widgets/dialogs outside the passive row delegate | Their validation, focus, authored input, and exact response target are inherently interactive. |
+
+When a rich row leaves overscan, only stable-keyed fold, text-selection,
+current/focus identity, and command inner-scroll values survive; its QWidget is
+released. Returning to the row reconstructs the established card, applies its
+current model value, restores local state after final geometry, and exposes no
+blank reservation. Root Turn folding sets nested row extents to zero and
+releases their editors without deleting model identity.
+
+## Behavior-parity matrix
+
+| Existing behavior | Final path | Qualification result |
+| --- | --- | --- |
+| Turn/You ownership and nested steering | Flat stable rows carry explicit section/root/nested roles; the view paints one continuous Turn surface and applies the established nested inset. | Preserved in model, card, NodeGraph UI, shell, and live steering tests. |
+| Optimistic prompt admission | Local prompt is an exact stable row with a real visible card and unchanged typed action target. | Calm first second, delayed sweep, recovery, and no lost draft pass. |
+| Authoritative prompt acknowledgement | Local key morphs to canonical user data without changing visual identity; exact `NodeRef` is acknowledged once. | Normal and steering correlation, duplicate text, delayed result, and failure paths pass. |
+| Running/delayed emphasis and lifecycle states | Active Turn and card status are row-local roles/data; borders and status update without unrelated geometry. | Pending, running, completed, interrupted, failed, and delayed-result assertions pass. |
+| Streaming Markdown/plain text | Visible passive row updates its bounded document and row rectangle; a rich visible row updates only its editor. | Visible row touch count is one; offscreen stream creates/layouts/paints no QWidget. |
+| Text selection and copying | Hover/current/press promotes one passive row; stable-keyed selection is captured and restored across updates/eviction. | Selection/copy before, during, and after streaming passes; live clipboard text matched exactly. |
+| Markdown, links, and code blocks | Delegate uses the same Markdown policy for rest; promotion hands interaction to the established text widget. | Rendering, context menu, safe link activation, copy source, and code-block behavior pass. |
+| Images and attachments | Expanded/image-bearing rows use the existing real widget; collapsed rows may be passive. | Image/file activation, fallback, attachment order, folding, and no remote embedded fetch pass. |
+| Command output and completion | Visible expanded command retains `CommandOutputView`; its inner pause/follow state is restored after final geometry. | Long running-to-completed transitions, inner/outer scroll independence, selection, and no freeze pass. |
+| Reasoning and update cards | Resting/collapsed content is delegate painted; exact visible interaction promotes one row. | Visibility preferences, active reasoning, stream changes, folds, and copy pass. |
+| Plan cards | Resting plan rows use bounded passive presentation; active interaction promotes the row. | Ordered steps, explanation, statuses, updates, copy, fold, and accessibility pass. |
+| Agent activity | Resting/collapsed activity is passive; detailed visible interaction uses the established card. | Spawn/progress/completion/interruption, deduplication, expansion state, and focus pass. |
+| File changes | Expanded visible file changes retain the rich widget and exact workspace-relative targets. | Status, changed paths, link action, expansion preference, and errors pass. |
+| Generic tool calls and errors | Resting/collapsed cards are passive; detailed or focused rows use the existing renderer. | Tool metadata, unknown/fallback activity, errors, interrupted/failed states, context menus, and tooltips pass. |
+| Approval controls | Existing request surface remains a real widget outside passive conversation painting and carries the exact request target. | Accept/reject/review shaping passes; live rejection displayed exact facts and created no file. |
+| User-input requests | Existing embedded request card and modal remain real widgets with authored input retained until exact response. | Validation/cancel/submit tests pass; live Plan-mode Alpha submission completed authoritatively. |
+| Expand/collapse state | Fold state is keyed by stable row; root fold sets nested extents to zero and releases invisible editors. | Card/root folding, automatic preferences, anchor preservation, and rematerialization pass. |
+| Hover, cursor, tooltip, context menu | Delegate hit-testing promotes only the pointed row, then existing widget semantics take over. | Pointer forwarding, disclosure/copy ordering, link cursor, menus, and tooltip tests pass. |
+| Keyboard navigation and visible focus | Qt current index is stable identity; focused rich editor remains materialized and is scrolled into view. | Tab/Backtab, arrows, activation, modal return, visible focus, and no unrelated focus jump pass. |
+| Accessibility | Model roles expose row names/structure; promoted controls retain their established accessible names and focus behavior. | Row, control, dialog, image/link, and nested-scroll accessibility assertions pass. |
+| Paused scroll and exact anchoring | Anchor is stable row key plus exact vertical pixel offset and horizontal value; height deltas above it are applied through the index. | Height change, insertion, tail arrival, selection, Load 80, and steering preserve both axes. |
+| Follow latest | Tail is followed only when already following; user wheel/slider activity changes to paused mode. | Arrival/completion at tail and manual pause/resume scenarios pass without blank-card exposure. |
+| Atomic selection and paging | Passive rows require no construction; initially visible rich rows stage behind the old complete surface/loading cover. | Initial long selection and Load 80 expose one completed frame with bounded event-loop work. |
+| Unrelated panes and idle CPU | Exact Shell routing updates Conversation only; no zero-delay retry is used. | ThreadPane/Inspector/chrome/settings counters stay unchanged for unrelated streams; live crops stay visually static. |
+
+## Final deterministic qualification
+
+The focused model and view tests cover stable `NodeRef` targeting; exact
+insert/remove/move/data-change signals; identical-value no-ops; 10,000 model
+rows without QWidget construction; logarithmic height lookup/update; bounded
+visible widget counts; visible versus offscreen targeted updates; exact anchor
+preservation across height changes and inserts; direct 10,000-row tail append
+with zero model, section, or height rebuild; pinned-root prefix trimming;
+paused/following tail behavior;
+atomic selection and paging; prompt/steering acknowledgment; command completion;
+selection/copy; links, files, images, folds, focus, accessibility; heterogeneous
+cards; inactive panes; and bounded event-loop passes without idle spin.
+
+The final persistent Debug build passes all 19 native suites under Xvfb/xcb.
+The independently reused integrated ASan/UBSan build also passes 19/19 with no
+sanitizer diagnostic. The supported NodeGraph/typed-queue/worker TSan boundary
+passes 5/5 with no race report; Qt itself is not run under TSan because the
+system Qt libraries are not instrumented. `npm run release --prefix web`
+passes 83/83 WebUI tests, the 10,000-item profile, the Vite production build,
+Chromium responsive/focus qualification, and relocatable artifact verification.
+
+## Final performance measurements
+
+Three Xvfb/xcb samples per size were taken from the same persistent Debug build
+and benchmark as the baseline. Values below are medians.
+
+| Loaded rows | Initial reveal | Conversation cards | Descendant QWidgets | Peak resident memory | 240-position sweep | Mean sweep position | One bounded tail append |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 320 | 16 ms | 0 | 8 | 86,116 KiB | 260.2 ms | 1.08 ms | 1.44 ms |
+| 1,280 | 25 ms | 0 | 8 | 85,160 KiB | 278.1 ms | 1.16 ms | 1.60 ms |
+| 10,000 | 97 ms | 0 | 8 | 100,308 KiB | 355.9 ms | 1.48 ms | 1.73 ms |
+
+The old 320/1,280-row initial reveal was 733/4,040 ms with 4,209/16,809
+descendant widgets and 125,324/281,616 KiB peak RSS. At 1,280 rows the final
+initial reveal is approximately 162 times faster and uses approximately 70%
+less peak resident memory. Four times the loaded history now changes the
+scroll sweep by approximately 6.9%, while widget count remains exactly eight;
+10,000 passive rows still create zero `ConversationCard` widgets. The original
+baseline did not record process CPU counters separately, so the directly
+comparable CPU-time proxy is the single-threaded initial-reveal and scroll-sweep
+wall time above rather than a fabricated percentage.
+
+The bounded append column measures the complete synchronous view operation,
+including exact anchor/follow restoration and visible materialization. Every
+sample reported zero model-index rebuilds and zero section-range rebuilds; the
+1.44–1.73 ms spread from 320 through 10,000 rows demonstrates that loaded
+history is not traversed.
+
+During a 60-fps live 1,600-line command interval with continuous outer scrolling,
+mean decoded-frame luminance deltas were 2.211289 in Conversation, 0.000012 in
+ThreadPane, 0.000003 in Inspector, 0 in the shell header, and 0.000689 in the
+settings/composer region. The tiny non-conversation values are H.264/cursor
+noise; no unrelated content movement is visible. Start/end activity transitions
+are excluded because those canonical state changes genuinely update controls.
+
+## Full-application evidence
+
+The Debug application was connected on isolated Xvfb display `:99` to one
+workspace-local `codex-bridge`/app-server on `127.0.0.1:8093`. That bridge stayed
+alive across all scenarios. Obsolete movies were removed first. Replacement
+movies and compact contact sheets are under
+`../../build/codexui-adapter-qualification/capture/qt-virtualized-final/`:
+
+- `initial-very-long-thread.mp4`: atomic selection of a copied 42,911-event
+  read-only local thread fixture; the first changed conversation surface is
+  complete.
+- `load-80-anchor.mp4`: exact-pixel paused anchor while 80 earlier activities
+  are inserted; no temporary blank extent is exposed.
+- `heterogeneous-history-scroll.mp4`: repeated sweeps through the long mixed
+  history while editor/widget count remains bounded.
+- `streaming-outer-scroll.mp4`: a real 1,600-line command while the outer
+  viewport repeatedly leaves and returns to the tail; scrolling remains
+  uninterrupted through running-to-completed transition.
+- `streaming-command-output-scroll.mp4`: nested command-output selection and
+  scrolling remain independent of the outer conversation.
+- `steering-paused-anchor.mp4`: a second long command, manual pause above the
+  tail, steering admission under the same Turn, and preserved viewport while
+  the authoritative final answer arrives below it.
+- `atomic-thread-selection.mp4`: populated-thread switches expose complete
+  final frames only.
+- `selection-fold-focus.mp4`: delegate promotion, real text selection/copy,
+  fold/unfold, and visible Tab/Backtab focus. Clipboard verification returned
+  the exact selected sentence.
+- `approval-request.mp4` and `approval-reject.mp4`: exact command approval
+  details and rejection; the requested probe file was never created.
+- `user-input-request.mp4` and `user-input-answer.mp4`: Plan-mode embedded
+  Alpha/Beta request, Review dialog, authored selection, exact submission, and
+  authoritative `Alpha selected.` completion.
+- `direct-tail-append.mp4`: the final Debug binary was reconnected without
+  restarting the bridge; two follow-tail prompt/final turns were admitted and
+  completed without blank reservation, ending with the exact authoritative
+  response `SECOND BOUNDED TAIL VERIFIED.`
+
+The movies supplement deterministic geometry and interaction assertions; lossy
+video alone cannot prove a sub-frame timing bound. No source, remote, GitHub,
+WebUI behavior, transport, thread, or graph-ownership change was made for the
+recording setup. The temporary 168 MiB copied long-thread fixture was deleted
+after paging qualification.
+
+## Remaining limitations
+
+- A same-thread non-tail structural move/insert/remove rebuilds the Fenwick
+  tree from validated row extents. This is deliberate uncommon structural work;
+  ordinary scrolling, streaming, completion, and tail append stay bounded.
+- A first interaction with a passive row constructs that one real editor. The
+  row is measured before exposure, so this trades one local interaction cost
+  for loaded-history-independent idle and scrolling cost.
+- Full-application recordings are finite samples. Deterministic tests and
+  instrumentation are the authority for exact identities, anchors, operation
+  counts, accessibility, and offscreen zero-widget work.
+
+No remote operation occurred during implementation or qualification.

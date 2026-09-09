@@ -242,6 +242,78 @@ bool testVisibilityAndLargeModelRemainDataOnly() {
   return result;
 }
 
+bool testBoundedTailAppendKeepsAbsoluteIdentityIndexes() {
+  ConversationItemModel model;
+  ConversationSnapshot data;
+  data.threadId = "tail-thread";
+  TurnSection section;
+  section.key = "tail-section";
+  section.turnId = "tail-turn";
+  constexpr int Count = 10'000;
+  section.cards.reserve(Count);
+  for (int position = 0; position < Count; ++position) {
+    VisibleCardData value;
+    value.key = AuthoritativeItemKey{"tail-thread", "tail-turn",
+                                     "item-" + std::to_string(position)};
+    value.kind = position == 0 ? CardKind::UserMessage : CardKind::AgentMessage;
+    value.threadId = "tail-thread";
+    value.turnId = "tail-turn";
+    value.itemId = "item-" + std::to_string(position);
+    value.payload = position == 0
+                        ? CardPayload{UserMessageData{"Question", {}}}
+                        : CardPayload{AgentMessageData{"Answer", true}};
+    section.cards.push_back(std::move(value));
+  }
+  section.rootCardKey = section.cards.front().key;
+  data.sections.push_back(std::move(section));
+  bool result = require(model.reconcile(std::move(data)),
+                        "tail fixture was not accepted");
+  SignalLog log(model);
+  const qulonglong rebuilds =
+      model.property("modelIndexRebuildCount").toULongLong();
+
+  const auto append = [&](int serial) {
+    ConversationTailCard tail;
+    tail.card.key = AuthoritativeItemKey{"tail-thread", "tail-turn",
+                                         "item-" + std::to_string(serial)};
+    tail.card.kind = CardKind::AgentMessage;
+    tail.card.threadId = "tail-thread";
+    tail.card.turnId = "tail-turn";
+    tail.card.itemId = "item-" + std::to_string(serial);
+    tail.card.payload = AgentMessageData{"Tail", true};
+    tail.sectionKey = "tail-section";
+    tail.nested = true;
+    return model.appendTail(std::move(tail));
+  };
+
+  result &= require(append(Count), "first bounded tail append failed");
+  const ConversationItemModel::HistoryTrim pin = model.trimHistoryTo(Count);
+  result &= require(
+      pin.pinnedRoot && pin.count == 0 && model.rowCount() == Count + 1 &&
+          log.inserted.size() == 1 && log.inserted.front().first == Count,
+      "first append did not retain the root outside the window");
+
+  log.clear();
+  result &= require(append(Count + 1), "second bounded tail append failed");
+  const ConversationItemModel::HistoryTrim trim = model.trimHistoryTo(Count);
+  result &= require(
+      trim.row == 1 && trim.count == 1 && trim.hiddenIncrement == 1 &&
+          log.inserted.size() == 1 && log.inserted.front().first == Count + 1 &&
+          log.removed.size() == 1 && log.removed.front().first == 1 &&
+          log.removed.front().last == 1,
+      "bounded append did not emit exact tail/prefix signals");
+  result &= require(
+      model.property("modelIndexRebuildCount").toULongLong() == rebuilds &&
+          model.indexForStableKey("item:11:tail-thread9:tail-turn6:item-0")
+                  .row() == 0 &&
+          model.indexForStableKey("item:11:tail-thread9:tail-turn6:item-2")
+                  .row() == 1 &&
+          model.indexForStableKey("item:11:tail-thread9:tail-turn10:item-10001")
+                  .row() == Count,
+      "front trim rebuilt or lost absolute stable identity indexes");
+  return result;
+}
+
 bool testHeightIndexIsBoundedAndExact() {
   constexpr std::size_t Count = 10000;
   std::vector<int> heights(Count);
@@ -292,6 +364,35 @@ bool testHeightIndexIsBoundedAndExact() {
   index.remove(8, 1);
   result &= require(index.size() == Count + 2,
                     "height removal did not restore the expected row count");
+
+  ConversationHeightIndex prefixIndex;
+  const std::vector<int> prefixHeights{50, 20, 30, 40};
+  prefixIndex.assign(prefixHeights);
+  const std::size_t prefixRebuilds = prefixIndex.rebuildCount();
+  prefixIndex.remove(0, 1);
+  result &=
+      require(prefixIndex.size() == 3 && prefixIndex.height(0) == 20 &&
+                  prefixIndex.top(1) == 20 && prefixIndex.totalHeight() == 90 &&
+                  prefixIndex.rowAt(21) == 1 &&
+                  prefixIndex.rebuildCount() == prefixRebuilds,
+              "prefix removal was not exact and bounded");
+  const std::vector<int> prefixTail{55};
+  prefixIndex.insert(prefixIndex.size(), prefixTail);
+  result &= require(prefixIndex.size() == 4 && prefixIndex.height(3) == 55 &&
+                        prefixIndex.totalHeight() == 145 &&
+                        prefixIndex.rebuildCount() == prefixRebuilds,
+                    "tail append after prefix removal rebuilt height state");
+
+  ConversationHeightIndex pinnedRoot;
+  const std::vector<int> pinnedHeights{60, 20, 30};
+  pinnedRoot.assign(pinnedHeights);
+  const std::size_t pinnedRebuilds = pinnedRoot.rebuildCount();
+  pinnedRoot.remove(1, 1);
+  result &= require(pinnedRoot.size() == 2 && pinnedRoot.height(0) == 60 &&
+                        pinnedRoot.height(1) == 30 &&
+                        pinnedRoot.totalHeight() == 90 &&
+                        pinnedRoot.rebuildCount() == pinnedRebuilds,
+                    "pinned-root prefix trim was not exact and bounded");
   return result;
 }
 
@@ -303,6 +404,7 @@ int main(int argc, char **argv) {
   using namespace codexui::codex::middle;
   bool result = testStableIdentityAndExactSignals();
   result &= testVisibilityAndLargeModelRemainDataOnly();
+  result &= testBoundedTailAppendKeepsAbsoluteIdentityIndexes();
   result &= testHeightIndexIsBoundedAndExact();
   if (result)
     std::cout << "Conversation item model tests passed\n";

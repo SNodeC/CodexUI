@@ -29,6 +29,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <array>
 #include <climits>
 #include <cmath>
 #include <ranges>
@@ -936,6 +937,203 @@ ConversationView::applyCardPresentation(VisibleCardData &&card) {
   return applyCardPresentationOwned(std::move(card));
 }
 
+bool ConversationView::appendTailCard(ConversationTailCard tail,
+                                      std::size_t historyActivityLimit) {
+  if (pendingStructuralSnapshot_ || tail.card.threadId != threadId_ ||
+      historyActivityLimit == 0)
+    return false;
+
+  const std::string appendedKey = stableKey(tail.card.key);
+  if (appendedKey.empty() || model_->indexForStableKey(appendedKey).isValid())
+    return false;
+
+  const Anchor anchor = captureAnchor();
+  const bool follow = mode_ == Mode::Following;
+  const std::size_t hiddenBefore = model_->hiddenAuthoritativeItemCount();
+  const bool providerHasMore = tail.providerHasMore;
+  const int oldLast = model_->rowCount() - 1;
+  std::string oldLastKey;
+  std::optional<SectionRange> oldLastSection;
+  int oldLastCardHeight = 0;
+  if (const ConversationItemModel::Row *row = model_->row(oldLast)) {
+    oldLastKey = row->stableKey;
+    if (const auto found = sectionRanges_.find(row->sectionKey);
+        found != sectionRanges_.end())
+      oldLastSection = found->second;
+    const int oldExtent = heights_.height(static_cast<std::size_t>(oldLast));
+    if (oldExtent > 0)
+      oldLastCardHeight = std::max(
+          1, oldExtent - rowSpacing(oldLast, oldLastSection ? &*oldLastSection
+                                                            : nullptr));
+  }
+
+  const bool startsActiveSection = tail.turnRoot && tail.activeTurn;
+  const std::string appendedSection = tail.sectionKey;
+  const QScopedValueRollback applying(applying_, true);
+  const QSignalBlocker scrollSignals(verticalScrollBar());
+  stopFollowingAnimation();
+
+  if (!model_->appendTail(std::move(tail)))
+    return false;
+  const int appendedRow = model_->rowCount() - 1;
+  const ConversationItemModel::Row *appended = model_->row(appendedRow);
+  if (!appended)
+    return false;
+
+  QRect damage;
+  if (startsActiveSection && !activeSectionKey_.empty() &&
+      activeSectionKey_ != appendedSection) {
+    const auto oldActive = sectionRanges_.find(activeSectionKey_);
+    if (oldActive != sectionRanges_.end()) {
+      oldActive->second.active = false;
+      if (const std::optional<int> root =
+              modelSectionRow(oldActive->second.root)) {
+        static_cast<void>(model_->setActiveTurn(*root, false));
+        damage = damage.united(rowRect(*root));
+        if (const ConversationItemModel::Row *rootRow = model_->row(*root))
+          if (ConversationCard *rootCard = cardForStableKey(rootRow->stableKey))
+            configureCardForRow(rootCard, *rootRow);
+      }
+    }
+  }
+
+  if (appended->turnRoot)
+    sectionRootRows_.insert_or_assign(appended->sectionKey,
+                                      storedSectionRow(appendedRow));
+  if (rowPresented(appendedRow)) {
+    SectionRange &range = sectionRanges_[appended->sectionKey];
+    if (range.first < 0)
+      range.first = storedSectionRow(appendedRow);
+    range.last = storedSectionRow(appendedRow);
+    if (appended->turnRoot)
+      range.root = storedSectionRow(appendedRow);
+    range.active = range.active || appended->activeTurn;
+  }
+  if (startsActiveSection)
+    activeSectionKey_ = appendedSection;
+
+  // Appending inside a represented turn changes only the previous tail's
+  // section edge spacing. Preserve its measured card height exactly.
+  if (oldLast >= 0 && oldLastCardHeight > 0)
+    static_cast<void>(
+        heights_.setHeight(static_cast<std::size_t>(oldLast),
+                           oldLastCardHeight + rowSpacing(oldLast)));
+
+  int appendedExtent = 0;
+  if (rowPresented(appendedRow)) {
+    int cardHeight = estimatedCardHeight(appended->card);
+    if (rowUsesPassiveDelegate(*appended)) {
+      QStyleOptionViewItem option;
+      option.initFrom(this);
+      option.rect = QRect(0, 0, rowWidth(*appended), 0);
+      const auto *delegate =
+          static_cast<const ConversationPassiveDelegate *>(itemDelegate());
+      cardHeight = delegate
+                       ->cardSize(option, model_->index(appendedRow),
+                                  rowCollapsed(*appended))
+                       .height();
+      heightCache_.insert_or_assign(
+          appendedKey, HeightRecord{rowWidth(*appended), cardHeight});
+    }
+    appendedExtent = std::max(1, cardHeight) + rowSpacing(appendedRow);
+  }
+  const std::array<int, 1> appendedHeights{appendedExtent};
+  heights_.insert(heights_.size(), appendedHeights);
+
+  std::size_t hiddenIncrement = 0;
+  while (true) {
+    const ConversationItemModel::HistoryTrim trim =
+        model_->trimHistoryTo(historyActivityLimit);
+    hiddenIncrement += trim.hiddenIncrement;
+    if (trim.pinnedRoot)
+      continue;
+    if (trim.count == 0)
+      break;
+
+    for (const std::string &key : trim.removedStableKeys) {
+      const auto materialized = materializedCards_.find(key);
+      if (materialized == materializedCards_.end())
+        continue;
+      ConversationCard *card = materialized->second;
+      materializedCards_.erase(materialized);
+      releaseCard(key, card);
+    }
+    heights_.remove(static_cast<std::size_t>(trim.row),
+                    static_cast<std::size_t>(trim.count));
+
+    sectionRowOrigin_ += trim.row == 1 ? 1 : trim.count;
+    const ConversationItemModel::Row *newFirst = model_->row(0);
+    if (trim.row == 1 && newFirst && newFirst->sectionKey == trim.sectionKey) {
+      SectionRange &range = sectionRanges_[trim.sectionKey];
+      range.first = sectionRowOrigin_;
+      range.root = sectionRowOrigin_;
+      sectionRootRows_.insert_or_assign(trim.sectionKey, sectionRowOrigin_);
+    } else if (newFirst && newFirst->sectionKey == trim.sectionKey) {
+      SectionRange &range = sectionRanges_[trim.sectionKey];
+      range.first = sectionRowOrigin_;
+      if (range.root >= 0 && range.root < sectionRowOrigin_) {
+        range.root = -1;
+        sectionRootRows_.erase(trim.sectionKey);
+      }
+    } else {
+      sectionRanges_.erase(trim.sectionKey);
+      sectionRootRows_.erase(trim.sectionKey);
+      if (activeSectionKey_ == trim.sectionKey)
+        activeSectionKey_.clear();
+    }
+  }
+
+  model_->setHistoryChrome(hiddenBefore + hiddenIncrement, providerHasMore);
+  loadMore_->setVisible(model_->hasMore());
+  if (model_->hasMore()) {
+    const std::size_t page =
+        model_->hiddenAuthoritativeItemCount() == 0
+            ? AuthoritativeHistoryPageSize
+            : std::min(AuthoritativeHistoryPageSize,
+                       model_->hiddenAuthoritativeItemCount());
+    loadMore_->setText(QStringLiteral("Load %1 more activities")
+                           .arg(static_cast<qulonglong>(page)));
+    loadMore_->setToolTip(
+        model_->hiddenAuthoritativeItemCount() == 0
+            ? QStringLiteral("Earlier activities are available")
+            : QStringLiteral("%1 earlier activities are retained")
+                  .arg(static_cast<qulonglong>(
+                      model_->hiddenAuthoritativeItemCount())));
+  }
+  empty_->setVisible(model_->rowCount() == 0);
+
+  updateScrollRange();
+  if (follow)
+    setScrollValue(verticalScrollBar()->maximum());
+  else
+    restoreAnchor(anchor);
+  updateMaterialization(false);
+  if (follow)
+    setScrollValue(verticalScrollBar()->maximum());
+  else
+    restoreAnchor(anchor);
+  layoutMaterializedCards();
+
+  if (!oldLastKey.empty()) {
+    const QModelIndex index = model_->indexForStableKey(oldLastKey);
+    if (index.isValid())
+      damage = damage.united(rowRect(index.row()));
+  }
+  const QModelIndex appendedIndex = model_->indexForStableKey(appendedKey);
+  if (appendedIndex.isValid())
+    damage = damage.united(rowRect(appendedIndex.row()));
+  if (!damage.isEmpty())
+    viewport()->update(damage.intersected(viewport()->rect()));
+
+  incrementProperty(this, "graphRefreshPasses");
+  incrementProperty(this, "targetedStructuralAppends");
+  setProperty("conversationHeightIndexUpdateSteps",
+              static_cast<qulonglong>(heights_.lastUpdateSteps()));
+  updateMaterializationProperties();
+  storeCurrentThreadState();
+  return true;
+}
+
 std::optional<PresentationImpact>
 ConversationView::applyCardPresentationOwned(VisibleCardData card) {
   const std::string key = stableKey(card.key);
@@ -984,9 +1182,13 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
       found != sectionRanges_.end())
     oldSection = found->second;
   QRect presentationDamage = rowRect(index.row());
-  if (oldSection && oldSection->root >= 0 && oldSection->last >= 0)
-    presentationDamage = presentationDamage.united(rowRect(oldSection->root))
-                             .united(rowRect(oldSection->last));
+  if (oldSection) {
+    const std::optional<int> root = modelSectionRow(oldSection->root);
+    const std::optional<int> last = modelSectionRow(oldSection->last);
+    if (root && last)
+      presentationDamage =
+          presentationDamage.united(rowRect(*root)).united(rowRect(*last));
+  }
   const bool becomingAuthoritative =
       before->card.kind == CardKind::LocalPrompt &&
       card.kind == CardKind::UserMessage && card.target;
@@ -1025,14 +1227,17 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
 
     std::unordered_set<int> affectedRows{index.row()};
     if (oldSection) {
-      affectedRows.insert(oldSection->root);
-      affectedRows.insert(oldSection->last);
+      if (const std::optional<int> row = modelSectionRow(oldSection->root))
+        affectedRows.insert(*row);
+      if (const std::optional<int> row = modelSectionRow(oldSection->last))
+        affectedRows.insert(*row);
     }
     if (nextSection) {
-      affectedRows.insert(nextSection->root);
-      affectedRows.insert(nextSection->last);
+      if (const std::optional<int> row = modelSectionRow(nextSection->root))
+        affectedRows.insert(*row);
+      if (const std::optional<int> row = modelSectionRow(nextSection->last))
+        affectedRows.insert(*row);
     }
-    affectedRows.erase(-1);
 
     for (const int affectedRow : affectedRows) {
       const ConversationItemModel::Row *affected = model_->row(affectedRow);
@@ -1100,9 +1305,13 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
       setScrollValue(verticalScrollBar()->maximum());
     else
       restoreAnchor(presentationAnchor);
-    if (nextSection && nextSection->root >= 0 && nextSection->last >= 0)
-      presentationDamage = presentationDamage.united(rowRect(nextSection->root))
-                               .united(rowRect(nextSection->last));
+    if (nextSection) {
+      const std::optional<int> root = modelSectionRow(nextSection->root);
+      const std::optional<int> last = modelSectionRow(nextSection->last);
+      if (root && last)
+        presentationDamage =
+            presentationDamage.united(rowRect(*root)).united(rowRect(*last));
+    }
     const int damageTop =
         std::clamp(presentationDamage.top(), 0, viewport()->height());
     viewport()->update(QRect(0, damageTop, viewport()->width(),
@@ -1207,11 +1416,15 @@ bool ConversationView::rowPresented(int rowIndex) const {
   const auto root = sectionRootRows_.find(row->sectionKey);
   if (root == sectionRootRows_.end())
     return true;
-  const ConversationItemModel::Row *rootRow = model_->row(root->second);
+  const std::optional<int> rootIndex = modelSectionRow(root->second);
+  const ConversationItemModel::Row *rootRow =
+      rootIndex ? model_->row(*rootIndex) : nullptr;
   return !rootRow || !rowCollapsed(*rootRow);
 }
 
 void ConversationView::rebuildSectionRanges() {
+  sectionRowOrigin_ = 0;
+  activeSectionKey_.clear();
   sectionRanges_.clear();
   sectionRootRows_.clear();
   sectionRanges_.reserve(static_cast<std::size_t>(model_->rowCount()));
@@ -1221,7 +1434,8 @@ void ConversationView::rebuildSectionRanges() {
     if (!row)
       continue;
     if (row->turnRoot)
-      sectionRootRows_.insert_or_assign(row->sectionKey, rowIndex);
+      sectionRootRows_.insert_or_assign(row->sectionKey,
+                                        storedSectionRow(rowIndex));
   }
   for (int rowIndex = 0; rowIndex < model_->rowCount(); ++rowIndex) {
     const ConversationItemModel::Row *row = model_->row(rowIndex);
@@ -1229,11 +1443,13 @@ void ConversationView::rebuildSectionRanges() {
       continue;
     SectionRange &range = sectionRanges_[row->sectionKey];
     if (range.first < 0)
-      range.first = rowIndex;
-    range.last = rowIndex;
+      range.first = storedSectionRow(rowIndex);
+    range.last = storedSectionRow(rowIndex);
     if (row->turnRoot)
-      range.root = rowIndex;
+      range.root = storedSectionRow(rowIndex);
     range.active = range.active || (row->turnRoot && row->activeTurn);
+    if (row->turnRoot && row->activeTurn)
+      activeSectionKey_ = row->sectionKey;
   }
   incrementProperty(this, "conversationSectionRangeRebuilds");
 }
@@ -1245,13 +1461,14 @@ void ConversationView::updateSectionRangeForPresentationChange(
     return;
 
   if (rowPresented(rowIndex)) {
+    const qint64 storedRow = storedSectionRow(rowIndex);
     SectionRange &range = sectionRanges_[changed->sectionKey];
-    if (range.first < 0 || rowIndex < range.first)
-      range.first = rowIndex;
-    if (range.last < 0 || rowIndex > range.last)
-      range.last = rowIndex;
+    if (range.first < 0 || storedRow < range.first)
+      range.first = storedRow;
+    if (range.last < 0 || storedRow > range.last)
+      range.last = storedRow;
     if (changed->turnRoot)
-      range.root = rowIndex;
+      range.root = storedRow;
     range.active = range.active || (changed->turnRoot && changed->activeTurn);
     return;
   }
@@ -1275,10 +1492,10 @@ void ConversationView::updateSectionRangeForPresentationChange(
     if (!rowPresented(candidateIndex))
       continue;
     if (replacement.first < 0)
-      replacement.first = candidateIndex;
-    replacement.last = candidateIndex;
+      replacement.first = storedSectionRow(candidateIndex);
+    replacement.last = storedSectionRow(candidateIndex);
     if (candidate->turnRoot)
-      replacement.root = candidateIndex;
+      replacement.root = storedSectionRow(candidateIndex);
     replacement.active =
         replacement.active || (candidate->turnRoot && candidate->activeTurn);
   }
@@ -1301,11 +1518,23 @@ int ConversationView::rowSpacing(int rowIndex,
                                  const SectionRange *section) const {
   if (!section || section->root < 0 || section->last <= section->root)
     return CardSpacing;
-  if (rowIndex == section->root)
+  const qint64 storedRow = storedSectionRow(rowIndex);
+  if (storedRow == section->root)
     return 14;
-  if (rowIndex == section->last)
+  if (storedRow == section->last)
     return CardSpacing + 10;
   return CardSpacing;
+}
+
+qint64 ConversationView::storedSectionRow(int modelRow) const noexcept {
+  return sectionRowOrigin_ + modelRow;
+}
+
+std::optional<int> ConversationView::modelSectionRow(qint64 storedRow) const {
+  const qint64 modelRow = storedRow - sectionRowOrigin_;
+  if (modelRow < 0 || modelRow >= model_->rowCount())
+    return std::nullopt;
+  return static_cast<int>(modelRow);
 }
 
 void ConversationView::rebuildHeightIndex() {
@@ -1772,10 +2001,10 @@ void ConversationView::setCardCollapsed(const std::string &key,
       if (!rowPresented(last))
         continue;
       if (replacement.first < 0)
-        replacement.first = last;
-      replacement.last = last;
+        replacement.first = storedSectionRow(last);
+      replacement.last = storedSectionRow(last);
       if (candidate->turnRoot)
-        replacement.root = last;
+        replacement.root = storedSectionRow(last);
       replacement.active = replacement.active ||
                            (candidate->turnRoot && candidate->activeTurn);
     }
@@ -2321,16 +2550,20 @@ void ConversationView::paintEvent(QPaintEvent *event) {
             section->second.last <= section->second.root)
           continue;
         const SectionRange &range = section->second;
-        const qreal top = static_cast<qreal>(leadingChromeHeight()) +
-                          static_cast<qreal>(heights_.top(
-                              static_cast<std::size_t>(range.root))) -
-                          verticalScrollBar()->value();
+        const std::optional<int> root = modelSectionRow(range.root);
+        const std::optional<int> sectionLast = modelSectionRow(range.last);
+        if (!root || !sectionLast)
+          continue;
+        const qreal top =
+            static_cast<qreal>(leadingChromeHeight()) +
+            static_cast<qreal>(heights_.top(static_cast<std::size_t>(*root))) -
+            verticalScrollBar()->value();
         const qreal bottom =
             static_cast<qreal>(leadingChromeHeight()) +
             static_cast<qreal>(
-                heights_.top(static_cast<std::size_t>(range.last))) +
-            heights_.height(static_cast<std::size_t>(range.last)) -
-            rowSpacing(range.last) + 10 - verticalScrollBar()->value();
+                heights_.top(static_cast<std::size_t>(*sectionLast))) +
+            heights_.height(static_cast<std::size_t>(*sectionLast)) -
+            rowSpacing(*sectionLast) + 10 - verticalScrollBar()->value();
         const QRectF surface(0.5, top + 0.5,
                              std::max(0, viewport()->width()) - 1.0,
                              std::max<qreal>(1.0, bottom - top - 1.0));
@@ -2352,7 +2585,7 @@ void ConversationView::paintEvent(QPaintEvent *event) {
         option.rect = rowRect(rowIndex);
         const auto section = sectionRanges_.find(row->sectionKey);
         if (section != sectionRanges_.end() &&
-            section->second.root == rowIndex &&
+            section->second.root == storedSectionRow(rowIndex) &&
             section->second.last > section->second.root)
           option.viewItemPosition = QStyleOptionViewItem::Beginning;
         if (!option.rect.intersects(event->rect()))

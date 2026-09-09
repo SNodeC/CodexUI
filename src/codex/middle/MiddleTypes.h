@@ -208,8 +208,25 @@ struct TurnSection {
   // its actual opening prompt. Rendering must never infer ownership from the
   // first user message that happens to survive history paging.
   std::optional<CardKey> rootCardKey;
+  // True only when the root lies before the requested activity suffix and is
+  // retained solely to preserve the canonical Turn/You owner.
+  bool rootPinned = false;
 
   bool operator==(const TurnSection &) const = default;
+};
+
+// Bounded projection for the common canonical tail insertion. It carries no
+// authority: the NodeRef target and all values are read from NodeGraph under
+// one short lock, then consumed by Qt after the lock has been released.
+struct ConversationTailCard {
+  VisibleCardData card;
+  std::string sectionKey;
+  bool turnRoot = false;
+  bool nested = false;
+  bool activeTurn = false;
+  bool historyActivity = true;
+  std::size_t authoritativeItemCount = 0;
+  bool providerHasMore = false;
 };
 
 struct ConversationSnapshot {

@@ -7,6 +7,7 @@
 
 #include <QAbstractListModel>
 
+#include <deque>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -59,8 +60,20 @@ public:
     bool lastInTurn = false;
     bool presented = true;
     bool activeTurn = false;
+    // Local prompts and roots retained only as a turn owner do not consume the
+    // bounded authoritative history activity window.
+    bool historyActivity = true;
 
     bool operator==(const Row &) const = default;
+  };
+
+  struct HistoryTrim {
+    int row = -1;
+    int count = 0;
+    std::vector<std::string> removedStableKeys;
+    bool pinnedRoot = false;
+    std::string sectionKey;
+    std::size_t hiddenIncrement = 0;
   };
 
   explicit ConversationItemModel(QObject *parent = nullptr);
@@ -76,6 +89,11 @@ public:
   // model reset. Same-thread order is reconciled with exact row operations.
   [[nodiscard]] bool reconcile(ConversationSnapshot snapshot);
   [[nodiscard]] CardUpdateResult updateCard(VisibleCardData card);
+  [[nodiscard]] bool appendTail(ConversationTailCard tail);
+  [[nodiscard]] HistoryTrim trimHistoryTo(std::size_t activityLimit);
+  [[nodiscard]] bool setActiveTurn(int row, bool active);
+  void setHistoryChrome(std::size_t hiddenAuthoritativeItemCount,
+                        bool providerHasMore);
   [[nodiscard]] bool setVisibility(Visibility visibility);
 
   [[nodiscard]] const Row *row(int row) const noexcept;
@@ -97,10 +115,16 @@ private:
   void rebuildIndexes();
   void incrementProperty(const char *name);
   void updateRow(int row, Row replacement);
+  [[nodiscard]] std::optional<int> logicalRow(std::size_t ordinal) const;
+  void eraseRowIdentity(const Row &row);
 
-  std::vector<Row> rows_;
-  std::unordered_map<std::string, int> stableRows_;
-  std::unordered_map<const nodegraph::Node *, int> targetRows_;
+  std::deque<Row> rows_;
+  // Absolute ordinals let a bounded front trim avoid rewriting every stable
+  // identity in the retained suffix.
+  std::unordered_map<std::string, std::size_t> stableRows_;
+  std::unordered_map<const nodegraph::Node *, std::size_t> targetRows_;
+  std::size_t rowBase_ = 0;
+  std::size_t historyActivityCount_ = 0;
   std::string threadId_;
   std::size_t hiddenAuthoritativeItemCount_ = 0;
   bool hasMore_ = false;

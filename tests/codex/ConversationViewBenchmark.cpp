@@ -130,6 +130,22 @@ int main(int argc, char **argv) {
   }
   const qint64 scrollMicroseconds = scroll.nsecsElapsed() / 1000;
 
+  const qulonglong modelRebuildsBefore =
+      view.conversationModel()
+          ->property("modelIndexRebuildCount")
+          .toULongLong();
+  const qulonglong sectionRebuildsBefore =
+      view.property("conversationSectionRangeRebuilds").toULongLong();
+  ConversationTailCard tail;
+  tail.card = cardData(count);
+  tail.sectionKey = "turn-section-" + std::to_string(count);
+  tail.historyActivity = true;
+  QElapsedTimer append;
+  append.start();
+  const bool appendAccepted = view.appendTailCard(std::move(tail), count);
+  const qint64 appendMicroseconds = append.nsecsElapsed() / 1000;
+  QApplication::processEvents(QEventLoop::AllEvents, 20);
+
   const auto cards = view.findChildren<ConversationCard *>();
   const auto widgets = view.findChildren<QWidget *>();
   std::size_t sections = 0;
@@ -143,6 +159,17 @@ int main(int argc, char **argv) {
       {"rows", static_cast<qint64>(count)},
       {"initialMilliseconds", initialMilliseconds},
       {"scrollSweepMicroseconds", scrollMicroseconds},
+      {"tailAppendMicroseconds", appendMicroseconds},
+      {"tailAppendAccepted", appendAccepted},
+      {"tailAppendModelRebuilds",
+       static_cast<qint64>(view.conversationModel()
+                               ->property("modelIndexRebuildCount")
+                               .toULongLong() -
+                           modelRebuildsBefore)},
+      {"tailAppendSectionRebuilds",
+       static_cast<qint64>(
+           view.property("conversationSectionRangeRebuilds").toULongLong() -
+           sectionRebuildsBefore)},
       {"scrollSamples", ScrollSamples},
       {"conversationCards", cards.size()},
       {"turnSections", static_cast<qint64>(sections)},

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 #include <unordered_set>
@@ -201,7 +202,9 @@ bool ConversationItemModel::reconcile(ConversationSnapshot snapshot) {
   hasMore_ = nextHasMore;
   if (authorityReplacement) {
     beginResetModel();
-    rows_ = std::move(desired);
+    rows_.clear();
+    rows_.insert(rows_.end(), std::make_move_iterator(desired.begin()),
+                 std::make_move_iterator(desired.end()));
     threadId_ = nextThreadId;
     rebuildIndexes();
     endResetModel();
@@ -310,7 +313,10 @@ ConversationItemModel::updateCard(VisibleCardData card) {
   const auto found = stableRows_.find(key);
   if (found == stableRows_.end())
     return CardUpdateResult::Missing;
-  Row &current = rows_[static_cast<std::size_t>(found->second)];
+  const std::optional<int> modelRow = logicalRow(found->second);
+  if (!modelRow)
+    return CardUpdateResult::Missing;
+  Row &current = rows_[static_cast<std::size_t>(*modelRow)];
   if (!compatible(current.card, card))
     return CardUpdateResult::Incompatible;
   if (current.card == card)
@@ -329,7 +335,8 @@ ConversationItemModel::updateCard(VisibleCardData card) {
   replacement.lastInTurn = current.lastInTurn;
   replacement.presented = isPresented(replacement.card);
   replacement.activeTurn = current.activeTurn;
-  updateRow(found->second, std::move(replacement));
+  replacement.historyActivity = current.historyActivity;
+  updateRow(*modelRow, std::move(replacement));
   if (oldTarget != newTarget) {
     if (oldTarget)
       targetRows_.erase(oldTarget);
@@ -337,6 +344,146 @@ ConversationItemModel::updateCard(VisibleCardData card) {
       targetRows_.insert_or_assign(newTarget, found->second);
   }
   return CardUpdateResult::Changed;
+}
+
+bool ConversationItemModel::appendTail(ConversationTailCard tail) {
+  if (tail.card.threadId != threadId_ || tail.sectionKey.empty())
+    return false;
+  const std::string key = stableKey(tail.card.key);
+  if (key.empty() || stableRows_.contains(key))
+    return false;
+
+  const bool startsSection =
+      rows_.empty() || rows_.back().sectionKey != tail.sectionKey;
+  if ((!startsSection && tail.turnRoot) || (startsSection && tail.nested))
+    return false;
+
+  if (!rows_.empty() && !startsSection) {
+    Row &previous = rows_.back();
+    previous.lastInTurn = false;
+    emit dataChanged(index(rowCount() - 1), index(rowCount() - 1),
+                     {LastInTurnRole});
+    incrementProperty("modelDataChangeCount");
+  }
+
+  Row row;
+  row.card = std::move(tail.card);
+  row.stableKey = key;
+  row.sectionKey = std::move(tail.sectionKey);
+  row.turnRoot = tail.turnRoot;
+  row.nested = tail.nested;
+  row.firstInTurn = startsSection;
+  row.lastInTurn = true;
+  row.presented = isPresented(row.card);
+  row.activeTurn = tail.turnRoot && tail.activeTurn;
+  row.historyActivity = tail.historyActivity;
+
+  const int insertedRow = rowCount();
+  const std::size_t ordinal = rowBase_ + rows_.size();
+  beginInsertRows({}, insertedRow, insertedRow);
+  rows_.push_back(std::move(row));
+  stableRows_.emplace(key, ordinal);
+  if (rows_.back().card.target)
+    targetRows_.emplace(rows_.back().card.target.get(), ordinal);
+  if (rows_.back().historyActivity)
+    ++historyActivityCount_;
+  endInsertRows();
+  incrementProperty("modelInsertCount");
+  incrementProperty("modelTailAppendCount");
+  return true;
+}
+
+ConversationItemModel::HistoryTrim
+ConversationItemModel::trimHistoryTo(std::size_t activityLimit) {
+  HistoryTrim result;
+  if (historyActivityCount_ <= activityLimit || rows_.empty())
+    return result;
+
+  Row &first = rows_.front();
+  result.sectionKey = first.sectionKey;
+  if (first.historyActivity && first.turnRoot && rows_.size() > 1 &&
+      rows_[1].sectionKey == first.sectionKey) {
+    first.historyActivity = false;
+    --historyActivityCount_;
+    result.pinnedRoot = true;
+    result.sectionKey = first.sectionKey;
+    incrementProperty("modelHistoryRootPins");
+    return result;
+  }
+
+  // Pending/recovery prompts are protected independently of the history
+  // suffix. If one is the complete leading section, leave the window one row
+  // over budget until its authoritative acknowledgement or a complete
+  // reconciliation can place it without changing optimistic ordering.
+  if (!first.historyActivity && (!first.turnRoot || rows_.size() == 1 ||
+                                 rows_[1].sectionKey != first.sectionKey))
+    return result;
+
+  int removeCount = 1;
+  int removeRow = 0;
+  if (!first.historyActivity && first.turnRoot && rows_.size() > 1 &&
+      rows_[1].sectionKey == first.sectionKey) {
+    result.sectionKey = first.sectionKey;
+    if (rows_.size() > 2 && rows_[2].sectionKey == first.sectionKey) {
+      // Retain the pinned owner at logical row zero while dropping the oldest
+      // nested activity. Moving that one row across the deque prefix keeps all
+      // later absolute identity ordinals unchanged.
+      removeRow = 1;
+    } else {
+      removeCount = 2;
+    }
+  }
+
+  for (int offset = 0; offset < removeCount; ++offset) {
+    const Row &removed = rows_[static_cast<std::size_t>(removeRow + offset)];
+    result.removedStableKeys.push_back(removed.stableKey);
+    if (removed.historyActivity) {
+      --historyActivityCount_;
+      ++result.hiddenIncrement;
+    }
+  }
+  result.row = removeRow;
+  result.count = removeCount;
+
+  beginRemoveRows({}, removeRow, removeRow + removeCount - 1);
+  if (removeRow == 1) {
+    Row retainedRoot = std::move(rows_.front());
+    eraseRowIdentity(rows_[1]);
+    rows_.pop_front();
+    rows_.front() = std::move(retainedRoot);
+    ++rowBase_;
+    stableRows_.insert_or_assign(rows_.front().stableKey, rowBase_);
+    if (rows_.front().card.target)
+      targetRows_.insert_or_assign(rows_.front().card.target.get(), rowBase_);
+  } else {
+    for (int offset = 0; offset < removeCount; ++offset) {
+      eraseRowIdentity(rows_.front());
+      rows_.pop_front();
+      ++rowBase_;
+    }
+  }
+  endRemoveRows();
+  incrementProperty("modelRemoveCount");
+  incrementProperty("modelBoundedFrontTrimCount");
+  return result;
+}
+
+bool ConversationItemModel::setActiveTurn(int rowIndex, bool active) {
+  Row *value = rowIndex >= 0 && rowIndex < rowCount()
+                   ? &rows_[static_cast<std::size_t>(rowIndex)]
+                   : nullptr;
+  if (!value || !value->turnRoot || value->activeTurn == active)
+    return false;
+  value->activeTurn = active;
+  emit dataChanged(index(rowIndex), index(rowIndex), {ActiveTurnRole});
+  incrementProperty("modelDataChangeCount");
+  return true;
+}
+
+void ConversationItemModel::setHistoryChrome(
+    std::size_t hiddenAuthoritativeItemCount, bool providerHasMore) {
+  hiddenAuthoritativeItemCount_ = hiddenAuthoritativeItemCount;
+  hasMore_ = hiddenAuthoritativeItemCount != 0 || providerHasMore;
 }
 
 bool ConversationItemModel::setVisibility(Visibility visibility) {
@@ -385,7 +532,10 @@ ConversationItemModel::card(int rowIndex) const noexcept {
 QModelIndex
 ConversationItemModel::indexForStableKey(const std::string &key) const {
   const auto found = stableRows_.find(key);
-  return found == stableRows_.end() ? QModelIndex{} : index(found->second);
+  if (found == stableRows_.end())
+    return {};
+  const std::optional<int> row = logicalRow(found->second);
+  return row ? index(*row) : QModelIndex{};
 }
 
 QModelIndex
@@ -395,8 +545,9 @@ ConversationItemModel::indexForTarget(const nodegraph::NodeRef &target) const {
   const auto found = targetRows_.find(target.get());
   if (found == targetRows_.end())
     return {};
-  const Row *candidate = row(found->second);
-  return candidate && candidate->card.target == target ? index(found->second)
+  const std::optional<int> modelRow = logicalRow(found->second);
+  const Row *candidate = modelRow ? row(*modelRow) : nullptr;
+  return candidate && candidate->card.target == target ? index(*modelRow)
                                                        : QModelIndex{};
 }
 
@@ -422,11 +573,14 @@ ConversationItemModel::flatten(ConversationSnapshot &&snapshot) const {
       const bool turnRoot = representedRoot && key == *root;
       result.push_back(Row{std::move(card), key, section.key, turnRoot,
                            representedRoot && !turnRoot, position == 0,
-                           position + 1 == section.cards.size(), false, false});
+                           position + 1 == section.cards.size(), false, false,
+                           false});
       Row &row = result.back();
       row.presented = isPresented(row.card);
       row.activeTurn = turnRoot && snapshot.activeTurnId &&
                        row.card.turnId == *snapshot.activeTurnId;
+      row.historyActivity = row.card.kind != CardKind::LocalPrompt &&
+                            !(turnRoot && section.rootPinned);
     }
   }
   return result;
@@ -447,14 +601,33 @@ void ConversationItemModel::rebuildIndexes() {
   targetRows_.clear();
   stableRows_.reserve(rows_.size());
   targetRows_.reserve(rows_.size());
+  rowBase_ = 0;
+  historyActivityCount_ = 0;
   for (std::size_t position = 0; position < rows_.size(); ++position) {
     Row &row = rows_[position];
-    const int modelRow = static_cast<int>(position);
-    stableRows_.emplace(row.stableKey, modelRow);
+    stableRows_.emplace(row.stableKey, position);
     if (row.card.target)
-      targetRows_.emplace(row.card.target.get(), modelRow);
+      targetRows_.emplace(row.card.target.get(), position);
+    if (row.historyActivity)
+      ++historyActivityCount_;
   }
   incrementProperty("modelIndexRebuildCount");
+}
+
+std::optional<int>
+ConversationItemModel::logicalRow(std::size_t ordinal) const {
+  if (ordinal < rowBase_ || ordinal - rowBase_ >= rows_.size())
+    return std::nullopt;
+  const std::size_t value = ordinal - rowBase_;
+  if (value > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    return std::nullopt;
+  return static_cast<int>(value);
+}
+
+void ConversationItemModel::eraseRowIdentity(const Row &row) {
+  stableRows_.erase(row.stableKey);
+  if (row.card.target)
+    targetRows_.erase(row.card.target.get());
 }
 
 void ConversationItemModel::incrementProperty(const char *name) {

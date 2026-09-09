@@ -258,8 +258,10 @@ ConversationRoute conversationRoute(const nodegraph::GraphChanged &change,
       if (read->structureChangedRevision(node) == change.revision ||
           std::ranges::any_of(Fields, [&](std::string_view field) {
             return fieldChanged(*read, node, field, change.revision);
-          }))
-        route = {true, true, {}};
+          })) {
+        route.affected = true;
+        route.structural = true;
+      }
       return;
     }
     if (node->id().kind == nodegraph::NodeKind::Thread)
@@ -295,14 +297,13 @@ ConversationRoute conversationRoute(const nodegraph::GraphChanged &change,
       if (!belongs)
         return;
       route.affected = true;
-      if (node->id().kind == nodegraph::NodeKind::Turn ||
-          read->structureChangedRevision(node) == change.revision) {
+      if (node->id().kind == nodegraph::NodeKind::Turn) {
         route.structural = true;
-        route.items.clear();
         return;
       }
-      if (!route.structural &&
-          std::ranges::find(route.items, node) == route.items.end())
+      if (read->structureChangedRevision(node) == change.revision)
+        route.structural = true;
+      if (std::ranges::find(route.items, node) == route.items.end())
         route.items.push_back(node);
     } catch (const std::invalid_argument &) {
       // A queued NodeRef may have been retired by a later graph transaction.
@@ -365,7 +366,8 @@ bool inspectorAffected(const nodegraph::GraphChanged &change,
       if (dependency == InspectorDependency::Changes)
         return fieldChanged(*read, node, "cwd", change.revision) ||
                fieldChanged(*read, node, "workspace", change.revision);
-      return read->structureChangedRevision(node) == change.revision ||
+      return (dependency == InspectorDependency::Agents &&
+              read->structureChangedRevision(node) == change.revision) ||
              fieldChanged(*read, node, "hydrationState", change.revision);
     }
     if (node->id().kind == nodegraph::NodeKind::Thread)
@@ -385,8 +387,7 @@ bool inspectorAffected(const nodegraph::GraphChanged &change,
       return false;
     if (node->id().kind == nodegraph::NodeKind::Turn)
       return dependency == InspectorDependency::Plan &&
-             (read->structureChangedRevision(node) == change.revision ||
-              fieldChanged(*read, node, "plan", change.revision) ||
+             (fieldChanged(*read, node, "plan", change.revision) ||
               fieldChanged(*read, node, "planExplanation", change.revision));
     const auto state = read->state(node);
     const std::string type = graphString(graphField(*state, "type"));
@@ -1735,6 +1736,46 @@ void ShellWidget::Impl::commitPendingPanes() {
           owner->property("targetedConversationRoutes").toULongLong() + 1);
     }
   }
+  if (pendingConversation && pendingConversationItems.size() == 1 &&
+      boundGraphThread &&
+      !middleRegion->conversation().structuralStagingActive()) {
+    const auto options = middleRegion->conversation().presentationOptions();
+    auto tail =
+        uiAdapter.tailCard(boundGraphThread, pendingConversationItems.front(),
+                           {options.showReasoning, options.showCodexUpdates});
+    if (tail) {
+      const std::string &threadId = boundGraphThread->id().canonical;
+      ConversationHistoryWindow nextHistory = conversationHistory[threadId];
+      const bool following =
+          middleRegion->conversation().modeForThread(threadId) ==
+          middle::ConversationView::Mode::Following;
+      if ((!following || nextHistory.effective > nextHistory.requested) &&
+          tail->authoritativeItemCount > nextHistory.lastAuthoritativeCount) {
+        nextHistory.effective +=
+            tail->authoritativeItemCount - nextHistory.lastAuthoritativeCount;
+      } else if (following) {
+        nextHistory.effective = nextHistory.requested;
+      }
+      nextHistory.lastAuthoritativeCount = tail->authoritativeItemCount;
+      if (middleRegion->conversation().appendTailCard(std::move(*tail),
+                                                      nextHistory.effective)) {
+        conversationHistory.insert_or_assign(threadId, nextHistory);
+        pendingConversation = false;
+        pendingConversationItems.clear();
+        ++conversationRoutes;
+        owner->setProperty("conversationRoutes",
+                           static_cast<qulonglong>(conversationRoutes));
+        owner->setProperty(
+            "targetedConversationRoutes",
+            owner->property("targetedConversationRoutes").toULongLong() + 1);
+        owner->setProperty(
+            "targetedConversationStructuralAppends",
+            owner->property("targetedConversationStructuralAppends")
+                    .toULongLong() +
+                1);
+      }
+    }
+  }
   if (pendingConversation) {
     if (refreshConversation()) {
       pendingConversation = false;
@@ -1836,9 +1877,18 @@ void ShellWidget::Impl::handleGraphChanged(
           pendingThreadRows.end())
         pendingThreadRows.push_back(thread);
   }
-  if (stagedPresentationInvalidated || conversation.structural) {
+  if (stagedPresentationInvalidated) {
     pendingConversation = true;
     pendingConversationItems.clear();
+  } else if (conversation.structural) {
+    if (!pendingConversation) {
+      pendingConversationItems = conversation.items;
+    } else if (pendingConversationItems != conversation.items) {
+      // More than one structural transaction was coalesced. The complete
+      // projection is the only safe way to establish the combined order.
+      pendingConversationItems.clear();
+    }
+    pendingConversation = true;
   } else if (conversation.affected && !pendingConversation) {
     for (const nodegraph::NodeRef &item : conversation.items)
       if (std::ranges::find(pendingConversationItems, item) ==

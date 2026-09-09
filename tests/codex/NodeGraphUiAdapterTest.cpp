@@ -144,9 +144,54 @@ bool limitsHistoryButPinsTheOwningPrompt() {
                  "bounded projection lost its turn") &&
          require(result->sections[0].cards.size() == 3,
                  "root was not pinned beside retained suffix") &&
+         require(result->sections[0].rootPinned,
+                 "bounded projection did not identify the retained owner") &&
          require(result->sections[0].cards.front().key ==
                      *result->sections[0].rootCardKey,
                  "pinned root does not own the turn");
+}
+
+bool projectsOnlyTheExactCanonicalTail() {
+  nodegraph::NodeGraph graph;
+  NodeRef thread;
+  NodeRef turn;
+  NodeRef root;
+  NodeRef tail;
+  {
+    auto write = graph.write();
+    NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{2});
+    threadState.fields.emplace("historyHasMore", true);
+    thread =
+        write.upsert({NodeKind::Thread, "tail-thread"}, std::move(threadState));
+    NodeState turnState;
+    turnState.fields.emplace("id", "tail-turn");
+    turnState.status = nodegraph::NodeStatus::Running;
+    turn = write.upsert({NodeKind::Turn, "tail-turn"}, std::move(turnState));
+    root = write.upsert({NodeKind::Item, "tail-root"},
+                        itemState("tail-root", "userMessage", "Question"));
+    tail = write.upsert({NodeKind::Item, "tail-answer"},
+                        itemState("tail-answer", "agentMessage", "Answer"));
+    write.setParent(thread, turn);
+    write.setParent(turn, root);
+    write.setParent(turn, tail);
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, root);
+    write.relate(thread, nodegraph::RelationKind::ActiveTurn, turn);
+    static_cast<void>(write.finish());
+  }
+
+  NodeGraphUiAdapter adapter(graph);
+  const auto projected = adapter.tailCard(thread, tail, {true, true});
+  return require(projected.has_value(),
+                 "canonical last item was not projected") &&
+         require(projected->card.target == tail && !projected->turnRoot &&
+                     projected->nested && projected->activeTurn,
+                 "tail projection lost exact NodeRef or turn placement") &&
+         require(projected->authoritativeItemCount == 2 &&
+                     projected->providerHasMore,
+                 "tail projection lost authoritative history chrome") &&
+         require(!adapter.tailCard(thread, root, {true, true}),
+                 "a non-tail item entered the bounded append path");
 }
 
 bool preservesReadinessActivityAndAuthoritativeBudgetSemantics() {
@@ -251,6 +296,7 @@ int main() {
   using namespace codexui::codex::ui;
   if (!projectsCanonicalTurnStructureAndRoot() ||
       !limitsHistoryButPinsTheOwningPrompt() ||
+      !projectsOnlyTheExactCanonicalTail() ||
       !preservesThreadRootsAndExactChildTargets() ||
       !preservesReadinessActivityAndAuthoritativeBudgetSemantics())
     return EXIT_FAILURE;

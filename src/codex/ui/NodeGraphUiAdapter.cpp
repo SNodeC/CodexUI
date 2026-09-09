@@ -1580,6 +1580,77 @@ NodeGraphUiAdapter::card(const nodegraph::NodeRef &thread,
                        graphString(graphField(*threadState, "cwd")));
 }
 
+std::optional<ConversationTailCard>
+NodeGraphUiAdapter::tailCard(const nodegraph::NodeRef &thread,
+                             const nodegraph::NodeRef &item,
+                             ConversationOptions options) const {
+  static_cast<void>(options);
+  if (!graph_ || !thread || !item)
+    return std::nullopt;
+  auto read = graph_->tryRead();
+  if (!read || !read->contains(thread) || !read->contains(item) ||
+      read->removed(thread) || read->removed(item) ||
+      thread->id().kind != nodegraph::NodeKind::Thread ||
+      item->id().kind != nodegraph::NodeKind::Item)
+    return std::nullopt;
+
+  const nodegraph::NodeRef turn = read->parent(item);
+  if (!turn || turn->id().kind != nodegraph::NodeKind::Turn ||
+      read->parent(turn) != thread)
+    return std::nullopt;
+  const std::size_t turnCount = read->childCount(thread);
+  const std::size_t itemCount = read->childCount(turn);
+  if (turnCount == 0 || itemCount == 0 ||
+      read->childAt(thread, turnCount - 1) != turn ||
+      read->childAt(turn, itemCount - 1) != item)
+    return std::nullopt;
+
+  // Prompt materialization deliberately reuses the local visual key and
+  // action target. The complete projection owns that uncommon alias handoff.
+  if (!read->related(item, nodegraph::RelationKind::PromptMaterialization)
+           .empty())
+    return std::nullopt;
+
+  const auto state = read->state(item);
+  const auto turnState = read->state(turn);
+  const auto threadState = read->state(thread);
+  if (!state || !turnState || !threadState)
+    return std::nullopt;
+  const auto authoritativeCount =
+      graphSize(graphField(*threadState, "historyLoadedItemCount"));
+  if (!authoritativeCount)
+    return std::nullopt;
+
+  const std::string threadId = thread->id().canonical;
+  const std::string turnId = nodegraph::protocolCanonicalId(*turnState, turn);
+  const auto roots = read->related(turn, nodegraph::RelationKind::TurnRootItem);
+  const nodegraph::NodeRef root = !roots.empty() && roots.front() &&
+                                          read->contains(roots.front()) &&
+                                          !read->removed(roots.front())
+                                      ? roots.front()
+                                      : nodegraph::NodeRef{};
+  const bool turnRoot = root == item;
+  bool activeTurn = graphTurnIsActive(*turnState);
+  if (!activeTurn) {
+    const auto active =
+        read->related(thread, nodegraph::RelationKind::ActiveTurn);
+    activeTurn = std::ranges::find(active, turn) != active.end();
+  }
+
+  ConversationTailCard result;
+  result.card = graphCardData(item, threadId, turnId, *state,
+                              graphString(graphField(*threadState, "cwd")));
+  result.sectionKey = sectionComponent("turn:", threadId, turnId);
+  result.turnRoot = turnRoot;
+  result.nested = root && !turnRoot;
+  result.activeTurn = activeTurn;
+  result.historyActivity =
+      graphString(graphField(*state, "type")) != "localPrompt";
+  result.authoritativeItemCount = *authoritativeCount;
+  result.providerHasMore = graphProviderHasMoreHistory(*threadState);
+  return result;
+}
+
 std::optional<ConversationSnapshot>
 NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
                                  std::size_t itemLimit,
@@ -1754,6 +1825,9 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
     section.key =
         sectionComponent("turn:", result.threadId, input.id);
     section.turnId = input.id;
+    section.rootPinned = retainedAuthoritativeCount && input.root &&
+                         !input.items.empty() &&
+                         !boundedAuthoritativeItems.contains(input.root.get());
     bool rootAdded = false;
     std::unordered_set<const nodegraph::Node *> readyPrompts;
     for (const nodegraph::NodeRef &candidate : input.items) {
@@ -1831,6 +1905,8 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
       const bool root = item == input.root;
       if (!selected && !root)
         continue;
+      if (!selected && root)
+        section.rootPinned = true;
       append(item, root);
     }
 

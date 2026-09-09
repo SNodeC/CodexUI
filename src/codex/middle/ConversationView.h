@@ -69,6 +69,11 @@ public:
   applyCardPresentation(const VisibleCardData &card);
   [[nodiscard]] std::optional<PresentationImpact>
   applyCardPresentation(VisibleCardData &&card);
+  // Applies one canonical tail insertion without traversing retained model
+  // rows. Returns false when the delta is not the exact append shape, so the
+  // caller can use complete structural reconciliation.
+  [[nodiscard]] bool appendTailCard(ConversationTailCard tail,
+                                    std::size_t historyActivityLimit);
 
   void setTrailingSpaceHeight(int height);
   void prepareForLocalPromptAdmission();
@@ -146,9 +151,9 @@ private:
   };
 
   struct SectionRange {
-    int first = -1;
-    int last = -1;
-    int root = -1;
+    qint64 first = -1;
+    qint64 last = -1;
+    qint64 root = -1;
     bool active = false;
   };
 
@@ -194,6 +199,8 @@ private:
   [[nodiscard]] bool rowPresented(int row) const;
   [[nodiscard]] int rowSpacing(int row) const;
   [[nodiscard]] int rowSpacing(int row, const SectionRange *section) const;
+  [[nodiscard]] qint64 storedSectionRow(int modelRow) const noexcept;
+  [[nodiscard]] std::optional<int> modelSectionRow(qint64 storedRow) const;
   [[nodiscard]] QRect rowRect(int row) const;
   [[nodiscard]] int measureCard(ConversationCard *card, int width) const;
   [[nodiscard]] bool updateMeasuredHeight(int row, int cardHeight,
@@ -252,7 +259,9 @@ private:
   std::unordered_map<std::string, int> stagedHeights_;
   std::unordered_map<std::string, HeightRecord> heightCache_;
   std::unordered_map<std::string, SectionRange> sectionRanges_;
-  std::unordered_map<std::string, int> sectionRootRows_;
+  std::unordered_map<std::string, qint64> sectionRootRows_;
+  qint64 sectionRowOrigin_ = 0;
+  std::string activeSectionKey_;
   std::unordered_map<std::string, CardInteractionState> cardInteractionStates_;
   std::unordered_map<std::string, bool> cardCollapsedStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>

@@ -154,7 +154,7 @@ Each pending prompt has a process-wide client-local submission ID and remains
 associated with its destination thread. It therefore remains visible when the
 user switches threads and returns. Successful correlated request
 acknowledgement or definitive failure stops delayed feedback immediately. The
-retained widget's fixed one-second admission deadline is the sole animation
+stable prompt row's fixed one-second admission deadline is the sole animation
 start trigger; the correlated `turn/start` or `turn/steer` result is the
 successful stop trigger. Unrelated worker updates cannot start, stop, or restart
 the sweep.
@@ -173,10 +173,10 @@ A prompt that starts a turn is the outer soft-blue turn card. A prompt admitted
 through `turn/steer` appears immediately inside the active turn as a calm teal
 `You` card with a right-aligned `steering` specialization. It uses the same
 one-second delayed-feedback rule as the outer card. After
-acknowledgment, the same widget becomes a soft-teal inset steering card with
+acknowledgment, the same stable row becomes a soft-teal inset steering card with
 the canonical teal border and title treatment.
-No optimistic card is exchanged for a second widget, and the turn grows around
-it without changing existing nested card identity.
+No optimistic card is exchanged for a second identity, and the turn grows
+around it without changing existing nested card or local interaction state.
 
 At acknowledgment, the retained outer You card immediately uses the stronger
 static blue running border. That border belongs to the card across its local-

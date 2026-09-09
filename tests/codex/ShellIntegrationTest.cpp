@@ -1647,6 +1647,82 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
       "a selected message routes only to ConversationView and leaves thread, "
       "Inspector, and shell-chrome boundaries untouched");
 
+  const int rowsBeforeTail =
+      conversation ? conversation->conversationModel()->rowCount() : 0;
+  const qulonglong structuralAppendsBefore =
+      shell.property("targetedConversationStructuralAppends").toULongLong();
+  const qulonglong modelRebuildsBefore =
+      conversation ? conversation->conversationModel()
+                         ->property("modelIndexRebuildCount")
+                         .toULongLong()
+                   : 0;
+  const qulonglong sectionRebuildsBefore =
+      conversation ? conversation->property("conversationSectionRangeRebuilds")
+                         .toULongLong()
+                   : 0;
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "item/started",
+       std::nullopt,
+       {{"threadId", Value("selected-thread")},
+        {"turnId", Value("selected-turn")},
+        {"item", Value(Value::Object{{"id", Value("selected-tail")},
+                                     {"type", Value("agentMessage")},
+                                     {"text", Value("Selected tail")}})}}}));
+  require(spinUntil([&] {
+            if (!conversation ||
+                conversation->conversationModel()->rowCount() !=
+                    rowsBeforeTail + 1)
+              return false;
+            const middle::VisibleCardData *tail =
+                conversation->conversationModel()->card(rowsBeforeTail);
+            return tail && tail->itemId == "selected-tail";
+          }),
+          "one canonical selected-thread tail item reaches the item view");
+  require(
+      shell.property("targetedConversationStructuralAppends").toULongLong() ==
+              structuralAppendsBefore + 1 &&
+          conversation->conversationModel()
+                  ->property("modelIndexRebuildCount")
+                  .toULongLong() == modelRebuildsBefore &&
+          conversation->property("conversationSectionRangeRebuilds")
+                  .toULongLong() == sectionRebuildsBefore &&
+          shell.property("threadPaneRoutes").toULongLong() ==
+              threadRoutesBefore &&
+          shell.property("inspectorRoutes").toULongLong() ==
+              inspectorRoutesBefore &&
+          shell.property("shellRenderCommits").toULongLong() ==
+              shellCommitsBefore,
+      "one canonical tail insertion uses the bounded structural path without "
+      "reindexing history or waking unrelated panes");
+  if (shell.property("targetedConversationStructuralAppends").toULongLong() !=
+          structuralAppendsBefore + 1 ||
+      conversation->conversationModel()
+              ->property("modelIndexRebuildCount")
+              .toULongLong() != modelRebuildsBefore ||
+      conversation->property("conversationSectionRangeRebuilds")
+              .toULongLong() != sectionRebuildsBefore ||
+      shell.property("threadPaneRoutes").toULongLong() != threadRoutesBefore ||
+      shell.property("inspectorRoutes").toULongLong() !=
+          inspectorRoutesBefore ||
+      shell.property("shellRenderCommits").toULongLong() != shellCommitsBefore)
+    std::cerr
+        << "tail route diagnostics: appends=" << structuralAppendsBefore << "->"
+        << shell.property("targetedConversationStructuralAppends").toULongLong()
+        << " model=" << modelRebuildsBefore << "->"
+        << conversation->conversationModel()
+               ->property("modelIndexRebuildCount")
+               .toULongLong()
+        << " sections=" << sectionRebuildsBefore << "->"
+        << conversation->property("conversationSectionRangeRebuilds")
+               .toULongLong()
+        << " threads=" << threadRoutesBefore << "->"
+        << shell.property("threadPaneRoutes").toULongLong()
+        << " inspector=" << inspectorRoutesBefore << "->"
+        << shell.property("inspectorRoutes").toULongLong()
+        << " shell=" << shellCommitsBefore << "->"
+        << shell.property("shellRenderCommits").toULongLong() << '\n';
+
   const qulonglong targetedThreadRoutesBefore =
       shell.property("targetedThreadPaneRoutes").toULongLong();
   const qulonglong targetedRowUpdatesBefore =

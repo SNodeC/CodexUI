@@ -179,6 +179,148 @@ bool viewportProportionalFoundation() {
   return result;
 }
 
+bool boundedTailAppendIsViewportProportional() {
+  ConversationView view;
+  view.resize(820, 600);
+  view.show();
+  bool result = expect(view.reconcile(conversation(10'000)),
+                       "bounded-tail fixture reconciles");
+  settle();
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum() / 2);
+  settle();
+  const auto anchorBefore = firstVisible(view);
+  const int horizontalBefore = view.horizontalScrollBar()->value();
+  const qulonglong modelRebuilds = view.conversationModel()
+                                       ->property("modelIndexRebuildCount")
+                                       .toULongLong();
+  const qulonglong sectionRebuilds =
+      view.property("conversationSectionRangeRebuilds").toULongLong();
+  const qulonglong heightRebuilds =
+      view.property("conversationHeightIndexRebuilds").toULongLong();
+  const int widgetsBefore = view.materializedCardCount();
+
+  ConversationTailCard tail;
+  tail.card = message(10'000);
+  tail.sectionKey = "section-10000";
+  tail.historyActivity = true;
+  const std::string tailKey = stableKey(tail.card.key);
+  result &= expect(view.appendTailCard(std::move(tail), 10'000),
+                   "canonical tail append was accepted");
+  settle();
+  const auto anchorAfter = firstVisible(view);
+  result &= expect(
+      view.conversationModel()->rowCount() == 10'000 &&
+          view.conversationModel()->indexForStableKey(tailKey).row() == 9'999 &&
+          view.conversationModel()->hiddenAuthoritativeItemCount() == 1 &&
+          view.conversationModel()->hasMore(),
+      "bounded tail append did not retain the exact suffix and history chrome");
+  result &= expect(anchorAfter == anchorBefore &&
+                       view.horizontalScrollBar()->value() == horizontalBefore,
+                   "bounded tail append and prefix trim did not preserve both "
+                   "viewport axes");
+  result &= expect(
+      view.conversationModel()
+                  ->property("modelIndexRebuildCount")
+                  .toULongLong() == modelRebuilds &&
+          view.property("conversationSectionRangeRebuilds").toULongLong() ==
+              sectionRebuilds &&
+          view.property("conversationHeightIndexRebuilds").toULongLong() ==
+              heightRebuilds &&
+          view.materializedCardCount() <= std::max(48, widgetsBefore + 4),
+      "one tail append traversed retained indexes or escaped the widget bound");
+
+  ConversationView following;
+  following.resize(820, 600);
+  following.show();
+  result &= expect(following.reconcile(conversation(80)),
+                   "following-tail fixture reconciles");
+  settle();
+  ConversationTailCard followingTail;
+  followingTail.card = message(80);
+  followingTail.sectionKey = "section-80";
+  followingTail.historyActivity = true;
+  const std::string followingKey = stableKey(followingTail.card.key);
+  result &= expect(following.appendTailCard(std::move(followingTail), 80),
+                   "following tail append was accepted");
+  settle();
+  const QModelIndex finalIndex =
+      following.conversationModel()->indexForStableKey(followingKey);
+  result &= expect(finalIndex.isValid() && following.isAtBottom() &&
+                       following.visualRect(finalIndex).bottom() <=
+                           following.viewport()->height(),
+                   "following append exposed one complete final card");
+
+  ConversationSnapshot rooted;
+  rooted.threadId = "virtual-thread";
+  TurnSection rootedSection;
+  rootedSection.key = "rooted-section";
+  rootedSection.turnId = "rooted-turn";
+  for (std::size_t serial = 0; serial < 80; ++serial) {
+    VisibleCardData value;
+    value.key = AuthoritativeItemKey{"virtual-thread", "rooted-turn",
+                                     "rooted-" + std::to_string(serial)};
+    value.kind = serial == 0 ? CardKind::UserMessage : CardKind::AgentMessage;
+    value.threadId = "virtual-thread";
+    value.turnId = "rooted-turn";
+    value.itemId = "rooted-" + std::to_string(serial);
+    value.payload = serial == 0
+                        ? CardPayload{UserMessageData{"Root prompt", {}}}
+                        : CardPayload{AgentMessageData{"Nested answer", true}};
+    rootedSection.cards.push_back(std::move(value));
+  }
+  rootedSection.rootCardKey = rootedSection.cards.front().key;
+  rooted.sections.push_back(std::move(rootedSection));
+  ConversationView rootedView;
+  rootedView.resize(820, 600);
+  rootedView.show();
+  result &= expect(rootedView.reconcile(std::move(rooted)),
+                   "rooted bounded-tail fixture reconciles");
+  settle();
+  rootedView.verticalScrollBar()->triggerAction(
+      QAbstractSlider::SliderToMinimum);
+  rootedView.verticalScrollBar()->setValue(
+      rootedView.verticalScrollBar()->maximum() / 2);
+  settle();
+  const auto rootedAnchor = firstVisible(rootedView);
+  const qulonglong rootedRebuilds = rootedView.conversationModel()
+                                        ->property("modelIndexRebuildCount")
+                                        .toULongLong();
+  const auto appendNested = [&rootedView](std::size_t serial) {
+    ConversationTailCard nestedTail;
+    nestedTail.card.key = AuthoritativeItemKey{
+        "virtual-thread", "rooted-turn", "rooted-" + std::to_string(serial)};
+    nestedTail.card.kind = CardKind::AgentMessage;
+    nestedTail.card.threadId = "virtual-thread";
+    nestedTail.card.turnId = "rooted-turn";
+    nestedTail.card.itemId = "rooted-" + std::to_string(serial);
+    nestedTail.card.payload = AgentMessageData{"Nested tail", true};
+    nestedTail.sectionKey = "rooted-section";
+    nestedTail.nested = true;
+    nestedTail.historyActivity = true;
+    return rootedView.appendTailCard(std::move(nestedTail), 80);
+  };
+  result &= expect(appendNested(80) && appendNested(81),
+                   "root-pinned nested tail appends were accepted");
+  settle();
+  result &= expect(
+      rootedView.conversationModel()->rowCount() == 81 &&
+          rootedView.conversationModel()
+                  ->indexForStableKey(
+                      "item:14:virtual-thread11:rooted-turn8:rooted-0")
+                  .row() == 0 &&
+          rootedView.conversationModel()
+                  ->indexForStableKey(
+                      "item:14:virtual-thread11:rooted-turn8:rooted-2")
+                  .row() == 1 &&
+          rootedView.conversationModel()
+                  ->property("modelIndexRebuildCount")
+                  .toULongLong() == rootedRebuilds &&
+          firstVisible(rootedView) == rootedAnchor,
+      "pinned Turn root trim lost identity, rebuilt history, or moved anchor");
+  return result;
+}
+
 bool targetedVisibilityChangeIsLocal() {
   ConversationView view;
   view.resize(820, 600);
@@ -468,6 +610,7 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   using namespace codexui::codex::middle;
   const bool result = viewportProportionalFoundation() &&
+                      boundedTailAppendIsViewportProportional() &&
                       targetedVisibilityChangeIsLocal() &&
                       atomicPagingAndFollowingArrival() &&
                       virtualTurnSurfaceAndInteractivePromotion() &&

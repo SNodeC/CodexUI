@@ -25,8 +25,10 @@ public:
   void move(std::size_t sourceRow, std::size_t count,
             std::size_t destinationRow);
 
-  [[nodiscard]] std::size_t size() const noexcept { return heights_.size(); }
-  [[nodiscard]] bool empty() const noexcept { return heights_.empty(); }
+  [[nodiscard]] std::size_t size() const noexcept {
+    return heights_.size() - offset_;
+  }
+  [[nodiscard]] bool empty() const noexcept { return size() == 0; }
   [[nodiscard]] int height(std::size_t row) const noexcept;
   [[nodiscard]] bool setHeight(std::size_t row, int height) noexcept;
   [[nodiscard]] qint64 top(std::size_t row) const noexcept;
@@ -46,11 +48,14 @@ public:
 
 private:
   [[nodiscard]] qint64 prefix(std::size_t count) const noexcept;
+  [[nodiscard]] qint64 physicalPrefix(std::size_t count) const noexcept;
   void append(int height);
+  void normalize();
   void rebuild();
 
   std::vector<int> heights_;
   std::vector<qint64> tree_{0};
+  std::size_t offset_ = 0;
   mutable std::size_t lastLookupSteps_ = 0;
   std::size_t lastUpdateSteps_ = 0;
   std::size_t rebuildCount_ = 0;
