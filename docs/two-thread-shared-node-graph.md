@@ -409,3 +409,33 @@ diagnostic; 16/17 suites passed, and only the shell suite's unchanged 100 ms
 wall-clock performance assertion exceeded its unsanitized budget under
 instrumentation (163 ms offscreen, 189 ms on Xvfb). The normal Debug suite and
 full-application Xvfb evidence satisfy that product timing boundary.
+
+### Final post-polish requalification (2026-09-09)
+
+The final retained-widget palette and prompt-acknowledgement changes were
+requalified against the current source. The independently configured
+nodegraph-only Debug, ASan/UBSan, and TSan builds each pass 5/5 tests without a
+sanitizer or race report. The current normal integrated build passes all 16
+tests executable in the managed environment. Its shell integration result
+includes an 86 ms atomic structural commit and now asserts the intentional
+prompt lifecycle precisely: calm before the fixed one-second admission
+deadline, animated afterward while unacknowledged, and permanently settled on
+the authoritative acknowledgement.
+
+The current performance samples remain approximately linear: 1,024/2,048
+stream deltas take 44.1/88.3 ms, 1,500/3,000-item authoritative thread deletion
+takes 4.4/9.0 ms, and 3,000/6,000-node batch removal takes 4.3/8.8 ms. The
+integrated ASan/UBSan build passes 15 of those 16 executable suites with no
+sanitizer diagnostic; the sole failure is the documented wall-clock-only shell
+threshold under instrumentation (168 ms versus the normal-build 100 ms
+budget).
+
+The WebUI release command passes its compatibility tests and production build.
+Its current 10,000-item profile records 48.28 ms hydration, 33.94 ms projection,
+and 9.51 ms for 2,000 stream deltas; the resulting two-asset relocatable bundle
+also passes artifact verification. The managed qualification environment denies
+creation of both the native AF_UNIX test listener and the Web browser-test
+loopback listener (`EPERM`), so those two listener-dependent commands cannot be
+re-executed inside this final sandbox. Their most recent complete passing runs
+remain the 17/17 native and full browser/Xvfb evidence recorded above; neither
+listener path nor WebUI source changed in the post-polish commits.

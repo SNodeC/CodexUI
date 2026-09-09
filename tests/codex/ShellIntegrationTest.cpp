@@ -914,10 +914,17 @@ void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
   QTimer *pendingAnimation =
       card ? card->findChild<QTimer *>(QStringLiteral("pendingAnimationTimer"))
            : nullptr;
-  require(card && card->property("pendingFeedbackVisible").toBool() &&
-              pendingAnimation && pendingAnimation->isActive(),
-          "the optimistically inserted Turn/You card starts its pending "
-          "animation immediately");
+  require(card && !card->property("pendingFeedbackVisible").toBool() &&
+              pendingAnimation && !pendingAnimation->isActive(),
+          "the optimistically inserted Turn/You card begins calm");
+  require(spinUntil(
+              [&] {
+                return card->property("pendingFeedbackVisible").toBool() &&
+                       pendingAnimation->isActive();
+              },
+              1500),
+          "the unacknowledged Turn/You card starts feedback at its fixed "
+          "one-second admission deadline");
 
   editor->setPlainText(QStringLiteral("unsent editor draft"));
   static_cast<void>(worker.apply({DecodedMessageKind::ClientResult,
