@@ -37,6 +37,7 @@ struct SignalLog {
   std::vector<Range> removed;
   std::vector<Move> moved;
   std::vector<Range> changed;
+  std::vector<QList<int>> changedRoles;
   int resets = 0;
 
   explicit SignalLog(ConversationItemModel &model) {
@@ -55,8 +56,9 @@ struct SignalLog {
                      });
     QObject::connect(&model, &QAbstractItemModel::dataChanged, &model,
                      [this](const QModelIndex &first, const QModelIndex &last,
-                            const QList<int> &) {
+                            const QList<int> &roles) {
                        changed.push_back({first.row(), last.row()});
+                       changedRoles.push_back(roles);
                      });
     QObject::connect(&model, &QAbstractItemModel::modelReset, &model,
                      [this] { ++resets; });
@@ -67,6 +69,7 @@ struct SignalLog {
     removed.clear();
     moved.clear();
     changed.clear();
+    changedRoles.clear();
     resets = 0;
   }
 };
@@ -144,7 +147,10 @@ bool testStableIdentityAndExactSignals() {
       require(model.updateCard(card("same-wire-id-b", second, "streamed")) ==
                       ConversationItemModel::CardUpdateResult::Changed &&
                   log.changed.size() == 1 && log.changed.front().first == 1 &&
-                  log.changed.front().last == 1,
+                  log.changed.front().last == 1 &&
+                  log.changedRoles.front().contains(
+                      ConversationItemModel::PresentationRole) &&
+                  log.changedRoles.front().contains(Qt::AccessibleTextRole),
               "one streamed card did not emit one exact dataChanged range");
   result &= require(model.property("modelIndexRebuildCount").toULongLong() ==
                         indexRebuilds,

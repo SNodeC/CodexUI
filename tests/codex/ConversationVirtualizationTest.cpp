@@ -4,7 +4,10 @@
 #include "codex/middle/ConversationView.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QElapsedTimer>
+#include <QKeyEvent>
+#include <QLabel>
 #include <QMouseEvent>
 #include <QScrollBar>
 
@@ -176,6 +179,60 @@ bool viewportProportionalFoundation() {
   return result;
 }
 
+bool targetedVisibilityChangeIsLocal() {
+  ConversationView view;
+  view.resize(820, 600);
+  view.setPresentationOptions(
+      {.showReasoning = true, .showCodexUpdates = false});
+  view.show();
+  ConversationSnapshot snapshot = conversation(10'000);
+  constexpr int TargetRow = 100;
+  auto &initial = std::get<AgentMessageData>(
+      snapshot.sections[TargetRow].cards.front().payload);
+  initial.finalAnswer = false;
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "a long thread with one filtered update reconciles");
+  settle();
+  const QModelIndex index = view.conversationModel()->index(TargetRow);
+  result &= expect(!index.data(ConversationItemModel::PresentedRole).toBool(),
+                   "the non-final update begins filtered");
+
+  VisibleCardData finalAnswer = *view.conversationModel()->card(TargetRow);
+  std::get<AgentMessageData>(finalAnswer.payload).finalAnswer = true;
+  const qulonglong sectionRebuilds =
+      view.property("conversationSectionRangeRebuilds").toULongLong();
+  const qulonglong indexRebuilds = view.conversationModel()
+                                       ->property("modelIndexRebuildCount")
+                                       .toULongLong();
+  const qulonglong constructions =
+      view.property("conversationCardConstructions").toULongLong();
+  const auto impact = view.applyCardPresentation(finalAnswer);
+  settle();
+  result &= expect(
+      impact == PresentationImpact::GeometryChanged &&
+          index.data(ConversationItemModel::PresentedRole).toBool() &&
+          view.property("conversationSectionRangeRebuilds").toULongLong() ==
+              sectionRebuilds &&
+          view.conversationModel()
+                  ->property("modelIndexRebuildCount")
+                  .toULongLong() == indexRebuilds &&
+          view.property("conversationCardConstructions").toULongLong() ==
+              constructions &&
+          view.property("conversationHeightIndexUpdateSteps").toULongLong() <=
+              15,
+      "final-answer visibility updates only its row and logarithmic height "
+      "index");
+
+  const qulonglong commits = view.property("targetedCardCommits").toULongLong();
+  result &=
+      expect(view.applyCardPresentation(std::move(finalAnswer)) ==
+                     PresentationImpact::None &&
+                 view.property("targetedCardCommits").toULongLong() == commits,
+             "repeated identical final state performs zero presentation "
+             "work");
+  return result;
+}
+
 bool atomicPagingAndFollowingArrival() {
   ConversationView view;
   view.resize(820, 600);
@@ -277,6 +334,127 @@ bool virtualTurnSurfaceAndInteractivePromotion() {
   return result;
 }
 
+bool selectionFocusAndOneGesturePromotion() {
+  ConversationView view;
+  view.resize(820, 600);
+  view.show();
+  ConversationSnapshot snapshot = conversation(200);
+  bool result =
+      expect(view.reconcile(snapshot), "interaction-state fixture reconciles");
+  settle();
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
+  const auto identity = firstVisible(view);
+  const QModelIndex index =
+      view.conversationModel()->indexForStableKey(identity.first);
+  const QPoint hover = view.visualRect(index).center();
+  QMouseEvent move(QEvent::MouseMove, QPointF(hover), QPointF(hover),
+                   view.viewport()->mapToGlobal(hover), Qt::NoButton,
+                   Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(view.viewport(), &move);
+  settle();
+  ConversationCard *card = materializedCard(view, identity.first);
+  QLabel *body = nullptr;
+  if (card) {
+    for (QLabel *label : card->findChildren<QLabel *>())
+      if (label->property("markdownSource").isValid()) {
+        body = label;
+        break;
+      }
+  }
+  result &= expect(card && body,
+                   "hover promotes selectable Markdown to its real card");
+  if (!body)
+    return false;
+  body->setSelection(0, 6);
+  const QString selected = body->selectedText();
+
+  VisibleCardData streamed = *view.conversationModel()->card(index.row());
+  std::get<AgentMessageData>(streamed.payload).text += " streamed suffix";
+  result &= expect(view.applyCardPresentation(std::move(streamed)).has_value(),
+                   "streaming targets the promoted row");
+  settle();
+  result &= expect(body->selectedText() == selected,
+                   "Markdown selection survives in-place streaming");
+  body->setFocus(Qt::OtherFocusReason);
+  QKeyEvent copy(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+  QApplication::sendEvent(body, &copy);
+  result &= expect(QApplication::clipboard()->text() == selected,
+                   "the promoted Markdown keeps native selection copying");
+
+  view.setFocus(Qt::OtherFocusReason);
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->minimum());
+  settle();
+  result &= expect(materializedCard(view, identity.first) == nullptr,
+                   "an unfocused editor is released outside bounded overscan");
+  view.scrollTo(index, QAbstractItemView::PositionAtTop);
+  settle();
+  const QPoint restoredHover = view.visualRect(index).center();
+  QMouseEvent restoredMove(QEvent::MouseMove, QPointF(restoredHover),
+                           QPointF(restoredHover),
+                           view.viewport()->mapToGlobal(restoredHover),
+                           Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(view.viewport(), &restoredMove);
+  settle();
+  card = materializedCard(view, identity.first);
+  body = nullptr;
+  if (card)
+    for (QLabel *label : card->findChildren<QLabel *>())
+      if (label->property("markdownSource").isValid()) {
+        body = label;
+        break;
+      }
+  result &=
+      expect(body && body->selectedText() == selected,
+             "selection is restored after virtualized release and return");
+  result &= expect(
+      index.data(Qt::AccessibleTextRole).toString().contains("streamed suffix"),
+      "the passive model exposes current card content to accessibility");
+
+  ConversationSnapshot foldedSnapshot;
+  foldedSnapshot.threadId = "folded-promotion";
+  VisibleCardData reasoning{
+      AuthoritativeItemKey{"folded-promotion", "turn", "reasoning"},
+      CardKind::Reasoning,
+      "folded-promotion",
+      "turn",
+      "reasoning",
+      ReasoningData{"Expanded by the same pointer gesture"}};
+  foldedSnapshot.sections.push_back(
+      {"folded-section", "turn", {reasoning}, std::nullopt});
+  ConversationView foldedView;
+  foldedView.resize(620, 320);
+  foldedView.show();
+  result &= expect(foldedView.reconcile(foldedSnapshot),
+                   "folded delegate fixture reconciles");
+  settle();
+  const QRect foldedRect =
+      foldedView.visualRect(foldedView.conversationModel()->index(0));
+  const QPoint disclosurePoint(foldedRect.right() - 16, foldedRect.top() + 22);
+  QMouseEvent press(QEvent::MouseButtonPress, QPointF(disclosurePoint),
+                    QPointF(disclosurePoint),
+                    foldedView.viewport()->mapToGlobal(disclosurePoint),
+                    Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+  QApplication::sendEvent(foldedView.viewport(), &press);
+  QMouseEvent release(QEvent::MouseButtonRelease, QPointF(disclosurePoint),
+                      QPointF(disclosurePoint),
+                      foldedView.viewport()->mapToGlobal(disclosurePoint),
+                      Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(foldedView.viewport(), &release);
+  settle();
+  ConversationCard *expanded =
+      materializedCard(foldedView, stableKey(reasoning.key));
+  result &= expect(expanded && !expanded->isCollapsed(),
+                   "a press-triggered promotion preserves one-gesture "
+                   "disclosure activation");
+  foldedView.setFocus(Qt::TabFocusReason);
+  foldedView.setCurrentIndex(foldedView.conversationModel()->index(0));
+  result &=
+      expect(foldedView.hasFocus() && foldedView.currentIndex().row() == 0,
+             "keyboard current-row focus remains visibly owned by the "
+             "item view");
+  return result;
+}
+
 } // namespace
 } // namespace codexui::codex::middle
 
@@ -284,8 +462,10 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   using namespace codexui::codex::middle;
   const bool result = viewportProportionalFoundation() &&
+                      targetedVisibilityChangeIsLocal() &&
                       atomicPagingAndFollowingArrival() &&
-                      virtualTurnSurfaceAndInteractivePromotion();
+                      virtualTurnSurfaceAndInteractivePromotion() &&
+                      selectionFocusAndOneGesturePromotion();
   if (result)
     std::cout << "Conversation virtualization tests passed\n";
   return result ? EXIT_SUCCESS : EXIT_FAILURE;

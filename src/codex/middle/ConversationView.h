@@ -113,6 +113,7 @@ protected:
                       const QModelIndex &previous) override;
   void mouseMoveEvent(QMouseEvent *event) override;
   void mousePressEvent(QMouseEvent *event) override;
+  void mouseReleaseEvent(QMouseEvent *event) override;
   void paintEvent(QPaintEvent *event) override;
   void resizeEvent(QResizeEvent *event) override;
   void wheelEvent(QWheelEvent *event) override;
@@ -151,6 +152,23 @@ private:
     bool active = false;
   };
 
+  struct LabelSelection {
+    int ordinal = -1;
+    int start = -1;
+    int length = 0;
+  };
+
+  struct EditSelection {
+    int ordinal = -1;
+    int position = 0;
+    int anchor = 0;
+  };
+
+  struct CardInteractionState {
+    std::vector<LabelSelection> labels;
+    std::vector<EditSelection> edits;
+  };
+
   [[nodiscard]] bool reconcileOwned(ConversationSnapshot snapshot);
   [[nodiscard]] std::optional<PresentationImpact>
   applyCardPresentationOwned(VisibleCardData card);
@@ -167,12 +185,14 @@ private:
 
   void rebuildHeightIndex();
   void rebuildSectionRanges();
+  void updateSectionRangeForPresentationChange(int row, bool wasPresented);
   [[nodiscard]] int estimatedCardHeight(const VisibleCardData &card) const;
   [[nodiscard]] int rowWidth(const ConversationItemModel::Row &row) const;
   [[nodiscard]] bool
   rowUsesPassiveDelegate(const ConversationItemModel::Row &row) const;
   [[nodiscard]] bool rowCollapsed(const ConversationItemModel::Row &row) const;
   [[nodiscard]] int rowSpacing(int row) const;
+  [[nodiscard]] int rowSpacing(int row, const SectionRange *section) const;
   [[nodiscard]] QRect rowRect(int row) const;
   [[nodiscard]] int measureCard(ConversationCard *card, int width) const;
   [[nodiscard]] bool updateMeasuredHeight(int row, int cardHeight,
@@ -187,6 +207,11 @@ private:
                                                  bool forInteraction = false);
   void releaseUnneededCards(int firstRow, int lastRow);
   void releaseCard(const std::string &key, ConversationCard *card);
+  void captureCardInteractionState(const std::string &key,
+                                   ConversationCard *card,
+                                   bool preserveExistingWhenEmpty);
+  void restoreCardInteractionState(const std::string &key,
+                                   ConversationCard *card);
   void releaseAllCards();
   void layoutMaterializedCards();
   void updateMaterializationProperties();
@@ -226,6 +251,7 @@ private:
   std::unordered_map<std::string, int> stagedHeights_;
   std::unordered_map<std::string, HeightRecord> heightCache_;
   std::unordered_map<std::string, SectionRange> sectionRanges_;
+  std::unordered_map<std::string, CardInteractionState> cardInteractionStates_;
   std::unordered_map<std::string, bool> cardCollapsedStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>
       commandOutputStates_;
@@ -250,6 +276,7 @@ private:
   bool materializing_ = false;
   bool structuralStagePassScheduled_ = false;
   bool committingStructuralStage_ = false;
+  QPointer<QWidget> forwardedMouseTarget_;
 };
 
 } // namespace codexui::codex::middle

@@ -3,9 +3,12 @@
 #include "codex/middle/ConversationItemModel.h"
 
 #include <QString>
+#include <QStringList>
 
 #include <algorithm>
 #include <iterator>
+#include <string_view>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 
@@ -38,6 +41,68 @@ QString cardLabel(CardKind kind) {
   return QStringLiteral("Activity");
 }
 
+QString boundedAccessibleText(std::string_view value) {
+  constexpr std::size_t MaximumAccessibleBytes = 8192;
+  const std::size_t length = std::min(value.size(), MaximumAccessibleBytes);
+  QString result =
+      QString::fromUtf8(value.data(), static_cast<qsizetype>(length));
+  if (length != value.size())
+    result += QStringLiteral("…");
+  return result;
+}
+
+QString accessibleCardText(const VisibleCardData &card) {
+  QString detail = std::visit(
+      [](const auto &payload) -> QString {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, UserMessageData>)
+          return boundedAccessibleText(payload.text);
+        if constexpr (std::is_same_v<Payload, AgentMessageData>)
+          return boundedAccessibleText(payload.text);
+        if constexpr (std::is_same_v<Payload, CommandExecutionData>)
+          return QStringLiteral("%1\n%2").arg(
+              boundedAccessibleText(payload.command),
+              boundedAccessibleText(payload.output));
+        if constexpr (std::is_same_v<Payload, AgentActivityData>)
+          return QStringLiteral("%1\n%2").arg(
+              boundedAccessibleText(payload.prompt),
+              boundedAccessibleText(payload.resultText));
+        if constexpr (std::is_same_v<Payload, ReasoningData>)
+          return boundedAccessibleText(payload.summary);
+        if constexpr (std::is_same_v<Payload, FileChangesData>) {
+          QStringList paths;
+          for (const FileChangeData &change : payload.changes)
+            paths.push_back(boundedAccessibleText(change.path));
+          return paths.join(QLatin1Char('\n'));
+        }
+        if constexpr (std::is_same_v<Payload, ImageGenerationData>)
+          return QStringLiteral("%1\n%2").arg(
+              boundedAccessibleText(payload.revisedPrompt),
+              boundedAccessibleText(payload.path));
+        if constexpr (std::is_same_v<Payload, PlanData>) {
+          QStringList lines{boundedAccessibleText(payload.explanation)};
+          for (const PlanStepData &step : payload.steps)
+            lines.push_back(boundedAccessibleText(step.text));
+          if (!payload.legacyText.empty())
+            lines.push_back(boundedAccessibleText(payload.legacyText));
+          return lines.join(QLatin1Char('\n'));
+        }
+        if constexpr (std::is_same_v<Payload, GenericActivityData>)
+          return boundedAccessibleText(payload.displayDetail);
+        if constexpr (std::is_same_v<Payload, LocalPromptData>)
+          return boundedAccessibleText(payload.prompt);
+        return {};
+      },
+      card.payload);
+  constexpr qsizetype MaximumAccessibleCharacters = 8192;
+  if (detail.size() > MaximumAccessibleCharacters) {
+    detail.truncate(MaximumAccessibleCharacters);
+    detail += QStringLiteral("…");
+  }
+  const QString label = cardLabel(card.kind);
+  return detail.isEmpty() ? label : label + QStringLiteral("\n") + detail;
+}
+
 bool compatible(const VisibleCardData &before,
                 const VisibleCardData &after) noexcept {
   return before.key == after.key &&
@@ -60,8 +125,9 @@ QVariant ConversationItemModel::data(const QModelIndex &index, int role) const {
     return {};
   switch (role) {
   case Qt::DisplayRole:
-  case Qt::AccessibleTextRole:
     return cardLabel(value->card.kind);
+  case Qt::AccessibleTextRole:
+    return accessibleCardText(value->card);
   case StableKeyRole:
     return QString::fromStdString(value->stableKey);
   case ThreadIdRole:
@@ -426,8 +492,10 @@ void ConversationItemModel::updateRow(int rowIndex, Row replacement) {
   if (before.activeTurn != replacement.activeTurn)
     roles.push_back(ActiveTurnRole);
   if (before.card.payload != replacement.card.payload ||
-      before.card.activeWork != replacement.card.activeWork)
+      before.card.activeWork != replacement.card.activeWork) {
     roles.push_back(PresentationRole);
+    roles.push_back(Qt::AccessibleTextRole);
+  }
   before = std::move(replacement);
   if (roles.empty())
     roles.push_back(PresentationRole);
