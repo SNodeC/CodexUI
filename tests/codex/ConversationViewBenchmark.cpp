@@ -39,8 +39,8 @@ VisibleCardData cardData(std::size_t index) {
     break;
   case 2:
     card.kind = CardKind::CommandExecution;
-    card.payload = CommandExecutionData{"printf benchmark", "line one\nline two",
-                                        "completed", "/tmp", 0, 4};
+    card.payload = CommandExecutionData{
+        "printf benchmark", "line one\nline two", "completed", "/tmp", 0, 4};
     break;
   case 3:
     card.kind = CardKind::Reasoning;
@@ -48,14 +48,15 @@ VisibleCardData cardData(std::size_t index) {
     break;
   case 4:
     card.kind = CardKind::AgentActivity;
-    card.payload = AgentActivityData{"worker", "completed", "completed", {},
-                                     "Agent result " + suffix};
+    card.payload = AgentActivityData{
+        "worker", "completed", "completed", {}, "Agent result " + suffix};
     break;
   case 5:
     card.kind = CardKind::FileChanges;
-    card.payload = FileChangesData{
-        "completed", {{"src/example-" + suffix + ".cpp", "update", 2, 1}},
-        "/tmp"};
+    card.payload =
+        FileChangesData{"completed",
+                        {{"src/example-" + suffix + ".cpp", "update", 2, 1}},
+                        "/tmp"};
     break;
   case 6:
     card.kind = CardKind::Plan;
@@ -65,8 +66,8 @@ VisibleCardData cardData(std::size_t index) {
     break;
   default:
     card.kind = CardKind::GenericActivity;
-    card.payload = GenericActivityData{"toolCall", {}, "completed",
-                                       "detail: benchmark " + suffix};
+    card.payload = GenericActivityData{
+        "toolCall", {}, "completed", "detail: benchmark " + suffix};
     break;
   }
   return card;
@@ -103,10 +104,9 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   using namespace codexui::codex::middle;
 
-  const std::size_t count = argc > 1
-                                ? std::max<std::size_t>(
-                                      1, std::strtoull(argv[1], nullptr, 10))
-                                : 80;
+  const std::size_t count =
+      argc > 1 ? std::max<std::size_t>(1, std::strtoull(argv[1], nullptr, 10))
+               : 80;
   ConversationView view;
   view.resize(900, 700);
   view.show();
@@ -124,8 +124,8 @@ int main(int argc, char **argv) {
   constexpr int ScrollSamples = 240;
   const int maximum = view.verticalScrollBar()->maximum();
   for (int sample = 0; sample < ScrollSamples; ++sample) {
-    view.verticalScrollBar()->setValue(
-        maximum * sample / std::max(1, ScrollSamples - 1));
+    view.verticalScrollBar()->setValue(maximum * sample /
+                                       std::max(1, ScrollSamples - 1));
     QApplication::processEvents(QEventLoop::AllEvents, 2);
   }
   const qint64 scrollMicroseconds = scroll.nsecsElapsed() / 1000;

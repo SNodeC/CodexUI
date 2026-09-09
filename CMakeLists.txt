@@ -89,6 +89,10 @@ set(
     src/codex/middle/ComposerPane.h
     src/codex/middle/ConversationCards.cpp
     src/codex/middle/ConversationCards.h
+    src/codex/middle/ConversationHeightIndex.cpp
+    src/codex/middle/ConversationHeightIndex.h
+    src/codex/middle/ConversationItemModel.cpp
+    src/codex/middle/ConversationItemModel.h
     src/codex/middle/ConversationView.cpp
     src/codex/middle/ConversationView.h
     src/codex/middle/InspectorPane.cpp
@@ -355,6 +359,35 @@ if(BUILD_TESTING)
     set_tests_properties(
         codexui-conversation-cards
         PROPERTIES TIMEOUT 35 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+
+    qt_add_executable(
+        codexui-conversation-item-model-test
+        tests/codex/ConversationItemModelTest.cpp
+        src/codex/middle/ConversationHeightIndex.cpp
+        src/codex/middle/ConversationHeightIndex.h
+        src/codex/middle/ConversationItemModel.cpp
+        src/codex/middle/ConversationItemModel.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+    )
+    target_compile_features(
+        codexui-conversation-item-model-test PRIVATE cxx_std_20
+    )
+    target_include_directories(
+        codexui-conversation-item-model-test PRIVATE src
+    )
+    target_link_libraries(
+        codexui-conversation-item-model-test
+        PRIVATE codexui-nodegraph Qt6::Widgets
+    )
+    add_test(
+        NAME codexui-conversation-item-model
+        COMMAND codexui-conversation-item-model-test
+    )
+    set_tests_properties(
+        codexui-conversation-item-model
+        PROPERTIES TIMEOUT 15
     )
 
     qt_add_executable(

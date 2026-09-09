@@ -100,6 +100,49 @@ The code follows the existing problem boundaries directly:
 No snapshot authority, event journal, projector, callback registry, generic
 observer, message bus, third logic thread, or alternate transport is introduced.
 
+## Item-model and height-index contract
+
+`middle::ConversationItemModel` is the thin Qt indexing surface. A row contains
+one last-rendered `VisibleCardData`, its unchanged `NodeRef` action target, and
+only the structural facts the view cannot infer safely: stable key, Turn
+section, root/nested position, first/last position, presentation visibility,
+and active-Turn emphasis. It does not accept graph revisions, protocol values,
+or mutations. A graph read and DTO projection always precede a model call.
+
+The model deliberately does not expose `VisibleCardData` through `QVariant`.
+Delegates and the view borrow it through the typed `card(row)` accessor on
+Qt-main, avoiding another copy of large streamed text. Standard roles expose
+only small identity, structure, visibility, title, and accessibility values.
+`indexForTarget(NodeRef)` compares the pinned pointer identity as well as the
+lookup result, so an action cannot silently retarget a replacement node with a
+similar protocol ID.
+
+Model changes have these exact meanings:
+
+- a different `threadId` is a complete authority replacement and emits one
+  model reset;
+- a retained same-thread key is moved with `beginMoveRows/endMoveRows` only
+  when its canonical position actually changes;
+- absent/present same-thread keys use contiguous remove/insert ranges;
+- a changed retained card or structural role emits `dataChanged` for that row
+  and the affected roles only;
+- an identical snapshot, card, or visibility tuple emits no signal and does
+  not increment a presentation-work counter.
+
+`middle::ConversationHeightIndex` is the view's variable-row geometry index.
+It stores integer row extents in a Fenwick prefix tree. `top`, `bottom`, total
+extent, position-to-row lookup, and a changed row height are logarithmic. A
+tail append extends the tree from prefix sums without traversing existing
+heights. Non-tail insertion/removal/movement is uncommon structural work and
+rebuilds the prefix tree from the already validated model order. Geometry
+values are nonnegative and accumulated as `qint64`; scrollbar conversion is a
+separate view concern.
+
+The deterministic foundation test exercises 10,000 rows and asserts no Qt
+widget construction is involved. At that size, position lookup and one-row
+height update each take at most 15 Fenwick steps, and appending rows leaves the
+rebuild counter unchanged.
+
 ## Qualification counters
 
 The final implementation reports at least these inspectable values on the
