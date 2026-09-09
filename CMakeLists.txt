@@ -358,6 +358,29 @@ if(BUILD_TESTING)
     )
 
     qt_add_executable(
+        codexui-conversation-view-benchmark
+        tests/codex/ConversationViewBenchmark.cpp
+        src/codex/middle/ConversationCards.cpp
+        src/codex/middle/ConversationCards.h
+        src/codex/middle/ConversationView.cpp
+        src/codex/middle/ConversationView.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
+    )
+    target_compile_features(
+        codexui-conversation-view-benchmark PRIVATE cxx_std_20
+    )
+    target_include_directories(
+        codexui-conversation-view-benchmark PRIVATE src
+    )
+    target_link_libraries(
+        codexui-conversation-view-benchmark
+        PRIVATE codexui-nodegraph Qt6::Widgets
+    )
+
+    qt_add_executable(
         codexui-application-layout-test
         tests/codex/EstablishedUiUxTest.cpp
         src/codex/DiffViewer.cpp
