@@ -486,6 +486,79 @@ bool virtualTurnSurfaceAndInteractivePromotion() {
   return result;
 }
 
+bool directTailGrowsTheRetainedTurnSurface() {
+  ConversationSnapshot snapshot;
+  snapshot.threadId = "tail-growth";
+  snapshot.activeTurnId = "active-turn";
+  VisibleCardData root{
+      LocalPromptKey{771}, CardKind::LocalPrompt, "tail-growth", "active-turn",
+      {}, LocalPromptData{771, "Pending question", PromptState::InFlight}};
+  TurnSection section;
+  section.key = "active-section";
+  section.turnId = "active-turn";
+  section.cards.push_back(root);
+  section.rootCardKey = root.key;
+  snapshot.sections.push_back(std::move(section));
+
+  ConversationView view;
+  view.resize(820, 360);
+  view.show();
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "single optimistic Turn fixture reconciles");
+  settle();
+  ConversationCard *retained = materializedCard(view, stableKey(root.key));
+  result &= expect(retained &&
+                       retained->property("authoritativeTurnActive").toBool() &&
+                       !retained->property("virtualTurnRoot").toBool(),
+                   "the optimistic Turn owns its emphasized border on its "
+                   "first complete frame");
+
+  const qulonglong constructions =
+      view.property("conversationCardConstructions").toULongLong();
+  const qulonglong sectionRebuilds =
+      view.property("conversationSectionRangeRebuilds").toULongLong();
+  ConversationTailCard tail;
+  tail.card = {AuthoritativeItemKey{"tail-growth", "active-turn", "answer"},
+               CardKind::AgentMessage,
+               "tail-growth",
+               "active-turn",
+               "answer",
+               AgentMessageData{"Final answer", true}};
+  tail.sectionKey = "active-section";
+  tail.nested = true;
+  tail.activeTurn = true;
+  tail.historyActivity = true;
+  const std::string answerKey = stableKey(tail.card.key);
+  result &= expect(view.appendTailCard(std::move(tail), 80),
+                   "the first nested direct-tail card appends");
+  settle();
+
+  const QModelIndex rootIndex =
+      view.conversationModel()->indexForStableKey(stableKey(root.key));
+  const QModelIndex answerIndex =
+      view.conversationModel()->indexForStableKey(answerKey);
+  const QRect answerRect = view.visualRect(answerIndex);
+  const QImage frame = view.viewport()->grab().toImage();
+  const QColor grownBorder = frame.pixelColor(
+      1, std::clamp(answerRect.center().y(), 0, frame.height() - 1));
+  const bool grew =
+      retained && retained == materializedCard(view, stableKey(root.key)) &&
+          retained->property("virtualTurnRoot").toBool() &&
+          !retained->property("authoritativeTurnActive").toBool() &&
+          rootIndex.data(ConversationItemModel::ActiveTurnRole).toBool() &&
+          answerIndex.isValid() && answerRect.left() == 12 &&
+          grownBorder.blue() > grownBorder.red() && grownBorder.red() < 183 &&
+          view.property("conversationCardConstructions").toULongLong() ==
+              constructions &&
+          view.property("conversationSectionRangeRebuilds").toULongLong() ==
+              sectionRebuilds;
+  result &= expect(
+      grew,
+      "direct-tail growth retains the root editor and exposes one continuous "
+      "emphasized Turn border without rebuilding section indexes");
+  return result;
+}
+
 bool selectionFocusAndOneGesturePromotion() {
   ConversationView view;
   view.resize(820, 600);
@@ -689,6 +762,7 @@ int main(int argc, char **argv) {
                       targetedVisibilityChangeIsLocal() &&
                       atomicPagingAndFollowingArrival() &&
                       virtualTurnSurfaceAndInteractivePromotion() &&
+                      directTailGrowsTheRetainedTurnSurface() &&
                       selectionFocusAndOneGesturePromotion() &&
                       outsideTextDragDoesNotReenterTheView();
   if (result)

@@ -955,8 +955,11 @@ bool ConversationView::appendTailCard(ConversationTailCard tail,
   std::string oldLastKey;
   std::optional<SectionRange> oldLastSection;
   int oldLastCardHeight = 0;
+  bool fragmentsMaterializedRoot = false;
   if (const ConversationItemModel::Row *row = model_->row(oldLast)) {
     oldLastKey = row->stableKey;
+    fragmentsMaterializedRoot =
+        tail.nested && row->turnRoot && row->sectionKey == tail.sectionKey;
     if (const auto found = sectionRanges_.find(row->sectionKey);
         found != sectionRanges_.end())
       oldLastSection = found->second;
@@ -1012,8 +1015,27 @@ bool ConversationView::appendTailCard(ConversationTailCard tail,
   if (startsActiveSection)
     activeSectionKey_ = appendedSection;
 
+  // The first child changes the retained prompt from a complete card into the
+  // transparent root fragment of the section-wide Turn surface. Direct-tail
+  // insertion must apply that transition to the existing editor before the
+  // completed frame is exposed; a later full reconcile may never be needed.
+  if (fragmentsMaterializedRoot) {
+    const ConversationItemModel::Row *rootRow = model_->row(oldLast);
+    ConversationCard *rootCard =
+        rootRow ? cardForStableKey(rootRow->stableKey) : nullptr;
+    if (rootRow && rootCard) {
+      configureCardForRow(rootCard, *rootRow);
+      oldLastCardHeight = measureCard(rootCard, rowWidth(*rootRow));
+      heightCache_.insert_or_assign(
+          rootRow->stableKey,
+          HeightRecord{rowWidth(*rootRow), oldLastCardHeight});
+      damage = damage.united(rowRect(oldLast));
+    }
+  }
+
   // Appending inside a represented turn changes only the previous tail's
-  // section edge spacing. Preserve its measured card height exactly.
+  // section edge spacing. Preserve its measured card height exactly, after
+  // accounting for the root-fragment margin transition above.
   if (oldLast >= 0 && oldLastCardHeight > 0)
     static_cast<void>(
         heights_.setHeight(static_cast<std::size_t>(oldLast),
