@@ -4,11 +4,13 @@
 #define CODEXUI_CODEX_MIDDLE_CONVERSATIONVIEW_H
 
 #include "codex/middle/ConversationCards.h"
+#include "codex/middle/ConversationHeightIndex.h"
+#include "codex/middle/ConversationItemModel.h"
 
-#include <QAbstractScrollArea>
+#include <QAbstractItemView>
+#include <QPointer>
 
 #include <functional>
-#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -16,20 +18,20 @@
 
 class QLabel;
 class QEvent;
+class QPaintEvent;
 class QPushButton;
-class QSpacerItem;
+class QResizeEvent;
 class QTimer;
 class QVariantAnimation;
-class QVBoxLayout;
 class QWheelEvent;
 
 namespace codexui::codex::middle {
 
-// The conversation has one projection path and one geometry owner.  Its
-// content is positioned directly in QAbstractScrollArea's viewport, so every
-// reconciliation can update the layout, range, and stable anchor in one
-// synchronous transaction.
-class ConversationView final : public QAbstractScrollArea {
+// Canonical variable-height item view for the conversation. NodeGraph remains
+// authoritative; this class owns only Qt indexing, cached row geometry, and
+// genuinely local interaction state. QWidget count is bounded by the visible
+// viewport plus one viewport of overscan on each side.
+class ConversationView final : public QAbstractItemView {
 public:
   enum class Mode { Following, Paused };
 
@@ -56,36 +58,19 @@ public:
     return presentationOptions_;
   }
 
-  // Returns false for a typed projection no-op.  Existing cards are mutated by
-  // key; first render and later updates use this same reconciliation path.
-  bool reconcile(const ConversationSnapshot &snapshot);
-
-  // Structural changes which introduce many rich cards are prepared under a
-  // hidden Qt parent in bounded event-loop slices, then committed through the
-  // ordinary reconcile contract in one visible transaction. Existing cards
-  // remain retained throughout Load-more staging.
+  [[nodiscard]] bool reconcile(const ConversationSnapshot &snapshot);
   void reconcileStaged(ConversationSnapshot snapshot);
   [[nodiscard]] bool structuralStagingActive() const noexcept {
     return pendingStructuralSnapshot_.has_value();
   }
 
-  // Applies one already-materialized card without constructing or traversing
-  // a complete conversation snapshot. A disengaged result requests the
-  // structural reconcile path because the card is absent, hidden, or changed
-  // identity/kind.
   [[nodiscard]] std::optional<PresentationImpact>
   applyCardPresentation(const VisibleCardData &card);
+  [[nodiscard]] std::optional<PresentationImpact>
+  applyCardPresentation(VisibleCardData &&card);
 
-  // Extra composer height is represented after the final card, while the
-  // viewport itself keeps its canonical geometry.
   void setTrailingSpaceHeight(int height);
-
-  // A local admission may resume a pause caused solely by composer growth.
-  // Explicit user-owned scrolling remains paused.
   void prepareForLocalPromptAdmission();
-
-  // Used by the middle-region chrome and adjacent splitter handles.  Nested
-  // scrollable controls should consume their own event before this is called.
   bool forwardWheelEvent(QWheelEvent *event);
 
   [[nodiscard]] Mode mode() const noexcept { return mode_; }
@@ -97,9 +82,33 @@ public:
   [[nodiscard]] int trailingSpaceHeight() const noexcept {
     return trailingSpaceHeight_;
   }
+  [[nodiscard]] ConversationItemModel *conversationModel() const noexcept {
+    return model_;
+  }
+  [[nodiscard]] int materializedCardCount() const noexcept {
+    return static_cast<int>(materializedCards_.size());
+  }
+
+  [[nodiscard]] QRect visualRect(const QModelIndex &index) const override;
+  void scrollTo(const QModelIndex &index,
+                ScrollHint hint = EnsureVisible) override;
+  [[nodiscard]] QModelIndex indexAt(const QPoint &point) const override;
 
 protected:
+  [[nodiscard]] QModelIndex
+  moveCursor(CursorAction cursorAction,
+             Qt::KeyboardModifiers modifiers) override;
+  [[nodiscard]] int horizontalOffset() const override;
+  [[nodiscard]] int verticalOffset() const override;
+  [[nodiscard]] bool isIndexHidden(const QModelIndex &index) const override;
+  void setSelection(const QRect &rect,
+                    QItemSelectionModel::SelectionFlags command) override;
+  [[nodiscard]] QRegion
+  visualRegionForSelection(const QItemSelection &selection) const override;
+  void updateGeometries() override;
+  void scrollContentsBy(int dx, int dy) override;
   bool eventFilter(QObject *watched, QEvent *event) override;
+  void paintEvent(QPaintEvent *event) override;
   void resizeEvent(QResizeEvent *event) override;
   void wheelEvent(QWheelEvent *event) override;
 
@@ -108,6 +117,7 @@ private:
     std::string stableKey;
     int pixelOffset = 0;
     int absoluteValue = 0;
+    int horizontalValue = 0;
   };
 
   struct ThreadScrollState {
@@ -116,86 +126,109 @@ private:
     bool pausedByComposerGrowth = false;
   };
 
-  class TurnSectionWidget;
+  struct HeightRecord {
+    int width = 0;
+    int height = 0;
+  };
 
-  bool reconcile(ConversationSnapshot snapshot, bool force,
-                 bool settleFollowImmediately);
-  [[nodiscard]] bool tryReconcileSingleInsertion(
-      ConversationSnapshot &snapshot, bool settleFollowImmediately);
+  struct PendingLocation {
+    std::size_t section = 0;
+    std::size_t card = 0;
+    bool nested = false;
+    bool root = false;
+    bool activeTurn = false;
+  };
+
+  [[nodiscard]] bool reconcileOwned(ConversationSnapshot snapshot);
+  [[nodiscard]] std::optional<PresentationImpact>
+  applyCardPresentationOwned(VisibleCardData card);
   [[nodiscard]] bool cardVisible(const VisibleCardData &card) const noexcept;
   void setThread(const std::string &threadId);
-  void setCardCollapsed(const std::string &key, ConversationCard *card,
-                        bool collapsed);
+  void storeCurrentThreadState();
   [[nodiscard]] Anchor captureAnchor() const;
   void restoreAnchor(const Anchor &anchor);
-  void storeCurrentThreadState();
   void setScrollValue(int value);
   void stopFollowingAnimation();
   void animateToBottom(int previousValue);
-  void recomputeCardGeometries(
-      const std::vector<ConversationCard *> &changedCards);
-  [[nodiscard]] int settleCardGeometry(ConversationCard *card, int width);
-  void recomputeAppendedNestedCardGeometry(
-      ConversationCard *card, ConversationCard *turnContainer,
-      TurnSectionWidget *section, int previousNestedHeight,
-      bool previousNestedVisible, int previousContainerHeight,
-      int previousSectionHeight);
-  void recomputeAppendedSectionGeometry(ConversationCard *card,
-                                        TurnSectionWidget *section,
-                                        int sectionTop);
-  void settlePaintOnlyCard(ConversationCard *card);
+  void handleUserScrollValue(int value);
+  [[nodiscard]] bool applyWheel(QWheelEvent *event);
+
+  void rebuildHeightIndex();
+  [[nodiscard]] int estimatedCardHeight(const VisibleCardData &card) const;
+  [[nodiscard]] int rowWidth(const ConversationItemModel::Row &row) const;
+  [[nodiscard]] QRect rowRect(int row) const;
+  [[nodiscard]] int measureCard(ConversationCard *card, int width) const;
+  [[nodiscard]] bool updateMeasuredHeight(int row, int cardHeight,
+                                          bool preserveAnchor);
+  void updateScrollRange();
+  [[nodiscard]] int leadingChromeHeight() const noexcept;
+  [[nodiscard]] qint64 naturalContentHeight() const noexcept;
+
+  void updateMaterialization(bool preserveAnchor = true);
+  [[nodiscard]] std::pair<int, int> materializationRows() const;
+  [[nodiscard]] ConversationCard *materializeRow(int row);
+  void releaseUnneededCards(int firstRow, int lastRow);
+  void releaseCard(const std::string &key, ConversationCard *card);
+  void releaseAllCards();
+  void layoutMaterializedCards();
+  void updateMaterializationProperties();
+  [[nodiscard]] ConversationCard *
+  cardForStableKey(const std::string &key) const;
+  void configureCardForRow(ConversationCard *card,
+                           const ConversationItemModel::Row &row);
+  [[nodiscard]] ConversationCard *createCard(const VisibleCardData &data,
+                                             QWidget *parent,
+                                             const std::string &key);
+  void setCardCollapsed(const std::string &key, ConversationCard *card,
+                        bool collapsed);
+
+  void buildPendingLocations();
+  void choosePendingStageRows();
+  [[nodiscard]] VisibleCardData *pendingCard(const std::string &key);
+  [[nodiscard]] const PendingLocation *
+  pendingLocation(const std::string &key) const;
   void scheduleStructuralStagePass();
   void runStructuralStagePass();
   void cancelStructuralStaging();
-  [[nodiscard]] ConversationCard *createRetainedCard(
-      const VisibleCardData &data, QWidget *parent, const std::string &key);
-  [[nodiscard]] VisibleCardData *pendingCard(const std::string &key);
-  void recomputeGeometry();
-  void positionContent();
-  void handleUserScrollValue(int value);
-  [[nodiscard]] bool applyWheel(QWheelEvent *event);
-  [[nodiscard]] ConversationCard *
-  cardForStableKey(const std::string &stableKey) const;
 
-  QWidget *content_ = nullptr;
+  ConversationItemModel *model_ = nullptr;
+  ConversationHeightIndex heights_;
+  QLabel *empty_ = nullptr;
+  QPushButton *loadMore_ = nullptr;
   QWidget *stagingHost_ = nullptr;
   QLabel *stagingOverlay_ = nullptr;
-  QVBoxLayout *contentLayout_ = nullptr;
-  QPushButton *loadMore_ = nullptr;
-  QSpacerItem *trailingSpace_ = nullptr;
-  QLabel *empty_ = nullptr;
   QVariantAnimation *followAnimation_ = nullptr;
+
   std::function<void()> loadMoreAction_;
   std::function<bool(nodegraph::NodeRef)> promptMaterializedAction_;
   std::function<void(nodegraph::NodeRef)> promptRecoveryAction_;
 
-  ConversationSnapshot snapshot_;
-  std::string threadId_;
-  std::unordered_map<std::string, TurnSectionWidget *> sections_;
-  std::unordered_map<std::string, ConversationCard *> cards_;
+  std::unordered_map<std::string, ConversationCard *> materializedCards_;
   std::unordered_map<std::string, ConversationCard *> stagedCards_;
-  std::vector<std::string> displayedSectionKeys_;
-  std::vector<std::string> displayedCardKeys_;
-  std::unordered_map<std::string, ThreadScrollState> threadStates_;
+  std::unordered_map<std::string, int> stagedHeights_;
+  std::unordered_map<std::string, HeightRecord> heightCache_;
+  std::unordered_map<std::string, bool> cardCollapsedStates_;
   std::unordered_map<std::string, CommandOutputView::ScrollState>
       commandOutputStates_;
-  std::unordered_map<std::string, bool> cardCollapsedStates_;
+  std::unordered_map<std::string, ThreadScrollState> threadStates_;
+
   PresentationOptions presentationOptions_;
+  std::string threadId_;
+  QString emptyMessage_;
   std::optional<ConversationSnapshot> pendingStructuralSnapshot_;
+  std::unordered_map<std::string, PendingLocation> pendingLocations_;
   std::vector<std::string> pendingStructuralCardKeys_;
   std::size_t pendingStructuralCardIndex_ = 0;
 
   Mode mode_ = Mode::Following;
   int trailingSpaceHeight_ = 0;
-  int naturalContentHeight_ = 0;
-  int contentHeight_ = 0;
-  QString emptyMessage_;
   bool applying_ = false;
   bool programmaticScroll_ = false;
   bool sliderDown_ = false;
   bool userActionPending_ = false;
   bool pausedByComposerGrowth_ = false;
   bool dispatchingNativeWheel_ = false;
+  bool materializing_ = false;
   bool structuralStagePassScheduled_ = false;
   bool committingStructuralStage_ = false;
 };

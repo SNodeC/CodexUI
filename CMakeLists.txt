@@ -197,6 +197,10 @@ if(BUILD_TESTING)
         src/codex/middle/ConversationCards.h
         src/codex/middle/ConversationView.cpp
         src/codex/middle/ConversationView.h
+        src/codex/middle/ConversationHeightIndex.cpp
+        src/codex/middle/ConversationHeightIndex.h
+        src/codex/middle/ConversationItemModel.cpp
+        src/codex/middle/ConversationItemModel.h
         src/codex/middle/MiddleTypes.cpp
         src/codex/middle/MiddleTypes.h
         src/codex/ui/UiStyle.cpp
@@ -340,6 +344,10 @@ if(BUILD_TESTING)
         src/codex/middle/ConversationCards.h
         src/codex/middle/ConversationView.cpp
         src/codex/middle/ConversationView.h
+        src/codex/middle/ConversationHeightIndex.cpp
+        src/codex/middle/ConversationHeightIndex.h
+        src/codex/middle/ConversationItemModel.cpp
+        src/codex/middle/ConversationItemModel.h
         src/codex/middle/MiddleTypes.cpp
         src/codex/middle/MiddleTypes.h
         src/codex/ui/UiStyle.cpp
@@ -391,12 +399,51 @@ if(BUILD_TESTING)
     )
 
     qt_add_executable(
+        codexui-conversation-virtualization-test
+        tests/codex/ConversationVirtualizationTest.cpp
+        src/codex/middle/ConversationCards.cpp
+        src/codex/middle/ConversationCards.h
+        src/codex/middle/ConversationHeightIndex.cpp
+        src/codex/middle/ConversationHeightIndex.h
+        src/codex/middle/ConversationItemModel.cpp
+        src/codex/middle/ConversationItemModel.h
+        src/codex/middle/ConversationView.cpp
+        src/codex/middle/ConversationView.h
+        src/codex/middle/MiddleTypes.cpp
+        src/codex/middle/MiddleTypes.h
+        src/codex/ui/UiStyle.cpp
+        src/codex/ui/UiStyle.h
+    )
+    target_compile_features(
+        codexui-conversation-virtualization-test PRIVATE cxx_std_20
+    )
+    target_include_directories(
+        codexui-conversation-virtualization-test PRIVATE src
+    )
+    target_link_libraries(
+        codexui-conversation-virtualization-test
+        PRIVATE codexui-nodegraph Qt6::Widgets
+    )
+    add_test(
+        NAME codexui-conversation-virtualization
+        COMMAND codexui-conversation-virtualization-test
+    )
+    set_tests_properties(
+        codexui-conversation-virtualization
+        PROPERTIES TIMEOUT 20 ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    )
+
+    qt_add_executable(
         codexui-conversation-view-benchmark
         tests/codex/ConversationViewBenchmark.cpp
         src/codex/middle/ConversationCards.cpp
         src/codex/middle/ConversationCards.h
         src/codex/middle/ConversationView.cpp
         src/codex/middle/ConversationView.h
+        src/codex/middle/ConversationHeightIndex.cpp
+        src/codex/middle/ConversationHeightIndex.h
+        src/codex/middle/ConversationItemModel.cpp
+        src/codex/middle/ConversationItemModel.h
         src/codex/middle/MiddleTypes.cpp
         src/codex/middle/MiddleTypes.h
         src/codex/ui/UiStyle.cpp
@@ -434,6 +481,10 @@ if(BUILD_TESTING)
         src/codex/middle/ConversationCards.h
         src/codex/middle/ConversationView.cpp
         src/codex/middle/ConversationView.h
+        src/codex/middle/ConversationHeightIndex.cpp
+        src/codex/middle/ConversationHeightIndex.h
+        src/codex/middle/ConversationItemModel.cpp
+        src/codex/middle/ConversationItemModel.h
         src/codex/middle/InspectorPane.cpp
         src/codex/middle/InspectorPane.h
         src/codex/middle/MiddleRegionWidget.cpp
