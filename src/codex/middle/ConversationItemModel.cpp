@@ -3,8 +3,6 @@
 #include "codex/middle/ConversationItemModel.h"
 
 #include <QString>
-#include <QStringList>
-
 #include <algorithm>
 #include <limits>
 #include <string_view>
@@ -51,6 +49,35 @@ QString boundedAccessibleText(std::string_view value) {
   return result;
 }
 
+constexpr qsizetype MaximumAccessibleCharacters = 8192;
+
+bool appendAccessibleLine(QString &destination, std::string_view value,
+                          bool prependNewline) {
+  qsizetype remaining = MaximumAccessibleCharacters - destination.size();
+  if (prependNewline) {
+    if (remaining <= 0)
+      return false;
+    destination += QLatin1Char('\n');
+    --remaining;
+  }
+  if (remaining <= 0)
+    return value.empty();
+
+  const std::size_t byteCount =
+      std::min(value.size(), static_cast<std::size_t>(remaining) * 4);
+  QString rendered =
+      QString::fromUtf8(value.data(), static_cast<qsizetype>(byteCount));
+  if (rendered.size() > remaining)
+    rendered.truncate(remaining);
+  destination += rendered;
+  return byteCount == value.size();
+}
+
+void markAccessibleTextTruncated(QString &value) {
+  value.truncate(MaximumAccessibleCharacters);
+  value += QStringLiteral("…");
+}
+
 QString accessibleCardText(const VisibleCardData &card) {
   QString detail = std::visit(
       [](const auto &payload) -> QString {
@@ -70,22 +97,37 @@ QString accessibleCardText(const VisibleCardData &card) {
         if constexpr (std::is_same_v<Payload, ReasoningData>)
           return boundedAccessibleText(payload.summary);
         if constexpr (std::is_same_v<Payload, FileChangesData>) {
-          QStringList paths;
-          for (const FileChangeData &change : payload.changes)
-            paths.push_back(boundedAccessibleText(change.path));
-          return paths.join(QLatin1Char('\n'));
+          QString paths;
+          bool first = true;
+          for (const FileChangeData &change : payload.changes) {
+            if (!appendAccessibleLine(paths, change.path, !first)) {
+              markAccessibleTextTruncated(paths);
+              break;
+            }
+            first = false;
+          }
+          return paths;
         }
         if constexpr (std::is_same_v<Payload, ImageGenerationData>)
           return QStringLiteral("%1\n%2").arg(
               boundedAccessibleText(payload.revisedPrompt),
               boundedAccessibleText(payload.path));
         if constexpr (std::is_same_v<Payload, PlanData>) {
-          QStringList lines{boundedAccessibleText(payload.explanation)};
-          for (const PlanStepData &step : payload.steps)
-            lines.push_back(boundedAccessibleText(step.text));
-          if (!payload.legacyText.empty())
-            lines.push_back(boundedAccessibleText(payload.legacyText));
-          return lines.join(QLatin1Char('\n'));
+          QString lines;
+          bool complete = appendAccessibleLine(lines, payload.explanation,
+                                               false);
+          for (const PlanStepData &step : payload.steps) {
+            if (!complete ||
+                !appendAccessibleLine(lines, step.text, true)) {
+              complete = false;
+              break;
+            }
+          }
+          if (complete && !payload.legacyText.empty())
+            complete = appendAccessibleLine(lines, payload.legacyText, true);
+          if (!complete)
+            markAccessibleTextTruncated(lines);
+          return lines;
         }
         if constexpr (std::is_same_v<Payload, GenericActivityData>)
           return boundedAccessibleText(payload.displayDetail);
@@ -94,10 +136,8 @@ QString accessibleCardText(const VisibleCardData &card) {
         return {};
       },
       card.payload);
-  constexpr qsizetype MaximumAccessibleCharacters = 8192;
   if (detail.size() > MaximumAccessibleCharacters) {
-    detail.truncate(MaximumAccessibleCharacters);
-    detail += QStringLiteral("…");
+    markAccessibleTextTruncated(detail);
   }
   const QString label = cardLabel(card.kind);
   return detail.isEmpty() ? label : label + QStringLiteral("\n") + detail;

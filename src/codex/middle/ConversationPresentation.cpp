@@ -17,6 +17,8 @@ namespace codexui::codex::middle::presentation {
 namespace {
 
 constexpr qsizetype MaximumGenericActivityCharacters = 4096;
+constexpr std::size_t MaximumGenericActivityUtf8Bytes =
+    static_cast<std::size_t>(MaximumGenericActivityCharacters) * 4;
 
 constexpr QTextDocument::MarkdownFeatures MarkdownFeatures =
     QTextDocument::MarkdownFeatures(QTextDocument::MarkdownDialectGitHub) |
@@ -182,8 +184,12 @@ QString genericActivityTitle(const GenericActivityData &activity) {
 }
 
 QString boundedGenericActivityDetail(const GenericActivityData &activity) {
-  QString rendered = text(activity.displayDetail);
-  if (rendered.size() <= MaximumGenericActivityCharacters)
+  const std::size_t byteCount = std::min(
+      activity.displayDetail.size(), MaximumGenericActivityUtf8Bytes);
+  QString rendered = QString::fromUtf8(
+      activity.displayDetail.data(), static_cast<qsizetype>(byteCount));
+  if (byteCount == activity.displayDetail.size() &&
+      rendered.size() <= MaximumGenericActivityCharacters)
     return rendered;
   rendered.truncate(MaximumGenericActivityCharacters);
   return rendered + QStringLiteral("\n\n[Activity details truncated]");

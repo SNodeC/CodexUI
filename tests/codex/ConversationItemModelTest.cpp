@@ -487,6 +487,46 @@ bool testHeightIndexIsBoundedAndExact() {
   return result;
 }
 
+bool testAccessibilityProjectionStopsAtItsVisibleBound() {
+  ConversationItemModel model;
+  VisibleCardData files;
+  files.key = AuthoritativeItemKey{"accessible-thread", "turn", "files"};
+  files.kind = CardKind::FileChanges;
+  files.threadId = "accessible-thread";
+  files.turnId = "turn";
+  files.itemId = "files";
+  files.payload = FileChangesData{
+      "completed",
+      {{std::string(100'000, 'x'), "update", 1, 1},
+       {"must-not-be-projected-after-the-bound", "update", 1, 1}}};
+  bool result = require(model.replaceConversation(snapshot({std::move(files)})),
+                        "large accessibility fixture was not accepted");
+  const QString fileText =
+      model.index(0).data(Qt::AccessibleTextRole).toString();
+  result &= require(fileText.size() <= 8210 &&
+                        fileText.endsWith(QStringLiteral("…")) &&
+                        !fileText.contains(QStringLiteral("must-not-be-projected")),
+                    "file accessibility traversed beyond its bounded text");
+
+  VisibleCardData plan;
+  plan.key = TurnPlanKey{"accessible-thread", "turn"};
+  plan.kind = CardKind::Plan;
+  plan.threadId = "accessible-thread";
+  plan.turnId = "turn";
+  plan.payload = PlanData{
+      std::string(100'000, 'p'),
+      {{"must-not-be-projected-after-the-bound", "pending"}}, {}};
+  result &= require(model.replaceConversation(snapshot({std::move(plan)})),
+                    "large plan accessibility fixture was not accepted");
+  const QString planText =
+      model.index(0).data(Qt::AccessibleTextRole).toString();
+  result &= require(planText.size() <= 8210 &&
+                        planText.endsWith(QStringLiteral("…")) &&
+                        !planText.contains(QStringLiteral("must-not-be-projected")),
+                    "plan accessibility traversed beyond its bounded text");
+  return result;
+}
+
 } // namespace
 } // namespace codexui::codex::middle
 
@@ -498,6 +538,7 @@ int main(int argc, char **argv) {
   result &= testVisibilityAndLargeModelRemainDataOnly();
   result &= testBoundedTailAppendKeepsAbsoluteIdentityIndexes();
   result &= testHeightIndexIsBoundedAndExact();
+  result &= testAccessibilityProjectionStopsAtItsVisibleBound();
   if (result)
     std::cout << "Conversation item model tests passed\n";
   return result ? 0 : 1;
