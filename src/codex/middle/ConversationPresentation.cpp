@@ -6,6 +6,9 @@
 #include "codex/ui/UiStyle.h"
 
 #include <QStringList>
+#include <QTextBlock>
+#include <QTextCursor>
+#include <QTextDocument>
 
 #include <algorithm>
 #include <cstddef>
@@ -14,6 +17,10 @@ namespace codexui::codex::middle::presentation {
 namespace {
 
 constexpr qsizetype MaximumGenericActivityCharacters = 4096;
+
+constexpr QTextDocument::MarkdownFeatures MarkdownFeatures =
+    QTextDocument::MarkdownFeatures(QTextDocument::MarkdownDialectGitHub) |
+    QTextDocument::MarkdownNoHTML;
 
 QString text(std::string_view value) {
   return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
@@ -31,6 +38,82 @@ QString displayChangeKind(std::string_view kind) {
   if (kind.empty())
     return QStringLiteral("Changed");
   return UiStyle::humanizeLabel(text(kind));
+}
+
+qsizetype lastSimpleMarkdownParagraphStart(QStringView source) {
+  qsizetype paragraphStart = 0;
+  qsizetype candidateStart = 0;
+  qsizetype lineStart = 0;
+  while (lineStart <= source.size()) {
+    qsizetype lineEnd = source.indexOf(QLatin1Char('\n'), lineStart);
+    if (lineEnd < 0)
+      lineEnd = source.size();
+    QStringView line = source.sliced(lineStart, lineEnd - lineStart);
+    if (!line.isEmpty() && line.back() == QLatin1Char('\r'))
+      line.chop(1);
+    bool blank = true;
+    for (QChar character : line) {
+      if (!character.isSpace()) {
+        blank = false;
+        break;
+      }
+    }
+    if (blank) {
+      candidateStart = std::min(source.size(), lineEnd + 1);
+    } else if (candidateStart > paragraphStart) {
+      paragraphStart = candidateStart;
+    }
+    if (lineEnd == source.size())
+      break;
+    lineStart = lineEnd + 1;
+  }
+  return paragraphStart;
+}
+
+bool simpleMarkdownParagraphs(QStringView source) {
+  qsizetype lineStart = 0;
+  while (lineStart <= source.size()) {
+    qsizetype lineEnd = source.indexOf(QLatin1Char('\n'), lineStart);
+    if (lineEnd < 0)
+      lineEnd = source.size();
+    QStringView line = source.sliced(lineStart, lineEnd - lineStart);
+    if (!line.isEmpty() && line.back() == QLatin1Char('\r'))
+      line.chop(1);
+    qsizetype indentation = 0;
+    while (indentation < line.size() &&
+           line.at(indentation) == QLatin1Char(' '))
+      ++indentation;
+    const QStringView content = line.sliced(indentation);
+    const bool heading =
+        content.startsWith(QLatin1Char('#')) &&
+        (content.size() == 1 || content.at(1).isSpace());
+    const bool quote = content.startsWith(QLatin1Char('>'));
+    const bool fence = content.startsWith(QLatin1StringView("```")) ||
+                       content.startsWith(QLatin1StringView("~~~"));
+    const bool unorderedList =
+        content.size() >= 2 &&
+        (content.at(0) == QLatin1Char('-') ||
+         content.at(0) == QLatin1Char('*') ||
+         content.at(0) == QLatin1Char('+')) &&
+        content.at(1).isSpace();
+    qsizetype digits = 0;
+    while (digits < content.size() && content.at(digits).isDigit())
+      ++digits;
+    const bool orderedList =
+        digits > 0 && digits + 1 < content.size() &&
+        (content.at(digits) == QLatin1Char('.') ||
+         content.at(digits) == QLatin1Char(')')) &&
+        content.at(digits + 1).isSpace();
+    const bool referenceDefinition = content.startsWith(QLatin1Char('['));
+    const bool table = content.contains(QLatin1Char('|'));
+    if (indentation >= 4 || heading || quote || fence || unorderedList ||
+        orderedList || referenceDefinition || table)
+      return false;
+    if (lineEnd == source.size())
+      break;
+    lineStart = lineEnd + 1;
+  }
+  return true;
 }
 
 } // namespace
@@ -104,6 +187,41 @@ QString boundedGenericActivityDetail(const GenericActivityData &activity) {
     return rendered;
   rendered.truncate(MaximumGenericActivityCharacters);
   return rendered + QStringLiteral("\n\n[Activity details truncated]");
+}
+
+MarkdownTailState markdownTailState(const QTextDocument &document,
+                                    QStringView markdown) {
+  if (markdown.isEmpty())
+    return {};
+  const qsizetype tail = lastSimpleMarkdownParagraphStart(markdown);
+  if (!simpleMarkdownParagraphs(markdown.sliced(tail)))
+    return {};
+  const QTextBlock lastBlock = document.lastBlock();
+  return lastBlock.isValid() ? MarkdownTailState{tail, lastBlock.position()}
+                             : MarkdownTailState{};
+}
+
+void replaceMarkdownDocument(QTextDocument &document, const QString &markdown,
+                             MarkdownTailState &tailState) {
+  document.setMarkdown(markdown, MarkdownFeatures);
+  tailState = markdownTailState(document, QStringView(markdown));
+}
+
+bool appendMarkdownDocument(QTextDocument &document, QStringView previous,
+                            QStringView next,
+                            MarkdownTailState &tailState) {
+  if (!tailState.valid() || !next.startsWith(previous))
+    return false;
+  const QStringView reparsedTail = next.sliced(tailState.sourceOffset);
+  if (!simpleMarkdownParagraphs(reparsedTail))
+    return false;
+  QTextCursor cursor(&document);
+  cursor.setPosition(tailState.documentPosition);
+  cursor.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
+  cursor.removeSelectedText();
+  cursor.insertMarkdown(reparsedTail.toString(), MarkdownFeatures);
+  tailState = markdownTailState(document, next);
+  return true;
 }
 
 } // namespace codexui::codex::middle::presentation

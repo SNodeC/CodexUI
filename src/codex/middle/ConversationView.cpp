@@ -11,6 +11,7 @@
 #include <QEasingCurve>
 #include <QElapsedTimer>
 #include <QEvent>
+#include <QHelpEvent>
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLayout>
@@ -30,6 +31,7 @@
 #include <QTextDocument>
 #include <QTextOption>
 #include <QTimer>
+#include <QToolTip>
 #include <QVariantAnimation>
 #include <QWheelEvent>
 
@@ -151,6 +153,7 @@ namespace {
 
 constexpr int CardSpacing = 8;
 constexpr int CardFrameExtent = 2;
+constexpr int CardBodyHorizontalInsets = 28;
 constexpr int HistoryButtonHeight = 32;
 constexpr int NestedCardIndent = 12;
 constexpr int NativeScrollLineStep = 20;
@@ -212,6 +215,13 @@ struct PassivePresentation {
   QColor titleColor = QColor(QStringLiteral("#1d2633"));
   std::vector<PassiveBlock> blocks;
   int verticalMargin = 10;
+};
+
+struct PassivePointerHit {
+  bool text = false;
+  bool action = false;
+  QString link;
+  QString tooltip;
 };
 
 QFont passiveBlockFont(bool metadata) {
@@ -295,6 +305,16 @@ PassivePresentation passivePresentation(const VisibleCardData &card) {
 }
 
 class ConversationPassiveDelegate final : public QStyledItemDelegate {
+  struct DocumentRecord {
+    QString text;
+    int width = 0;
+    bool markdown = false;
+    QFont font;
+    std::shared_ptr<QTextDocument> document;
+    presentation::MarkdownTailState markdownTail;
+    std::uint64_t used = 0;
+  };
+
 public:
   explicit ConversationPassiveDelegate(QObject *parent)
       : QStyledItemDelegate(parent) {}
@@ -315,7 +335,8 @@ public:
     const PassivePresentation presentation = passivePresentation(row->card);
     int height = CardFrameExtent + 24 + 2 * presentation.verticalMargin;
     if (!collapsed) {
-      const int bodyWidth = std::max(1, option.rect.width() - 24);
+      const int bodyWidth =
+          std::max(1, option.rect.width() - CardBodyHorizontalInsets);
       bool first = true;
       for (std::size_t block = 0; block < presentation.blocks.size(); ++block) {
         const PassiveBlock &value = presentation.blocks[block];
@@ -377,7 +398,8 @@ public:
 
     if (!collapsed) {
       int blockTop = top + 30;
-      const int bodyWidth = std::max(1, option.rect.width() - 24);
+      const int bodyWidth =
+          std::max(1, option.rect.width() - CardBodyHorizontalInsets);
       for (std::size_t block = 0; block < presentation.blocks.size(); ++block) {
         const PassiveBlock &value = presentation.blocks[block];
         const QFont font = passiveBlockFont(value.metadata);
@@ -415,27 +437,166 @@ public:
     painter->restore();
   }
 
+  std::shared_ptr<QTextDocument>
+  takeMarkdownDocument(const std::string &stableKey,
+                       const VisibleCardData &card, int cardWidth) const {
+    const PassivePresentation value = passivePresentation(card);
+    const int bodyWidth = std::max(1, cardWidth - CardBodyHorizontalInsets);
+    for (std::size_t block = 0; block < value.blocks.size(); ++block) {
+      const PassiveBlock &candidate = value.blocks[block];
+      if (!candidate.markdown)
+        continue;
+      const std::string key = stableKey + ':' + std::to_string(block);
+      const auto found = documents_.find(key);
+      const QFont font = passiveBlockFont(candidate.metadata);
+      if (found == documents_.end() || found->second.text != candidate.text ||
+          found->second.width != bodyWidth || !found->second.markdown ||
+          found->second.font != font)
+        return {};
+      std::shared_ptr<QTextDocument> document = found->second.document;
+      documents_.erase(found);
+      incrementProperty(parent(), "conversationDelegateDocumentTransfers");
+      return document;
+    }
+    return {};
+  }
+
+  void adoptMarkdownDocument(const std::string &stableKey,
+                             const VisibleCardData &card, int cardWidth,
+                             std::shared_ptr<QTextDocument> document) const {
+    if (!document)
+      return;
+    const PassivePresentation value = passivePresentation(card);
+    const int bodyWidth = std::max(1, cardWidth - CardBodyHorizontalInsets);
+    for (std::size_t block = 0; block < value.blocks.size(); ++block) {
+      const PassiveBlock &candidate = value.blocks[block];
+      if (!candidate.markdown)
+        continue;
+      const std::string key = stableKey + ':' + std::to_string(block);
+      if (!documents_.contains(key) && documents_.size() >= 128) {
+        const auto oldest =
+            std::ranges::min_element(documents_, {}, [](const auto &entry) {
+              return entry.second.used;
+            });
+        if (oldest != documents_.end())
+          documents_.erase(oldest);
+      }
+      document->setTextWidth(bodyWidth);
+      DocumentRecord record;
+      record.text = candidate.text;
+      record.width = bodyWidth;
+      record.markdown = true;
+      record.font = passiveBlockFont(candidate.metadata);
+      record.document = std::move(document);
+      record.markdownTail = presentation::markdownTailState(
+          *record.document, QStringView(record.text));
+      record.used = ++documentUse_;
+      documents_.insert_or_assign(key, std::move(record));
+      incrementProperty(parent(), "conversationDelegateDocumentReturns");
+      return;
+    }
+  }
+
+  PassivePointerHit pointerHit(const QStyleOptionViewItem &option,
+                               const QModelIndex &index,
+                               const QPoint &position,
+                               bool collapsed) const {
+    const auto *conversation =
+        qobject_cast<const ConversationItemModel *>(index.model());
+    const ConversationItemModel::Row *row =
+        conversation ? conversation->row(index.row()) : nullptr;
+    if (!row || !option.rect.contains(position))
+      return {};
+    const PassivePresentation presentation = passivePresentation(row->card);
+    const int top = option.rect.top() + presentation.verticalMargin;
+    if (QRect(option.rect.right() - 52, top, 24, 24).contains(position))
+      return {.action = true, .tooltip = QStringLiteral("Copy")};
+    if (QRect(option.rect.right() - 28, top, 24, 24).contains(position))
+      return {.action = true,
+              .tooltip = collapsed ? QStringLiteral("Expand")
+                                   : QStringLiteral("Collapse")};
+    if (collapsed)
+      return {};
+
+    int blockTop = top + 30;
+    const int bodyWidth =
+        std::max(1, option.rect.width() - CardBodyHorizontalInsets);
+    for (std::size_t block = 0; block < presentation.blocks.size(); ++block) {
+      const PassiveBlock &value = presentation.blocks[block];
+      const std::string key = row->stableKey + ':' + std::to_string(block);
+      const auto found = documents_.find(key);
+      const QFont font = passiveBlockFont(value.metadata);
+      if (found == documents_.end() || found->second.text != value.text ||
+          found->second.width != bodyWidth ||
+          found->second.markdown != value.markdown ||
+          found->second.font != font)
+        return {};
+      const int height =
+          std::max(1, static_cast<int>(std::ceil(
+                          found->second.document->size().height())) +
+                          (value.markdown ? 4 : 0));
+      const QRect blockRect(option.rect.left() + 12, blockTop, bodyWidth,
+                            height);
+      if (blockRect.contains(position)) {
+        const QPoint local = position - blockRect.topLeft();
+        const int character =
+            found->second.document->documentLayout()->hitTest(
+                QPointF(local), Qt::ExactHit);
+        if (character < 0)
+          return {};
+        QTextCursor cursor(found->second.document.get());
+        cursor.setPosition(std::clamp(
+            character, 0, found->second.document->characterCount() - 1));
+        const QString link = cursor.charFormat().anchorHref();
+        return {.text = true, .link = link, .tooltip = link};
+      }
+      blockTop += height + 6;
+    }
+    return {};
+  }
+
 private:
-  struct DocumentRecord {
-    QString text;
-    int width = 0;
-    bool markdown = false;
-    QFont font;
-    std::unique_ptr<QTextDocument> document;
-    std::uint64_t used = 0;
-  };
+  bool appendDocument(DocumentRecord &record, const PassiveBlock &value) const {
+    if (!value.text.startsWith(record.text))
+      return false;
+    if (record.markdown) {
+      if (!presentation::appendMarkdownDocument(
+              *record.document, QStringView(record.text),
+              QStringView(value.text), record.markdownTail))
+        return false;
+    } else {
+      QTextCursor cursor(record.document.get());
+      cursor.movePosition(QTextCursor::End);
+      cursor.insertText(value.text.sliced(record.text.size()));
+    }
+    record.text = value.text;
+    incrementProperty(parent(), "conversationDelegateIncrementalAppends");
+    return true;
+  }
 
   QTextDocument *document(const std::string &stableKey, std::size_t block,
                           const PassiveBlock &value, int width,
                           const QFont &font) const {
     const std::string key = stableKey + ':' + std::to_string(block);
     auto found = documents_.find(key);
-    if (found == documents_.end() || found->second.text != value.text ||
-        found->second.width != width ||
-        found->second.markdown != value.markdown ||
-        found->second.font != font) {
-      if (found != documents_.end())
-        documents_.erase(found);
+    const bool compatible =
+        found != documents_.end() &&
+        found->second.markdown == value.markdown && found->second.font == font;
+    if (found != documents_.end() && !compatible) {
+      documents_.erase(found);
+      found = documents_.end();
+    }
+    if (compatible && found->second.text != value.text &&
+        !appendDocument(found->second, value)) {
+      documents_.erase(found);
+      found = documents_.end();
+    }
+    if (found != documents_.end() && found->second.width != width) {
+      found->second.width = width;
+      found->second.document->setTextWidth(width);
+      incrementProperty(parent(), "conversationDelegateWidthRelayouts");
+    }
+    if (found == documents_.end()) {
       if (documents_.size() >= 128) {
         const auto oldest =
             std::ranges::min_element(documents_, {}, [](const auto &entry) {
@@ -449,7 +610,7 @@ private:
       record.width = width;
       record.markdown = value.markdown;
       record.font = font;
-      record.document = std::make_unique<QTextDocument>();
+      record.document = std::make_shared<QTextDocument>();
       record.document->setDocumentMargin(0);
       record.document->setDefaultFont(font);
       record.document->setDefaultStyleSheet(
@@ -458,14 +619,13 @@ private:
       textOption.setWrapMode(QTextOption::WordWrap);
       record.document->setDefaultTextOption(textOption);
       if (value.markdown)
-        record.document->setMarkdown(value.text,
-                                     QTextDocument::MarkdownFeatures(
-                                         QTextDocument::MarkdownDialectGitHub) |
-                                         QTextDocument::MarkdownNoHTML);
+        presentation::replaceMarkdownDocument(
+            *record.document, value.text, record.markdownTail);
       else
         record.document->setPlainText(value.text);
       record.document->setTextWidth(width);
       found = documents_.emplace(key, std::move(record)).first;
+      incrementProperty(parent(), "conversationDelegateDocumentRebuilds");
     }
     found->second.used = ++documentUse_;
     return found->second.document.get();
@@ -2445,10 +2605,15 @@ ConversationCard *ConversationView::createCard(const VisibleCardData &data,
                                                QWidget *parent,
                                                const std::string &key,
                                                int width) {
+  auto *delegate =
+      static_cast<ConversationPassiveDelegate *>(itemDelegate());
+  std::shared_ptr<QTextDocument> markdownDocument =
+      delegate->takeMarkdownDocument(key, data, width);
   ConversationCard *card = createConversationCard(
       data, parent, !presentationOptions_.commandsInitiallyExpanded,
       !presentationOptions_.imagesInitiallyExpanded,
-      !presentationOptions_.fileChangesInitiallyExpanded, width);
+      !presentationOptions_.fileChangesInitiallyExpanded, width,
+      std::move(markdownDocument));
   card->setProperty("conversationAnchorKey", QString::fromStdString(key));
   if (const auto collapsed = cardCollapsedStates_.find(key);
       collapsed != cardCollapsedStates_.end())
@@ -2564,6 +2729,15 @@ void ConversationView::releaseCard(const std::string &key,
   cardCollapsedStates_.insert_or_assign(key, card->isCollapsed());
   if (const auto state = card->commandOutputScrollState())
     commandOutputStates_.insert_or_assign(key, *state);
+  const QModelIndex index = model_->indexForStableKey(key);
+  const ConversationItemModel::Row *row =
+      index.isValid() ? model_->row(index.row()) : nullptr;
+  if (index.isValid() && row && card->canApply(row->card)) {
+    auto *delegate =
+        static_cast<ConversationPassiveDelegate *>(itemDelegate());
+    delegate->adoptMarkdownDocument(key, row->card, rowWidth(*row),
+                                    card->markdownDocument());
+  }
   card->setViewportVisible(false);
   delete card;
   incrementProperty(this, "conversationRowsReleased");
@@ -3195,6 +3369,30 @@ void ConversationView::scrollContentsBy(int dx, int dy) {
   viewport()->update();
 }
 
+bool ConversationView::viewportEvent(QEvent *event) {
+  if (event && event->type() == QEvent::ToolTip) {
+    auto *help = static_cast<QHelpEvent *>(event);
+    const QModelIndex index = indexAt(help->pos());
+    const ConversationItemModel::Row *row =
+        index.isValid() ? model_->row(index.row()) : nullptr;
+    if (index.isValid() && row && !cardForStableKey(row->stableKey)) {
+      QStyleOptionViewItem option;
+      option.initFrom(this);
+      option.rect = visualRect(index);
+      const auto *delegate =
+          static_cast<const ConversationPassiveDelegate *>(itemDelegate());
+      const PassivePointerHit hit =
+          delegate->pointerHit(option, index, help->pos(), rowCollapsed(*row));
+      if (!hit.tooltip.isEmpty()) {
+        QToolTip::showText(help->globalPos(), hit.tooltip, viewport(),
+                           option.rect);
+        return true;
+      }
+    }
+  }
+  return QAbstractItemView::viewportEvent(event);
+}
+
 bool ConversationView::eventFilter(QObject *watched, QEvent *event) {
   auto *widget = qobject_cast<QWidget *>(watched);
   ConversationCard *card = nullptr;
@@ -3272,23 +3470,24 @@ void ConversationView::mouseMoveEvent(QMouseEvent *event) {
     return;
   }
   const QModelIndex index = indexAt(event->position().toPoint());
-  if (index.isValid() &&
-      !cardForStableKey(index.data(ConversationItemModel::StableKeyRole)
-                            .toString()
-                            .toStdString())) {
-    const Anchor anchor = captureAnchor();
-    const bool follow = mode_ == Mode::Following;
-    const qint64 before = heights_.totalHeight();
-    static_cast<void>(materializeRow(index.row(), true));
-    if (before != heights_.totalHeight()) {
-      updateScrollRange();
-      if (follow)
-        setScrollValue(verticalScrollBar()->maximum());
-      else
-        restoreAnchor(anchor);
-    }
-    layoutMaterializedCards();
-    updateMaterializationProperties();
+  const ConversationItemModel::Row *row =
+      index.isValid() ? model_->row(index.row()) : nullptr;
+  if (index.isValid() && row && !cardForStableKey(row->stableKey)) {
+    QStyleOptionViewItem option;
+    option.initFrom(this);
+    option.rect = visualRect(index);
+    const auto *delegate =
+        static_cast<const ConversationPassiveDelegate *>(itemDelegate());
+    const PassivePointerHit hit = delegate->pointerHit(
+        option, index, event->position().toPoint(), rowCollapsed(*row));
+    if (hit.action || !hit.link.isEmpty())
+      viewport()->setCursor(Qt::PointingHandCursor);
+    else if (hit.text)
+      viewport()->setCursor(Qt::IBeamCursor);
+    else
+      viewport()->unsetCursor();
+  } else {
+    viewport()->unsetCursor();
   }
   QAbstractItemView::mouseMoveEvent(event);
 }

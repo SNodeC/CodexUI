@@ -8,6 +8,7 @@
 #include <QClipboard>
 #include <QColor>
 #include <QElapsedTimer>
+#include <QHelpEvent>
 #include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
@@ -15,6 +16,7 @@
 #include <QPlainTextEdit>
 #include <QScrollBar>
 #include <QThread>
+#include <QToolTip>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -861,10 +863,15 @@ bool virtualTurnSurfaceAndInteractivePromotion() {
                    Qt::NoButton, Qt::NoModifier);
   QApplication::sendEvent(view.viewport(), &move);
   settle();
+  sendViewportMouse(view, QEvent::MouseButtonPress, hover, Qt::LeftButton,
+                    Qt::LeftButton);
+  sendViewportMouse(view, QEvent::MouseButtonRelease, hover, Qt::LeftButton,
+                    Qt::NoButton);
+  settle();
   ConversationCard *promoted = materializedCard(view, stableKey(root.key));
   result &= expect(promoted && promoted->property("virtualTurnRoot").toBool() &&
                        promoted->parentWidget() == view.viewport(),
-                   "hover promotes only the interactive root fragment to a "
+                   "press promotes only the interactive root fragment to a "
                    "real viewport editor");
   result &= expect(view.materializedCardCount() == 1,
                    "interactive promotion remains row-local and bounded");
@@ -1038,17 +1045,17 @@ bool selectionFocusAndOneGesturePromotion() {
                    Qt::NoButton, Qt::NoModifier);
   QApplication::sendEvent(view.viewport(), &move);
   settle();
+  result &= expect(materializedCard(view, identity.first) == nullptr,
+                   "passive Markdown hover constructs no editor");
+  sendViewportMouse(view, QEvent::MouseButtonPress, hover, Qt::LeftButton,
+                    Qt::LeftButton);
+  sendViewportMouse(view, QEvent::MouseButtonRelease, hover, Qt::LeftButton,
+                    Qt::NoButton);
+  settle();
   ConversationCard *card = materializedCard(view, identity.first);
-  QLabel *body = nullptr;
-  if (card) {
-    for (QLabel *label : card->findChildren<QLabel *>())
-      if (label->property("markdownSource").isValid()) {
-        body = label;
-        break;
-      }
-  }
+  MarkdownTextView *body = card ? card->findChild<MarkdownTextView *>() : nullptr;
   result &= expect(card && body,
-                   "hover promotes selectable Markdown to its real card");
+                   "one press promotes selectable Markdown to its real card");
   if (!body)
     return false;
   body->setSelection(0, 6);
@@ -1077,20 +1084,13 @@ bool selectionFocusAndOneGesturePromotion() {
   view.scrollTo(index, QAbstractItemView::PositionAtTop);
   settle();
   const QPoint restoredHover = view.visualRect(index).center();
-  QMouseEvent restoredMove(QEvent::MouseMove, QPointF(restoredHover),
-                           QPointF(restoredHover),
-                           view.viewport()->mapToGlobal(restoredHover),
-                           Qt::NoButton, Qt::NoButton, Qt::NoModifier);
-  QApplication::sendEvent(view.viewport(), &restoredMove);
+  sendViewportMouse(view, QEvent::MouseButtonPress, restoredHover,
+                    Qt::LeftButton, Qt::LeftButton);
+  sendViewportMouse(view, QEvent::MouseButtonRelease, restoredHover,
+                    Qt::LeftButton, Qt::NoButton);
   settle();
   card = materializedCard(view, identity.first);
-  body = nullptr;
-  if (card)
-    for (QLabel *label : card->findChildren<QLabel *>())
-      if (label->property("markdownSource").isValid()) {
-        body = label;
-        break;
-      }
+  body = card ? card->findChild<MarkdownTextView *>() : nullptr;
   result &=
       expect(body && body->selectedText() == selected,
              "selection is restored after virtualized release and return");
@@ -1337,6 +1337,162 @@ bool largeIncomingCommandUsesBoundedFinalWidthLayout() {
   return result;
 }
 
+bool streamingMarkdownReparsesOnlyMutableTail() {
+  std::string markdown;
+  markdown.reserve(192 * 1024);
+  for (int paragraph = 0; paragraph < 2400; ++paragraph) {
+    markdown += "Stable paragraph ";
+    markdown += std::to_string(paragraph);
+    markdown += " remains unchanged while the visible tail streams.\n\n";
+  }
+  markdown += "Mutable **tail";
+
+  VisibleCardData update{
+      AuthoritativeItemKey{"markdown-tail", "turn", "update"},
+      CardKind::AgentMessage,
+      "markdown-tail",
+      "turn",
+      "update",
+      AgentMessageData{std::move(markdown), false}};
+  ConversationSnapshot snapshot;
+  snapshot.threadId = update.threadId;
+  VisibleCardData sentinel{
+      AuthoritativeItemKey{"markdown-tail", "sentinel-turn", "sentinel"},
+      CardKind::UserMessage,
+      "markdown-tail",
+      "sentinel-turn",
+      "sentinel",
+      UserMessageData{"Keep the keyboard current row separate."}};
+  snapshot.sections.push_back(
+      {"sentinel-section", sentinel.turnId, {sentinel}, std::nullopt});
+  snapshot.sections.push_back(
+      {"markdown-section", update.turnId, {update}, std::nullopt});
+
+  ConversationView view;
+  view.resize(760, 480);
+  view.show();
+  bool result =
+      expect(view.reconcile(std::move(snapshot)),
+             "large Markdown tail fixture reconciles through the delegate");
+  settle();
+  view.setCurrentIndex(view.conversationModel()->index(0));
+  settle();
+  const qulonglong rebuildsBefore =
+      view.property("conversationDelegateDocumentRebuilds").toULongLong();
+  const qulonglong appendsBefore =
+      view.property("conversationDelegateIncrementalAppends").toULongLong();
+
+  auto &message = std::get<AgentMessageData>(update.payload);
+  message.text += "** with a [link](https://example.com).\n\n"
+                  "The final paragraph is complete.";
+  QElapsedTimer timer;
+  timer.start();
+  result &= expect(view.applyCardPresentation(update).has_value(),
+                   "the visible Markdown row accepts its streamed suffix");
+  const qint64 updateMicros = timer.nsecsElapsed() / 1000;
+  settle();
+  const QModelIndex index =
+      view.conversationModel()->indexForStableKey(stableKey(update.key));
+  const int passiveHeight = view.visualRect(index).height();
+  result &= expect(
+      view.property("conversationDelegateDocumentRebuilds").toULongLong() ==
+              rebuildsBefore &&
+          view.property("conversationDelegateIncrementalAppends")
+                  .toULongLong() == appendsBefore + 1,
+      "streaming reparses only the mutable Markdown tail instead of rebuilding "
+      "the unchanged document");
+  view.setProperty("largeMarkdownTailUpdateMicros", updateMicros);
+
+  const QPoint hover =
+      view.visualRect(index).intersected(view.viewport()->rect()).center();
+  QMouseEvent move(QEvent::MouseMove, QPointF(hover), QPointF(hover),
+                   view.viewport()->mapToGlobal(hover), Qt::NoButton,
+                   Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(view.viewport(), &move);
+  settle();
+  result &= expect(materializedCard(view, stableKey(update.key)) == nullptr,
+                   "hovering a very large update performs no QWidget work");
+  const qulonglong transfersBefore =
+      view.property("conversationDelegateDocumentTransfers").toULongLong();
+  QElapsedTimer promotionTimer;
+  promotionTimer.start();
+  sendViewportMouse(view, QEvent::MouseButtonPress, hover, Qt::LeftButton,
+                    Qt::LeftButton);
+  sendViewportMouse(view, QEvent::MouseButtonRelease, hover, Qt::LeftButton,
+                    Qt::NoButton);
+  const qint64 promotionMicros = promotionTimer.nsecsElapsed() / 1000;
+  settle();
+  ConversationCard *card = materializedCard(view, stableKey(update.key));
+  MarkdownTextView *body = card ? card->findChild<MarkdownTextView *>() : nullptr;
+  view.setProperty("largeMarkdownPromotionMicros", promotionMicros);
+  result &= expect(
+      card && body &&
+          view.property("conversationDelegateDocumentTransfers")
+                  .toULongLong() == transfersBefore + 1 &&
+          body->property("markdownSource").toString() ==
+              QString::fromStdString(message.text) &&
+          body->toHtml().contains(QStringLiteral("https://example.com")) &&
+          card->height() == passiveHeight,
+      "interaction promotion preserves the complete streamed Markdown, link, "
+      "and delegate geometry");
+  return result;
+}
+
+bool passiveMarkdownHoverKeepsLinkSemanticsWithoutAnEditor() {
+  VisibleCardData sentinel{
+      AuthoritativeItemKey{"passive-link", "sentinel", "sentinel"},
+      CardKind::UserMessage,
+      "passive-link",
+      "sentinel",
+      "sentinel",
+      UserMessageData{"Keep current focus separate."}};
+  VisibleCardData linked{
+      AuthoritativeItemKey{"passive-link", "turn", "linked"},
+      CardKind::AgentMessage,
+      "passive-link",
+      "turn",
+      "linked",
+      AgentMessageData{"[Docs](https://example.com)", false}};
+  ConversationSnapshot snapshot;
+  snapshot.threadId = "passive-link";
+  snapshot.sections.push_back(
+      {"sentinel-section", sentinel.turnId, {sentinel}, std::nullopt});
+  snapshot.sections.push_back(
+      {"linked-section", linked.turnId, {linked}, std::nullopt});
+
+  ConversationView view;
+  view.resize(620, 320);
+  view.show();
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "passive link fixture reconciles");
+  settle();
+  view.setCurrentIndex(view.conversationModel()->index(0));
+  settle();
+  const QModelIndex index =
+      view.conversationModel()->indexForStableKey(stableKey(linked.key));
+  const QRect row = view.visualRect(index);
+  const QPoint anchor(row.left() + 16, row.top() + 46);
+  QMouseEvent move(QEvent::MouseMove, QPointF(anchor), QPointF(anchor),
+                   view.viewport()->mapToGlobal(anchor), Qt::NoButton,
+                   Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(view.viewport(), &move);
+  settle();
+  result &= expect(
+      !materializedCard(view, stableKey(linked.key)) &&
+          view.viewport()->cursor().shape() == Qt::PointingHandCursor,
+      "a passive Markdown link keeps its pointing cursor without constructing "
+      "an editor");
+
+  QHelpEvent tooltip(QEvent::ToolTip, anchor,
+                     view.viewport()->mapToGlobal(anchor));
+  QApplication::sendEvent(view.viewport(), &tooltip);
+  result &= expect(
+      QToolTip::text() == QStringLiteral("https://example.com"),
+      "a passive Markdown link exposes its established URL tooltip");
+  QToolTip::hideText();
+  return result;
+}
+
 bool outsideTextDragDoesNotReenterTheView() {
   ConversationSnapshot snapshot;
   snapshot.threadId = "virtual-thread";
@@ -1371,13 +1527,7 @@ bool outsideTextDragDoesNotReenterTheView() {
   settle();
 
   ConversationCard *card = materializedCard(view, stableKey(update.key));
-  QLabel *body = nullptr;
-  if (card)
-    for (QLabel *label : card->findChildren<QLabel *>())
-      if (label->property("markdownSource").isValid()) {
-        body = label;
-        break;
-      }
+  MarkdownTextView *body = card ? card->findChild<MarkdownTextView *>() : nullptr;
   result &= expect(card && body && view.currentIndex() == index,
                    "padding press remains a bounded row interaction");
   if (!body)
@@ -1424,6 +1574,8 @@ int main(int argc, char **argv) {
                       passiveAndInteractivePresentationShareExactGeometry() &&
                       bidirectionalLazyMeasurementPreservesNativeScrollMotion() &&
                       largeIncomingCommandUsesBoundedFinalWidthLayout() &&
+                      streamingMarkdownReparsesOnlyMutableTail() &&
+                      passiveMarkdownHoverKeepsLinkSemanticsWithoutAnEditor() &&
                       selectionFocusAndOneGesturePromotion() &&
                       outsideTextDragDoesNotReenterTheView();
   if (result)

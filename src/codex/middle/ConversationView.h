@@ -149,6 +149,7 @@ protected:
   visualRegionForSelection(const QItemSelection &selection) const override;
   void updateGeometries() override;
   void scrollContentsBy(int dx, int dy) override;
+  bool viewportEvent(QEvent *event) override;
   bool eventFilter(QObject *watched, QEvent *event) override;
   void currentChanged(const QModelIndex &current,
                       const QModelIndex &previous) override;

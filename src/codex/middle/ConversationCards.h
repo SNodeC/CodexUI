@@ -3,10 +3,12 @@
 #ifndef CODEXUI_CODEX_MIDDLE_CONVERSATIONCARDS_H
 #define CODEXUI_CODEX_MIDDLE_CONVERSATIONCARDS_H
 
+#include "codex/middle/ConversationPresentation.h"
 #include "codex/middle/MiddleTypes.h"
 
 #include <QFrame>
 #include <QPlainTextEdit>
+#include <QTextBrowser>
 #include <QTextEdit>
 
 #include <memory>
@@ -17,12 +19,46 @@ class QLabel;
 class QPaintEvent;
 class QResizeEvent;
 class QTimer;
+class QTextDocument;
 class QVBoxLayout;
 class QWheelEvent;
 
 namespace codexui::codex::middle {
 
 enum class PresentationImpact { None, PaintOnly, GeometryChanged };
+
+class MarkdownTextView final : public QTextBrowser {
+  Q_OBJECT
+
+public:
+  explicit MarkdownTextView(
+      const QString &markdown,
+      std::shared_ptr<QTextDocument> preparedDocument = {},
+      int initialWidth = 0,
+      QWidget *parent = nullptr);
+  ~MarkdownTextView() override;
+
+  bool setContent(const QString &markdown);
+  [[nodiscard]] const QString &markdownSource() const noexcept;
+  [[nodiscard]] std::shared_ptr<QTextDocument> sharedDocument() const;
+  [[nodiscard]] bool hasSelectedText() const;
+  [[nodiscard]] int selectionStart() const;
+  [[nodiscard]] QString selectedText() const;
+  void setSelection(int start, int length);
+  [[nodiscard]] int heightForWidth(int width) const override;
+  [[nodiscard]] QSize sizeHint() const override;
+  [[nodiscard]] QSize minimumSizeHint() const override;
+
+private:
+  void configureDocument();
+  void refreshPreferredHeight(int documentWidth) const;
+
+  std::shared_ptr<QTextDocument> document_;
+  QString markdown_;
+  presentation::MarkdownTailState markdownTail_;
+  mutable int preferredDocumentWidth_ = 0;
+  mutable int preferredHeight_ = 0;
+};
 
 class ContentSizedTextView : public QTextEdit {
 public:
@@ -104,11 +140,13 @@ public:
                             bool commandInitiallyCollapsed = true,
                             bool imageInitiallyCollapsed = true,
                             bool fileChangesInitiallyCollapsed = true,
-                            int initialWidth = 0);
+                            int initialWidth = 0,
+                            std::shared_ptr<QTextDocument> markdownDocument = {});
   ~ConversationCard() override;
 
   [[nodiscard]] CardKind cardKind() const noexcept;
   [[nodiscard]] const VisibleCardData &data() const noexcept;
+  [[nodiscard]] std::shared_ptr<QTextDocument> markdownDocument() const;
   [[nodiscard]] bool isCollapsed() const noexcept;
   void setCollapsed(bool collapsed);
   bool setAuthoritativeTurnActive(bool active);
@@ -151,7 +189,8 @@ createConversationCard(const VisibleCardData &data, QWidget *parent = nullptr,
                        bool commandInitiallyCollapsed = true,
                        bool imageInitiallyCollapsed = true,
                        bool fileChangesInitiallyCollapsed = true,
-                       int initialWidth = 0);
+                       int initialWidth = 0,
+                       std::shared_ptr<QTextDocument> markdownDocument = {});
 
 } // namespace codexui::codex::middle
 

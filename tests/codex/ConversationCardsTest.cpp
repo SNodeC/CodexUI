@@ -772,10 +772,15 @@ ConversationCard *card(ConversationView &view, const std::string &key) {
   if (!index.isValid() || !geometry.intersects(view.viewport()->rect()))
     return nullptr;
   const QPoint position = geometry.intersected(view.viewport()->rect()).center();
-  QMouseEvent move(QEvent::MouseMove, QPointF(position), QPointF(position),
-                   view.viewport()->mapToGlobal(position), Qt::NoButton,
-                   Qt::NoButton, Qt::NoModifier);
-  QApplication::sendEvent(view.viewport(), &move);
+  QMouseEvent press(QEvent::MouseButtonPress, QPointF(position),
+                    QPointF(position), view.viewport()->mapToGlobal(position),
+                    Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+  QApplication::sendEvent(view.viewport(), &press);
+  QMouseEvent release(QEvent::MouseButtonRelease, QPointF(position),
+                      QPointF(position),
+                      view.viewport()->mapToGlobal(position), Qt::LeftButton,
+                      Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(view.viewport(), &release);
   QApplication::processEvents();
   return findMaterialized();
 }
@@ -2131,11 +2136,16 @@ bool testMutableCardsAndCommandOutput() {
   for (const auto &value : snapshot.sections.front().cards)
     identities[stableKey(value.key)] = card(view, stableKey(value.key));
   auto containsLabelText = [](QWidget *parent, const QString &needle) {
-    return std::ranges::any_of(
+    const bool labelContains = std::ranges::any_of(
         parent->findChildren<QLabel *>(), [&needle](QLabel *label) {
-          return label->text().contains(needle) ||
-                 label->property("markdownSource").toString().contains(needle);
+          return label->text().contains(needle);
         });
+    return labelContains ||
+           std::ranges::any_of(
+               parent->findChildren<MarkdownTextView *>(),
+               [&needle](MarkdownTextView *view) {
+                 return view->markdownSource().contains(needle);
+               });
   };
   auto titleText = [](QWidget *parent) {
     const auto labels = parent->findChildren<QLabel *>();
@@ -2177,22 +2187,17 @@ bool testMutableCardsAndCommandOutput() {
       CardKey{AuthoritativeItemKey{thread, "turn", "activity"}})];
   auto *activityStatus =
       activityCard->findChild<QLabel *>(QStringLiteral("agentActivityStatus"));
-  const auto userLabels = userCard->findChildren<QLabel *>();
-  result &=
-      expect(std::ranges::any_of(
-                 userLabels,
-                 [](QLabel *label) {
-                   return label->property("markdownSource").toString() ==
-                              QStringLiteral(
-                                  "hello **Markdown**\n\n| Value | Rating |\n"
-                                  "|---|---|\n| State | 10 |\n\n"
-                                  "[Docs](https://example.com)") &&
-                          label->textFormat() == Qt::RichText &&
-                          label->text().contains(QStringLiteral("<table")) &&
-                          label->textInteractionFlags().testFlag(
-                              Qt::LinksAccessibleByKeyboard);
-                 }),
-             "authoritative user messages render GitHub Markdown tables");
+  auto *userMarkdown = userCard->findChild<MarkdownTextView *>();
+  result &= expect(
+      userMarkdown &&
+          userMarkdown->markdownSource() ==
+              QStringLiteral("hello **Markdown**\n\n| Value | Rating |\n"
+                             "|---|---|\n| State | 10 |\n\n"
+                             "[Docs](https://example.com)") &&
+          userMarkdown->toHtml().contains(QStringLiteral("<table")) &&
+          userMarkdown->textInteractionFlags().testFlag(
+              Qt::LinksAccessibleByKeyboard),
+      "authoritative user messages render GitHub Markdown tables");
   result &= expect(
       titleText(agentCardWidget) == QStringLiteral("Codex") && agentPhase &&
           agentPhase->text() == QStringLiteral("update") &&
@@ -2248,16 +2253,11 @@ bool testMutableCardsAndCommandOutput() {
           commandText->verticalScrollBarPolicy() == Qt::ScrollBarAsNeeded,
       "short command text trims empty lines and uses its content height");
   auto *pendingCard = identities[stableKey(CardKey{LocalPromptKey{77}})];
+  auto *pendingMarkdown = pendingCard->findChild<MarkdownTextView *>();
   result &= expect(
-      std::ranges::any_of(
-          pendingCard->findChildren<QLabel *>(),
-          [](QLabel *label) {
-            return label->property("markdownSource")
-                       .toString()
-                       .contains(QStringLiteral(
-                           "[report.pdf](file:///tmp/report.pdf)")) &&
-                   label->textFormat() == Qt::RichText;
-          }),
+      pendingMarkdown &&
+          pendingMarkdown->markdownSource().contains(
+              QStringLiteral("[report.pdf](file:///tmp/report.pdf)")),
       "pending prompts render file links before authoritative replacement");
 
   commandCard->setCollapsed(false);
@@ -3094,8 +3094,15 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
                          "/workspace"}}}});
   const auto containsText = [](QWidget *widget, const QString &needle) {
     return std::ranges::any_of(
-        widget->findChildren<QLabel *>(),
-        [&needle](QLabel *label) { return label->text().contains(needle); });
+               widget->findChildren<QLabel *>(),
+               [&needle](QLabel *label) {
+                 return label->text().contains(needle);
+               }) ||
+           std::ranges::any_of(
+               widget->findChildren<MarkdownTextView *>(),
+               [&needle](MarkdownTextView *view) {
+                 return view->markdownSource().contains(needle);
+               });
   };
 
   ConversationView view;
@@ -3354,12 +3361,7 @@ bool testRootlessFinalAnswerGeometrySettlement() {
   result &= expect(applyConversation(view, snapshot),
                    "rootless final answer accepts an authoritative update");
   spin();
-  QLabel *answerBody = nullptr;
-  for (QLabel *label : answerCard->findChildren<QLabel *>())
-    if (!label->property("markdownSource").toString().isEmpty()) {
-      answerBody = label;
-      break;
-    }
+  MarkdownTextView *answerBody = answerCard->findChild<MarkdownTextView *>();
   result &= expect(answerBody &&
                        answerCard->height() == answerCard->minimumHeight() &&
                        answerCard->height() < 200 &&
@@ -3437,25 +3439,15 @@ bool testRetainedNestedFinalAnswerGeometrySettlement() {
   view.scrollTo(answerIndex, QAbstractItemView::PositionAtTop);
   spin(40);
   ConversationCard *answerCard = card(view, stableKey(answer.key));
-  QLabel *answerBody = nullptr;
-  if (answerCard)
-    for (QLabel *label : answerCard->findChildren<QLabel *>())
-      if (label->property("markdownSource").toString() == markdown) {
-        answerBody = label;
-        break;
-      }
+  MarkdownTextView *answerBody =
+      answerCard ? answerCard->findChild<MarkdownTextView *>() : nullptr;
   int documentHeight = 0;
-  if (answerBody) {
-    QTextDocument document;
-    document.setDefaultFont(answerBody->font());
-    document.setDocumentMargin(0);
-    document.setHtml(answerBody->text());
-    document.setTextWidth(answerBody->width());
-    documentHeight = static_cast<int>(std::ceil(document.size().height()));
-  }
+  if (answerBody)
+    documentHeight =
+        static_cast<int>(std::ceil(answerBody->document()->size().height()));
   result &= expect(
       promptIndex.isValid() && answerIndex.isValid() && answerCard &&
-          answerBody &&
+          answerBody && answerBody->markdownSource() == markdown &&
           promptIndex.data(ConversationItemModel::TurnRootRole).toBool() &&
           answerIndex.data(ConversationItemModel::NestedCardRole).toBool() &&
           answerBody->height() >=
