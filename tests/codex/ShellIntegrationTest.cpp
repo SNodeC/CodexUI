@@ -1856,7 +1856,7 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
                 conversation->conversationModel()->card(index.row());
             return index.isValid() && card &&
                    card->kind == middle::CardKind::UserMessage &&
-                   card->target == localPrompt;
+                   card->target == authoritativePrompt;
           }),
           "the authoritative prompt morphs the exact local row");
   const std::vector<QtToWorkerMessage> materializationActions =
@@ -1882,7 +1882,119 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
       "prompt materialization targets one stable row and exact acknowledgement "
       "without structural reconciliation");
 
+  const qulonglong retirementResetsBefore =
+      conversation->conversationModel()->property("modelResetCount")
+          .toULongLong();
+  const qulonglong retirementRemovalsBefore =
+      conversation->conversationModel()->property("modelExactRemoveCount")
+          .toULongLong();
+  const qulonglong retirementRoutesBefore =
+      shell.property("targetedConversationStructuralDeltas").toULongLong();
+  GraphChange promptRetirement;
+  {
+    auto write = graph.write();
+    write.remove(localPrompt);
+    promptRetirement = write.finish();
+  }
+  require(messageAdmitted(
+              channels.sendGraphChanged(std::move(promptRetirement))),
+          "the acknowledged prompt retirement is admitted to Qt");
+  require(spinUntil([&] {
+            const QModelIndex index = conversation->conversationModel()
+                                          ->indexForStableKey(localKey);
+            const middle::VisibleCardData *card =
+                conversation->conversationModel()->card(index.row());
+            return index.isValid() && card &&
+                   card->target == authoritativePrompt &&
+                   shell.property("targetedConversationStructuralDeltas")
+                           .toULongLong() == retirementRoutesBefore + 1;
+          }),
+          "retiring the prompt preserves its authoritative row as an exact "
+          "structural no-op");
+  require(conversation->conversationModel()
+                  ->property("modelResetCount")
+                  .toULongLong() == retirementResetsBefore &&
+              conversation->conversationModel()
+                      ->property("modelExactRemoveCount")
+                      .toULongLong() == retirementRemovalsBefore,
+          "prompt retirement neither resets nor removes the authoritative "
+          "conversation row");
+
+  NodeRef insertedItem;
+  const qulonglong exactInsertsBefore =
+      conversation->conversationModel()->property("modelExactInsertCount")
+          .toULongLong();
+  const qulonglong exactMovesBefore =
+      conversation->conversationModel()->property("modelExactMoveCount")
+          .toULongLong();
+  const qulonglong structuralResetsBefore =
+      conversation->conversationModel()->property("modelResetCount")
+          .toULongLong();
+  GraphChange middleInsertion;
+  {
+    auto write = graph.write();
+    NodeState inserted;
+    inserted.status = NodeStatus::Running;
+    inserted.fields = {{"id", Value("middle-structural-item")},
+                       {"type", Value("agentMessage")},
+                       {"text", Value("Middle structural item")}};
+    insertedItem = write.upsert(
+        {NodeKind::Item, "middle-structural-item"}, std::move(inserted));
+    write.setParent(selectedTurn, insertedItem);
+    write.replaceChildren(
+        selectedTurn,
+        std::array<NodeRef, 3>{selectedItem, insertedItem,
+                               authoritativePrompt});
+    middleInsertion = write.finish();
+  }
+  require(messageAdmitted(
+              channels.sendGraphChanged(std::move(middleInsertion))),
+          "a canonical middle insertion is admitted to Qt");
+  require(spinUntil([&] {
+            return conversation->conversationModel()
+                           ->indexForTarget(insertedItem)
+                           .row() == 1 &&
+                   conversation->conversationModel()
+                           ->property("modelExactInsertCount")
+                           .toULongLong() == exactInsertsBefore + 1 &&
+                   conversation->conversationModel()
+                           ->property("modelExactMoveCount")
+                           .toULongLong() == exactMovesBefore;
+          }),
+          "the graph middle insertion reaches its exact model row");
+
+  GraphChange rowMove;
+  {
+    auto write = graph.write();
+    write.replaceChildren(
+        selectedTurn,
+        std::array<NodeRef, 3>{selectedItem, authoritativePrompt,
+                               insertedItem});
+    rowMove = write.finish();
+  }
+  require(messageAdmitted(channels.sendGraphChanged(std::move(rowMove))),
+          "a canonical row reorder is admitted to Qt");
+  require(spinUntil([&] {
+            return conversation->conversationModel()
+                           ->indexForTarget(insertedItem)
+                           .row() == 2 &&
+                   conversation->conversationModel()
+                           ->property("modelExactMoveCount")
+                           .toULongLong() == exactMovesBefore + 1;
+          }),
+          "the graph reorder reaches the exact moved model row");
+  require(conversation->conversationModel()
+                  ->property("modelResetCount")
+                  .toULongLong() == structuralResetsBefore,
+          "middle insertion and movement use no conversation model reset");
+
   QPointer<QWidget> removedWidget = selectedCard;
+  const qulonglong exactRemovalsBefore =
+      conversation->conversationModel()->property("modelExactRemoveCount")
+          .toULongLong();
+  const qulonglong removalResetsBefore =
+      conversation->conversationModel()->property("modelResetCount")
+          .toULongLong();
   GraphChange removal;
   {
     auto write = graph.write();
@@ -1900,10 +2012,17 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
           "the background notification carrying a removed ref is admitted");
   require(spinUntil([&] {
             return selectedItem->uiAttachment() == nullptr &&
-                   removedWidget.isNull();
+                   removedWidget.isNull() &&
+                   conversation->conversationModel()
+                           ->property("modelExactRemoveCount")
+                           .toULongLong() == exactRemovalsBefore + 1;
           }),
           "removed refs always detach matching selected widgets even when "
           "the change needs no structural refresh");
+  require(conversation->conversationModel()
+                  ->property("modelResetCount")
+                  .toULongLong() == removalResetsBefore,
+          "an exact selected-row removal does not reset the conversation");
 }
 
 void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {

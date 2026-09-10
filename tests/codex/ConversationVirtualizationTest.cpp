@@ -218,6 +218,90 @@ bool viewportProportionalFoundation() {
   return result;
 }
 
+bool exactStructuralRowsPreserveTheViewport() {
+  nodegraph::NodeGraph graph;
+  std::vector<nodegraph::NodeRef> targets;
+  nodegraph::NodeRef insertedTarget;
+  {
+    auto write = graph.write();
+    for (int row = 0; row < 24; ++row)
+      targets.push_back(write.upsert(
+          {nodegraph::NodeKind::Item, "exact-row-" + std::to_string(row)}));
+    insertedTarget =
+        write.upsert({nodegraph::NodeKind::Item, "exact-row-inserted"});
+    static_cast<void>(write.finish());
+  }
+
+  ConversationSnapshot snapshot = conversation(targets.size());
+  for (std::size_t row = 0; row < targets.size(); ++row)
+    snapshot.sections[row].cards.front().target = targets[row];
+  ConversationView view;
+  view.resize(820, 420);
+  view.show();
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "exact structural row fixture reconciles");
+  settle();
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum() / 2);
+  settle();
+
+  const auto anchorBeforeInsert = firstVisible(view);
+  VisibleCardData inserted = message(1000, "Inserted in the middle");
+  inserted.target = insertedTarget;
+  ConversationRowChange insertion;
+  insertion.placement =
+      {inserted, "section-inserted", false, false, false, true};
+  insertion.previousCardKey = message(7).key;
+  insertion.nextCardKey = message(8).key;
+  const qulonglong resetsBefore =
+      view.conversationModel()->property("modelResetCount").toULongLong();
+  result &= expect(view.applyRowChange(std::move(insertion)) &&
+                       view.conversationModel()
+                               ->indexForTarget(insertedTarget)
+                               .row() == 8 &&
+                       firstVisible(view) == anchorBeforeInsert,
+                   "a middle insertion preserves the exact pixel anchor");
+
+  ConversationRowChange movement;
+  movement.placement =
+      {message(2), "section-2", false, false, false, true};
+  movement.placement.card.target = targets[2];
+  movement.previousCardKey =
+      view.conversationModel()
+          ->row(view.conversationModel()->rowCount() - 1)
+          ->card.key;
+  const auto anchorBeforeMove = firstVisible(view);
+  const bool moved = view.applyRowChange(std::move(movement));
+  const auto anchorAfterMove = firstVisible(view);
+  result &= expect(moved &&
+                       view.conversationModel()->indexForTarget(targets[2])
+                               .row() ==
+                           view.conversationModel()->rowCount() - 1 &&
+                       anchorAfterMove == anchorBeforeMove,
+                   "an exact row move preserves the viewport anchor");
+
+  const auto anchorBeforeRemoval = firstVisible(view);
+  result &= expect(
+      view.removeCardTarget(targets.front()) &&
+          !view.conversationModel()->indexForTarget(targets.front()).isValid() &&
+          firstVisible(view) == anchorBeforeRemoval &&
+          view.conversationModel()->property("modelResetCount").toULongLong() ==
+              resetsBefore &&
+          view.conversationModel()
+                  ->property("modelExactInsertCount")
+                  .toULongLong() == 1 &&
+          view.conversationModel()
+                  ->property("modelExactMoveCount")
+                  .toULongLong() == 1 &&
+          view.conversationModel()
+                  ->property("modelExactRemoveCount")
+                  .toULongLong() == 1 &&
+          view.materializedCardCount() <= 48,
+      "exact structural operations use narrow model signals and bounded "
+      "widgets without a model reset");
+  return result;
+}
+
 bool boundedTailAppendIsViewportProportional() {
   ConversationView view;
   view.resize(820, 600);
@@ -907,6 +991,7 @@ int main(int argc, char **argv) {
   QApplication application(argc, argv);
   using namespace codexui::codex::middle;
   const bool result = viewportProportionalFoundation() &&
+                      exactStructuralRowsPreserveTheViewport() &&
                       boundedTailAppendIsViewportProportional() &&
                       targetedVisibilityChangeIsLocal() &&
                       atomicPagingAndFollowingArrival() &&

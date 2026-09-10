@@ -224,14 +224,70 @@ bool projectsExactPromptMaterialization() {
   const auto result = adapter.promptMaterialization(thread, authoritative);
   return require(result.has_value(),
                  "exact prompt materialization was not projected") &&
-         require(result->key == middle::CardKey{middle::LocalPromptKey{91}},
+         require(result->card.key ==
+                     middle::CardKey{middle::LocalPromptKey{91}},
                  "prompt materialization changed the stable local key") &&
-         require(result->kind == middle::CardKind::UserMessage &&
-                     result->target == prompt,
-                 "prompt materialization lost its authoritative presentation "
-                 "or exact acknowledgement target") &&
+         require(result->card.kind == middle::CardKind::UserMessage &&
+                     result->card.target == authoritative &&
+                     result->prompt == prompt,
+                 "prompt materialization conflated authoritative row and "
+                 "exact acknowledgement identities") &&
          require(!adapter.promptMaterialization(thread, prompt),
                  "a local prompt was accepted as its own materialization");
+}
+
+bool projectsExactRowPlacementAndNeighbors() {
+  nodegraph::NodeGraph graph;
+  NodeRef thread;
+  NodeRef turn;
+  NodeRef first;
+  NodeRef moved;
+  NodeRef last;
+  {
+    auto write = graph.write();
+    thread = write.upsert({NodeKind::Thread, "row-thread"});
+    turn = write.upsert({NodeKind::Turn, "row-turn"});
+    write.setField(turn, "id", "row-turn");
+    first = write.upsert({NodeKind::Item, "row-first"},
+                         itemState("first", "userMessage", "first"));
+    moved = write.upsert({NodeKind::Item, "row-moved"},
+                         itemState("moved", "agentMessage", "moved"));
+    last = write.upsert({NodeKind::Item, "row-last"},
+                        itemState("last", "agentMessage", "last"));
+    write.setParent(thread, turn);
+    write.setParent(turn, first);
+    write.setParent(turn, moved);
+    write.setParent(turn, last);
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, first);
+    static_cast<void>(write.finish());
+  }
+
+  NodeGraphUiAdapter adapter(graph);
+  auto placement = adapter.rowChange(thread, moved);
+  const middle::CardKey firstKey = middle::AuthoritativeItemKey{
+      "row-thread", "row-turn", "row-first"};
+  const middle::CardKey lastKey = middle::AuthoritativeItemKey{
+      "row-thread", "row-turn", "row-last"};
+  bool result =
+      require(placement && placement->placement.card.target == moved &&
+                  placement->placement.sectionKey ==
+                      "turn:10:row-thread8:row-turn" &&
+                  placement->placement.nested &&
+                  !placement->placement.turnRoot &&
+                  placement->previousCardKey == firstKey &&
+                  placement->nextCardKey == lastKey,
+              "one row projection lost its exact placement or neighbors");
+
+  {
+    auto write = graph.write();
+    write.replaceChildren(turn, std::array<NodeRef, 3>{first, last, moved});
+    static_cast<void>(write.finish());
+  }
+  placement = adapter.rowChange(thread, moved);
+  result &= require(placement && placement->previousCardKey == lastKey &&
+                        !placement->nextCardKey,
+                    "a canonical move did not update the exact row neighbors");
+  return result;
 }
 
 bool preservesReadinessActivityAndAuthoritativeBudgetSemantics() {
@@ -338,6 +394,7 @@ int main() {
       !limitsHistoryButPinsTheOwningPrompt() ||
       !projectsOnlyTheExactCanonicalTail() ||
       !projectsExactPromptMaterialization() ||
+      !projectsExactRowPlacementAndNeighbors() ||
       !preservesThreadRootsAndExactChildTargets() ||
       !preservesReadinessActivityAndAuthoritativeBudgetSemantics())
     return EXIT_FAILURE;

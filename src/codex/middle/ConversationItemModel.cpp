@@ -545,7 +545,8 @@ ConversationItemModel::moveTarget(const nodegraph::NodeRef &target,
   }
 
   const std::string oldSection = current.sectionKey;
-  if (sourceRow != destinationRow) {
+  const bool movedRows = sourceRow != destinationRow;
+  if (movedRows) {
     const int destinationChild =
         destinationRow > sourceRow ? destinationRow + 1 : destinationRow;
     beginMoveRows({}, sourceRow, sourceRow, {}, destinationChild);
@@ -572,7 +573,8 @@ ConversationItemModel::moveTarget(const nodegraph::NodeRef &target,
   if (rows_[static_cast<std::size_t>(destinationRow)].sectionKey != oldSection)
     refreshSectionStructure(
         rows_[static_cast<std::size_t>(destinationRow)].sectionKey);
-  incrementProperty("modelExactMoveCount");
+  incrementProperty(movedRows ? "modelExactMoveCount"
+                              : "modelExactPlacementUpdateCount");
   return StructuralChangeResult::Changed;
 }
 

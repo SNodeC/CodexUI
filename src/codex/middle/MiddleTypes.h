@@ -224,6 +224,23 @@ struct ConversationRowPlacement {
   bool historyActivity = true;
 };
 
+// One canonical row plus its immediate presented neighbors. The neighboring
+// keys are positioning facts only; NodeGraph remains the source of both the
+// row values and their order.
+struct ConversationRowChange {
+  ConversationRowPlacement placement;
+  std::optional<CardKey> previousCardKey;
+  std::optional<CardKey> nextCardKey;
+};
+
+// Prompt acknowledgement and authoritative row ownership are two different
+// identities during materialization. Keeping them explicit lets the Qt row
+// adopt the authoritative Item NodeRef before the local prompt is retired.
+struct PromptMaterialization {
+  VisibleCardData card;
+  nodegraph::NodeRef prompt;
+};
+
 // Bounded projection for the common canonical tail insertion, with the two
 // thread-history facts needed to update the retained window chrome.
 struct ConversationTailCard : ConversationRowPlacement {

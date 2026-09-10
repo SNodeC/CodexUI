@@ -226,14 +226,6 @@ ConversationRoute conversationRoute(const nodegraph::GraphChanged &change,
     return {true, true, {}};
   if (!selectedThread)
     return {};
-  // Removal intentionally erases ancestry and addressing fields before Qt is
-  // notified. Conservatively reconcile the selected conversation so no
-  // retired card reference can survive acknowledgement.
-  if (std::ranges::any_of(change.removed, [](const auto &node) {
-        return node && (node->id().kind == nodegraph::NodeKind::Turn ||
-                        node->id().kind == nodegraph::NodeKind::Item);
-      }))
-    return {true, true, {}};
   constexpr std::size_t MaximumFilteredNodes = 64;
   if (change.affected.size() + change.removed.size() > MaximumFilteredNodes)
     return {true, true, {}};
@@ -244,6 +236,10 @@ ConversationRoute conversationRoute(const nodegraph::GraphChanged &change,
 
   const std::string &selectedId = selectedThread->id().canonical;
   ConversationRoute route;
+  const auto addItem = [&](const nodegraph::NodeRef &item) {
+    if (item && std::ranges::find(route.items, item) == route.items.end())
+      route.items.push_back(item);
+  };
   const auto routeNode = [&](const nodegraph::NodeRef &node) {
     if (!node)
       return;
@@ -294,17 +290,30 @@ ConversationRoute conversationRoute(const nodegraph::GraphChanged &change,
           }
         }
       }
-      if (!belongs)
+      if (!belongs) {
+        if (node->id().kind == nodegraph::NodeKind::Item &&
+            read->structureChangedRevision(node) == change.revision) {
+          // A row moved out of the selected thread has already lost its old
+          // ancestry. The Qt model's exact NodeRef index determines whether
+          // there is a selected row to remove.
+          route.affected = true;
+          route.structural = true;
+          addItem(node);
+        }
         return;
+      }
       route.affected = true;
       if (node->id().kind == nodegraph::NodeKind::Turn) {
         route.structural = true;
+        const auto roots =
+            read->related(node, nodegraph::RelationKind::TurnRootItem);
+        if (!roots.empty())
+          addItem(roots.front());
         return;
       }
       if (read->structureChangedRevision(node) == change.revision)
         route.structural = true;
-      if (std::ranges::find(route.items, node) == route.items.end())
-        route.items.push_back(node);
+      addItem(node);
     } catch (const std::invalid_argument &) {
       // A queued NodeRef may have been retired by a later graph transaction.
       // Conservatively refresh rather than risk missing a selected update.
@@ -314,8 +323,22 @@ ConversationRoute conversationRoute(const nodegraph::GraphChanged &change,
 
   for (const nodegraph::NodeRef &node : change.affected)
     routeNode(node);
-  for (const nodegraph::NodeRef &node : change.removed)
-    routeNode(node);
+  for (const nodegraph::NodeRef &node : change.removed) {
+    if (!node)
+      continue;
+    if (node == selectedThread)
+      return {true, true, {}};
+    if (node->id().kind == nodegraph::NodeKind::Item) {
+      route.affected = true;
+      route.structural = true;
+      addItem(node);
+    } else if (node->id().kind == nodegraph::NodeKind::Turn) {
+      // Its descendants are separately affected or removed by NodeGraph.
+      // The exact Item identities below decide whether selected rows exist.
+      route.affected = true;
+      route.structural = true;
+    }
+  }
   return route;
 }
 
@@ -1732,7 +1755,7 @@ void ShellWidget::Impl::commitPendingPanes() {
   if (pendingConversation && !pendingConversationItems.empty() &&
       boundGraphThread &&
       !middleRegion->conversation().structuralStagingActive()) {
-    std::optional<middle::VisibleCardData> materialization;
+    std::optional<middle::PromptMaterialization> materialization;
     nodegraph::NodeRef authoritativeItem;
     bool ambiguous = false;
     for (const nodegraph::NodeRef &item : pendingConversationItems) {
@@ -1751,11 +1774,11 @@ void ShellWidget::Impl::commitPendingPanes() {
         std::ranges::all_of(pendingConversationItems,
                             [&](const nodegraph::NodeRef &item) {
                               return item == authoritativeItem ||
-                                     item == materialization->target;
+                                     item == materialization->prompt;
                             });
     if (exactMaterialization &&
         middleRegion->conversation()
-            .applyCardPresentation(std::move(*materialization))
+            .applyPromptMaterialization(std::move(*materialization))
             .has_value()) {
       pendingConversation = false;
       pendingConversationItems.clear();
@@ -1808,6 +1831,179 @@ void ShellWidget::Impl::commitPendingPanes() {
                     .toULongLong() +
                 1);
       }
+    }
+  }
+  if (pendingConversation && !pendingConversationItems.empty() &&
+      boundGraphThread &&
+      !middleRegion->conversation().structuralStagingActive()) {
+    bool exact = true;
+    bool touched = false;
+    std::vector<nodegraph::NodeRef> unresolved;
+    unresolved.reserve(pendingConversationItems.size());
+    std::vector<middle::ConversationRowChange> rowChanges;
+    rowChanges.reserve(pendingConversationItems.size());
+
+    // Live projections run first so prompt retirement can transfer the stable
+    // row to its authoritative NodeRef before the removed prompt is examined.
+    for (const nodegraph::NodeRef &item : pendingConversationItems) {
+      auto change = uiAdapter.rowChange(boundGraphThread, item);
+      if (!change) {
+        unresolved.push_back(item);
+        continue;
+      }
+      rowChanges.push_back(std::move(*change));
+    }
+
+    std::vector<nodegraph::NodeRef> postponedRemovals;
+    postponedRemovals.reserve(unresolved.size());
+    for (const nodegraph::NodeRef &item : unresolved) {
+      const QModelIndex index = middleRegion->conversation()
+                                    .conversationModel()
+                                    ->indexForTarget(item);
+      const middle::ConversationItemModel::Row *row =
+          middleRegion->conversation().conversationModel()->row(index.row());
+      if (!index.isValid() || !row)
+        continue;
+      const bool replacementPending =
+          std::ranges::any_of(rowChanges, [&](const auto &change) {
+            return middle::stableKey(change.placement.card.key) ==
+                       row->stableKey &&
+                   change.placement.card.target != item;
+          });
+      if (replacementPending) {
+        postponedRemovals.push_back(item);
+        continue;
+      }
+      if (!middleRegion->conversation().removeCardTarget(item)) {
+        exact = false;
+        break;
+      }
+      touched = true;
+    }
+
+    // replaceChildren can name every changed sibling in an implementation
+    // order that differs from the final provider order. Apply the small delta
+    // batch in the neighbor order supplied by NodeGraph so already-correct
+    // rows do not oscillate through redundant Qt moves.
+    std::unordered_map<std::string, std::size_t> changedRows;
+    changedRows.reserve(rowChanges.size());
+    for (std::size_t index = 0; index < rowChanges.size(); ++index)
+      changedRows.emplace(
+          middle::stableKey(rowChanges[index].placement.card.key), index);
+    std::vector<std::vector<std::size_t>> following(rowChanges.size());
+    std::vector<std::size_t> predecessors(rowChanges.size(), 0);
+    const auto relateOrder = [&](std::size_t before, std::size_t after) {
+      if (before == after ||
+          std::ranges::find(following[before], after) !=
+              following[before].end())
+        return;
+      following[before].push_back(after);
+      ++predecessors[after];
+    };
+    for (std::size_t index = 0; index < rowChanges.size(); ++index) {
+      if (rowChanges[index].previousCardKey) {
+        const auto previous = changedRows.find(
+            middle::stableKey(*rowChanges[index].previousCardKey));
+        if (previous != changedRows.end())
+          relateOrder(previous->second, index);
+      }
+      if (rowChanges[index].nextCardKey) {
+        const auto next = changedRows.find(
+            middle::stableKey(*rowChanges[index].nextCardKey));
+        if (next != changedRows.end())
+          relateOrder(index, next->second);
+      }
+    }
+    std::vector<std::size_t> orderedRows;
+    orderedRows.reserve(rowChanges.size());
+    std::vector<bool> emitted(rowChanges.size(), false);
+    while (exact && orderedRows.size() < rowChanges.size()) {
+      std::optional<std::size_t> ready;
+      for (std::size_t index = 0; index < rowChanges.size(); ++index) {
+        if (!emitted[index] && predecessors[index] == 0) {
+          ready = index;
+          break;
+        }
+      }
+      if (!ready) {
+        exact = false;
+        break;
+      }
+      const std::size_t index = *ready;
+      emitted[index] = true;
+      orderedRows.push_back(index);
+      for (const std::size_t next : following[index])
+        --predecessors[next];
+    }
+
+    for (const std::size_t rowIndex : orderedRows) {
+      if (!exact)
+        break;
+      middle::ConversationRowChange &change = rowChanges[rowIndex];
+      const std::string key = middle::stableKey(change.placement.card.key);
+      const bool represented =
+          middleRegion->conversation()
+              .conversationModel()
+              ->indexForTarget(change.placement.card.target)
+              .isValid() ||
+          middleRegion->conversation()
+              .conversationModel()
+              ->indexForStableKey(key)
+              .isValid();
+      const bool adjacent =
+          (change.previousCardKey &&
+           middleRegion->conversation()
+               .conversationModel()
+               ->indexForStableKey(middle::stableKey(*change.previousCardKey))
+               .isValid()) ||
+          (change.nextCardKey &&
+           middleRegion->conversation()
+               .conversationModel()
+               ->indexForStableKey(middle::stableKey(*change.nextCardKey))
+               .isValid()) ||
+          middleRegion->conversation().conversationModel()->rowCount() == 0;
+      if (!represented && !adjacent)
+        continue;
+      if (!middleRegion->conversation().applyRowChange(std::move(change))) {
+        exact = false;
+        break;
+      }
+      touched = true;
+    }
+    if (exact) {
+      for (const nodegraph::NodeRef &item : postponedRemovals) {
+        if (!middleRegion->conversation()
+                 .conversationModel()
+                 ->indexForTarget(item)
+                 .isValid())
+          continue;
+        if (!middleRegion->conversation().removeCardTarget(item)) {
+          exact = false;
+          break;
+        }
+        touched = true;
+      }
+    }
+    if (exact) {
+      pendingConversation = false;
+      pendingConversationItems.clear();
+      ++conversationRoutes;
+      owner->setProperty("conversationRoutes",
+                         static_cast<qulonglong>(conversationRoutes));
+      owner->setProperty(
+          "targetedConversationRoutes",
+          owner->property("targetedConversationRoutes").toULongLong() + 1);
+      owner->setProperty(
+          "targetedConversationStructuralDeltas",
+          owner->property("targetedConversationStructuralDeltas")
+                  .toULongLong() +
+              1);
+      if (!touched)
+        owner->setProperty(
+            "targetedConversationStructuralNoops",
+            owner->property("targetedConversationStructuralNoops")
+                    .toULongLong() +
+                1);
     }
   }
   if (pendingConversation) {

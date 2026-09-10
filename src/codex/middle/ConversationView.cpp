@@ -1011,6 +1011,178 @@ ConversationView::applyCardPresentation(VisibleCardData &&card) {
   return applyCardPresentationOwned(std::move(card));
 }
 
+std::optional<PresentationImpact> ConversationView::applyPromptMaterialization(
+    PromptMaterialization materialization) {
+  if (!materialization.prompt)
+    return std::nullopt;
+  return applyCardPresentationOwned(std::move(materialization.card),
+                                    std::move(materialization.prompt));
+}
+
+bool ConversationView::applyRowChange(ConversationRowChange change) {
+  if (pendingStructuralSnapshot_ ||
+      change.placement.card.threadId != threadId_)
+    return false;
+  const std::string key = stableKey(change.placement.card.key);
+  if (key.empty())
+    return false;
+
+  QModelIndex source =
+      model_->indexForTarget(change.placement.card.target);
+  const QModelIndex stableSource = model_->indexForStableKey(key);
+  if (!source.isValid() && stableSource.isValid()) {
+    const ConversationItemModel::Row *row = model_->row(stableSource.row());
+    if (!row)
+      return false;
+    const auto retargeted = model_->updateCard(change.placement.card);
+    if (retargeted == ConversationItemModel::CardUpdateResult::Missing ||
+        retargeted == ConversationItemModel::CardUpdateResult::Incompatible)
+      return false;
+    source = model_->indexForTarget(change.placement.card.target);
+  }
+
+  const int sourceRow = source.isValid() ? source.row() : -1;
+  int destinationRow = -1;
+  if (change.previousCardKey) {
+    const QModelIndex previous =
+        model_->indexForStableKey(stableKey(*change.previousCardKey));
+    if (previous.isValid() && previous.row() != sourceRow) {
+      destinationRow = previous.row() + 1;
+      if (sourceRow >= 0 && sourceRow < destinationRow)
+        --destinationRow;
+    }
+  } else {
+    // The adapter saw the canonical beginning, rather than merely failing to
+    // resolve a predecessor. Applying a coalesced reorder from front to back
+    // therefore leaves the already-correct prefix stable.
+    destinationRow = 0;
+  }
+  if (destinationRow < 0 && change.nextCardKey) {
+    const QModelIndex next =
+        model_->indexForStableKey(stableKey(*change.nextCardKey));
+    if (next.isValid() && next.row() != sourceRow) {
+      destinationRow = next.row();
+      if (sourceRow >= 0 && sourceRow < destinationRow)
+        --destinationRow;
+    }
+  }
+  if (destinationRow < 0) {
+    if (sourceRow >= 0)
+      destinationRow = sourceRow;
+    else if (model_->rowCount() == 0)
+      destinationRow = 0;
+    else
+      return false;
+  }
+
+  const Anchor anchor = captureAnchor();
+  const bool follow = mode_ == Mode::Following;
+  const QScopedValueRollback applying(applying_, true);
+  const QSignalBlocker scrollSignals(verticalScrollBar());
+  stopFollowingAnimation();
+
+  ConversationItemModel::StructuralChangeResult result;
+  if (sourceRow >= 0) {
+    nodegraph::NodeRef target = change.placement.card.target;
+    result = model_->moveTarget(target, destinationRow,
+                                std::move(change.placement));
+  } else {
+    result =
+        model_->insertCard(destinationRow, std::move(change.placement));
+  }
+  if (result == ConversationItemModel::StructuralChangeResult::Missing ||
+      result == ConversationItemModel::StructuralChangeResult::Invalid ||
+      result == ConversationItemModel::StructuralChangeResult::Duplicate)
+    return false;
+  if (result == ConversationItemModel::StructuralChangeResult::Unchanged)
+    return true;
+
+  finishExactStructureChange(anchor, follow);
+  incrementProperty(this, "targetedStructuralRowChanges");
+  return true;
+}
+
+bool ConversationView::removeCardTarget(const nodegraph::NodeRef &target) {
+  if (pendingStructuralSnapshot_)
+    return false;
+  const QModelIndex index = model_->indexForTarget(target);
+  const ConversationItemModel::Row *row = model_->row(index.row());
+  if (!index.isValid() || !row)
+    return false;
+  const std::string key = row->stableKey;
+  const Anchor anchor = captureAnchor();
+  const bool follow = mode_ == Mode::Following;
+  const QScopedValueRollback applying(applying_, true);
+  const QSignalBlocker scrollSignals(verticalScrollBar());
+  stopFollowingAnimation();
+
+  if (model_->removeTarget(target) !=
+      ConversationItemModel::StructuralChangeResult::Changed)
+    return false;
+  if (const auto found = materializedCards_.find(key);
+      found != materializedCards_.end()) {
+    ConversationCard *card = found->second;
+    materializedCards_.erase(found);
+    releaseCard(key, card);
+  }
+  heightCache_.erase(key);
+  cardCollapsedStates_.erase(key);
+  cardInteractionStates_.erase(key);
+  finishExactStructureChange(anchor, follow);
+  incrementProperty(this, "targetedStructuralRemovals");
+  return true;
+}
+
+void ConversationView::finishExactStructureChange(const Anchor &anchor,
+                                                  bool follow) {
+  rebuildSectionRanges();
+  std::vector<std::string> released;
+  for (auto &[key, card] : materializedCards_) {
+    const QModelIndex index = model_->indexForStableKey(key);
+    const ConversationItemModel::Row *row = model_->row(index.row());
+    if (!index.isValid() || !row || !rowPresented(index.row()) ||
+        !card->canApply(row->card)) {
+      released.push_back(key);
+      continue;
+    }
+    if (card->data() != row->card) {
+      captureCardInteractionState(key, card, false);
+      static_cast<void>(card->applyPresentation(row->card));
+      restoreCardInteractionState(key, card);
+    }
+    configureCardForRow(card, *row);
+    const int height = measureCard(card, rowWidth(*row));
+    heightCache_.insert_or_assign(
+        key, HeightRecord{rowWidth(*row), height});
+  }
+  for (const std::string &key : released) {
+    const auto found = materializedCards_.find(key);
+    if (found == materializedCards_.end())
+      continue;
+    ConversationCard *card = found->second;
+    materializedCards_.erase(found);
+    releaseCard(key, card);
+  }
+
+  empty_->setVisible(model_->rowCount() == 0);
+  rebuildHeightIndex();
+  updateScrollRange();
+  if (follow)
+    setScrollValue(verticalScrollBar()->maximum());
+  else
+    restoreAnchor(anchor);
+  updateMaterialization(false);
+  if (follow)
+    setScrollValue(verticalScrollBar()->maximum());
+  else
+    restoreAnchor(anchor);
+  layoutMaterializedCards();
+  viewport()->update();
+  incrementProperty(this, "graphRefreshPasses");
+  updateMaterializationProperties();
+  storeCurrentThreadState();
+}
+
 bool ConversationView::appendTailCard(ConversationTailCard tail,
                                       std::size_t historyActivityLimit) {
   if (pendingStructuralSnapshot_ || tail.card.threadId != threadId_ ||
@@ -1231,7 +1403,8 @@ bool ConversationView::appendTailCard(ConversationTailCard tail,
 }
 
 std::optional<PresentationImpact>
-ConversationView::applyCardPresentationOwned(VisibleCardData card) {
+ConversationView::applyCardPresentationOwned(
+    VisibleCardData card, nodegraph::NodeRef materializedPrompt) {
   const std::string key = stableKey(card.key);
   if (VisibleCardData *pending = pendingCard(key);
       pending && pendingStructuralSnapshot_ &&
@@ -1287,11 +1460,12 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
   }
   const bool becomingAuthoritative =
       before->card.kind == CardKind::LocalPrompt &&
-      card.kind == CardKind::UserMessage && card.target;
+      card.kind == CardKind::UserMessage && materializedPrompt;
   const bool paintedInViewport =
       wasPresented && rowRect(index.row()).intersects(viewport()->rect());
-  nodegraph::NodeRef authoritativeTarget =
-      becomingAuthoritative ? card.target : nodegraph::NodeRef{};
+  nodegraph::NodeRef acknowledgementTarget =
+      becomingAuthoritative ? std::move(materializedPrompt)
+                            : nodegraph::NodeRef{};
   ConversationCard *visibleCard = cardForStableKey(key);
   PresentationImpact impact = PresentationImpact::None;
   if (visibleCard) {
@@ -1441,7 +1615,7 @@ ConversationView::applyCardPresentationOwned(VisibleCardData card) {
   storeCurrentThreadState();
   if (becomingAuthoritative && promptMaterializedAction_)
     static_cast<void>(
-        promptMaterializedAction_(std::move(authoritativeTarget)));
+        promptMaterializedAction_(std::move(acknowledgementTarget)));
   return impact;
 }
 

@@ -40,10 +40,18 @@ public:
 
   // Projects an authoritative user item only when it exactly materializes a
   // still-current local prompt. The returned card retains the LocalPromptKey
-  // and prompt NodeRef so Qt can morph and acknowledge that one stable row.
-  [[nodiscard]] std::optional<middle::VisibleCardData>
+  // and authoritative Item identity; the separate prompt identity is used
+  // only to acknowledge that one stable row transition.
+  [[nodiscard]] std::optional<middle::PromptMaterialization>
   promptMaterialization(const nodegraph::NodeRef &thread,
                         const nodegraph::NodeRef &item) const;
+
+  // Projects one live Item together with its immediate canonical row
+  // neighbors. This is the bounded structural adapter for non-tail insertion
+  // and actual movement; it never returns a complete conversation snapshot.
+  [[nodiscard]] std::optional<middle::ConversationRowChange>
+  rowChange(const nodegraph::NodeRef &thread,
+            const nodegraph::NodeRef &item) const;
 
   // Projects only a canonical last item of the selected thread. It is the
   // bounded structural fast path for ordinary append; any non-tail or prompt

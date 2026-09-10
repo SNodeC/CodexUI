@@ -119,8 +119,13 @@ always means “no coherent value was available now”, never “render empty”
   payload fields. A stale/detached item returns `nullopt`.
 - `promptMaterialization(thread, item)` accepts only an authoritative user item
   related to one current local prompt in `awaitingMaterialization`. It returns
-  the authoritative presentation under that prompt's `LocalPromptKey` and
-  exact prompt `NodeRef`, allowing one row-local morph and acknowledgement.
+  the authoritative presentation under that prompt's `LocalPromptKey`, the
+  authoritative Item `NodeRef` for row ownership, and the separate exact
+  prompt `NodeRef` for acknowledgement.
+- `rowChange(thread, item)` projects one live selected-thread Item, its exact
+  section/root/nesting facts, and the immediate canonical card keys on either
+  side. It is the non-snapshot input for an exact middle insertion or move;
+  it retains no ordering state after the read guard is released.
 - `tailCard(thread, item)` additionally requires that the exact item
   be the last child of the last canonical Turn and that it not participate in
   prompt-materialization aliasing. It returns one `ConversationTailCard` with
@@ -137,6 +142,7 @@ always means “no coherent value was available now”, never “render empty”
 | `conversation` | `thread`, positive effective `itemLimit`; returns optional complete snapshot | Pre: the caller has observed `conversationInfo.readyForDisplay`; this primitive projects the graph's current content and does not itself infer temporal hydration completeness. Limit is clamped to at least one. Success preserves canonical order and root ownership. Invalid target/contention returns `nullopt`. |
 | `card` | exact `thread` and `item`; returns optional card DTO | Success requires the item still be a child of a Turn owned by the exact thread. It never searches by payload IDs. |
 | `promptMaterialization` | exact `thread` and authoritative `item`; returns optional card DTO | Success requires one live related local prompt owned by the thread with a valid submission ID and awaiting-materialization state. No relation inference or payload-ID search is permitted. |
+| `rowChange` | exact `thread` and live `item`; returns optional row-change DTO | Success requires current Turn ownership by the exact thread. Immediate neighbor keys reflect canonical graph order with a materializing local prompt suppressed behind its authoritative row. |
 | `tailCard` | exact `thread` and `item`; returns optional tail DTO | Success requires the exact canonical last item of the exact canonical last Turn, usable loaded-count state, and no prompt alias. The DTO is non-authoritative and owns only values needed for one Qt append. |
 
 ### `middle::ThreadPane`
@@ -301,6 +307,14 @@ released, and QWidget work never occurs while a graph or channel lock is held.
   facts without constructing, laying out, or painting a QWidget. A visible
   passive row invalidates only its row rectangle; a visible rich row applies
   only to that editor and propagates only its genuine height delta.
+- `applyPromptMaterialization(value)` morphs one local-keyed row, transfers its
+  model ownership to the authoritative Item `NodeRef`, and then acknowledges
+  the separate prompt `NodeRef`. Prompt retirement cannot remove the row.
+- `applyRowChange(value)` resolves the projected neighbor keys against the
+  current bounded model and emits only the required insert, move, or structural
+  row update. Coalesced sibling changes are applied in canonical neighbor order.
+- `removeCardTarget(ref)` removes only the row currently indexed by that exact
+  Item `NodeRef`; unrelated and already-transferred prompt removals are no-ops.
 - `appendTailCard(tail, historyActivityLimit)` is the ordinary structural fast
   path after `NodeGraphUiAdapter::tailCard` validates canonical placement. It
   emits one insert, performs an optional bounded prefix trim, preserves the

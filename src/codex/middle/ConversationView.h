@@ -75,6 +75,14 @@ public:
   applyCardPresentation(const VisibleCardData &card);
   [[nodiscard]] std::optional<PresentationImpact>
   applyCardPresentation(VisibleCardData &&card);
+  [[nodiscard]] std::optional<PresentationImpact>
+  applyPromptMaterialization(PromptMaterialization materialization);
+  // Applies one exact non-tail row insertion or movement. Canonical neighbor
+  // keys determine the final model row; no complete snapshot is consulted.
+  [[nodiscard]] bool applyRowChange(ConversationRowChange change);
+  // Removes only the row whose current identity is the exact target NodeRef.
+  // A missing target is not treated as a structural authority replacement.
+  [[nodiscard]] bool removeCardTarget(const nodegraph::NodeRef &target);
   // Applies one canonical tail insertion without traversing retained model
   // rows. Returns false when the delta is not the exact append shape, so the
   // caller can use complete structural reconciliation.
@@ -182,7 +190,9 @@ private:
 
   [[nodiscard]] bool reconcileOwned(ConversationSnapshot snapshot);
   [[nodiscard]] std::optional<PresentationImpact>
-  applyCardPresentationOwned(VisibleCardData card);
+  applyCardPresentationOwned(VisibleCardData card,
+                             nodegraph::NodeRef materializedPrompt = {});
+  void finishExactStructureChange(const Anchor &anchor, bool follow);
   [[nodiscard]] bool cardVisible(const VisibleCardData &card) const noexcept;
   void setThread(const std::string &threadId);
   void storeCurrentThreadState();

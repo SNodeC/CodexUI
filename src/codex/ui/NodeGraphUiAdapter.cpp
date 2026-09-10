@@ -1567,7 +1567,7 @@ NodeGraphUiAdapter::card(const nodegraph::NodeRef &thread,
                        graphString(graphField(*threadState, "cwd")));
 }
 
-std::optional<VisibleCardData> NodeGraphUiAdapter::promptMaterialization(
+std::optional<PromptMaterialization> NodeGraphUiAdapter::promptMaterialization(
     const nodegraph::NodeRef &thread, const nodegraph::NodeRef &item) const {
   if (!graph_ || !thread || !item)
     return std::nullopt;
@@ -1606,15 +1606,178 @@ std::optional<VisibleCardData> NodeGraphUiAdapter::promptMaterialization(
     if (!submissionId || *submissionId < 0)
       continue;
 
-    VisibleCardData result = graphCardData(
+    VisibleCardData card = graphCardData(
         item, thread->id().canonical,
         nodegraph::protocolCanonicalId(*turnState, turn), *state,
         graphString(graphField(*threadState, "cwd")));
-    result.key = LocalPromptKey{static_cast<std::uint64_t>(*submissionId)};
-    result.target = prompt;
-    return result;
+    card.key = LocalPromptKey{static_cast<std::uint64_t>(*submissionId)};
+    return PromptMaterialization{std::move(card), prompt};
   }
   return std::nullopt;
+}
+
+std::optional<ConversationRowChange>
+NodeGraphUiAdapter::rowChange(const nodegraph::NodeRef &thread,
+                              const nodegraph::NodeRef &item) const {
+  if (!graph_ || !thread || !item)
+    return std::nullopt;
+  auto read = graph_->tryRead();
+  if (!read || !read->contains(thread) || !read->contains(item) ||
+      read->removed(thread) || read->removed(item) ||
+      thread->id().kind != nodegraph::NodeKind::Thread ||
+      item->id().kind != nodegraph::NodeKind::Item)
+    return std::nullopt;
+
+  const nodegraph::NodeRef turn = read->parent(item);
+  if (!turn || turn->id().kind != nodegraph::NodeKind::Turn ||
+      read->parent(turn) != thread)
+    return std::nullopt;
+  const auto itemState = read->state(item);
+  const auto turnState = read->state(turn);
+  const auto threadState = read->state(thread);
+  if (!itemState || !turnState || !threadState)
+    return std::nullopt;
+
+  const std::string threadId = thread->id().canonical;
+  const auto turnId = [&](const nodegraph::NodeRef &owner) {
+    const auto state = owner ? read->state(owner) : nullptr;
+    return state ? nodegraph::protocolCanonicalId(*state, owner)
+                 : std::string{};
+  };
+  const auto readyPrompts = [&](const nodegraph::NodeRef &owner) {
+    std::unordered_set<const nodegraph::Node *> result;
+    const std::size_t count = read->childCount(owner);
+    for (std::size_t index = 0; index < count; ++index) {
+      const nodegraph::NodeRef candidate = read->childAt(owner, index);
+      if (!candidate || !read->contains(candidate) || read->removed(candidate))
+        continue;
+      for (const nodegraph::NodeRef &prompt : read->related(
+               candidate, nodegraph::RelationKind::PromptMaterialization)) {
+        if (!prompt || !read->contains(prompt) || read->removed(prompt))
+          continue;
+        const auto state = read->state(prompt);
+        if (state && graphString(graphField(*state, "type")) == "localPrompt" &&
+            graphString(graphField(*state, "dispatchState")) ==
+                "awaitingMaterialization")
+          result.insert(prompt.get());
+      }
+    }
+    return result;
+  };
+  const auto projectedKey =
+      [&](const nodegraph::NodeRef &candidate,
+          const nodegraph::NodeRef &owner,
+          const std::unordered_set<const nodegraph::Node *> &hiddenPrompts)
+      -> std::optional<CardKey> {
+    if (!candidate || !read->contains(candidate) || read->removed(candidate) ||
+        candidate->id().kind != nodegraph::NodeKind::Item)
+      return std::nullopt;
+    const auto state = read->state(candidate);
+    if (!state)
+      return std::nullopt;
+    const std::string type = graphString(graphField(*state, "type"));
+    if (type == "localPrompt") {
+      if (hiddenPrompts.contains(candidate.get()))
+        return std::nullopt;
+      const std::int64_t rawId =
+          graphInteger(graphField(*state, "submissionId")).value_or(0);
+      return LocalPromptKey{rawId < 0 ? 0
+                                     : static_cast<std::uint64_t>(rawId)};
+    }
+    if (graphCardKind(*state) == CardKind::UserMessage) {
+      const auto submission =
+          graphInteger(graphField(*state, "localSubmissionId"));
+      if (submission && *submission >= 0)
+        return LocalPromptKey{static_cast<std::uint64_t>(*submission)};
+    }
+    return AuthoritativeItemKey{
+        threadId, turnId(owner),
+        nodegraph::protocolCanonicalId(*state, candidate)};
+  };
+
+  const auto hiddenInTurn = readyPrompts(turn);
+  const std::optional<CardKey> itemKey =
+      projectedKey(item, turn, hiddenInTurn);
+  if (!itemKey)
+    return std::nullopt;
+
+  std::optional<CardKey> previous;
+  std::optional<CardKey> next;
+  const std::size_t itemCount = read->childCount(turn);
+  std::size_t itemIndex = itemCount;
+  for (std::size_t index = 0; index < itemCount; ++index) {
+    if (read->childAt(turn, index) == item) {
+      itemIndex = index;
+      break;
+    }
+  }
+  if (itemIndex == itemCount)
+    return std::nullopt;
+  for (std::size_t offset = itemIndex; offset > 0 && !previous; --offset)
+    previous = projectedKey(read->childAt(turn, offset - 1), turn,
+                            hiddenInTurn);
+  for (std::size_t index = itemIndex + 1; index < itemCount && !next; ++index)
+    next = projectedKey(read->childAt(turn, index), turn, hiddenInTurn);
+
+  const std::size_t turnCount = read->childCount(thread);
+  std::size_t turnIndex = turnCount;
+  for (std::size_t index = 0; index < turnCount; ++index) {
+    if (read->childAt(thread, index) == turn) {
+      turnIndex = index;
+      break;
+    }
+  }
+  if (turnIndex == turnCount)
+    return std::nullopt;
+  for (std::size_t offset = turnIndex; offset > 0 && !previous; --offset) {
+    const nodegraph::NodeRef owner = read->childAt(thread, offset - 1);
+    if (!owner || owner->id().kind != nodegraph::NodeKind::Turn)
+      continue;
+    const auto hidden = readyPrompts(owner);
+    for (std::size_t child = read->childCount(owner);
+         child > 0 && !previous; --child)
+      previous =
+          projectedKey(read->childAt(owner, child - 1), owner, hidden);
+  }
+  for (std::size_t ownerIndex = turnIndex + 1;
+       ownerIndex < turnCount && !next; ++ownerIndex) {
+    const nodegraph::NodeRef owner = read->childAt(thread, ownerIndex);
+    if (!owner || owner->id().kind != nodegraph::NodeKind::Turn)
+      continue;
+    const auto hidden = readyPrompts(owner);
+    for (std::size_t child = 0;
+         child < read->childCount(owner) && !next; ++child)
+      next = projectedKey(read->childAt(owner, child), owner, hidden);
+  }
+
+  const auto roots =
+      read->related(turn, nodegraph::RelationKind::TurnRootItem);
+  const nodegraph::NodeRef root =
+      !roots.empty() && roots.front() && read->contains(roots.front()) &&
+              !read->removed(roots.front())
+          ? roots.front()
+          : nodegraph::NodeRef{};
+  bool activeTurn = graphTurnIsActive(*turnState);
+  if (!activeTurn) {
+    const auto active =
+        read->related(thread, nodegraph::RelationKind::ActiveTurn);
+    activeTurn = std::ranges::find(active, turn) != active.end();
+  }
+
+  ConversationRowChange result;
+  result.placement.card = graphCardData(
+      item, threadId, turnId(turn), *itemState,
+      graphString(graphField(*threadState, "cwd")));
+  result.placement.sectionKey =
+      sectionComponent("turn:", threadId, turnId(turn));
+  result.placement.turnRoot = root == item;
+  result.placement.nested = root && root != item;
+  result.placement.activeTurn = activeTurn;
+  result.placement.historyActivity =
+      graphString(graphField(*itemState, "type")) != "localPrompt";
+  result.previousCardKey = std::move(previous);
+  result.nextCardKey = std::move(next);
+  return result;
 }
 
 std::optional<ConversationTailCard>

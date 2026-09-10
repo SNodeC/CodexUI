@@ -235,7 +235,7 @@ bool promptMorphPreservesExactTargetAndWidget() {
   const auto materialized =
       adapter.promptMaterialization(thread, authoritative);
   if (!materialized ||
-      !view.applyCardPresentation(*materialized).has_value())
+      !view.applyPromptMaterialization(*materialized).has_value())
     return false;
   QApplication::processEvents();
   const auto after = view.findChildren<middle::ConversationCard *>();
@@ -246,8 +246,11 @@ bool promptMorphPreservesExactTargetAndWidget() {
       !require(acknowledged == prompt,
                "prompt morph discarded its exact NodeRef target"))
     return false;
+  if (!require(after.front()->data().target == authoritative,
+               "prompt morph did not adopt its authoritative NodeRef"))
+    return false;
 
-  static_cast<void>(view.applyCardPresentation(*materialized));
+  static_cast<void>(view.applyPromptMaterialization(*materialized));
   if (!require(acknowledgements == 1,
                "unchanged prompt projection acknowledged twice"))
     return false;
@@ -386,7 +389,7 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
       adapter.promptMaterialization(thread, authoritative);
   if (!materialized)
     return false;
-  static_cast<void>(view.applyCardPresentation(*materialized));
+  static_cast<void>(view.applyPromptMaterialization(*materialized));
   QApplication::processEvents();
   const int promotedTop = stable->mapTo(view.viewport(), QPoint{}).y();
   if (!require(stable->data().kind == middle::CardKind::UserMessage &&
