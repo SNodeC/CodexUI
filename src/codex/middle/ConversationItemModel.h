@@ -43,6 +43,14 @@ public:
     Changed,
   };
 
+  enum class StructuralChangeResult {
+    Missing,
+    Invalid,
+    Duplicate,
+    Unchanged,
+    Changed,
+  };
+
   struct Visibility {
     bool showReasoning = true;
     bool showCodexUpdates = true;
@@ -85,10 +93,24 @@ public:
   [[nodiscard]] Qt::ItemFlags flags(const QModelIndex &index) const override;
   [[nodiscard]] QHash<int, QByteArray> roleNames() const override;
 
-  // A different thread is one complete authority replacement and therefore a
-  // model reset. Same-thread order is reconciled with exact row operations.
+  // Complete replacement is explicit and is reserved for a different thread
+  // or a genuine full rescan where no narrower operation is correct.
+  [[nodiscard]] bool replaceConversation(ConversationSnapshot snapshot);
+  // A history page is a same-thread superset that retains every existing row
+  // in order. It inserts only the missing ranges and updates changed row facts.
+  [[nodiscard]] bool prependHistoryPage(ConversationSnapshot snapshot);
+  // Compatibility reconciliation remains while integration routes are moved
+  // to the explicit operations below.
   [[nodiscard]] bool reconcile(ConversationSnapshot snapshot);
   [[nodiscard]] CardUpdateResult updateCard(VisibleCardData card);
+  [[nodiscard]] StructuralChangeResult
+  insertCard(int row, ConversationRowPlacement placement);
+  [[nodiscard]] StructuralChangeResult
+  removeTarget(const nodegraph::NodeRef &target);
+  // destinationRow is the row's final logical position after the move.
+  [[nodiscard]] StructuralChangeResult
+  moveTarget(const nodegraph::NodeRef &target, int destinationRow,
+             ConversationRowPlacement placement);
   [[nodiscard]] bool appendTail(ConversationTailCard tail);
   [[nodiscard]] HistoryTrim trimHistoryTo(std::size_t activityLimit);
   [[nodiscard]] bool setActiveTurn(int row, bool active);
@@ -111,6 +133,11 @@ public:
 
 private:
   [[nodiscard]] std::vector<Row> flatten(ConversationSnapshot &&snapshot) const;
+  [[nodiscard]] bool rowsAreUnique(const std::vector<Row> &rows) const;
+  [[nodiscard]] Row rowFromPlacement(ConversationRowPlacement placement) const;
+  [[nodiscard]] bool sectionPlacementIsValid(int row,
+                                             const Row &candidate) const;
+  void refreshSectionStructure(const std::string &sectionKey);
   [[nodiscard]] bool isPresented(const VisibleCardData &card) const noexcept;
   void rebuildIndexes();
   void incrementProperty(const char *name);

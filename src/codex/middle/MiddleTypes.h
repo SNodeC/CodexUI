@@ -212,16 +212,21 @@ struct TurnSection {
   bool operator==(const TurnSection &) const = default;
 };
 
-// Bounded projection for the common canonical tail insertion. It carries no
-// authority: the NodeRef target and all values are read from NodeGraph under
-// one short lock, then consumed by Qt after the lock has been released.
-struct ConversationTailCard {
+// Exact placement facts for one conversation row. They carry no authority:
+// the NodeRef target and all values are read from NodeGraph under one short
+// lock, then consumed by Qt after the lock has been released.
+struct ConversationRowPlacement {
   VisibleCardData card;
   std::string sectionKey;
   bool turnRoot = false;
   bool nested = false;
   bool activeTurn = false;
   bool historyActivity = true;
+};
+
+// Bounded projection for the common canonical tail insertion, with the two
+// thread-history facts needed to update the retained window chrome.
+struct ConversationTailCard : ConversationRowPlacement {
   std::size_t authoritativeItemCount = 0;
   bool providerHasMore = false;
 };

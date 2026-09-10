@@ -102,6 +102,16 @@ ConversationSnapshot snapshot(std::vector<VisibleCardData> cards,
   return result;
 }
 
+ConversationRowPlacement placement(VisibleCardData value,
+                                   bool turnRoot = false) {
+  ConversationRowPlacement result;
+  result.card = std::move(value);
+  result.sectionKey = "section";
+  result.turnRoot = turnRoot;
+  result.nested = !turnRoot;
+  return result;
+}
+
 bool testStableIdentityAndExactSignals() {
   nodegraph::NodeGraph graph;
   nodegraph::NodeRef first;
@@ -117,10 +127,10 @@ bool testStableIdentityAndExactSignals() {
 
   ConversationItemModel model;
   SignalLog log(model);
-  bool result = require(
-      model.reconcile(snapshot({card("same-wire-id-a", first, "one"),
-                                card("same-wire-id-b", second, "two")})),
-      "initial authority was not accepted");
+  bool result = require(model.replaceConversation(
+                            snapshot({card("same-wire-id-a", first, "one"),
+                                      card("same-wire-id-b", second, "two")})),
+                        "initial authority was not accepted");
   result &=
       require(log.resets == 1 && log.inserted.empty() && model.rowCount() == 2,
               "initial thread did not use one model reset");
@@ -164,30 +174,29 @@ bool testStableIdentityAndExactSignals() {
 
   log.clear();
   result &= require(
-      model.reconcile(snapshot({card("same-wire-id-a", first, "one"),
-                                card("inserted", third, "three"),
-                                card("same-wire-id-b", second, "streamed")})) &&
+      model.insertCard(1, placement(card("inserted", third, "three"))) ==
+              ConversationItemModel::StructuralChangeResult::Changed &&
           log.inserted.size() == 1 && log.inserted.front().first == 1 &&
           log.inserted.front().last == 1 && log.resets == 0,
       "middle insertion did not use beginInsertRows/endInsertRows");
 
   log.clear();
   result &= require(
-      model.reconcile(snapshot({card("inserted", third, "three"),
-                                card("same-wire-id-a", first, "one"),
-                                card("same-wire-id-b", second, "streamed")})) &&
-          log.moved.size() == 1 && log.moved.front().first == 1 &&
-          log.moved.front().last == 1 && log.moved.front().destination == 0 &&
+      model.moveTarget(second, 1,
+                       placement(card("same-wire-id-b", second, "streamed"))) ==
+              ConversationItemModel::StructuralChangeResult::Changed &&
+          log.moved.size() == 1 && log.moved.front().first == 2 &&
+          log.moved.front().last == 2 && log.moved.front().destination == 1 &&
           log.resets == 0,
       "actual reordering did not use beginMoveRows/endMoveRows");
 
   log.clear();
-  result &= require(
-      model.reconcile(snapshot({card("inserted", third, "three"),
-                                card("same-wire-id-b", second, "streamed")})) &&
-          log.removed.size() == 1 && log.removed.front().first == 1 &&
-          log.removed.front().last == 1 && log.resets == 0,
-      "removal did not use beginRemoveRows/endRemoveRows");
+  result &=
+      require(model.removeTarget(third) ==
+                      ConversationItemModel::StructuralChangeResult::Changed &&
+                  log.removed.size() == 1 && log.removed.front().first == 2 &&
+                  log.removed.front().last == 2 && log.resets == 0,
+              "removal did not use beginRemoveRows/endRemoveRows");
   result &= require(
       model.indexForTarget(second).row() == 1 &&
           model.indexForStableKey("item:6:thread4:turn14:same-wire-id-b")
@@ -195,9 +204,57 @@ bool testStableIdentityAndExactSignals() {
       "stable and exact target indexes were not rebuilt");
 
   log.clear();
-  result &= require(model.reconcile(snapshot({}, "replacement")) &&
+  result &= require(model.replaceConversation(snapshot({}, "replacement")) &&
                         log.resets == 1 && model.rowCount() == 0,
                     "genuine thread replacement did not use a model reset");
+  return result;
+}
+
+bool testHistoryPageInsertsOnlyMissingRanges() {
+  nodegraph::NodeGraph graph;
+  nodegraph::NodeRef root;
+  nodegraph::NodeRef middle;
+  nodegraph::NodeRef tail;
+  {
+    auto write = graph.write();
+    root = write.upsert({nodegraph::NodeKind::Item, "page/root"});
+    middle = write.upsert({nodegraph::NodeKind::Item, "page/middle"});
+    tail = write.upsert({nodegraph::NodeKind::Item, "page/tail"});
+    static_cast<void>(write.finish());
+  }
+
+  ConversationSnapshot initial =
+      snapshot({card("root", root, "root"), card("tail", tail, "tail")});
+  initial.hiddenAuthoritativeItemCount = 1;
+  initial.hasMore = true;
+  initial.sections.front().rootPinned = true;
+  ConversationItemModel model;
+  bool result = require(model.replaceConversation(std::move(initial)),
+                        "history page fixture was not accepted");
+  SignalLog log(model);
+
+  ConversationSnapshot expanded =
+      snapshot({card("root", root, "root"), card("middle", middle, "middle"),
+                card("tail", tail, "tail")});
+  result &= require(
+      model.prependHistoryPage(std::move(expanded)) && log.resets == 0 &&
+          log.inserted.size() == 1 && log.inserted.front().first == 1 &&
+          log.inserted.front().last == 1 && model.rowCount() == 3 &&
+          model.indexForTarget(root).row() == 0 &&
+          model.indexForTarget(middle).row() == 1 &&
+          model.indexForTarget(tail).row() == 2,
+      "history expansion did not insert only the missing range after its "
+      "pinned root");
+
+  log.clear();
+  ConversationSnapshot reordered =
+      snapshot({card("root", root, "root"), card("tail", tail, "tail"),
+                card("middle", middle, "middle")});
+  result &= require(!model.prependHistoryPage(std::move(reordered)) &&
+                        log.inserted.empty() && log.moved.empty() &&
+                        log.removed.empty() && log.changed.empty(),
+                    "a reordered target was incorrectly accepted as a "
+                    "history-page insertion");
   return result;
 }
 
@@ -403,6 +460,7 @@ int main(int argc, char **argv) {
   QCoreApplication application(argc, argv);
   using namespace codexui::codex::middle;
   bool result = testStableIdentityAndExactSignals();
+  result &= testHistoryPageInsertsOnlyMissingRanges();
   result &= testVisibilityAndLargeModelRemainDataOnly();
   result &= testBoundedTailAppendKeepsAbsoluteIdentityIndexes();
   result &= testHeightIndexIsBoundedAndExact();

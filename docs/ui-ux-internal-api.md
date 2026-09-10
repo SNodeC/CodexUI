@@ -201,10 +201,17 @@ available to the view/delegate through the typed `card(row)` accessor rather
 than copied through `QVariant`; standard roles expose only small identity,
 structure, visibility, and accessibility values.
 
-- `reconcile(snapshot)` flattens one complete toolkit-neutral snapshot into
-  canonical order. A different thread is the only normal complete authority
-  replacement and emits `modelReset`. Same-thread differences emit contiguous
-  insert/remove operations, actual row moves, and row-local `dataChanged`.
+- `replaceConversation(snapshot)` is the explicit complete-authority operation
+  for a different thread or genuine rescan and emits `modelReset` only when
+  effective state differs. `prependHistoryPage(snapshot)` accepts only a
+  same-thread ordered superset, inserts its missing ranges, and never resets or
+  moves retained rows.
+- `insertCard(row, placement)`, `removeTarget(ref)`, and
+  `moveTarget(ref, destination, placement)` are the exact structural
+  operations. They reject duplicate/stale/ambiguous targets and emit only the
+  matching insert, remove, move, and affected structural-role changes.
+- `reconcile(snapshot)` remains a temporary same-thread compatibility fallback
+  while integration routes are migrated to those explicit operations.
   Identical effective input emits no signal and increments no presentation
   counter.
 - `updateCard(card)` resolves the stable key once and returns `Missing`,

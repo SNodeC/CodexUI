@@ -184,34 +184,124 @@ QHash<int, QByteArray> ConversationItemModel::roleNames() const {
       {ActiveTurnRole, "activeTurn"},   {PresentationRole, "presentation"}};
 }
 
-bool ConversationItemModel::reconcile(ConversationSnapshot snapshot) {
-  const bool authorityReplacement = snapshot.threadId != threadId_;
+bool ConversationItemModel::replaceConversation(ConversationSnapshot snapshot) {
   const std::string nextThreadId = snapshot.threadId;
   const std::size_t nextHiddenCount = snapshot.hiddenAuthoritativeItemCount;
   const bool nextHasMore = snapshot.hasMore;
   std::vector<Row> desired = flatten(std::move(snapshot));
-  std::unordered_set<std::string> unique;
-  unique.reserve(desired.size());
-  for (const Row &row : desired)
-    if (!unique.insert(row.stableKey).second)
+  if (!rowsAreUnique(desired))
+    return false;
+
+  const bool identical =
+      nextThreadId == threadId_ &&
+      nextHiddenCount == hiddenAuthoritativeItemCount_ &&
+      nextHasMore == hasMore_ && desired.size() == rows_.size() &&
+      std::equal(rows_.begin(), rows_.end(), desired.begin());
+  if (identical)
+    return false;
+
+  beginResetModel();
+  rows_.clear();
+  rows_.insert(rows_.end(), std::make_move_iterator(desired.begin()),
+               std::make_move_iterator(desired.end()));
+  threadId_ = nextThreadId;
+  hiddenAuthoritativeItemCount_ = nextHiddenCount;
+  hasMore_ = nextHasMore;
+  rebuildIndexes();
+  endResetModel();
+  incrementProperty("modelResetCount");
+  incrementProperty("modelReplacementCount");
+  return true;
+}
+
+bool ConversationItemModel::prependHistoryPage(ConversationSnapshot snapshot) {
+  if (snapshot.threadId != threadId_)
+    return false;
+  const std::size_t nextHiddenCount = snapshot.hiddenAuthoritativeItemCount;
+  const bool nextHasMore = snapshot.hasMore;
+  std::vector<Row> desired = flatten(std::move(snapshot));
+  if (!rowsAreUnique(desired) || desired.size() < rows_.size())
+    return false;
+
+  std::size_t retained = 0;
+  for (const Row &candidate : desired) {
+    if (retained < rows_.size() &&
+        candidate.stableKey == rows_[retained].stableKey) {
+      ++retained;
+      continue;
+    }
+    if (stableRows_.contains(candidate.stableKey))
       return false;
+  }
+  if (retained != rows_.size())
+    return false;
+
+  bool changed = nextHiddenCount != hiddenAuthoritativeItemCount_ ||
+                 nextHasMore != hasMore_;
+  bool indexesDirty = false;
+  std::size_t desiredPosition = 0;
+  std::size_t modelPosition = 0;
+  while (desiredPosition < desired.size()) {
+    if (modelPosition < rows_.size() &&
+        desired[desiredPosition].stableKey == rows_[modelPosition].stableKey) {
+      if (rows_[modelPosition] != desired[desiredPosition]) {
+        indexesDirty = indexesDirty || rows_[modelPosition].card.target !=
+                                           desired[desiredPosition].card.target;
+        updateRow(static_cast<int>(modelPosition),
+                  std::move(desired[desiredPosition]));
+        changed = true;
+      }
+      ++desiredPosition;
+      ++modelPosition;
+      continue;
+    }
+
+    const std::size_t firstDesired = desiredPosition;
+    while (
+        desiredPosition < desired.size() &&
+        !(modelPosition < rows_.size() &&
+          desired[desiredPosition].stableKey == rows_[modelPosition].stableKey))
+      ++desiredPosition;
+    const std::size_t count = desiredPosition - firstDesired;
+    const int firstRow = static_cast<int>(modelPosition);
+    const int lastRow = static_cast<int>(modelPosition + count - 1);
+    beginInsertRows({}, firstRow, lastRow);
+    rows_.insert(
+        rows_.begin() + static_cast<std::ptrdiff_t>(modelPosition),
+        std::make_move_iterator(desired.begin() +
+                                static_cast<std::ptrdiff_t>(firstDesired)),
+        std::make_move_iterator(desired.begin() +
+                                static_cast<std::ptrdiff_t>(desiredPosition)));
+    rebuildIndexes();
+    endInsertRows();
+    incrementProperty("modelInsertCount");
+    changed = true;
+    indexesDirty = false;
+    modelPosition += count;
+  }
+
+  hiddenAuthoritativeItemCount_ = nextHiddenCount;
+  hasMore_ = nextHasMore;
+  if (indexesDirty)
+    rebuildIndexes();
+  if (changed)
+    incrementProperty("modelHistoryPrependCount");
+  return changed;
+}
+
+bool ConversationItemModel::reconcile(ConversationSnapshot snapshot) {
+  if (snapshot.threadId != threadId_)
+    return replaceConversation(std::move(snapshot));
+  const std::size_t nextHiddenCount = snapshot.hiddenAuthoritativeItemCount;
+  const bool nextHasMore = snapshot.hasMore;
+  std::vector<Row> desired = flatten(std::move(snapshot));
+  if (!rowsAreUnique(desired))
+    return false;
 
   const bool chromeChanged = nextHiddenCount != hiddenAuthoritativeItemCount_ ||
                              nextHasMore != hasMore_;
   hiddenAuthoritativeItemCount_ = nextHiddenCount;
   hasMore_ = nextHasMore;
-  if (authorityReplacement) {
-    beginResetModel();
-    rows_.clear();
-    rows_.insert(rows_.end(), std::make_move_iterator(desired.begin()),
-                 std::make_move_iterator(desired.end()));
-    threadId_ = nextThreadId;
-    rebuildIndexes();
-    endResetModel();
-    incrementProperty("modelResetCount");
-    return true;
-  }
-
   std::unordered_set<std::string> desiredKeys;
   desiredKeys.reserve(desired.size());
   for (const Row &row : desired)
@@ -344,6 +434,146 @@ ConversationItemModel::updateCard(VisibleCardData card) {
       targetRows_.insert_or_assign(newTarget, found->second);
   }
   return CardUpdateResult::Changed;
+}
+
+ConversationItemModel::StructuralChangeResult
+ConversationItemModel::insertCard(int rowIndex,
+                                  ConversationRowPlacement placement) {
+  Row candidate = rowFromPlacement(std::move(placement));
+  if (candidate.card.threadId != threadId_ || candidate.stableKey.empty() ||
+      !sectionPlacementIsValid(rowIndex, candidate))
+    return StructuralChangeResult::Invalid;
+  if (stableRows_.contains(candidate.stableKey) ||
+      (candidate.card.target &&
+       targetRows_.contains(candidate.card.target.get())))
+    return StructuralChangeResult::Duplicate;
+
+  const bool previousInSection =
+      rowIndex > 0 &&
+      rows_[static_cast<std::size_t>(rowIndex - 1)].sectionKey ==
+          candidate.sectionKey;
+  const bool nextInSection =
+      rowIndex < rowCount() &&
+      rows_[static_cast<std::size_t>(rowIndex)].sectionKey ==
+          candidate.sectionKey;
+  candidate.firstInTurn = !previousInSection;
+  candidate.lastInTurn = !nextInSection;
+
+  beginInsertRows({}, rowIndex, rowIndex);
+  rows_.insert(rows_.begin() + static_cast<std::ptrdiff_t>(rowIndex),
+               std::move(candidate));
+  rebuildIndexes();
+  endInsertRows();
+  incrementProperty("modelInsertCount");
+  incrementProperty("modelExactInsertCount");
+  refreshSectionStructure(rows_[static_cast<std::size_t>(rowIndex)].sectionKey);
+  return StructuralChangeResult::Changed;
+}
+
+ConversationItemModel::StructuralChangeResult
+ConversationItemModel::removeTarget(const nodegraph::NodeRef &target) {
+  const QModelIndex targetIndex = indexForTarget(target);
+  if (!targetIndex.isValid())
+    return StructuralChangeResult::Missing;
+  const int rowIndex = targetIndex.row();
+  const std::string sectionKey =
+      rows_[static_cast<std::size_t>(rowIndex)].sectionKey;
+
+  beginRemoveRows({}, rowIndex, rowIndex);
+  rows_.erase(rows_.begin() + static_cast<std::ptrdiff_t>(rowIndex));
+  rebuildIndexes();
+  endRemoveRows();
+  incrementProperty("modelRemoveCount");
+  incrementProperty("modelExactRemoveCount");
+  refreshSectionStructure(sectionKey);
+  return StructuralChangeResult::Changed;
+}
+
+ConversationItemModel::StructuralChangeResult
+ConversationItemModel::moveTarget(const nodegraph::NodeRef &target,
+                                  int destinationRow,
+                                  ConversationRowPlacement placement) {
+  const QModelIndex targetIndex = indexForTarget(target);
+  if (!targetIndex.isValid())
+    return StructuralChangeResult::Missing;
+  if (destinationRow < 0 || destinationRow >= rowCount() ||
+      placement.card.threadId != threadId_ || placement.card.target != target ||
+      placement.sectionKey.empty())
+    return StructuralChangeResult::Invalid;
+
+  const int sourceRow = targetIndex.row();
+  const Row &current = rows_[static_cast<std::size_t>(sourceRow)];
+  Row replacement = rowFromPlacement(std::move(placement));
+  if (replacement.stableKey != current.stableKey ||
+      !compatible(current.card, replacement.card) ||
+      (replacement.turnRoot && replacement.nested))
+    return StructuralChangeResult::Invalid;
+
+  std::vector<std::string> sectionOrder;
+  std::vector<bool> rootOrder;
+  sectionOrder.reserve(rows_.size());
+  rootOrder.reserve(rows_.size());
+  for (int rowIndex = 0; rowIndex < rowCount(); ++rowIndex) {
+    if (rowIndex == sourceRow)
+      continue;
+    if (static_cast<int>(sectionOrder.size()) == destinationRow) {
+      sectionOrder.push_back(replacement.sectionKey);
+      rootOrder.push_back(replacement.turnRoot);
+    }
+    sectionOrder.push_back(
+        rows_[static_cast<std::size_t>(rowIndex)].sectionKey);
+    rootOrder.push_back(rows_[static_cast<std::size_t>(rowIndex)].turnRoot);
+  }
+  if (static_cast<int>(sectionOrder.size()) == destinationRow) {
+    sectionOrder.push_back(replacement.sectionKey);
+    rootOrder.push_back(replacement.turnRoot);
+  }
+  std::unordered_set<std::string> completedSections;
+  std::string previousSection;
+  for (std::size_t position = 0; position < sectionOrder.size(); ++position) {
+    const std::string &section = sectionOrder[position];
+    if (section == previousSection) {
+      if (rootOrder[position])
+        return StructuralChangeResult::Invalid;
+      continue;
+    }
+    if (!previousSection.empty())
+      completedSections.insert(previousSection);
+    if (completedSections.contains(section))
+      return StructuralChangeResult::Invalid;
+    previousSection = section;
+  }
+
+  const std::string oldSection = current.sectionKey;
+  if (sourceRow != destinationRow) {
+    const int destinationChild =
+        destinationRow > sourceRow ? destinationRow + 1 : destinationRow;
+    beginMoveRows({}, sourceRow, sourceRow, {}, destinationChild);
+    Row moved = std::move(rows_[static_cast<std::size_t>(sourceRow)]);
+    rows_.erase(rows_.begin() + static_cast<std::ptrdiff_t>(sourceRow));
+    rows_.insert(rows_.begin() + static_cast<std::ptrdiff_t>(destinationRow),
+                 std::move(moved));
+    rebuildIndexes();
+    endMoveRows();
+    incrementProperty("modelMoveCount");
+  }
+
+  Row &moved = rows_[static_cast<std::size_t>(destinationRow)];
+  replacement.firstInTurn = moved.firstInTurn;
+  replacement.lastInTurn = moved.lastInTurn;
+  const bool presentationChanged = moved != replacement;
+  if (presentationChanged)
+    updateRow(destinationRow, std::move(replacement));
+  if (sourceRow == destinationRow && !presentationChanged)
+    return StructuralChangeResult::Unchanged;
+
+  rebuildIndexes();
+  refreshSectionStructure(oldSection);
+  if (rows_[static_cast<std::size_t>(destinationRow)].sectionKey != oldSection)
+    refreshSectionStructure(
+        rows_[static_cast<std::size_t>(destinationRow)].sectionKey);
+  incrementProperty("modelExactMoveCount");
+  return StructuralChangeResult::Changed;
 }
 
 bool ConversationItemModel::appendTail(ConversationTailCard tail) {
@@ -586,6 +816,111 @@ ConversationItemModel::flatten(ConversationSnapshot &&snapshot) const {
   return result;
 }
 
+bool ConversationItemModel::rowsAreUnique(const std::vector<Row> &rows) const {
+  std::unordered_set<std::string> unique;
+  unique.reserve(rows.size());
+  for (const Row &row : rows)
+    if (row.stableKey.empty() || !unique.insert(row.stableKey).second)
+      return false;
+  return true;
+}
+
+ConversationItemModel::Row ConversationItemModel::rowFromPlacement(
+    ConversationRowPlacement placement) const {
+  Row result;
+  result.card = std::move(placement.card);
+  result.stableKey = stableKey(result.card.key);
+  result.sectionKey = std::move(placement.sectionKey);
+  result.turnRoot = placement.turnRoot;
+  result.nested = placement.nested;
+  result.presented = isPresented(result.card);
+  result.activeTurn = placement.turnRoot && placement.activeTurn;
+  result.historyActivity = placement.historyActivity;
+  return result;
+}
+
+bool ConversationItemModel::sectionPlacementIsValid(
+    int rowIndex, const Row &candidate) const {
+  if (rowIndex < 0 || rowIndex > rowCount() || candidate.sectionKey.empty() ||
+      (candidate.turnRoot && candidate.nested))
+    return false;
+
+  bool sectionSeen = false;
+  bool sectionClosed = false;
+  bool rootSeen = false;
+  for (int position = 0; position <= rowCount(); ++position) {
+    const Row *row =
+        position == rowIndex
+            ? &candidate
+            : this->row(position < rowIndex ? position : position - 1);
+    if (!row)
+      continue;
+    if (row->sectionKey != candidate.sectionKey) {
+      if (sectionSeen)
+        sectionClosed = true;
+      continue;
+    }
+    if (sectionClosed)
+      return false;
+    if (row->turnRoot) {
+      if (rootSeen || sectionSeen)
+        return false;
+      rootSeen = true;
+    }
+    sectionSeen = true;
+  }
+  return true;
+}
+
+void ConversationItemModel::refreshSectionStructure(
+    const std::string &sectionKey) {
+  if (sectionKey.empty())
+    return;
+  int first = -1;
+  int last = -1;
+  int root = -1;
+  for (int rowIndex = 0; rowIndex < rowCount(); ++rowIndex) {
+    const Row &row = rows_[static_cast<std::size_t>(rowIndex)];
+    if (row.sectionKey != sectionKey)
+      continue;
+    if (first < 0)
+      first = rowIndex;
+    last = rowIndex;
+    if (row.turnRoot)
+      root = rowIndex;
+  }
+  if (first < 0)
+    return;
+
+  for (int rowIndex = first; rowIndex <= last; ++rowIndex) {
+    Row &row = rows_[static_cast<std::size_t>(rowIndex)];
+    QList<int> roles;
+    const bool firstInTurn = rowIndex == first;
+    const bool lastInTurn = rowIndex == last;
+    const bool nested = root >= 0 && rowIndex != root;
+    if (row.firstInTurn != firstInTurn) {
+      row.firstInTurn = firstInTurn;
+      roles.push_back(FirstInTurnRole);
+    }
+    if (row.lastInTurn != lastInTurn) {
+      row.lastInTurn = lastInTurn;
+      roles.push_back(LastInTurnRole);
+    }
+    if (row.nested != nested) {
+      row.nested = nested;
+      roles.push_back(NestedCardRole);
+    }
+    if (row.activeTurn && !row.turnRoot) {
+      row.activeTurn = false;
+      roles.push_back(ActiveTurnRole);
+    }
+    if (roles.empty())
+      continue;
+    emit dataChanged(index(rowIndex), index(rowIndex), roles);
+    incrementProperty("modelDataChangeCount");
+  }
+}
+
 bool ConversationItemModel::isPresented(
     const VisibleCardData &card) const noexcept {
   if (card.kind == CardKind::Reasoning)
@@ -671,7 +1006,7 @@ void ConversationItemModel::updateRow(int rowIndex, Row replacement) {
   }
   before = std::move(replacement);
   if (roles.empty())
-    roles.push_back(PresentationRole);
+    return;
   emit dataChanged(index(rowIndex), index(rowIndex), roles);
   incrementProperty("modelDataChangeCount");
 }
