@@ -365,9 +365,8 @@ graph. Their `VisibleCardData` is the entire canonical presentation input.
   when a card is not itself the Turn root. The item view paints the continuous
   Turn/You surface and positions nested rows independently, so a visible card
   never owns historical sibling rows.
-- `setNestedCards`/`setNestedItems` remain narrow card compatibility methods,
-  but the virtualized conversation clears them and owns each visible row
-  directly. They are not a retained conversation layout path.
+- A card never owns nested sibling widgets. The virtualized view owns each
+  visible row directly and paints the continuous Turn surface independently.
 - `setViewportVisible(value)` pauses purely local visual feedback when a card
   cannot paint; it never changes canonical status.
 - `commandOutputScrollState()` and `restoreCommandOutputScrollState(state)`

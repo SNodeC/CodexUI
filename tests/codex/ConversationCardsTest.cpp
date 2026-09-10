@@ -2549,9 +2549,8 @@ bool testCardFoldingGeometryAndRetention() {
                            QStringLiteral("conversationNestedCards"),
                            Qt::FindDirectChildrenOnly)
                      : nullptr;
-  result &= expect(promptOnlyCard && promptOnlyNestedCards &&
-                       promptOnlyNestedCards->isHidden(),
-                   "an initial turn prompt reserves no nested-card gap");
+  result &= expect(promptOnlyCard && !promptOnlyNestedCards,
+                   "a virtualized turn prompt owns no nested-card container");
   result &= expect(applyConversation(view, snapshot),
                    "first nested activity extends the folding fixture");
   const bool foldingCardsReady = spinUntil([&] {
@@ -5361,20 +5360,17 @@ bool testDelayedInitialHistoryMaterializesAtomically() {
                        ? nullptr
                        : qobject_cast<ConversationCard *>(
                              graphAttachment(items.front())->widget.data());
-  QWidget *nested = rootCard
-                        ? rootCard->findChild<QWidget *>(
-                              QStringLiteral("conversationNestedCards"),
-                              Qt::FindDirectChildrenOnly)
-                        : nullptr;
   const int rootHeight = rootCard ? rootCard->height() : -1;
-  const int nestedHeight = nested ? nested->height() : -1;
   const int scrollMaximum = view.verticalScrollBar()->maximum();
   const qulonglong geometryPasses =
       view.property("conversationGeometryPasses").toULongLong();
   spin(80);
   const bool finalLayoutStable =
-      rootCard && nested && rootCard->property("turnContainer").toBool() &&
-      rootCard->height() == rootHeight && nested->height() == nestedHeight &&
+      rootCard && rootCard->property("turnContainer").toBool() &&
+      !rootCard->findChild<QWidget *>(
+          QStringLiteral("conversationNestedCards"),
+          Qt::FindDirectChildrenOnly) &&
+      rootCard->height() == rootHeight &&
       view.verticalScrollBar()->maximum() == scrollMaximum &&
       view.property("conversationGeometryPasses").toULongLong() ==
           geometryPasses;
@@ -5383,7 +5379,7 @@ bool testDelayedInitialHistoryMaterializesAtomically() {
       emptyBindingHeld && loadingCoverVisible && hydratedWindowReady &&
           noPartialHistoryFrame && finalLayoutStable,
       "history arriving after an empty selection remains invisible until all "
-      "retained cards have their stable final old-UI layout");
+      "visible cards have their stable final virtualized layout");
 }
 
 bool testPartialLiveTailWaitsForAuthoritativeInitialHistory() {

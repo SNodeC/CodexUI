@@ -45,7 +45,6 @@
 #include <limits>
 #include <string_view>
 #include <type_traits>
-#include <unordered_set>
 #include <utility>
 
 namespace codexui::codex::middle {
@@ -1036,16 +1035,6 @@ public:
     contentLayout->setSpacing(6);
     layout->addWidget(content);
 
-    nestedCards = new QWidget(owner);
-    nestedCards->setObjectName(QStringLiteral("conversationNestedCards"));
-    nestedLayout = new QVBoxLayout(nestedCards);
-    // Keep a visible section boundary between the complete prompt and the
-    // activity nested beneath it, in addition to ordinary widget spacing.
-    nestedLayout->setContentsMargins(0, 8, 0, 0);
-    nestedLayout->setSpacing(8);
-    nestedCards->hide();
-    layout->addWidget(nestedCards);
-
     QObject::connect(disclosure, &QToolButton::clicked, owner,
                      [this] { emit this->owner->foldRequested(!collapsed); });
     QObject::connect(copy, &QToolButton::clicked, owner, [this] {
@@ -1259,81 +1248,6 @@ public:
     owner->update();
   }
 
-  void setNestedItems(const std::vector<QWidget *> &items) {
-    std::vector<QWidget *> currentItems;
-    currentItems.reserve(static_cast<std::size_t>(nestedLayout->count()));
-    for (int index = 0; index < nestedLayout->count(); ++index)
-      if (QWidget *item = nestedLayout->itemAt(index)->widget())
-        currentItems.push_back(item);
-
-    const bool unchanged = currentItems == items;
-    const bool appendOnly =
-        currentItems.size() <= items.size() &&
-        std::equal(currentItems.begin(), currentItems.end(), items.begin());
-    if (unchanged) {
-      const bool visible = std::ranges::any_of(
-          items, [](const QWidget *item) { return item && !item->isHidden(); });
-      if (hasVisibleNestedCards != visible) {
-        hasVisibleNestedCards = visible;
-        refreshFoldPresentation();
-      }
-      return;
-    }
-    if (appendOnly) {
-      for (std::size_t index = currentItems.size(); index < items.size();
-           ++index) {
-        QWidget *item = items[index];
-        if (!item)
-          continue;
-        const bool explicitlyHidden = item->isHidden();
-        nestedLayout->addWidget(item);
-        item->setVisible(!explicitlyHidden);
-        if (auto *card = dynamic_cast<ConversationCard *>(item))
-          card->impl_->setNestedConversationCard(true);
-      }
-      hasVisibleNestedCards = std::ranges::any_of(
-          items, [](const QWidget *item) { return item && !item->isHidden(); });
-      refreshFoldPresentation();
-      return;
-    }
-
-    const std::unordered_set<QWidget *> retained(items.begin(), items.end());
-    for (int index = nestedLayout->count() - 1; index >= 0; --index) {
-      QWidget *item = nestedLayout->itemAt(index)->widget();
-      if (!item || retained.contains(item))
-        continue;
-      const bool explicitlyHidden = item->isHidden();
-      nestedLayout->removeWidget(item);
-      item->setParent(owner->parentWidget());
-      item->setVisible(!explicitlyHidden);
-      if (auto *card = dynamic_cast<ConversationCard *>(item))
-        card->impl_->setNestedConversationCard(false);
-    }
-    for (std::size_t index = 0; index < items.size(); ++index) {
-      QWidget *item = items[index];
-      if (!item)
-        continue;
-      const bool explicitlyHidden = item->isHidden();
-      const int position = static_cast<int>(index);
-      if (nestedLayout->indexOf(item) != position)
-        nestedLayout->insertWidget(position, item);
-      item->setVisible(!explicitlyHidden);
-      if (auto *card = dynamic_cast<ConversationCard *>(item))
-        card->impl_->setNestedConversationCard(true);
-    }
-    hasVisibleNestedCards = std::ranges::any_of(
-        items, [](const QWidget *item) { return item && !item->isHidden(); });
-    refreshFoldPresentation();
-  }
-
-  void setNestedCards(const std::vector<ConversationCard *> &cards) {
-    std::vector<QWidget *> items;
-    items.reserve(cards.size());
-    for (ConversationCard *card : cards)
-      items.push_back(card);
-    setNestedItems(items);
-  }
-
   [[nodiscard]] bool hasVisibleContent() const {
     for (int index = 0; index < contentLayout->count(); ++index) {
       if (QWidget *widget = contentLayout->itemAt(index)->widget();
@@ -1344,11 +1258,10 @@ public:
   }
 
   void refreshFoldPresentation() {
-    const bool expandable = hasVisibleContent() || hasVisibleNestedCards;
+    const bool expandable = hasVisibleContent();
     disclosure->setExpanded(!collapsed);
     disclosure->setVisible(expandable);
     content->setVisible(expandable && !collapsed);
-    nestedCards->setVisible(hasVisibleNestedCards && !collapsed);
   }
 
   void refreshCopyPresentation() {
@@ -1773,9 +1686,6 @@ public:
   std::optional<qint64> pendingFeedbackDeadlineMs;
   ImageRibbon *images = nullptr;
   QStringList fileChangeOpenPaths;
-  QWidget *nestedCards = nullptr;
-  QVBoxLayout *nestedLayout = nullptr;
-  bool hasVisibleNestedCards = false;
   bool authoritativeTurnActive = false;
   int turnRootBottomMargin = 10;
 };
@@ -1815,15 +1725,6 @@ void ConversationCard::setNestedPresentation(bool nested) {
 
 void ConversationCard::setVirtualTurnRootPresentation(bool fragmented) {
   impl_->setVirtualTurnRootPresentation(fragmented);
-}
-
-void ConversationCard::setNestedCards(
-    const std::vector<ConversationCard *> &cards) {
-  impl_->setNestedCards(cards);
-}
-
-void ConversationCard::setNestedItems(const std::vector<QWidget *> &items) {
-  impl_->setNestedItems(items);
 }
 
 void ConversationCard::setViewportVisible(bool visible) {

@@ -1890,7 +1890,6 @@ void ConversationView::configureCardForRow(
   const bool fragmentedRoot = row.turnRoot && section != sectionRanges_.end() &&
                               section->second.last > section->second.root;
   card->setProperty("turnContainer", row.turnRoot);
-  card->setNestedCards({});
   card->setNestedPresentation(row.nested);
   card->setVirtualTurnRootPresentation(fragmentedRoot);
   card->setAuthoritativeTurnActive(row.turnRoot && row.activeTurn &&

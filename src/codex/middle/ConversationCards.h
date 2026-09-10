@@ -104,10 +104,6 @@ public:
   // In a virtualized turn the view paints the continuous outer You surface;
   // the root card keeps only its content and interaction geometry.
   void setVirtualTurnRootPresentation(bool fragmented);
-  void setNestedCards(const std::vector<ConversationCard *> &cards);
-  // ConversationView supplies the retained child widgets in canonical order.
-  // They stay in this existing nested layout while the thread is selected.
-  void setNestedItems(const std::vector<QWidget *> &items);
   // ConversationView uses this to pause local feedback timers while a card is
   // not painted.
   void setViewportVisible(bool visible);
