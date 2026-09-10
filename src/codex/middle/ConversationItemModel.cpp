@@ -6,7 +6,6 @@
 #include <QStringList>
 
 #include <algorithm>
-#include <iterator>
 #include <limits>
 #include <string_view>
 #include <type_traits>
@@ -116,8 +115,10 @@ bool compatible(const VisibleCardData &before,
 ConversationItemModel::ConversationItemModel(QObject *parent)
     : QAbstractListModel(parent) {}
 
+ConversationItemModel::~ConversationItemModel() = default;
+
 int ConversationItemModel::rowCount(const QModelIndex &parent) const {
-  return parent.isValid() ? 0 : static_cast<int>(rows_.size());
+  return parent.isValid() ? 0 : static_cast<int>(nodeCount(rows_));
 }
 
 QVariant ConversationItemModel::data(const QModelIndex &index, int role) const {
@@ -192,18 +193,22 @@ bool ConversationItemModel::replaceConversation(ConversationSnapshot snapshot) {
   if (!rowsAreUnique(desired))
     return false;
 
-  const bool identical =
-      nextThreadId == threadId_ &&
-      nextHiddenCount == hiddenAuthoritativeItemCount_ &&
-      nextHasMore == hasMore_ && desired.size() == rows_.size() &&
-      std::equal(rows_.begin(), rows_.end(), desired.begin());
+  bool identical = nextThreadId == threadId_ &&
+                   nextHiddenCount == hiddenAuthoritativeItemCount_ &&
+                   nextHasMore == hasMore_ &&
+                   desired.size() == nodeCount(rows_);
+  for (std::size_t position = 0; identical && position < desired.size();
+       ++position) {
+    const RowNode *current = nodeAt(position);
+    identical = current && current->value == desired[position];
+  }
   if (identical)
     return false;
 
   beginResetModel();
-  rows_.clear();
-  rows_.insert(rows_.end(), std::make_move_iterator(desired.begin()),
-               std::make_move_iterator(desired.end()));
+  clearRows();
+  for (Row &row : desired)
+    insertRow(nodeCount(rows_), std::move(row));
   threadId_ = nextThreadId;
   hiddenAuthoritativeItemCount_ = nextHiddenCount;
   hasMore_ = nextHasMore;
@@ -220,33 +225,31 @@ bool ConversationItemModel::prependHistoryPage(ConversationSnapshot snapshot) {
   const std::size_t nextHiddenCount = snapshot.hiddenAuthoritativeItemCount;
   const bool nextHasMore = snapshot.hasMore;
   std::vector<Row> desired = flatten(std::move(snapshot));
-  if (!rowsAreUnique(desired) || desired.size() < rows_.size())
+  if (!rowsAreUnique(desired) || desired.size() < nodeCount(rows_))
     return false;
 
   std::size_t retained = 0;
   for (const Row &candidate : desired) {
-    if (retained < rows_.size() &&
-        candidate.stableKey == rows_[retained].stableKey) {
+    const RowNode *current = nodeAt(retained);
+    if (current && candidate.stableKey == current->value.stableKey) {
       ++retained;
       continue;
     }
     if (stableRows_.contains(candidate.stableKey))
       return false;
   }
-  if (retained != rows_.size())
+  if (retained != nodeCount(rows_))
     return false;
 
   bool changed = nextHiddenCount != hiddenAuthoritativeItemCount_ ||
                  nextHasMore != hasMore_;
-  bool indexesDirty = false;
   std::size_t desiredPosition = 0;
   std::size_t modelPosition = 0;
   while (desiredPosition < desired.size()) {
-    if (modelPosition < rows_.size() &&
-        desired[desiredPosition].stableKey == rows_[modelPosition].stableKey) {
-      if (rows_[modelPosition] != desired[desiredPosition]) {
-        indexesDirty = indexesDirty || rows_[modelPosition].card.target !=
-                                           desired[desiredPosition].card.target;
+    const RowNode *current = nodeAt(modelPosition);
+    if (current && desired[desiredPosition].stableKey ==
+                       current->value.stableKey) {
+      if (current->value != desired[desiredPosition]) {
         updateRow(static_cast<int>(modelPosition),
                   std::move(desired[desiredPosition]));
         changed = true;
@@ -259,31 +262,26 @@ bool ConversationItemModel::prependHistoryPage(ConversationSnapshot snapshot) {
     const std::size_t firstDesired = desiredPosition;
     while (
         desiredPosition < desired.size() &&
-        !(modelPosition < rows_.size() &&
-          desired[desiredPosition].stableKey == rows_[modelPosition].stableKey))
+        !([&] {
+          const RowNode *retainedRow = nodeAt(modelPosition);
+          return retainedRow && desired[desiredPosition].stableKey ==
+                                    retainedRow->value.stableKey;
+        })())
       ++desiredPosition;
     const std::size_t count = desiredPosition - firstDesired;
     const int firstRow = static_cast<int>(modelPosition);
     const int lastRow = static_cast<int>(modelPosition + count - 1);
     beginInsertRows({}, firstRow, lastRow);
-    rows_.insert(
-        rows_.begin() + static_cast<std::ptrdiff_t>(modelPosition),
-        std::make_move_iterator(desired.begin() +
-                                static_cast<std::ptrdiff_t>(firstDesired)),
-        std::make_move_iterator(desired.begin() +
-                                static_cast<std::ptrdiff_t>(desiredPosition)));
-    rebuildIndexes();
+    for (std::size_t inserted = firstDesired; inserted < desiredPosition;
+         ++inserted)
+      insertRow(modelPosition++, std::move(desired[inserted]));
     endInsertRows();
     incrementProperty("modelInsertCount");
     changed = true;
-    indexesDirty = false;
-    modelPosition += count;
   }
 
   hiddenAuthoritativeItemCount_ = nextHiddenCount;
   hasMore_ = nextHasMore;
-  if (indexesDirty)
-    rebuildIndexes();
   if (changed)
     incrementProperty("modelHistoryPrependCount");
   return changed;
@@ -308,54 +306,44 @@ bool ConversationItemModel::reconcile(ConversationSnapshot snapshot) {
     desiredKeys.insert(row.stableKey);
 
   bool changed = chromeChanged;
-  bool indexesDirty = false;
-  for (std::size_t offset = rows_.size(); offset > 0;) {
+  for (std::size_t offset = nodeCount(rows_); offset > 0;) {
     std::size_t last = offset - 1;
-    if (desiredKeys.contains(rows_[last].stableKey)) {
+    const RowNode *lastNode = nodeAt(last);
+    if (lastNode && desiredKeys.contains(lastNode->value.stableKey)) {
       offset = last;
       continue;
     }
     std::size_t first = last;
-    while (first > 0 && !desiredKeys.contains(rows_[first - 1].stableKey))
+    while (first > 0 &&
+           !desiredKeys.contains(nodeAt(first - 1)->value.stableKey))
       --first;
     beginRemoveRows({}, static_cast<int>(first), static_cast<int>(last));
-    rows_.erase(rows_.begin() + static_cast<std::ptrdiff_t>(first),
-                rows_.begin() + static_cast<std::ptrdiff_t>(last + 1));
+    for (std::size_t position = last + 1; position > first; --position)
+      (void)takeRow(position - 1);
     endRemoveRows();
     incrementProperty("modelRemoveCount");
     changed = true;
-    indexesDirty = true;
     offset = first;
   }
 
   std::vector<bool> inserted(desired.size(), false);
   for (std::size_t position = 0; position < desired.size(); ++position) {
-    if (position < rows_.size() &&
-        rows_[position].stableKey == desired[position].stableKey)
+    const RowNode *current = nodeAt(position);
+    if (current && current->value.stableKey == desired[position].stableKey)
       continue;
-    const auto found =
-        std::find_if(rows_.begin() + static_cast<std::ptrdiff_t>(
-                                         std::min(position, rows_.size())),
-                     rows_.end(), [&](const Row &row) {
-                       return row.stableKey == desired[position].stableKey;
-                     });
-    if (found == rows_.end()) {
+    const auto found = stableRows_.find(desired[position].stableKey);
+    const std::optional<int> source =
+        found == stableRows_.end() ? std::nullopt : rowOf(found->second);
+    if (!source) {
       std::size_t count = 1;
       while (position + count < desired.size() &&
-             std::ranges::none_of(
-                 rows_,
-                 [&](const Row &row) {
-                   return row.stableKey == desired[position + count].stableKey;
-                 }))
+             !stableRows_.contains(desired[position + count].stableKey))
         ++count;
       beginInsertRows({}, static_cast<int>(position),
                       static_cast<int>(position + count - 1));
-      rows_.insert(
-          rows_.begin() + static_cast<std::ptrdiff_t>(position),
-          std::make_move_iterator(desired.begin() +
-                                  static_cast<std::ptrdiff_t>(position)),
-          std::make_move_iterator(
-              desired.begin() + static_cast<std::ptrdiff_t>(position + count)));
+      for (std::size_t inserted = 0; inserted < count; ++inserted)
+        insertRow(position + inserted,
+                  std::move(desired[position + inserted]));
       endInsertRows();
       std::fill(inserted.begin() + static_cast<std::ptrdiff_t>(position),
                 inserted.begin() +
@@ -363,37 +351,28 @@ bool ConversationItemModel::reconcile(ConversationSnapshot snapshot) {
                 true);
       incrementProperty("modelInsertCount");
       changed = true;
-      indexesDirty = true;
       position += count - 1;
       continue;
     }
 
-    const std::size_t source =
-        static_cast<std::size_t>(std::distance(rows_.begin(), found));
-    beginMoveRows({}, static_cast<int>(source), static_cast<int>(source), {},
+    beginMoveRows({}, *source, *source, {},
                   static_cast<int>(position));
-    Row moved = std::move(rows_[source]);
-    rows_.erase(rows_.begin() + static_cast<std::ptrdiff_t>(source));
-    rows_.insert(rows_.begin() + static_cast<std::ptrdiff_t>(position),
-                 std::move(moved));
+    std::unique_ptr<RowNode> moved = takeRow(static_cast<std::size_t>(*source));
+    insertRow(position, std::move(moved->value));
     endMoveRows();
     incrementProperty("modelMoveCount");
     changed = true;
-    indexesDirty = true;
   }
 
   for (std::size_t position = 0; position < desired.size(); ++position) {
     if (inserted[position])
       continue;
-    if (rows_[position] == desired[position])
+    const RowNode *current = nodeAt(position);
+    if (current && current->value == desired[position])
       continue;
-    indexesDirty = indexesDirty ||
-                   rows_[position].card.target != desired[position].card.target;
     updateRow(static_cast<int>(position), std::move(desired[position]));
     changed = true;
   }
-  if (indexesDirty)
-    rebuildIndexes();
   return changed;
 }
 
@@ -403,18 +382,15 @@ ConversationItemModel::updateCard(VisibleCardData card) {
   const auto found = stableRows_.find(key);
   if (found == stableRows_.end())
     return CardUpdateResult::Missing;
-  const std::optional<int> modelRow = logicalRow(found->second);
+  const std::optional<int> modelRow = rowOf(found->second);
   if (!modelRow)
     return CardUpdateResult::Missing;
-  Row &current = rows_[static_cast<std::size_t>(*modelRow)];
+  Row &current = found->second->value;
   if (!compatible(current.card, card))
     return CardUpdateResult::Incompatible;
   if (current.card == card)
     return CardUpdateResult::Unchanged;
 
-  const nodegraph::Node *oldTarget =
-      current.card.target ? current.card.target.get() : nullptr;
-  const nodegraph::Node *newTarget = card.target ? card.target.get() : nullptr;
   Row replacement;
   replacement.card = std::move(card);
   replacement.stableKey = current.stableKey;
@@ -427,12 +403,6 @@ ConversationItemModel::updateCard(VisibleCardData card) {
   replacement.activeTurn = current.activeTurn;
   replacement.historyActivity = current.historyActivity;
   updateRow(*modelRow, std::move(replacement));
-  if (oldTarget != newTarget) {
-    if (oldTarget)
-      targetRows_.erase(oldTarget);
-    if (newTarget)
-      targetRows_.insert_or_assign(newTarget, found->second);
-  }
   return CardUpdateResult::Changed;
 }
 
@@ -447,26 +417,25 @@ ConversationItemModel::insertCard(int rowIndex,
       (candidate.card.target &&
        targetRows_.contains(candidate.card.target.get())))
     return StructuralChangeResult::Duplicate;
+  const SectionStructure before = sectionStructure(candidate.sectionKey);
+  const std::string changedKey = candidate.stableKey;
 
   const bool previousInSection =
       rowIndex > 0 &&
-      rows_[static_cast<std::size_t>(rowIndex - 1)].sectionKey ==
-          candidate.sectionKey;
+      row(rowIndex - 1)->sectionKey == candidate.sectionKey;
   const bool nextInSection =
       rowIndex < rowCount() &&
-      rows_[static_cast<std::size_t>(rowIndex)].sectionKey ==
-          candidate.sectionKey;
+      row(rowIndex)->sectionKey == candidate.sectionKey;
   candidate.firstInTurn = !previousInSection;
   candidate.lastInTurn = !nextInSection;
 
   beginInsertRows({}, rowIndex, rowIndex);
-  rows_.insert(rows_.begin() + static_cast<std::ptrdiff_t>(rowIndex),
-               std::move(candidate));
-  rebuildIndexes();
+  RowNode *inserted = insertRow(static_cast<std::size_t>(rowIndex),
+                                std::move(candidate));
   endInsertRows();
   incrementProperty("modelInsertCount");
   incrementProperty("modelExactInsertCount");
-  refreshSectionStructure(rows_[static_cast<std::size_t>(rowIndex)].sectionKey);
+  refreshSectionStructure(inserted->value.sectionKey, before, changedKey);
   return StructuralChangeResult::Changed;
 }
 
@@ -476,16 +445,16 @@ ConversationItemModel::removeTarget(const nodegraph::NodeRef &target) {
   if (!targetIndex.isValid())
     return StructuralChangeResult::Missing;
   const int rowIndex = targetIndex.row();
-  const std::string sectionKey =
-      rows_[static_cast<std::size_t>(rowIndex)].sectionKey;
+  const std::string sectionKey = row(rowIndex)->sectionKey;
+  const std::string changedKey = row(rowIndex)->stableKey;
+  const SectionStructure before = sectionStructure(sectionKey);
 
   beginRemoveRows({}, rowIndex, rowIndex);
-  rows_.erase(rows_.begin() + static_cast<std::ptrdiff_t>(rowIndex));
-  rebuildIndexes();
+  (void)takeRow(static_cast<std::size_t>(rowIndex));
   endRemoveRows();
   incrementProperty("modelRemoveCount");
   incrementProperty("modelExactRemoveCount");
-  refreshSectionStructure(sectionKey);
+  refreshSectionStructure(sectionKey, before, changedKey);
   return StructuralChangeResult::Changed;
 }
 
@@ -502,64 +471,61 @@ ConversationItemModel::moveTarget(const nodegraph::NodeRef &target,
     return StructuralChangeResult::Invalid;
 
   const int sourceRow = targetIndex.row();
-  const Row &current = rows_[static_cast<std::size_t>(sourceRow)];
+  const Row &current = targetRows_.at(target.get())->value;
+  const std::string changedKey = current.stableKey;
+  const SectionStructure oldBefore = sectionStructure(current.sectionKey);
   Row replacement = rowFromPlacement(std::move(placement));
   if (replacement.stableKey != current.stableKey ||
       !compatible(current.card, replacement.card) ||
       (replacement.turnRoot && replacement.nested))
     return StructuralChangeResult::Invalid;
 
-  std::vector<std::string> sectionOrder;
-  std::vector<bool> rootOrder;
-  sectionOrder.reserve(rows_.size());
-  rootOrder.reserve(rows_.size());
-  for (int rowIndex = 0; rowIndex < rowCount(); ++rowIndex) {
-    if (rowIndex == sourceRow)
-      continue;
-    if (static_cast<int>(sectionOrder.size()) == destinationRow) {
-      sectionOrder.push_back(replacement.sectionKey);
-      rootOrder.push_back(replacement.turnRoot);
-    }
-    sectionOrder.push_back(
-        rows_[static_cast<std::size_t>(rowIndex)].sectionKey);
-    rootOrder.push_back(rows_[static_cast<std::size_t>(rowIndex)].turnRoot);
-  }
-  if (static_cast<int>(sectionOrder.size()) == destinationRow) {
-    sectionOrder.push_back(replacement.sectionKey);
-    rootOrder.push_back(replacement.turnRoot);
-  }
-  std::unordered_set<std::string> completedSections;
-  std::string previousSection;
-  for (std::size_t position = 0; position < sectionOrder.size(); ++position) {
-    const std::string &section = sectionOrder[position];
-    if (section == previousSection) {
-      if (rootOrder[position])
-        return StructuralChangeResult::Invalid;
-      continue;
-    }
-    if (!previousSection.empty())
-      completedSections.insert(previousSection);
-    if (completedSections.contains(section))
-      return StructuralChangeResult::Invalid;
-    previousSection = section;
-  }
+  const auto rowAfterRemoval = [&](int position) -> const RowNode * {
+    if (position < 0 || position >= rowCount() - 1)
+      return nullptr;
+    const int original = position < sourceRow ? position : position + 1;
+    return nodeAt(static_cast<std::size_t>(original));
+  };
+  const RowNode *previous = rowAfterRemoval(destinationRow - 1);
+  const RowNode *next = rowAfterRemoval(destinationRow);
+  const bool previousInSection =
+      previous && previous->value.sectionKey == replacement.sectionKey;
+  const bool nextInSection =
+      next && next->value.sectionKey == replacement.sectionKey;
+  const auto section = sectionRows_.find(replacement.sectionKey);
+  const std::size_t remainingSectionRows =
+      section == sectionRows_.end()
+          ? 0
+          : section->second.count -
+                static_cast<std::size_t>(current.sectionKey ==
+                                         replacement.sectionKey);
+  const bool remainingRoot =
+      section != sectionRows_.end() && section->second.root &&
+      section->second.root != targetRows_.at(target.get());
+  if ((remainingSectionRows != 0 && !previousInSection && !nextInSection) ||
+      (replacement.turnRoot && (remainingRoot || previousInSection)) ||
+      (!replacement.turnRoot && nextInSection && next->value.turnRoot))
+    return StructuralChangeResult::Invalid;
 
   const std::string oldSection = current.sectionKey;
+  const SectionStructure newBefore =
+      replacement.sectionKey == oldSection
+          ? oldBefore
+          : sectionStructure(replacement.sectionKey);
   const bool movedRows = sourceRow != destinationRow;
   if (movedRows) {
     const int destinationChild =
         destinationRow > sourceRow ? destinationRow + 1 : destinationRow;
     beginMoveRows({}, sourceRow, sourceRow, {}, destinationChild);
-    Row moved = std::move(rows_[static_cast<std::size_t>(sourceRow)]);
-    rows_.erase(rows_.begin() + static_cast<std::ptrdiff_t>(sourceRow));
-    rows_.insert(rows_.begin() + static_cast<std::ptrdiff_t>(destinationRow),
-                 std::move(moved));
-    rebuildIndexes();
+    std::unique_ptr<RowNode> moved =
+        takeRow(static_cast<std::size_t>(sourceRow));
+    insertRow(static_cast<std::size_t>(destinationRow),
+              std::move(moved->value));
     endMoveRows();
     incrementProperty("modelMoveCount");
   }
 
-  Row &moved = rows_[static_cast<std::size_t>(destinationRow)];
+  Row &moved = nodeAt(static_cast<std::size_t>(destinationRow))->value;
   replacement.firstInTurn = moved.firstInTurn;
   replacement.lastInTurn = moved.lastInTurn;
   const bool presentationChanged = moved != replacement;
@@ -568,11 +534,10 @@ ConversationItemModel::moveTarget(const nodegraph::NodeRef &target,
   if (sourceRow == destinationRow && !presentationChanged)
     return StructuralChangeResult::Unchanged;
 
-  rebuildIndexes();
-  refreshSectionStructure(oldSection);
-  if (rows_[static_cast<std::size_t>(destinationRow)].sectionKey != oldSection)
-    refreshSectionStructure(
-        rows_[static_cast<std::size_t>(destinationRow)].sectionKey);
+  refreshSectionStructure(oldSection, oldBefore, changedKey);
+  const std::string newSection = row(destinationRow)->sectionKey;
+  if (newSection != oldSection)
+    refreshSectionStructure(newSection, newBefore, changedKey);
   incrementProperty(movedRows ? "modelExactMoveCount"
                               : "modelExactPlacementUpdateCount");
   return StructuralChangeResult::Changed;
@@ -586,12 +551,12 @@ bool ConversationItemModel::appendTail(ConversationTailCard tail) {
     return false;
 
   const bool startsSection =
-      rows_.empty() || rows_.back().sectionKey != tail.sectionKey;
+      rowCount() == 0 || row(rowCount() - 1)->sectionKey != tail.sectionKey;
   if ((!startsSection && tail.turnRoot) || (startsSection && tail.nested))
     return false;
 
-  if (!rows_.empty() && !startsSection) {
-    Row &previous = rows_.back();
+  if (rowCount() != 0 && !startsSection) {
+    Row &previous = nodeAt(static_cast<std::size_t>(rowCount() - 1))->value;
     previous.lastInTurn = false;
     emit dataChanged(index(rowCount() - 1), index(rowCount() - 1),
                      {LastInTurnRole});
@@ -611,14 +576,8 @@ bool ConversationItemModel::appendTail(ConversationTailCard tail) {
   row.historyActivity = tail.historyActivity;
 
   const int insertedRow = rowCount();
-  const std::size_t ordinal = rowBase_ + rows_.size();
   beginInsertRows({}, insertedRow, insertedRow);
-  rows_.push_back(std::move(row));
-  stableRows_.emplace(key, ordinal);
-  if (rows_.back().card.target)
-    targetRows_.emplace(rows_.back().card.target.get(), ordinal);
-  if (rows_.back().historyActivity)
-    ++historyActivityCount_;
+  insertRow(static_cast<std::size_t>(insertedRow), std::move(row));
   endInsertRows();
   incrementProperty("modelInsertCount");
   incrementProperty("modelTailAppendCount");
@@ -628,13 +587,13 @@ bool ConversationItemModel::appendTail(ConversationTailCard tail) {
 ConversationItemModel::HistoryTrim
 ConversationItemModel::trimHistoryTo(std::size_t activityLimit) {
   HistoryTrim result;
-  if (historyActivityCount_ <= activityLimit || rows_.empty())
+  if (historyActivityCount_ <= activityLimit || rowCount() == 0)
     return result;
 
-  Row &first = rows_.front();
+  Row &first = nodeAt(0)->value;
   result.sectionKey = first.sectionKey;
-  if (first.historyActivity && first.turnRoot && rows_.size() > 1 &&
-      rows_[1].sectionKey == first.sectionKey) {
+  if (first.historyActivity && first.turnRoot && rowCount() > 1 &&
+      row(1)->sectionKey == first.sectionKey) {
     first.historyActivity = false;
     --historyActivityCount_;
     result.pinnedRoot = true;
@@ -647,19 +606,20 @@ ConversationItemModel::trimHistoryTo(std::size_t activityLimit) {
   // suffix. If one is the complete leading section, leave the window one row
   // over budget until its authoritative acknowledgement or a complete
   // reconciliation can place it without changing optimistic ordering.
-  if (!first.historyActivity && (!first.turnRoot || rows_.size() == 1 ||
-                                 rows_[1].sectionKey != first.sectionKey))
+  if (!first.historyActivity &&
+      (!first.turnRoot || rowCount() == 1 ||
+       row(1)->sectionKey != first.sectionKey))
     return result;
 
   int removeCount = 1;
   int removeRow = 0;
-  if (!first.historyActivity && first.turnRoot && rows_.size() > 1 &&
-      rows_[1].sectionKey == first.sectionKey) {
+  if (!first.historyActivity && first.turnRoot && rowCount() > 1 &&
+      row(1)->sectionKey == first.sectionKey) {
     result.sectionKey = first.sectionKey;
-    if (rows_.size() > 2 && rows_[2].sectionKey == first.sectionKey) {
+    if (rowCount() > 2 && row(2)->sectionKey == first.sectionKey) {
       // Retain the pinned owner at logical row zero while dropping the oldest
-      // nested activity. Moving that one row across the deque prefix keeps all
-      // later absolute identity ordinals unchanged.
+      // nested activity. The order-statistic tree removes that one row without
+      // changing the identity nodes of the retained suffix.
       removeRow = 1;
     } else {
       removeCount = 2;
@@ -667,33 +627,17 @@ ConversationItemModel::trimHistoryTo(std::size_t activityLimit) {
   }
 
   for (int offset = 0; offset < removeCount; ++offset) {
-    const Row &removed = rows_[static_cast<std::size_t>(removeRow + offset)];
+    const Row &removed = *row(removeRow + offset);
     result.removedStableKeys.push_back(removed.stableKey);
-    if (removed.historyActivity) {
-      --historyActivityCount_;
+    if (removed.historyActivity)
       ++result.hiddenIncrement;
-    }
   }
   result.row = removeRow;
   result.count = removeCount;
 
   beginRemoveRows({}, removeRow, removeRow + removeCount - 1);
-  if (removeRow == 1) {
-    Row retainedRoot = std::move(rows_.front());
-    eraseRowIdentity(rows_[1]);
-    rows_.pop_front();
-    rows_.front() = std::move(retainedRoot);
-    ++rowBase_;
-    stableRows_.insert_or_assign(rows_.front().stableKey, rowBase_);
-    if (rows_.front().card.target)
-      targetRows_.insert_or_assign(rows_.front().card.target.get(), rowBase_);
-  } else {
-    for (int offset = 0; offset < removeCount; ++offset) {
-      eraseRowIdentity(rows_.front());
-      rows_.pop_front();
-      ++rowBase_;
-    }
-  }
+  for (int offset = 0; offset < removeCount; ++offset)
+    (void)takeRow(static_cast<std::size_t>(removeRow));
   endRemoveRows();
   incrementProperty("modelRemoveCount");
   incrementProperty("modelBoundedFrontTrimCount");
@@ -701,9 +645,9 @@ ConversationItemModel::trimHistoryTo(std::size_t activityLimit) {
 }
 
 bool ConversationItemModel::setActiveTurn(int rowIndex, bool active) {
-  Row *value = rowIndex >= 0 && rowIndex < rowCount()
-                   ? &rows_[static_cast<std::size_t>(rowIndex)]
-                   : nullptr;
+  RowNode *node = rowIndex >= 0 ? nodeAt(static_cast<std::size_t>(rowIndex))
+                                : nullptr;
+  Row *value = node ? &node->value : nullptr;
   if (!value || !value->turnRoot || value->activeTurn == active)
     return false;
   value->activeTurn = active;
@@ -724,22 +668,22 @@ bool ConversationItemModel::setVisibility(Visibility visibility) {
   visibility_ = visibility;
   int first = -1;
   bool changed = false;
-  for (std::size_t position = 0; position < rows_.size(); ++position) {
-    Row &row = rows_[position];
-    const bool presented = isPresented(row.card);
-    if (presented == row.presented) {
+  for (int position = 0; position < rowCount(); ++position) {
+    Row &current = nodeAt(static_cast<std::size_t>(position))->value;
+    const bool presented = isPresented(current.card);
+    if (presented == current.presented) {
       if (first >= 0) {
-        emit dataChanged(index(first), index(static_cast<int>(position) - 1),
+        emit dataChanged(index(first), index(position - 1),
                          {PresentedRole});
         incrementProperty("modelDataChangeCount");
         first = -1;
       }
       continue;
     }
-    row.presented = presented;
+    current.presented = presented;
     changed = true;
     if (first < 0)
-      first = static_cast<int>(position);
+      first = position;
   }
   if (first < 0)
     return changed;
@@ -750,9 +694,9 @@ bool ConversationItemModel::setVisibility(Visibility visibility) {
 
 const ConversationItemModel::Row *
 ConversationItemModel::row(int rowIndex) const noexcept {
-  return rowIndex >= 0 && static_cast<std::size_t>(rowIndex) < rows_.size()
-             ? &rows_[static_cast<std::size_t>(rowIndex)]
-             : nullptr;
+  const RowNode *node =
+      rowIndex >= 0 ? nodeAt(static_cast<std::size_t>(rowIndex)) : nullptr;
+  return node ? &node->value : nullptr;
 }
 
 const VisibleCardData *
@@ -766,7 +710,7 @@ ConversationItemModel::indexForStableKey(const std::string &key) const {
   const auto found = stableRows_.find(key);
   if (found == stableRows_.end())
     return {};
-  const std::optional<int> row = logicalRow(found->second);
+  const std::optional<int> row = rowOf(found->second);
   return row ? index(*row) : QModelIndex{};
 }
 
@@ -777,7 +721,7 @@ ConversationItemModel::indexForTarget(const nodegraph::NodeRef &target) const {
   const auto found = targetRows_.find(target.get());
   if (found == targetRows_.end())
     return {};
-  const std::optional<int> modelRow = logicalRow(found->second);
+  const std::optional<int> modelRow = rowOf(found->second);
   const Row *candidate = modelRow ? row(*modelRow) : nullptr;
   return candidate && candidate->card.target == target ? index(*modelRow)
                                                        : QModelIndex{};
@@ -847,78 +791,106 @@ bool ConversationItemModel::sectionPlacementIsValid(
       (candidate.turnRoot && candidate.nested))
     return false;
 
-  bool sectionSeen = false;
-  bool sectionClosed = false;
-  bool rootSeen = false;
-  for (int position = 0; position <= rowCount(); ++position) {
-    const Row *row =
-        position == rowIndex
-            ? &candidate
-            : this->row(position < rowIndex ? position : position - 1);
-    if (!row)
-      continue;
-    if (row->sectionKey != candidate.sectionKey) {
-      if (sectionSeen)
-        sectionClosed = true;
-      continue;
-    }
-    if (sectionClosed)
-      return false;
-    if (row->turnRoot) {
-      if (rootSeen || sectionSeen)
-        return false;
-      rootSeen = true;
-    }
-    sectionSeen = true;
-  }
-  return true;
+  const RowNode *previous =
+      rowIndex > 0 ? nodeAt(static_cast<std::size_t>(rowIndex - 1)) : nullptr;
+  const RowNode *next = rowIndex < rowCount()
+                            ? nodeAt(static_cast<std::size_t>(rowIndex))
+                            : nullptr;
+  const bool previousInSection =
+      previous && previous->value.sectionKey == candidate.sectionKey;
+  const bool nextInSection =
+      next && next->value.sectionKey == candidate.sectionKey;
+  const auto found = sectionRows_.find(candidate.sectionKey);
+  if (found != sectionRows_.end() &&
+      !previousInSection && !nextInSection)
+    return false;
+  if (candidate.turnRoot)
+    return (found == sectionRows_.end() || !found->second.root) &&
+           !previousInSection;
+  return !nextInSection || !next->value.turnRoot;
+}
+
+ConversationItemModel::SectionStructure
+ConversationItemModel::sectionStructure(const std::string &sectionKey) const {
+  SectionStructure result;
+  const auto found = sectionRows_.find(sectionKey);
+  if (found == sectionRows_.end())
+    return result;
+  if (found->second.first)
+    result.first = found->second.first->value.stableKey;
+  if (found->second.last)
+    result.last = found->second.last->value.stableKey;
+  if (found->second.root)
+    result.root = found->second.root->value.stableKey;
+  return result;
 }
 
 void ConversationItemModel::refreshSectionStructure(
-    const std::string &sectionKey) {
+    const std::string &sectionKey, const SectionStructure &before,
+    const std::string &changedKey) {
   if (sectionKey.empty())
     return;
-  int first = -1;
-  int last = -1;
-  int root = -1;
-  for (int rowIndex = 0; rowIndex < rowCount(); ++rowIndex) {
-    const Row &row = rows_[static_cast<std::size_t>(rowIndex)];
-    if (row.sectionKey != sectionKey)
-      continue;
-    if (first < 0)
-      first = rowIndex;
-    last = rowIndex;
-    if (row.turnRoot)
-      root = rowIndex;
-  }
-  if (first < 0)
+  const auto found = sectionRows_.find(sectionKey);
+  if (found == sectionRows_.end())
     return;
 
-  for (int rowIndex = first; rowIndex <= last; ++rowIndex) {
-    Row &row = rows_[static_cast<std::size_t>(rowIndex)];
+  const SectionStructure after = sectionStructure(sectionKey);
+  std::vector<RowNode *> affected;
+  affected.reserve(7);
+  const auto retain = [this, &affected](const std::string &key) {
+    if (key.empty())
+      return;
+    const auto found = stableRows_.find(key);
+    if (found != stableRows_.end() &&
+        std::ranges::find(affected, found->second) == affected.end())
+      affected.push_back(found->second);
+  };
+  retain(before.first);
+  retain(before.last);
+  retain(before.root);
+  retain(after.first);
+  retain(after.last);
+  retain(after.root);
+  retain(changedKey);
+
+  if (before.root != after.root) {
+    affected.clear();
+    RowNode *node = found->second.first;
+    while (node && node->value.sectionKey == sectionKey) {
+      affected.push_back(node);
+      node = nextNode(node);
+    }
+  }
+
+  for (RowNode *node : affected) {
+    incrementProperty("modelSectionStructureRowsTouched");
+    const std::optional<int> rowPosition = rowOf(node);
+    if (!rowPosition || node->value.sectionKey != sectionKey)
+      continue;
+    Row &current = node->value;
     QList<int> roles;
-    const bool firstInTurn = rowIndex == first;
-    const bool lastInTurn = rowIndex == last;
-    const bool nested = root >= 0 && rowIndex != root;
-    if (row.firstInTurn != firstInTurn) {
-      row.firstInTurn = firstInTurn;
+    const bool firstInTurn = node == found->second.first;
+    const bool lastInTurn = node == found->second.last;
+    const bool nested = found->second.root && node != found->second.root;
+    if (current.firstInTurn != firstInTurn) {
+      current.firstInTurn = firstInTurn;
       roles.push_back(FirstInTurnRole);
     }
-    if (row.lastInTurn != lastInTurn) {
-      row.lastInTurn = lastInTurn;
+    if (current.lastInTurn != lastInTurn) {
+      current.lastInTurn = lastInTurn;
       roles.push_back(LastInTurnRole);
     }
-    if (row.nested != nested) {
-      row.nested = nested;
+    if (current.nested != nested) {
+      current.nested = nested;
       roles.push_back(NestedCardRole);
     }
-    if (row.activeTurn && !row.turnRoot) {
-      row.activeTurn = false;
+    if (current.activeTurn && !current.turnRoot) {
+      current.activeTurn = false;
       roles.push_back(ActiveTurnRole);
     }
     if (roles.empty())
       continue;
-    emit dataChanged(index(rowIndex), index(rowIndex), roles);
+    emit dataChanged(index(*rowPosition), index(*rowPosition), roles);
     incrementProperty("modelDataChangeCount");
   }
 }
@@ -936,29 +908,277 @@ bool ConversationItemModel::isPresented(
 void ConversationItemModel::rebuildIndexes() {
   stableRows_.clear();
   targetRows_.clear();
-  stableRows_.reserve(rows_.size());
-  targetRows_.reserve(rows_.size());
-  rowBase_ = 0;
+  sectionRows_.clear();
+  stableRows_.reserve(nodeCount(rows_));
+  targetRows_.reserve(nodeCount(rows_));
   historyActivityCount_ = 0;
-  for (std::size_t position = 0; position < rows_.size(); ++position) {
-    Row &row = rows_[position];
-    stableRows_.emplace(row.stableKey, position);
-    if (row.card.target)
-      targetRows_.emplace(row.card.target.get(), position);
-    if (row.historyActivity)
+  std::vector<RowNode *> pending;
+  RowNode *current = rows_.get();
+  while (current || !pending.empty()) {
+    while (current) {
+      pending.push_back(current);
+      current = current->left.get();
+    }
+    current = pending.back();
+    pending.pop_back();
+    stableRows_.emplace(current->value.stableKey, current);
+    if (current->value.card.target)
+      targetRows_.emplace(current->value.card.target.get(), current);
+    if (current->value.historyActivity)
       ++historyActivityCount_;
+    addSectionIdentity(current);
+    current = current->right.get();
   }
   incrementProperty("modelIndexRebuildCount");
 }
 
+ConversationItemModel::RowNode *
+ConversationItemModel::nodeAt(std::size_t row) const noexcept {
+  RowNode *current = rows_.get();
+  while (current) {
+    const std::size_t leftCount = nodeCount(current->left);
+    if (row < leftCount) {
+      current = current->left.get();
+      continue;
+    }
+    if (row == leftCount)
+      return current;
+    row -= leftCount + 1;
+    current = current->right.get();
+  }
+  return nullptr;
+}
+
 std::optional<int>
-ConversationItemModel::logicalRow(std::size_t ordinal) const {
-  if (ordinal < rowBase_ || ordinal - rowBase_ >= rows_.size())
+ConversationItemModel::rowOf(const RowNode *node) const noexcept {
+  if (!node)
     return std::nullopt;
-  const std::size_t value = ordinal - rowBase_;
-  if (value > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+  std::size_t result = nodeCount(node->left);
+  while (node->parent) {
+    if (node == node->parent->right.get())
+      result += nodeCount(node->parent->left) + 1;
+    node = node->parent;
+  }
+  if (node != rows_.get() ||
+      result > static_cast<std::size_t>(std::numeric_limits<int>::max()))
     return std::nullopt;
-  return static_cast<int>(value);
+  return static_cast<int>(result);
+}
+
+ConversationItemModel::RowNode *
+ConversationItemModel::insertRow(std::size_t row, Row value) {
+  auto inserted = std::make_unique<RowNode>(std::move(value), nextPriority());
+  RowNode *result = inserted.get();
+  auto [left, right] = splitRows(std::move(rows_), row);
+  rows_ = mergeRows(mergeRows(std::move(left), std::move(inserted)),
+                    std::move(right));
+  stableRows_.insert_or_assign(result->value.stableKey, result);
+  if (result->value.card.target)
+    targetRows_.insert_or_assign(result->value.card.target.get(), result);
+  if (result->value.historyActivity)
+    ++historyActivityCount_;
+  addSectionIdentity(result);
+  return result;
+}
+
+std::unique_ptr<ConversationItemModel::RowNode>
+ConversationItemModel::takeRow(std::size_t row) {
+  RowNode *candidate = nodeAt(row);
+  if (!candidate)
+    return {};
+  removeSectionIdentity(candidate);
+  auto [left, suffix] = splitRows(std::move(rows_), row);
+  auto [removed, right] = splitRows(std::move(suffix), 1);
+  rows_ = mergeRows(std::move(left), std::move(right));
+  if (!removed)
+    return {};
+  eraseRowIdentity(removed->value);
+  if (removed->value.historyActivity)
+    --historyActivityCount_;
+  removed->parent = nullptr;
+  return removed;
+}
+
+void ConversationItemModel::clearRows() noexcept {
+  stableRows_.clear();
+  targetRows_.clear();
+  sectionRows_.clear();
+  historyActivityCount_ = 0;
+  rows_.reset();
+}
+
+std::uint64_t ConversationItemModel::nextPriority() noexcept {
+  priorityState_ ^= priorityState_ >> 12;
+  priorityState_ ^= priorityState_ << 25;
+  priorityState_ ^= priorityState_ >> 27;
+  return priorityState_ * 0x2545f4914f6cdd1dULL;
+}
+
+std::size_t ConversationItemModel::nodeCount(
+    const std::unique_ptr<RowNode> &node) noexcept {
+  return node ? node->count : 0;
+}
+
+void ConversationItemModel::updateNode(RowNode *node) noexcept {
+  if (!node)
+    return;
+  node->count = nodeCount(node->left) + 1 + nodeCount(node->right);
+  if (node->left)
+    node->left->parent = node;
+  if (node->right)
+    node->right->parent = node;
+}
+
+std::pair<std::unique_ptr<ConversationItemModel::RowNode>,
+          std::unique_ptr<ConversationItemModel::RowNode>>
+ConversationItemModel::splitRows(std::unique_ptr<RowNode> root,
+                                 std::size_t leftCount) {
+  if (!root)
+    return {};
+  if (nodeCount(root->left) >= leftCount) {
+    auto [left, middle] = splitRows(std::move(root->left), leftCount);
+    root->left = std::move(middle);
+    updateNode(root.get());
+    root->parent = nullptr;
+    if (left)
+      left->parent = nullptr;
+    return {std::move(left), std::move(root)};
+  }
+  const std::size_t remaining = leftCount - nodeCount(root->left) - 1;
+  auto [middle, right] = splitRows(std::move(root->right), remaining);
+  root->right = std::move(middle);
+  updateNode(root.get());
+  root->parent = nullptr;
+  if (right)
+    right->parent = nullptr;
+  return {std::move(root), std::move(right)};
+}
+
+std::unique_ptr<ConversationItemModel::RowNode>
+ConversationItemModel::mergeRows(std::unique_ptr<RowNode> left,
+                                 std::unique_ptr<RowNode> right) {
+  if (!left) {
+    if (right)
+      right->parent = nullptr;
+    return right;
+  }
+  if (!right) {
+    left->parent = nullptr;
+    return left;
+  }
+  if (left->priority >= right->priority) {
+    left->right = mergeRows(std::move(left->right), std::move(right));
+    updateNode(left.get());
+    left->parent = nullptr;
+    return left;
+  }
+  right->left = mergeRows(std::move(left), std::move(right->left));
+  updateNode(right.get());
+  right->parent = nullptr;
+  return right;
+}
+
+ConversationItemModel::RowNode *
+ConversationItemModel::previousNode(RowNode *node) noexcept {
+  if (!node)
+    return nullptr;
+  if (node->left) {
+    node = node->left.get();
+    while (node->right)
+      node = node->right.get();
+    return node;
+  }
+  while (node->parent && node == node->parent->left.get())
+    node = node->parent;
+  return node->parent;
+}
+
+ConversationItemModel::RowNode *
+ConversationItemModel::nextNode(RowNode *node) noexcept {
+  if (!node)
+    return nullptr;
+  if (node->right) {
+    node = node->right.get();
+    while (node->left)
+      node = node->left.get();
+    return node;
+  }
+  while (node->parent && node == node->parent->right.get())
+    node = node->parent;
+  return node->parent;
+}
+
+void ConversationItemModel::addSectionIdentity(RowNode *node) {
+  if (!node || node->value.sectionKey.empty())
+    return;
+  SectionIndex &section = sectionRows_[node->value.sectionKey];
+  const std::optional<int> position = rowOf(node);
+  if (!section.member) {
+    section.member = node;
+    section.first = node;
+    section.last = node;
+  } else if (position) {
+    const std::optional<int> first = rowOf(section.first);
+    const std::optional<int> last = rowOf(section.last);
+    if (!first || *position < *first)
+      section.first = node;
+    if (!last || *position > *last)
+      section.last = node;
+  }
+  if (node->value.turnRoot)
+    section.root = node;
+  ++section.count;
+}
+
+void ConversationItemModel::removeSectionIdentity(RowNode *node) {
+  if (!node || node->value.sectionKey.empty())
+    return;
+  const auto found = sectionRows_.find(node->value.sectionKey);
+  if (found == sectionRows_.end())
+    return;
+  SectionIndex &section = found->second;
+  RowNode *previous = previousNode(node);
+  RowNode *next = nextNode(node);
+  if (section.root == node)
+    section.root = nullptr;
+  if (section.first == node)
+    section.first =
+        next && next->value.sectionKey == node->value.sectionKey ? next
+                                                                 : nullptr;
+  if (section.last == node)
+    section.last =
+        previous && previous->value.sectionKey == node->value.sectionKey
+            ? previous
+            : nullptr;
+  if (section.count > 0)
+    --section.count;
+  if (section.count == 0) {
+    sectionRows_.erase(found);
+    return;
+  }
+  if (section.member == node) {
+    RowNode *replacement = previous;
+    if (!replacement ||
+        replacement->value.sectionKey != node->value.sectionKey)
+      replacement = next;
+    section.member = replacement;
+  }
+  if (!section.first && section.member) {
+    section.first = section.member;
+    while (RowNode *candidate = previousNode(section.first)) {
+      if (candidate->value.sectionKey != node->value.sectionKey)
+        break;
+      section.first = candidate;
+    }
+  }
+  if (!section.last && section.member) {
+    section.last = section.member;
+    while (RowNode *candidate = nextNode(section.last)) {
+      if (candidate->value.sectionKey != node->value.sectionKey)
+        break;
+      section.last = candidate;
+    }
+  }
 }
 
 void ConversationItemModel::eraseRowIdentity(const Row &row) {
@@ -972,7 +1192,10 @@ void ConversationItemModel::incrementProperty(const char *name) {
 }
 
 void ConversationItemModel::updateRow(int rowIndex, Row replacement) {
-  Row &before = rows_[static_cast<std::size_t>(rowIndex)];
+  RowNode *node = nodeAt(static_cast<std::size_t>(rowIndex));
+  if (!node)
+    return;
+  Row &before = node->value;
   QList<int> roles;
   if (before.card.threadId != replacement.card.threadId)
     roles.push_back(ThreadIdRole);
@@ -1006,7 +1229,36 @@ void ConversationItemModel::updateRow(int rowIndex, Row replacement) {
     roles.push_back(PresentationRole);
     roles.push_back(Qt::AccessibleTextRole);
   }
+  const std::string oldStableKey = before.stableKey;
+  const std::string oldSectionKey = before.sectionKey;
+  const bool oldTurnRoot = before.turnRoot;
+  const nodegraph::Node *oldTarget =
+      before.card.target ? before.card.target.get() : nullptr;
+  const bool oldHistoryActivity = before.historyActivity;
+  if (oldSectionKey != replacement.sectionKey ||
+      oldTurnRoot != replacement.turnRoot)
+    removeSectionIdentity(node);
   before = std::move(replacement);
+  if (oldSectionKey != before.sectionKey || oldTurnRoot != before.turnRoot)
+    addSectionIdentity(node);
+  if (oldStableKey != before.stableKey) {
+    stableRows_.erase(oldStableKey);
+    stableRows_.insert_or_assign(before.stableKey, node);
+  }
+  const nodegraph::Node *newTarget =
+      before.card.target ? before.card.target.get() : nullptr;
+  if (oldTarget != newTarget) {
+    if (oldTarget)
+      targetRows_.erase(oldTarget);
+    if (newTarget)
+      targetRows_.insert_or_assign(newTarget, node);
+  }
+  if (oldHistoryActivity != before.historyActivity) {
+    if (before.historyActivity)
+      ++historyActivityCount_;
+    else
+      --historyActivityCount_;
+  }
   if (roles.empty())
     return;
   emit dataChanged(index(rowIndex), index(rowIndex), roles);

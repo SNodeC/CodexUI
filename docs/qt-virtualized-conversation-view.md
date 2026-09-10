@@ -130,31 +130,30 @@ Model changes have these exact meanings:
 - a changed retained card or structural role emits `dataChanged` for that row
   and the affected roles only;
 - a validated canonical tail uses one `beginInsertRows/endInsertRows`; stable
-  lookup tables retain absolute deque ordinals, so dropping the bounded prefix
-  does not reindex the surviving rows;
+  lookup tables point to nodes in a conversation-specific order-statistic row
+  tree, so dropping a prefix or changing the middle does not reindex surviving
+  rows;
 - an identical snapshot, card, or visibility tuple emits no signal and does
   not increment a presentation-work counter.
 
 `middle::ConversationHeightIndex` is the view's variable-row geometry index.
-It stores integer row extents in a Fenwick prefix tree. `top`, `bottom`, total
-extent, position-to-row lookup, and a changed row height are logarithmic. A
-tail append extends the tree from prefix sums without traversing existing
-heights. A leading removal advances a physical Fenwick origin; the special
-pinned-Turn-root case replaces only the next prefix slot. Neither operation
-traverses the retained suffix. Non-tail insertion/removal/movement is uncommon
-structural work and rebuilds the prefix tree from the already validated model
-order. Geometry values are nonnegative and accumulated as `qint64`; scrollbar
-conversion is a separate view concern.
+It stores integer row extents in a dedicated order-statistic tree whose nodes
+carry subtree counts and `qint64` extent sums. `top`, `bottom`, total extent,
+position-to-row lookup, a changed height, and tail or middle
+insertion/removal/movement are logarithmic tree-path operations. Only `assign`
+for a complete row sequence increments the rebuild counter. Geometry values
+are nonnegative; scrollbar conversion is a separate view concern.
 
 The deterministic foundation test exercises 10,000 rows and asserts no Qt
-widget construction is involved. At that size, position lookup and one-row
-height update each take at most 15 Fenwick steps, and appending rows leaves the
-rebuild counter unchanged.
+widget construction is involved. At that size, lookup and one-row height
+updates remain on logarithmic paths; exact middle insertion, movement, and
+removal leave the model identity, stable-key section, and height rebuild
+counters unchanged.
 
 ## Item-view and passive-delegate contract
 
 `ConversationView` is a narrowly specialized `QAbstractItemView`. The model
-owns row identity and order; a Fenwick index maps content positions to
+owns row identity and order; an extent order-statistic tree maps positions to
 variable-height rows; the view materializes only rows whose behavior currently
 requires a real control. It does not create placeholder widgets. Cached height
 records contain only stable key, width, and measured height and therefore
@@ -390,9 +389,9 @@ after paging qualification.
 
 ## Remaining limitations
 
-- A same-thread non-tail structural move/insert/remove rebuilds the Fenwick
-  tree from validated row extents. This is deliberate uncommon structural work;
-  ordinary scrolling, streaming, completion, and tail append stay bounded.
+- A root insertion/removal can genuinely change nesting, width, and collapse
+  visibility for every row in that one Turn. That Turn alone is re-evaluated;
+  unrelated Turns and the loaded conversation are not traversed.
 - A first interaction with a passive row constructs that one real editor. The
   row is measured before exposure, so this trades one local interaction cost
   for loaded-history-independent idle and scrolling cost.

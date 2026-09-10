@@ -200,8 +200,10 @@ bool testStableIdentityAndExactSignals() {
   result &= require(
       model.indexForTarget(second).row() == 1 &&
           model.indexForStableKey("item:6:thread4:turn14:same-wire-id-b")
-                  .row() == 1,
-      "stable and exact target indexes were not rebuilt");
+                  .row() == 1 &&
+          model.property("modelIndexRebuildCount").toULongLong() ==
+              indexRebuilds,
+      "exact structure changes rebuilt or lost stable identity indexes");
 
   log.clear();
   result &= require(model.replaceConversation(snapshot({}, "replacement")) &&
@@ -296,6 +298,31 @@ bool testVisibilityAndLargeModelRemainDataOnly() {
   log.clear();
   result &= require(!model.setVisibility({false, false}) && log.changed.empty(),
                     "identical visibility emitted work");
+  VisibleCardData inserted;
+  inserted.key = AuthoritativeItemKey{"large", "large-turn", "inserted"};
+  inserted.kind = CardKind::AgentMessage;
+  inserted.threadId = "large";
+  inserted.turnId = "large-turn";
+  inserted.itemId = "inserted";
+  inserted.payload = AgentMessageData{"inserted", true};
+  ConversationRowPlacement insertedPlacement;
+  insertedPlacement.card = std::move(inserted);
+  insertedPlacement.sectionKey = "large-section";
+  insertedPlacement.nested = true;
+  const qulonglong indexRebuilds =
+      model.property("modelIndexRebuildCount").toULongLong();
+  const qulonglong sectionRows =
+      model.property("modelSectionStructureRowsTouched").toULongLong();
+  result &= require(
+      model.insertCard(Count / 2, std::move(insertedPlacement)) ==
+              ConversationItemModel::StructuralChangeResult::Changed &&
+          model.rowCount() == Count + 1 &&
+          model.property("modelIndexRebuildCount").toULongLong() ==
+              indexRebuilds &&
+          model.property("modelSectionStructureRowsTouched").toULongLong() -
+                  sectionRows <=
+              7,
+      "a middle insert traversed the ten-thousand-row Turn section");
   return result;
 }
 
@@ -355,6 +382,7 @@ bool testBoundedTailAppendKeepsAbsoluteIdentityIndexes() {
   const ConversationItemModel::HistoryTrim trim = model.trimHistoryTo(Count);
   result &= require(
       trim.row == 1 && trim.count == 1 && trim.hiddenIncrement == 1 &&
+          model.historyActivityCount() == Count &&
           log.inserted.size() == 1 && log.inserted.front().first == Count + 1 &&
           log.removed.size() == 1 && log.removed.front().first == 1 &&
           log.removed.front().last == 1,
@@ -389,7 +417,7 @@ bool testHeightIndexIsBoundedAndExact() {
         std::upper_bound(prefix.begin(), prefix.end(), y) - prefix.begin() - 1);
     if (!require(index.rowAt(y) == std::min(expected, Count - 1),
                  "position-to-row lookup returned the wrong row") ||
-        !require(index.lastLookupSteps() <= 15,
+        !require(index.lastLookupSteps() <= 64,
                  "position-to-row lookup exceeded logarithmic steps")) {
       result = false;
       break;
@@ -401,7 +429,7 @@ bool testHeightIndexIsBoundedAndExact() {
   result &= require(index.setHeight(5000, heights[5000] + 91) &&
                         index.totalHeight() == totalBefore + 91 &&
                         index.rebuildCount() == rebuilds &&
-                        index.lastUpdateSteps() <= 15,
+                        index.lastUpdateSteps() <= 64,
                     "one height update was not exact and logarithmic");
   const std::vector<int> appended{41, 42};
   index.insert(index.size(), appended);
@@ -412,15 +440,20 @@ bool testHeightIndexIsBoundedAndExact() {
 
   const std::vector<int> inserted{77};
   index.insert(3, inserted);
-  result &=
-      require(index.height(3) == 77 && index.rebuildCount() == rebuilds + 1,
-              "non-tail insertion did not rebuild exact prefix state");
+  result &= require(index.height(3) == 77 &&
+                        index.rebuildCount() == rebuilds &&
+                        index.lastUpdateSteps() <= 128,
+                    "non-tail insertion was not exact and bounded");
   index.move(3, 1, 8);
-  result &= require(index.height(8) == 77,
-                    "height movement did not retain the moved extent");
+  result &= require(index.height(8) == 77 &&
+                        index.rebuildCount() == rebuilds &&
+                        index.lastUpdateSteps() <= 256,
+                    "height movement did not retain a bounded moved extent");
   index.remove(8, 1);
-  result &= require(index.size() == Count + 2,
-                    "height removal did not restore the expected row count");
+  result &= require(index.size() == Count + 2 &&
+                        index.rebuildCount() == rebuilds &&
+                        index.lastUpdateSteps() <= 128,
+                    "height removal was not exact and bounded");
 
   ConversationHeightIndex prefixIndex;
   const std::vector<int> prefixHeights{50, 20, 30, 40};

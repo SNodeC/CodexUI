@@ -189,9 +189,9 @@ private:
   };
 
   struct SectionRange {
-    qint64 first = -1;
-    qint64 last = -1;
-    qint64 root = -1;
+    std::string first;
+    std::string last;
+    std::string root;
     bool active = false;
   };
 
@@ -216,7 +216,11 @@ private:
   [[nodiscard]] std::optional<PresentationImpact>
   applyCardPresentationOwned(VisibleCardData card,
                              nodegraph::NodeRef materializedPrompt = {});
-  void finishExactStructureChange(const Anchor &anchor, bool follow);
+  void finishExactStructureChange(const Anchor &anchor, bool follow,
+                                  int sourceRow, int destinationRow,
+                                  std::string changedKey,
+                                  std::string oldSection,
+                                  std::string newSection);
   [[nodiscard]] bool cardVisible(const VisibleCardData &card) const noexcept;
   void setThread(const std::string &threadId);
   void storeCurrentThreadState();
@@ -230,6 +234,7 @@ private:
 
   void rebuildHeightIndex();
   void rebuildSectionRanges();
+  void rebuildSectionRange(const std::string &sectionKey, int nearRow);
   void updateSectionRangeForPresentationChange(int row, bool wasPresented);
   [[nodiscard]] int estimatedCardHeight(const VisibleCardData &card) const;
   [[nodiscard]] int rowWidth(const ConversationItemModel::Row &row) const;
@@ -239,8 +244,8 @@ private:
   [[nodiscard]] bool rowPresented(int row) const;
   [[nodiscard]] int rowSpacing(int row) const;
   [[nodiscard]] int rowSpacing(int row, const SectionRange *section) const;
-  [[nodiscard]] qint64 storedSectionRow(int modelRow) const noexcept;
-  [[nodiscard]] std::optional<int> modelSectionRow(qint64 storedRow) const;
+  [[nodiscard]] std::optional<int>
+  modelSectionRow(const std::string &stableKey) const;
   [[nodiscard]] QRect rowRect(int row) const;
   [[nodiscard]] int measureCard(ConversationCard *card, int width) const;
   [[nodiscard]] bool updateMeasuredHeight(int row, int cardHeight,
@@ -301,8 +306,6 @@ private:
   std::unordered_map<std::string, int> stagedHeights_;
   std::unordered_map<std::string, HeightRecord> heightCache_;
   std::unordered_map<std::string, SectionRange> sectionRanges_;
-  std::unordered_map<std::string, qint64> sectionRootRows_;
-  qint64 sectionRowOrigin_ = 0;
   std::string activeSectionKey_;
   std::unordered_map<std::string, CardInteractionState> cardInteractionStates_;
   std::unordered_map<std::string, bool> cardCollapsedStates_;

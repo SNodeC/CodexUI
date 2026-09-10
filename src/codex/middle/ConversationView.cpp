@@ -1060,6 +1060,9 @@ bool ConversationView::applyRowChange(ConversationRowChange change) {
   }
 
   const int sourceRow = source.isValid() ? source.row() : -1;
+  const std::string oldSection =
+      sourceRow >= 0 ? model_->row(sourceRow)->sectionKey : std::string{};
+  const std::string newSection = change.placement.sectionKey;
   int destinationRow = -1;
   if (change.previousCardKey) {
     const QModelIndex previous =
@@ -1115,7 +1118,8 @@ bool ConversationView::applyRowChange(ConversationRowChange change) {
   if (result == ConversationItemModel::StructuralChangeResult::Unchanged)
     return true;
 
-  finishExactStructureChange(anchor, follow);
+  finishExactStructureChange(anchor, follow, sourceRow, destinationRow, key,
+                             oldSection, newSection);
   incrementProperty(this, "targetedStructuralRowChanges");
   return true;
 }
@@ -1128,6 +1132,8 @@ bool ConversationView::removeCardTarget(const nodegraph::NodeRef &target) {
   if (!index.isValid() || !row)
     return false;
   const std::string key = row->stableKey;
+  const std::string oldSection = row->sectionKey;
+  const int removedRow = index.row();
   const Anchor anchor = captureAnchor();
   const bool follow = mode_ == Mode::Following;
   const QScopedValueRollback applying(applying_, true);
@@ -1146,14 +1152,216 @@ bool ConversationView::removeCardTarget(const nodegraph::NodeRef &target) {
   heightCache_.erase(key);
   cardCollapsedStates_.erase(key);
   cardInteractionStates_.erase(key);
-  finishExactStructureChange(anchor, follow);
+  finishExactStructureChange(anchor, follow, removedRow, -1, key, oldSection,
+                             {});
   incrementProperty(this, "targetedStructuralRemovals");
   return true;
 }
 
 void ConversationView::finishExactStructureChange(const Anchor &anchor,
-                                                  bool follow) {
-  rebuildSectionRanges();
+                                                  bool follow, int sourceRow,
+                                                  int destinationRow,
+                                                  std::string changedKey,
+                                                  std::string oldSection,
+                                                  std::string newSection) {
+  std::unordered_map<std::string, SectionRange> previousSections;
+  for (const std::string *section : {&oldSection, &newSection}) {
+    if (section->empty() || previousSections.contains(*section))
+      continue;
+    if (const auto found = sectionRanges_.find(*section);
+        found != sectionRanges_.end())
+      previousSections.emplace(*section, found->second);
+  }
+
+  if (sourceRow < 0) {
+    const std::array<int, 1> inserted{0};
+    heights_.insert(static_cast<std::size_t>(destinationRow), inserted);
+  } else if (destinationRow < 0) {
+    heights_.remove(static_cast<std::size_t>(sourceRow), 1);
+  } else if (sourceRow != destinationRow) {
+    heights_.move(static_cast<std::size_t>(sourceRow), 1,
+                  static_cast<std::size_t>(destinationRow));
+  }
+
+  const auto nearSectionRow = [this](const std::string &section,
+                                     int preferred) {
+    if (preferred >= 0 && preferred < model_->rowCount()) {
+      const ConversationItemModel::Row *candidate = model_->row(preferred);
+      if (candidate && candidate->sectionKey == section)
+        return preferred;
+    }
+    for (const int neighbor : {preferred - 1, preferred + 1}) {
+      if (neighbor < 0 || neighbor >= model_->rowCount())
+        continue;
+      const ConversationItemModel::Row *candidate = model_->row(neighbor);
+      if (candidate && candidate->sectionKey == section)
+        return neighbor;
+    }
+    return -1;
+  };
+  const auto updateSection = [&](const std::string &section,
+                                 int preferred) {
+    if (section.empty())
+      return;
+    const auto previous = previousSections.find(section);
+    SectionRange replacement = previous == previousSections.end()
+                                   ? SectionRange{}
+                                   : previous->second;
+    bool rescan = false;
+    const auto validRow = [this, &section](const std::string &key,
+                                          bool requireRoot) {
+      const std::optional<int> position = modelSectionRow(key);
+      const ConversationItemModel::Row *row =
+          position ? model_->row(*position) : nullptr;
+      return row && row->sectionKey == section &&
+             (!requireRoot || row->turnRoot);
+    };
+    if (!replacement.root.empty() && !validRow(replacement.root, true))
+      replacement.root.clear();
+    if (!replacement.first.empty() &&
+        (!validRow(replacement.first, false) ||
+         !rowPresented(*modelSectionRow(replacement.first)))) {
+      replacement.first.clear();
+      rescan = true;
+    }
+    if (!replacement.last.empty() &&
+        (!validRow(replacement.last, false) ||
+         !rowPresented(*modelSectionRow(replacement.last)))) {
+      replacement.last.clear();
+      rescan = true;
+    }
+
+    const QModelIndex changedIndex = model_->indexForStableKey(changedKey);
+    const ConversationItemModel::Row *changed =
+        model_->row(changedIndex.row());
+    const bool changedInSection =
+        changedIndex.isValid() && changed && changed->sectionKey == section;
+    if (changedInSection && changed->turnRoot)
+      replacement.root = changedKey;
+    const std::string oldRoot = previous == previousSections.end()
+                                    ? std::string{}
+                                    : previous->second.root;
+    if (replacement.root != oldRoot)
+      rescan = true;
+
+    if (sourceRow >= 0 && destinationRow >= 0 && sourceRow != destinationRow &&
+        previous != previousSections.end() &&
+        (previous->second.first == changedKey ||
+         previous->second.last == changedKey))
+      rescan = true;
+    if (changedInSection && rowPresented(changedIndex.row())) {
+      const std::optional<int> first = modelSectionRow(replacement.first);
+      const std::optional<int> last = modelSectionRow(replacement.last);
+      if (!first || changedIndex.row() < *first)
+        replacement.first = changedKey;
+      if (!last || changedIndex.row() > *last)
+        replacement.last = changedKey;
+    } else if (previous != previousSections.end() &&
+               (previous->second.first == changedKey ||
+                previous->second.last == changedKey)) {
+      rescan = true;
+    }
+
+    if (rescan) {
+      rebuildSectionRange(section, nearSectionRow(section, preferred));
+      return;
+    }
+    const std::optional<int> root = modelSectionRow(replacement.root);
+    const ConversationItemModel::Row *rootRow =
+        root ? model_->row(*root) : nullptr;
+    replacement.active = rootRow && rootRow->activeTurn;
+    if (replacement.first.empty() && replacement.root.empty()) {
+      sectionRanges_.erase(section);
+      if (activeSectionKey_ == section)
+        activeSectionKey_.clear();
+    } else {
+      if (replacement.active)
+        activeSectionKey_ = section;
+      else if (activeSectionKey_ == section)
+        activeSectionKey_.clear();
+      sectionRanges_.insert_or_assign(section, std::move(replacement));
+    }
+    incrementProperty(this, "conversationSectionRangeLocalUpdates");
+  };
+  updateSection(oldSection, std::max(0, sourceRow));
+  if (newSection != oldSection)
+    updateSection(newSection, destinationRow);
+
+  std::unordered_set<std::string> affectedKeys{std::move(changedKey)};
+  bool rootStructureChanged = false;
+  for (const std::string *section : {&oldSection, &newSection}) {
+    if (section->empty())
+      continue;
+    const auto before = previousSections.find(*section);
+    const auto after = sectionRanges_.find(*section);
+    if (before != previousSections.end()) {
+      affectedKeys.insert(before->second.first);
+      affectedKeys.insert(before->second.last);
+      affectedKeys.insert(before->second.root);
+    }
+    if (after != sectionRanges_.end()) {
+      affectedKeys.insert(after->second.first);
+      affectedKeys.insert(after->second.last);
+      affectedKeys.insert(after->second.root);
+    }
+    const std::string beforeRoot = before == previousSections.end()
+                                       ? std::string{}
+                                       : before->second.root;
+    const std::string afterRoot = after == sectionRanges_.end()
+                                      ? std::string{}
+                                      : after->second.root;
+    rootStructureChanged = rootStructureChanged || beforeRoot != afterRoot;
+  }
+
+  if (rootStructureChanged) {
+    for (const std::string *section : {&oldSection, &newSection}) {
+      if (section->empty())
+        continue;
+      const auto range = sectionRanges_.find(*section);
+      const std::optional<int> member =
+          range == sectionRanges_.end()
+              ? std::nullopt
+              : modelSectionRow(!range->second.first.empty()
+                                    ? range->second.first
+                                    : range->second.root);
+      if (!member)
+        continue;
+      int first = *member;
+      while (first > 0 && model_->row(first - 1)->sectionKey == *section)
+        --first;
+      for (int rowIndex = first; rowIndex < model_->rowCount(); ++rowIndex) {
+        const ConversationItemModel::Row *row = model_->row(rowIndex);
+        if (!row || row->sectionKey != *section)
+          break;
+        affectedKeys.insert(row->stableKey);
+      }
+    }
+  }
+
+  const auto refreshExtent = [this](const std::string &key) {
+    if (key.empty())
+      return;
+    const QModelIndex index = model_->indexForStableKey(key);
+    const ConversationItemModel::Row *row = model_->row(index.row());
+    if (!index.isValid() || !row)
+      return;
+    if (!rowPresented(index.row())) {
+      static_cast<void>(
+          heights_.setHeight(static_cast<std::size_t>(index.row()), 0));
+      return;
+    }
+    int cardHeight = estimatedCardHeight(row->card);
+    if (const auto cached = heightCache_.find(key);
+        cached != heightCache_.end() &&
+        cached->second.width == rowWidth(*row))
+      cardHeight = cached->second.height;
+    static_cast<void>(heights_.setHeight(
+        static_cast<std::size_t>(index.row()),
+        std::max(1, cardHeight) + rowSpacing(index.row())));
+  };
+  for (const std::string &key : affectedKeys)
+    refreshExtent(key);
+
   std::vector<std::string> released;
   for (auto &[key, card] : materializedCards_) {
     const QModelIndex index = model_->indexForStableKey(key);
@@ -1163,6 +1371,9 @@ void ConversationView::finishExactStructureChange(const Anchor &anchor,
       released.push_back(key);
       continue;
     }
+    if (!affectedKeys.contains(key) && row->sectionKey != oldSection &&
+        row->sectionKey != newSection)
+      continue;
     if (card->data() != row->card) {
       captureCardInteractionState(key, card, false);
       static_cast<void>(card->applyPresentation(row->card));
@@ -1172,6 +1383,8 @@ void ConversationView::finishExactStructureChange(const Anchor &anchor,
     const int height = measureCard(card, rowWidth(*row));
     heightCache_.insert_or_assign(
         key, HeightRecord{rowWidth(*row), height});
+    static_cast<void>(heights_.setHeight(
+        static_cast<std::size_t>(index.row()), height + rowSpacing(index.row())));
   }
   for (const std::string &key : released) {
     const auto found = materializedCards_.find(key);
@@ -1183,7 +1396,8 @@ void ConversationView::finishExactStructureChange(const Anchor &anchor,
   }
 
   empty_->setVisible(model_->rowCount() == 0);
-  rebuildHeightIndex();
+  setProperty("conversationHeightIndexUpdateSteps",
+              static_cast<qulonglong>(heights_.lastUpdateSteps()));
   updateScrollRange();
   if (follow)
     setScrollValue(verticalScrollBar()->maximum());
@@ -1316,15 +1530,12 @@ bool ConversationView::appendTailCard(ConversationTailCard tail) {
   }
 
   if (appended->turnRoot)
-    sectionRootRows_.insert_or_assign(appended->sectionKey,
-                                      storedSectionRow(appendedRow));
+    sectionRanges_[appended->sectionKey].root = appended->stableKey;
   if (rowPresented(appendedRow)) {
     SectionRange &range = sectionRanges_[appended->sectionKey];
-    if (range.first < 0)
-      range.first = storedSectionRow(appendedRow);
-    range.last = storedSectionRow(appendedRow);
-    if (appended->turnRoot)
-      range.root = storedSectionRow(appendedRow);
+    if (range.first.empty())
+      range.first = appended->stableKey;
+    range.last = appended->stableKey;
     range.active = range.active || appended->activeTurn;
   }
   if (startsActiveSection)
@@ -1398,23 +1609,15 @@ bool ConversationView::appendTailCard(ConversationTailCard tail) {
     heights_.remove(static_cast<std::size_t>(trim.row),
                     static_cast<std::size_t>(trim.count));
 
-    sectionRowOrigin_ += trim.row == 1 ? 1 : trim.count;
     const ConversationItemModel::Row *newFirst = model_->row(0);
-    if (trim.row == 1 && newFirst && newFirst->sectionKey == trim.sectionKey) {
-      SectionRange &range = sectionRanges_[trim.sectionKey];
-      range.first = sectionRowOrigin_;
-      range.root = sectionRowOrigin_;
-      sectionRootRows_.insert_or_assign(trim.sectionKey, sectionRowOrigin_);
+    if (trim.row == 1 && newFirst &&
+        newFirst->sectionKey == trim.sectionKey) {
+      // The pinned root and the presented section boundaries stay unchanged;
+      // only one nested prefix extent was removed.
     } else if (newFirst && newFirst->sectionKey == trim.sectionKey) {
-      SectionRange &range = sectionRanges_[trim.sectionKey];
-      range.first = sectionRowOrigin_;
-      if (range.root >= 0 && range.root < sectionRowOrigin_) {
-        range.root = -1;
-        sectionRootRows_.erase(trim.sectionKey);
-      }
+      rebuildSectionRange(trim.sectionKey, 0);
     } else {
       sectionRanges_.erase(trim.sectionKey);
-      sectionRootRows_.erase(trim.sectionKey);
       if (activeSectionKey_ == trim.sectionKey)
         activeSectionKey_.clear();
     }
@@ -1752,45 +1955,105 @@ bool ConversationView::rowPresented(int rowIndex) const {
     return false;
   if (!row->nested)
     return true;
-  const auto root = sectionRootRows_.find(row->sectionKey);
-  if (root == sectionRootRows_.end())
+  const auto section = sectionRanges_.find(row->sectionKey);
+  if (section == sectionRanges_.end() || section->second.root.empty())
     return true;
-  const std::optional<int> rootIndex = modelSectionRow(root->second);
+  const std::optional<int> rootIndex = modelSectionRow(section->second.root);
   const ConversationItemModel::Row *rootRow =
       rootIndex ? model_->row(*rootIndex) : nullptr;
   return !rootRow || !rowCollapsed(*rootRow);
 }
 
 void ConversationView::rebuildSectionRanges() {
-  sectionRowOrigin_ = 0;
   activeSectionKey_.clear();
   sectionRanges_.clear();
-  sectionRootRows_.clear();
   sectionRanges_.reserve(static_cast<std::size_t>(model_->rowCount()));
-  sectionRootRows_.reserve(static_cast<std::size_t>(model_->rowCount()));
   for (int rowIndex = 0; rowIndex < model_->rowCount(); ++rowIndex) {
     const ConversationItemModel::Row *row = model_->row(rowIndex);
     if (!row)
       continue;
     if (row->turnRoot)
-      sectionRootRows_.insert_or_assign(row->sectionKey,
-                                        storedSectionRow(rowIndex));
+      sectionRanges_[row->sectionKey].root = row->stableKey;
   }
   for (int rowIndex = 0; rowIndex < model_->rowCount(); ++rowIndex) {
     const ConversationItemModel::Row *row = model_->row(rowIndex);
     if (!row || !rowPresented(rowIndex))
       continue;
     SectionRange &range = sectionRanges_[row->sectionKey];
-    if (range.first < 0)
-      range.first = storedSectionRow(rowIndex);
-    range.last = storedSectionRow(rowIndex);
-    if (row->turnRoot)
-      range.root = storedSectionRow(rowIndex);
+    if (range.first.empty())
+      range.first = row->stableKey;
+    range.last = row->stableKey;
     range.active = range.active || (row->turnRoot && row->activeTurn);
     if (row->turnRoot && row->activeTurn)
       activeSectionKey_ = row->sectionKey;
   }
   incrementProperty(this, "conversationSectionRangeRebuilds");
+}
+
+void ConversationView::rebuildSectionRange(const std::string &sectionKey,
+                                           int nearRow) {
+  if (sectionKey.empty())
+    return;
+  if (nearRow < 0 || nearRow >= model_->rowCount() ||
+      model_->row(nearRow)->sectionKey != sectionKey) {
+    const auto retained = sectionRanges_.find(sectionKey);
+    const std::optional<int> retainedRow =
+        retained == sectionRanges_.end()
+            ? std::nullopt
+            : modelSectionRow(!retained->second.first.empty()
+                                  ? retained->second.first
+                                  : retained->second.root);
+    if (!retainedRow) {
+      sectionRanges_.erase(sectionKey);
+      if (activeSectionKey_ == sectionKey)
+        activeSectionKey_.clear();
+      return;
+    }
+    nearRow = *retainedRow;
+  }
+
+  int first = nearRow;
+  while (first > 0) {
+    const ConversationItemModel::Row *candidate = model_->row(first - 1);
+    if (!candidate || candidate->sectionKey != sectionKey)
+      break;
+    --first;
+  }
+  SectionRange replacement;
+  int end = first;
+  for (; end < model_->rowCount(); ++end) {
+    const ConversationItemModel::Row *candidate = model_->row(end);
+    if (!candidate || candidate->sectionKey != sectionKey)
+      break;
+    if (candidate->turnRoot)
+      replacement.root = candidate->stableKey;
+  }
+  const std::optional<int> rootRow = modelSectionRow(replacement.root);
+  const ConversationItemModel::Row *root =
+      rootRow ? model_->row(*rootRow) : nullptr;
+  const bool childrenPresented = !root || !rowCollapsed(*root);
+  for (int candidateIndex = first; candidateIndex < end; ++candidateIndex) {
+    const ConversationItemModel::Row *candidate = model_->row(candidateIndex);
+    if (!candidate->presented || (candidate->nested && !childrenPresented))
+      continue;
+    if (replacement.first.empty())
+      replacement.first = candidate->stableKey;
+    replacement.last = candidate->stableKey;
+    replacement.active =
+        replacement.active || (candidate->turnRoot && candidate->activeTurn);
+  }
+  if (replacement.first.empty() && replacement.root.empty()) {
+    sectionRanges_.erase(sectionKey);
+    if (activeSectionKey_ == sectionKey)
+      activeSectionKey_.clear();
+  } else {
+    if (replacement.active)
+      activeSectionKey_ = sectionKey;
+    else if (activeSectionKey_ == sectionKey)
+      activeSectionKey_.clear();
+    sectionRanges_.insert_or_assign(sectionKey, std::move(replacement));
+  }
+  incrementProperty(this, "conversationSectionRangeLocalUpdates");
 }
 
 void ConversationView::updateSectionRangeForPresentationChange(
@@ -1800,14 +2063,15 @@ void ConversationView::updateSectionRangeForPresentationChange(
     return;
 
   if (rowPresented(rowIndex)) {
-    const qint64 storedRow = storedSectionRow(rowIndex);
     SectionRange &range = sectionRanges_[changed->sectionKey];
-    if (range.first < 0 || storedRow < range.first)
-      range.first = storedRow;
-    if (range.last < 0 || storedRow > range.last)
-      range.last = storedRow;
+    const std::optional<int> first = modelSectionRow(range.first);
+    const std::optional<int> last = modelSectionRow(range.last);
+    if (!first || rowIndex < *first)
+      range.first = changed->stableKey;
+    if (!last || rowIndex > *last)
+      range.last = changed->stableKey;
     if (changed->turnRoot)
-      range.root = storedRow;
+      range.root = changed->stableKey;
     range.active = range.active || (changed->turnRoot && changed->activeTurn);
     return;
   }
@@ -1815,33 +2079,7 @@ void ConversationView::updateSectionRangeForPresentationChange(
   // Hiding a targeted row is uncommon (global visibility changes use the
   // structural rebuild path). Recompute only its canonical turn, never the
   // loaded conversation.
-  SectionRange replacement;
-  int first = rowIndex;
-  while (first > 0) {
-    const ConversationItemModel::Row *candidate = model_->row(first - 1);
-    if (!candidate || candidate->sectionKey != changed->sectionKey)
-      break;
-    --first;
-  }
-  for (int candidateIndex = first; candidateIndex < model_->rowCount();
-       ++candidateIndex) {
-    const ConversationItemModel::Row *candidate = model_->row(candidateIndex);
-    if (!candidate || candidate->sectionKey != changed->sectionKey)
-      break;
-    if (!rowPresented(candidateIndex))
-      continue;
-    if (replacement.first < 0)
-      replacement.first = storedSectionRow(candidateIndex);
-    replacement.last = storedSectionRow(candidateIndex);
-    if (candidate->turnRoot)
-      replacement.root = storedSectionRow(candidateIndex);
-    replacement.active =
-        replacement.active || (candidate->turnRoot && candidate->activeTurn);
-  }
-  if (replacement.first < 0)
-    sectionRanges_.erase(changed->sectionKey);
-  else
-    sectionRanges_.insert_or_assign(changed->sectionKey, replacement);
+  rebuildSectionRange(changed->sectionKey, rowIndex);
 }
 
 int ConversationView::rowSpacing(int rowIndex) const {
@@ -1855,25 +2093,25 @@ int ConversationView::rowSpacing(int rowIndex) const {
 
 int ConversationView::rowSpacing(int rowIndex,
                                  const SectionRange *section) const {
-  if (!section || section->root < 0 || section->last <= section->root)
+  if (!section || section->root.empty() || section->last.empty())
     return CardSpacing;
-  const qint64 storedRow = storedSectionRow(rowIndex);
-  if (storedRow == section->root)
+  const std::optional<int> root = modelSectionRow(section->root);
+  const std::optional<int> last = modelSectionRow(section->last);
+  if (!root || !last || *last <= *root)
+    return CardSpacing;
+  if (rowIndex == *root)
     return 14;
-  if (storedRow == section->last)
+  if (rowIndex == *last)
     return CardSpacing + 10;
   return CardSpacing;
 }
 
-qint64 ConversationView::storedSectionRow(int modelRow) const noexcept {
-  return sectionRowOrigin_ + modelRow;
-}
-
-std::optional<int> ConversationView::modelSectionRow(qint64 storedRow) const {
-  const qint64 modelRow = storedRow - sectionRowOrigin_;
-  if (modelRow < 0 || modelRow >= model_->rowCount())
+std::optional<int>
+ConversationView::modelSectionRow(const std::string &stableKey) const {
+  if (stableKey.empty())
     return std::nullopt;
-  return static_cast<int>(modelRow);
+  const QModelIndex index = model_->indexForStableKey(stableKey);
+  return index.isValid() ? std::optional<int>(index.row()) : std::nullopt;
 }
 
 void ConversationView::rebuildHeightIndex() {
@@ -2078,8 +2316,16 @@ void ConversationView::configureCardForRow(
   if (!card)
     return;
   const auto section = sectionRanges_.find(row.sectionKey);
-  const bool fragmentedRoot = row.turnRoot && section != sectionRanges_.end() &&
-                              section->second.last > section->second.root;
+  const std::optional<int> root =
+      section == sectionRanges_.end()
+          ? std::nullopt
+          : modelSectionRow(section->second.root);
+  const std::optional<int> last =
+      section == sectionRanges_.end()
+          ? std::nullopt
+          : modelSectionRow(section->second.last);
+  const bool fragmentedRoot =
+      row.turnRoot && root && last && *last > *root;
   card->setProperty("turnContainer", row.turnRoot);
   card->setNestedPresentation(row.nested);
   card->setVirtualTurnRootPresentation(fragmentedRoot);
@@ -2338,15 +2584,15 @@ void ConversationView::setCardCollapsed(const std::string &key,
         break;
       if (!rowPresented(last))
         continue;
-      if (replacement.first < 0)
-        replacement.first = storedSectionRow(last);
-      replacement.last = storedSectionRow(last);
+      if (replacement.first.empty())
+        replacement.first = candidate->stableKey;
+      replacement.last = candidate->stableKey;
       if (candidate->turnRoot)
-        replacement.root = storedSectionRow(last);
+        replacement.root = candidate->stableKey;
       replacement.active = replacement.active ||
                            (candidate->turnRoot && candidate->activeTurn);
     }
-    if (replacement.first < 0)
+    if (replacement.first.empty() && replacement.root.empty())
       sectionRanges_.erase(row->sectionKey);
     else
       sectionRanges_.insert_or_assign(row->sectionKey, replacement);
@@ -2902,13 +3148,13 @@ void ConversationView::paintEvent(QPaintEvent *event) {
             !paintedSections.insert(row->sectionKey).second)
           continue;
         const auto section = sectionRanges_.find(row->sectionKey);
-        if (section == sectionRanges_.end() || section->second.root < 0 ||
-            section->second.last <= section->second.root)
+        if (section == sectionRanges_.end() ||
+            section->second.root.empty() || section->second.last.empty())
           continue;
         const SectionRange &range = section->second;
         const std::optional<int> root = modelSectionRow(range.root);
         const std::optional<int> sectionLast = modelSectionRow(range.last);
-        if (!root || !sectionLast)
+        if (!root || !sectionLast || *sectionLast <= *root)
           continue;
         const qreal top =
             static_cast<qreal>(leadingChromeHeight()) +
@@ -2940,10 +3186,14 @@ void ConversationView::paintEvent(QPaintEvent *event) {
         option.initFrom(this);
         option.rect = rowRect(rowIndex);
         const auto section = sectionRanges_.find(row->sectionKey);
-        if (section != sectionRanges_.end() &&
-            section->second.root == storedSectionRow(rowIndex) &&
-            section->second.last > section->second.root)
-          option.viewItemPosition = QStyleOptionViewItem::Beginning;
+        if (section != sectionRanges_.end()) {
+          const std::optional<int> root =
+              modelSectionRow(section->second.root);
+          const std::optional<int> last =
+              modelSectionRow(section->second.last);
+          if (root && last && *root == rowIndex && *last > *root)
+            option.viewItemPosition = QStyleOptionViewItem::Beginning;
+        }
         if (!option.rect.intersects(event->rect()))
           continue;
         if (selectionModel() &&

@@ -278,17 +278,19 @@ Existing native widgets and styling remain the renderer. Conversation history
 remains in NodeGraph, while the adapter supplies the established view with one
 bounded 80-activity DTO plus any pinned owning prompts. The native conversation
 is a variable-height `QAbstractItemView` backed by a thin
-`ConversationItemModel` and Fenwick height index. Passive rows are delegate
+`ConversationItemModel` plus presentation-only row-order and variable-height
+order-statistic indexes. Passive rows are delegate
 painted; real `ConversationCard` widgets exist only for rich rows in the
 viewport plus bounded overscan. Selection and Load 80 stage only initially
 visible rich editors beneath a hidden owner and expose one complete final
-frame. Stable keys, row-local interaction records, and exact row/pixel anchors
+frame. Stable keys, row-local interaction records, stable-key Turn boundaries,
+and exact row/pixel anchors
 preserve both scroll axes across eviction and rematerialization. Ordinary graph
 deltas resolve directly to one model index; offscreen changes construct and
 paint no QWidget. An ordinary canonical last-item delta is verified under one
-short graph read and appended with one Qt insert signal; absolute row ordinals
-and a lazy height origin permit the history prefix to be trimmed without
-scanning the retained conversation. Non-tail or ambiguous structure uses the
+short graph read and appended with one Qt insert signal; stable row nodes and
+logarithmic extent paths permit a history prefix or middle row to change
+without rebuilding the retained conversation. Non-tail or ambiguous structure uses the
 exact row placement/removal APIs; only authority replacement, paging, and an
 explicit rescan use a complete projection. The view owns per-thread history
 windows and publishes one post-stage completion boundary so Shell reveals

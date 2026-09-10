@@ -231,8 +231,10 @@ structure, visibility, and accessibility values.
 - `appendTail(tail)` accepts only a unique card in the exact last Turn
   position, changes the former tail's `LastInTurnRole`, and emits one row
   insertion. `trimHistoryTo(limit)` retains an owning Turn root where needed
-  and removes only the bounded prefix. Stable/target maps use absolute deque
-  ordinals, so surviving rows are not reindexed.
+  and removes only the bounded prefix. Rows live in a conversation-specific
+  order-statistic tree; stable-key and exact-NodeRef maps point to stable row
+  nodes, so insert, remove, move, and surviving identity lookup never rebuild
+  or renumber a loaded-history-sized index.
 - `setHistoryChrome(hidden, providerHasMore)` changes only Load More facts;
   `setActiveTurn(row, active)` changes only the exact root role.
 - `setVisibility(visibility)` changes only the rows whose presented role
@@ -243,15 +245,13 @@ structure, visibility, and accessibility values.
 
 ### `middle::ConversationHeightIndex`
 
-`ConversationHeightIndex` is a non-QObject Fenwick prefix index owned by the
-view. It stores only nonnegative row extents. `top`, `bottom`, total height,
-position-to-row lookup, and a changed row height are logarithmic; a tail append
-extends the tree and a leading trim advances its physical origin without
-traversing retained rows. The pinned-root row-one removal updates one Fenwick
-slot and advances the same origin. Uncommon non-tail insert, remove, or move
-operations rebuild from the already validated model order. Geometry uses
-`qint64` internally and is converted to scrollbar coordinates only at the view
-boundary. The index contains no card values or authority.
+`ConversationHeightIndex` is a non-QObject order-statistic extent tree owned by
+the view. It stores only nonnegative row extents plus subtree row counts and
+`qint64` sums. `top`, `bottom`, total height, position-to-row lookup, a changed
+row height, and tail or non-tail insert/remove/move operations touch only
+logarithmic tree paths. `assign` is the explicit complete-sequence operation
+and the only operation counted as a rebuild. Scrollbar conversion remains a
+separate view concern. The index contains no card values or authority.
 
 ### `middle::ConversationView`
 
@@ -317,7 +317,9 @@ released, and QWidget work never occurs while a graph or channel lock is held.
   the separate prompt `NodeRef`. Prompt retirement cannot remove the row.
 - `applyRowChange(value)` resolves the projected neighbor keys against the
   current bounded model and emits only the required insert, move, or structural
-  row update. Coalesced sibling changes are applied in canonical neighbor order.
+  row update. Stable-key section boundaries and the extent tree are updated
+  only for the affected old/new Turn; later sections are neither shifted nor
+  rebuilt. Coalesced sibling changes are applied in canonical neighbor order.
 - `removeCardTarget(ref)` removes only the row currently indexed by that exact
   Item `NodeRef`; unrelated and already-transferred prompt removals are no-ops.
 - `appendTailCard(tail)` is the ordinary structural fast

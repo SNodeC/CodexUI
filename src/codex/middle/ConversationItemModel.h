@@ -7,10 +7,11 @@
 
 #include <QAbstractListModel>
 
-#include <deque>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace codexui::codex::middle {
@@ -85,6 +86,7 @@ public:
   };
 
   explicit ConversationItemModel(QObject *parent = nullptr);
+  ~ConversationItemModel() override;
 
   [[nodiscard]] int
   rowCount(const QModelIndex &parent = QModelIndex()) const override;
@@ -135,26 +137,71 @@ public:
   [[nodiscard]] bool hasMore() const noexcept { return hasMore_; }
 
 private:
+  struct RowNode {
+    explicit RowNode(Row value, std::uint64_t priority)
+        : value(std::move(value)), priority(priority) {}
+
+    Row value;
+    std::uint64_t priority = 0;
+    std::size_t count = 1;
+    std::unique_ptr<RowNode> left;
+    std::unique_ptr<RowNode> right;
+    RowNode *parent = nullptr;
+  };
+
+  struct SectionIndex {
+    RowNode *member = nullptr;
+    RowNode *first = nullptr;
+    RowNode *last = nullptr;
+    RowNode *root = nullptr;
+    std::size_t count = 0;
+  };
+
+  struct SectionStructure {
+    std::string first;
+    std::string last;
+    std::string root;
+  };
+
   [[nodiscard]] std::vector<Row> flatten(ConversationSnapshot &&snapshot) const;
   [[nodiscard]] bool rowsAreUnique(const std::vector<Row> &rows) const;
   [[nodiscard]] Row rowFromPlacement(ConversationRowPlacement placement) const;
   [[nodiscard]] bool sectionPlacementIsValid(int row,
                                              const Row &candidate) const;
-  void refreshSectionStructure(const std::string &sectionKey);
+  [[nodiscard]] SectionStructure
+  sectionStructure(const std::string &sectionKey) const;
+  void refreshSectionStructure(const std::string &sectionKey,
+                               const SectionStructure &before,
+                               const std::string &changedKey);
   [[nodiscard]] bool isPresented(const VisibleCardData &card) const noexcept;
   void rebuildIndexes();
+  [[nodiscard]] RowNode *nodeAt(std::size_t row) const noexcept;
+  [[nodiscard]] std::optional<int> rowOf(const RowNode *node) const noexcept;
+  RowNode *insertRow(std::size_t row, Row value);
+  [[nodiscard]] std::unique_ptr<RowNode> takeRow(std::size_t row);
+  void clearRows() noexcept;
+  [[nodiscard]] std::uint64_t nextPriority() noexcept;
+  static std::size_t nodeCount(const std::unique_ptr<RowNode> &node) noexcept;
+  static void updateNode(RowNode *node) noexcept;
+  static std::pair<std::unique_ptr<RowNode>, std::unique_ptr<RowNode>>
+  splitRows(std::unique_ptr<RowNode> root, std::size_t leftCount);
+  static std::unique_ptr<RowNode>
+  mergeRows(std::unique_ptr<RowNode> left,
+            std::unique_ptr<RowNode> right);
+  static RowNode *previousNode(RowNode *node) noexcept;
+  static RowNode *nextNode(RowNode *node) noexcept;
+  void addSectionIdentity(RowNode *node);
+  void removeSectionIdentity(RowNode *node);
   void incrementProperty(const char *name);
   void updateRow(int row, Row replacement);
-  [[nodiscard]] std::optional<int> logicalRow(std::size_t ordinal) const;
   void eraseRowIdentity(const Row &row);
 
-  std::deque<Row> rows_;
-  // Absolute ordinals let a bounded front trim avoid rewriting every stable
-  // identity in the retained suffix.
-  std::unordered_map<std::string, std::size_t> stableRows_;
-  std::unordered_map<const nodegraph::Node *, std::size_t> targetRows_;
-  std::size_t rowBase_ = 0;
+  std::unique_ptr<RowNode> rows_;
+  std::unordered_map<std::string, RowNode *> stableRows_;
+  std::unordered_map<const nodegraph::Node *, RowNode *> targetRows_;
+  std::unordered_map<std::string, SectionIndex> sectionRows_;
   std::size_t historyActivityCount_ = 0;
+  std::uint64_t priorityState_ = 0x9e3779b97f4a7c15ULL;
   std::string threadId_;
   std::size_t hiddenAuthoritativeItemCount_ = 0;
   bool hasMore_ = false;

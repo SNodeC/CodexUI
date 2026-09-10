@@ -224,7 +224,7 @@ bool exactStructuralRowsPreserveTheViewport() {
   nodegraph::NodeRef insertedTarget;
   {
     auto write = graph.write();
-    for (int row = 0; row < 24; ++row)
+    for (int row = 0; row < 10'000; ++row)
       targets.push_back(write.upsert(
           {nodegraph::NodeKind::Item, "exact-row-" + std::to_string(row)}));
     insertedTarget =
@@ -246,7 +246,7 @@ bool exactStructuralRowsPreserveTheViewport() {
   settle();
 
   const auto anchorBeforeInsert = firstVisible(view);
-  VisibleCardData inserted = message(1000, "Inserted in the middle");
+  VisibleCardData inserted = message(10'001, "Inserted in the middle");
   inserted.target = insertedTarget;
   ConversationRowChange insertion;
   insertion.placement =
@@ -255,6 +255,14 @@ bool exactStructuralRowsPreserveTheViewport() {
   insertion.nextCardKey = message(8).key;
   const qulonglong resetsBefore =
       view.conversationModel()->property("modelResetCount").toULongLong();
+  const qulonglong identityRebuildsBefore = view.conversationModel()
+                                                  ->property(
+                                                      "modelIndexRebuildCount")
+                                                  .toULongLong();
+  const qulonglong sectionRebuildsBefore =
+      view.property("conversationSectionRangeRebuilds").toULongLong();
+  const qulonglong heightRebuildsBefore =
+      view.property("conversationHeightIndexRebuilds").toULongLong();
   result &= expect(view.applyRowChange(std::move(insertion)) &&
                        view.conversationModel()
                                ->indexForTarget(insertedTarget)
@@ -281,8 +289,9 @@ bool exactStructuralRowsPreserveTheViewport() {
                    "an exact row move preserves the viewport anchor");
 
   const auto anchorBeforeRemoval = firstVisible(view);
-  result &= expect(
-      view.removeCardTarget(targets.front()) &&
+  const bool removed = view.removeCardTarget(targets.front());
+  const bool exactBounded =
+      removed &&
           !view.conversationModel()->indexForTarget(targets.front()).isValid() &&
           firstVisible(view) == anchorBeforeRemoval &&
           view.conversationModel()->property("modelResetCount").toULongLong() ==
@@ -296,9 +305,18 @@ bool exactStructuralRowsPreserveTheViewport() {
           view.conversationModel()
                   ->property("modelExactRemoveCount")
                   .toULongLong() == 1 &&
-          view.materializedCardCount() <= 48,
+          view.conversationModel()
+                  ->property("modelIndexRebuildCount")
+                  .toULongLong() == identityRebuildsBefore &&
+          view.property("conversationSectionRangeRebuilds").toULongLong() ==
+              sectionRebuildsBefore &&
+          view.property("conversationHeightIndexRebuilds").toULongLong() ==
+              heightRebuildsBefore &&
+          view.materializedCardCount() <= 48;
+  result &= expect(
+      exactBounded,
       "exact structural operations use narrow model signals and bounded "
-      "widgets without a model reset");
+      "widgets without rebuilding ten thousand retained indexes");
   return result;
 }
 
