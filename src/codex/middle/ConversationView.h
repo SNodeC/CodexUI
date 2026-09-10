@@ -348,6 +348,7 @@ private:
   bool pausedByComposerGrowth_ = false;
   bool dispatchingNativeWheel_ = false;
   bool materializing_ = false;
+  bool adjustingScrollRange_ = false;
   bool structuralStagePassScheduled_ = false;
   bool committingStructuralStage_ = false;
   // A synthetic event ignored by a card child can propagate back through the

@@ -2,6 +2,7 @@
 
 #include "codex/middle/ConversationCards.h"
 #include "codex/middle/ConversationView.h"
+#include "codex/ui/UiStyle.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -13,6 +14,7 @@
 #include <QMouseEvent>
 #include <QScrollBar>
 #include <QThread>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <cstdlib>
@@ -1142,6 +1144,128 @@ bool selectionFocusAndOneGesturePromotion() {
   return result;
 }
 
+bool passiveAndInteractivePresentationShareExactGeometry() {
+  ConversationSnapshot snapshot;
+  snapshot.threadId = "geometry-invariant";
+  TurnSection section;
+  section.key = "geometry-section";
+  section.turnId = "turn";
+  for (int row = 0; row < 50; ++row) {
+    std::string markdown;
+    const int paragraphs = row == 25 ? 22 : 3 + row % 5;
+    for (int paragraph = 0; paragraph < paragraphs; ++paragraph)
+      markdown += std::string(100, 'W') + "\n\n";
+    section.cards.push_back(
+        {AuthoritativeItemKey{"geometry-invariant", "turn",
+                              "update-" + std::to_string(row)},
+         CardKind::AgentMessage,
+         "geometry-invariant",
+         "turn",
+         "update-" + std::to_string(row),
+         AgentMessageData{std::move(markdown), false}});
+  }
+  const VisibleCardData update = section.cards[25];
+  snapshot.sections.push_back(std::move(section));
+
+  ConversationView view;
+  view.resize(620, 360);
+  view.show();
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "geometry-invariant fixture reconciles");
+  settle();
+  const QModelIndex index = view.conversationModel()->index(25);
+  view.scrollTo(index, QAbstractItemView::PositionAtCenter);
+  settle();
+  result &= expect(materializedCard(view, stableKey(update.key)) == nullptr,
+                   "geometry-invariant row begins in passive presentation");
+  const int passiveHeight = view.visualRect(index).height();
+  view.setCurrentIndex(index);
+  settle();
+  const int interactiveHeight = view.visualRect(index).height();
+  if (interactiveHeight != passiveHeight)
+    std::cerr << "geometry mismatch: passive=" << passiveHeight
+              << " interactive=" << interactiveHeight << '\n';
+  result &= expect(materializedCard(view, stableKey(update.key)) &&
+                       interactiveHeight == passiveHeight,
+                   "passive Markdown and its interactive widget have exact "
+                   "row-height parity");
+  return result;
+}
+
+bool bidirectionalLazyMeasurementPreservesNativeScrollMotion() {
+  ConversationSnapshot snapshot;
+  snapshot.threadId = "lazy-scroll-anchor";
+  TurnSection section;
+  section.key = "lazy-scroll-section";
+  section.turnId = "turn";
+  for (int row = 0; row < 240; ++row) {
+    std::string markdown;
+    const int paragraphs = 1 + row % 9;
+    for (int paragraph = 0; paragraph < paragraphs; ++paragraph)
+      markdown += std::string(90 + row % 37, 'W') + "\n\n";
+    section.cards.push_back(
+        {AuthoritativeItemKey{"lazy-scroll-anchor", "turn",
+                              "update-" + std::to_string(row)},
+         CardKind::AgentMessage,
+         "lazy-scroll-anchor",
+         "turn",
+         "update-" + std::to_string(row),
+         AgentMessageData{std::move(markdown), false}});
+  }
+  snapshot.sections.push_back(std::move(section));
+
+  ConversationView view;
+  view.resize(620, 360);
+  view.show();
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "lazy-scroll anchor fixture reconciles");
+  settle();
+  view.verticalScrollBar()->setValue(view.verticalScrollBar()->maximum() / 2);
+  settle();
+
+  const auto verifySteps = [&](QAbstractSlider::SliderAction action,
+                               int expectedDelta) {
+    for (int step = 0; step < 80; ++step) {
+      const auto before = firstVisible(view);
+      if (before.first.empty())
+        return false;
+      const QModelIndex retained =
+          view.conversationModel()->indexForStableKey(before.first);
+      const int valueBefore = view.verticalScrollBar()->value();
+      view.verticalScrollBar()->triggerAction(action);
+      settle(1);
+      if (view.verticalScrollBar()->value() == valueBefore)
+        return true;
+      if (!retained.isValid() ||
+          view.visualRect(retained).top() - before.second != expectedDelta)
+        return false;
+    }
+    return true;
+  };
+  result &= expect(verifySteps(QAbstractSlider::SliderSingleStepSub,
+                               view.verticalScrollBar()->singleStep()),
+                   "upward scrolling preserves exact motion while rows above "
+                   "become measured");
+  result &= expect(verifySteps(QAbstractSlider::SliderSingleStepAdd,
+                               -view.verticalScrollBar()->singleStep()),
+                   "downward scrolling preserves exact motion while rows "
+                   "below become measured");
+  const qulonglong passesBefore =
+      view.property("conversationMaterializationPasses").toULongLong();
+  const QPointF local = view.viewport()->rect().center();
+  QWheelEvent wheel(local, view.viewport()->mapToGlobal(local.toPoint()), {},
+                    QPoint(0, 120), Qt::NoButton, Qt::NoModifier,
+                    Qt::NoScrollPhase, false);
+  result &= expect(view.forwardWheelEvent(&wheel),
+                   "conversation accepts one native wheel gesture");
+  settle(1);
+  result &= expect(
+      view.property("conversationMaterializationPasses").toULongLong() ==
+          passesBefore + 1,
+      "one wheel update performs exactly one materialization pass");
+  return result;
+}
+
 bool outsideTextDragDoesNotReenterTheView() {
   ConversationSnapshot snapshot;
   snapshot.threadId = "virtual-thread";
@@ -1213,6 +1337,7 @@ bool outsideTextDragDoesNotReenterTheView() {
 
 int main(int argc, char **argv) {
   QApplication application(argc, argv);
+  qApp->setStyleSheet(codexui::UiStyle::applicationStyleSheet());
   using namespace codexui::codex::middle;
   const bool result = viewportProportionalFoundation() &&
                       exactStructuralRowsPreserveTheViewport() &&
@@ -1225,6 +1350,8 @@ int main(int argc, char **argv) {
                       virtualTurnSurfaceAndInteractivePromotion() &&
                       directTailGrowsTheRetainedTurnSurface() &&
                       acknowledgedSteeringMovesAboveFollowingActivity() &&
+                      passiveAndInteractivePresentationShareExactGeometry() &&
+                      bidirectionalLazyMeasurementPreservesNativeScrollMotion() &&
                       selectionFocusAndOneGesturePromotion() &&
                       outsideTextDragDoesNotReenterTheView();
   if (result)

@@ -26,6 +26,7 @@
 #include <QStyleOptionViewItem>
 #include <QStyledItemDelegate>
 #include <QTextDocument>
+#include <QTextOption>
 #include <QTimer>
 #include <QVariantAnimation>
 #include <QWheelEvent>
@@ -147,6 +148,7 @@ private:
 namespace {
 
 constexpr int CardSpacing = 8;
+constexpr int CardFrameExtent = 2;
 constexpr int HistoryButtonHeight = 32;
 constexpr int NestedCardIndent = 12;
 constexpr int NativeScrollLineStep = 20;
@@ -209,6 +211,13 @@ struct PassivePresentation {
   std::vector<PassiveBlock> blocks;
   int verticalMargin = 10;
 };
+
+QFont passiveBlockFont(bool metadata) {
+  QFont font = QApplication::font();
+  if (metadata)
+    font.setPointSizeF(std::max(7.0, font.pointSizeF() - 1.0));
+  return font;
+}
 
 PassivePresentation passivePresentation(const VisibleCardData &card) {
   PassivePresentation result;
@@ -302,15 +311,13 @@ public:
     if (!row)
       return {};
     const PassivePresentation presentation = passivePresentation(row->card);
-    int height = 24 + 2 * presentation.verticalMargin;
+    int height = CardFrameExtent + 24 + 2 * presentation.verticalMargin;
     if (!collapsed) {
       const int bodyWidth = std::max(1, option.rect.width() - 24);
       bool first = true;
       for (std::size_t block = 0; block < presentation.blocks.size(); ++block) {
         const PassiveBlock &value = presentation.blocks[block];
-        QFont font = option.font;
-        if (value.metadata)
-          font.setPointSizeF(std::max(7.0, font.pointSizeF() - 1.0));
+        const QFont font = passiveBlockFont(value.metadata);
         height += (first ? 6 : 6) +
                   documentHeight(row->stableKey, block, value, bodyWidth, font);
         first = false;
@@ -343,7 +350,7 @@ public:
       painter->drawRoundedRect(bounds, 10.0, 10.0);
     }
 
-    QFont titleFont = option.font;
+    QFont titleFont = QApplication::font();
     titleFont.setWeight(QFont::DemiBold);
     painter->setFont(titleFont);
     painter->setPen(presentation.titleColor);
@@ -351,20 +358,19 @@ public:
     const QRect titleRect(option.rect.left() + 12, top,
                           std::max(0, option.rect.width() - 88), 24);
     painter->drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter,
-                      option.fontMetrics.elidedText(presentation.title,
-                                                    Qt::ElideRight,
-                                                    titleRect.width()));
+                      QFontMetrics(titleFont).elidedText(
+                          presentation.title, Qt::ElideRight,
+                          titleRect.width()));
 
     if (!presentation.status.isEmpty()) {
-      QFont statusFont = option.font;
-      statusFont.setPointSizeF(std::max(7.0, statusFont.pointSizeF() - 1.0));
+      const QFont statusFont = QApplication::font();
       painter->setFont(statusFont);
       painter->setPen(QColor(QStringLiteral("#667085")));
       const QRect statusRect(option.rect.right() - 205, top, 145, 24);
       painter->drawText(statusRect, Qt::AlignRight | Qt::AlignVCenter,
-                        option.fontMetrics.elidedText(presentation.status,
-                                                      Qt::ElideRight,
-                                                      statusRect.width()));
+                        QFontMetrics(statusFont).elidedText(
+                            presentation.status, Qt::ElideRight,
+                            statusRect.width()));
     }
 
     if (!collapsed) {
@@ -372,9 +378,7 @@ public:
       const int bodyWidth = std::max(1, option.rect.width() - 24);
       for (std::size_t block = 0; block < presentation.blocks.size(); ++block) {
         const PassiveBlock &value = presentation.blocks[block];
-        QFont font = option.font;
-        if (value.metadata)
-          font.setPointSizeF(std::max(7.0, font.pointSizeF() - 1.0));
+        const QFont font = passiveBlockFont(value.metadata);
         const int height =
             documentHeight(row->stableKey, block, value, bodyWidth, font);
         paintDocument(
@@ -448,6 +452,9 @@ private:
       record.document->setDefaultFont(font);
       record.document->setDefaultStyleSheet(
           QStringLiteral("a{color:#5471a6;text-decoration:none;}"));
+      QTextOption textOption = record.document->defaultTextOption();
+      textOption.setWrapMode(QTextOption::WordWrap);
+      record.document->setDefaultTextOption(textOption);
       if (value.markdown)
         record.document->setMarkdown(value.text,
                                      QTextDocument::MarkdownFeatures(
@@ -639,7 +646,7 @@ void ConversationView::setPresentationOptions(PresentationOptions options) {
     setScrollValue(verticalScrollBar()->maximum());
   else
     restoreAnchor(anchor);
-  updateMaterialization(false);
+  updateMaterialization(true);
   viewport()->update();
 }
 
@@ -792,7 +799,7 @@ bool ConversationView::reconcileOwned(ConversationSnapshot snapshot,
     setScrollValue(verticalScrollBar()->maximum());
   else
     restoreAnchor(targetAnchor);
-  updateMaterialization(false);
+  updateMaterialization(true);
 
   if (follow)
     setScrollValue(verticalScrollBar()->maximum());
@@ -1437,7 +1444,7 @@ void ConversationView::finishExactStructureChange(const Anchor &anchor,
     setScrollValue(verticalScrollBar()->maximum());
   else
     restoreAnchor(anchor);
-  updateMaterialization(false);
+  updateMaterialization(true);
   if (follow)
     setScrollValue(verticalScrollBar()->maximum());
   else
@@ -1802,7 +1809,7 @@ bool ConversationView::appendTailCard(ConversationTailCard tail) {
     setScrollValue(verticalScrollBar()->maximum());
   else
     restoreAnchor(anchor);
-  updateMaterialization(false);
+  updateMaterialization(true);
   if (follow)
     setScrollValue(verticalScrollBar()->maximum());
   else
@@ -1997,7 +2004,7 @@ ConversationView::applyCardPresentationOwned(
       setScrollValue(verticalScrollBar()->maximum());
     else
       restoreAnchor(presentationAnchor);
-    updateMaterialization(false);
+    updateMaterialization(true);
     if (followedBefore)
       setScrollValue(verticalScrollBar()->maximum());
     else
@@ -2316,6 +2323,7 @@ qint64 ConversationView::naturalContentHeight() const noexcept {
 void ConversationView::updateScrollRange() {
   if (!model_ || !viewport())
     return;
+  const QScopedValueRollback adjusting(adjustingScrollRange_, true);
   const int viewportHeight = std::max(0, viewport()->height());
   const qint64 maximum64 =
       std::max<qint64>(0, naturalContentHeight() - viewportHeight);
@@ -2648,6 +2656,7 @@ void ConversationView::updateMaterialization(bool preserveAnchor) {
   if (materializing_)
     return;
   const QScopedValueRollback materializing(materializing_, true);
+  incrementProperty(this, "conversationMaterializationPasses");
   const Anchor anchor = preserveAnchor ? captureAnchor() : Anchor{};
   const bool follow = mode_ == Mode::Following;
 
@@ -2786,7 +2795,7 @@ void ConversationView::setCardCollapsed(const std::string &key,
                 static_cast<qulonglong>(heights_.lastUpdateSteps()));
     updateScrollRange();
     restoreAnchor(anchor);
-    updateMaterialization(false);
+    updateMaterialization(true);
     restoreAnchor(anchor);
     layoutMaterializedCards();
     viewport()->update();
@@ -2877,8 +2886,12 @@ ConversationView::Anchor ConversationView::captureAnchor() const {
       std::max<qint64>(0, static_cast<qint64>(verticalScrollBar()->value()) -
                               leadingChromeHeight());
   std::size_t rowIndex = heights_.rowAt(contentY);
-  while (rowIndex < heights_.size() && heights_.height(rowIndex) == 0)
+  while (rowIndex < heights_.size()) {
+    if (heights_.height(rowIndex) != 0 &&
+        rowRect(static_cast<int>(rowIndex)).bottom() >= 0)
+      break;
     ++rowIndex;
+  }
   if (rowIndex >= heights_.size())
     return anchor;
   const ConversationItemModel::Row *row =
@@ -3003,7 +3016,6 @@ bool ConversationView::applyWheel(QWheelEvent *event) {
     mode_ = Mode::Paused;
   if (isAtBottom())
     mode_ = Mode::Following;
-  updateMaterialization(false);
   storeCurrentThreadState();
   event->accept();
   return true;
@@ -3032,7 +3044,7 @@ void ConversationView::scrollTo(const QModelIndex &index, ScrollHint hint) {
     target += geometry.bottom() - viewport()->height() + 1;
   setScrollValue(target);
   handleUserScrollValue(verticalScrollBar()->value());
-  updateMaterialization(false);
+  updateMaterialization(true);
 }
 
 QModelIndex ConversationView::indexAt(const QPoint &point) const {
@@ -3138,8 +3150,13 @@ void ConversationView::updateGeometries() {
 void ConversationView::scrollContentsBy(int dx, int dy) {
   static_cast<void>(dx);
   static_cast<void>(dy);
-  if (!materializing_)
-    updateMaterialization(false);
+  if (!programmaticScroll_ && !applying_ && !adjustingScrollRange_) {
+    stopFollowingAnimation();
+    pausedByComposerGrowth_ = false;
+    mode_ = isAtBottom() ? Mode::Following : Mode::Paused;
+  }
+  if (!materializing_ && !adjustingScrollRange_)
+    updateMaterialization(true);
   layoutMaterializedCards();
   viewport()->update();
 }
@@ -3422,7 +3439,7 @@ void ConversationView::resizeEvent(QResizeEvent *event) {
     setScrollValue(verticalScrollBar()->maximum());
   else
     restoreAnchor(anchor);
-  updateMaterialization(false);
+  updateMaterialization(true);
   viewport()->update();
   storeCurrentThreadState();
 }

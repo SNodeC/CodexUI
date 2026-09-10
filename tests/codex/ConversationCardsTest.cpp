@@ -1188,13 +1188,19 @@ bool testFollowPauseAndStableAnchor() {
                    "follow animation is monotonic and reaches the new bottom");
 
   const int beforeWheelNotch = view.verticalScrollBar()->value();
+  const auto beforeWheelAnchor = firstVisible(view);
+  const QModelIndex beforeWheelIndex =
+      view.conversationModel()->indexForStableKey(beforeWheelAnchor.first);
   mouseWheelNotch(view, 120);
+  const int nativeWheelDistance =
+      std::min(beforeWheelNotch,
+               view.verticalScrollBar()->singleStep() *
+                   std::max(1, QApplication::wheelScrollLines()));
   result &= expect(
       view.mode() == ConversationView::Mode::Paused && !view.isAtBottom() &&
-          beforeWheelNotch - view.verticalScrollBar()->value() ==
-              std::min(beforeWheelNotch,
-                       view.verticalScrollBar()->singleStep() *
-                           std::max(1, QApplication::wheelScrollLines())),
+          beforeWheelIndex.isValid() &&
+          view.visualRect(beforeWheelIndex).top() - beforeWheelAnchor.second ==
+              nativeWheelDistance,
       "native mouse-wheel handling uses the configured line "
       "distance and "
       "pauses following immediately");
