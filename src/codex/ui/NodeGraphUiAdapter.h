@@ -18,11 +18,6 @@ namespace codexui::codex::ui {
 // values, and releases the graph before any QWidget code runs.
 class NodeGraphUiAdapter final {
 public:
-  struct ConversationOptions {
-    bool showReasoning = true;
-    bool showCodexUpdates = true;
-  };
-
   struct ConversationInfo {
     std::size_t authoritativeItemCount = 0;
     bool readyForDisplay = false;
@@ -33,22 +28,22 @@ public:
   explicit NodeGraphUiAdapter(const nodegraph::NodeGraph &graph) noexcept;
 
   [[nodiscard]] std::optional<middle::ConversationSnapshot>
-  conversation(const nodegraph::NodeRef &thread, std::size_t itemLimit,
-               ConversationOptions options) const;
+  conversation(const nodegraph::NodeRef &thread,
+               std::size_t itemLimit) const;
 
   [[nodiscard]] std::optional<ConversationInfo>
   conversationInfo(const nodegraph::NodeRef &thread) const;
 
   [[nodiscard]] std::optional<middle::VisibleCardData>
-  card(const nodegraph::NodeRef &thread, const nodegraph::NodeRef &item,
-       ConversationOptions options) const;
+  card(const nodegraph::NodeRef &thread,
+       const nodegraph::NodeRef &item) const;
 
   // Projects only a canonical last item of the selected thread. It is the
   // bounded structural fast path for ordinary append; any non-tail or prompt
   // alias case returns nullopt and uses complete reconciliation instead.
   [[nodiscard]] std::optional<middle::ConversationTailCard>
-  tailCard(const nodegraph::NodeRef &thread, const nodegraph::NodeRef &item,
-           ConversationOptions options) const;
+  tailCard(const nodegraph::NodeRef &thread,
+           const nodegraph::NodeRef &item) const;
 
   [[nodiscard]] std::optional<ThreadListSnapshot>
   threads(const nodegraph::NodeRef &selectedThread) const;

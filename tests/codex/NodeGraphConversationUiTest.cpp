@@ -94,7 +94,7 @@ bool oldUiConsumesAdapterSnapshotsAtomically() {
   QApplication::processEvents();
 
   const auto initial =
-      adapter.conversation(fixture.thread, 80, {true, true});
+      adapter.conversation(fixture.thread, 80);
   if (!require(initial.has_value(), "initial adapter read failed") ||
       !require(view.reconcile(*initial), "initial UI reconciliation was empty"))
     return false;
@@ -123,7 +123,7 @@ bool oldUiConsumesAdapterSnapshotsAtomically() {
 
   fixture.appendTurn("new following answer");
   const auto appended =
-      adapter.conversation(fixture.thread, 80, {true, true});
+      adapter.conversation(fixture.thread, 80);
   if (!require(appended.has_value(), "appended adapter read failed") ||
       !require(view.reconcile(*appended), "new cards were not presented"))
     return false;
@@ -144,7 +144,7 @@ bool pausedViewportKeepsItsPaintedAnchor() {
   view.resize(760, 520);
   view.show();
   const auto initial =
-      adapter.conversation(fixture.thread, 80, {true, true});
+      adapter.conversation(fixture.thread, 80);
   if (!initial || !view.reconcile(*initial))
     return false;
   QApplication::processEvents();
@@ -163,7 +163,7 @@ bool pausedViewportKeepsItsPaintedAnchor() {
 
   fixture.appendTurn("offscreen tail");
   const auto appended =
-      adapter.conversation(fixture.thread, 80, {true, true});
+      adapter.conversation(fixture.thread, 80);
   if (!appended || !view.reconcile(*appended))
     return false;
   QApplication::processEvents();
@@ -207,7 +207,7 @@ bool promptMorphPreservesExactTargetAndWidget() {
         acknowledged = std::move(target);
         return true;
       });
-  auto snapshot = adapter.conversation(thread, 80, {true, true});
+  auto snapshot = adapter.conversation(thread, 80);
   if (!snapshot || !view.reconcile(*snapshot))
     return false;
   QApplication::processEvents();
@@ -232,7 +232,7 @@ bool promptMorphPreservesExactTargetAndWidget() {
     write.relate(turn, nodegraph::RelationKind::TurnRootItem, authoritative);
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80, {true, true});
+  snapshot = adapter.conversation(thread, 80);
   if (!snapshot || !view.reconcile(*snapshot))
     return false;
   QApplication::processEvents();
@@ -256,7 +256,7 @@ bool promptMorphPreservesExactTargetAndWidget() {
     write.remove(prompt);
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80, {true, true});
+  snapshot = adapter.conversation(thread, 80);
   if (!require(snapshot.has_value(),
                "local retirement did not project the authoritative card"))
     return false;
@@ -322,7 +322,7 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
     ++acknowledgements;
     return target == steering;
   });
-  auto snapshot = adapter.conversation(thread, 80, {true, true});
+  auto snapshot = adapter.conversation(thread, 80);
   if (!snapshot || !view.reconcile(*snapshot))
     return false;
   QApplication::processEvents();
@@ -352,7 +352,7 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
     write.setField(steering, "showPendingAnimation", false);
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80, {true, true});
+  snapshot = adapter.conversation(thread, 80);
   if (!snapshot)
     return false;
   static_cast<void>(view.reconcile(*snapshot));
@@ -380,7 +380,7 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
         turn, std::array<NodeRef, 4>{root, steering, authoritative, progress});
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80, {true, true});
+  snapshot = adapter.conversation(thread, 80);
   if (!snapshot)
     return false;
   static_cast<void>(view.reconcile(*snapshot));
@@ -399,7 +399,7 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
     write.remove(steering);
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80, {true, true});
+  snapshot = adapter.conversation(thread, 80);
   if (!snapshot)
     return false;
   static_cast<void>(view.reconcile(*snapshot));
@@ -438,7 +438,7 @@ bool fileChangesUseCanonicalWorkspace() {
   }
 
   ui::NodeGraphUiAdapter adapter(graph);
-  auto snapshot = adapter.conversation(thread, 80, {true, true});
+  auto snapshot = adapter.conversation(thread, 80);
   if (!require(snapshot && snapshot->sections.size() == 1 &&
                    snapshot->sections.front().cards.size() == 1,
                "file changes were not projected from the owning thread"))
@@ -454,7 +454,7 @@ bool fileChangesUseCanonicalWorkspace() {
     write.setField(changes, "cwd", "/workspace/item");
     static_cast<void>(write.finish());
   }
-  auto projected = adapter.card(thread, changes, {true, true});
+  auto projected = adapter.card(thread, changes);
   const auto *specific =
       projected
           ? std::get_if<middle::FileChangesData>(&projected->payload)

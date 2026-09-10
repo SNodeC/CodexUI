@@ -443,17 +443,6 @@ CardKind graphCardKind(const nodegraph::NodeState &state) {
   return CardKind::GenericActivity;
 }
 
-bool graphCardVisible(const nodegraph::NodeState &state,
-                      const NodeGraphUiAdapter::ConversationOptions &options) {
-  const CardKind kind = graphCardKind(state);
-  if (kind == CardKind::Reasoning)
-    return options.showReasoning;
-  if (kind != CardKind::AgentMessage)
-    return true;
-  return graphString(graphField(state, "phase")) == "final_answer" ||
-         options.showCodexUpdates;
-}
-
 VisibleCardData graphCardData(const nodegraph::NodeRef &item,
                               std::string threadId, std::string turnId,
                               const nodegraph::NodeState &state,
@@ -1556,9 +1545,7 @@ NodeGraphUiAdapter::inspector(
 
 std::optional<VisibleCardData>
 NodeGraphUiAdapter::card(const nodegraph::NodeRef &thread,
-                         const nodegraph::NodeRef &item,
-                         ConversationOptions options) const {
-  static_cast<void>(options);
+                         const nodegraph::NodeRef &item) const {
   if (!graph_ || !thread || !item)
     return std::nullopt;
   auto read = graph_->tryRead();
@@ -1582,9 +1569,7 @@ NodeGraphUiAdapter::card(const nodegraph::NodeRef &thread,
 
 std::optional<ConversationTailCard>
 NodeGraphUiAdapter::tailCard(const nodegraph::NodeRef &thread,
-                             const nodegraph::NodeRef &item,
-                             ConversationOptions options) const {
-  static_cast<void>(options);
+                             const nodegraph::NodeRef &item) const {
   if (!graph_ || !thread || !item)
     return std::nullopt;
   auto read = graph_->tryRead();
@@ -1653,9 +1638,7 @@ NodeGraphUiAdapter::tailCard(const nodegraph::NodeRef &thread,
 
 std::optional<ConversationSnapshot>
 NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
-                                 std::size_t itemLimit,
-                                 ConversationOptions options) const {
-  static_cast<void>(options);
+                                 std::size_t itemLimit) const {
   if (!graph_ || !thread)
     return std::nullopt;
   auto read = graph_->tryRead();

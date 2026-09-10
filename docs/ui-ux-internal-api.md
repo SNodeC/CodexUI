@@ -108,23 +108,20 @@ always means “no coherent value was available now”, never “render empty”
   needed before a potentially larger projection: authoritative item count,
   display readiness, hydration failure, and provider continuation. Local
   prompts never contribute to the authoritative count.
-- `conversation(thread, itemLimit, options)` returns one complete retained
+- `conversation(thread, itemLimit)` returns one complete retained
   `ConversationSnapshot` for a validated thread. `itemLimit` is the effective
   per-thread history window, never an instruction to mutate graph state.
-  `options` mirrors the existing presentation preferences; visibility remains
-  the widget's responsibility so toggling it can reuse widgets and local fold
-  state.
-- `card(thread, item, options)` projects one validated item only when the item
+- Presentation visibility remains the item model/view's responsibility so
+  toggling it can reuse visible editors and stable local interaction state.
+- `card(thread, item)` projects one validated item only when the item
   is still parented by a Turn owned by the supplied thread. It is reserved for
   a targeted visible-card update and must never reconstruct identity from
   payload fields. A stale/detached item returns `nullopt`.
-- `tailCard(thread, item, options)` additionally requires that the exact item
+- `tailCard(thread, item)` additionally requires that the exact item
   be the last child of the last canonical Turn and that it not participate in
   prompt-materialization aliasing. It returns one `ConversationTailCard` with
   section/root/nested/activity placement and current history chrome for the
   bounded structural append path. Any ambiguity returns `nullopt`.
-- `ConversationOptions` carries only `showReasoning` and
-  `showCodexUpdates`; it owns no filter state.
 - `ConversationInfo` is adapter control metadata, not a presentation model or
   widget snapshot.
 
@@ -133,9 +130,9 @@ always means “no coherent value was available now”, never “render empty”
 | constructor | `graph`: long-lived canonical graph; no return | Pre: graph outlives adapter. Post: no read and no allocation is performed. |
 | `threads` | `selectedThread`: optional stable target; returns optional complete DTO | Stale/removed selection is represented as no selected ID, while valid roots still project. Contention returns `nullopt` without side effects. |
 | `conversationInfo` | `thread`: required stable Thread; returns optional control facts | Wrong kind, stale generation, removal, or contention returns `nullopt`. Success does not construct card DTOs. |
-| `conversation` | `thread`, positive effective `itemLimit`, presentation `options`; returns optional complete snapshot | Pre: the caller has observed `conversationInfo.readyForDisplay`; this primitive projects the graph's current content and does not itself infer temporal hydration completeness. Limit is clamped to at least one. Success preserves canonical order and root ownership. Invalid target/contention returns `nullopt`. |
-| `card` | exact `thread` and `item`, presentation `options`; returns optional card DTO | Success requires the item still be a child of a Turn owned by the exact thread. It never searches by payload IDs. |
-| `tailCard` | exact `thread` and `item`, presentation `options`; returns optional tail DTO | Success requires the exact canonical last item of the exact canonical last Turn, usable loaded-count state, and no prompt alias. The DTO is non-authoritative and owns only values needed for one Qt append. |
+| `conversation` | `thread`, positive effective `itemLimit`; returns optional complete snapshot | Pre: the caller has observed `conversationInfo.readyForDisplay`; this primitive projects the graph's current content and does not itself infer temporal hydration completeness. Limit is clamped to at least one. Success preserves canonical order and root ownership. Invalid target/contention returns `nullopt`. |
+| `card` | exact `thread` and `item`; returns optional card DTO | Success requires the item still be a child of a Turn owned by the exact thread. It never searches by payload IDs. |
+| `tailCard` | exact `thread` and `item`; returns optional tail DTO | Success requires the exact canonical last item of the exact canonical last Turn, usable loaded-count state, and no prompt alias. The DTO is non-authoritative and owns only values needed for one Qt append. |
 
 ### `middle::ThreadPane`
 

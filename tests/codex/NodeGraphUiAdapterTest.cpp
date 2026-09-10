@@ -76,7 +76,7 @@ bool projectsCanonicalTurnStructureAndRoot() {
   }
 
   NodeGraphUiAdapter adapter(graph);
-  const auto result = adapter.conversation(thread, 80, {true, true});
+  const auto result = adapter.conversation(thread, 80);
   if (!require(result.has_value(), "adapter projection was unavailable") ||
       !require(result->threadId == "thread-1", "wrong projected thread") ||
       !require(result->sections.size() == 2, "wrong turn count") ||
@@ -135,7 +135,7 @@ bool limitsHistoryButPinsTheOwningPrompt() {
   }
 
   NodeGraphUiAdapter adapter(graph);
-  const auto result = adapter.conversation(thread, 2, {true, true});
+  const auto result = adapter.conversation(thread, 2);
   return require(result.has_value(), "bounded projection unavailable") &&
          require(result->hasMore, "bounded projection lost Load More") &&
          require(result->hiddenAuthoritativeItemCount == 3,
@@ -181,7 +181,7 @@ bool projectsOnlyTheExactCanonicalTail() {
   }
 
   NodeGraphUiAdapter adapter(graph);
-  const auto projected = adapter.tailCard(thread, tail, {true, true});
+  const auto projected = adapter.tailCard(thread, tail);
   return require(projected.has_value(),
                  "canonical last item was not projected") &&
          require(projected->card.target == tail && !projected->turnRoot &&
@@ -190,7 +190,7 @@ bool projectsOnlyTheExactCanonicalTail() {
          require(projected->authoritativeItemCount == 2 &&
                      projected->providerHasMore,
                  "tail projection lost authoritative history chrome") &&
-         require(!adapter.tailCard(thread, root, {true, true}),
+         require(!adapter.tailCard(thread, root),
                  "a non-tail item entered the bounded append path");
 }
 

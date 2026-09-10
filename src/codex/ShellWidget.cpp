@@ -1594,10 +1594,8 @@ bool ShellWidget::Impl::refreshConversation() {
     return true;
   }
 
-  auto snapshot = uiAdapter.conversation(
-      boundGraphThread, history.effective,
-      {middleRegion->conversation().presentationOptions().showReasoning,
-       middleRegion->conversation().presentationOptions().showCodexUpdates});
+  auto snapshot =
+      uiAdapter.conversation(boundGraphThread, history.effective);
   if (!snapshot)
     return false;
   middleRegion->conversation().setEmptyMessage(
@@ -1712,11 +1710,8 @@ void ShellWidget::Impl::commitPendingPanes() {
     std::vector<nodegraph::NodeRef> items = std::move(pendingConversationItems);
     pendingConversationItems.clear();
     bool requiresStructuralReconcile = false;
-    const auto options = middleRegion->conversation().presentationOptions();
     for (const nodegraph::NodeRef &item : items) {
-      auto card =
-          uiAdapter.card(boundGraphThread, item,
-                         {options.showReasoning, options.showCodexUpdates});
+      auto card = uiAdapter.card(boundGraphThread, item);
       if (!card || !middleRegion->conversation().applyCardPresentation(
                        std::move(*card))) {
         requiresStructuralReconcile = true;
@@ -1737,10 +1732,8 @@ void ShellWidget::Impl::commitPendingPanes() {
   if (pendingConversation && pendingConversationItems.size() == 1 &&
       boundGraphThread &&
       !middleRegion->conversation().structuralStagingActive()) {
-    const auto options = middleRegion->conversation().presentationOptions();
-    auto tail =
-        uiAdapter.tailCard(boundGraphThread, pendingConversationItems.front(),
-                           {options.showReasoning, options.showCodexUpdates});
+    auto tail = uiAdapter.tailCard(boundGraphThread,
+                                   pendingConversationItems.front());
     if (tail) {
       const std::string &threadId = boundGraphThread->id().canonical;
       ConversationHistoryWindow nextHistory = conversationHistory[threadId];
