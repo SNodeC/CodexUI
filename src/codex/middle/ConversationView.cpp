@@ -601,6 +601,11 @@ void ConversationView::setPromptRecoveryAction(
   promptRecoveryAction_ = std::move(action);
 }
 
+void ConversationView::setPresentationCommittedAction(
+    std::function<void(const std::string &)> action) {
+  presentationCommittedAction_ = std::move(action);
+}
+
 void ConversationView::setEmptyMessage(QString message) {
   if (message == emptyMessage_)
     return;
@@ -709,6 +714,17 @@ bool ConversationView::reconcileOwned(ConversationSnapshot snapshot) {
   stopFollowingAnimation();
 
   const bool changed = model_->reconcile(std::move(snapshot));
+  if (!targetThreadId.empty()) {
+    HistoryWindow &history = historyWindows_[targetThreadId];
+    const std::size_t represented = model_->historyActivityCount();
+    if (represented > history.effective) {
+      history.requested = represented;
+      history.effective = represented;
+    }
+    history.lastAuthoritativeCount =
+        std::max(history.lastAuthoritativeCount,
+                 represented + model_->hiddenAuthoritativeItemCount());
+  }
   rebuildSectionRanges();
   loadMore_->setVisible(model_->hasMore());
   if (model_->hasMore()) {
@@ -999,6 +1015,8 @@ void ConversationView::finishThreadSelection(const std::string &threadId) {
   loadingThreadId_.clear();
   stagingOverlay_->finish();
   incrementProperty(this, "threadSelectionLoadsFinished");
+  if (presentationCommittedAction_)
+    presentationCommittedAction_(threadId);
 }
 
 std::optional<PresentationImpact>
@@ -1183,8 +1201,58 @@ void ConversationView::finishExactStructureChange(const Anchor &anchor,
   storeCurrentThreadState();
 }
 
-bool ConversationView::appendTailCard(ConversationTailCard tail,
-                                      std::size_t historyActivityLimit) {
+std::size_t ConversationView::historyLimitForThread(
+    const std::string &threadId, std::size_t authoritativeItemCount) {
+  HistoryWindow &history = historyWindows_[threadId];
+  const bool following = modeForThread(threadId) == Mode::Following;
+  if (!following &&
+      authoritativeItemCount > history.lastAuthoritativeCount) {
+    history.effective +=
+        authoritativeItemCount - history.lastAuthoritativeCount;
+  } else if (following) {
+    history.effective = history.requested;
+  }
+  history.lastAuthoritativeCount = authoritativeItemCount;
+  return history.effective;
+}
+
+ConversationView::HistoryPageRequest ConversationView::requestNextHistoryPage(
+    const std::string &threadId, std::size_t authoritativeItemCount,
+    bool providerHasMore) {
+  HistoryWindow &history = historyWindows_[threadId];
+  const bool retainedHistoryAvailable =
+      history.effective < authoritativeItemCount;
+  history.requested += AuthoritativeHistoryPageSize;
+  history.effective += AuthoritativeHistoryPageSize;
+  return {history.effective,
+          !retainedHistoryAvailable && providerHasMore};
+}
+
+void ConversationView::forgetThreadPresentation(const std::string &threadId) {
+  historyWindows_.erase(threadId);
+  threadStates_.erase(threadId);
+}
+
+bool ConversationView::appendTailCard(ConversationTailCard tail) {
+  const std::string threadId = tail.card.threadId;
+  HistoryWindow nextHistory = historyWindows_[threadId];
+  std::size_t authoritativeItemCount = tail.authoritativeItemCount;
+  if (authoritativeItemCount == 0) {
+    authoritativeItemCount = std::max(
+        nextHistory.lastAuthoritativeCount + 1,
+        model_->historyActivityCount() +
+            model_->hiddenAuthoritativeItemCount() + 1);
+  }
+  const bool following = modeForThread(threadId) == Mode::Following;
+  if ((!following || nextHistory.effective > nextHistory.requested) &&
+      authoritativeItemCount > nextHistory.lastAuthoritativeCount) {
+    nextHistory.effective +=
+        authoritativeItemCount - nextHistory.lastAuthoritativeCount;
+  } else if (following) {
+    nextHistory.effective = nextHistory.requested;
+  }
+  nextHistory.lastAuthoritativeCount = authoritativeItemCount;
+  const std::size_t historyActivityLimit = nextHistory.effective;
   if (pendingStructuralSnapshot_ || tail.card.threadId != threadId_ ||
       historyActivityLimit == 0)
     return false;
@@ -1224,6 +1292,7 @@ bool ConversationView::appendTailCard(ConversationTailCard tail,
 
   if (!model_->appendTail(std::move(tail)))
     return false;
+  historyWindows_.insert_or_assign(threadId, nextHistory);
   const int appendedRow = model_->rowCount() - 1;
   const ConversationItemModel::Row *appended = model_->row(appendedRow);
   if (!appended)

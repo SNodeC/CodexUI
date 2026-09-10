@@ -258,9 +258,10 @@ boundary. The index contains no card values or authority.
 `ConversationView` is the canonical variable-height `QAbstractItemView` for
 the conversation. It owns the thin item model, height index, bounded delegate
 document cache, visible rich cards/editors, Load More and empty controls, and
-genuinely local interaction state. It retains per-thread follow/pause anchors,
-fold state, text selections, focus/current-row identity, nested command-output
-scroll state, and presentation options by stable row key.
+genuinely local interaction state. It retains per-thread history windows,
+follow/pause anchors, fold state, text selections, focus/current-row identity,
+nested command-output scroll state, and presentation options by stable row
+key. Shell retains only the selected canonical graph target.
 
 Thread/ownership contract: Qt-main only. Passive historical rows have no
 QWidget or placeholder. QObject parentage owns only the rich cards currently
@@ -273,7 +274,8 @@ released, and QWidget work never occurs while a graph or channel lock is held.
   private list model and delegate, height index, Load More control, empty label,
   and hidden staging host. It creates no historical card widgets.
 - `setLoadMoreAction(callback)` installs the one user gesture for expanding
-  history. The callback decides retained-graph versus provider loading.
+  history after the view has advanced its own requested/effective window. The
+  callback decides whether to project or send the exact provider action.
 - `setPromptMaterializedAction(callback)` is a narrow additive integration
   hook. After a local card has successfully morphed to its authoritative user
   card and after all QWidget work, it returns the exact prompt `NodeRef` for
@@ -281,6 +283,9 @@ released, and QWidget work never occurs while a graph or channel lock is held.
   pass; the widget never retries automatically.
 - `setPromptRecoveryAction(callback)` is a narrow additive hook fired only by
   explicit recovery on the exact failed local-prompt token.
+- `setPresentationCommittedAction(callback)` fires once only after a selected
+  thread's staged model, geometry, editors, cover, and spinner have committed.
+  Shell uses that boundary to reveal matching heading and Inspector values.
 - `setEmptyMessage(message)` changes empty text only, preserving anchor and
   follow behavior. It must not clear cards.
 - `setPresentationOptions(options)` updates reasoning/update visibility and
@@ -315,11 +320,17 @@ released, and QWidget work never occurs while a graph or channel lock is held.
   row update. Coalesced sibling changes are applied in canonical neighbor order.
 - `removeCardTarget(ref)` removes only the row currently indexed by that exact
   Item `NodeRef`; unrelated and already-transferred prompt removals are no-ops.
-- `appendTailCard(tail, historyActivityLimit)` is the ordinary structural fast
+- `appendTailCard(tail)` is the ordinary structural fast
   path after `NodeGraphUiAdapter::tailCard` validates canonical placement. It
   emits one insert, performs an optional bounded prefix trim, preserves the
   stable anchor or existing follow state, and never rebuilds model, section, or
   height indexes. `false` requests complete structural reconciliation.
+- `historyLimitForThread`, `requestNextHistoryPage`, and
+  `forgetThreadPresentation` own the requested/effective 80-row window and its
+  lifecycle beside that thread's anchor/follow state. Canonical counts are
+  inputs; these methods create no domain authority and issue no provider call.
+- `presentedThreadId()` identifies the complete model frame currently exposed
+  (or covered during replacement), never the merely selected graph target.
 - `conversationModel()` exposes the owned model for Qt selection,
   accessibility, deterministic instrumentation, and exact action targeting;
   callers must not treat it as graph authority.
@@ -345,9 +356,10 @@ released, and QWidget work never occurs while a graph or channel lock is held.
 | Method | Parameters / return | Preconditions and observable effect |
 | --- | --- | --- |
 | constructor | optional QWidget `parent` | Produces an empty following-mode item view. No historical card widgets exist. |
-| `setLoadMoreAction` | replacement `void()` callback | Called once per accepted button gesture; view neither changes history count nor calls provider itself. |
+| `setLoadMoreAction` | replacement `void()` callback | Called once per accepted button gesture after the view advances its local history window; the callback may project retained rows or request the provider. |
 | `setPromptMaterializedAction` | replacement `bool(NodeRef)` callback | Called after a successful local-to-authoritative visual transition. Exact token is moved to callback. False aborts only the remaining callbacks in this reconcile. |
 | `setPromptRecoveryAction` | replacement `void(NodeRef)` callback | Called only from explicit recovery gesture on the current matching card. |
+| `setPresentationCommittedAction` | replacement `void(threadId)` callback | Called after the exact selected staged frame is complete and visible. Superseded stages never call it. |
 | `setEmptyMessage` | display `QString` value | Changes only empty-label text; model rows remain. Anchor is preserved. |
 | `setPresentationOptions` | complete local options | Updates model presentation roles and visible/materialized rows without a graph query. Existing user fold choices win over initial-fold defaults. |
 | `presentationOptions` | returns value copy | Pure query. |
@@ -355,7 +367,9 @@ released, and QWidget work never occurs while a graph or channel lock is held.
 | `beginThreadSelection` | exact selected thread ID | Immediately covers only the message viewport and starts one 500 ms visual-delay timer. Repeating the same pending identity is a no-op; a new identity cancels superseded staging. |
 | `reconcileStaged` | owned complete snapshot | Same final-state contract as `reconcile`; only initially visible rich editors are prepared beneath the hidden host in bounded event-loop passes before one atomic reveal. |
 | `applyCardPresentation` | one exact `VisibleCardData`; returns optional local impact | Wrong thread/key/incompatible kind returns `nullopt`; identical data returns `None`; otherwise only the resolved row, its genuine section-edge geometry, and its visible editor/delegate rectangle may change. |
-| `appendTailCard` | one validated `ConversationTailCard`, activity limit; returns bool | Exact canonical tail inserts directly and optionally trims the prefix without retained-history traversal. Wrong thread, duplicate/invalid placement, active staging, or zero limit returns false for complete reconciliation. |
+| `appendTailCard` | one validated `ConversationTailCard`; returns bool | Exact canonical tail updates the view-owned history window, inserts directly, and optionally trims the prefix without retained-history traversal. Wrong thread, duplicate/invalid placement, or active staging returns false for complete reconciliation. |
+| `historyLimitForThread`, `requestNextHistoryPage` | thread ID plus current canonical history facts | Update only per-thread presentation-window counters and return the effective projection limit/provider-request decision. |
+| `forgetThreadPresentation`, `presentedThreadId` | retired thread ID / pure current-frame query | Releases per-thread window/anchor state or reports the complete frame currently owned by the model. |
 | `conversationModel`, `materializedCardCount` | borrowed model pointer / integer count | Inspection only. The model is non-authoritative and the widget count remains viewport proportional. |
 | `setTrailingSpaceHeight` | nonnegative effective pixels | Post: content extent/anchor reflects composer overlay without changing viewport ownership. Repeated value is a no-op. |
 | `prepareForLocalPromptAdmission` | no parameters | May change pause caused only by composer growth; never overrides explicit user pause. |

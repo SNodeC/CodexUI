@@ -289,7 +289,11 @@ paint no QWidget. An ordinary canonical last-item delta is verified under one
 short graph read and appended with one Qt insert signal; absolute row ordinals
 and a lazy height origin permit the history prefix to be trimmed without
 scanning the retained conversation. Non-tail or ambiguous structure uses the
-complete projection. Thread rows follow the expanded hierarchy, and Inspector
+exact row placement/removal APIs; only authority replacement, paging, and an
+explicit rescan use a complete projection. The view owns per-thread history
+windows and publishes one post-stage completion boundary so Shell reveals
+matching chrome and Inspector data only with the complete conversation frame.
+Thread rows follow the expanded hierarchy, and Inspector
 constructs rows only for the active tab when its effective snapshot changes.
 There is no permanent parallel NodeId-to-widget registry. Focus, animation,
 folding, filters, drafts, editor mechanics, and scroll-following remain

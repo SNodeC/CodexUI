@@ -140,9 +140,10 @@ int main(int argc, char **argv) {
   tail.card = cardData(count);
   tail.sectionKey = "turn-section-" + std::to_string(count);
   tail.historyActivity = true;
+  tail.authoritativeItemCount = count + 1;
   QElapsedTimer append;
   append.start();
-  const bool appendAccepted = view.appendTailCard(std::move(tail), count);
+  const bool appendAccepted = view.appendTailCard(std::move(tail));
   const qint64 appendMicroseconds = append.nsecsElapsed() / 1000;
   QApplication::processEvents(QEventLoop::AllEvents, 20);
 

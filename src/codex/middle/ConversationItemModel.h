@@ -129,6 +129,9 @@ public:
   [[nodiscard]] std::size_t hiddenAuthoritativeItemCount() const noexcept {
     return hiddenAuthoritativeItemCount_;
   }
+  [[nodiscard]] std::size_t historyActivityCount() const noexcept {
+    return historyActivityCount_;
+  }
   [[nodiscard]] bool hasMore() const noexcept { return hasMore_; }
 
 private:

@@ -48,6 +48,11 @@ public:
     bool operator==(const PresentationOptions &) const = default;
   };
 
+  struct HistoryPageRequest {
+    std::size_t effectiveLimit = AuthoritativeHistoryPageSize;
+    bool requestProvider = false;
+  };
+
   explicit ConversationView(QWidget *parent = nullptr);
   ~ConversationView() override;
 
@@ -55,6 +60,8 @@ public:
   void
   setPromptMaterializedAction(std::function<bool(nodegraph::NodeRef)> action);
   void setPromptRecoveryAction(std::function<void(nodegraph::NodeRef)> action);
+  void setPresentationCommittedAction(
+      std::function<void(const std::string &)> action);
   void setEmptyMessage(QString message);
   void setPresentationOptions(PresentationOptions options);
   [[nodiscard]] PresentationOptions presentationOptions() const noexcept {
@@ -86,8 +93,19 @@ public:
   // Applies one canonical tail insertion without traversing retained model
   // rows. Returns false when the delta is not the exact append shape, so the
   // caller can use complete structural reconciliation.
-  [[nodiscard]] bool appendTailCard(ConversationTailCard tail,
-                                    std::size_t historyActivityLimit);
+  [[nodiscard]] bool appendTailCard(ConversationTailCard tail);
+
+  // History-window and staged-presentation state belong to the item view.
+  // Shell supplies current canonical counts but retains no presentation copy.
+  [[nodiscard]] std::size_t historyLimitForThread(
+      const std::string &threadId, std::size_t authoritativeItemCount);
+  [[nodiscard]] HistoryPageRequest requestNextHistoryPage(
+      const std::string &threadId, std::size_t authoritativeItemCount,
+      bool providerHasMore);
+  void forgetThreadPresentation(const std::string &threadId);
+  [[nodiscard]] const std::string &presentedThreadId() const noexcept {
+    return threadId_;
+  }
 
   void setTrailingSpaceHeight(int height);
   void prepareForLocalPromptAdmission();
@@ -149,6 +167,12 @@ private:
     Mode mode = Mode::Following;
     Anchor anchor;
     bool pausedByComposerGrowth = false;
+  };
+
+  struct HistoryWindow {
+    std::size_t requested = AuthoritativeHistoryPageSize;
+    std::size_t effective = AuthoritativeHistoryPageSize;
+    std::size_t lastAuthoritativeCount = 0;
   };
 
   struct HeightRecord {
@@ -270,6 +294,7 @@ private:
   std::function<void()> loadMoreAction_;
   std::function<bool(nodegraph::NodeRef)> promptMaterializedAction_;
   std::function<void(nodegraph::NodeRef)> promptRecoveryAction_;
+  std::function<void(const std::string &)> presentationCommittedAction_;
 
   std::unordered_map<std::string, ConversationCard *> materializedCards_;
   std::unordered_map<std::string, ConversationCard *> stagedCards_;
@@ -284,6 +309,7 @@ private:
   std::unordered_map<std::string, CommandOutputView::ScrollState>
       commandOutputStates_;
   std::unordered_map<std::string, ThreadScrollState> threadStates_;
+  std::unordered_map<std::string, HistoryWindow> historyWindows_;
 
   PresentationOptions presentationOptions_;
   std::string threadId_;

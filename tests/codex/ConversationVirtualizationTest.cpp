@@ -327,20 +327,20 @@ bool boundedTailAppendIsViewportProportional() {
   tail.card = message(10'000);
   tail.sectionKey = "section-10000";
   tail.historyActivity = true;
+  tail.authoritativeItemCount = 10'001;
   const std::string tailKey = stableKey(tail.card.key);
-  result &= expect(view.appendTailCard(std::move(tail), 10'000),
+  result &= expect(view.appendTailCard(std::move(tail)),
                    "canonical tail append was accepted");
   settle();
   const auto anchorAfter = firstVisible(view);
   result &= expect(
-      view.conversationModel()->rowCount() == 10'000 &&
-          view.conversationModel()->indexForStableKey(tailKey).row() == 9'999 &&
-          view.conversationModel()->hiddenAuthoritativeItemCount() == 1 &&
-          view.conversationModel()->hasMore(),
-      "bounded tail append did not retain the exact suffix and history chrome");
+      view.conversationModel()->rowCount() == 10'001 &&
+          view.conversationModel()->indexForStableKey(tailKey).row() == 10'000 &&
+          view.conversationModel()->hiddenAuthoritativeItemCount() == 0,
+      "paused tail append did not expand its retained window exactly once");
   result &= expect(anchorAfter == anchorBefore &&
                        view.horizontalScrollBar()->value() == horizontalBefore,
-                   "bounded tail append and prefix trim did not preserve both "
+                   "paused tail append did not preserve both "
                    "viewport axes");
   result &= expect(
       view.conversationModel()
@@ -363,8 +363,9 @@ bool boundedTailAppendIsViewportProportional() {
   followingTail.card = message(80);
   followingTail.sectionKey = "section-80";
   followingTail.historyActivity = true;
+  followingTail.authoritativeItemCount = 81;
   const std::string followingKey = stableKey(followingTail.card.key);
-  result &= expect(following.appendTailCard(std::move(followingTail), 80),
+  result &= expect(following.appendTailCard(std::move(followingTail)),
                    "following tail append was accepted");
   settle();
   const QModelIndex finalIndex =
@@ -400,12 +401,6 @@ bool boundedTailAppendIsViewportProportional() {
   result &= expect(rootedView.reconcile(std::move(rooted)),
                    "rooted bounded-tail fixture reconciles");
   settle();
-  rootedView.verticalScrollBar()->triggerAction(
-      QAbstractSlider::SliderToMinimum);
-  rootedView.verticalScrollBar()->setValue(
-      rootedView.verticalScrollBar()->maximum() / 2);
-  settle();
-  const auto rootedAnchor = firstVisible(rootedView);
   const qulonglong rootedRebuilds = rootedView.conversationModel()
                                         ->property("modelIndexRebuildCount")
                                         .toULongLong();
@@ -421,7 +416,8 @@ bool boundedTailAppendIsViewportProportional() {
     nestedTail.sectionKey = "rooted-section";
     nestedTail.nested = true;
     nestedTail.historyActivity = true;
-    return rootedView.appendTailCard(std::move(nestedTail), 80);
+    nestedTail.authoritativeItemCount = serial + 1;
+    return rootedView.appendTailCard(std::move(nestedTail));
   };
   result &= expect(appendNested(80) && appendNested(81),
                    "root-pinned nested tail appends were accepted");
@@ -439,8 +435,9 @@ bool boundedTailAppendIsViewportProportional() {
           rootedView.conversationModel()
                   ->property("modelIndexRebuildCount")
                   .toULongLong() == rootedRebuilds &&
-          firstVisible(rootedView) == rootedAnchor,
-      "pinned Turn root trim lost identity, rebuilt history, or moved anchor");
+          rootedView.isAtBottom(),
+      "pinned Turn root trim lost identity, rebuilt history, or stopped "
+      "following");
   return result;
 }
 
@@ -545,6 +542,30 @@ bool atomicPagingAndFollowingArrival() {
   return result;
 }
 
+bool historyWindowLivesWithThePresentedThread() {
+  ConversationView view;
+  bool result = expect(view.historyLimitForThread("history-a", 200) == 80,
+                       "a new thread begins with the canonical 80-row window");
+  const auto retainedFirst =
+      view.requestNextHistoryPage("history-a", 200, true);
+  const auto retainedSecond =
+      view.requestNextHistoryPage("history-a", 200, true);
+  const auto provider = view.requestNextHistoryPage("history-a", 200, true);
+  result &= expect(retainedFirst.effectiveLimit == 160 &&
+                       !retainedFirst.requestProvider &&
+                       retainedSecond.effectiveLimit == 240 &&
+                       !retainedSecond.requestProvider &&
+                       provider.effectiveLimit == 320 &&
+                       provider.requestProvider,
+                   "retained pages are consumed before one provider request");
+  result &= expect(view.historyLimitForThread("history-b", 500) == 80,
+                   "history windows remain independent per thread");
+  view.forgetThreadPresentation("history-a");
+  result &= expect(view.historyLimitForThread("history-a", 200) == 80,
+                   "retiring a thread releases its presentation window");
+  return result;
+}
+
 bool delayedThreadSelectionSpinner() {
   ConversationView view;
   view.resize(820, 600);
@@ -554,6 +575,9 @@ bool delayedThreadSelectionSpinner() {
   bool result = expect(view.reconcile(source),
                        "spinner source conversation reconciles");
   settle();
+  std::vector<std::string> committedThreads;
+  view.setPresentationCommittedAction(
+      [&](const std::string &threadId) { committedThreads.push_back(threadId); });
 
   view.beginThreadSelection("spinner-slow-target");
   settle();
@@ -572,6 +596,8 @@ bool delayedThreadSelectionSpinner() {
               .isValid(),
       "thread selection immediately covers the outgoing message viewport "
       "with a blank centered loading surface");
+  result &= expect(committedThreads.empty(),
+                   "selection does not publish presentation readiness early");
 
   QElapsedTimer early;
   early.start();
@@ -629,6 +655,9 @@ bool delayedThreadSelectionSpinner() {
                       "spinner-slow-target", "turn", "message"}))
               .isValid(),
       "the complete target frame atomically removes and stops the spinner");
+  result &= expect(committedThreads ==
+                       std::vector<std::string>{"spinner-slow-target"},
+                   "the complete target frame publishes readiness once");
 
   view.beginThreadSelection("spinner-fast-target");
   view.reconcileStaged(singleMessageConversation("spinner-fast-target",
@@ -636,7 +665,10 @@ bool delayedThreadSelectionSpinner() {
   settle();
   result &= expect(
       overlay && !overlay->isVisible() &&
-          !overlay->property("spinnerAnimationActive").toBool(),
+          !overlay->property("spinnerAnimationActive").toBool() &&
+          committedThreads ==
+              std::vector<std::string>{"spinner-slow-target",
+                                       "spinner-fast-target"},
       "a fast staged selection clears and reveals without spinner motion");
 
   view.beginThreadSelection("spinner-stale-target");
@@ -648,7 +680,7 @@ bool delayedThreadSelectionSpinner() {
   result &= expect(
       view.property("staleThreadStagesIgnored").toULongLong() ==
               ignoredBefore + 1 &&
-          overlay && overlay->isVisible(),
+          overlay && overlay->isVisible() && committedThreads.size() == 2,
       "a superseded thread stage cannot reveal or stop the current load");
   view.reconcileStaged(singleMessageConversation("spinner-final-target",
                                                  "Final conversation"));
@@ -659,7 +691,11 @@ bool delayedThreadSelectionSpinner() {
               ->indexForStableKey(
                   stableKey(AuthoritativeItemKey{
                       "spinner-final-target", "turn", "message"}))
-              .isValid(),
+              .isValid() &&
+          committedThreads ==
+              std::vector<std::string>{"spinner-slow-target",
+                                       "spinner-fast-target",
+                                       "spinner-final-target"},
       "the newest thread identity alone completes the loading surface");
   return result;
 }
@@ -761,8 +797,9 @@ bool directTailGrowsTheRetainedTurnSurface() {
   tail.nested = true;
   tail.activeTurn = true;
   tail.historyActivity = true;
+  tail.authoritativeItemCount = 2;
   const std::string answerKey = stableKey(tail.card.key);
-  result &= expect(view.appendTailCard(std::move(tail), 80),
+  result &= expect(view.appendTailCard(std::move(tail)),
                    "the first nested direct-tail card appends");
   settle();
 
@@ -995,6 +1032,7 @@ int main(int argc, char **argv) {
                       boundedTailAppendIsViewportProportional() &&
                       targetedVisibilityChangeIsLocal() &&
                       atomicPagingAndFollowingArrival() &&
+                      historyWindowLivesWithThePresentedThread() &&
                       delayedThreadSelectionSpinner() &&
                       virtualTurnSurfaceAndInteractivePromotion() &&
                       directTailGrowsTheRetainedTurnSurface() &&

@@ -995,12 +995,6 @@ QFrame *statusDot() {
 } // namespace
 
 struct ShellWidget::Impl final {
-  struct ConversationHistoryWindow {
-    std::size_t requested = middle::AuthoritativeHistoryPageSize;
-    std::size_t effective = middle::AuthoritativeHistoryPageSize;
-    std::size_t lastAuthoritativeCount = 0;
-  };
-
   Impl(ShellWidget *owner, FrontendSession &session)
       : owner(owner), session(session), uiAdapter(session.nodeGraph()),
         alive(std::make_shared<bool>(true)) {
@@ -1089,12 +1083,6 @@ struct ShellWidget::Impl final {
   bool creationInFlight = false;
   std::string selectedGraphThreadId;
   nodegraph::NodeRef boundGraphThread;
-  // The established view stages a newly selected hydration behind the last
-  // complete conversation. This is UI coordination state, not another model:
-  // the actual cards and their snapshot remain owned by ConversationView.
-  nodegraph::NodeRef presentedGraphThread;
-  std::unordered_map<std::string, ConversationHistoryWindow>
-      conversationHistory;
   nodegraph::NodeRef attentionInteraction;
   std::map<const nodegraph::Node *, std::pair<nodegraph::NodeRef, QString>>
       retainedRenames;
@@ -1416,16 +1404,14 @@ void ShellWidget::Impl::connectUi() {
           "Conversation state is busy; no history request was sent."));
       return;
     }
-    ConversationHistoryWindow &history =
-        conversationHistory[boundGraphThread->id().canonical];
-    const bool retainedHistoryAvailable =
-        history.effective < info->authoritativeItemCount;
-    history.requested += middle::AuthoritativeHistoryPageSize;
-    history.effective += middle::AuthoritativeHistoryPageSize;
+    const middle::ConversationView::HistoryPageRequest request =
+        middleRegion->conversation().requestNextHistoryPage(
+            boundGraphThread->id().canonical,
+            info->authoritativeItemCount, info->providerHasMore);
     pendingConversation = true;
     pendingConversationItems.clear();
     commitPendingPanes();
-    if (retainedHistoryAvailable || !info->providerHasMore)
+    if (!request.requestProvider)
       return;
     nodegraph::NodeAction action{boundGraphThread,
                                  nodegraph::NodeActionKind::LoadHistory};
@@ -1442,6 +1428,15 @@ void ShellWidget::Impl::connectUi() {
       });
   middleRegion->conversation().setPromptRecoveryAction(
       [this](nodegraph::NodeRef prompt) { recoverPrompt(prompt); });
+  middleRegion->conversation().setPresentationCommittedAction(
+      [this](const std::string &threadId) {
+        if (!boundGraphThread || boundGraphThread->id().canonical != threadId)
+          return;
+        renderedChrome.reset();
+        pendingInspector = true;
+        pendingChrome = true;
+        schedulePaneCommit();
+      });
   middleRegion->inspector().setRequestActions(
       [this](const std::string &id) { reviewPending(id); },
       [this](const std::string &id) { acceptPending(id); },
@@ -1580,7 +1575,6 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
 bool ShellWidget::Impl::refreshConversation() {
   if (!boundGraphThread) {
     static_cast<void>(middleRegion->conversation().reconcile({}));
-    presentedGraphThread.reset();
     return true;
   }
 
@@ -1588,17 +1582,9 @@ bool ShellWidget::Impl::refreshConversation() {
   if (!info)
     return false;
   const std::string &threadId = boundGraphThread->id().canonical;
-  ConversationHistoryWindow &history = conversationHistory[threadId];
-  const bool following = middleRegion->conversation().modeForThread(threadId) ==
-                         middle::ConversationView::Mode::Following;
-  if (!following &&
-      info->authoritativeItemCount > history.lastAuthoritativeCount) {
-    history.effective +=
-        info->authoritativeItemCount - history.lastAuthoritativeCount;
-  } else if (following) {
-    history.effective = history.requested;
-  }
-  history.lastAuthoritativeCount = info->authoritativeItemCount;
+  const std::size_t historyLimit =
+      middleRegion->conversation().historyLimitForThread(
+          threadId, info->authoritativeItemCount);
 
   if (!info->readyForDisplay) {
     if (!info->hydrationFailed) {
@@ -1610,25 +1596,15 @@ bool ShellWidget::Impl::refreshConversation() {
     middle::ConversationSnapshot failed;
     failed.threadId = threadId;
     static_cast<void>(middleRegion->conversation().reconcile(failed));
-    if (presentedGraphThread != boundGraphThread) {
-      presentedGraphThread = boundGraphThread;
-      renderedChrome.reset();
-    }
     return true;
   }
 
-  auto snapshot =
-      uiAdapter.conversation(boundGraphThread, history.effective);
+  auto snapshot = uiAdapter.conversation(boundGraphThread, historyLimit);
   if (!snapshot)
     return false;
   middleRegion->conversation().setEmptyMessage(
       QStringLiteral("No materialized activity."));
   middleRegion->conversation().reconcileStaged(std::move(*snapshot));
-  if (presentedGraphThread != boundGraphThread) {
-    presentedGraphThread = boundGraphThread;
-    renderedChrome.reset();
-    scheduleRender();
-  }
   return true;
 }
 
@@ -1638,8 +1614,11 @@ bool ShellWidget::Impl::refreshInspector() {
     const auto info = uiAdapter.conversationInfo(inspectorThread);
     if (!info)
       return false;
-    if (!info->readyForDisplay && presentedGraphThread &&
-        presentedGraphThread != inspectorThread && !info->hydrationFailed)
+    const std::string &presentedThreadId =
+        middleRegion->conversation().presentedThreadId();
+    if (!presentedThreadId.empty() &&
+        presentedThreadId != inspectorThread->id().canonical &&
+        !info->hydrationFailed)
       return true;
     if (!info->readyForDisplay)
       inspectorThread.reset();
@@ -1801,22 +1780,7 @@ void ShellWidget::Impl::commitPendingPanes() {
     auto tail = uiAdapter.tailCard(boundGraphThread,
                                    pendingConversationItems.front());
     if (tail) {
-      const std::string &threadId = boundGraphThread->id().canonical;
-      ConversationHistoryWindow nextHistory = conversationHistory[threadId];
-      const bool following =
-          middleRegion->conversation().modeForThread(threadId) ==
-          middle::ConversationView::Mode::Following;
-      if ((!following || nextHistory.effective > nextHistory.requested) &&
-          tail->authoritativeItemCount > nextHistory.lastAuthoritativeCount) {
-        nextHistory.effective +=
-            tail->authoritativeItemCount - nextHistory.lastAuthoritativeCount;
-      } else if (following) {
-        nextHistory.effective = nextHistory.requested;
-      }
-      nextHistory.lastAuthoritativeCount = tail->authoritativeItemCount;
-      if (middleRegion->conversation().appendTailCard(std::move(*tail),
-                                                      nextHistory.effective)) {
-        conversationHistory.insert_or_assign(threadId, nextHistory);
+      if (middleRegion->conversation().appendTailCard(std::move(*tail))) {
         pendingConversation = false;
         pendingConversationItems.clear();
         ++conversationRoutes;
@@ -2046,7 +2010,8 @@ void ShellWidget::Impl::handleGraphChanged(
     if (!removed)
       continue;
     if (removed->id().kind == nodegraph::NodeKind::Thread)
-      conversationHistory.erase(removed->id().canonical);
+      middleRegion->conversation().forgetThreadPresentation(
+          removed->id().canonical);
     if (removed->id().kind == nodegraph::NodeKind::Interaction)
       retainedInteractionResponses.erase(removed->id().canonical);
     retainedRenames.erase(removed.get());
@@ -2056,9 +2021,6 @@ void ShellWidget::Impl::handleGraphChanged(
                               change.removed.end()
           ? boundGraphThread
           : nodegraph::NodeRef{};
-  const bool stagedPresentationInvalidated =
-      presentedGraphThread && presentedGraphThread != boundGraphThread &&
-      !change.removed.empty();
   const bool providerReset =
       removedBoundThread &&
       std::ranges::any_of(change.affected, [](const auto &node) {
@@ -2107,10 +2069,7 @@ void ShellWidget::Impl::handleGraphChanged(
           pendingThreadRows.end())
         pendingThreadRows.push_back(thread);
   }
-  if (stagedPresentationInvalidated) {
-    pendingConversation = true;
-    pendingConversationItems.clear();
-  } else if (conversation.structural) {
+  if (conversation.structural) {
     if (!pendingConversation) {
       pendingConversationItems = conversation.items;
     } else if (pendingConversationItems != conversation.items) {
@@ -2127,8 +2086,7 @@ void ShellWidget::Impl::handleGraphChanged(
   }
   pendingInspector = pendingInspector ||
                      inspectorAffected(change, session.nodeGraph(),
-                                       boundGraphThread, inspectorDependency) ||
-                     stagedPresentationInvalidated;
+                                       boundGraphThread, inspectorDependency);
   pendingChrome = pendingChrome || updateChrome;
   if (change.rescanRequired ||
       containsKind(change, {nodegraph::NodeKind::Thread}))
@@ -2144,13 +2102,6 @@ void ShellWidget::Impl::handleGraphChanged(
     if (!providerReset)
       selectedGraphThreadId.clear();
     bindGraphPanes({});
-  } else if (stagedPresentationInvalidated) {
-    // Removal notifications must release every card-held NodeRef before the
-    // worker retirement acknowledgement. Fall back to the selected thread's
-    // stable loading surface rather than retaining the outgoing snapshot.
-    presentedGraphThread.reset();
-    renderedChrome.reset();
-    pendingChrome = true;
   }
 
   // Retirement must not outlive presentation references. Ordinary state
@@ -2780,10 +2731,12 @@ void ShellWidget::Impl::render() {
   if (!chromeChanged)
     return;
 
-  const bool replacementHydrating = boundGraphThread && presentedGraphThread &&
-                                    boundGraphThread != presentedGraphThread &&
-                                    !values.conversationReadyForDisplay &&
-                                    !values.hydrationFailed;
+  const std::string &presentedThreadId =
+      middleRegion->conversation().presentedThreadId();
+  const bool replacementHydrating =
+      boundGraphThread && !presentedThreadId.empty() &&
+      boundGraphThread->id().canonical != presentedThreadId &&
+      !values.hydrationFailed;
 
   attentionInteraction =
       values.attention ? values.attention->node : nodegraph::NodeRef{};
