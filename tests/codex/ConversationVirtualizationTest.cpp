@@ -263,6 +263,11 @@ bool exactStructuralRowsPreserveTheViewport() {
       view.property("conversationSectionRangeRebuilds").toULongLong();
   const qulonglong heightRebuildsBefore =
       view.property("conversationHeightIndexRebuilds").toULongLong();
+  const qulonglong structuralRepaintsBefore =
+      view.property("targetedStructuralRepaints").toULongLong();
+  const qulonglong offscreenRepaintsBefore =
+      view.property("targetedStructuralOffscreenRepaintsAvoided")
+          .toULongLong();
   result &= expect(view.applyRowChange(std::move(insertion)) &&
                        view.conversationModel()
                                ->indexForTarget(insertedTarget)
@@ -312,11 +317,16 @@ bool exactStructuralRowsPreserveTheViewport() {
               sectionRebuildsBefore &&
           view.property("conversationHeightIndexRebuilds").toULongLong() ==
               heightRebuildsBefore &&
+          view.property("targetedStructuralRepaints").toULongLong() ==
+              structuralRepaintsBefore &&
+          view.property("targetedStructuralOffscreenRepaintsAvoided")
+                  .toULongLong() ==
+              offscreenRepaintsBefore + 3 &&
           view.materializedCardCount() <= 48;
   result &= expect(
       exactBounded,
       "exact structural operations use narrow model signals and bounded "
-      "widgets without rebuilding ten thousand retained indexes");
+      "widgets without rebuilding or repainting ten thousand retained rows");
   return result;
 }
 

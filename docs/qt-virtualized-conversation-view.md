@@ -97,8 +97,10 @@ The code follows the existing problem boundaries directly:
    survive materialization changes.
 10. Selection and Load 80 prepare the new model/geometry and initial visible
    materialization behind the existing stable surface, then reveal one complete
-   frame. Ordinary streaming is coalesced within one GUI frame and affects only
-   the addressed row.
+   frame. Ordinary streaming identities are coalesced for one GUI frame, then
+   projected from latest NodeGraph state at no more than eight distinct rows
+   per 16 ms presentation pass. Remaining identities retain their order for the
+   next nonzero-delay pass; an empty queue schedules no further work.
 
 No snapshot authority, event journal, projector, callback registry, generic
 observer, message bus, third logic thread, or alternate transport is introduced.
@@ -206,6 +208,16 @@ correlate visible behavior with work:
 - complete-view geometry/repaint fallbacks, which must remain zero during
   ordinary scrolling and streaming;
 - targeted structural tail appends and their model/section rebuild deltas.
+
+The Shell exposes the ordinary-row presentation budget, rows processed in the
+last pass, maximum rows observed in one pass, deferred-pass count, and pane
+commit count. A 24-target deterministic burst requires at least three passes,
+reaches every latest graph value, creates no card QWidget, leaves ThreadPane,
+Inspector, and shell chrome counters unchanged, and becomes timer-idle after
+the queue drains. Exact structural changes above a paused stable anchor issue
+no viewport repaint; visible insert/remove damage begins at the changed row,
+and visible moves repaint only their affected interval unless they cross the
+anchor, where only the changed side below the anchor is invalidated.
 
 ## Final ownership and lifecycle
 

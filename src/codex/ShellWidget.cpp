@@ -45,6 +45,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <initializer_list>
 #include <limits>
@@ -64,6 +65,7 @@ namespace {
 
 constexpr auto DraftThreadId = "draft:new-thread";
 constexpr int GraphRetryDelayMilliseconds = 8;
+constexpr std::size_t ConversationPresentationRowsPerPass = 8;
 
 bool containsKind(const nodegraph::GraphChanged &change,
                   std::initializer_list<nodegraph::NodeKind> kinds) {
@@ -998,6 +1000,9 @@ struct ShellWidget::Impl final {
   Impl(ShellWidget *owner, FrontendSession &session)
       : owner(owner), session(session), uiAdapter(session.nodeGraph()),
         alive(std::make_shared<bool>(true)) {
+    owner->setProperty("conversationPresentationRowsPerPassBudget",
+                       static_cast<qulonglong>(
+                           ConversationPresentationRowsPerPass));
     buildUi();
     connectUi();
     const auto token = alive;
@@ -1095,7 +1100,7 @@ struct ShellWidget::Impl final {
   bool pendingThreadPane = false;
   std::vector<nodegraph::NodeRef> pendingThreadRows;
   bool pendingConversation = false;
-  std::vector<nodegraph::NodeRef> pendingConversationItems;
+  std::deque<nodegraph::NodeRef> pendingConversationItems;
   bool pendingInspector = false;
   bool pendingChrome = false;
   bool draftSelectionScheduled = false;
@@ -1671,6 +1676,10 @@ void ShellWidget::Impl::schedulePaneCommit(bool immediate) {
 }
 
 void ShellWidget::Impl::commitPendingPanes() {
+  owner->setProperty("paneCommitInvocations",
+                     owner->property("paneCommitInvocations").toULongLong() +
+                         1);
+  owner->setProperty("conversationPresentationRowsInLastPass", qulonglong{0});
   bool retry = false;
   if (!pendingThreadPane && !pendingThreadRows.empty()) {
     std::vector<nodegraph::NodeRef> rows = std::move(pendingThreadRows);
@@ -1709,20 +1718,37 @@ void ShellWidget::Impl::commitPendingPanes() {
     }
   }
   if (!pendingConversation && !pendingConversationItems.empty()) {
-    std::vector<nodegraph::NodeRef> items = std::move(pendingConversationItems);
-    pendingConversationItems.clear();
+    std::size_t appliedRows = 0;
     bool requiresStructuralReconcile = false;
-    for (const nodegraph::NodeRef &item : items) {
+    while (appliedRows < ConversationPresentationRowsPerPass &&
+           !pendingConversationItems.empty()) {
+      nodegraph::NodeRef item = std::move(pendingConversationItems.front());
+      pendingConversationItems.pop_front();
       auto card = uiAdapter.card(boundGraphThread, item);
       if (!card || !middleRegion->conversation().applyCardPresentation(
                        std::move(*card))) {
+        pendingConversationItems.push_front(std::move(item));
         requiresStructuralReconcile = true;
         break;
       }
+      ++appliedRows;
     }
+    owner->setProperty("conversationPresentationRowsInLastPass",
+                       static_cast<qulonglong>(appliedRows));
+    owner->setProperty(
+        "conversationPresentationRowsProcessed",
+        owner->property("conversationPresentationRowsProcessed")
+                .toULongLong() +
+            static_cast<qulonglong>(appliedRows));
+    owner->setProperty(
+        "conversationPresentationMaxRowsPerPass",
+        std::max(owner->property("conversationPresentationMaxRowsPerPass")
+                     .toULongLong(),
+                 static_cast<qulonglong>(appliedRows)));
     if (requiresStructuralReconcile) {
       pendingConversation = true;
-    } else {
+    }
+    if (appliedRows != 0) {
       ++conversationRoutes;
       owner->setProperty("conversationRoutes",
                          static_cast<qulonglong>(conversationRoutes));
@@ -1730,6 +1756,12 @@ void ShellWidget::Impl::commitPendingPanes() {
           "targetedConversationRoutes",
           owner->property("targetedConversationRoutes").toULongLong() + 1);
     }
+    if (!pendingConversation && !pendingConversationItems.empty())
+      owner->setProperty(
+          "conversationPresentationDeferredPasses",
+          owner->property("conversationPresentationDeferredPasses")
+                  .toULongLong() +
+              1);
   }
   if (pendingConversation && !pendingConversationItems.empty() &&
       boundGraphThread &&
@@ -2071,8 +2103,10 @@ void ShellWidget::Impl::handleGraphChanged(
   }
   if (conversation.structural) {
     if (!pendingConversation) {
-      pendingConversationItems = conversation.items;
-    } else if (pendingConversationItems != conversation.items) {
+      pendingConversationItems.assign(conversation.items.begin(),
+                                      conversation.items.end());
+    } else if (!std::ranges::equal(pendingConversationItems,
+                                   conversation.items)) {
       // More than one structural transaction was coalesced. The complete
       // projection is the only safe way to establish the combined order.
       pendingConversationItems.clear();

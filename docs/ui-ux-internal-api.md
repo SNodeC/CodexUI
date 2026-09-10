@@ -596,9 +596,12 @@ implementation and creates all visible child panes on Qt-main. Destruction
 removes application event filters/notifiers before child teardown. Its
 `eventFilter(QObject*, QEvent*)` returns the middle region's decision for
 eligible wheel events and otherwise preserves Qt's normal dispatch. Graph
-notifications are frame-coalesced only after worker reduction; removals are
-handled synchronously. Shell never waits for graph access and never clears
-user input merely because a wake write failed after queue admission.
+notifications are frame-coalesced only after worker reduction. An ordered
+queue projects at most eight distinct ordinary conversation rows from latest
+NodeGraph state per 16 ms GUI pass; any remainder schedules exactly one later
+nonzero-delay pass, while authoritative structural changes and removals retain
+their exact handling. Shell never waits for graph access and never clears user
+input merely because a wake write failed after queue admission.
 
 ### DTO identity and value types
 
@@ -744,10 +747,14 @@ derived from current graph state; they never become application authority.
 1. Detach removals synchronously.
 2. Route only identities relevant to ThreadPane, selected conversation,
    visible Inspector behavior, and effective chrome.
-3. Union streaming identities for one display frame.
-4. Project the latest current DTO for each affected surface.
-5. Let the old widget compare stable identities and values. Repeating the same
-   DTO must perform zero presentation work.
+3. Union streaming identities in arrival order for one display frame.
+4. Project latest current DTOs for no more than eight distinct ordinary
+   conversation rows in that pass; retain any remainder for one later 16 ms
+   pass and stop scheduling as soon as the queue is empty.
+5. Project each other affected surface only when its explicit dependency was
+   addressed.
+6. Let the receiving view compare stable identities and values. Repeating the
+   same DTO must perform zero presentation work.
 
 ### Load 80 more activities
 

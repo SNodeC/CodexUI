@@ -366,7 +366,10 @@ Deleted threads and provider resets reparent affected local prompts to explicit
 recovery state; reconnection never resends a non-idempotent operation.
 Conversation row identities remain indexed for the bounded selected history
 window, while QWidget/editor ownership is limited to visible rich interaction
-plus bounded overscan.
+plus bounded overscan. Qt coalesces ordinary selected-conversation identities
+for a frame and projects at most eight latest row values per 16 ms pass; it
+retains ordered remainder identities without another authority and schedules
+nothing once that queue drains. Structural retirement remains synchronous.
 
 Qualification covers the standalone target/tests, exact source-derived
 inventory, graph atomicity, non-blocking read contention, removal lifetime,
@@ -375,6 +378,10 @@ payloads, worker ownership, scoped identity collisions, realtime append/final
 semantics, and bounded visible-only rendering. It also includes a Qt heartbeat
 while 4,096 distinct inbound items plus 4,096 streaming deltas saturate and
 drain the notification queue.
+The shell integration suite additionally queues 24 distinct current-row
+changes before presentation, proves the eight-row pass ceiling, observes at
+least three GUI passes and exact final values, and verifies that the drained
+queue produces no idle commit loop or ThreadPane/Inspector/chrome work.
 
 The direct CodexBridge integration test exercises every supported UI wire
 family rather than only counting method names: hydrate/reload, history paging,

@@ -866,6 +866,156 @@ void qtHeartbeatSurvivesLargeInboundTraffic(Configuration &configuration) {
           "large inbound traffic uses explicit notification coalescing");
 }
 
+void conversationPresentationBurstIsFrameBounded(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  NodeGraph &graph = FrontendSessionTestPeer::graph(session);
+  WorkerLogic worker(graph, channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  constexpr int ItemCount = 24;
+  makeReady(worker);
+  applyThread(worker, "bounded-stream-thread", "Bounded stream thread");
+  static_cast<void>(worker.apply(
+      {DecodedMessageKind::ServerNotification,
+       "turn/started",
+       std::nullopt,
+       {{"threadId", Value("bounded-stream-thread")},
+        {"turn", Value(Value::Object{{"id", Value("bounded-stream-turn")},
+                                     {"status", Value("inProgress")}})}}}));
+  for (int index = 0; index < ItemCount; ++index) {
+    static_cast<void>(worker.apply(
+        {DecodedMessageKind::ServerNotification,
+         "item/started",
+         std::nullopt,
+         {{"threadId", Value("bounded-stream-thread")},
+          {"turnId", Value("bounded-stream-turn")},
+          {"item",
+           Value(Value::Object{
+               {"id", Value("bounded-stream-item-" + std::to_string(index))},
+               {"type", Value("agentMessage")},
+               {"text", Value("initial-" + std::to_string(index))}})}}}));
+  }
+  markThreadReady(session, worker, "bounded-stream-thread");
+
+  auto *threadList =
+      shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(spinUntil([&] {
+            return threadItem(threadList, "bounded-stream-thread") != nullptr;
+          }),
+          "the bounded streaming fixture reaches the thread pane");
+  require(selectThread(threadList, "bounded-stream-thread"),
+          "the bounded streaming fixture binds the conversation view");
+  auto *conversation = dynamic_cast<middle::ConversationView *>(
+      shell.findChild<QWidget *>(QStringLiteral("conversationScroll")));
+  require(conversation && spinUntil([&] {
+            return conversation->conversationModel()->rowCount() == ItemCount &&
+                   !conversation->structuralStagingActive() &&
+                   conversation->viewport()->updatesEnabled();
+          }),
+          "the bounded streaming fixture exposes its complete initial model");
+  if (!conversation)
+    return;
+
+  std::vector<NodeRef> items;
+  items.reserve(ItemCount);
+  {
+    auto read = graph.tryRead();
+    for (int index = 0; read && index < ItemCount; ++index) {
+      items.push_back(read->find(scopedItemNodeId(
+          scopedTurnNodeId("bounded-stream-thread", "bounded-stream-turn"),
+          "bounded-stream-item-" + std::to_string(index))));
+    }
+  }
+  require(items.size() == ItemCount &&
+              std::ranges::all_of(items,
+                                  [](const NodeRef &item) { return !!item; }),
+          "the bounded streaming fixture resolves every exact item target");
+  if (items.size() != ItemCount ||
+      !std::ranges::all_of(items, [](const NodeRef &item) { return !!item; }))
+    return;
+
+  // Let selection/staging timers become fully idle before measuring the
+  // presentation scheduler itself.
+  spin(80);
+  const qulonglong threadRoutesBefore =
+      shell.property("threadPaneRoutes").toULongLong();
+  const qulonglong inspectorRoutesBefore =
+      shell.property("inspectorRoutes").toULongLong();
+  const qulonglong shellCommitsBefore =
+      shell.property("shellRenderCommits").toULongLong();
+  const qulonglong constructionsBefore =
+      conversation->property("conversationCardConstructions").toULongLong();
+  shell.setProperty("conversationPresentationRowsProcessed", qulonglong{0});
+  shell.setProperty("conversationPresentationMaxRowsPerPass", qulonglong{0});
+  shell.setProperty("conversationPresentationDeferredPasses", qulonglong{0});
+
+  bool admitted = true;
+  for (int index = 0; index < ItemCount; ++index) {
+    GraphChange change;
+    {
+      auto write = graph.write();
+      write.setField(items[static_cast<std::size_t>(index)], "text",
+                     Value("final-" + std::to_string(index)));
+      change = write.finish();
+    }
+    admitted = messageAdmitted(channels.sendGraphChanged(std::move(change))) &&
+               admitted;
+  }
+  require(admitted, "every distinct presentation delta enters the Qt queue");
+
+  const bool finalStatePresented = spinUntil(
+      [&] {
+        if (conversation->conversationModel()->rowCount() != ItemCount)
+          return false;
+        for (int row = 0; row < ItemCount; ++row) {
+          const middle::VisibleCardData *card =
+              conversation->conversationModel()->card(row);
+          const auto *message =
+              card ? std::get_if<middle::AgentMessageData>(&card->payload)
+                   : nullptr;
+          if (!message || message->text != "final-" + std::to_string(row))
+            return false;
+        }
+        return true;
+      },
+      2000);
+  require(finalStatePresented,
+          "a multi-frame presentation burst reaches every latest graph value");
+
+  // One already-scheduled timer may have become redundant as the final pass
+  // emptied the queue. Measure only after that timer has had time to fire.
+  spin(40);
+  const qulonglong idleCommits =
+      shell.property("paneCommitInvocations").toULongLong();
+  spin(80);
+  require(
+      shell.property("conversationPresentationRowsProcessed").toULongLong() ==
+              ItemCount &&
+          shell.property("conversationPresentationMaxRowsPerPass")
+                  .toULongLong() <=
+              shell.property("conversationPresentationRowsPerPassBudget")
+                  .toULongLong() &&
+          shell.property("conversationPresentationDeferredPasses")
+                  .toULongLong() >= 2,
+      "ordinary conversation projection is capped per GUI frame");
+  require(shell.property("paneCommitInvocations").toULongLong() ==
+              idleCommits,
+          "an empty presentation queue schedules no idle pane commits");
+  require(
+      shell.property("threadPaneRoutes").toULongLong() == threadRoutesBefore &&
+          shell.property("inspectorRoutes").toULongLong() ==
+              inspectorRoutesBefore &&
+          shell.property("shellRenderCommits").toULongLong() ==
+              shellCommitsBefore &&
+          conversation->property("conversationCardConstructions")
+                  .toULongLong() == constructionsBefore,
+      "stream coalescing leaves unrelated panes and QWidget population alone");
+}
+
 void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
   FrontendSession session(configuration);
   ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
@@ -3205,6 +3355,7 @@ int main(int argc, char **argv) {
   removedAffectedOptimisticRetryDoesNotReadReleasedNode(*configuration);
   typedActionsAreExactOnceAndBounded(*configuration);
   qtHeartbeatSurvivesLargeInboundTraffic(*configuration);
+  conversationPresentationBurstIsFrameBounded(*configuration);
   graphBackedShellPreservesDraftsAndPrompts(*configuration);
   initialHydrationUsesTheEstablishedBoundedWindow(*configuration);
   completedLiveAgentAppearsWithoutThreadReselection(*configuration);

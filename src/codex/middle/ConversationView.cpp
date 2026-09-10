@@ -1287,7 +1287,7 @@ void ConversationView::finishExactStructureChange(const Anchor &anchor,
   if (newSection != oldSection)
     updateSection(newSection, destinationRow);
 
-  std::unordered_set<std::string> affectedKeys{std::move(changedKey)};
+  std::unordered_set<std::string> affectedKeys{changedKey};
   bool rootStructureChanged = false;
   for (const std::string *section : {&oldSection, &newSection}) {
     if (section->empty())
@@ -1409,7 +1409,128 @@ void ConversationView::finishExactStructureChange(const Anchor &anchor,
   else
     restoreAnchor(anchor);
   layoutMaterializedCards();
-  viewport()->update();
+
+  QRect damage;
+  const QRect viewportBounds = viewport()->rect();
+  const auto addPresentedRow = [&](int rowIndex) {
+    const QRect row = rowRect(rowIndex).intersected(viewportBounds);
+    if (!row.isEmpty())
+      damage = damage.united(row);
+  };
+  for (const std::string &key : affectedKeys) {
+    const QModelIndex index = model_->indexForStableKey(key);
+    if (index.isValid())
+      addPresentedRow(index.row());
+  }
+
+  const auto firstPresentedAtOrAfter = [this](int rowIndex) {
+    if (heights_.totalHeight() <= 0 || rowIndex >= model_->rowCount())
+      return -1;
+    rowIndex = std::max(0, rowIndex);
+    const qint64 top = heights_.top(static_cast<std::size_t>(rowIndex));
+    if (top >= heights_.totalHeight())
+      return -1;
+    const int candidate = static_cast<int>(heights_.rowAt(top));
+    return candidate >= rowIndex && rowPresented(candidate) ? candidate : -1;
+  };
+  const auto lastPresentedAtOrBefore = [this](int rowIndex) {
+    if (heights_.totalHeight() <= 0 || rowIndex < 0)
+      return -1;
+    rowIndex = std::min(rowIndex, model_->rowCount() - 1);
+    const qint64 bottom = heights_.bottom(static_cast<std::size_t>(rowIndex));
+    if (bottom <= 0)
+      return -1;
+    const int candidate = static_cast<int>(heights_.rowAt(bottom - 1));
+    return candidate <= rowIndex && rowPresented(candidate) ? candidate : -1;
+  };
+  const auto addInterval = [&](int firstRow, int lastRow) {
+    const int first = firstPresentedAtOrAfter(firstRow);
+    const int last = lastPresentedAtOrBefore(lastRow);
+    if (first >= 0 && last >= first) {
+      const QRect interval =
+          rowRect(first).united(rowRect(last)).intersected(viewportBounds);
+      if (!interval.isEmpty())
+        damage = damage.united(
+            QRect(0, interval.top(), viewport()->width(), interval.height()));
+    }
+  };
+  const auto addFromRowToBottom = [&](int changedRow) {
+    const int first = firstPresentedAtOrAfter(changedRow);
+    if (first >= 0) {
+      const QRect firstRect = rowRect(first);
+      if (firstRect.bottom() >= viewportBounds.top() &&
+          firstRect.top() <= viewportBounds.bottom()) {
+        const int top = std::max(viewportBounds.top(), firstRect.top());
+        damage = damage.united(
+            QRect(0, top, viewport()->width(),
+                  viewportBounds.bottom() - top + 1));
+      }
+    }
+  };
+
+  const QModelIndex anchorIndex =
+      model_->indexForStableKey(anchor.stableKey);
+  const int finalAnchorRow = anchorIndex.isValid() ? anchorIndex.row() : -1;
+  const bool changedAnchor = !anchor.stableKey.empty() &&
+                             anchor.stableKey == changedKey;
+  if (changedAnchor) {
+    damage = damage.united(viewportBounds);
+  } else if (sourceRow >= 0 && destinationRow >= 0 &&
+             sourceRow != destinationRow) {
+    int oldAnchorRow = finalAnchorRow;
+    if (finalAnchorRow >= 0 && sourceRow < destinationRow &&
+        finalAnchorRow >= sourceRow && finalAnchorRow < destinationRow) {
+      ++oldAnchorRow;
+    } else if (finalAnchorRow >= 0 && sourceRow > destinationRow &&
+               finalAnchorRow > destinationRow &&
+               finalAnchorRow <= sourceRow) {
+      --oldAnchorRow;
+    }
+    const bool sourceAboveAnchor =
+        oldAnchorRow >= 0 && sourceRow < oldAnchorRow;
+    const bool destinationAboveAnchor =
+        finalAnchorRow >= 0 && destinationRow < finalAnchorRow;
+    if (sourceAboveAnchor && destinationAboveAnchor) {
+      // Restoring the stable anchor compensates the complete moved interval.
+    } else if (sourceAboveAnchor) {
+      addFromRowToBottom(destinationRow);
+    } else if (destinationAboveAnchor) {
+      addFromRowToBottom(sourceRow);
+    } else {
+      addInterval(std::min(sourceRow, destinationRow),
+                  std::max(sourceRow, destinationRow));
+    }
+  } else if (sourceRow < 0) {
+    if (finalAnchorRow < 0 || destinationRow >= finalAnchorRow)
+      addFromRowToBottom(destinationRow);
+  } else {
+    const bool removedAboveAnchor =
+        finalAnchorRow >= 0 && sourceRow <= finalAnchorRow;
+    if (!removedAboveAnchor)
+      addFromRowToBottom(sourceRow);
+    if (!removedAboveAnchor &&
+        firstPresentedAtOrAfter(sourceRow) < 0) {
+      const qint64 contentBottom = static_cast<qint64>(leadingChromeHeight()) +
+                                   heights_.totalHeight() -
+                                   verticalScrollBar()->value();
+      if (contentBottom >= viewportBounds.top() &&
+          contentBottom <= viewportBounds.bottom()) {
+        const int top = static_cast<int>(contentBottom);
+        damage = damage.united(
+            QRect(0, top, viewport()->width(),
+                  viewportBounds.bottom() - top + 1));
+      }
+    }
+  }
+  damage = damage.intersected(viewportBounds);
+  if (!damage.isEmpty()) {
+    viewport()->update(damage);
+    incrementProperty(this, "targetedStructuralRepaints");
+    setProperty("lastTargetedStructuralRepaintHeight", damage.height());
+  } else {
+    incrementProperty(this, "targetedStructuralOffscreenRepaintsAvoided");
+    setProperty("lastTargetedStructuralRepaintHeight", 0);
+  }
   incrementProperty(this, "graphRefreshPasses");
   updateMaterializationProperties();
   storeCurrentThreadState();
