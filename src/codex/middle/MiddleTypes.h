@@ -5,8 +5,6 @@
 
 #include "codex/nodegraph/NodeGraph.h"
 
-#include <nlohmann/json.hpp>
-
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -157,7 +155,6 @@ struct PlanData {
 
 struct GenericActivityData {
   std::string type;
-  nlohmann::json raw = nlohmann::json::object();
   std::string status;
   std::string displayDetail;
 

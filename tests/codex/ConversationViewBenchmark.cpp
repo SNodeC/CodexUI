@@ -66,8 +66,8 @@ VisibleCardData cardData(std::size_t index) {
     break;
   default:
     card.kind = CardKind::GenericActivity;
-    card.payload = GenericActivityData{
-        "toolCall", {}, "completed", "detail: benchmark " + suffix};
+    card.payload = GenericActivityData{"toolCall", "completed",
+                                       "detail: benchmark " + suffix};
     break;
   }
   return card;

@@ -641,17 +641,7 @@ QString planMarkdown(const PlanData &plan) {
   return rows.join(QLatin1Char('\n'));
 }
 
-QString boundedGenericActivity(const nlohmann::json &raw) {
-  QString rendered = QString::fromStdString(raw.dump(2));
-  if (rendered.size() <= MaximumGenericActivityCharacters)
-    return rendered;
-  rendered.truncate(MaximumGenericActivityCharacters);
-  return rendered + QStringLiteral("\n\n[Activity details truncated]");
-}
-
 QString boundedGenericActivity(const GenericActivityData &activity) {
-  if (activity.displayDetail.empty())
-    return boundedGenericActivity(activity.raw);
   QString rendered = text(activity.displayDetail);
   if (rendered.size() <= MaximumGenericActivityCharacters)
     return rendered;

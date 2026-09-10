@@ -301,9 +301,8 @@ VisibleCardData cardForAppearanceAudit(const std::string &threadId,
     payload = PlanData{"Initial plan", {{"Inspect", "inProgress"}}, {}};
     break;
   case CardKind::GenericActivity:
-    payload = GenericActivityData{
-        "unknownActivity",
-        {{"type", "unknownActivity"}, {"status", "inProgress"}}};
+    payload = GenericActivityData{"unknownActivity", "inProgress",
+                                  "type: unknownActivity\nstatus: inProgress"};
     break;
   case CardKind::LocalPrompt:
     payload = LocalPromptData{9000U + static_cast<std::uint64_t>(index),
@@ -340,32 +339,6 @@ struct ConversationGraphSpec {
   mutable std::shared_ptr<FixtureGraph> storage =
       std::make_shared<FixtureGraph>();
 };
-
-nodegraph::Value graphValue(const nlohmann::json &value) {
-  if (value.is_null())
-    return nullptr;
-  if (value.is_boolean())
-    return value.get<bool>();
-  if (value.is_number_unsigned())
-    return value.get<std::uint64_t>();
-  if (value.is_number_integer())
-    return value.get<std::int64_t>();
-  if (value.is_number_float())
-    return value.get<double>();
-  if (value.is_string())
-    return value.get<std::string>();
-  if (value.is_array()) {
-    nodegraph::Value::Array result;
-    result.reserve(value.size());
-    for (const nlohmann::json &entry : value)
-      result.push_back(graphValue(entry));
-    return result;
-  }
-  nodegraph::Value::Object result;
-  for (const auto &[key, entry] : value.items())
-    result.emplace(key, graphValue(entry));
-  return result;
-}
 
 nodegraph::NodeStatus graphStatus(std::string_view status) {
   if (status == "pending" || status == "inProgress" || status == "running")
@@ -507,9 +480,6 @@ nodegraph::NodeState fixtureNodeState(const VisibleCardData &card) {
   }
   case CardKind::GenericActivity: {
     const auto &data = std::get<GenericActivityData>(card.payload);
-    const nodegraph::Value raw = graphValue(data.raw);
-    if (const auto *object = raw.asObject())
-      fields = *object;
     fields.insert_or_assign("type", data.type);
     fields.insert_or_assign("status", data.status);
     if (!data.displayDetail.empty())
@@ -1960,8 +1930,8 @@ bool testCardCopyControls() {
        false},
       {{AuthoritativeItemKey{thread, "turn", "generic"},
         CardKind::GenericActivity, thread, "turn", "generic",
-        GenericActivityData{"custom", {{"detail", "value"}}}},
-       QStringLiteral("{\n  \"detail\": \"value\"\n}"),
+        GenericActivityData{"custom", {}, "detail: value"}},
+       QStringLiteral("detail: value"),
        false},
       {{LocalPromptKey{99},
         CardKind::LocalPrompt,
@@ -2112,7 +2082,7 @@ bool testMutableCardsAndCommandOutput() {
                 {}}},
       {AuthoritativeItemKey{thread, "turn", "generic"},
        CardKind::GenericActivity, thread, "turn", "generic",
-       GenericActivityData{"custom activity", {{"detail", "initial"}}}},
+       GenericActivityData{"custom activity", {}, "detail: initial"}},
       {LocalPromptKey{77},
        CardKind::LocalPrompt,
        thread,
@@ -2311,7 +2281,7 @@ bool testMutableCardsAndCommandOutput() {
   std::get<PlanData>(cards[6].payload).steps[1].status = "completed";
   auto &generic = std::get<GenericActivityData>(cards[7].payload);
   generic.type = "updated custom activity";
-  generic.raw["detail"] = "updated";
+  generic.displayDetail = "detail: updated";
   std::get<LocalPromptData>(cards[8].payload).state = PromptState::Failed;
   std::get<LocalPromptData>(cards[8].payload).error = "error";
   result &= expect(applyConversation(view, snapshot),
@@ -2513,7 +2483,7 @@ bool testCardFoldingGeometryAndRetention() {
       thread,
       "turn",
       "generic",
-      GenericActivityData{"Unknown activity", {{"detail", "bounded"}}}};
+      GenericActivityData{"Unknown activity", {}, "detail: bounded"}};
   const VisibleCardData emptyReasoning{
       AuthoritativeItemKey{thread, "turn", "empty-reasoning"},
       CardKind::Reasoning,
@@ -7352,9 +7322,9 @@ bool testGeneratedImagePresentationAndGenericBound() {
       "generated",
       "turn",
       "unknown",
-      GenericActivityData{"contextCompaction",
-                          {{"type", "contextCompaction"},
-                           {"large", std::string(100000, 'x')}}}};
+      GenericActivityData{"contextCompaction", {},
+                          "type: contextCompaction\nlarge: " +
+                              std::string(100000, 'x')}};
   ConversationCard genericCard(generic);
   genericCard.show();
   spin();
@@ -7374,7 +7344,7 @@ bool testGeneratedImagePresentationAndGenericBound() {
           details && details->text().size() < 4200 &&
           details->text().endsWith(
               QStringLiteral("[Activity details truncated]")),
-      "protocol labels are humanized without changing bounded raw details");
+      "protocol labels are humanized while retaining bounded display details");
   auto &genericData = std::get<GenericActivityData>(generic.payload);
   genericData.displayDetail = "field: direct graph detail";
   result &= expect(genericCard.apply(generic) && details &&

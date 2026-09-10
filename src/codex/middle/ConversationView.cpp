@@ -227,9 +227,7 @@ QString planText(const PlanData &plan) {
 }
 
 QString genericDetail(const GenericActivityData &activity) {
-  QString value = activity.displayDetail.empty()
-                      ? QString::fromStdString(activity.raw.dump(2))
-                      : text(activity.displayDetail);
+  QString value = text(activity.displayDetail);
   constexpr qsizetype MaximumCharacters = 4096;
   if (value.size() <= MaximumCharacters)
     return value;
