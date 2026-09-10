@@ -236,6 +236,7 @@ private:
   void setThread(const std::string &threadId);
   void storeCurrentThreadState();
   [[nodiscard]] Anchor captureAnchor() const;
+  [[nodiscard]] Anchor captureHistoryPrependAnchor() const;
   void restoreAnchor(const Anchor &anchor);
   void setScrollValue(int value);
   void stopFollowingAnimation();

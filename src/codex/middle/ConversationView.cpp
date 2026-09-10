@@ -693,7 +693,10 @@ bool ConversationView::reconcileOwned(ConversationSnapshot snapshot,
                                       SnapshotOperation operation) {
   const std::string targetThreadId = snapshot.threadId;
   const bool switchedThread = snapshot.threadId != threadId_;
-  const Anchor currentAnchor = captureAnchor();
+  const Anchor currentAnchor =
+      operation == SnapshotOperation::HistoryPrepend
+          ? captureHistoryPrependAnchor()
+          : captureAnchor();
   setThread(snapshot.threadId);
   Anchor targetAnchor = currentAnchor;
   if (switchedThread) {
@@ -2884,6 +2887,36 @@ ConversationView::Anchor ConversationView::captureAnchor() const {
     return anchor;
   anchor.stableKey = row->stableKey;
   anchor.pixelOffset = rowRect(static_cast<int>(rowIndex)).top();
+  return anchor;
+}
+
+ConversationView::Anchor
+ConversationView::captureHistoryPrependAnchor() const {
+  Anchor anchor = captureAnchor();
+  if (anchor.stableKey.empty())
+    return anchor;
+  const QModelIndex anchored = model_->indexForStableKey(anchor.stableKey);
+  if (!anchored.isValid())
+    return anchor;
+  const ConversationItemModel::Row *anchoredRow = model_->row(anchored.row());
+  if (!anchoredRow || anchoredRow->historyActivity)
+    return anchor;
+
+  // A turn root may be displayed solely to own the retained suffix. Loading
+  // an earlier page can insert newly revealed siblings after that root, not
+  // before it. In that shape the root is presentation chrome for paging: the
+  // first retained activity is the stable semantic anchor whose old pixel
+  // position must survive the insertion.
+  for (int rowIndex = anchored.row() + 1; rowIndex < model_->rowCount();
+       ++rowIndex) {
+    const ConversationItemModel::Row *row = model_->row(rowIndex);
+    if (!row || !row->historyActivity || !rowPresented(rowIndex) ||
+        heights_.height(static_cast<std::size_t>(rowIndex)) == 0)
+      continue;
+    anchor.stableKey = row->stableKey;
+    anchor.pixelOffset = rowRect(rowIndex).top();
+    break;
+  }
   return anchor;
 }
 

@@ -57,6 +57,39 @@ ConversationSnapshot conversation(std::size_t count,
   return result;
 }
 
+ConversationSnapshot pinnedTurnPage(std::size_t firstActivity,
+                                    std::size_t activityCount) {
+  ConversationSnapshot result;
+  result.threadId = "virtual-thread";
+  TurnSection section;
+  section.key = "shared-turn-section";
+  section.turnId = "shared-turn";
+  VisibleCardData root{
+      AuthoritativeItemKey{"virtual-thread", "shared-turn", "root"},
+      CardKind::UserMessage,
+      "virtual-thread",
+      "shared-turn",
+      "root",
+      UserMessageData{"Continue"}};
+  section.rootCardKey = root.key;
+  section.rootPinned = firstActivity != 1;
+  section.cards.push_back(std::move(root));
+  for (std::size_t serial = firstActivity;
+       serial < firstActivity + activityCount; ++serial) {
+    const std::string suffix = std::to_string(serial);
+    section.cards.push_back(
+        {AuthoritativeItemKey{"virtual-thread", "shared-turn",
+                              "item-" + suffix},
+         CardKind::AgentMessage,
+         "virtual-thread",
+         "shared-turn",
+         "item-" + suffix,
+         AgentMessageData{"Answer " + suffix, true}});
+  }
+  result.sections.push_back(std::move(section));
+  return result;
+}
+
 void settle(int passes = 4) {
   while (passes-- > 0)
     QApplication::processEvents(QEventLoop::AllEvents, 20);
@@ -536,6 +569,12 @@ bool atomicPagingAndFollowingArrival() {
   const int widgetsBefore = view.materializedCardCount();
   const qulonglong resetsBefore =
       view.conversationModel()->property("modelResetCount").toULongLong();
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  settle();
+  const auto anchorBeforePage = firstVisible(view);
+  result &= expect(view.mode() == ConversationView::Mode::Paused &&
+                       !anchorBeforePage.first.empty(),
+                   "Load 80 begins from an explicit paused viewport anchor");
 
   ConversationSnapshot loaded = conversation(160);
   loaded.hasMore = true;
@@ -561,6 +600,11 @@ bool atomicPagingAndFollowingArrival() {
                        view.materializedCardCount() <= 48,
                    "Load 80 commits one complete virtualized frame without a "
                    "model reset");
+  result &= expect(firstVisible(view) == anchorBeforePage,
+                   "Load 80 preserves the exact paused row and pixel offset");
+
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMaximum);
+  settle();
 
   ConversationSnapshot appended = conversation(161);
   view.reconcileStaged(std::move(appended));
@@ -573,6 +617,41 @@ bool atomicPagingAndFollowingArrival() {
       expect(view.isAtBottom() && tail.isValid() &&
                  view.visualRect(tail).bottom() <= view.viewport()->height(),
              "following arrival reveals its complete final card");
+  return result;
+}
+
+bool pinnedTurnPagingPreservesRetainedActivityAnchor() {
+  ConversationView view;
+  view.resize(820, 600);
+  view.show();
+  ConversationSnapshot initial = pinnedTurnPage(80, 80);
+  initial.hasMore = true;
+  bool result = expect(view.reconcile(initial),
+                       "a bounded page retains its owning turn root");
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderToMinimum);
+  settle();
+  const QModelIndex retained =
+      view.conversationModel()->indexForStableKey(stableKey(
+          AuthoritativeItemKey{"virtual-thread", "shared-turn", "item-80"}));
+  const int retainedTop = view.visualRect(retained).top();
+  result &= expect(retained.isValid() && retainedTop > 0 &&
+                       view.mode() == ConversationView::Mode::Paused,
+                   "the first retained activity establishes a paused paging "
+                   "anchor below its pinned owner");
+
+  ConversationSnapshot loaded = pinnedTurnPage(1, 159);
+  view.prependHistoryPageStaged(std::move(loaded));
+  result &= expect(waitUntil([&] { return !view.structuralStagingActive(); },
+                             5000),
+                   "the pinned-root history page commits");
+  settle();
+  const QModelIndex retainedAfter =
+      view.conversationModel()->indexForStableKey(stableKey(
+          AuthoritativeItemKey{"virtual-thread", "shared-turn", "item-80"}));
+  result &= expect(retainedAfter.isValid() &&
+                       view.visualRect(retainedAfter).top() == retainedTop,
+                   "paging anchors the first retained activity rather than "
+                   "the root pinned outside the old history window");
   return result;
 }
 
@@ -1066,6 +1145,7 @@ int main(int argc, char **argv) {
                       boundedTailAppendIsViewportProportional() &&
                       targetedVisibilityChangeIsLocal() &&
                       atomicPagingAndFollowingArrival() &&
+                      pinnedTurnPagingPreservesRetainedActivityAnchor() &&
                       historyWindowLivesWithThePresentedThread() &&
                       delayedThreadSelectionSpinner() &&
                       virtualTurnSurfaceAndInteractivePromotion() &&
