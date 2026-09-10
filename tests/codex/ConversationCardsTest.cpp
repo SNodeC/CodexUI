@@ -2277,6 +2277,9 @@ bool testMutableCardsAndCommandOutput() {
           openedFiles.urls.back().toLocalFile() ==
               QStringLiteral("/workspace/src/card.cpp"),
       "a relative changed-file link opens from the canonical thread workspace");
+  planCard->setCollapsed(false);
+  commandCard->setCollapsed(false);
+  spin();
   result &= expect(
       containsLabelText(planCard, QStringLiteral("Keep the card compact")) &&
           containsLabelText(planCard, QStringLiteral("✓ Inspect data")) &&
@@ -2296,8 +2299,6 @@ bool testMutableCardsAndCommandOutput() {
               QStringLiteral("[report.pdf](file:///tmp/report.pdf)")),
       "pending prompts render file links before authoritative replacement");
 
-  commandCard->setCollapsed(false);
-  spin();
   view.verticalScrollBar()->setValue(
       view.verticalScrollBar()->value() +
       commandCard->mapTo(view.viewport(), QPoint{}).y() - 8);
@@ -2801,17 +2802,30 @@ bool testCardFoldingGeometryAndRetention() {
   auto *output = dynamic_cast<CommandOutputView *>(
       commandCard->findChild<QPlainTextEdit *>(
           QStringLiteral("commandOutputView")));
-  result &= spinUntil([&] {
-    return output &&
-           output->toPlainText().contains(QStringLiteral("streamed line 4"));
-  });
+  result &= expect(
+      output &&
+          !output->toPlainText().contains(QStringLiteral("streamed line 4")) &&
+          commandCard->property("conversationBodyProjectionDeferred").toBool(),
+      "streaming into a folded command defers its hidden document work");
   view.verticalScrollBar()->setValue(scrollBeforeCommandUpdate);
   spin(20);
   result &= expect(
       commandCard->isCollapsed() && commandCard->height() == commandHeight &&
-          output &&
-          output->toPlainText().contains(QStringLiteral("streamed line 4")),
-      "streaming updates folded content without changing height");
+          output,
+      "streaming keeps folded command geometry unchanged");
+  result &= expect(setFolded(commandCard, false),
+                   "the updated folded command expands on demand");
+  result &= spinUntil([&] {
+    return output &&
+           output->toPlainText().contains(QStringLiteral("streamed line 4"));
+  });
+  result &= expect(
+      output &&
+          output->toPlainText().contains(QStringLiteral("streamed line 4")) &&
+          !commandCard->property("conversationBodyProjectionDeferred").toBool(),
+      "command expansion projects the latest deferred output exactly once");
+  result &= expect(setFolded(commandCard, true),
+                   "the command returns to its retained folded state");
 
   const int userHeight = userCard->height();
   result &= expect(setFolded(userCard, true),
@@ -3243,8 +3257,7 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
   result &= expect(
       update && reasoning && !update->isHidden() && !reasoning->isHidden() &&
           containsText(update, QStringLiteral("Updated while hidden")) &&
-          containsText(reasoning,
-                       QStringLiteral("Reasoning updated while hidden")) &&
+          reasoning->property("conversationBodyProjectionDeferred").toBool() &&
           firstCommand && firstCommand->isCollapsed() && secondCommand &&
           secondCommand->isCollapsed() && firstImage &&
           !firstImage->isCollapsed() && secondImage &&
@@ -3253,6 +3266,12 @@ bool testPresentationOptionsRetainCardsAndInitialFolding() {
           secondFileChanges->isCollapsed(),
       "restoring visibility reveals latest content and preserves existing "
       "folds");
+  result &= expect(setFolded(reasoning, false),
+                   "the restored reasoning card expands on demand");
+  result &= expect(
+      containsText(reasoning, QStringLiteral("Reasoning updated while hidden")) &&
+          !reasoning->property("conversationBodyProjectionDeferred").toBool(),
+      "expansion projects the latest reasoning retained while hidden");
 
   const AuthoritativeItemKey thirdCommandKey{thread, "turn", "command-3"};
   const AuthoritativeItemKey thirdFileChangesKey{thread, "turn", "files-3"};

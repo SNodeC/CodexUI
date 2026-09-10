@@ -1183,7 +1183,8 @@ void ConversationView::runStructuralStagePass() {
       continue;
     const int width = std::max(
         0, viewport()->width() - (location->nested ? 2 * NestedCardIndent : 0));
-    ConversationCard *card = createCard(*data, stagingHost_, key, width);
+    ConversationCard *card =
+        createCard(*data, stagingHost_, key, width, false);
     card->setNestedPresentation(location->nested);
     card->setAuthoritativeTurnActive(location->activeTurn);
     const int height = measureCard(card, width);
@@ -2621,16 +2622,17 @@ std::pair<int, int> ConversationView::materializationRows() const {
 ConversationCard *ConversationView::createCard(const VisibleCardData &data,
                                                QWidget *parent,
                                                const std::string &key,
-                                               int width) {
+                                               int width, bool collapsed) {
   auto *delegate =
       static_cast<ConversationPassiveDelegate *>(itemDelegate());
   std::shared_ptr<QTextDocument> markdownDocument =
-      delegate->takeMarkdownDocument(key, data, width);
+      collapsed ? std::shared_ptr<QTextDocument>{}
+                : delegate->takeMarkdownDocument(key, data, width);
   ConversationCard *card = createConversationCard(
       data, parent, !presentationOptions_.commandsInitiallyExpanded,
       !presentationOptions_.imagesInitiallyExpanded,
       !presentationOptions_.fileChangesInitiallyExpanded, width,
-      std::move(markdownDocument));
+      std::move(markdownDocument), collapsed);
   card->setProperty("conversationAnchorKey", QString::fromStdString(key));
   if (const auto collapsed = cardCollapsedStates_.find(key);
       collapsed != cardCollapsedStates_.end())
@@ -2714,7 +2716,8 @@ ConversationCard *ConversationView::materializeRow(int rowIndex,
   } else {
     QElapsedTimer constructionTimer;
     constructionTimer.start();
-    card = createCard(row->card, stagingHost_, row->stableKey, rowWidth(*row));
+    card = createCard(row->card, stagingHost_, row->stableKey, rowWidth(*row),
+                      rowCollapsed(*row));
     card->setProperty("conversationConstructionMicros",
                       constructionTimer.nsecsElapsed() / 1000);
     incrementProperty(this, "conversationCardConstructions");

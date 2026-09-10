@@ -581,6 +581,11 @@ QString commandMetadata(const CommandExecutionData &command) {
   return metadata.join(QStringLiteral("  |  "));
 }
 
+bool commandHasMetadata(const CommandExecutionData &command) noexcept {
+  return command.exitCode || !command.cwd.empty() ||
+         command.durationMilliseconds;
+}
+
 QString displayChangeKind(std::string_view kind) {
   if (kind.empty())
     return QStringLiteral("Changed");
@@ -1491,11 +1496,13 @@ public:
   Impl(ConversationCard *owner, const VisibleCardData &initial,
        bool commandInitiallyCollapsed, bool imageInitiallyCollapsed,
        bool fileChangesInitiallyCollapsed,
-       std::shared_ptr<QTextDocument> preparedMarkdownDocument)
+       std::shared_ptr<QTextDocument> preparedMarkdownDocument,
+       std::optional<bool> collapsedOverride)
       : owner(owner), current(initial),
-        collapsed(initiallyCollapsed(initial.kind, commandInitiallyCollapsed,
-                                     imageInitiallyCollapsed,
-                                     fileChangesInitiallyCollapsed)),
+        collapsed(collapsedOverride.value_or(initiallyCollapsed(
+            initial.kind, commandInitiallyCollapsed, imageInitiallyCollapsed,
+            fileChangesInitiallyCollapsed))),
+        deferCollapsedBodyProjection(collapsedOverride.has_value()),
         preparedMarkdownDocument(std::move(preparedMarkdownDocument)) {
     owner->setObjectName(QStringLiteral("conversationCard"));
     owner->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
@@ -1600,8 +1607,7 @@ public:
           before && after && before->command == after->command &&
           before->output == after->output && before->cwd == after->cwd &&
           !before->status.empty() && !after->status.empty() &&
-          !commandMetadata(*before).isEmpty() &&
-          !commandMetadata(*after).isEmpty();
+          commandHasMetadata(*before) && commandHasMetadata(*after);
     }
     if (becomingAuthoritative)
       promoteToAuthoritativeUserMessage();
@@ -1622,7 +1628,8 @@ public:
       return PresentationImpact::PaintOnly;
     }
     const int previousNaturalHeight =
-        commandLifecycleOnly ? naturalHeightForCurrentWidth() : -1;
+        commandLifecycleOnly && !collapsed ? naturalHeightForCurrentWidth()
+                                           : -1;
     std::visit(
         [this, fileChangesBodyChanged](const auto &payload) {
           using Payload = std::decay_t<decltype(payload)>;
@@ -1647,7 +1654,7 @@ public:
                                           (!fileChangesBodyChanged || collapsed);
     const bool geometryChanged = !cappedCommandOutputOnly &&
                                  !measuredLifecyclePaintOnly &&
-                                 !fileChangesLifecycleOnly;
+                                 !fileChangesLifecycleOnly && !collapsed;
     if (geometryChanged)
       owner->updateGeometry();
     owner->update();
@@ -1702,10 +1709,18 @@ public:
   void setCollapsed(bool next) {
     if (collapsed == next)
       return;
-    if (!next && current.kind == CardKind::FileChanges)
-      updateComposition(std::get<FileChangesData>(current.payload), false,
-                        true);
     collapsed = next;
+    if (!collapsed) {
+      std::visit(
+          [this](const auto &payload) {
+            using Payload = std::decay_t<decltype(payload)>;
+            if constexpr (std::is_same_v<Payload, FileChangesData>)
+              updateComposition(payload, false, true);
+            else
+              updateComposition(payload);
+          },
+          current.payload);
+    }
     refreshFoldPresentation();
     owner->updateGeometry();
     owner->update();
@@ -1837,6 +1852,26 @@ public:
     return std::exchange(preparedMarkdownDocument, {});
   }
 
+  std::shared_ptr<QTextDocument> takePreparedVisibleMarkdownDocument() {
+    if (collapsed && deferCollapsedBodyProjection) {
+      preparedMarkdownDocument.reset();
+      return {};
+    }
+    return takePreparedMarkdownDocument();
+  }
+
+  void markBodyProjectionDeferred() {
+    owner->setProperty("conversationBodyProjectionDeferred", true);
+  }
+
+  void markBodyProjectionReady() {
+    if (owner->property("conversationBodyProjectionDeferred").toBool())
+      owner->setProperty(
+          "conversationDeferredBodyBuilds",
+          owner->property("conversationDeferredBodyBuilds").toULongLong() + 1);
+    owner->setProperty("conversationBodyProjectionDeferred", false);
+  }
+
   int markdownContentWidth() const {
     const QMargins margins = layout->contentsMargins();
     return std::max(1, owner->contentsRect().width() - margins.left() -
@@ -1850,26 +1885,37 @@ public:
   void createComposition(const UserMessageData &message) {
     owner->setProperty("messageRole", "user");
     title->setText(QStringLiteral("You"));
-    markdownBody = makeMarkdownView(text(message.text),
-                                    takePreparedMarkdownDocument(),
-                                    markdownContentWidth(), content);
+    markdownBody = makeMarkdownView(
+        collapsed && deferCollapsedBodyProjection ? QString{}
+                                                   : text(message.text),
+        takePreparedVisibleMarkdownDocument(), markdownContentWidth(),
+        content);
     contentLayout->addWidget(markdownBody);
     createImageContainer();
     updateComposition(message);
   }
 
   void updateComposition(const UserMessageData &message) {
+    if (collapsed && deferCollapsedBodyProjection) {
+      markdownBody->setVisible(!message.text.empty());
+      images->setVisible(!message.imagePaths.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
     setVisibleMarkdown(markdownBody, text(message.text));
     setImages(textList(message.imagePaths));
+    markBodyProjectionReady();
   }
 
   void createComposition(const AgentMessageData &message) {
     owner->setProperty("messageRole", "agent");
     title->setText(QStringLiteral("Codex"));
     showPhase({}, QStringLiteral("agentMessagePhase"));
-    markdownBody = makeMarkdownView(text(message.text),
-                                    takePreparedMarkdownDocument(),
-                                    markdownContentWidth(), content);
+    markdownBody = makeMarkdownView(
+        collapsed && deferCollapsedBodyProjection ? QString{}
+                                                   : text(message.text),
+        takePreparedVisibleMarkdownDocument(), markdownContentWidth(),
+        content);
     contentLayout->addWidget(markdownBody);
     updateComposition(message);
   }
@@ -1891,7 +1937,13 @@ public:
     setStatusTone(phase, phaseStatus);
     layout->setContentsMargins(12, message.finalAnswer ? 10 : 8, 12,
                                message.finalAnswer ? 10 : 8);
+    if (collapsed && deferCollapsedBodyProjection) {
+      markdownBody->setVisible(!message.text.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
     setVisibleMarkdown(markdownBody, text(message.text));
+    markBodyProjectionReady();
   }
 
   void createComposition(const CommandExecutionData &execution) {
@@ -1921,6 +1973,14 @@ public:
   void updateComposition(const CommandExecutionData &execution) {
     setActiveWork(isActiveStatus(execution.status));
     showStatus(text(execution.status), QStringLiteral("commandStatus"));
+    if (collapsed && deferCollapsedBodyProjection) {
+      command->setVisible(
+          hasTextAfterTrimmingTrailingEmptyLines(execution.command));
+      output->setVisible(terminalOutputHasVisibleText(execution.output));
+      metadata->setVisible(commandHasMetadata(execution));
+      markBodyProjectionDeferred();
+      return;
+    }
     const std::string trimmedCommand =
         trimTrailingEmptyLines(execution.command);
     const QString displayCommand = text(trimmedCommand);
@@ -1941,14 +2001,17 @@ public:
       output->restoreScrollState({true, 0});
     }
     setVisibleText(metadata, commandMetadata(execution));
+    markBodyProjectionReady();
   }
 
   void createComposition(const AgentActivityData &activity) {
     title->setText(QStringLiteral("Agent activity"));
     metadata = makeLabel({}, "meta", content);
     body = makeLabel({}, "body", content);
-    detail = makeMarkdownView(text(activity.resultText),
-                              takePreparedMarkdownDocument(),
+    detail = makeMarkdownView(collapsed && deferCollapsedBodyProjection
+                                  ? QString{}
+                                  : text(activity.resultText),
+                              takePreparedVisibleMarkdownDocument(),
                               markdownContentWidth(), content);
     contentLayout->addWidget(metadata);
     contentLayout->addWidget(body);
@@ -1958,22 +2021,44 @@ public:
 
   void updateComposition(const AgentActivityData &activity) {
     showStatus(text(activity.status), QStringLiteral("agentActivityStatus"));
+    if (collapsed && deferCollapsedBodyProjection) {
+      metadata->setVisible(!activity.tool.empty() || !activity.kind.empty() ||
+                           !activity.receivers.empty() ||
+                           !activity.model.empty() ||
+                           !activity.reasoningEffort.empty() ||
+                           !activity.childThreadId.empty() ||
+                           !activity.agentPath.empty() ||
+                           !activity.senderThreadId.empty());
+      body->setVisible(!activity.prompt.empty());
+      detail->setVisible(!activity.resultText.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
     setVisibleText(metadata, presentation::agentMetadata(activity));
     setVisibleText(body, text(activity.prompt));
     setVisibleMarkdown(detail, text(activity.resultText));
+    markBodyProjectionReady();
   }
 
   void createComposition(const ReasoningData &reasoning) {
     title->setText(QStringLiteral("Reasoning"));
-    markdownBody = makeMarkdownView(text(reasoning.summary),
-                                    takePreparedMarkdownDocument(),
+    markdownBody = makeMarkdownView(collapsed && deferCollapsedBodyProjection
+                                        ? QString{}
+                                        : text(reasoning.summary),
+                                    takePreparedVisibleMarkdownDocument(),
                                     markdownContentWidth(), content);
     contentLayout->addWidget(markdownBody);
     updateComposition(reasoning);
   }
 
   void updateComposition(const ReasoningData &reasoning) {
+    if (collapsed && deferCollapsedBodyProjection) {
+      markdownBody->setVisible(!reasoning.summary.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
     setVisibleMarkdown(markdownBody, text(reasoning.summary));
+    markBodyProjectionReady();
   }
 
   void createComposition(const FileChangesData &changes) {
@@ -1989,6 +2074,11 @@ public:
                          bool presentBody) {
     if (contentChanged)
       fileChangesBodyReady = false;
+    if (!presentBody) {
+      markBodyProjectionDeferred();
+      showStatus(text(changes.status), QStringLiteral("fileChangesStatus"));
+      return;
+    }
     if (presentBody && !fileChangesBodyReady) {
       QElapsedTimer buildTimer;
       buildTimer.start();
@@ -2009,20 +2099,31 @@ public:
           owner->property("fileChangesBodyRebuilds").toULongLong() + 1);
       fileChangesBodyReady = true;
     }
+    markBodyProjectionReady();
     showStatus(text(changes.status), QStringLiteral("fileChangesStatus"));
   }
 
   void createComposition(const PlanData &plan) {
     title->setText(QStringLiteral("Plan"));
-    markdownBody = makeMarkdownView(presentation::planMarkdown(plan),
-                                    takePreparedMarkdownDocument(),
-                                    markdownContentWidth(), content);
+    markdownBody = makeMarkdownView(
+        collapsed && deferCollapsedBodyProjection
+            ? QString{}
+            : presentation::planMarkdown(plan),
+        takePreparedVisibleMarkdownDocument(), markdownContentWidth(),
+        content);
     contentLayout->addWidget(markdownBody);
     updateComposition(plan);
   }
 
   void updateComposition(const PlanData &plan) {
+    if (collapsed && deferCollapsedBodyProjection) {
+      markdownBody->setVisible(!plan.explanation.empty() ||
+                               !plan.steps.empty() || !plan.legacyText.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
     setVisibleMarkdown(markdownBody, presentation::planMarkdown(plan));
+    markBodyProjectionReady();
   }
 
   void createComposition(const ImageGenerationData &image) {
@@ -2040,13 +2141,21 @@ public:
         !image.status.empty() || !image.revisedPrompt.empty();
     title->setText(generated ? QStringLiteral("Generated image")
                              : QStringLiteral("Image"));
+    if (collapsed && deferCollapsedBodyProjection) {
+      body->setVisible(!image.revisedPrompt.empty());
+      images->setVisible(!image.path.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
     setVisibleText(body, text(image.revisedPrompt));
     setImages(image.path.empty() ? QStringList{}
                                  : QStringList{text(image.path)});
+    markBodyProjectionReady();
   }
 
   void createComposition(const GenericActivityData &activity) {
     metadata = makeLabel({}, "meta", content);
+    metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
     contentLayout->addWidget(metadata);
     updateComposition(activity);
   }
@@ -2054,10 +2163,15 @@ public:
   void updateComposition(const GenericActivityData &activity) {
     title->setText(presentation::genericActivityTitle(activity));
     showStatus(text(activity.status), QStringLiteral("genericActivityStatus"));
+    if (collapsed && deferCollapsedBodyProjection) {
+      metadata->setVisible(!activity.displayDetail.empty());
+      markBodyProjectionDeferred();
+      return;
+    }
     metadata->setText(
         presentation::boundedGenericActivityDetail(activity));
-    metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
     metadata->show();
+    markBodyProjectionReady();
   }
 
   void createComposition(const LocalPromptData &prompt) {
@@ -2066,8 +2180,10 @@ public:
         QStringLiteral("QFrame#pendingPromptCard{background:transparent;"
                        "border:1px solid transparent;border-radius:8px;}"));
     title->setText(QStringLiteral("You"));
-    markdownBody = makeMarkdownView(text(prompt.prompt),
-                                    takePreparedMarkdownDocument(),
+    markdownBody = makeMarkdownView(collapsed && deferCollapsedBodyProjection
+                                        ? QString{}
+                                        : text(prompt.prompt),
+                                    takePreparedVisibleMarkdownDocument(),
                                     markdownContentWidth(), content);
     metadata = makeLabel({}, "meta", content);
     contentLayout->addWidget(markdownBody);
@@ -2102,8 +2218,15 @@ public:
   }
 
   void updateComposition(const LocalPromptData &prompt) {
-    setVisibleMarkdown(markdownBody, text(prompt.prompt));
-    setImages(textList(prompt.imagePaths));
+    if (collapsed && deferCollapsedBodyProjection) {
+      markdownBody->setVisible(!prompt.prompt.empty());
+      images->setVisible(!prompt.imagePaths.empty());
+      markBodyProjectionDeferred();
+    } else {
+      setVisibleMarkdown(markdownBody, text(prompt.prompt));
+      setImages(textList(prompt.imagePaths));
+      markBodyProjectionReady();
+    }
     refreshPendingPresentation();
   }
 
@@ -2233,6 +2356,7 @@ public:
   std::optional<qint64> pendingFeedbackDeadlineMs;
   ImageRibbon *images = nullptr;
   bool fileChangesBodyReady = false;
+  bool deferCollapsedBodyProjection = false;
   std::shared_ptr<QTextDocument> preparedMarkdownDocument;
   bool authoritativeTurnActive = false;
   int turnRootBottomMargin = 10;
@@ -2244,14 +2368,16 @@ ConversationCard::ConversationCard(const VisibleCardData &data, QWidget *parent,
                                    bool fileChangesInitiallyCollapsed,
                                    int initialWidth,
                                    std::shared_ptr<QTextDocument>
-                                       markdownDocument)
+                                       markdownDocument,
+                                   std::optional<bool> collapsedOverride)
     : QFrame(parent) {
   if (initialWidth > 0)
     resize(initialWidth, 1);
   impl_ = std::make_unique<Impl>(this, data, commandInitiallyCollapsed,
                                  imageInitiallyCollapsed,
                                  fileChangesInitiallyCollapsed,
-                                 std::move(markdownDocument));
+                                 std::move(markdownDocument),
+                                 collapsedOverride);
 }
 
 ConversationCard::~ConversationCard() = default;
@@ -2413,11 +2539,12 @@ ConversationCard *createConversationCard(const VisibleCardData &data,
                                          bool fileChangesInitiallyCollapsed,
                                          int initialWidth,
                                          std::shared_ptr<QTextDocument>
-                                             markdownDocument) {
+                                             markdownDocument,
+                                         std::optional<bool> collapsedOverride) {
   return new ConversationCard(data, parent, commandInitiallyCollapsed,
                               imageInitiallyCollapsed,
                               fileChangesInitiallyCollapsed, initialWidth,
-                              std::move(markdownDocument));
+                              std::move(markdownDocument), collapsedOverride);
 }
 
 } // namespace codexui::codex::middle

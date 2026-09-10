@@ -234,10 +234,16 @@ middle::ConversationCard *agentMessageCard(ShellWidget &shell,
   if (!target.isValid() || visible.isEmpty())
     return nullptr;
   const QPoint position = visible.center();
-  QMouseEvent move(QEvent::MouseMove, QPointF(position), QPointF(position),
-                   view->viewport()->mapToGlobal(position), Qt::NoButton,
-                   Qt::NoButton, Qt::NoModifier);
-  QApplication::sendEvent(view->viewport(), &move);
+  QMouseEvent press(QEvent::MouseButtonPress, QPointF(position),
+                    QPointF(position),
+                    view->viewport()->mapToGlobal(position), Qt::LeftButton,
+                    Qt::LeftButton, Qt::NoModifier);
+  QApplication::sendEvent(view->viewport(), &press);
+  QMouseEvent release(QEvent::MouseButtonRelease, QPointF(position),
+                      QPointF(position),
+                      view->viewport()->mapToGlobal(position), Qt::LeftButton,
+                      Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(view->viewport(), &release);
   QCoreApplication::processEvents();
   return findMaterialized();
 }

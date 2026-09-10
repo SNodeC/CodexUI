@@ -1644,6 +1644,110 @@ bool collapsedLargeCardsSkipBodyProjection() {
   return result;
 }
 
+bool collapsedInteractionDefersEveryHeavyCardBody() {
+  const std::string large(20'000, 'x');
+  const std::string marker = "latest-deferred-body";
+  std::vector<VisibleCardData> cards{
+      {AuthoritativeItemKey{"deferred", "turn", "user"},
+       CardKind::UserMessage, "deferred", "turn", "user",
+       UserMessageData{large, {}}},
+      {AuthoritativeItemKey{"deferred", "turn", "agent"},
+       CardKind::AgentMessage, "deferred", "turn", "agent",
+       AgentMessageData{large, false}},
+      {AuthoritativeItemKey{"deferred", "turn", "command"},
+       CardKind::CommandExecution, "deferred", "turn", "command",
+       CommandExecutionData{large, large, "inProgress", "/workspace", {}}},
+      {AuthoritativeItemKey{"deferred", "turn", "activity"},
+       CardKind::AgentActivity, "deferred", "turn", "activity",
+       AgentActivityData{"spawn_agent", "inProgress", {}, large, large}},
+      {AuthoritativeItemKey{"deferred", "turn", "reasoning"},
+       CardKind::Reasoning, "deferred", "turn", "reasoning",
+       ReasoningData{large}},
+      {TurnPlanKey{"deferred", "turn"}, CardKind::Plan, "deferred", "turn",
+       {}, PlanData{large, {{large, "inProgress"}}, {}}},
+      {AuthoritativeItemKey{"deferred", "turn", "image"},
+       CardKind::ImageGeneration, "deferred", "turn", "image",
+       ImageGenerationData{{}, "inProgress", large}},
+      {AuthoritativeItemKey{"deferred", "turn", "generic"},
+       CardKind::GenericActivity, "deferred", "turn", "generic",
+       GenericActivityData{"customActivity", "inProgress", large}},
+      {LocalPromptKey{912}, CardKind::LocalPrompt, "deferred", "turn", {},
+       LocalPromptData{912, large, PromptState::InFlight, 0, {}, {}}}};
+
+  auto appendMarker = [&marker](VisibleCardData &card) {
+    std::visit(
+        [&marker](auto &payload) {
+          using Payload = std::decay_t<decltype(payload)>;
+          if constexpr (std::is_same_v<Payload, UserMessageData>)
+            payload.text += marker;
+          else if constexpr (std::is_same_v<Payload, AgentMessageData>)
+            payload.text += marker;
+          else if constexpr (std::is_same_v<Payload, CommandExecutionData>)
+            payload.output += marker;
+          else if constexpr (std::is_same_v<Payload, AgentActivityData>)
+            payload.resultText += marker;
+          else if constexpr (std::is_same_v<Payload, ReasoningData>)
+            payload.summary += marker;
+          else if constexpr (std::is_same_v<Payload, PlanData>)
+            payload.explanation += marker;
+          else if constexpr (std::is_same_v<Payload, ImageGenerationData>)
+            payload.revisedPrompt += marker;
+          else if constexpr (std::is_same_v<Payload, GenericActivityData>)
+            payload.displayDetail = marker + payload.displayDetail;
+          else if constexpr (std::is_same_v<Payload, LocalPromptData>)
+            payload.prompt += marker;
+        },
+        card.payload);
+  };
+  auto bodyContains = [&marker](ConversationCard &card) {
+    const auto markdown = card.findChildren<MarkdownTextView *>();
+    if (std::ranges::any_of(markdown, [&marker](MarkdownTextView *view) {
+          return view->markdownSource().contains(QString::fromStdString(marker));
+        }))
+      return true;
+    const auto textEdits = card.findChildren<QTextEdit *>();
+    if (std::ranges::any_of(textEdits, [&marker](QTextEdit *view) {
+          return view->toPlainText().contains(QString::fromStdString(marker));
+        }))
+      return true;
+    const auto plainEdits = card.findChildren<QPlainTextEdit *>();
+    if (std::ranges::any_of(plainEdits, [&marker](QPlainTextEdit *view) {
+          return view->toPlainText().contains(QString::fromStdString(marker));
+        }))
+      return true;
+    return std::ranges::any_of(
+        card.findChildren<QLabel *>(), [&marker](QLabel *label) {
+          return label->property("kind").toString() != QStringLiteral("title") &&
+                 label->text().contains(QString::fromStdString(marker));
+        });
+  };
+
+  bool result = true;
+  for (VisibleCardData &data : cards) {
+    ConversationCard card(data, nullptr, true, true, true, 820, {}, true);
+    result &= expect(
+        card.isCollapsed() &&
+            card.property("conversationBodyProjectionDeferred").toBool() &&
+            !bodyContains(card),
+        "collapsed interaction constructs no hidden heavy body");
+    VisibleCardData latest = data;
+    appendMarker(latest);
+    result &= expect(
+        card.applyPresentation(latest) == PresentationImpact::PaintOnly &&
+            card.property("conversationBodyProjectionDeferred").toBool() &&
+            !bodyContains(card),
+        "collapsed lifecycle updates only the card header surface");
+    card.setCollapsed(false);
+    result &= expect(
+        !card.property("conversationBodyProjectionDeferred").toBool() &&
+            card.property("conversationDeferredBodyBuilds").toULongLong() ==
+                1 &&
+            bodyContains(card),
+        "expansion projects the latest deferred body exactly once");
+  }
+  return result;
+}
+
 } // namespace
 } // namespace codexui::codex::middle
 
@@ -1669,7 +1773,8 @@ int main(int argc, char **argv) {
                       passiveMarkdownHoverKeepsLinkSemanticsWithoutAnEditor() &&
                       selectionFocusAndOneGesturePromotion() &&
                       outsideTextDragDoesNotReenterTheView() &&
-                      collapsedLargeCardsSkipBodyProjection();
+                      collapsedLargeCardsSkipBodyProjection() &&
+                      collapsedInteractionDefersEveryHeavyCardBody();
   if (result)
     std::cout << "Conversation virtualization tests passed\n";
   return result ? EXIT_SUCCESS : EXIT_FAILURE;

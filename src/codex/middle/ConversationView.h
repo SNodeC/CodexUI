@@ -289,7 +289,7 @@ private:
   [[nodiscard]] ConversationCard *createCard(const VisibleCardData &data,
                                              QWidget *parent,
                                              const std::string &key,
-                                             int width);
+                                             int width, bool collapsed);
   void setCardCollapsed(const std::string &key, ConversationCard *card,
                         bool collapsed);
 

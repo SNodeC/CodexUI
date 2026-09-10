@@ -141,7 +141,8 @@ public:
                             bool imageInitiallyCollapsed = true,
                             bool fileChangesInitiallyCollapsed = true,
                             int initialWidth = 0,
-                            std::shared_ptr<QTextDocument> markdownDocument = {});
+                            std::shared_ptr<QTextDocument> markdownDocument = {},
+                            std::optional<bool> collapsedOverride = {});
   ~ConversationCard() override;
 
   [[nodiscard]] CardKind cardKind() const noexcept;
@@ -190,7 +191,8 @@ createConversationCard(const VisibleCardData &data, QWidget *parent = nullptr,
                        bool imageInitiallyCollapsed = true,
                        bool fileChangesInitiallyCollapsed = true,
                        int initialWidth = 0,
-                       std::shared_ptr<QTextDocument> markdownDocument = {});
+                       std::shared_ptr<QTextDocument> markdownDocument = {},
+                       std::optional<bool> collapsedOverride = {});
 
 } // namespace codexui::codex::middle
 
