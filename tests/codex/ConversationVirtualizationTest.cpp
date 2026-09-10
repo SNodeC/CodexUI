@@ -12,6 +12,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QPlainTextEdit>
 #include <QScrollBar>
 #include <QThread>
 #include <QWheelEvent>
@@ -1266,6 +1267,76 @@ bool bidirectionalLazyMeasurementPreservesNativeScrollMotion() {
   return result;
 }
 
+bool largeIncomingCommandUsesBoundedFinalWidthLayout() {
+  const std::string thread = "bounded-command";
+  VisibleCardData root{
+      AuthoritativeItemKey{thread, "turn", "root"},
+      CardKind::UserMessage,
+      thread,
+      "turn",
+      "root",
+      UserMessageData{"Run the command"}};
+  ConversationSnapshot snapshot;
+  snapshot.threadId = thread;
+  snapshot.sections.push_back(
+      {"command-section", "turn", {root}, root.key});
+
+  ConversationView view;
+  ConversationView::PresentationOptions options = view.presentationOptions();
+  options.commandsInitiallyExpanded = true;
+  view.setPresentationOptions(options);
+  view.resize(760, 480);
+  view.show();
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "bounded-command fixture reconciles");
+  settle();
+
+  std::string output;
+  output.reserve(192 * 1024);
+  while (output.size() < 192 * 1024)
+    output += "0123456789abcdef command output line for bounded layout\n";
+  output.resize(192 * 1024);
+  ConversationTailCard tail;
+  tail.card = {AuthoritativeItemKey{thread, "turn", "command"},
+               CardKind::CommandExecution,
+               thread,
+               "turn",
+               "command",
+               CommandExecutionData{"printf diagnostic", std::move(output),
+                                    "inProgress", "/workspace", {}, {}},
+               true};
+  const std::string key = stableKey(tail.card.key);
+  tail.sectionKey = "command-section";
+  tail.nested = true;
+  tail.activeTurn = true;
+  tail.historyActivity = true;
+  tail.authoritativeItemCount = 2;
+
+  QElapsedTimer timer;
+  timer.start();
+  result &= expect(view.appendTailCard(std::move(tail)),
+                   "large command appends through the direct-tail path");
+  const qint64 appendMicros = timer.nsecsElapsed() / 1000;
+  settle();
+  ConversationCard *commandCard = materializedCard(view, key);
+  CommandOutputView *commandOutput = commandCard
+                                         ? dynamic_cast<CommandOutputView *>(
+                                               commandCard->findChild<QPlainTextEdit *>(
+                                                   QStringLiteral(
+                                                       "commandOutputView")))
+                                         : nullptr;
+  result &= expect(
+      commandOutput && commandOutput->viewport()->width() > 500 &&
+          commandOutput->property("boundedOutputMeasurements").toULongLong() >=
+              1 &&
+          commandOutput->property("fullOutputMeasurements").toULongLong() == 0 &&
+          commandOutput->document()->characterCount() > 190 * 1024,
+      "large command output is retained but bypasses whole-document geometry "
+      "at its final row width");
+  view.setProperty("largeCommandAppendMicros", appendMicros);
+  return result;
+}
+
 bool outsideTextDragDoesNotReenterTheView() {
   ConversationSnapshot snapshot;
   snapshot.threadId = "virtual-thread";
@@ -1352,6 +1423,7 @@ int main(int argc, char **argv) {
                       acknowledgedSteeringMovesAboveFollowingActivity() &&
                       passiveAndInteractivePresentationShareExactGeometry() &&
                       bidirectionalLazyMeasurementPreservesNativeScrollMotion() &&
+                      largeIncomingCommandUsesBoundedFinalWidthLayout() &&
                       selectionFocusAndOneGesturePromotion() &&
                       outsideTextDragDoesNotReenterTheView();
   if (result)

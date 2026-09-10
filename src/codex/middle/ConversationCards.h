@@ -6,6 +6,7 @@
 #include "codex/middle/MiddleTypes.h"
 
 #include <QFrame>
+#include <QPlainTextEdit>
 #include <QTextEdit>
 
 #include <memory>
@@ -40,6 +41,7 @@ protected:
   [[nodiscard]] bool contentHeightCapped() const noexcept;
 
 private:
+  [[nodiscard]] bool setPreferredContentHeight(int height, bool notifyParent);
   int preferredHeight_ = 0;
   bool pinScrollToStart_ = false;
   bool wheelGestureActive_ = false;
@@ -47,7 +49,7 @@ private:
   bool wheelGestureOwned_ = false;
 };
 
-class CommandOutputView final : public ContentSizedTextView {
+class CommandOutputView final : public QPlainTextEdit {
 public:
   struct ScrollState {
     bool followsLatest = true;
@@ -61,6 +63,9 @@ public:
   [[nodiscard]] ScrollState scrollState() const;
   [[nodiscard]] bool followsLatest() const noexcept;
   [[nodiscard]] bool isHeightCapped() const noexcept;
+  [[nodiscard]] bool retainsWheelGesture(QWheelEvent *event);
+  QSize sizeHint() const override;
+  QSize minimumSizeHint() const override;
 
   // Returns false for a true no-op. Programmatic document/range changes do
   // not alter the user's follow/paused choice.
@@ -68,16 +73,24 @@ public:
   void restoreScrollState(const ScrollState &state);
 
 protected:
+  void resizeEvent(QResizeEvent *event) override;
   void wheelEvent(QWheelEvent *event) override;
 
 private:
+  [[nodiscard]] bool measureAtCurrentWidth(bool notifyParent);
+  [[nodiscard]] bool setPreferredContentHeight(int height, bool notifyParent);
   void settleScroll();
   [[nodiscard]] bool isAtBottom() const;
+  [[nodiscard]] bool outputRequiresMaximumHeight(const QString &output) const;
 
   bool followsLatest_ = true;
   bool programmaticScroll_ = false;
   bool settlingScroll_ = false;
   bool userScrollActive_ = false;
+  bool wheelGestureActive_ = false;
+  bool wheelGestureDecided_ = false;
+  bool wheelGestureOwned_ = false;
+  int preferredHeight_ = 0;
   int preservedScrollValue_ = 0;
   QString currentOutput_;
 };
@@ -90,7 +103,8 @@ public:
                             QWidget *parent = nullptr,
                             bool commandInitiallyCollapsed = true,
                             bool imageInitiallyCollapsed = true,
-                            bool fileChangesInitiallyCollapsed = true);
+                            bool fileChangesInitiallyCollapsed = true,
+                            int initialWidth = 0);
   ~ConversationCard() override;
 
   [[nodiscard]] CardKind cardKind() const noexcept;
@@ -136,7 +150,8 @@ private:
 createConversationCard(const VisibleCardData &data, QWidget *parent = nullptr,
                        bool commandInitiallyCollapsed = true,
                        bool imageInitiallyCollapsed = true,
-                       bool fileChangesInitiallyCollapsed = true);
+                       bool fileChangesInitiallyCollapsed = true,
+                       int initialWidth = 0);
 
 } // namespace codexui::codex::middle
 

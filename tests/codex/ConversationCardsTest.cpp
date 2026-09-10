@@ -22,6 +22,7 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPointer>
+#include <QPlainTextEdit>
 #include <QPersistentModelIndex>
 #include <QPushButton>
 #include <QScrollArea>
@@ -1306,7 +1307,7 @@ bool testPausedExpandedCommandStaysPainted() {
                    "completed command is expanded before incoming cards");
   QPointer<CommandOutputView> outputView =
       commandCard ? dynamic_cast<CommandOutputView *>(
-                        commandCard->findChild<QTextEdit *>(
+                        commandCard->findChild<QPlainTextEdit *>(
                             QStringLiteral("commandOutputView")))
                   : nullptr;
   if (outputView && outputView->verticalScrollBar()->maximum() > 0) {
@@ -2146,7 +2147,8 @@ bool testMutableCardsAndCommandOutput() {
   auto *commandCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "command"}})];
   auto *output = dynamic_cast<CommandOutputView *>(
-      commandCard->findChild<QTextEdit *>(QStringLiteral("commandOutputView")));
+      commandCard->findChild<QPlainTextEdit *>(
+          QStringLiteral("commandOutputView")));
   auto *commandText = dynamic_cast<ContentSizedTextView *>(
       commandCard->findChild<QTextEdit *>(QStringLiteral("commandTextView")));
   auto *commandStatus =
@@ -2761,7 +2763,8 @@ bool testCardFoldingGeometryAndRetention() {
   result &= expect(applyConversation(view, snapshot),
                    "folded command accepts a streamed content update");
   auto *output = dynamic_cast<CommandOutputView *>(
-      commandCard->findChild<QTextEdit *>(QStringLiteral("commandOutputView")));
+      commandCard->findChild<QPlainTextEdit *>(
+          QStringLiteral("commandOutputView")));
   result &= spinUntil([&] {
     return output &&
            output->toPlainText().contains(QStringLiteral("streamed line 4"));
@@ -3266,7 +3269,7 @@ bool testInitialCommandGeometrySettlement() {
   result &= expect(setFolded(commandCard, false),
                    "initially folded command can be expanded for inspection");
   auto *outputView = commandCard ? dynamic_cast<CommandOutputView *>(
-                                       commandCard->findChild<QTextEdit *>(
+                                       commandCard->findChild<QPlainTextEdit *>(
                                            QStringLiteral("commandOutputView")))
                                  : nullptr;
   result &= expect(commandCard && outputView && !outputView->isHidden() &&
@@ -3540,7 +3543,7 @@ bool testBottomAnchoredCommandOutputGrowth() {
           ? commandCard->findChild<QLabel *>(QStringLiteral("commandStatus"))
           : nullptr;
   auto *output = commandCard ? dynamic_cast<CommandOutputView *>(
-                                   commandCard->findChild<QTextEdit *>(
+                                   commandCard->findChild<QPlainTextEdit *>(
                                        QStringLiteral("commandOutputView")))
                              : nullptr;
   result &= expect(commandCard && metadata && metadata->isHidden() && status &&
@@ -3610,6 +3613,11 @@ bool testBottomAnchoredCommandOutputGrowth() {
   const qulonglong geometryBeforeAppend =
       view.property("conversationGeometryPasses").toULongLong();
   QPointer<ConversationCard> retainedCommand = commandCard;
+  QTextCursor selectedOutput(output->document());
+  selectedOutput.setPosition(12);
+  selectedOutput.setPosition(38, QTextCursor::KeepAnchor);
+  output->setTextCursor(selectedOutput);
+  const QString selectionBeforeAppend = output->textCursor().selectedText();
   live.output += "one more append-only streaming line\n";
   result &= expect(applyConversation(view, snapshot),
                    "capped output accepts another streaming append");
@@ -3622,6 +3630,9 @@ bool testBottomAnchoredCommandOutputGrowth() {
                   .y() == cardBottomBefore,
       "append-only capped output repaints its retained card without a "
       "conversation geometry pass");
+  result &= expect(output->textCursor().selectedText() == selectionBeforeAppend,
+                   "append-only command streaming preserves output text "
+                   "selection");
   return result;
 }
 
@@ -3650,7 +3661,7 @@ bool testCommandOutputStateAcrossNavigation() {
                        "navigation command expands from its compact default");
   auto *initialOutput = commandCard
                             ? dynamic_cast<CommandOutputView *>(
-                                  commandCard->findChild<QTextEdit *>(
+                                  commandCard->findChild<QPlainTextEdit *>(
                                       QStringLiteral("commandOutputView")))
                             : nullptr;
   result &=
@@ -3664,7 +3675,7 @@ bool testCommandOutputStateAcrossNavigation() {
   spin();
   commandCard = card(view, stableKey(command.key));
   initialOutput = commandCard ? dynamic_cast<CommandOutputView *>(
-                                    commandCard->findChild<QTextEdit *>(
+                                    commandCard->findChild<QPlainTextEdit *>(
                                         QStringLiteral("commandOutputView")))
                               : nullptr;
   result &= expect(initialOutput && initialOutput->followsLatest() &&
@@ -3677,6 +3688,11 @@ bool testCommandOutputStateAcrossNavigation() {
   initialOutput->verticalScrollBar()->triggerAction(
       QAbstractSlider::SliderSingleStepSub);
   spin();
+  QTextCursor retainedSelection(initialOutput->document());
+  retainedSelection.setPosition(output.size() - 48);
+  retainedSelection.setPosition(output.size() - 22, QTextCursor::KeepAnchor);
+  initialOutput->setTextCursor(retainedSelection);
+  const QString selectedText = retainedSelection.selectedText();
   const int pausedValue = initialOutput->verticalScrollBar()->value();
   result &= expect(!initialOutput->followsLatest(),
                    "command output is paused before thread navigation");
@@ -3688,13 +3704,15 @@ bool testCommandOutputStateAcrossNavigation() {
   commandCard = card(view, stableKey(command.key));
   auto *restoredOutput = commandCard
                              ? dynamic_cast<CommandOutputView *>(
-                                   commandCard->findChild<QTextEdit *>(
+                                   commandCard->findChild<QPlainTextEdit *>(
                                        QStringLiteral("commandOutputView")))
                              : nullptr;
   result &=
       expect(restoredOutput && !restoredOutput->followsLatest() &&
-                 restoredOutput->verticalScrollBar()->value() == pausedValue,
-             "thread navigation restores paused command output state");
+                 restoredOutput->verticalScrollBar()->value() == pausedValue &&
+                 restoredOutput->textCursor().selectedText() == selectedText,
+             "thread navigation restores paused command output and selection "
+             "state");
   return result;
 }
 
@@ -4246,7 +4264,7 @@ bool testFocusedGraphCardSurvivesViewportReconciliation() {
                        "the focus-pinning fixture exposes its command output");
   QPointer<CommandOutputView> output =
       commandCard ? dynamic_cast<CommandOutputView *>(
-                        commandCard->findChild<QTextEdit *>(
+                        commandCard->findChild<QPlainTextEdit *>(
                             QStringLiteral("commandOutputView")))
                   : nullptr;
   if (!commandCard || !output)
@@ -4378,7 +4396,7 @@ bool testGraphRootFoldSuppressesAndRestoresChildExtent() {
              "the root-fold fixture materializes an expanded child");
   QPointer<CommandOutputView> output =
       commandCard ? dynamic_cast<CommandOutputView *>(
-                        commandCard->findChild<QTextEdit *>(
+                        commandCard->findChild<QPlainTextEdit *>(
                             QStringLiteral("commandOutputView")))
                   : nullptr;
   if (!rootCard || !commandCard || !output)
@@ -4409,7 +4427,7 @@ bool testGraphRootFoldSuppressesAndRestoresChildExtent() {
   });
   commandCard = card(view, stableKey(command.key));
   output = commandCard ? dynamic_cast<CommandOutputView *>(
-                             commandCard->findChild<QTextEdit *>(
+                             commandCard->findChild<QPlainTextEdit *>(
                                  QStringLiteral("commandOutputView")))
                        : nullptr;
   const auto childStateAfter =

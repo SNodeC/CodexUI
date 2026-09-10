@@ -9,6 +9,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QEasingCurve>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QItemSelectionModel>
 #include <QLabel>
@@ -16,6 +17,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScopedValueRollback>
@@ -1002,11 +1004,11 @@ void ConversationView::runStructuralStagePass() {
     const PendingLocation *location = pendingLocation(key);
     if (!data || !location)
       continue;
-    ConversationCard *card = createCard(*data, stagingHost_, key);
-    card->setNestedPresentation(location->nested);
-    card->setAuthoritativeTurnActive(location->activeTurn);
     const int width = std::max(
         0, viewport()->width() - (location->nested ? 2 * NestedCardIndent : 0));
+    ConversationCard *card = createCard(*data, stagingHost_, key, width);
+    card->setNestedPresentation(location->nested);
+    card->setAuthoritativeTurnActive(location->activeTurn);
     const int height = measureCard(card, width);
     card->hide();
     stagedCards_.insert_or_assign(key, card);
@@ -2441,11 +2443,12 @@ std::pair<int, int> ConversationView::materializationRows() const {
 
 ConversationCard *ConversationView::createCard(const VisibleCardData &data,
                                                QWidget *parent,
-                                               const std::string &key) {
+                                               const std::string &key,
+                                               int width) {
   ConversationCard *card = createConversationCard(
       data, parent, !presentationOptions_.commandsInitiallyExpanded,
       !presentationOptions_.imagesInitiallyExpanded,
-      !presentationOptions_.fileChangesInitiallyExpanded);
+      !presentationOptions_.fileChangesInitiallyExpanded, width);
   card->setProperty("conversationAnchorKey", QString::fromStdString(key));
   if (const auto collapsed = cardCollapsedStates_.find(key);
       collapsed != cardCollapsedStates_.end())
@@ -2527,7 +2530,11 @@ ConversationCard *ConversationView::materializeRow(int rowIndex,
     stagedCards_.erase(staged);
     stagedHeights_.erase(row->stableKey);
   } else {
-    card = createCard(row->card, stagingHost_, row->stableKey);
+    QElapsedTimer constructionTimer;
+    constructionTimer.start();
+    card = createCard(row->card, stagingHost_, row->stableKey, rowWidth(*row));
+    card->setProperty("conversationConstructionMicros",
+                      constructionTimer.nsecsElapsed() / 1000);
     incrementProperty(this, "conversationCardConstructions");
   }
   card->hide();
@@ -2583,7 +2590,16 @@ void ConversationView::captureCardInteractionState(
       continue;
     state.edits.push_back({ordinal, cursor.position(), cursor.anchor()});
   }
-  if (!state.labels.empty() || !state.edits.empty())
+  const auto plainEdits = card->findChildren<QPlainTextEdit *>();
+  for (int ordinal = 0; ordinal < plainEdits.size(); ++ordinal) {
+    const QTextCursor cursor = plainEdits.at(ordinal)->textCursor();
+    if (!cursor.hasSelection())
+      continue;
+    state.plainEdits.push_back(
+        {ordinal, cursor.position(), cursor.anchor()});
+  }
+  if (!state.labels.empty() || !state.edits.empty() ||
+      !state.plainEdits.empty())
     cardInteractionStates_.insert_or_assign(key, std::move(state));
   else if (!preserveExistingWhenEmpty)
     cardInteractionStates_.erase(key);
@@ -2608,12 +2624,30 @@ void ConversationView::restoreCardInteractionState(const std::string &key,
     if (selection.ordinal < 0 || selection.ordinal >= edits.size())
       continue;
     QTextEdit *edit = edits.at(selection.ordinal);
+    QScrollBar *bar = edit->verticalScrollBar();
+    const int retainedScroll = bar->value();
     const int maximum = std::max(0, edit->document()->characterCount() - 1);
     QTextCursor cursor(edit->document());
     cursor.setPosition(std::clamp(selection.anchor, 0, maximum));
     cursor.setPosition(std::clamp(selection.position, 0, maximum),
                        QTextCursor::KeepAnchor);
     edit->setTextCursor(cursor);
+    bar->setValue(retainedScroll);
+  }
+  const auto plainEdits = card->findChildren<QPlainTextEdit *>();
+  for (const EditSelection &selection : retained->second.plainEdits) {
+    if (selection.ordinal < 0 || selection.ordinal >= plainEdits.size())
+      continue;
+    QPlainTextEdit *edit = plainEdits.at(selection.ordinal);
+    QScrollBar *bar = edit->verticalScrollBar();
+    const int retainedScroll = bar->value();
+    const int maximum = std::max(0, edit->document()->characterCount() - 1);
+    QTextCursor cursor(edit->document());
+    cursor.setPosition(std::clamp(selection.anchor, 0, maximum));
+    cursor.setPosition(std::clamp(selection.position, 0, maximum),
+                       QTextCursor::KeepAnchor);
+    edit->setTextCursor(cursor);
+    bar->setValue(retainedScroll);
   }
 }
 
