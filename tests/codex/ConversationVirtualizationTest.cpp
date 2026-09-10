@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
 
 namespace codexui::codex::middle {
@@ -1553,6 +1554,96 @@ bool outsideTextDragDoesNotReenterTheView() {
   return result;
 }
 
+bool collapsedLargeCardsSkipBodyProjection() {
+  FileChangesData changes;
+  changes.status = "completed";
+  changes.cwd = "/workspace";
+  changes.changes.reserve(5'000);
+  for (int index = 0; index < 5'000; ++index) {
+    changes.changes.push_back({"src/generated/file-" +
+                                   std::to_string(index) + ".cpp",
+                               "update", index % 9, index % 4});
+  }
+  VisibleCardData card{
+      AuthoritativeItemKey{"virtual-thread", "large-files", "changes"},
+      CardKind::FileChanges,
+      "virtual-thread",
+      "large-files",
+      "changes",
+      std::move(changes)};
+  ConversationSnapshot snapshot;
+  snapshot.threadId = "virtual-thread";
+  snapshot.sections.push_back(
+      {"large-file-section", "large-files", {card}, std::nullopt});
+
+  ConversationView view;
+  view.resize(820, 320);
+  view.show();
+  bool result =
+      expect(view.reconcile(std::move(snapshot)),
+             "large collapsed file-change fixture reconciles");
+  settle();
+  static_cast<void>(view.viewport()->grab());
+  settle();
+  const QModelIndex index = view.conversationModel()->index(0);
+  ConversationCard *richCard = materializedCard(view, stableKey(card.key));
+  const bool bodySkipped =
+      index.isValid() && view.visualRect(index).height() == 46 &&
+      view.materializedCardCount() <= 1 && richCard &&
+      richCard->property("fileChangesBodyRebuilds").toULongLong() == 0 &&
+      view.property("conversationDelegateDocumentRebuilds").toULongLong() ==
+          0;
+  if (!bodySkipped)
+    std::cerr << "collapsed large card: valid=" << index.isValid()
+              << " height=" << view.visualRect(index).height()
+              << " materialized=" << view.materializedCardCount()
+              << " bodyRebuilds="
+              << (richCard ? richCard->property("fileChangesBodyRebuilds")
+                                     .toULongLong()
+                           : std::numeric_limits<qulonglong>::max())
+              << " documents="
+              << view.property("conversationDelegateDocumentRebuilds")
+                     .toULongLong()
+              << '\n';
+  result &= expect(
+      bodySkipped,
+      "collapsed large cards paint only their header without converting or "
+      "laying out their body");
+  QElapsedTimer expansionTimer;
+  expansionTimer.start();
+  richCard->setCollapsed(false);
+  const qint64 expansionMicros = expansionTimer.nsecsElapsed() / 1000;
+  auto *fileList = richCard->findChild<QPlainTextEdit *>(
+      QStringLiteral("fileChangesList"));
+  const bool boundedExpansion =
+      fileList && fileList->blockCount() == 5'000 &&
+      richCard->property("fileChangesBodyRebuilds").toULongLong() == 1 &&
+      expansionMicros < 100'000;
+  if (!boundedExpansion)
+    std::cerr << "large file-change expansion us=" << expansionMicros
+              << " internal="
+              << richCard->property("fileChangesBodyBuildMicros").toLongLong()
+              << " text="
+              << (fileList ? fileList->property("fileChangesSetTextMicros")
+                                 .toLongLong()
+                           : -1)
+              << " links="
+              << (fileList
+                      ? fileList->property("fileChangesFormatLinksMicros")
+                            .toLongLong()
+                      : -1)
+              << " measure="
+              << (fileList ? fileList->property("fileChangesMeasureMicros")
+                                 .toLongLong()
+                           : -1)
+              << '\n';
+  result &= expect(
+      boundedExpansion,
+      "expanding a large file-change card creates one block-oriented document "
+      "without one widget per path");
+  return result;
+}
+
 } // namespace
 } // namespace codexui::codex::middle
 
@@ -1577,7 +1668,8 @@ int main(int argc, char **argv) {
                       streamingMarkdownReparsesOnlyMutableTail() &&
                       passiveMarkdownHoverKeepsLinkSemanticsWithoutAnEditor() &&
                       selectionFocusAndOneGesturePromotion() &&
-                      outsideTextDragDoesNotReenterTheView();
+                      outsideTextDragDoesNotReenterTheView() &&
+                      collapsedLargeCardsSkipBodyProjection();
   if (result)
     std::cout << "Conversation virtualization tests passed\n";
   return result ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -9,6 +9,7 @@
 #include <QScrollBar>
 #include <QTimer>
 
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -435,7 +436,11 @@ bool fileChangesUseCanonicalWorkspace() {
     changesState.fields.emplace(
         "changes",
         nodegraph::Value::Array{nodegraph::Value(nodegraph::Value::Object{
-            {"path", "src/file.cpp"}, {"kind", "update"}})});
+            {"path", "src/file.cpp"},
+            {"kind", "update"},
+            {"additions", std::int64_t{7}},
+            {"deletions", std::int64_t{3}},
+            {"diff", "+different fallback\n"}})});
     changes = write.upsert({NodeKind::Item, "files"},
                            std::move(changesState));
     write.setParent(thread, turn);
@@ -451,8 +456,12 @@ bool fileChangesUseCanonicalWorkspace() {
     return false;
   const auto *inherited = std::get_if<middle::FileChangesData>(
       &snapshot->sections.front().cards.front().payload);
-  if (!require(inherited && inherited->cwd == "/workspace/thread",
-               "relative file changes did not inherit the thread workspace"))
+  if (!require(inherited && inherited->cwd == "/workspace/thread" &&
+                   inherited->changes.size() == 1 &&
+                   inherited->changes.front().additions == 7 &&
+                   inherited->changes.front().deletions == 3,
+               "relative file changes did not inherit the thread workspace "
+               "and canonical diff counts"))
     return false;
 
   {

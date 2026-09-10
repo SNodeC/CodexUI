@@ -47,6 +47,8 @@ using CardKey = std::variant<AuthoritativeItemKey, TurnPlanKey, LocalPromptKey>;
 [[nodiscard]] std::string stableKey(const CardKey &key);
 [[nodiscard]] bool terminalOutputHasVisibleText(std::string_view output);
 [[nodiscard]] std::string trimUnicodeWhitespace(std::string_view text);
+[[nodiscard]] bool
+hasTextAfterTrimmingTrailingEmptyLines(std::string_view text);
 [[nodiscard]] std::string trimTrailingEmptyLines(std::string_view text);
 
 enum class PromptState { Queued, InFlight, Accepted, Failed };

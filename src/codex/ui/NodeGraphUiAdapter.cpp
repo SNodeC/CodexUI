@@ -539,8 +539,20 @@ VisibleCardData graphCardData(const nodegraph::NodeRef &item,
         FileChangeData entry{graphString(graphMember(*change, "path")),
                              graphString(graphMember(*change, "kind")),
                              std::nullopt, std::nullopt};
-        if (std::string diff = graphString(graphMember(*change, "diff"));
-            !diff.empty()) {
+        const auto additions =
+            graphInteger(graphMember(*change, "additions"));
+        const auto deletions =
+            graphInteger(graphMember(*change, "deletions"));
+        if (additions && deletions && *additions >= 0 && *deletions >= 0) {
+          entry.additions = static_cast<int>(std::min<std::int64_t>(
+              *additions, std::numeric_limits<int>::max()));
+          entry.deletions = static_cast<int>(std::min<std::int64_t>(
+              *deletions, std::numeric_limits<int>::max()));
+        } else if (const nodegraph::Value *diffValue =
+                       graphMember(*change, "diff");
+                   diffValue && diffValue->asString() &&
+                   !diffValue->asString()->empty()) {
+          const std::string &diff = *diffValue->asString();
           const auto [additions, deletions] = graphDiffCounts(diff);
           entry.additions = additions;
           entry.deletions = deletions;

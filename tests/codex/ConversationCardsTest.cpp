@@ -2217,25 +2217,61 @@ bool testMutableCardsAndCommandOutput() {
       "agent activity exposes its canonical lowercase status in the header");
   auto *filesCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "files"}})];
+  filesCard->setCollapsed(false);
+  spin();
   auto *filesStatus =
       filesCard->findChild<QLabel *>(QStringLiteral("fileChangesStatus"));
-  auto *filesList =
-      filesCard->findChild<QLabel *>(QStringLiteral("fileChangesList"));
+  auto *filesList = filesCard->findChild<QPlainTextEdit *>(
+      QStringLiteral("fileChangesList"));
   auto *planCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "plan"}})];
   result &= expect(
-      containsLabelText(filesCard,
-                        QStringLiteral("src/card.cpp")) &&
-          containsLabelText(filesCard, QStringLiteral("+2 −1")) &&
+      filesList && filesList->toPlainText().contains(
+                       QStringLiteral("src/card.cpp")) &&
+          filesList->toPlainText().contains(QStringLiteral("+2 −1")) &&
+          [&] {
+            QTextCursor cursor(filesList->document());
+            cursor.setPosition(1);
+            return cursor.charFormat().anchorHref() ==
+                       QStringLiteral("codexui-file:0") &&
+                   cursor.charFormat().foreground().color() ==
+                       QColor(QString::fromLatin1(UiStyle::blue));
+          }() &&
           filesStatus &&
           filesStatus->font().capitalization() == QFont::MixedCase &&
           filesStatus->text() == QStringLiteral("running") &&
           filesStatus->property("tone").toString() == QStringLiteral("active"),
       "file-change cards keep counts below and expose status in the "
       "header");
-  if (filesList)
-    QMetaObject::invokeMethod(filesList, "linkActivated", Qt::DirectConnection,
-                              Q_ARG(QString, QStringLiteral("codexui-file:0")));
+  const qulonglong fileBodyRebuilds =
+      filesCard->property("fileChangesBodyRebuilds").toULongLong();
+  if (filesList) {
+    QTextCursor retainedFileSelection(filesList->document());
+    retainedFileSelection.setPosition(0);
+    retainedFileSelection.setPosition(QStringLiteral("src/card.cpp").size(),
+                                      QTextCursor::KeepAnchor);
+    filesList->setTextCursor(retainedFileSelection);
+  }
+  VisibleCardData fileLifecycle = filesCard->data();
+  std::get<FileChangesData>(fileLifecycle.payload).status = "completed";
+  result &= expect(
+      filesCard->applyPresentation(fileLifecycle) ==
+              PresentationImpact::PaintOnly &&
+          filesCard->property("fileChangesBodyRebuilds").toULongLong() ==
+              fileBodyRebuilds &&
+          filesStatus->text() == QStringLiteral("completed") &&
+          filesList && filesList->textCursor().selectedText() ==
+              QStringLiteral("src/card.cpp"),
+      "a file-change lifecycle update does not rebuild, reparse, or remeasure "
+      "the unchanged path list");
+  snapshot.sections.front().cards[5] = fileLifecycle;
+  if (filesList) {
+    QTextCursor cursor(filesList->document());
+    cursor.setPosition(1);
+    filesList->setTextCursor(cursor);
+    QKeyEvent activate(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QApplication::sendEvent(filesList, &activate);
+  }
   result &= expect(
       openedFiles.urls.size() == 1 && openedFiles.urls.back().isLocalFile() &&
           openedFiles.urls.back().toLocalFile() ==

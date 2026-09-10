@@ -231,7 +231,8 @@ QFont passiveBlockFont(bool metadata) {
   return font;
 }
 
-PassivePresentation passivePresentation(const VisibleCardData &card) {
+PassivePresentation passivePresentation(const VisibleCardData &card,
+                                        bool includeBlocks = true) {
   PassivePresentation result;
   std::visit(
       [&](const auto &payload) {
@@ -241,7 +242,8 @@ PassivePresentation passivePresentation(const VisibleCardData &card) {
           result.background = QColor(QStringLiteral("#eff5fe"));
           result.border = QColor(QStringLiteral("#b7cff9"));
           result.titleColor = QColor(QStringLiteral("#415882"));
-          result.blocks.push_back({text(payload.text), true, false});
+          if (includeBlocks)
+            result.blocks.push_back({text(payload.text), true, false});
         } else if constexpr (std::is_same_v<Payload, AgentMessageData>) {
           result.title = QStringLiteral("Codex");
           result.status = payload.finalAnswer ? QStringLiteral("final answer")
@@ -256,46 +258,58 @@ PassivePresentation passivePresentation(const VisibleCardData &card) {
               QColor(payload.finalAnswer ? QStringLiteral("#59507f")
                                          : QStringLiteral("#6b5521"));
           result.verticalMargin = payload.finalAnswer ? 10 : 8;
-          result.blocks.push_back({text(payload.text), true, false});
+          if (includeBlocks)
+            result.blocks.push_back({text(payload.text), true, false});
         } else if constexpr (std::is_same_v<Payload, CommandExecutionData>) {
           result.title = QStringLiteral("Command execution");
           result.status = presentation::statusLabel(payload.status);
-          result.blocks.push_back({text(payload.command), false, false});
-          result.blocks.push_back({text(payload.output), false, false});
+          if (includeBlocks) {
+            result.blocks.push_back({text(payload.command), false, false});
+            result.blocks.push_back({text(payload.output), false, false});
+          }
         } else if constexpr (std::is_same_v<Payload, AgentActivityData>) {
           result.title = QStringLiteral("Agent activity");
           result.status = presentation::statusLabel(payload.status);
-          result.blocks.push_back(
-              {presentation::agentMetadata(payload), false, true});
-          result.blocks.push_back({text(payload.prompt), false, false});
-          result.blocks.push_back({text(payload.resultText), true, false});
+          if (includeBlocks) {
+            result.blocks.push_back(
+                {presentation::agentMetadata(payload), false, true});
+            result.blocks.push_back({text(payload.prompt), false, false});
+            result.blocks.push_back({text(payload.resultText), true, false});
+          }
         } else if constexpr (std::is_same_v<Payload, ReasoningData>) {
           result.title = QStringLiteral("Reasoning");
-          result.blocks.push_back({text(payload.summary), true, false});
+          if (includeBlocks)
+            result.blocks.push_back({text(payload.summary), true, false});
         } else if constexpr (std::is_same_v<Payload, FileChangesData>) {
           result.title = QStringLiteral("File changes");
           result.status = presentation::statusLabel(payload.status);
-          result.blocks.push_back(
-              {presentation::fileChangesText(payload), false, false});
+          if (includeBlocks)
+            result.blocks.push_back(
+                {presentation::fileChangesText(payload), false, false});
         } else if constexpr (std::is_same_v<Payload, PlanData>) {
           result.title = QStringLiteral("Plan");
-          result.blocks.push_back(
-              {presentation::planMarkdown(payload), true, false});
+          if (includeBlocks)
+            result.blocks.push_back(
+                {presentation::planMarkdown(payload), true, false});
         } else if constexpr (std::is_same_v<Payload, ImageGenerationData>) {
           result.title = payload.status.empty() && payload.revisedPrompt.empty()
                              ? QStringLiteral("Image")
                              : QStringLiteral("Generated image");
           result.status = presentation::statusLabel(payload.status);
-          result.blocks.push_back({text(payload.revisedPrompt), false, false});
+          if (includeBlocks)
+            result.blocks.push_back(
+                {text(payload.revisedPrompt), false, false});
         } else if constexpr (std::is_same_v<Payload, GenericActivityData>) {
           result.title = presentation::genericActivityTitle(payload);
           result.status = presentation::statusLabel(payload.status);
-          result.blocks.push_back(
-              {presentation::boundedGenericActivityDetail(payload), false,
-               true});
+          if (includeBlocks)
+            result.blocks.push_back(
+                {presentation::boundedGenericActivityDetail(payload), false,
+                 true});
         } else if constexpr (std::is_same_v<Payload, LocalPromptData>) {
           result.title = QStringLiteral("You");
-          result.blocks.push_back({text(payload.prompt), true, false});
+          if (includeBlocks)
+            result.blocks.push_back({text(payload.prompt), true, false});
         }
       },
       card.payload);
@@ -332,7 +346,8 @@ public:
         conversation ? conversation->row(index.row()) : nullptr;
     if (!row)
       return {};
-    const PassivePresentation presentation = passivePresentation(row->card);
+    const PassivePresentation presentation =
+        passivePresentation(row->card, !collapsed);
     int height = CardFrameExtent + 24 + 2 * presentation.verticalMargin;
     if (!collapsed) {
       const int bodyWidth =
@@ -363,7 +378,8 @@ public:
     if (!painter || !row)
       return;
 
-    const PassivePresentation presentation = passivePresentation(row->card);
+    const PassivePresentation presentation =
+        passivePresentation(row->card, !collapsed);
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
     const QRectF bounds = QRectF(option.rect).adjusted(0.5, 0.5, -0.5, -0.5);
@@ -507,7 +523,8 @@ public:
         conversation ? conversation->row(index.row()) : nullptr;
     if (!row || !option.rect.contains(position))
       return {};
-    const PassivePresentation presentation = passivePresentation(row->card);
+    const PassivePresentation presentation =
+        passivePresentation(row->card, !collapsed);
     const int top = option.rect.top() + presentation.verticalMargin;
     if (QRect(option.rect.right() - 52, top, 24, 24).contains(position))
       return {.action = true, .tooltip = QStringLiteral("Copy")};

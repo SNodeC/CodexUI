@@ -592,6 +592,18 @@ struct DiffCounts {
   int deletions = 0;
 };
 
+struct FileChangesRendering {
+  struct Link {
+    int start = 0;
+    int length = 0;
+  };
+
+  QString text;
+  QStringList openPaths;
+  std::vector<Link> links;
+  std::optional<DiffCounts> counts;
+};
+
 struct CardCopyContent {
   QString text;
   bool markdown = false;
@@ -602,9 +614,10 @@ QString joinedCopyText(QStringList parts) {
   return parts.join(QStringLiteral("\n\n"));
 }
 
-QString fileChangesHtml(const FileChangesData &data, QStringList &openPaths) {
-  openPaths.clear();
-  QStringList rows;
+FileChangesRendering fileChangesRendering(const FileChangesData &data) {
+  FileChangesRendering result;
+  DiffCounts total;
+  bool countsAvailable = false;
   for (const FileChangeData &change : data.changes) {
     if (change.path.empty())
       continue;
@@ -612,37 +625,197 @@ QString fileChangesHtml(const FileChangesData &data, QStringList &openPaths) {
     QFileInfo resolved(displayPath);
     if (resolved.isRelative() && !data.cwd.empty())
       resolved = QFileInfo(QDir(text(data.cwd)), displayPath);
-    const int targetIndex = openPaths.size();
-    openPaths.push_back(QDir::cleanPath(resolved.absoluteFilePath()));
+    const int targetIndex = result.openPaths.size();
+    result.openPaths.push_back(QDir::cleanPath(resolved.absoluteFilePath()));
 
+    if (!result.text.isEmpty())
+      result.text += QLatin1Char('\n');
+    result.links.push_back(
+        {static_cast<int>(result.text.size()),
+         static_cast<int>(displayPath.size())});
+    result.text += displayPath;
+    result.text += QStringLiteral("  ·  ");
     QString detail = displayChangeKind(change.kind);
-    if (change.additions && change.deletions)
+    if (change.additions && change.deletions) {
       detail += QStringLiteral("  +%1 −%2")
                     .arg(*change.additions)
                     .arg(*change.deletions);
-    rows.push_back(
-        QStringLiteral("<a href=\"codexui-file:%1\" "
-                       "style=\"color:%2;text-decoration:none;\">%3</a>"
-                       "&nbsp;&nbsp;·&nbsp;&nbsp;%4")
-            .arg(targetIndex)
-            .arg(QString::fromLatin1(UiStyle::blue),
-                 displayPath.toHtmlEscaped(), detail.toHtmlEscaped()));
+      countsAvailable = true;
+      total.additions += *change.additions;
+      total.deletions += *change.deletions;
+    }
+    result.text += detail;
+    Q_ASSERT(targetIndex == static_cast<int>(result.links.size()) - 1);
   }
-  return rows.join(QStringLiteral("<br/>"));
+  if (countsAvailable)
+    result.counts = total;
+  return result;
 }
 
-std::optional<DiffCounts> totalDiffCounts(const FileChangesData &data) {
-  DiffCounts total;
-  bool available = false;
-  for (const FileChangeData &change : data.changes) {
-    if (!change.additions || !change.deletions)
-      continue;
-    available = true;
-    total.additions += *change.additions;
-    total.deletions += *change.deletions;
+class FileChangesView final : public QPlainTextEdit {
+public:
+  explicit FileChangesView(QWidget *parent = nullptr) : QPlainTextEdit(parent) {
+    setObjectName(QStringLiteral("fileChangesList"));
+    setProperty("kind", "body");
+    setStyleSheet(QStringLiteral(
+        "QPlainTextEdit#fileChangesList{background:transparent;border:0;"
+        "padding:0;margin:0;}"));
+    setFrameShape(QFrame::NoFrame);
+    setReadOnly(true);
+    setUndoRedoEnabled(false);
+    setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    setMinimumSize(0, 0);
+    setFocusPolicy(Qt::StrongFocus);
+    setAccessibleName(QStringLiteral("Changed files"));
+    document()->setDocumentMargin(0);
   }
-  return available ? std::optional<DiffCounts>{total} : std::nullopt;
-}
+
+  void setContent(FileChangesRendering rendering) {
+    const QTextCursor retained = textCursor();
+    const int retainedPosition = retained.position();
+    const int retainedAnchor = retained.anchor();
+    QElapsedTimer phaseTimer;
+    phaseTimer.start();
+    setPlainText(rendering.text);
+    setProperty("fileChangesSetTextMicros",
+                phaseTimer.nsecsElapsed() / 1000);
+    phaseTimer.restart();
+    openPaths_ = std::move(rendering.openPaths);
+    QTextCharFormat linkFormat;
+    linkFormat.setForeground(QColor(QString::fromLatin1(UiStyle::blue)));
+    linkFormat.setFontUnderline(false);
+    linkFormat.setAnchor(true);
+    QTextCursor cursor(document());
+    cursor.beginEditBlock();
+    for (std::size_t index = 0; index < rendering.links.size(); ++index) {
+      const FileChangesRendering::Link &link = rendering.links[index];
+      linkFormat.setAnchorHref(
+          QStringLiteral("codexui-file:%1").arg(index));
+      cursor.setPosition(link.start);
+      cursor.setPosition(link.start + link.length, QTextCursor::KeepAnchor);
+      cursor.mergeCharFormat(linkFormat);
+    }
+    cursor.endEditBlock();
+    setProperty("fileChangesFormatLinksMicros",
+                phaseTimer.nsecsElapsed() / 1000);
+    phaseTimer.restart();
+    const int maximum = std::max(0, document()->characterCount() - 1);
+    QTextCursor restored(document());
+    restored.setPosition(std::clamp(retainedAnchor, 0, maximum));
+    restored.setPosition(std::clamp(retainedPosition, 0, maximum),
+                         QTextCursor::KeepAnchor);
+    setTextCursor(restored);
+    preferredWidth_ = 0;
+    preferredHeight_ = 0;
+    refreshPreferredHeight(std::max(1, viewport()->width()));
+    setProperty("fileChangesMeasureMicros",
+                phaseTimer.nsecsElapsed() / 1000);
+    updateGeometry();
+  }
+
+  [[nodiscard]] QSize sizeHint() const override {
+    QSize result = QPlainTextEdit::sizeHint();
+    result.setHeight(preferredHeight(std::max(1, viewport()->width())));
+    return result;
+  }
+
+  [[nodiscard]] QSize minimumSizeHint() const override { return {0, 0}; }
+
+protected:
+  void resizeEvent(QResizeEvent *event) override {
+    QPlainTextEdit::resizeEvent(event);
+    refreshPreferredHeight(std::max(1, viewport()->width()));
+  }
+
+  void mousePressEvent(QMouseEvent *event) override {
+    pressedLink_ = event->button() == Qt::LeftButton
+                       ? anchorAt(event->position().toPoint())
+                       : QString{};
+    QPlainTextEdit::mousePressEvent(event);
+  }
+
+  void mouseMoveEvent(QMouseEvent *event) override {
+    const QString link = anchorAt(event->position().toPoint());
+    viewport()->setCursor(link.isEmpty() ? Qt::IBeamCursor
+                                         : Qt::PointingHandCursor);
+    if (!link.isEmpty())
+      setToolTip(linkPath(link));
+    else
+      setToolTip({});
+    QPlainTextEdit::mouseMoveEvent(event);
+  }
+
+  void mouseReleaseEvent(QMouseEvent *event) override {
+    const QString releasedLink =
+        event->button() == Qt::LeftButton
+            ? anchorAt(event->position().toPoint())
+            : QString{};
+    QPlainTextEdit::mouseReleaseEvent(event);
+    if (!pressedLink_.isEmpty() && releasedLink == pressedLink_ &&
+        !textCursor().hasSelection())
+      static_cast<void>(activateLink(releasedLink));
+    pressedLink_.clear();
+  }
+
+  void keyPressEvent(QKeyEvent *event) override {
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
+        event->key() == Qt::Key_Space) {
+      QTextCursor cursor = textCursor();
+      QString link = cursor.charFormat().anchorHref();
+      if (link.isEmpty() && cursor.position() > 0) {
+        cursor.setPosition(cursor.position() - 1);
+        link = cursor.charFormat().anchorHref();
+      }
+      if (activateLink(link)) {
+        event->accept();
+        return;
+      }
+    }
+    QPlainTextEdit::keyPressEvent(event);
+  }
+
+  void wheelEvent(QWheelEvent *event) override { event->ignore(); }
+
+private:
+  [[nodiscard]] QString linkPath(const QString &link) const {
+    constexpr QLatin1StringView prefix("codexui-file:");
+    if (!link.startsWith(prefix))
+      return {};
+    bool valid = false;
+    const int index = link.sliced(prefix.size()).toInt(&valid);
+    return valid && index >= 0 && index < openPaths_.size()
+               ? QDir::toNativeSeparators(openPaths_.at(index))
+               : QString{};
+  }
+
+  bool activateLink(const QString &link) {
+    const QString path = linkPath(link);
+    return !path.isEmpty() && openLocalFile(path);
+  }
+
+  int preferredHeight(int width) const {
+    refreshPreferredHeight(width);
+    return preferredHeight_;
+  }
+
+  void refreshPreferredHeight(int width) const {
+    if (preferredWidth_ == width && preferredHeight_ > 0)
+      return;
+    document()->setTextWidth(width);
+    preferredWidth_ = width;
+    preferredHeight_ =
+        std::max(1, static_cast<int>(std::ceil(document()->size().height())));
+  }
+
+  QStringList openPaths_;
+  QString pressedLink_;
+  mutable int preferredWidth_ = 0;
+  mutable int preferredHeight_ = 0;
+};
 
 CardCopyContent cardCopyContent(const VisibleCardData &card) {
   return std::visit(
@@ -684,6 +857,46 @@ CardCopyContent cardCopyContent(const VisibleCardData &card) {
                                        false}
                      : CardCopyContent{text(payload.prompt), true};
         }
+      },
+      card.payload);
+}
+
+bool cardHasCopyContent(const VisibleCardData &card) {
+  return std::visit(
+      [](const auto &payload) {
+        using Payload = std::decay_t<decltype(payload)>;
+        if constexpr (std::is_same_v<Payload, UserMessageData>)
+          return !payload.text.empty() ||
+                 std::ranges::any_of(payload.imagePaths,
+                                     [](const auto &path) {
+                                       return !path.empty();
+                                     });
+        else if constexpr (std::is_same_v<Payload, AgentMessageData>)
+          return !payload.text.empty();
+        else if constexpr (std::is_same_v<Payload, CommandExecutionData>)
+          return hasTextAfterTrimmingTrailingEmptyLines(payload.command) ||
+                 hasTextAfterTrimmingTrailingEmptyLines(payload.output);
+        else if constexpr (std::is_same_v<Payload, AgentActivityData>)
+          return !payload.prompt.empty() || !payload.resultText.empty();
+        else if constexpr (std::is_same_v<Payload, ReasoningData>)
+          return !payload.summary.empty();
+        else if constexpr (std::is_same_v<Payload, FileChangesData>)
+          return std::ranges::any_of(payload.changes, [](const auto &change) {
+            return !change.path.empty();
+          });
+        else if constexpr (std::is_same_v<Payload, PlanData>)
+          return !payload.explanation.empty() || !payload.steps.empty() ||
+                 !payload.legacyText.empty();
+        else if constexpr (std::is_same_v<Payload, ImageGenerationData>)
+          return !payload.revisedPrompt.empty() || !payload.path.empty();
+        else if constexpr (std::is_same_v<Payload, GenericActivityData>)
+          return !payload.displayDetail.empty();
+        else
+          return !payload.prompt.empty() ||
+                 std::ranges::any_of(payload.imagePaths,
+                                     [](const auto &path) {
+                                       return !path.empty();
+                                     });
       },
       card.payload);
 }
@@ -1392,6 +1605,15 @@ public:
     }
     if (becomingAuthoritative)
       promoteToAuthoritativeUserMessage();
+    bool fileChangesBodyChanged = true;
+    if (!becomingAuthoritative && current.kind == CardKind::FileChanges &&
+        next.kind == CardKind::FileChanges) {
+      const auto *before = std::get_if<FileChangesData>(&current.payload);
+      const auto *after = std::get_if<FileChangesData>(&next.payload);
+      fileChangesBodyChanged =
+          !before || !after || before->changes != after->changes ||
+          before->cwd != after->cwd;
+    }
     current = next;
     if (!presentationChanged)
       return PresentationImpact::None;
@@ -1401,11 +1623,19 @@ public:
     }
     const int previousNaturalHeight =
         commandLifecycleOnly ? naturalHeightForCurrentWidth() : -1;
-    std::visit([this](const auto &payload) { updateComposition(payload); },
-               next.payload);
+    std::visit(
+        [this, fileChangesBodyChanged](const auto &payload) {
+          using Payload = std::decay_t<decltype(payload)>;
+          if constexpr (std::is_same_v<Payload, FileChangesData>)
+            updateComposition(payload, fileChangesBodyChanged, !collapsed);
+          else
+            updateComposition(payload);
+        },
+        next.payload);
     if (next.activeWork)
       setActiveWork(*next.activeWork);
-    refreshCopyPresentation();
+    if (fileChangesBodyChanged)
+      refreshCopyPresentation();
     refreshFoldPresentation();
     const int nextNaturalHeight = commandLifecycleOnly
                                       ? naturalHeightForCurrentWidth()
@@ -1413,8 +1643,11 @@ public:
     const bool measuredLifecyclePaintOnly =
         commandLifecycleOnly && previousNaturalHeight >= 0 &&
         nextNaturalHeight == previousNaturalHeight;
-    const bool geometryChanged =
-        !cappedCommandOutputOnly && !measuredLifecyclePaintOnly;
+    const bool fileChangesLifecycleOnly = next.kind == CardKind::FileChanges &&
+                                          (!fileChangesBodyChanged || collapsed);
+    const bool geometryChanged = !cappedCommandOutputOnly &&
+                                 !measuredLifecyclePaintOnly &&
+                                 !fileChangesLifecycleOnly;
     if (geometryChanged)
       owner->updateGeometry();
     owner->update();
@@ -1469,6 +1702,9 @@ public:
   void setCollapsed(bool next) {
     if (collapsed == next)
       return;
+    if (!next && current.kind == CardKind::FileChanges)
+      updateComposition(std::get<FileChangesData>(current.payload), false,
+                        true);
     collapsed = next;
     refreshFoldPresentation();
     owner->updateGeometry();
@@ -1550,7 +1786,7 @@ public:
   }
 
   void refreshCopyPresentation() {
-    copy->setVisible(!cardCopyContent(current).text.isEmpty());
+    copy->setVisible(cardHasCopyContent(current));
   }
 
   void showPhase(const QString &value, const QString &objectName) {
@@ -1743,43 +1979,37 @@ public:
   void createComposition(const FileChangesData &changes) {
     title->setText(QStringLiteral("File changes"));
     metadata = makeLabel({}, "meta", content);
-    body = makeLabel({}, "body", content);
-    body->setObjectName(QStringLiteral("fileChangesList"));
-    body->setTextFormat(Qt::RichText);
-    body->setOpenExternalLinks(false);
-    body->setTextInteractionFlags(Qt::TextSelectableByMouse |
-                                  Qt::LinksAccessibleByMouse |
-                                  Qt::LinksAccessibleByKeyboard);
-    QObject::connect(body, &QLabel::linkActivated, owner,
-                     [this](const QString &link) {
-                       constexpr QLatin1StringView prefix("codexui-file:");
-                       if (!link.startsWith(prefix))
-                         return;
-                       bool valid = false;
-                       const int index = link.sliced(prefix.size()).toInt(&valid);
-                       if (valid && index >= 0 &&
-                           index < fileChangeOpenPaths.size())
-                         static_cast<void>(
-                             openLocalFile(fileChangeOpenPaths.at(index)));
-                     });
-    contentLayout->addWidget(body);
+    fileChanges = new FileChangesView(content);
+    contentLayout->addWidget(fileChanges);
     contentLayout->addWidget(metadata);
-    updateComposition(changes);
+    updateComposition(changes, true, !collapsed);
   }
 
-  void updateComposition(const FileChangesData &changes) {
-    const QString html = fileChangesHtml(changes, fileChangeOpenPaths);
-    if (body->text() != html)
-      body->setText(html);
-    body->setVisible(!html.isEmpty());
+  void updateComposition(const FileChangesData &changes, bool contentChanged,
+                         bool presentBody) {
+    if (contentChanged)
+      fileChangesBodyReady = false;
+    if (presentBody && !fileChangesBodyReady) {
+      QElapsedTimer buildTimer;
+      buildTimer.start();
+      FileChangesRendering rendering = fileChangesRendering(changes);
+      fileChanges->setVisible(!rendering.text.isEmpty());
+      QStringList values{QStringLiteral("%1 paths").arg(changes.changes.size())};
+      if (rendering.counts)
+        values << QStringLiteral("+%1 −%2")
+                      .arg(rendering.counts->additions)
+                      .arg(rendering.counts->deletions);
+      metadata->setText(values.join(QStringLiteral("  |  ")));
+      metadata->show();
+      fileChanges->setContent(std::move(rendering));
+      owner->setProperty("fileChangesBodyBuildMicros",
+                         buildTimer.nsecsElapsed() / 1000);
+      owner->setProperty(
+          "fileChangesBodyRebuilds",
+          owner->property("fileChangesBodyRebuilds").toULongLong() + 1);
+      fileChangesBodyReady = true;
+    }
     showStatus(text(changes.status), QStringLiteral("fileChangesStatus"));
-    QStringList values{QStringLiteral("%1 paths").arg(changes.changes.size())};
-    if (const auto counts = totalDiffCounts(changes))
-      values << QStringLiteral("+%1 −%2")
-                    .arg(counts->additions)
-                    .arg(counts->deletions);
-    metadata->setText(values.join(QStringLiteral("  |  ")));
-    metadata->show();
   }
 
   void createComposition(const PlanData &plan) {
@@ -1994,6 +2224,7 @@ public:
   MarkdownTextView *detail = nullptr;
   ContentSizedTextView *command = nullptr;
   CommandOutputView *output = nullptr;
+  FileChangesView *fileChanges = nullptr;
   QTimer *animationTimer = nullptr;
   QTimer *pendingDelayTimer = nullptr;
   QPushButton *recovery = nullptr;
@@ -2001,7 +2232,7 @@ public:
   bool viewportVisible = true;
   std::optional<qint64> pendingFeedbackDeadlineMs;
   ImageRibbon *images = nullptr;
-  QStringList fileChangeOpenPaths;
+  bool fileChangesBodyReady = false;
   std::shared_ptr<QTextDocument> preparedMarkdownDocument;
   bool authoritativeTurnActive = false;
   int turnRootBottomMargin = 10;

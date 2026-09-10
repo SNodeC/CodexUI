@@ -89,6 +89,25 @@ bool whitespaceOnly(std::string_view value) noexcept {
   return true;
 }
 
+std::size_t trimmedTrailingLinesEnd(std::string_view text) {
+  std::size_t end = text.size();
+  while (end > 0) {
+    while (end > 0 && (text[end - 1] == '\n' || text[end - 1] == '\r'))
+      --end;
+    if (end == 0)
+      break;
+
+    std::size_t lineStart = end;
+    while (lineStart > 0 && text[lineStart - 1] != '\n' &&
+           text[lineStart - 1] != '\r')
+      --lineStart;
+    if (!whitespaceOnly(text.substr(lineStart, end - lineStart)))
+      break;
+    end = lineStart;
+  }
+  return end;
+}
+
 } // namespace
 
 std::string stableKey(const CardKey &key) {
@@ -206,23 +225,12 @@ std::string trimUnicodeWhitespace(std::string_view text) {
   return found ? std::string(text.substr(first, last - first)) : std::string{};
 }
 
-std::string trimTrailingEmptyLines(std::string_view text) {
-  std::size_t end = text.size();
-  while (end > 0) {
-    while (end > 0 && (text[end - 1] == '\n' || text[end - 1] == '\r'))
-      --end;
-    if (end == 0)
-      break;
+bool hasTextAfterTrimmingTrailingEmptyLines(std::string_view text) {
+  return trimmedTrailingLinesEnd(text) != 0;
+}
 
-    std::size_t lineStart = end;
-    while (lineStart > 0 && text[lineStart - 1] != '\n' &&
-           text[lineStart - 1] != '\r')
-      --lineStart;
-    if (!whitespaceOnly(text.substr(lineStart, end - lineStart)))
-      break;
-    end = lineStart;
-  }
-  return std::string(text.substr(0, end));
+std::string trimTrailingEmptyLines(std::string_view text) {
+  return std::string(text.substr(0, trimmedTrailingLinesEnd(text)));
 }
 
 std::vector<CardKey> ConversationSnapshot::cardKeys() const {
