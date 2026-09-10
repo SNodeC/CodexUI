@@ -942,6 +942,80 @@ bool directTailGrowsTheRetainedTurnSurface() {
   return result;
 }
 
+bool acknowledgedSteeringMovesAboveFollowingActivity() {
+  ConversationSnapshot snapshot = conversation(12);
+  TurnSection active;
+  active.key = "steering-section";
+  active.turnId = "steering-turn";
+  VisibleCardData root{
+      AuthoritativeItemKey{"virtual-thread", "steering-turn", "root"},
+      CardKind::UserMessage,
+      "virtual-thread",
+      "steering-turn",
+      "root",
+      UserMessageData{"Opening prompt"}};
+  active.rootCardKey = root.key;
+  active.cards.push_back(std::move(root));
+  VisibleCardData steering{LocalPromptKey{812},
+                           CardKind::UserMessage,
+                           "virtual-thread",
+                           "steering-turn",
+                           "provider-steering",
+                           UserMessageData{"Acknowledged steering"}};
+  const std::string steeringKey = stableKey(steering.key);
+  active.cards.push_back(std::move(steering));
+  snapshot.activeTurnId = active.turnId;
+  snapshot.sections.push_back(std::move(active));
+
+  ConversationView view;
+  view.resize(820, 360);
+  view.show();
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "acknowledged steering fixture reconciles");
+  settle();
+  const QModelIndex steeringIndex =
+      view.conversationModel()->indexForStableKey(steeringKey);
+  const QRect before = view.visualRect(steeringIndex);
+  const VisibleCardData *settledSteering =
+      view.conversationModel()->card(steeringIndex.row());
+  result &= expect(steeringIndex.isValid() && settledSteering &&
+                       settledSteering->kind == CardKind::UserMessage &&
+                       view.mode() == ConversationView::Mode::Following &&
+                       before.bottom() <= view.viewport()->height(),
+                   "the settled steering card begins at the followed tail");
+
+  ConversationTailCard activity;
+  activity.card = {
+      AuthoritativeItemKey{"virtual-thread", "steering-turn", "after-steer"},
+      CardKind::AgentMessage,
+      "virtual-thread",
+      "steering-turn",
+      "after-steer",
+      AgentMessageData{"Activity caused by the steering prompt", false}};
+  activity.sectionKey = "steering-section";
+  activity.nested = true;
+  activity.activeTurn = true;
+  activity.historyActivity = true;
+  const std::string activityKey = stableKey(activity.card.key);
+  result &= expect(view.appendTailCard(std::move(activity)),
+                   "post-steering activity appends through the bounded path");
+  settle();
+
+  const QRect after = view.visualRect(steeringIndex);
+  const QModelIndex activityIndex =
+      view.conversationModel()->indexForStableKey(activityKey);
+  result &= expect(
+      view.conversationModel()->indexForStableKey(steeringKey) ==
+              steeringIndex &&
+          after.top() < before.top() && activityIndex.isValid() &&
+          after.bottom() < view.visualRect(activityIndex).top() &&
+          view.visualRect(activityIndex).bottom() <= view.viewport()->height() &&
+          view.mode() == ConversationView::Mode::Following,
+      "an acknowledged steering card moves upward when following activity "
+      "arrives instead of remaining pinned to the viewport bottom");
+  return result;
+}
+
 bool selectionFocusAndOneGesturePromotion() {
   ConversationView view;
   view.resize(820, 600);
@@ -1150,6 +1224,7 @@ int main(int argc, char **argv) {
                       delayedThreadSelectionSpinner() &&
                       virtualTurnSurfaceAndInteractivePromotion() &&
                       directTailGrowsTheRetainedTurnSurface() &&
+                      acknowledgedSteeringMovesAboveFollowingActivity() &&
                       selectionFocusAndOneGesturePromotion() &&
                       outsideTextDragDoesNotReenterTheView();
   if (result)

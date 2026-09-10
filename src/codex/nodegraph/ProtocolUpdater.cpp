@@ -1118,6 +1118,73 @@ std::vector<NodeRef> replaceAuthoritativeChildren(
     if (write.find(node->id()) == node)
       write.remove(node);
   }
+
+  // A steering prompt occupies the position at which the user submitted it,
+  // even when its provider userMessage arrived after activity caused by that
+  // prompt. ingestItem establishes that position, but a containing
+  // thread/read or turns/list replacement applies provider order after all
+  // items have been ingested. Preserve only the locally submitted rows at
+  // their existing boundary; all other children still follow provider order.
+  if (parent && parent->id().kind == NodeKind::Turn) {
+    const auto retainsSubmittedSlot = [&](const NodeRef &node) {
+      if (!node || node->id().kind != NodeKind::Item ||
+          write.find(node->id()) != node)
+        return false;
+      if (isExplicitLocalOptimistic(write, node) &&
+          canonicalValue(member(write.state(node)->fields, "type")) ==
+              "localPrompt")
+        return true;
+      const Value *submission =
+          member(write.state(node)->fields, "localSubmissionId");
+      return submission && (submission->asUInt64() || submission->asInt64());
+    };
+
+    std::unordered_set<const Node *> finalNodes;
+    finalNodes.reserve(authoritative.size());
+    for (const NodeRef &node : authoritative)
+      if (node && write.find(node->id()) == node)
+        finalNodes.insert(node.get());
+
+    std::unordered_set<const Node *> submittedNodes;
+    submittedNodes.reserve(authoritative.size());
+    for (const NodeRef &node : existing)
+      if (node && finalNodes.contains(node.get()) &&
+          retainsSubmittedSlot(node))
+        submittedNodes.insert(node.get());
+
+    if (!submittedNodes.empty()) {
+      std::vector<NodeRef> leading;
+      std::unordered_map<const Node *, std::vector<NodeRef>> after;
+      const Node *preceding = nullptr;
+      for (const NodeRef &node : existing) {
+        if (!node || !finalNodes.contains(node.get()))
+          continue;
+        if (!submittedNodes.contains(node.get())) {
+          preceding = node.get();
+          continue;
+        }
+        if (preceding)
+          after[preceding].push_back(node);
+        else
+          leading.push_back(node);
+      }
+
+      std::vector<NodeRef> ordered;
+      ordered.reserve(authoritative.size());
+      ordered.insert(ordered.end(), leading.begin(), leading.end());
+      for (NodeRef &node : authoritative) {
+        if (!node || submittedNodes.contains(node.get()))
+          continue;
+        const Node *identity = node.get();
+        ordered.emplace_back(std::move(node));
+        if (const auto positioned = after.find(identity);
+            positioned != after.end())
+          ordered.insert(ordered.end(), positioned->second.begin(),
+                         positioned->second.end());
+      }
+      authoritative = std::move(ordered);
+    }
+  }
   return authoritative;
 }
 
