@@ -89,6 +89,8 @@ set(
     src/codex/middle/ComposerPane.h
     src/codex/middle/ConversationCards.cpp
     src/codex/middle/ConversationCards.h
+    src/codex/middle/ConversationPresentation.cpp
+    src/codex/middle/ConversationPresentation.h
     src/codex/middle/ConversationHeightIndex.cpp
     src/codex/middle/ConversationHeightIndex.h
     src/codex/middle/ConversationItemModel.cpp
@@ -195,6 +197,8 @@ if(BUILD_TESTING)
         src/codex/ui/NodeGraphUiAdapter.h
         src/codex/middle/ConversationCards.cpp
         src/codex/middle/ConversationCards.h
+        src/codex/middle/ConversationPresentation.cpp
+        src/codex/middle/ConversationPresentation.h
         src/codex/middle/ConversationView.cpp
         src/codex/middle/ConversationView.h
         src/codex/middle/ConversationHeightIndex.cpp
@@ -342,6 +346,8 @@ if(BUILD_TESTING)
         tests/codex/ConversationCardsTest.cpp
         src/codex/middle/ConversationCards.cpp
         src/codex/middle/ConversationCards.h
+        src/codex/middle/ConversationPresentation.cpp
+        src/codex/middle/ConversationPresentation.h
         src/codex/middle/ConversationView.cpp
         src/codex/middle/ConversationView.h
         src/codex/middle/ConversationHeightIndex.cpp
@@ -403,6 +409,8 @@ if(BUILD_TESTING)
         tests/codex/ConversationVirtualizationTest.cpp
         src/codex/middle/ConversationCards.cpp
         src/codex/middle/ConversationCards.h
+        src/codex/middle/ConversationPresentation.cpp
+        src/codex/middle/ConversationPresentation.h
         src/codex/middle/ConversationHeightIndex.cpp
         src/codex/middle/ConversationHeightIndex.h
         src/codex/middle/ConversationItemModel.cpp
@@ -438,6 +446,8 @@ if(BUILD_TESTING)
         tests/codex/ConversationViewBenchmark.cpp
         src/codex/middle/ConversationCards.cpp
         src/codex/middle/ConversationCards.h
+        src/codex/middle/ConversationPresentation.cpp
+        src/codex/middle/ConversationPresentation.h
         src/codex/middle/ConversationView.cpp
         src/codex/middle/ConversationView.h
         src/codex/middle/ConversationHeightIndex.cpp
@@ -479,6 +489,8 @@ if(BUILD_TESTING)
         src/codex/middle/ComposerPane.h
         src/codex/middle/ConversationCards.cpp
         src/codex/middle/ConversationCards.h
+        src/codex/middle/ConversationPresentation.cpp
+        src/codex/middle/ConversationPresentation.h
         src/codex/middle/ConversationView.cpp
         src/codex/middle/ConversationView.h
         src/codex/middle/ConversationHeightIndex.cpp

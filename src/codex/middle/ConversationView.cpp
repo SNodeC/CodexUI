@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MIT
 
 #include "codex/middle/ConversationView.h"
+#include "codex/middle/ConversationPresentation.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QAbstractSlider>
@@ -209,32 +210,6 @@ struct PassivePresentation {
   int verticalMargin = 10;
 };
 
-QString planText(const PlanData &plan) {
-  if (!plan.legacyText.empty())
-    return text(plan.legacyText);
-  QStringList lines;
-  if (!plan.explanation.empty())
-    lines.push_back(text(plan.explanation));
-  if (!lines.empty() && !plan.steps.empty())
-    lines.push_back({});
-  for (const PlanStepData &step : plan.steps) {
-    const QString marker = step.status == "completed"    ? QStringLiteral("✓")
-                           : step.status == "inProgress" ? QStringLiteral("◉")
-                                                         : QStringLiteral("○");
-    lines.push_back(QStringLiteral("%1 %2").arg(marker, text(step.text)));
-  }
-  return lines.join(QLatin1Char('\n'));
-}
-
-QString genericDetail(const GenericActivityData &activity) {
-  QString value = text(activity.displayDetail);
-  constexpr qsizetype MaximumCharacters = 4096;
-  if (value.size() <= MaximumCharacters)
-    return value;
-  value.truncate(MaximumCharacters);
-  return value + QStringLiteral("\n\n[Activity details truncated]");
-}
-
 PassivePresentation passivePresentation(const VisibleCardData &card) {
   PassivePresentation result;
   std::visit(
@@ -263,28 +238,14 @@ PassivePresentation passivePresentation(const VisibleCardData &card) {
           result.blocks.push_back({text(payload.text), true, false});
         } else if constexpr (std::is_same_v<Payload, CommandExecutionData>) {
           result.title = QStringLiteral("Command execution");
-          result.status = text(payload.status);
+          result.status = presentation::statusLabel(payload.status);
           result.blocks.push_back({text(payload.command), false, false});
           result.blocks.push_back({text(payload.output), false, false});
         } else if constexpr (std::is_same_v<Payload, AgentActivityData>) {
           result.title = QStringLiteral("Agent activity");
-          result.status = text(payload.status);
-          QStringList metadata;
-          if (!payload.tool.empty())
-            metadata.push_back(text(payload.tool));
-          if (!payload.receivers.empty()) {
-            QStringList receivers;
-            for (const std::string &receiver : payload.receivers)
-              receivers.push_back(text(receiver));
-            metadata.push_back(receivers.join(QStringLiteral(", ")));
-          }
-          if (!payload.model.empty())
-            metadata.push_back(text(payload.model));
-          if (!payload.childThreadId.empty())
-            metadata.push_back(
-                QStringLiteral("thread %1").arg(text(payload.childThreadId)));
+          result.status = presentation::statusLabel(payload.status);
           result.blocks.push_back(
-              {metadata.join(QStringLiteral("  |  ")), false, true});
+              {presentation::agentMetadata(payload), false, true});
           result.blocks.push_back({text(payload.prompt), false, false});
           result.blocks.push_back({text(payload.resultText), true, false});
         } else if constexpr (std::is_same_v<Payload, ReasoningData>) {
@@ -292,36 +253,25 @@ PassivePresentation passivePresentation(const VisibleCardData &card) {
           result.blocks.push_back({text(payload.summary), true, false});
         } else if constexpr (std::is_same_v<Payload, FileChangesData>) {
           result.title = QStringLiteral("File changes");
-          result.status = text(payload.status);
-          QStringList lines;
-          for (const FileChangeData &change : payload.changes) {
-            QString line = text(change.path);
-            if (!change.kind.empty())
-              line += QStringLiteral("  ·  ") + text(change.kind);
-            if (change.additions && change.deletions)
-              line += QStringLiteral("  +%1 −%2")
-                          .arg(*change.additions)
-                          .arg(*change.deletions);
-            lines.push_back(line);
-          }
+          result.status = presentation::statusLabel(payload.status);
           result.blocks.push_back(
-              {lines.join(QLatin1Char('\n')), false, false});
+              {presentation::fileChangesText(payload), false, false});
         } else if constexpr (std::is_same_v<Payload, PlanData>) {
           result.title = QStringLiteral("Plan");
-          result.blocks.push_back({planText(payload), true, false});
+          result.blocks.push_back(
+              {presentation::planMarkdown(payload), true, false});
         } else if constexpr (std::is_same_v<Payload, ImageGenerationData>) {
           result.title = payload.status.empty() && payload.revisedPrompt.empty()
                              ? QStringLiteral("Image")
                              : QStringLiteral("Generated image");
-          result.status = text(payload.status);
+          result.status = presentation::statusLabel(payload.status);
           result.blocks.push_back({text(payload.revisedPrompt), false, false});
         } else if constexpr (std::is_same_v<Payload, GenericActivityData>) {
-          result.title = payload.type.empty() ? QStringLiteral("Activity")
-                                              : text(payload.type);
-          if (!result.title.isEmpty())
-            result.title[0] = result.title.front().toUpper();
-          result.status = text(payload.status);
-          result.blocks.push_back({genericDetail(payload), false, true});
+          result.title = presentation::genericActivityTitle(payload);
+          result.status = presentation::statusLabel(payload.status);
+          result.blocks.push_back(
+              {presentation::boundedGenericActivityDetail(payload), false,
+               true});
         } else if constexpr (std::is_same_v<Payload, LocalPromptData>) {
           result.title = QStringLiteral("You");
           result.blocks.push_back({text(payload.prompt), true, false});

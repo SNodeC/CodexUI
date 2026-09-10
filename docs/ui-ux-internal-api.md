@@ -340,6 +340,9 @@ released, and QWidget work never occurs while a graph or channel lock is held.
 
 Cards remain the established specialized renderers. They do not read the
 graph. Their `VisibleCardData` is the entire canonical presentation input.
+`ConversationPresentation` supplies only pure status, plan, agent-metadata,
+file-change, and generic-activity display values shared with the passive
+delegate. It owns no renderer selection, geometry, interaction, or state.
 
 - `ConversationCard(data, parent, commandInitiallyCollapsed,
   imageInitiallyCollapsed, fileChangesInitiallyCollapsed)` creates exactly
@@ -390,7 +393,6 @@ inner wheel/follow state; restoring it must not move the outer conversation.
 | `applyPresentation` | complete candidate DTO; returns impact enum | Same postcondition as `apply`; impact is local and must not be promoted blindly to pane/window invalidation. |
 | collapse methods | bool setter / bool query | Fold state is user-owned; the view updates only the affected indexed row/section range and restores the exact anchor. |
 | `setAuthoritativeTurnActive` | bool; returns paint-change bool | Valid primarily for the root You card. No geometry change for border-only state. |
-| nested-parent methods | ordered child QWidget/card pointers | Card-internal compatibility only. `ConversationView` supplies an empty list and represents Turn ownership through model roles, indexed geometry, and delegate painting. |
 | viewport visibility | bool | Affects only local timers/painting, not data or identity. |
 | command output state methods | optional state / state const reference | Preserve inner scrollbar value/follow mode without modifying outer anchor. |
 

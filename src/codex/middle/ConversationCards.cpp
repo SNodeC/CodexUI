@@ -2,6 +2,8 @@
 
 #include "codex/middle/ConversationCards.h"
 
+#include "codex/middle/ConversationPresentation.h"
+
 #include "codex/UiStatus.h"
 #include "codex/ui/UiStyle.h"
 
@@ -57,7 +59,6 @@ constexpr int PendingAnimationIntervalMilliseconds = 32;
 constexpr qint64 PendingHalfCycleMilliseconds = 850;
 constexpr int ThumbnailMaximumWidth = 280;
 constexpr int ThumbnailMaximumHeight = 180;
-constexpr qsizetype MaximumGenericActivityCharacters = 4096;
 constexpr int CardHeaderActionSpacing = 4;
 constexpr int CopyMorphDurationMilliseconds = 160;
 constexpr int CopyCheckHoldMilliseconds = 500;
@@ -487,8 +488,8 @@ bool setVisibleMarkdown(QLabel *label, const QString &markdown) {
 
 QString displayStatus(const QString &status) {
   const QByteArray encoded = status.toUtf8();
-  return text(codexui::codex::displayStatus(std::string_view(
-      encoded.constData(), static_cast<std::size_t>(encoded.size()))));
+  return presentation::statusLabel(std::string_view(
+      encoded.constData(), static_cast<std::size_t>(encoded.size())));
 }
 
 QString statusTone(const QString &status) {
@@ -524,27 +525,6 @@ QString commandMetadata(const CommandExecutionData &command) {
   return metadata.join(QStringLiteral("  |  "));
 }
 
-QString agentMetadata(const AgentActivityData &activity) {
-  QStringList metadata;
-  if (!activity.tool.empty())
-    metadata << text(activity.tool);
-  if (activity.status.empty() && !activity.kind.empty())
-    metadata << displayStatus(text(activity.kind));
-  if (!activity.receivers.empty())
-    metadata << textList(activity.receivers).join(QStringLiteral(", "));
-  if (!activity.model.empty())
-    metadata << text(activity.model);
-  if (!activity.reasoningEffort.empty())
-    metadata << text(activity.reasoningEffort);
-  if (!activity.childThreadId.empty())
-    metadata << QStringLiteral("thread %1").arg(text(activity.childThreadId));
-  if (!activity.agentPath.empty())
-    metadata << text(activity.agentPath);
-  if (!activity.senderThreadId.empty())
-    metadata << QStringLiteral("sender %1").arg(text(activity.senderThreadId));
-  return metadata.join(QStringLiteral("  |  "));
-}
-
 QString displayChangeKind(std::string_view kind) {
   if (kind.empty())
     return QStringLiteral("Changed");
@@ -564,22 +544,6 @@ struct CardCopyContent {
 QString joinedCopyText(QStringList parts) {
   parts.removeAll(QString{});
   return parts.join(QStringLiteral("\n\n"));
-}
-
-QString fileChangesText(const FileChangesData &data) {
-  QStringList rows;
-  for (const FileChangeData &change : data.changes) {
-    if (change.path.empty())
-      continue;
-    QString row = QStringLiteral("%1  ·  %2")
-                      .arg(text(change.path), displayChangeKind(change.kind));
-    if (change.additions && change.deletions)
-      row += QStringLiteral("  +%1 −%2")
-                 .arg(*change.additions)
-                 .arg(*change.deletions);
-    rows << row;
-  }
-  return rows.join(QLatin1Char('\n'));
 }
 
 QString fileChangesHtml(const FileChangesData &data, QStringList &openPaths) {
@@ -624,31 +588,6 @@ std::optional<DiffCounts> totalDiffCounts(const FileChangesData &data) {
   return available ? std::optional<DiffCounts>{total} : std::nullopt;
 }
 
-QString planMarkdown(const PlanData &plan) {
-  if (!plan.legacyText.empty())
-    return text(plan.legacyText);
-  QStringList rows;
-  if (!plan.explanation.empty())
-    rows << text(plan.explanation);
-  if (!plan.steps.empty() && !rows.empty())
-    rows << QString{};
-  for (const PlanStepData &step : plan.steps) {
-    const QString marker = step.status == "completed"    ? QStringLiteral("✓")
-                           : step.status == "inProgress" ? QStringLiteral("◉")
-                                                         : QStringLiteral("○");
-    rows << QStringLiteral("%1 %2  ").arg(marker, text(step.text));
-  }
-  return rows.join(QLatin1Char('\n'));
-}
-
-QString boundedGenericActivity(const GenericActivityData &activity) {
-  QString rendered = text(activity.displayDetail);
-  if (rendered.size() <= MaximumGenericActivityCharacters)
-    return rendered;
-  rendered.truncate(MaximumGenericActivityCharacters);
-  return rendered + QStringLiteral("\n\n[Activity details truncated]");
-}
-
 CardCopyContent cardCopyContent(const VisibleCardData &card) {
   return std::visit(
       [](const auto &payload) -> CardCopyContent {
@@ -673,15 +612,15 @@ CardCopyContent cardCopyContent(const VisibleCardData &card) {
         } else if constexpr (std::is_same_v<Payload, ReasoningData>) {
           return {text(payload.summary), true};
         } else if constexpr (std::is_same_v<Payload, FileChangesData>) {
-          return {fileChangesText(payload), false};
+          return {presentation::fileChangesText(payload), false};
         } else if constexpr (std::is_same_v<Payload, PlanData>) {
-          return {planMarkdown(payload), true};
+          return {presentation::planMarkdown(payload), true};
         } else if constexpr (std::is_same_v<Payload, ImageGenerationData>) {
           return {
               joinedCopyText({text(payload.revisedPrompt), text(payload.path)}),
               false};
         } else if constexpr (std::is_same_v<Payload, GenericActivityData>) {
-          return {boundedGenericActivity(payload), false};
+          return {presentation::boundedGenericActivityDetail(payload), false};
         } else {
           return payload.prompt.empty()
                      ? CardCopyContent{textList(payload.imagePaths)
@@ -1405,7 +1344,7 @@ public:
 
   void updateComposition(const AgentActivityData &activity) {
     showStatus(text(activity.status), QStringLiteral("agentActivityStatus"));
-    setVisibleText(metadata, agentMetadata(activity));
+    setVisibleText(metadata, presentation::agentMetadata(activity));
     setVisibleText(body, text(activity.prompt));
     setVisibleMarkdown(detail, text(activity.resultText));
   }
@@ -1471,7 +1410,7 @@ public:
   }
 
   void updateComposition(const PlanData &plan) {
-    setVisibleMarkdown(body, planMarkdown(plan));
+    setVisibleMarkdown(body, presentation::planMarkdown(plan));
   }
 
   void createComposition(const ImageGenerationData &image) {
@@ -1504,11 +1443,10 @@ public:
   }
 
   void updateComposition(const GenericActivityData &activity) {
-    title->setText(activity.type.empty()
-                       ? QStringLiteral("Activity")
-                       : UiStyle::humanizeLabel(text(activity.type)));
+    title->setText(presentation::genericActivityTitle(activity));
     showStatus(text(activity.status), QStringLiteral("genericActivityStatus"));
-    metadata->setText(boundedGenericActivity(activity));
+    metadata->setText(
+        presentation::boundedGenericActivityDetail(activity));
     metadata->setObjectName(QStringLiteral("genericActivityMetadata"));
     metadata->show();
   }
