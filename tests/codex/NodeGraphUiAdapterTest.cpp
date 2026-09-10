@@ -151,6 +151,97 @@ bool limitsHistoryButPinsTheOwningPrompt() {
                  "pinned root does not own the turn");
 }
 
+bool boundedOptimisticPromptKeepsItsCanonicalSlot() {
+  nodegraph::NodeGraph graph;
+  NodeRef thread;
+  NodeRef turn;
+  NodeRef root;
+  NodeRef local;
+  NodeRef answer;
+  {
+    auto write = graph.write();
+    NodeState threadState;
+    threadState.fields.emplace("historyLoadedItemCount", std::uint64_t{2});
+    thread = write.upsert({NodeKind::Thread, "bounded-prompt-thread"},
+                          std::move(threadState));
+    turn = write.upsert({NodeKind::Turn, "bounded-prompt-turn"});
+    write.setField(turn, "id", "bounded-prompt-turn");
+    root = write.upsert(
+        {NodeKind::Item, "bounded-prompt-root"},
+        itemState("bounded-prompt-root", "userMessage", "Opening prompt"));
+    NodeState localState =
+        itemState("bounded-local-steering", "localPrompt", "Steer here");
+    localState.fields.emplace("local", true);
+    localState.fields.emplace("submissionId", std::uint64_t{77});
+    localState.fields.emplace("dispatchState", "dispatching");
+    localState.fields.emplace("startsTurn", false);
+    local = write.upsert({NodeKind::Item, "bounded-local-steering"},
+                         std::move(localState));
+    answer = write.upsert(
+        {NodeKind::Item, "bounded-prompt-answer"},
+        itemState("bounded-prompt-answer", "agentMessage", "First answer"));
+    write.setParent(thread, turn);
+    write.setParent(turn, root);
+    write.setParent(turn, local);
+    write.setParent(turn, answer);
+    write.relate(turn, nodegraph::RelationKind::TurnRootItem, root);
+    write.relate(thread, nodegraph::RelationKind::PendingPrompt, local);
+    static_cast<void>(write.finish());
+  }
+
+  NodeGraphUiAdapter adapter(graph);
+  const auto optimistic = adapter.conversation(thread, 80);
+  const middle::CardKey rootKey = middle::AuthoritativeItemKey{
+      "bounded-prompt-thread", "bounded-prompt-turn",
+      "bounded-prompt-root"};
+  const middle::CardKey steeringKey = middle::LocalPromptKey{77};
+  const middle::CardKey answerKey = middle::AuthoritativeItemKey{
+      "bounded-prompt-thread", "bounded-prompt-turn",
+      "bounded-prompt-answer"};
+  if (!require(optimistic && optimistic->sections.size() == 1 &&
+                   optimistic->sections.front().cards.size() == 3,
+               "bounded optimistic steering projection was unavailable") ||
+      !require(optimistic->sections.front().cards[0].key == rootKey &&
+                   optimistic->sections.front().cards[1].key == steeringKey &&
+                   optimistic->sections.front().cards[2].key == answerKey,
+               "bounded projection moved an optimistic steering prompt out "
+               "of its canonical sibling slot"))
+    return false;
+
+  NodeRef authoritative;
+  {
+    auto write = graph.write();
+    write.setField(local, "dispatchState", "awaitingMaterialization");
+    authoritative = write.upsert(
+        {NodeKind::Item, "bounded-authoritative-steering"},
+        itemState("bounded-authoritative-steering", "userMessage",
+                  "Steer here"));
+    write.setField(authoritative, "localSubmissionId", std::uint64_t{77});
+    write.setParent(turn, authoritative);
+    write.relate(authoritative,
+                 nodegraph::RelationKind::PromptMaterialization, local);
+    write.replaceChildren(
+        turn, std::array<NodeRef, 4>{root, local, authoritative, answer});
+    write.setField(thread, "historyLoadedItemCount", std::uint64_t{3});
+    static_cast<void>(write.finish());
+  }
+
+  const auto materialized = adapter.conversation(thread, 80);
+  return require(materialized && materialized->sections.size() == 1 &&
+                     materialized->sections.front().cards.size() == 3,
+                 "bounded steering materialization was unavailable") &&
+         require(materialized->sections.front().cards[0].key == rootKey &&
+                     materialized->sections.front().cards[1].key ==
+                         steeringKey &&
+                     materialized->sections.front().cards[2].key == answerKey,
+                 "steering materialization changed the projected row order") &&
+         require(materialized->sections.front().cards[1].kind ==
+                         middle::CardKind::UserMessage &&
+                     materialized->sections.front().cards[1].target == local,
+                 "steering materialization did not preserve its stable local "
+                 "row while awaiting UI acknowledgement");
+}
+
 bool projectsOnlyTheExactCanonicalTail() {
   nodegraph::NodeGraph graph;
   NodeRef thread;
@@ -400,6 +491,7 @@ int main() {
   using namespace codexui::codex::ui;
   if (!projectsCanonicalTurnStructureAndRoot() ||
       !limitsHistoryButPinsTheOwningPrompt() ||
+      !boundedOptimisticPromptKeepsItsCanonicalSlot() ||
       !projectsOnlyTheExactCanonicalTail() ||
       !projectsExactPromptMaterialization() ||
       !projectsExactRowPlacementAndNeighbors() ||

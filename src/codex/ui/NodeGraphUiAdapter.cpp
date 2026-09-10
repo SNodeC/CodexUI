@@ -1906,6 +1906,17 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
 
   std::unordered_set<const nodegraph::Node *> boundedAuthoritativeItems;
   if (retainedAuthoritativeCount) {
+    const std::vector<nodegraph::NodeRef> pendingPrompts =
+        read->related(thread, nodegraph::RelationKind::PendingPrompt);
+    std::unordered_set<const nodegraph::Node *> pendingPromptNodes;
+    pendingPromptNodes.reserve(pendingPrompts.size());
+    for (const nodegraph::NodeRef &prompt : pendingPrompts)
+      if (prompt && read->contains(prompt) && !read->removed(prompt) &&
+          prompt->id().kind == nodegraph::NodeKind::Item)
+        pendingPromptNodes.insert(prompt.get());
+
+    std::unordered_set<const nodegraph::Node *> positionedPrompts;
+    positionedPrompts.reserve(pendingPromptNodes.size());
     std::size_t remaining = itemLimit;
     for (std::size_t turnOffset = turns.size(); turnOffset > 0 && remaining > 0;
          --turnOffset) {
@@ -1918,8 +1929,15 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
             item->id().kind != nodegraph::NodeKind::Item)
           continue;
         const auto state = read->state(item);
-        if (!state || graphString(graphField(*state, "type")) == "localPrompt")
+        if (!state)
           continue;
+        if (graphString(graphField(*state, "type")) == "localPrompt") {
+          if (pendingPromptNodes.contains(item.get())) {
+            input.items.push_back(item);
+            positionedPrompts.insert(item.get());
+          }
+          continue;
+        }
         input.items.push_back(item);
         boundedAuthoritativeItems.insert(item.get());
         --remaining;
@@ -1930,10 +1948,10 @@ NodeGraphUiAdapter::conversation(const nodegraph::NodeRef &thread,
     // User-authored optimistic/recovery prompts are explicitly protected from
     // history paging. The worker maintains this narrow relation, so retaining
     // them does not require scanning all historical items.
-    for (const nodegraph::NodeRef &prompt :
-         read->related(thread, nodegraph::RelationKind::PendingPrompt)) {
+    for (const nodegraph::NodeRef &prompt : pendingPrompts) {
       if (!prompt || !read->contains(prompt) || read->removed(prompt) ||
-          prompt->id().kind != nodegraph::NodeKind::Item)
+          prompt->id().kind != nodegraph::NodeKind::Item ||
+          positionedPrompts.contains(prompt.get()))
         continue;
       const nodegraph::NodeRef turn = read->parent(prompt);
       const auto position = turnPositions.find(turn.get());
