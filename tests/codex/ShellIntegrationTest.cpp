@@ -1535,6 +1535,7 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
       shell.findChild<QWidget *>(QStringLiteral("inspector")));
 
   NodeRef selectedItem;
+  NodeRef selectedTurn;
   NodeRef backgroundItem;
   NodeRef selectedThread;
   {
@@ -1546,15 +1547,17 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
                    scopedTurnNodeId("selected-thread", "selected-turn"),
                    "selected-item"))
              : NodeRef{};
+    selectedTurn = read ? read->parent(selectedItem) : NodeRef{};
     backgroundItem =
         read ? read->find(scopedItemNodeId(
                    scopedTurnNodeId("background-thread", "background-turn"),
                    "background-item"))
              : NodeRef{};
   }
-  require(selectedThread && selectedItem && backgroundItem,
+  require(selectedThread && selectedTurn && selectedItem && backgroundItem,
           "the test resolves the selected thread and both scoped items");
-  if (!selectedThread || !selectedItem || !backgroundItem || !selectedCard)
+  if (!selectedThread || !selectedTurn || !selectedItem || !backgroundItem ||
+      !selectedCard)
     return;
 
   const qulonglong threadRoutesBefore =
@@ -1779,6 +1782,105 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
               conversationGeometryBefore,
       "a non-sort thread field patches only its row without topology or "
       "conversation geometry work");
+
+  static_cast<void>(takeQtMessages(channels));
+  NodeRef localPrompt;
+  GraphChange localPromptChange;
+  {
+    auto write = graph.write();
+    NodeState local;
+    local.status = NodeStatus::Pending;
+    local.fields = {{"id", Value("local-materialization")},
+                    {"type", Value("localPrompt")},
+                    {"text", Value("Materialize me")},
+                    {"submissionId", Value(std::uint64_t{808})},
+                    {"dispatchState", Value("awaitingMaterialization")},
+                    {"local", Value(true)}};
+    localPrompt = write.upsert({NodeKind::Item, "local-materialization"},
+                               std::move(local));
+    write.setParent(selectedTurn, localPrompt);
+    write.relate(selectedThread, RelationKind::PendingPrompt, localPrompt);
+    localPromptChange = write.finish();
+  }
+  require(messageAdmitted(
+              channels.sendGraphChanged(std::move(localPromptChange))),
+          "the local materialization row is admitted to Qt");
+  const std::string localKey =
+      middle::stableKey(middle::LocalPromptKey{808});
+  require(spinUntil([&] {
+            return conversation->conversationModel()
+                ->indexForStableKey(localKey)
+                .isValid();
+          }),
+          "the local prompt reaches its stable conversation row");
+  middle::ConversationCard *localCard = nullptr;
+  for (middle::ConversationCard *card :
+       conversation->findChildren<middle::ConversationCard *>())
+    if (card->property("conversationAnchorKey").toString().toStdString() ==
+        localKey)
+      localCard = card;
+  const int materializationRowsBefore =
+      conversation->conversationModel()->rowCount();
+  const qulonglong promptRoutesBefore =
+      shell.property("targetedConversationPromptMaterializations")
+          .toULongLong();
+  const qulonglong promptSectionRebuildsBefore =
+      conversation->property("conversationSectionRangeRebuilds").toULongLong();
+
+  NodeRef authoritativePrompt;
+  GraphChange materializationChange;
+  {
+    auto write = graph.write();
+    NodeState authoritative;
+    authoritative.status = NodeStatus::Completed;
+    authoritative.fields = {
+        {"id", Value("provider-materialization")},
+        {"type", Value("userMessage")},
+        {"text", Value("Materialize me")},
+        {"localSubmissionId", Value(std::uint64_t{808})}};
+    authoritativePrompt =
+        write.upsert({NodeKind::Item, "provider-materialization"},
+                     std::move(authoritative));
+    write.setParent(selectedTurn, authoritativePrompt);
+    write.relate(authoritativePrompt, RelationKind::PromptMaterialization,
+                 localPrompt);
+    materializationChange = write.finish();
+  }
+  require(messageAdmitted(
+              channels.sendGraphChanged(std::move(materializationChange))),
+          "the authoritative prompt materialization is admitted to Qt");
+  require(spinUntil([&] {
+            const QModelIndex index = conversation->conversationModel()
+                                          ->indexForStableKey(localKey);
+            const middle::VisibleCardData *card =
+                conversation->conversationModel()->card(index.row());
+            return index.isValid() && card &&
+                   card->kind == middle::CardKind::UserMessage &&
+                   card->target == localPrompt;
+          }),
+          "the authoritative prompt morphs the exact local row");
+  const std::vector<QtToWorkerMessage> materializationActions =
+      takeQtMessages(channels);
+  const bool exactAcknowledgement =
+      std::ranges::count_if(materializationActions, [&](const auto &message) {
+        const auto *action = std::get_if<NodeAction>(&message);
+        return action && action->kind == NodeActionKind::PromptMaterialized &&
+               action->target == localPrompt;
+      }) == 1;
+  require(
+      exactAcknowledgement &&
+          conversation->conversationModel()->rowCount() ==
+              materializationRowsBefore &&
+          shell.property("targetedConversationPromptMaterializations")
+                  .toULongLong() ==
+              promptRoutesBefore + 1 &&
+          conversation->property("conversationSectionRangeRebuilds")
+                  .toULongLong() == promptSectionRebuildsBefore &&
+          (!localCard ||
+           localCard->property("conversationAnchorKey").toString()
+                   .toStdString() == localKey),
+      "prompt materialization targets one stable row and exact acknowledgement "
+      "without structural reconciliation");
 
   QPointer<QWidget> removedWidget = selectedCard;
   GraphChange removal;

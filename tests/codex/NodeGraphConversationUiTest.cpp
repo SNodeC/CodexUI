@@ -232,8 +232,10 @@ bool promptMorphPreservesExactTargetAndWidget() {
     write.relate(turn, nodegraph::RelationKind::TurnRootItem, authoritative);
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80);
-  if (!snapshot || !view.reconcile(*snapshot))
+  const auto materialized =
+      adapter.promptMaterialization(thread, authoritative);
+  if (!materialized ||
+      !view.applyCardPresentation(*materialized).has_value())
     return false;
   QApplication::processEvents();
   const auto after = view.findChildren<middle::ConversationCard *>();
@@ -245,7 +247,7 @@ bool promptMorphPreservesExactTargetAndWidget() {
                "prompt morph discarded its exact NodeRef target"))
     return false;
 
-  static_cast<void>(view.reconcile(*snapshot));
+  static_cast<void>(view.applyCardPresentation(*materialized));
   if (!require(acknowledgements == 1,
                "unchanged prompt projection acknowledged twice"))
     return false;
@@ -352,10 +354,10 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
     write.setField(steering, "showPendingAnimation", false);
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80);
-  if (!snapshot)
+  const auto acknowledgedPrompt = adapter.card(thread, steering);
+  if (!acknowledgedPrompt)
     return false;
-  static_cast<void>(view.reconcile(*snapshot));
+  static_cast<void>(view.applyCardPresentation(*acknowledgedPrompt));
   QApplication::processEvents();
   QTimer *animation = stable->findChild<QTimer *>(
       QStringLiteral("pendingAnimationTimer"));
@@ -380,10 +382,11 @@ bool steeringMorphKeepsItsSlotThroughRetirement() {
         turn, std::array<NodeRef, 4>{root, steering, authoritative, progress});
     static_cast<void>(write.finish());
   }
-  snapshot = adapter.conversation(thread, 80);
-  if (!snapshot)
+  const auto materialized =
+      adapter.promptMaterialization(thread, authoritative);
+  if (!materialized)
     return false;
-  static_cast<void>(view.reconcile(*snapshot));
+  static_cast<void>(view.applyCardPresentation(*materialized));
   QApplication::processEvents();
   const int promotedTop = stable->mapTo(view.viewport(), QPoint{}).y();
   if (!require(stable->data().kind == middle::CardKind::UserMessage &&

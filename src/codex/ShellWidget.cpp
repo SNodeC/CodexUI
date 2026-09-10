@@ -1729,6 +1729,49 @@ void ShellWidget::Impl::commitPendingPanes() {
           owner->property("targetedConversationRoutes").toULongLong() + 1);
     }
   }
+  if (pendingConversation && !pendingConversationItems.empty() &&
+      boundGraphThread &&
+      !middleRegion->conversation().structuralStagingActive()) {
+    std::optional<middle::VisibleCardData> materialization;
+    nodegraph::NodeRef authoritativeItem;
+    bool ambiguous = false;
+    for (const nodegraph::NodeRef &item : pendingConversationItems) {
+      auto candidate = uiAdapter.promptMaterialization(boundGraphThread, item);
+      if (!candidate)
+        continue;
+      if (materialization) {
+        ambiguous = true;
+        break;
+      }
+      materialization = std::move(*candidate);
+      authoritativeItem = item;
+    }
+    const bool exactMaterialization =
+        materialization && !ambiguous &&
+        std::ranges::all_of(pendingConversationItems,
+                            [&](const nodegraph::NodeRef &item) {
+                              return item == authoritativeItem ||
+                                     item == materialization->target;
+                            });
+    if (exactMaterialization &&
+        middleRegion->conversation()
+            .applyCardPresentation(std::move(*materialization))
+            .has_value()) {
+      pendingConversation = false;
+      pendingConversationItems.clear();
+      ++conversationRoutes;
+      owner->setProperty("conversationRoutes",
+                         static_cast<qulonglong>(conversationRoutes));
+      owner->setProperty(
+          "targetedConversationRoutes",
+          owner->property("targetedConversationRoutes").toULongLong() + 1);
+      owner->setProperty(
+          "targetedConversationPromptMaterializations",
+          owner->property("targetedConversationPromptMaterializations")
+                  .toULongLong() +
+              1);
+    }
+  }
   if (pendingConversation && pendingConversationItems.size() == 1 &&
       boundGraphThread &&
       !middleRegion->conversation().structuralStagingActive()) {

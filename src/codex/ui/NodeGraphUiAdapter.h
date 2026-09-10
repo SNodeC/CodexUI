@@ -38,6 +38,13 @@ public:
   card(const nodegraph::NodeRef &thread,
        const nodegraph::NodeRef &item) const;
 
+  // Projects an authoritative user item only when it exactly materializes a
+  // still-current local prompt. The returned card retains the LocalPromptKey
+  // and prompt NodeRef so Qt can morph and acknowledge that one stable row.
+  [[nodiscard]] std::optional<middle::VisibleCardData>
+  promptMaterialization(const nodegraph::NodeRef &thread,
+                        const nodegraph::NodeRef &item) const;
+
   // Projects only a canonical last item of the selected thread. It is the
   // bounded structural fast path for ordinary append; any non-tail or prompt
   // alias case returns nullopt and uses complete reconciliation instead.

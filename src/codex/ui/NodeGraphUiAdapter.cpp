@@ -1567,6 +1567,56 @@ NodeGraphUiAdapter::card(const nodegraph::NodeRef &thread,
                        graphString(graphField(*threadState, "cwd")));
 }
 
+std::optional<VisibleCardData> NodeGraphUiAdapter::promptMaterialization(
+    const nodegraph::NodeRef &thread, const nodegraph::NodeRef &item) const {
+  if (!graph_ || !thread || !item)
+    return std::nullopt;
+  auto read = graph_->tryRead();
+  if (!read || !read->contains(thread) || !read->contains(item) ||
+      read->removed(thread) || read->removed(item) ||
+      thread->id().kind != nodegraph::NodeKind::Thread ||
+      item->id().kind != nodegraph::NodeKind::Item)
+    return std::nullopt;
+
+  const nodegraph::NodeRef turn = read->parent(item);
+  if (!turn || turn->id().kind != nodegraph::NodeKind::Turn ||
+      read->parent(turn) != thread)
+    return std::nullopt;
+  const auto state = read->state(item);
+  const auto turnState = read->state(turn);
+  const auto threadState = read->state(thread);
+  if (!state || !turnState || !threadState ||
+      graphCardKind(*state) != CardKind::UserMessage)
+    return std::nullopt;
+
+  for (const nodegraph::NodeRef &prompt :
+       read->related(item, nodegraph::RelationKind::PromptMaterialization)) {
+    if (!prompt || !read->contains(prompt) || read->removed(prompt) ||
+        prompt->id().kind != nodegraph::NodeKind::Item)
+      continue;
+    const auto promptState = read->state(prompt);
+    const nodegraph::NodeRef promptTurn = read->parent(prompt);
+    if (!promptState || !promptTurn || read->parent(promptTurn) != thread ||
+        graphString(graphField(*promptState, "type")) != "localPrompt" ||
+        graphString(graphField(*promptState, "dispatchState")) !=
+            "awaitingMaterialization")
+      continue;
+    const auto submissionId =
+        graphInteger(graphField(*promptState, "submissionId"));
+    if (!submissionId || *submissionId < 0)
+      continue;
+
+    VisibleCardData result = graphCardData(
+        item, thread->id().canonical,
+        nodegraph::protocolCanonicalId(*turnState, turn), *state,
+        graphString(graphField(*threadState, "cwd")));
+    result.key = LocalPromptKey{static_cast<std::uint64_t>(*submissionId)};
+    result.target = prompt;
+    return result;
+  }
+  return std::nullopt;
+}
+
 std::optional<ConversationTailCard>
 NodeGraphUiAdapter::tailCard(const nodegraph::NodeRef &thread,
                              const nodegraph::NodeRef &item) const {

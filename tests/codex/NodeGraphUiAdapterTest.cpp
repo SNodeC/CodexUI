@@ -194,6 +194,46 @@ bool projectsOnlyTheExactCanonicalTail() {
                  "a non-tail item entered the bounded append path");
 }
 
+bool projectsExactPromptMaterialization() {
+  nodegraph::NodeGraph graph;
+  NodeRef thread;
+  NodeRef turn;
+  NodeRef prompt;
+  NodeRef authoritative;
+  {
+    auto write = graph.write();
+    thread = write.upsert({NodeKind::Thread, "prompt-thread"});
+    turn = write.upsert({NodeKind::Turn, "prompt-turn"});
+    write.setField(turn, "id", "prompt-turn");
+    NodeState local = itemState("local-prompt", "localPrompt", "hello");
+    local.fields.emplace("submissionId", std::uint64_t{91});
+    local.fields.emplace("dispatchState", "awaitingMaterialization");
+    prompt = write.upsert({NodeKind::Item, "local-prompt"}, std::move(local));
+    authoritative = write.upsert(
+        {NodeKind::Item, "provider-prompt"},
+        itemState("provider-prompt", "userMessage", "hello"));
+    write.setParent(thread, turn);
+    write.setParent(turn, prompt);
+    write.setParent(turn, authoritative);
+    write.relate(authoritative,
+                 nodegraph::RelationKind::PromptMaterialization, prompt);
+    static_cast<void>(write.finish());
+  }
+
+  NodeGraphUiAdapter adapter(graph);
+  const auto result = adapter.promptMaterialization(thread, authoritative);
+  return require(result.has_value(),
+                 "exact prompt materialization was not projected") &&
+         require(result->key == middle::CardKey{middle::LocalPromptKey{91}},
+                 "prompt materialization changed the stable local key") &&
+         require(result->kind == middle::CardKind::UserMessage &&
+                     result->target == prompt,
+                 "prompt materialization lost its authoritative presentation "
+                 "or exact acknowledgement target") &&
+         require(!adapter.promptMaterialization(thread, prompt),
+                 "a local prompt was accepted as its own materialization");
+}
+
 bool preservesReadinessActivityAndAuthoritativeBudgetSemantics() {
   nodegraph::NodeGraph graph;
   NodeRef runtime;
@@ -297,6 +337,7 @@ int main() {
   if (!projectsCanonicalTurnStructureAndRoot() ||
       !limitsHistoryButPinsTheOwningPrompt() ||
       !projectsOnlyTheExactCanonicalTail() ||
+      !projectsExactPromptMaterialization() ||
       !preservesThreadRootsAndExactChildTargets() ||
       !preservesReadinessActivityAndAuthoritativeBudgetSemantics())
     return EXIT_FAILURE;

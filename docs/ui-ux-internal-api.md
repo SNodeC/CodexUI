@@ -55,7 +55,7 @@ concrete graph-cutover requirement.
 | initial conversation selection | Never exposes part of an authoritative replacement. The first content frame has complete cards, final parentage, final width/height, and final anchor. When switching populated threads, the outgoing surface stays stable until the incoming final snapshot is ready. | Compatible. Provider fragments are blocked, the outgoing conversation/heading/Inspector remain staged, and readiness replaces them once with the complete bounded window. |
 | conversation history window | Starts at 80 authoritative items. Pinned opening prompts do not consume the budget. Load More adds 80. While paused, new authoritative tail items expand the effective window; following resets it to the requested window. | Compatible after replacing the unbounded adapter request with per-thread requested/effective counters and excluding local prompts from the authoritative count. |
 | card DTO and rendering | Typed payloads preserve the old card kinds, text, metadata, status, images, truncation disclosure, plan, diff counts, and unknown fallback. Presentation options are applied by `ConversationView`, not by protocol logic. | Compatible. Generic detail is a safe bounded rendering string because the graph deliberately does not retain raw payloads for UI convenience. |
-| prompt materialization | An admitted local card keeps its `LocalPromptKey` while the authoritative user item arrives; the same widget changes type in place and preserves owner, anchor, focus, and local fold state. | Compatible through a narrow additive callback carrying the exact prompt `NodeRef`; widgets do not inspect graph state. |
+| prompt materialization | An admitted local card keeps its `LocalPromptKey` while the authoritative user item arrives; the same widget changes type in place and preserves owner, anchor, focus, and local fold state. | Compatible through the exact adapter projection and one targeted model `dataChanged`; acknowledgement carries the related prompt `NodeRef` and performs no complete conversation reconciliation. |
 | prompt recovery | A definite/uncertain failed prompt remains visible and restores text/attachments only by explicit user action, without overwriting an existing draft. | Compatible through a narrow additive recovery callback carrying the exact prompt `NodeRef`. |
 | `setEmptyMessage` | Changes only the empty-state text and preserves the current anchor/follow behavior. It does not authorize clearing an existing conversation. | Compatible. Hydration staging decides whether an empty snapshot may be reconciled. |
 | presentation options | Reasoning/Codex-update visibility and initial command/image/file-change folding remain local UI preferences; changing them reuses current card widgets and state. | Compatible. The adapter does not reinterpret these preferences. |
@@ -117,6 +117,10 @@ always means “no coherent value was available now”, never “render empty”
   is still parented by a Turn owned by the supplied thread. It is reserved for
   a targeted visible-card update and must never reconstruct identity from
   payload fields. A stale/detached item returns `nullopt`.
+- `promptMaterialization(thread, item)` accepts only an authoritative user item
+  related to one current local prompt in `awaitingMaterialization`. It returns
+  the authoritative presentation under that prompt's `LocalPromptKey` and
+  exact prompt `NodeRef`, allowing one row-local morph and acknowledgement.
 - `tailCard(thread, item)` additionally requires that the exact item
   be the last child of the last canonical Turn and that it not participate in
   prompt-materialization aliasing. It returns one `ConversationTailCard` with
@@ -132,6 +136,7 @@ always means “no coherent value was available now”, never “render empty”
 | `conversationInfo` | `thread`: required stable Thread; returns optional control facts | Wrong kind, stale generation, removal, or contention returns `nullopt`. Success does not construct card DTOs. |
 | `conversation` | `thread`, positive effective `itemLimit`; returns optional complete snapshot | Pre: the caller has observed `conversationInfo.readyForDisplay`; this primitive projects the graph's current content and does not itself infer temporal hydration completeness. Limit is clamped to at least one. Success preserves canonical order and root ownership. Invalid target/contention returns `nullopt`. |
 | `card` | exact `thread` and `item`; returns optional card DTO | Success requires the item still be a child of a Turn owned by the exact thread. It never searches by payload IDs. |
+| `promptMaterialization` | exact `thread` and authoritative `item`; returns optional card DTO | Success requires one live related local prompt owned by the thread with a valid submission ID and awaiting-materialization state. No relation inference or payload-ID search is permitted. |
 | `tailCard` | exact `thread` and `item`; returns optional tail DTO | Success requires the exact canonical last item of the exact canonical last Turn, usable loaded-count state, and no prompt alias. The DTO is non-authoritative and owns only values needed for one Qt append. |
 
 ### `middle::ThreadPane`
