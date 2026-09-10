@@ -124,8 +124,9 @@ always means “no coherent value was available now”, never “render empty”
   prompt `NodeRef` for acknowledgement.
 - `rowChange(thread, item)` projects one live selected-thread Item, its exact
   section/root/nesting facts, and the immediate canonical card keys on either
-  side. It is the non-snapshot input for an exact middle insertion or move;
-  it retains no ordering state after the read guard is released.
+  side. It is the non-snapshot input for an exact middle insertion or move and
+  distinguishes a busy graph read from an authoritative absence; it retains no
+  ordering state after the read guard is released.
 - `tailCard(thread, item)` additionally requires that the exact item
   be the last child of the last canonical Turn and that it not participate in
   prompt-materialization aliasing. It returns one `ConversationTailCard` with
@@ -142,7 +143,7 @@ always means “no coherent value was available now”, never “render empty”
 | `conversation` | `thread`, positive effective `itemLimit`; returns optional complete snapshot | Pre: the caller has observed `conversationInfo.readyForDisplay`; this primitive projects the graph's current content and does not itself infer temporal hydration completeness. Limit is clamped to at least one. Success preserves canonical order and root ownership. Invalid target/contention returns `nullopt`. |
 | `card` | exact `thread` and `item`; returns optional card DTO | Success requires the item still be a child of a Turn owned by the exact thread. It never searches by payload IDs. |
 | `promptMaterialization` | exact `thread` and authoritative `item`; returns optional card DTO | Success requires one live related local prompt owned by the thread with a valid submission ID and awaiting-materialization state. No relation inference or payload-ID search is permitted. |
-| `rowChange` | exact `thread` and live `item`; returns optional row-change DTO | Success requires current Turn ownership by the exact thread. Immediate neighbor keys reflect canonical graph order with a materializing local prompt suppressed behind its authoritative row. |
+| `rowChange` | exact `thread` and live `item`; returns `ConversationRowProjection` | `graphBusy` requests one nonzero-delay retry and is never interpreted as removal. A present change requires current Turn ownership by the exact thread; an absent change with `graphBusy == false` is authoritative absence. Immediate neighbor keys reflect canonical graph order with a materializing local prompt suppressed behind its authoritative row. |
 | `tailCard` | exact `thread` and `item`; returns optional tail DTO | Success requires the exact canonical last item of the exact canonical last Turn, usable loaded-count state, and no prompt alias. The DTO is non-authoritative and owns only values needed for one Qt append. |
 
 ### `middle::ThreadPane`
@@ -221,10 +222,10 @@ structure, visibility, and accessibility values.
   `moveTarget(ref, destination, placement)` are the exact structural
   operations. They reject duplicate/stale/ambiguous targets and emit only the
   matching insert, remove, move, and affected structural-role changes.
-- `reconcile(snapshot)` remains a temporary same-thread compatibility fallback
-  while integration routes are migrated to those explicit operations.
-  Identical effective input emits no signal and increments no presentation
-  counter.
+- `reconcile(snapshot)` preserves the established direct `ConversationView`
+  contract with precise ordered row differences. Production Shell graph
+  routing never uses it as a delta fallback: selection/rescan calls replacement,
+  paging calls ordered-superset insertion, and live changes carry exact refs.
 - `updateCard(card)` resolves the stable key once and returns `Missing`,
   `Incompatible`, `Unchanged`, or `Changed`. Only `Changed` emits row-local
   `dataChanged` with the affected roles.
@@ -302,11 +303,13 @@ released, and QWidget work never occurs while a graph or channel lock is held.
   gray ring with a 3 px stroke; its 33 ms animation timer exists only while
   the ring is visible. A superseded thread identity cannot reveal or dismiss
   the current cover.
-- `reconcileStaged(snapshot)` preserves that final-state contract for initial
-  selection and Load 80. Only rich rows expected in the initial viewport and
-  bounded overscan are constructed and measured one at a time beneath the
-  hidden staging host; passive rows need no construction. The old complete
-  surface or stable loading cover remains visible until one final commit.
+- `reconcileStaged(snapshot)` preserves that final-state contract for explicit
+  selection/rescan replacement. `prependHistoryPageStaged(snapshot)` applies
+  Load 80 as a same-thread ordered superset without reset or retained-row
+  movement. Only rich rows expected in the initial viewport and bounded
+  overscan are constructed and measured one at a time beneath the hidden
+  staging host; passive rows need no construction. The old complete surface or
+  stable loading cover remains visible until one final commit.
 - `applyCardPresentation(card)` is the ordinary exact-row path. An identical
   value is a no-op. An offscreen update changes model data and cached/indexed
   facts without constructing, laying out, or painting a QWidget. A visible
@@ -326,7 +329,8 @@ released, and QWidget work never occurs while a graph or channel lock is held.
   path after `NodeGraphUiAdapter::tailCard` validates canonical placement. It
   emits one insert, performs an optional bounded prefix trim, preserves the
   stable anchor or existing follow state, and never rebuilds model, section, or
-  height indexes. `false` requests complete structural reconciliation.
+  height indexes. `false` keeps the exact NodeRef on the canonical-neighbor row
+  path; it does not request a snapshot diff.
 - `historyLimitForThread`, `requestNextHistoryPage`, and
   `forgetThreadPresentation` own the requested/effective 80-row window and its
   lifecycle beside that thread's anchor/follow state. Canonical counts are
@@ -365,11 +369,12 @@ released, and QWidget work never occurs while a graph or channel lock is held.
 | `setEmptyMessage` | display `QString` value | Changes only empty-label text; model rows remain. Anchor is preserved. |
 | `setPresentationOptions` | complete local options | Updates model presentation roles and visible/materialized rows without a graph query. Existing user fold choices win over initial-fold defaults. |
 | `presentationOptions` | returns value copy | Pure query. |
-| `reconcile` | complete snapshot const reference; returns changed bool | Pre: unique section/card stable keys and correct root keys. Post: model order, indexed geometry, bounded editors, delegate surface, and scroll policy match one complete target. False means no effective model change. |
+| `reconcile` | complete snapshot const reference; returns changed bool | Explicit immediate authority replacement used by direct consumers/tests. Pre: unique section/card stable keys and correct root keys. Post: model order, indexed geometry, bounded editors, delegate surface, and scroll policy match one complete target. False means no effective model change. |
 | `beginThreadSelection` | exact selected thread ID | Immediately covers only the message viewport and starts one 500 ms visual-delay timer. Repeating the same pending identity is a no-op; a new identity cancels superseded staging. |
-| `reconcileStaged` | owned complete snapshot | Same final-state contract as `reconcile`; only initially visible rich editors are prepared beneath the hidden host in bounded event-loop passes before one atomic reveal. |
+| `reconcileStaged` | owned complete snapshot | Explicit different-thread or rescan replacement; only initially visible rich editors are prepared beneath the hidden host in bounded event-loop passes before one atomic reveal. |
+| `prependHistoryPageStaged` | owned same-thread ordered superset | Inserts missing history ranges and patches changed retained rows without a model reset or movement, then reveals one complete staged frame. |
 | `applyCardPresentation` | one exact `VisibleCardData`; returns optional local impact | Wrong thread/key/incompatible kind returns `nullopt`; identical data returns `None`; otherwise only the resolved row, its genuine section-edge geometry, and its visible editor/delegate rectangle may change. |
-| `appendTailCard` | one validated `ConversationTailCard`; returns bool | Exact canonical tail updates the view-owned history window, inserts directly, and optionally trims the prefix without retained-history traversal. Wrong thread, duplicate/invalid placement, or active staging returns false for complete reconciliation. |
+| `appendTailCard` | one validated `ConversationTailCard`; returns bool | Exact canonical tail updates the view-owned history window, inserts directly, and optionally trims the prefix without retained-history traversal. Wrong thread, duplicate/invalid placement, or active staging returns false so the same NodeRef proceeds through exact neighbor placement. |
 | `historyLimitForThread`, `requestNextHistoryPage` | thread ID plus current canonical history facts | Update only per-thread presentation-window counters and return the effective projection limit/provider-request decision. |
 | `forgetThreadPresentation`, `presentedThreadId` | retired thread ID / pure current-frame query | Releases per-thread window/anchor state or reports the complete frame currently owned by the model. |
 | `conversationModel`, `materializedCardCount` | borrowed model pointer / integer count | Inspection only. The model is non-authoritative and the widget count remains viewport proportional. |

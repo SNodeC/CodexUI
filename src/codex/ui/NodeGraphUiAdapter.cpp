@@ -1616,27 +1616,29 @@ std::optional<PromptMaterialization> NodeGraphUiAdapter::promptMaterialization(
   return std::nullopt;
 }
 
-std::optional<ConversationRowChange>
+NodeGraphUiAdapter::ConversationRowProjection
 NodeGraphUiAdapter::rowChange(const nodegraph::NodeRef &thread,
                               const nodegraph::NodeRef &item) const {
   if (!graph_ || !thread || !item)
-    return std::nullopt;
+    return {};
   auto read = graph_->tryRead();
-  if (!read || !read->contains(thread) || !read->contains(item) ||
+  if (!read)
+    return {true, std::nullopt};
+  if (!read->contains(thread) || !read->contains(item) ||
       read->removed(thread) || read->removed(item) ||
       thread->id().kind != nodegraph::NodeKind::Thread ||
       item->id().kind != nodegraph::NodeKind::Item)
-    return std::nullopt;
+    return {};
 
   const nodegraph::NodeRef turn = read->parent(item);
   if (!turn || turn->id().kind != nodegraph::NodeKind::Turn ||
       read->parent(turn) != thread)
-    return std::nullopt;
+    return {};
   const auto itemState = read->state(item);
   const auto turnState = read->state(turn);
   const auto threadState = read->state(thread);
   if (!itemState || !turnState || !threadState)
-    return std::nullopt;
+    return {};
 
   const std::string threadId = thread->id().canonical;
   const auto turnId = [&](const nodegraph::NodeRef &owner) {
@@ -1699,7 +1701,7 @@ NodeGraphUiAdapter::rowChange(const nodegraph::NodeRef &thread,
   const std::optional<CardKey> itemKey =
       projectedKey(item, turn, hiddenInTurn);
   if (!itemKey)
-    return std::nullopt;
+    return {};
 
   std::optional<CardKey> previous;
   std::optional<CardKey> next;
@@ -1712,7 +1714,7 @@ NodeGraphUiAdapter::rowChange(const nodegraph::NodeRef &thread,
     }
   }
   if (itemIndex == itemCount)
-    return std::nullopt;
+    return {};
   for (std::size_t offset = itemIndex; offset > 0 && !previous; --offset)
     previous = projectedKey(read->childAt(turn, offset - 1), turn,
                             hiddenInTurn);
@@ -1728,7 +1730,7 @@ NodeGraphUiAdapter::rowChange(const nodegraph::NodeRef &thread,
     }
   }
   if (turnIndex == turnCount)
-    return std::nullopt;
+    return {};
   for (std::size_t offset = turnIndex; offset > 0 && !previous; --offset) {
     const nodegraph::NodeRef owner = read->childAt(thread, offset - 1);
     if (!owner || owner->id().kind != nodegraph::NodeKind::Turn)
@@ -1777,7 +1779,7 @@ NodeGraphUiAdapter::rowChange(const nodegraph::NodeRef &thread,
       graphString(graphField(*itemState, "type")) != "localPrompt";
   result.previousCardKey = std::move(previous);
   result.nextCardKey = std::move(next);
-  return result;
+  return {false, std::move(result)};
 }
 
 std::optional<ConversationTailCard>

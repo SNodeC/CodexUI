@@ -143,8 +143,9 @@ bool testStableIdentityAndExactSignals() {
 
   log.clear();
   result &= require(
-      !model.reconcile(snapshot({card("same-wire-id-a", first, "one"),
-                                 card("same-wire-id-b", second, "two")})) &&
+      !model.replaceConversation(
+          snapshot({card("same-wire-id-a", first, "one"),
+                    card("same-wire-id-b", second, "two")})) &&
           log.resets == 0 && log.inserted.empty() && log.removed.empty() &&
           log.moved.empty() && log.changed.empty(),
       "identical model state emitted presentation work");
@@ -284,9 +285,9 @@ bool testVisibilityAndLargeModelRemainDataOnly() {
   }
   section.rootCardKey = section.cards.front().key;
   data.sections.push_back(std::move(section));
-  bool result =
-      require(model.reconcile(std::move(data)) && model.rowCount() == Count,
-              "ten-thousand-row model was not indexed");
+  bool result = require(
+      model.replaceConversation(std::move(data)) && model.rowCount() == Count,
+      "ten-thousand-row model was not indexed");
   SignalLog log(model);
   result &= require(
       model.setVisibility({false, false}) &&
@@ -350,7 +351,7 @@ bool testBoundedTailAppendKeepsAbsoluteIdentityIndexes() {
   }
   section.rootCardKey = section.cards.front().key;
   data.sections.push_back(std::move(section));
-  bool result = require(model.reconcile(std::move(data)),
+  bool result = require(model.replaceConversation(std::move(data)),
                         "tail fixture was not accepted");
   SignalLog log(model);
   const qulonglong rebuilds =

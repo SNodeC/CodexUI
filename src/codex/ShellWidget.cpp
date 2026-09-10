@@ -52,6 +52,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <ranges>
 #include <stdexcept>
 #include <string>
@@ -219,25 +220,27 @@ struct ConversationRoute {
   bool affected = false;
   bool structural = false;
   std::vector<nodegraph::NodeRef> items;
+  bool authorityReplacement = false;
 };
 
 ConversationRoute conversationRoute(const nodegraph::GraphChanged &change,
                                     const nodegraph::NodeGraph &graph,
                                     const nodegraph::NodeRef &selectedThread) {
   if (change.rescanRequired)
-    return {true, true, {}};
+    return {true, true, {}, true};
   if (!selectedThread)
     return {};
   constexpr std::size_t MaximumFilteredNodes = 64;
   if (change.affected.size() + change.removed.size() > MaximumFilteredNodes)
-    return {true, true, {}};
+    return {true, true, {}, true};
 
   const std::optional<nodegraph::NodeGraph::ReadAccess> read = graph.tryRead();
   if (!read)
-    return {true, true, {}};
+    return {true, true, {}, true};
 
   const std::string &selectedId = selectedThread->id().canonical;
   ConversationRoute route;
+  bool selectedStructureChanged = false;
   const auto addItem = [&](const nodegraph::NodeRef &item) {
     if (item && std::ranges::find(route.items, item) == route.items.end())
       route.items.push_back(item);
@@ -247,7 +250,7 @@ ConversationRoute conversationRoute(const nodegraph::GraphChanged &change,
       return;
     if (node == selectedThread) {
       if (!read->contains(node)) {
-        route = {true, true, {}};
+        route = {true, true, {}, true};
         return;
       }
       constexpr std::array<std::string_view, 5> Fields{
@@ -259,6 +262,7 @@ ConversationRoute conversationRoute(const nodegraph::GraphChanged &change,
           })) {
         route.affected = true;
         route.structural = true;
+        selectedStructureChanged = true;
       }
       return;
     }
@@ -319,7 +323,7 @@ ConversationRoute conversationRoute(const nodegraph::GraphChanged &change,
     } catch (const std::invalid_argument &) {
       // A queued NodeRef may have been retired by a later graph transaction.
       // Conservatively refresh rather than risk missing a selected update.
-      route = {true, true, {}};
+      route = {true, true, {}, true};
     }
   };
 
@@ -329,7 +333,7 @@ ConversationRoute conversationRoute(const nodegraph::GraphChanged &change,
     if (!node)
       continue;
     if (node == selectedThread)
-      return {true, true, {}};
+      return {true, true, {}, true};
     if (node->id().kind == nodegraph::NodeKind::Item) {
       route.affected = true;
       route.structural = true;
@@ -341,6 +345,8 @@ ConversationRoute conversationRoute(const nodegraph::GraphChanged &change,
       route.structural = true;
     }
   }
+  if (selectedStructureChanged && route.items.empty())
+    route.authorityReplacement = true;
   return route;
 }
 
@@ -1100,6 +1106,9 @@ struct ShellWidget::Impl final {
   bool pendingThreadPane = false;
   std::vector<nodegraph::NodeRef> pendingThreadRows;
   bool pendingConversation = false;
+  bool pendingConversationHistoryPage = false;
+  bool pendingConversationAuthorityReplacement = false;
+  bool historyPageAwaitingProvider = false;
   std::deque<nodegraph::NodeRef> pendingConversationItems;
   bool pendingInspector = false;
   bool pendingChrome = false;
@@ -1401,7 +1410,9 @@ void ShellWidget::Impl::connectUi() {
   middleRegion->composer().setActions(std::move(composerActions));
 
   middleRegion->conversation().setLoadMoreAction([this] {
-    if (!boundGraphThread)
+    if (!boundGraphThread || pendingConversation ||
+        historyPageAwaitingProvider ||
+        middleRegion->conversation().structuralStagingActive())
       return;
     const auto info = uiAdapter.conversationInfo(boundGraphThread);
     if (!info) {
@@ -1413,16 +1424,19 @@ void ShellWidget::Impl::connectUi() {
         middleRegion->conversation().requestNextHistoryPage(
             boundGraphThread->id().canonical,
             info->authoritativeItemCount, info->providerHasMore);
-    pendingConversation = true;
-    pendingConversationItems.clear();
-    commitPendingPanes();
-    if (!request.requestProvider)
+    if (!request.requestProvider) {
+      pendingConversation = true;
+      pendingConversationHistoryPage = true;
+      pendingConversationAuthorityReplacement = false;
+      pendingConversationItems.clear();
+      commitPendingPanes();
       return;
+    }
     nodegraph::NodeAction action{boundGraphThread,
                                  nodegraph::NodeActionKind::LoadHistory};
-    static_cast<void>(sendNodeAction(
+    historyPageAwaitingProvider = sendNodeAction(
         std::move(action),
-        QStringLiteral("History request was not admitted; try again.")));
+        QStringLiteral("History request was not admitted; try again."));
   });
   middleRegion->conversation().setPromptMaterializedAction(
       [this](nodegraph::NodeRef localPrompt) {
@@ -1560,6 +1574,9 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
   if (selectedThread && boundGraphThread != selectedThread)
     middleRegion->conversation().beginThreadSelection(
         selectedThread->id().canonical);
+  pendingConversationHistoryPage = false;
+  pendingConversationAuthorityReplacement = false;
+  historyPageAwaitingProvider = false;
   boundGraphThread = std::move(selectedThread);
   graphPanesBound = true;
   if (auto threads = uiAdapter.threads(boundGraphThread))
@@ -1571,6 +1588,7 @@ void ShellWidget::Impl::bindGraphPanes(nodegraph::NodeRef selectedThread) {
   pendingThreadPane = false;
   pendingThreadRows.clear();
   pendingConversation = !conversationReady;
+  pendingConversationAuthorityReplacement = !conversationReady;
   pendingConversationItems.clear();
   pendingInspector = !inspectorReady;
   if (pendingConversation || pendingInspector)
@@ -1609,7 +1627,10 @@ bool ShellWidget::Impl::refreshConversation() {
     return false;
   middleRegion->conversation().setEmptyMessage(
       QStringLiteral("No materialized activity."));
-  middleRegion->conversation().reconcileStaged(std::move(*snapshot));
+  if (pendingConversationHistoryPage)
+    middleRegion->conversation().prependHistoryPageStaged(std::move(*snapshot));
+  else
+    middleRegion->conversation().reconcileStaged(std::move(*snapshot));
   return true;
 }
 
@@ -1681,6 +1702,7 @@ void ShellWidget::Impl::commitPendingPanes() {
                          1);
   owner->setProperty("conversationPresentationRowsInLastPass", qulonglong{0});
   bool retry = false;
+  bool conversationReadRetry = false;
   if (!pendingThreadPane && !pendingThreadRows.empty()) {
     std::vector<nodegraph::NodeRef> rows = std::move(pendingThreadRows);
     pendingThreadRows.clear();
@@ -1763,7 +1785,8 @@ void ShellWidget::Impl::commitPendingPanes() {
                   .toULongLong() +
               1);
   }
-  if (pendingConversation && !pendingConversationItems.empty() &&
+  if (pendingConversation && !pendingConversationAuthorityReplacement &&
+      !pendingConversationItems.empty() &&
       boundGraphThread &&
       !middleRegion->conversation().structuralStagingActive()) {
     std::optional<middle::PromptMaterialization> materialization;
@@ -1792,6 +1815,7 @@ void ShellWidget::Impl::commitPendingPanes() {
             .applyPromptMaterialization(std::move(*materialization))
             .has_value()) {
       pendingConversation = false;
+      pendingConversationAuthorityReplacement = false;
       pendingConversationItems.clear();
       ++conversationRoutes;
       owner->setProperty("conversationRoutes",
@@ -1806,7 +1830,8 @@ void ShellWidget::Impl::commitPendingPanes() {
               1);
     }
   }
-  if (pendingConversation && pendingConversationItems.size() == 1 &&
+  if (pendingConversation && !pendingConversationAuthorityReplacement &&
+      pendingConversationItems.size() == 1 &&
       boundGraphThread &&
       !middleRegion->conversation().structuralStagingActive()) {
     auto tail = uiAdapter.tailCard(boundGraphThread,
@@ -1814,6 +1839,7 @@ void ShellWidget::Impl::commitPendingPanes() {
     if (tail) {
       if (middleRegion->conversation().appendTailCard(std::move(*tail))) {
         pendingConversation = false;
+        pendingConversationAuthorityReplacement = false;
         pendingConversationItems.clear();
         ++conversationRoutes;
         owner->setProperty("conversationRoutes",
@@ -1829,7 +1855,8 @@ void ShellWidget::Impl::commitPendingPanes() {
       }
     }
   }
-  if (pendingConversation && !pendingConversationItems.empty() &&
+  if (pendingConversation && !pendingConversationAuthorityReplacement &&
+      !pendingConversationItems.empty() &&
       boundGraphThread &&
       !middleRegion->conversation().structuralStagingActive()) {
     bool exact = true;
@@ -1842,12 +1869,24 @@ void ShellWidget::Impl::commitPendingPanes() {
     // Live projections run first so prompt retirement can transfer the stable
     // row to its authoritative NodeRef before the removed prompt is examined.
     for (const nodegraph::NodeRef &item : pendingConversationItems) {
-      auto change = uiAdapter.rowChange(boundGraphThread, item);
-      if (!change) {
+      auto projection = uiAdapter.rowChange(boundGraphThread, item);
+      if (projection.graphBusy) {
+        conversationReadRetry = true;
+        exact = false;
+        break;
+      }
+      if (!projection) {
         unresolved.push_back(item);
         continue;
       }
-      rowChanges.push_back(std::move(*change));
+      rowChanges.push_back(std::move(*projection));
+    }
+
+    if (conversationReadRetry) {
+      retry = true;
+      owner->setProperty(
+          "conversationGraphReadRetries",
+          owner->property("conversationGraphReadRetries").toULongLong() + 1);
     }
 
     std::vector<nodegraph::NodeRef> postponedRemovals;
@@ -1912,25 +1951,23 @@ void ShellWidget::Impl::commitPendingPanes() {
     }
     std::vector<std::size_t> orderedRows;
     orderedRows.reserve(rowChanges.size());
-    std::vector<bool> emitted(rowChanges.size(), false);
-    while (exact && orderedRows.size() < rowChanges.size()) {
-      std::optional<std::size_t> ready;
-      for (std::size_t index = 0; index < rowChanges.size(); ++index) {
-        if (!emitted[index] && predecessors[index] == 0) {
-          ready = index;
-          break;
-        }
-      }
-      if (!ready) {
-        exact = false;
-        break;
-      }
-      const std::size_t index = *ready;
-      emitted[index] = true;
+    std::priority_queue<std::size_t, std::vector<std::size_t>,
+                        std::greater<>>
+        readyRows;
+    for (std::size_t index = 0; index < rowChanges.size(); ++index)
+      if (predecessors[index] == 0)
+        readyRows.push(index);
+    while (!readyRows.empty()) {
+      const std::size_t index = readyRows.top();
+      readyRows.pop();
       orderedRows.push_back(index);
-      for (const std::size_t next : following[index])
-        --predecessors[next];
+      for (const std::size_t next : following[index]) {
+        if (--predecessors[next] == 0)
+          readyRows.push(next);
+      }
     }
+    if (orderedRows.size() != rowChanges.size())
+      exact = false;
 
     for (const std::size_t rowIndex : orderedRows) {
       if (!exact)
@@ -1982,6 +2019,7 @@ void ShellWidget::Impl::commitPendingPanes() {
     }
     if (exact) {
       pendingConversation = false;
+      pendingConversationAuthorityReplacement = false;
       pendingConversationItems.clear();
       ++conversationRoutes;
       owner->setProperty("conversationRoutes",
@@ -2002,9 +2040,22 @@ void ShellWidget::Impl::commitPendingPanes() {
                 1);
     }
   }
-  if (pendingConversation) {
+  if (pendingConversation &&
+      middleRegion->conversation().structuralStagingActive()) {
+    retry = true;
+  } else if (pendingConversation && !conversationReadRetry) {
+    if (!pendingConversationAuthorityReplacement &&
+        !pendingConversationHistoryPage && !pendingConversationItems.empty()) {
+      owner->setProperty(
+          "conversationInvariantRecoveryReplacements",
+          owner->property("conversationInvariantRecoveryReplacements")
+                  .toULongLong() +
+              1);
+    }
     if (refreshConversation()) {
       pendingConversation = false;
+      pendingConversationHistoryPage = false;
+      pendingConversationAuthorityReplacement = false;
       pendingConversationItems.clear();
       ++conversationRoutes;
       owner->setProperty("conversationRoutes",
@@ -2101,17 +2152,33 @@ void ShellWidget::Impl::handleGraphChanged(
           pendingThreadRows.end())
         pendingThreadRows.push_back(thread);
   }
-  if (conversation.structural) {
-    if (!pendingConversation) {
+  if (conversation.structural && historyPageAwaitingProvider) {
+    pendingConversation = true;
+    pendingConversationHistoryPage = true;
+    pendingConversationAuthorityReplacement = false;
+    historyPageAwaitingProvider = false;
+    pendingConversationItems.clear();
+  } else if (conversation.authorityReplacement) {
+    pendingConversation = true;
+    pendingConversationHistoryPage = false;
+    pendingConversationAuthorityReplacement = true;
+    historyPageAwaitingProvider = false;
+    pendingConversationItems.clear();
+  } else if (conversation.structural) {
+    if (!conversation.items.empty() && !pendingConversation) {
+      pendingConversation = true;
       pendingConversationItems.assign(conversation.items.begin(),
                                       conversation.items.end());
-    } else if (!std::ranges::equal(pendingConversationItems,
-                                   conversation.items)) {
-      // More than one structural transaction was coalesced. The complete
-      // projection is the only safe way to establish the combined order.
-      pendingConversationItems.clear();
+      pendingConversationHistoryPage = false;
+      pendingConversationAuthorityReplacement = false;
+    } else if (!conversation.items.empty() &&
+               !pendingConversationHistoryPage &&
+               !pendingConversationAuthorityReplacement) {
+      for (const nodegraph::NodeRef &item : conversation.items)
+        if (std::ranges::find(pendingConversationItems, item) ==
+            pendingConversationItems.end())
+          pendingConversationItems.push_back(item);
     }
-    pendingConversation = true;
   } else if (conversation.affected && !pendingConversation) {
     for (const nodegraph::NodeRef &item : conversation.items)
       if (std::ranges::find(pendingConversationItems, item) ==

@@ -287,6 +287,14 @@ bool projectsExactRowPlacementAndNeighbors() {
   result &= require(placement && placement->previousCardKey == lastKey &&
                         !placement->nextCardKey,
                     "a canonical move did not update the exact row neighbors");
+  {
+    auto write = graph.write();
+    const auto busy = adapter.rowChange(thread, moved);
+    result &= require(busy.graphBusy && !busy,
+                      "row projection distinguishes graph contention from an "
+                      "authoritative removal");
+    static_cast<void>(write.finish());
+  }
   return result;
 }
 

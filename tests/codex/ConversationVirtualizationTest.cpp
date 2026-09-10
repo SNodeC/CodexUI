@@ -534,10 +534,12 @@ bool atomicPagingAndFollowingArrival() {
   settle();
   const int rowsBefore = view.conversationModel()->rowCount();
   const int widgetsBefore = view.materializedCardCount();
+  const qulonglong resetsBefore =
+      view.conversationModel()->property("modelResetCount").toULongLong();
 
   ConversationSnapshot loaded = conversation(160);
   loaded.hasMore = true;
-  view.reconcileStaged(std::move(loaded));
+  view.prependHistoryPageStaged(std::move(loaded));
   const bool deferred = view.structuralStagingActive();
   result &= expect(
       deferred ? view.conversationModel()->rowCount() == rowsBefore &&
@@ -553,8 +555,12 @@ bool atomicPagingAndFollowingArrival() {
   settle();
   result &= expect(!view.structuralStagingActive() &&
                        view.conversationModel()->rowCount() == 160 &&
+                       view.conversationModel()
+                               ->property("modelResetCount")
+                               .toULongLong() == resetsBefore &&
                        view.materializedCardCount() <= 48,
-                   "Load 80 commits one complete virtualized frame");
+                   "Load 80 commits one complete virtualized frame without a "
+                   "model reset");
 
   ConversationSnapshot appended = conversation(161);
   view.reconcileStaged(std::move(appended));

@@ -73,7 +73,11 @@ public:
   // selection. A delayed spinner remains presentation-only; the incoming
   // snapshot still commits through reconcileStaged as one complete frame.
   void beginThreadSelection(const std::string &threadId);
+  // Commits a different-thread selection or explicit authority rescan.
   void reconcileStaged(ConversationSnapshot snapshot);
+  // Commits a same-thread ordered superset using precise row insertions and
+  // row-local value changes; retained rows are never reset or moved.
+  void prependHistoryPageStaged(ConversationSnapshot snapshot);
   [[nodiscard]] bool structuralStagingActive() const noexcept {
     return pendingStructuralSnapshot_.has_value();
   }
@@ -91,8 +95,8 @@ public:
   // A missing target is not treated as a structural authority replacement.
   [[nodiscard]] bool removeCardTarget(const nodegraph::NodeRef &target);
   // Applies one canonical tail insertion without traversing retained model
-  // rows. Returns false when the delta is not the exact append shape, so the
-  // caller can use complete structural reconciliation.
+  // rows. Returns false when the delta is not the exact append shape; the
+  // caller then uses exact neighbor placement for that same NodeRef.
   [[nodiscard]] bool appendTailCard(ConversationTailCard tail);
 
   // History-window and staged-presentation state belong to the item view.
@@ -212,7 +216,14 @@ private:
     std::vector<EditSelection> edits;
   };
 
-  [[nodiscard]] bool reconcileOwned(ConversationSnapshot snapshot);
+  enum class SnapshotOperation {
+    OrderedReconciliation,
+    AuthorityReplacement,
+    HistoryPrepend,
+  };
+
+  [[nodiscard]] bool reconcileOwned(ConversationSnapshot snapshot,
+                                    SnapshotOperation operation);
   [[nodiscard]] std::optional<PresentationImpact>
   applyCardPresentationOwned(VisibleCardData card,
                              nodegraph::NodeRef materializedPrompt = {});
@@ -280,6 +291,8 @@ private:
 
   void buildPendingLocations();
   void choosePendingStageRows();
+  void stageSnapshot(ConversationSnapshot snapshot,
+                     SnapshotOperation operation);
   [[nodiscard]] VisibleCardData *pendingCard(const std::string &key);
   [[nodiscard]] const PendingLocation *
   pendingLocation(const std::string &key) const;
@@ -319,6 +332,8 @@ private:
   QString emptyMessage_;
   std::string loadingThreadId_;
   std::optional<ConversationSnapshot> pendingStructuralSnapshot_;
+  SnapshotOperation pendingSnapshotOperation_ =
+      SnapshotOperation::AuthorityReplacement;
   std::unordered_map<std::string, PendingLocation> pendingLocations_;
   std::vector<std::string> pendingStructuralCardKeys_;
   std::size_t pendingStructuralCardIndex_ = 0;

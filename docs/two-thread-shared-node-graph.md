@@ -382,6 +382,11 @@ The shell integration suite additionally queues 24 distinct current-row
 changes before presentation, proves the eight-row pass ceiling, observes at
 least three GUI passes and exact final values, and verifies that the drained
 queue produces no idle commit loop or ThreadPane/Inspector/chrome work.
+Two different structural transactions queued before one presentation commit
+retain their exact NodeRef union and reach final canonical neighbor order with
+only insert/move/data signals. Same-thread model reconciliation is absent;
+selection/rescan is an explicit replacement and Load 80 is an explicit staged
+ordered-superset insertion.
 
 The direct CodexBridge integration test exercises every supported UI wire
 family rather than only counting method names: hydrate/reload, history paging,

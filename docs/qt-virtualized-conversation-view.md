@@ -131,6 +131,8 @@ Model changes have these exact meanings:
 - absent/present same-thread keys use contiguous remove/insert ranges;
 - a changed retained card or structural role emits `dataChanged` for that row
   and the affected roles only;
+- the established direct full-snapshot API computes the same precise
+  insert/remove/move/data differences but is not used by Shell graph routing;
 - a validated canonical tail uses one `beginInsertRows/endInsertRows`; stable
   lookup tables point to nodes in a conversation-specific order-statistic row
   tree, so dropping a prefix or changing the middle does not reindex surviving
@@ -241,15 +243,26 @@ verifies that the exact `NodeRef` is the last child of the last canonical Turn
 and refuses prompt-materialization aliases. `ConversationView::appendTailCard`
 then changes only the old tail edge, the inserted row, an optional pinned
 leading owner, and scroll chrome. Coalesced multi-item structure, non-tail
-insertion, removal, movement, and aliases deliberately fall back to the full
-projection because only that projection can establish their complete order.
+insertion, removal, movement, and aliases retain the union of exact NodeRefs;
+the adapter supplies canonical neighbor identities and the view emits only the
+required row operations. Graph-read contention is a distinct retry result and
+can never be mistaken for authoritative row removal. The former same-thread
+whole-snapshot fallback is absent from Shell routing. The established direct
+`ConversationView::reconcile` API remains available to non-Shell consumers and
+implements precise Qt row differences rather than an unconditional reset.
+Only a proven rejection while applying an already-projected exact row batch
+may request an explicit authority-recovery replacement; this path has a
+dedicated counter and remains zero through coalesced structural qualification.
 
-On selection or Load 80, passive rows need no construction. Only initially
-visible rich rows are created and measured one per nonzero-delay staging pass
-beneath the hidden host. The old complete view or stable loading cover remains
-visible until model order, row extents, visible editors, and the restored anchor
-are ready for one commit. Ordinary deltas bypass structural staging and resolve
-directly to one stable model index.
+On selection or explicit rescan, the model performs an authority replacement.
+Load 80 instead accepts only a same-thread ordered superset and emits precise
+history insertions and row-local changes without a reset. In both cases passive
+rows need no construction; initially visible rich rows are created and measured
+one per nonzero-delay staging pass beneath the hidden host. The old complete
+view or stable loading cover remains visible until model order, row extents,
+visible editors, and the restored anchor are ready for one commit. Ordinary
+deltas bypass structural staging and resolve directly to one stable model
+index.
 
 ## Delegate and editor boundary
 

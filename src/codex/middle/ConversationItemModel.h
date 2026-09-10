@@ -101,8 +101,8 @@ public:
   // A history page is a same-thread superset that retains every existing row
   // in order. It inserts only the missing ranges and updates changed row facts.
   [[nodiscard]] bool prependHistoryPage(ConversationSnapshot snapshot);
-  // Compatibility reconciliation remains while integration routes are moved
-  // to the explicit operations below.
+  // Preserves the established direct ConversationView API. Shell graph
+  // routing never uses this whole-snapshot ordered diff as a delta fallback.
   [[nodiscard]] bool reconcile(ConversationSnapshot snapshot);
   [[nodiscard]] CardUpdateResult updateCard(VisibleCardData card);
   [[nodiscard]] StructuralChangeResult

@@ -674,7 +674,8 @@ void ConversationView::setThread(const std::string &threadId) {
 bool ConversationView::reconcile(const ConversationSnapshot &snapshot) {
   if (!committingStructuralStage_ && pendingStructuralSnapshot_)
     cancelStructuralStaging();
-  return reconcileOwned(ConversationSnapshot(snapshot));
+  return reconcileOwned(ConversationSnapshot(snapshot),
+                        SnapshotOperation::OrderedReconciliation);
 }
 
 void ConversationView::beginThreadSelection(const std::string &threadId) {
@@ -688,7 +689,8 @@ void ConversationView::beginThreadSelection(const std::string &threadId) {
   incrementProperty(this, "threadSelectionLoadsStarted");
 }
 
-bool ConversationView::reconcileOwned(ConversationSnapshot snapshot) {
+bool ConversationView::reconcileOwned(ConversationSnapshot snapshot,
+                                      SnapshotOperation operation) {
   const std::string targetThreadId = snapshot.threadId;
   const bool switchedThread = snapshot.threadId != threadId_;
   const Anchor currentAnchor = captureAnchor();
@@ -713,7 +715,18 @@ bool ConversationView::reconcileOwned(ConversationSnapshot snapshot) {
   viewport()->setUpdatesEnabled(false);
   stopFollowingAnimation();
 
-  const bool changed = model_->reconcile(std::move(snapshot));
+  bool changed = false;
+  switch (operation) {
+  case SnapshotOperation::OrderedReconciliation:
+    changed = model_->reconcile(std::move(snapshot));
+    break;
+  case SnapshotOperation::AuthorityReplacement:
+    changed = model_->replaceConversation(std::move(snapshot));
+    break;
+  case SnapshotOperation::HistoryPrepend:
+    changed = model_->prependHistoryPage(std::move(snapshot));
+    break;
+  }
   if (!targetThreadId.empty()) {
     HistoryWindow &history = historyWindows_[targetThreadId];
     const std::size_t represented = model_->historyActivityCount();
@@ -809,6 +822,21 @@ bool ConversationView::reconcileOwned(ConversationSnapshot snapshot) {
 }
 
 void ConversationView::reconcileStaged(ConversationSnapshot snapshot) {
+  stageSnapshot(std::move(snapshot), SnapshotOperation::AuthorityReplacement);
+}
+
+void ConversationView::prependHistoryPageStaged(
+    ConversationSnapshot snapshot) {
+  stageSnapshot(std::move(snapshot), SnapshotOperation::HistoryPrepend);
+}
+
+void ConversationView::stageSnapshot(ConversationSnapshot snapshot,
+                                     SnapshotOperation operation) {
+  if (operation == SnapshotOperation::HistoryPrepend &&
+      snapshot.threadId != threadId_) {
+    incrementProperty(this, "invalidHistoryPageStages");
+    return;
+  }
   if (!loadingThreadId_.empty() &&
       snapshot.threadId != loadingThreadId_) {
     incrementProperty(this, "staleThreadStagesIgnored");
@@ -819,6 +847,7 @@ void ConversationView::reconcileStaged(ConversationSnapshot snapshot) {
   else
     cancelStructuralStaging();
   pendingStructuralSnapshot_ = std::move(snapshot);
+  pendingSnapshotOperation_ = operation;
   buildPendingLocations();
   choosePendingStageRows();
   pendingStructuralCardIndex_ = 0;
@@ -978,12 +1007,13 @@ void ConversationView::runStructuralStagePass() {
   }
 
   ConversationSnapshot completed = std::move(*pendingStructuralSnapshot_);
+  const SnapshotOperation operation = pendingSnapshotOperation_;
   pendingStructuralSnapshot_.reset();
   pendingStructuralCardKeys_.clear();
   pendingStructuralCardIndex_ = 0;
   pendingLocations_.clear();
   const QScopedValueRollback committing(committingStructuralStage_, true);
-  static_cast<void>(reconcileOwned(std::move(completed)));
+  static_cast<void>(reconcileOwned(std::move(completed), operation));
   for (auto &[key, card] : stagedCards_) {
     static_cast<void>(key);
     delete card;
@@ -995,6 +1025,7 @@ void ConversationView::runStructuralStagePass() {
 
 void ConversationView::cancelStructuralStaging() {
   pendingStructuralSnapshot_.reset();
+  pendingSnapshotOperation_ = SnapshotOperation::AuthorityReplacement;
   pendingLocations_.clear();
   pendingStructuralCardKeys_.clear();
   pendingStructuralCardIndex_ = 0;

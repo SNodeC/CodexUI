@@ -1227,6 +1227,9 @@ void initialHydrationUsesTheEstablishedBoundedWindow(
               loadMore->text() == QStringLiteral("Load 19 more activities"),
           "the old Load More surface reports only unrepresented retained "
           "activities after pinning the structural root");
+  const qulonglong pagingResetsBefore =
+      conversation->conversationModel()->property("modelResetCount")
+          .toULongLong();
   if (loadMore)
     loadMore->click();
   const bool pagingDeferred = conversation->structuralStagingActive();
@@ -1243,6 +1246,10 @@ void initialHydrationUsesTheEstablishedBoundedWindow(
           "Load More exposes all retained graph rows in one complete frame");
   require(conversation->materializedCardCount() <= 48,
           "Load More does not create one QWidget per retained graph row");
+  require(conversation->conversationModel()
+                  ->property("modelResetCount")
+                  .toULongLong() == pagingResetsBefore,
+          "Load More extends the current model without an authority reset");
   const std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
   require(std::ranges::none_of(messages, [](const QtToWorkerMessage &message) {
             const auto *action = std::get_if<NodeAction>(&message);
@@ -2080,6 +2087,9 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
   const qulonglong structuralResetsBefore =
       conversation->conversationModel()->property("modelResetCount")
           .toULongLong();
+  const qulonglong recoveryReplacementsBefore =
+      shell.property("conversationInvariantRecoveryReplacements")
+          .toULongLong();
   GraphChange middleInsertion;
   {
     auto write = graph.write();
@@ -2137,6 +2147,67 @@ void backgroundGraphChangesDoNotRefreshSelectedConversation(
                   ->property("modelResetCount")
                   .toULongLong() == structuralResetsBefore,
           "middle insertion and movement use no conversation model reset");
+
+  NodeRef coalescedFirst;
+  NodeRef coalescedSecond;
+  GraphChange firstCoalescedInsertion;
+  GraphChange secondCoalescedInsertion;
+  {
+    auto write = graph.write();
+    NodeState state;
+    state.status = NodeStatus::Running;
+    state.fields = {{"id", Value("coalesced-first")},
+                    {"type", Value("agentMessage")},
+                    {"text", Value("Coalesced first")}};
+    coalescedFirst = write.upsert({NodeKind::Item, "coalesced-first"},
+                                  std::move(state));
+    write.setParent(selectedTurn, coalescedFirst);
+    write.replaceChildren(
+        selectedTurn,
+        std::array<NodeRef, 4>{selectedItem, coalescedFirst,
+                               authoritativePrompt, insertedItem});
+    firstCoalescedInsertion = write.finish();
+  }
+  {
+    auto write = graph.write();
+    NodeState state;
+    state.status = NodeStatus::Running;
+    state.fields = {{"id", Value("coalesced-second")},
+                    {"type", Value("agentMessage")},
+                    {"text", Value("Coalesced second")}};
+    coalescedSecond = write.upsert({NodeKind::Item, "coalesced-second"},
+                                   std::move(state));
+    write.setParent(selectedTurn, coalescedSecond);
+    write.replaceChildren(
+        selectedTurn,
+        std::array<NodeRef, 5>{selectedItem, coalescedSecond, coalescedFirst,
+                               authoritativePrompt, insertedItem});
+    secondCoalescedInsertion = write.finish();
+  }
+  require(messageAdmitted(channels.sendGraphChanged(
+              std::move(firstCoalescedInsertion))) &&
+              messageAdmitted(channels.sendGraphChanged(
+                  std::move(secondCoalescedInsertion))),
+          "two structural transactions queue before one presentation commit");
+  require(
+      spinUntil([&] {
+        return conversation->conversationModel()
+                       ->indexForTarget(coalescedSecond)
+                       .row() == 1 &&
+               conversation->conversationModel()
+                       ->indexForTarget(coalescedFirst)
+                       .row() == 2;
+      }) &&
+          conversation->conversationModel()
+                  ->property("modelExactInsertCount")
+                  .toULongLong() == exactInsertsBefore + 3 &&
+          conversation->conversationModel()
+                  ->property("modelResetCount")
+                  .toULongLong() == structuralResetsBefore &&
+          shell.property("conversationInvariantRecoveryReplacements")
+                  .toULongLong() == recoveryReplacementsBefore,
+      "coalesced structural identities retain exact final order without a "
+      "snapshot fallback or model reset");
 
   QPointer<QWidget> removedWidget = selectedCard;
   const qulonglong exactRemovalsBefore =

@@ -25,6 +25,29 @@ public:
     bool providerHasMore = false;
   };
 
+  struct ConversationRowProjection {
+    bool graphBusy = false;
+    std::optional<middle::ConversationRowChange> change;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+      return change.has_value();
+    }
+    [[nodiscard]] middle::ConversationRowChange &operator*() noexcept {
+      return *change;
+    }
+    [[nodiscard]] const middle::ConversationRowChange &
+    operator*() const noexcept {
+      return *change;
+    }
+    [[nodiscard]] middle::ConversationRowChange *operator->() noexcept {
+      return &*change;
+    }
+    [[nodiscard]] const middle::ConversationRowChange *
+    operator->() const noexcept {
+      return &*change;
+    }
+  };
+
   explicit NodeGraphUiAdapter(const nodegraph::NodeGraph &graph) noexcept;
 
   [[nodiscard]] std::optional<middle::ConversationSnapshot>
@@ -49,13 +72,13 @@ public:
   // Projects one live Item together with its immediate canonical row
   // neighbors. This is the bounded structural adapter for non-tail insertion
   // and actual movement; it never returns a complete conversation snapshot.
-  [[nodiscard]] std::optional<middle::ConversationRowChange>
+  [[nodiscard]] ConversationRowProjection
   rowChange(const nodegraph::NodeRef &thread,
             const nodegraph::NodeRef &item) const;
 
   // Projects only a canonical last item of the selected thread. It is the
   // bounded structural fast path for ordinary append; any non-tail or prompt
-  // alias case returns nullopt and uses complete reconciliation instead.
+  // alias case returns nullopt and proceeds through exact neighbor placement.
   [[nodiscard]] std::optional<middle::ConversationTailCard>
   tailCard(const nodegraph::NodeRef &thread,
            const nodegraph::NodeRef &item) const;
