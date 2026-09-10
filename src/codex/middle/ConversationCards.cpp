@@ -26,6 +26,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QPixmapCache>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -281,10 +282,36 @@ bool openLocalFile(const QString &path) {
       QUrl::fromLocalFile(QFileInfo(path).absoluteFilePath()));
 }
 
+struct ImageFileIdentity {
+  QString absolutePath;
+  qint64 size = -1;
+  qint64 modifiedMilliseconds = -1;
+  qint64 metadataChangedMilliseconds = -1;
+  bool file = false;
+
+  bool operator==(const ImageFileIdentity &) const = default;
+};
+
+ImageFileIdentity imageFileIdentity(const QString &path) {
+  const QFileInfo info(path);
+  return {info.absoluteFilePath(), info.size(),
+          info.lastModified().toMSecsSinceEpoch(),
+          info.metadataChangeTime().toMSecsSinceEpoch(), info.isFile()};
+}
+
+QString thumbnailCacheKey(const ImageFileIdentity &identity) {
+  return QStringLiteral("codexui-thumbnail:%1:%2:%3:%4")
+      .arg(identity.absolutePath)
+      .arg(identity.size)
+      .arg(identity.modifiedMilliseconds)
+      .arg(identity.metadataChangedMilliseconds);
+}
+
 class ImageThumbnail final : public QLabel {
 public:
   ImageThumbnail(QString path, QWidget *parent)
-      : QLabel(parent), path_(std::move(path)) {
+      : QLabel(parent), path_(std::move(path)),
+        identity_(imageFileIdentity(path_)) {
     setObjectName(QStringLiteral("messageImageThumbnail"));
     setProperty("kind", "imageThumbnail");
     setCursor(Qt::PointingHandCursor);
@@ -294,15 +321,30 @@ public:
     setMinimumSize(72, 48);
     setMaximumSize(ThumbnailMaximumWidth, ThumbnailMaximumHeight);
 
-    QImageReader reader(path_);
-    reader.setAutoTransform(true);
-    const QSize source = reader.size();
-    if (source.isValid())
-      reader.setScaledSize(source.scaled(ThumbnailMaximumWidth - 8,
-                                         ThumbnailMaximumHeight - 8,
-                                         Qt::KeepAspectRatio));
-    const QImage image = reader.read();
-    if (image.isNull()) {
+    QPixmap pixmap;
+    const bool cacheHit = identity_.file &&
+                          QPixmapCache::find(thumbnailCacheKey(identity_),
+                                             &pixmap);
+    setProperty("imageCacheHit", cacheHit);
+    if (!cacheHit) {
+      QElapsedTimer decodeTimer;
+      decodeTimer.start();
+      QImageReader reader(identity_.absolutePath);
+      reader.setAutoTransform(true);
+      const QSize source = reader.size();
+      if (source.isValid())
+        reader.setScaledSize(source.scaled(ThumbnailMaximumWidth - 8,
+                                           ThumbnailMaximumHeight - 8,
+                                           Qt::KeepAspectRatio));
+      const QImage image = reader.read();
+      setProperty("imageDecodeMicros", decodeTimer.nsecsElapsed() / 1000);
+      setProperty("imageDecodePerformed", true);
+      if (!image.isNull()) {
+        pixmap = QPixmap::fromImage(image);
+        QPixmapCache::insert(thumbnailCacheKey(identity_), pixmap);
+      }
+    }
+    if (pixmap.isNull()) {
       setAccessibleName(QStringLiteral("Image unavailable: %1")
                             .arg(QFileInfo(path_).fileName()));
       setText(QStringLiteral("Image unavailable\n%1")
@@ -316,13 +358,12 @@ public:
         QStringLiteral("Open image: %1").arg(QFileInfo(path_).fileName()));
     setFocusPolicy(Qt::StrongFocus);
     setProperty("imageAvailable", true);
-    setPixmap(QPixmap::fromImage(image));
-    setFixedSize(image.size() + QSize(8, 8));
+    setPixmap(pixmap);
+    setFixedSize(pixmap.size() + QSize(8, 8));
   }
 
   [[nodiscard]] bool represents(const QString &path) const {
-    return path_ == path &&
-           property("imageAvailable").toBool() == QFileInfo(path).isFile();
+    return path_ == path && identity_ == imageFileIdentity(path);
   }
 
 protected:
@@ -368,6 +409,7 @@ private:
   }
 
   QString path_;
+  ImageFileIdentity identity_;
   bool leftPressArmed_ = false;
 };
 
@@ -396,30 +438,42 @@ public:
     hide();
   }
 
-  void setPaths(const QStringList &paths, bool forceRebuild = false) {
-    bool matches = !forceRebuild && layout_->count() == paths.size();
-    for (qsizetype index = 0; matches && index < paths.size(); ++index) {
-      const auto *thumbnail = dynamic_cast<ImageThumbnail *>(
-          layout_->itemAt(static_cast<int>(index))->widget());
-      matches = thumbnail && thumbnail->represents(paths.at(index));
+  void setPaths(const QStringList &paths) {
+    bool changed = false;
+    for (qsizetype index = 0; index < paths.size(); ++index) {
+      QLayoutItem *item = layout_->itemAt(static_cast<int>(index));
+      const auto *thumbnail =
+          item ? dynamic_cast<ImageThumbnail *>(item->widget()) : nullptr;
+      if (thumbnail && thumbnail->represents(paths.at(index)))
+        continue;
+      if (item) {
+        item = layout_->takeAt(static_cast<int>(index));
+        delete item->widget();
+        delete item;
+      }
+      layout_->insertWidget(static_cast<int>(index),
+                            new ImageThumbnail(paths.at(index), strip_), 0,
+                            Qt::AlignVCenter);
+      changed = true;
     }
-    if (matches) {
+    while (layout_->count() > paths.size()) {
+      QLayoutItem *item = layout_->takeAt(paths.size());
+      delete item->widget();
+      delete item;
+      changed = true;
+    }
+
+    if (!changed) {
       setVisible(!paths.isEmpty());
       return;
     }
 
-    while (QLayoutItem *item = layout_->takeAt(0)) {
-      delete item->widget();
-      delete item;
-    }
-    for (const QString &path : paths)
-      layout_->addWidget(new ImageThumbnail(path, strip_), 0, Qt::AlignVCenter);
-
+    const int retainedScroll = horizontalScrollBar()->value();
     layout_->activate();
     naturalSize_ = layout_->sizeHint().expandedTo(QSize(0, 0));
     strip_->setFixedSize(naturalSize_);
-    horizontalScrollBar()->setValue(0);
     refreshHeight();
+    horizontalScrollBar()->setValue(retainedScroll);
     setVisible(!paths.isEmpty());
   }
 
@@ -1553,8 +1607,8 @@ public:
                            margins.right());
   }
 
-  void setImages(const QStringList &paths, bool forceRebuild = false) {
-    images->setPaths(paths, forceRebuild);
+  void setImages(const QStringList &paths) {
+    images->setPaths(paths);
   }
 
   void createComposition(const UserMessageData &message) {
@@ -1757,11 +1811,8 @@ public:
     title->setText(generated ? QStringLiteral("Generated image")
                              : QStringLiteral("Image"));
     setVisibleText(body, text(image.revisedPrompt));
-    // A generated image can become readable at the same path as its status
-    // advances, so its update remains the authoritative reload boundary.
     setImages(image.path.empty() ? QStringList{}
-                                 : QStringList{text(image.path)},
-              true);
+                                 : QStringList{text(image.path)});
   }
 
   void createComposition(const GenericActivityData &activity) {

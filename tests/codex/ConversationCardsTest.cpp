@@ -7104,15 +7104,20 @@ bool testMessageImagePresentation() {
   const QString portraitPath =
       directory.filePath(QStringLiteral("portrait.png"));
   const QString squarePath = directory.filePath(QStringLiteral("square.png"));
+  const QString replacementPath =
+      directory.filePath(QStringLiteral("replacement.png"));
   QImage source(640, 360, QImage::Format_ARGB32_Premultiplied);
   source.fill(QColor(QStringLiteral("#2f6feb")));
   QImage portrait(320, 640, QImage::Format_ARGB32_Premultiplied);
   portrait.fill(QColor(QStringLiteral("#6941c6")));
   QImage square(420, 420, QImage::Format_ARGB32_Premultiplied);
   square.fill(QColor(QStringLiteral("#18865e")));
+  QImage replacement(500, 260, QImage::Format_ARGB32_Premultiplied);
+  replacement.fill(QColor(QStringLiteral("#bc5c32")));
   bool result =
       expect(directory.isValid() && source.save(path) &&
-                 portrait.save(portraitPath) && square.save(squarePath),
+                 portrait.save(portraitPath) && square.save(squarePath) &&
+                 replacement.save(replacementPath),
              "image test fixtures are real readable images");
 
   VisibleCardData message{
@@ -7183,6 +7188,25 @@ bool testMessageImagePresentation() {
   result &= expect(retainedThumbnail == thumbnail,
                    "an unchanged attachment retains its decoded thumbnail");
   thumbnail = retainedThumbnail;
+  QPointer<QLabel> retainedFirst(thumbnails.at(0));
+  QPointer<QLabel> replacedMiddle(thumbnails.at(1));
+  QPointer<QLabel> retainedLast(thumbnails.at(2));
+  payload.imagePaths.at(1) = utf8(replacementPath);
+  result &= expect(card->apply(message),
+                   "one changed attachment invalidates card presentation");
+  spin();
+  auto changedThumbnails =
+      card->findChildren<QLabel *>(QStringLiteral("messageImageThumbnail"));
+  std::ranges::sort(changedThumbnails, [ribbon](QLabel *left, QLabel *right) {
+    return left->mapTo(ribbon, QPoint{}).x() <
+           right->mapTo(ribbon, QPoint{}).x();
+  });
+  result &= expect(changedThumbnails.size() == 3 &&
+                       changedThumbnails.at(0) == retainedFirst &&
+                       changedThumbnails.at(2) == retainedLast &&
+                       replacedMiddle.isNull(),
+                   "changing one attachment reconstructs only its thumbnail");
+  thumbnail = changedThumbnails.empty() ? nullptr : changedThumbnails.front();
   result &= expect(thumbnail && thumbnail->focusPolicy() == Qt::StrongFocus &&
                        !thumbnail->accessibleName().isEmpty(),
                    "available image thumbnails expose a named keyboard target");
@@ -7289,6 +7313,14 @@ bool testGeneratedImagePresentationAndGenericBound() {
       QStringLiteral("messageImageThumbnail"));
   result &= expect(thumbnail && thumbnail->property("imageAvailable").toBool(),
                    "generated-image card reuses the bounded thumbnail");
+  QPointer<QLabel> retainedGenerated(thumbnail);
+  auto &generatedPayload = std::get<ImageGenerationData>(generated.payload);
+  generatedPayload.status = "inProgress";
+  generatedPayload.revisedPrompt += " while streaming";
+  result &= expect(generatedCard.apply(generated) && retainedGenerated ==
+                                                        thumbnail,
+                   "a generated-image status update performs no thumbnail "
+                   "rebuild or decode");
   if (thumbnail) {
     const QPointF local(thumbnail->rect().center());
     QMouseEvent press(QEvent::MouseButtonPress, local, local,
@@ -7316,6 +7348,8 @@ bool testGeneratedImagePresentationAndGenericBound() {
   viewedCard.show();
   spin();
   const auto viewedLabels = viewedCard.findChildren<QLabel *>();
+  auto *viewedThumbnail = viewedCard.findChild<QLabel *>(
+      QStringLiteral("messageImageThumbnail"));
   result &= expect(
       std::ranges::any_of(viewedLabels,
                           [](QLabel *label) {
@@ -7329,8 +7363,12 @@ bool testGeneratedImagePresentationAndGenericBound() {
                 return label->objectName() ==
                            QStringLiteral("messageImageThumbnail") &&
                        label->property("imageAvailable").toBool();
-              }),
-      "plain image-view cards use a neutral title and the shared thumbnail");
+              }) &&
+          viewedThumbnail &&
+          viewedThumbnail->property("imageCacheHit").toBool() &&
+          !viewedThumbnail->property("imageDecodePerformed").toBool(),
+      "plain image-view cards use a neutral title and reuse the cached "
+      "thumbnail without decoding");
 
   VisibleCardData generic{
       AuthoritativeItemKey{"generated", "turn", "unknown"},
