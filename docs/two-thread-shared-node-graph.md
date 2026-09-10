@@ -459,7 +459,7 @@ re-executed inside this final sandbox. Their most recent complete passing runs
 remain the 17/17 native and full browser/Xvfb evidence recorded above; neither
 listener path nor WebUI source changed in the post-polish commits.
 
-### Qt item-view requalification (2026-09-09)
+### Qt item-view requalification (2026-09-10)
 
 The retained-card surface has now been replaced without changing the graph,
 worker, bridge, mailbox, eventfd, or two-thread ownership boundaries. The final
@@ -471,12 +471,14 @@ and recording inventory are in `qt-virtualized-conversation-view.md`.
 The current persistent Debug build passes 19/19 native suites. Integrated
 ASan/UBSan also passes 19/19 without a diagnostic, and the supported independent
 NodeGraph/queue/worker TSan boundary passes 5/5 without a race report. WebUI is
-unchanged and its full release gate passes 83/83 tests, the profile, production
+unchanged and its full release gate passes 85/85 tests, the profile, production
 build, Chromium qualification, and artifact verification.
 
 At 320/1,280/10,000 passive rows, the final Debug benchmark retains exactly
 eight descendant QWidgets and zero `ConversationCard` instances. Median initial
-reveal is 7/14/76 ms and the 240-position sweep is 279.9/282.9/339.9 ms. The
+reveal is 11/33/259 ms and the 240-position sweep is 313.8/355.6/448.4 ms. One
+bounded tail append remains 0.45/0.51/0.48 ms with zero model-index or
+section-range rebuilds. The
 isolated full application was recorded through atomic long-thread selection,
 Load 80, manual outer and nested scrolling during long commands, paused
 steering, selection/copy, folds/focus, approval rejection, and Plan-mode input

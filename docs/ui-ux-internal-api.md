@@ -768,8 +768,11 @@ derived from current graph state; they never become application authority.
    provider call.
 3. Otherwise send one exact `LoadHistory` action only when the provider reports
    more history.
-4. Preserve the stable row and exact pixel anchor while the expanded complete snapshot is reconciled;
-   never expose reserved empty space followed by delayed cards.
+4. Preserve the stable row and exact pixel anchor while the expanded complete
+   snapshot is reconciled. If the first visible Turn root was pinned solely to
+   own the old bounded suffix, anchor the first retained activity instead,
+   because newly revealed siblings are inserted after that owner.
+5. Never expose reserved empty space followed by delayed cards.
 
 ### Admit and acknowledge a prompt
 
@@ -832,7 +835,7 @@ uncontrolled connection.
 
 No remote or GitHub operation is used to maintain this document.
 
-### Qt item-view qualification (2026-09-09)
+### Qt item-view qualification (2026-09-10)
 
 The final `QAbstractItemView` implementation was exercised through the complete
 Debug application on isolated Xvfb display `:99`, connected to one
@@ -841,15 +844,17 @@ scenario. Obsolete retained-widget recordings were removed before replacement.
 Current movies and contact sheets are under
 `../../build/codexui-adapter-qualification/capture/qt-virtualized-final/`.
 
-The recordings prove atomic selection of a copied 42,911-event thread; exact
-paused anchoring while Load 80 inserts earlier rows; repeated heterogeneous
-history sweeps; outer and nested scrolling during 1,600/1,800-line commands;
+The recordings prove atomic selection of a copied 10,023-event thread; exact
+paused anchoring while Load 80 inserts earlier rows, including a Turn owner
+pinned outside the old activity suffix; repeated heterogeneous history sweeps;
+outer and nested scrolling during a 1,200-line command;
 running-to-completed command transition; normal prompt and steering admission;
 authoritative steering acknowledgement below a paused viewport; delegate
 promotion, selection/copy, fold/unfold and visible focus; command approval
 rejection; and Plan-mode user-input Review, selection, submission, and final
-acknowledgement. The temporary copied session was deleted after the paging
-recording, and the rejected approval probe created no file.
+acknowledgement. The temporary copied session, state database, configuration,
+second UI, and paging bridge were deleted after the paging recording, and the
+rejected approval probe created no file.
 
 During an active-only 60-fps interval with continuous outer scrolling, mean
 decoded-frame luminance deltas were 2.211289 in Conversation, 0.000012 in
@@ -862,7 +867,7 @@ deterministic tests rather than inferred from lossy video.
 The persistent Debug and integrated ASan/UBSan builds each pass all 19 native
 suites; ASan/UBSan reports no finding. The supported independent NodeGraph,
 typed-queue, and worker TSan boundary passes 5/5 without a race report. WebUI is
-unchanged and its release gate passes 83/83 tests, performance profiling,
+unchanged and its release gate passes 85/85 tests, performance profiling,
 production bundling, Chromium responsive/focus qualification, and relocatable
 artifact verification. Full ownership, delegate/editor decisions, benchmark
 tables, movie names, and remaining limitations are recorded in

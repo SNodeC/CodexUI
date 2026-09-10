@@ -331,8 +331,10 @@ The independently reused integrated ASan/UBSan build also passes 19/19 with no
 sanitizer diagnostic. The supported NodeGraph/typed-queue/worker TSan boundary
 passes 5/5 with no race report; Qt itself is not run under TSan because the
 system Qt libraries are not instrumented. `npm run release --prefix web`
-passes 83/83 WebUI tests, the 10,000-item profile, the Vite production build,
+passes 85/85 WebUI tests, the 10,000-item profile, the Vite production build,
 Chromium responsive/focus qualification, and relocatable artifact verification.
+The current profile reports 45.77 ms hydration, 34.69 ms projection, and
+9.40 ms for 2,000 streaming deltas.
 
 ## Final performance measurements
 
@@ -341,15 +343,15 @@ and benchmark as the baseline. Values below are medians.
 
 | Loaded rows | Initial reveal | Conversation cards | Descendant QWidgets | Peak resident memory | 240-position sweep | Mean sweep position | One bounded tail append |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 320 | 16 ms | 0 | 8 | 86,116 KiB | 260.2 ms | 1.08 ms | 1.44 ms |
-| 1,280 | 25 ms | 0 | 8 | 85,160 KiB | 278.1 ms | 1.16 ms | 1.60 ms |
-| 10,000 | 97 ms | 0 | 8 | 100,308 KiB | 355.9 ms | 1.48 ms | 1.73 ms |
+| 320 | 11 ms | 0 | 8 | 78,092 KiB | 313.8 ms | 1.31 ms | 0.45 ms |
+| 1,280 | 33 ms | 0 | 8 | 78,500 KiB | 355.6 ms | 1.48 ms | 0.51 ms |
+| 10,000 | 259 ms | 0 | 8 | 99,164 KiB | 448.4 ms | 1.87 ms | 0.48 ms |
 
 The old 320/1,280-row initial reveal was 733/4,040 ms with 4,209/16,809
 descendant widgets and 125,324/281,616 KiB peak RSS. At 1,280 rows the final
-initial reveal is approximately 162 times faster and uses approximately 70%
+initial reveal is approximately 122 times faster and uses approximately 72%
 less peak resident memory. Four times the loaded history now changes the
-scroll sweep by approximately 6.9%, while widget count remains exactly eight;
+scroll sweep by approximately 13.3%, while widget count remains exactly eight;
 10,000 passive rows still create zero `ConversationCard` widgets. The original
 baseline did not record process CPU counters separately, so the directly
 comparable CPU-time proxy is the single-threaded initial-reveal and scroll-sweep
@@ -358,10 +360,10 @@ wall time above rather than a fabricated percentage.
 The bounded append column measures the complete synchronous view operation,
 including exact anchor/follow restoration and visible materialization. Every
 sample reported zero model-index rebuilds and zero section-range rebuilds; the
-1.44–1.73 ms spread from 320 through 10,000 rows demonstrates that loaded
+0.45–0.51 ms spread from 320 through 10,000 rows demonstrates that loaded
 history is not traversed.
 
-During a 60-fps live 1,600-line command interval with continuous outer scrolling,
+During a 60-fps live 1,200-line command interval with continuous outer scrolling,
 mean decoded-frame luminance deltas were 2.211289 in Conversation, 0.000012 in
 ThreadPane, 0.000003 in Inspector, 0 in the shell header, and 0.000689 in the
 settings/composer region. The tiny non-conversation values are H.264/cursor
@@ -376,14 +378,16 @@ alive across all scenarios. Obsolete movies were removed first. Replacement
 movies and compact contact sheets are under
 `../../build/codexui-adapter-qualification/capture/qt-virtualized-final/`:
 
-- `initial-very-long-thread.mp4`: atomic selection of a copied 42,911-event
+- `initial-very-long-thread.mp4`: atomic selection of a copied 10,023-event
   read-only local thread fixture; the first changed conversation surface is
   complete.
 - `load-80-anchor.mp4`: exact-pixel paused anchor while 80 earlier activities
-  are inserted; no temporary blank extent is exposed.
+  are inserted. When a Turn root was retained only as the owner of the old
+  bounded suffix, the first old activity—not that pinned owner—remains at its
+  exact pixel offset; no temporary blank extent is exposed.
 - `heterogeneous-history-scroll.mp4`: repeated sweeps through the long mixed
   history while editor/widget count remains bounded.
-- `streaming-outer-scroll.mp4`: a real 1,600-line command while the outer
+- `streaming-outer-scroll.mp4`: a real 1,200-line command while the outer
   viewport repeatedly leaves and returns to the tail; scrolling remains
   uninterrupted through running-to-completed transition.
 - `streaming-command-output-scroll.mp4`: nested command-output selection and
@@ -396,21 +400,24 @@ movies and compact contact sheets are under
 - `selection-fold-focus.mp4`: delegate promotion, real text selection/copy,
   fold/unfold, and visible Tab/Backtab focus. Clipboard verification returned
   the exact selected sentence.
-- `approval-request.mp4` and `approval-reject.mp4`: exact command approval
-  details and rejection; the requested probe file was never created.
-- `user-input-request.mp4` and `user-input-answer.mp4`: Plan-mode embedded
+- `approval-reject.mp4` plus `approval-pending.png` and
+  `approval-rejected.png`: exact command approval details and rejection; the
+  requested probe file was never created.
+- `user-input-answer.mp4` plus `input-pending.png`, `input-dialog.png`, and
+  `input-answered.png`: Plan-mode embedded
   Alpha/Beta request, Review dialog, authored selection, exact submission, and
   authoritative `Alpha selected.` completion.
 - `direct-tail-append.mp4`: the final Debug binary was reconnected without
   restarting the bridge; two follow-tail prompt/final turns were admitted and
   completed without blank reservation, ending with the exact authoritative
-  response `SECOND BOUNDED TAIL VERIFIED.`
+  response `FINAL BOUNDED TAIL VERIFIED.`
 
 The movies supplement deterministic geometry and interaction assertions; lossy
 video alone cannot prove a sub-frame timing bound. No source, remote, GitHub,
 WebUI behavior, transport, thread, or graph-ownership change was made for the
-recording setup. The temporary 168 MiB copied long-thread fixture was deleted
-after paging qualification.
+recording setup. The temporary copied long-thread fixture, state database,
+configuration, second UI, and paging bridge were deleted after qualification;
+the primary bridge stayed alive across its scenarios.
 
 ## Remaining limitations
 
