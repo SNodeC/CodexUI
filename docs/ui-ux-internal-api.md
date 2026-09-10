@@ -264,6 +264,15 @@ follow/pause anchors, fold state, text selections, focus/current-row identity,
 nested command-output scroll state, and presentation options by stable row
 key. Shell retains only the selected canonical graph target.
 
+Passive-row hover, cursor, and tooltip hit-testing stay in the delegate and do
+not materialize a card. A press or keyboard current-row transition may create
+the one required editor. When production materialization starts collapsed, the
+real card initially contains only its header/control/status surface; hidden
+Markdown, command output, plan/file/activity detail, image, attachment, and
+other body projection is deferred until expansion and is built from the latest
+row value. Accessible model detail is bounded to 8,192 characters without
+first traversing or converting an unbounded plan or file-change collection.
+
 Thread/ownership contract: Qt-main only. Passive historical rows have no
 QWidget or placeholder. QObject parentage owns only the rich cards currently
 inside the viewport plus one viewport of bounded overscan and temporary hidden

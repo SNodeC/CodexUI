@@ -164,15 +164,27 @@ records contain only stable key, width, and measured height and therefore
 cannot become presentation authority.
 
 Collapsed cards and text-only resting cards are painted by the item delegate.
-Its Markdown document cache is bounded to 128 visible/recent blocks. Hover,
-keyboard current-row movement, or a direct press promotes exactly that row to
-the established `ConversationCard`, so selection, copying, links, tooltips,
-focus, and controls continue to use their existing implementations. Local
-pending prompts and expanded command, file, and image surfaces remain real
-widgets because their animation, nested scrolling, file actions, and image
-controls are intrinsically interactive. Scrolling a promoted editor out of the
-bounded overscan stores only its fold and inner-command-scroll state before the
-widget is released.
+Its Markdown document cache is bounded to 128 visible/recent blocks. Hover and
+tooltip hit-testing remain entirely delegate-side; a direct press or keyboard
+current-row transition promotes exactly that row to the established
+`ConversationCard`, so selection, copying, links, focus, and controls continue
+to use their existing implementations without constructing a widget merely for
+pointer travel. Local pending prompts and expanded command, file, and image
+surfaces remain real widgets because their animation, nested scrolling, file
+actions, and image controls are intrinsically interactive. Scrolling a promoted
+editor out of the bounded overscan stores only its fold and
+inner-command-scroll state before the widget is released.
+
+Production materialization passes the row's resolved collapse state into the
+card factory. A collapsed rich card constructs only its header, disclosure,
+copy action, focus surface, and status metadata. Its Markdown parse, command
+document, plan/file/activity details, image thumbnail, attachments, and other
+hidden body projection are deferred until expansion and then built once from
+the latest model value. Updates received while collapsed change only the
+visible header/status facts; expansion can therefore never reveal stale hidden
+content. Direct standalone `ConversationCard` construction retains the
+established eager behavior for callers that do not supply an initial collapse
+state.
 
 A canonical Turn is still flat in the model, but not visually flattened. The
 view paints the continuous outer You surface from the root row through the last
@@ -268,10 +280,10 @@ index.
 
 | Content/state | Presentation | Reason |
 | --- | --- | --- |
-| Resting user text without images | passive delegate; promoted on hover, current-row focus, or press | Fast history scrolling while preserving selection, copy, context menu, tooltips, and keyboard interaction on demand. |
+| Resting user text without images | passive delegate; promoted on press or keyboard current-row focus | Fast history scrolling while preserving selection, copy, context menu, tooltips, and keyboard interaction on demand; hover remains widget-free. |
 | Resting Markdown/final answer | passive `QTextDocument` delegate with a 128-document bound; promoted on interaction | Preserves Markdown appearance while preventing document count from scaling with history. |
 | Resting reasoning, update, plan, agent activity, and generic tool/activity cards | passive delegate while their current state is noninteractive or collapsed | These rows need text, status, disclosure, and Turn hierarchy but no continuously live editor. |
-| Any collapsed completed card | passive delegate | Disclosure can promote exactly the pointed row; no hidden subtree is retained. |
+| Any collapsed completed card | passive delegate; header-only real card after explicit promotion | Disclosure can promote exactly the pointed row; even then, no hidden body subtree or document is created until expansion. |
 | Local optimistic prompt | real visible `ConversationCard` | Delayed sweep animation, recovery, and authoritative morph are live behavior. |
 | Expanded/running command output | real visible `ConversationCard` and `CommandOutputView` | Requires nested scrolling, tail-follow state, selection/copy, streaming output, and completion controls. |
 | Expanded file changes and images/attachments | real visible `ConversationCard` | Requires file/image activation, hover/cursor behavior, and rich child controls. |
@@ -305,9 +317,9 @@ releases their editors without deleting model identity.
 | Approval controls | Existing request surface remains a real widget outside passive conversation painting and carries the exact request target. | Accept/reject/review shaping passes; live rejection displayed exact facts and created no file. |
 | User-input requests | Existing embedded request card and modal remain real widgets with authored input retained until exact response. | Validation/cancel/submit tests pass; live Plan-mode Alpha submission completed authoritatively. |
 | Expand/collapse state | Fold state is keyed by stable row; root fold sets nested extents to zero and releases invisible editors. | Card/root folding, automatic preferences, anchor preservation, and rematerialization pass. |
-| Hover, cursor, tooltip, context menu | Delegate hit-testing promotes only the pointed row, then existing widget semantics take over. | Pointer forwarding, disclosure/copy ordering, link cursor, menus, and tooltip tests pass. |
+| Hover, cursor, tooltip, context menu | Delegate hit-testing supplies cursor and tooltip without promotion; press materializes only the pointed row before forwarding the exact interaction. | Widget-free hover, pointer forwarding, disclosure/copy ordering, link cursor, menus, and tooltip tests pass. |
 | Keyboard navigation and visible focus | Qt current index is stable identity; focused rich editor remains materialized and is scrolled into view. | Tab/Backtab, arrows, activation, modal return, visible focus, and no unrelated focus jump pass. |
-| Accessibility | Model roles expose row names/structure; promoted controls retain their established accessible names and focus behavior. | Row, control, dialog, image/link, and nested-scroll accessibility assertions pass. |
+| Accessibility | Model roles expose row names/structure through an 8,192-character bounded projection; promoted controls retain their established accessible names and focus behavior. | Row, control, dialog, image/link, nested-scroll, and large plan/file accessibility bounds pass. |
 | Paused scroll and exact anchoring | Anchor is stable row key plus exact vertical pixel offset and horizontal value; height deltas above it are applied through the index. | Height change, insertion, tail arrival, selection, Load 80, and steering preserve both axes. |
 | Follow latest | Tail is followed only when already following; user wheel/slider activity changes to paused mode. | Arrival/completion at tail and manual pause/resume scenarios pass without blank-card exposure. |
 | Atomic selection and paging | Passive rows require no construction; initially visible rich rows stage behind the old complete surface/loading cover. | Initial long selection and Load 80 expose one completed frame with bounded event-loop work. |
@@ -324,7 +336,10 @@ with zero model, section, or height rebuild; pinned-root prefix trimming;
 paused/following tail behavior;
 atomic selection and paging; prompt/steering acknowledgment; command completion;
 selection/copy; links, files, images, folds, focus, accessibility; heterogeneous
-cards; inactive panes; and bounded event-loop passes without idle spin.
+cards; inactive panes; bounded 4,096-character generic detail and
+8,192-character accessibility projection; header-only construction for every
+collapsed heavy card kind; current-value expansion after hidden streaming; and
+bounded event-loop passes without idle spin.
 
 The final persistent Debug build passes all 19 native suites under Xvfb/xcb.
 The independently reused integrated ASan/UBSan build also passes 19/19 with no
@@ -333,8 +348,8 @@ passes 5/5 with no race report; Qt itself is not run under TSan because the
 system Qt libraries are not instrumented. `npm run release --prefix web`
 passes 85/85 WebUI tests, the 10,000-item profile, the Vite production build,
 Chromium responsive/focus qualification, and relocatable artifact verification.
-The current profile reports 45.77 ms hydration, 34.69 ms projection, and
-9.40 ms for 2,000 streaming deltas.
+The current profile reports 44.81 ms hydration, 35.17 ms projection, and
+9.12 ms for 2,000 streaming deltas.
 
 ## Final performance measurements
 
@@ -343,25 +358,30 @@ and benchmark as the baseline. Values below are medians.
 
 | Loaded rows | Initial reveal | Conversation cards | Descendant QWidgets | Peak resident memory | 240-position sweep | Mean sweep position | One bounded tail append |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 320 | 11 ms | 0 | 8 | 78,092 KiB | 313.8 ms | 1.31 ms | 0.45 ms |
-| 1,280 | 33 ms | 0 | 8 | 78,500 KiB | 355.6 ms | 1.48 ms | 0.51 ms |
-| 10,000 | 259 ms | 0 | 8 | 99,164 KiB | 448.4 ms | 1.87 ms | 0.48 ms |
+| 320 | 12 ms | 0 | 8 | 78,136 KiB | 417.8 ms | 1.74 ms | 0.49 ms |
+| 1,280 | 33 ms | 0 | 8 | 78,620 KiB | 468.6 ms | 1.95 ms | 0.58 ms |
+| 10,000 | 269 ms | 0 | 8 | 99,036 KiB | 679.1 ms | 2.83 ms | 0.72 ms |
 
 The old 320/1,280-row initial reveal was 733/4,040 ms with 4,209/16,809
 descendant widgets and 125,324/281,616 KiB peak RSS. At 1,280 rows the final
 initial reveal is approximately 122 times faster and uses approximately 72%
 less peak resident memory. Four times the loaded history now changes the
-scroll sweep by approximately 13.3%, while widget count remains exactly eight;
-10,000 passive rows still create zero `ConversationCard` widgets. The original
-baseline did not record process CPU counters separately, so the directly
-comparable CPU-time proxy is the single-threaded initial-reveal and scroll-sweep
-wall time above rather than a fabricated percentage.
+scroll sweep by approximately 12.2%, while widget count remains exactly eight;
+10,000 passive rows still create zero `ConversationCard` widgets. Absolute xcb
+sweep time varies with the shared Xvfb host and delegate rasterization, so the
+architectural result is the bounded per-position cost and fixed widget count,
+not a claim that every synthetic sweep is faster than QWidget blitting. The
+original baseline did not record process CPU counters separately, so the
+directly comparable CPU-time proxy is the single-threaded initial-reveal and
+scroll-sweep wall time above rather than a fabricated percentage.
 
 The bounded append column measures the complete synchronous view operation,
 including exact anchor/follow restoration and visible materialization. Every
 sample reported zero model-index rebuilds and zero section-range rebuilds; the
-0.45–0.51 ms spread from 320 through 10,000 rows demonstrates that loaded
-history is not traversed.
+sub-millisecond medians from 320 through 10,000 rows demonstrate that loaded
+history is not traversed. Peak RSS was measured in a forked benchmark child so
+the kernel high-water counter did not inherit the long-lived command harness's
+unrelated resident set.
 
 During a 60-fps live 1,200-line command interval with continuous outer scrolling,
 mean decoded-frame luminance deltas were 2.211289 in Conversation, 0.000012 in
@@ -411,6 +431,28 @@ movies and compact contact sheets are under
   restarting the bridge; two follow-tail prompt/final turns were admitted and
   completed without blank reservation, ending with the exact authoritative
   response `FINAL BOUNDED TAIL VERIFIED.`
+
+After the command/update/file/image/accessibility hardening, the same Debug
+binary was qualified again on display `:98` without restarting the bridge.
+Additional evidence is under
+`../../build/codexui-adapter-qualification/capture/qt-stall-final/`:
+
+- `long-thread-and-folding.mp4`: current-binary thread switching, repeated
+  long-history scrolling, and fold/materialization interaction;
+- `streaming-current-binary.mp4`: a real 800-line command with continuous outer
+  scrolling, running-to-completed transition, final answer, nested output
+  scrolling, and collapse/expand;
+- `steering-current-binary.mp4`: a real 1,200-line command, manual outer
+  scrolling during output, steering admission under the same active Turn, and
+  one authoritative final answer containing `STEERING ACKNOWLEDGED`;
+- `steering-admitted.png` and `steering-completed.png`: exact ordering and
+  lifecycle endpoints for that steering run.
+
+The settled current-binary process advanced zero scheduler ticks during a
+five-second idle sample. Its qualification log contains no warning, error,
+assertion, timeout, sanitizer, or crash diagnostic. The user separately
+qualified the same fixes against their real running session and reported the
+interaction smooth.
 
 The movies supplement deterministic geometry and interaction assertions; lossy
 video alone cannot prove a sub-frame timing bound. No source, remote, GitHub,
