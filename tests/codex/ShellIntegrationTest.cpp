@@ -34,6 +34,7 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QSplitter>
 #include <QThread>
 #include <QTimer>
 
@@ -514,6 +515,44 @@ void selectedRemovalUnbindsBeforeWorkerRetirement(
               !threadItem(list, "removed-selected") &&
               !agentMessageCard(shell, "remove this card"),
           "deferred Qt work retains no released selected-thread NodeRef");
+}
+
+void splitterHandleDrivesInteractiveConversationResize(
+    Configuration &configuration) {
+  FrontendSession session(configuration);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+  spin();
+  auto *splitter =
+      shell.findChild<QSplitter *>(QStringLiteral("workspaceSplitter"));
+  auto *conversation = dynamic_cast<middle::ConversationView *>(
+      shell.findChild<QWidget *>(QStringLiteral("conversationScroll")));
+  QWidget *handle = splitter ? splitter->handle(1) : nullptr;
+  require(splitter && conversation && handle,
+          "workspace exposes its splitter and conversation resize surface");
+  if (!handle || !conversation)
+    return;
+
+  const QPoint local = handle->rect().center();
+  QMouseEvent press(QEvent::MouseButtonPress, QPointF(local), QPointF(local),
+                    handle->mapToGlobal(local), Qt::LeftButton,
+                    Qt::LeftButton, Qt::NoModifier);
+  QApplication::sendEvent(handle, &press);
+  const bool activated =
+      conversation->property("conversationInteractiveResizeActive").toBool();
+  QMouseEvent release(QEvent::MouseButtonRelease, QPointF(local),
+                      QPointF(local), handle->mapToGlobal(local),
+                      Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+  QApplication::sendEvent(handle, &release);
+  require(
+      activated &&
+          !conversation->property("conversationInteractiveResizeActive")
+               .toBool() &&
+          conversation->property("conversationInteractiveResizeSettlements")
+                  .toULongLong() ==
+              1,
+      "splitter press and release bracket one interactive resize burst");
 }
 
 void removedAffectedOptimisticRetryDoesNotReadReleasedNode(
@@ -3571,6 +3610,7 @@ int main(int argc, char **argv) {
   graphNotificationsDetachBeforeRetirement(*configuration);
   massRetirementIsSliced(*configuration);
   selectedRemovalUnbindsBeforeWorkerRetirement(*configuration);
+  splitterHandleDrivesInteractiveConversationResize(*configuration);
   removedAffectedOptimisticRetryDoesNotReadReleasedNode(*configuration);
   typedActionsAreExactOnceAndBounded(*configuration);
   qtHeartbeatSurvivesLargeInboundTraffic(*configuration);

@@ -114,6 +114,11 @@ public:
   void setTrailingSpaceHeight(int height);
   void prepareForLocalPromptAdmission();
   bool forwardWheelEvent(QWheelEvent *event);
+  // QSplitter live drags can produce one resize per pointer movement. Keep
+  // the panel geometry live while bounding rich-text reflow to display-frame
+  // cadence, then reconcile every cached row once the drag finishes.
+  void beginInteractiveResize();
+  void endInteractiveResize();
 
   [[nodiscard]] Mode mode() const noexcept { return mode_; }
   [[nodiscard]] Mode modeForThread(const std::string &threadId) const noexcept;
@@ -265,6 +270,8 @@ private:
   [[nodiscard]] bool updateMeasuredHeight(int row, int cardHeight,
                                           bool preserveAnchor);
   void updateScrollRange();
+  void reflowAfterResize(bool exact);
+  void scheduleInteractiveResizeReflow();
   [[nodiscard]] int leadingChromeHeight() const noexcept;
   [[nodiscard]] qint64 naturalContentHeight() const noexcept;
 
@@ -312,6 +319,8 @@ private:
   QWidget *stagingHost_ = nullptr;
   ConversationLoadingOverlay *stagingOverlay_ = nullptr;
   QVariantAnimation *followAnimation_ = nullptr;
+  QTimer *resizeFrameTimer_ = nullptr;
+  QTimer *resizeSettleTimer_ = nullptr;
 
   std::function<void()> loadMoreAction_;
   std::function<bool(nodegraph::NodeRef)> promptMaterializedAction_;
@@ -354,6 +363,7 @@ private:
   bool adjustingScrollRange_ = false;
   bool structuralStagePassScheduled_ = false;
   bool committingStructuralStage_ = false;
+  bool interactiveResize_ = false;
   // A synthetic event ignored by a card child can propagate back through the
   // viewport. Stop that propagated event from entering the forwarding path a
   // second time.

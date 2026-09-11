@@ -615,6 +615,10 @@ This class remains the sole geometry and cross-pane event owner.
   restore controls can mirror it.
 - `routeScrollEvent(watched, event)` preserves nested-scroll precedence and
   returns `true` only when the conversation consumed the gesture.
+- Splitter-handle press/release events bracket
+  `ConversationView::beginInteractiveResize()` and
+  `endInteractiveResize()`: live width changes remain immediate, rich-card
+  reflow is frame-coalesced, and release performs one exact settlement.
 
 | Method | Parameters / return | Preconditions and observable effect |
 | --- | --- | --- |
@@ -626,6 +630,7 @@ This class remains the sole geometry and cross-pane event owner.
 | pane visibility methods | bool setters / bool getters | Preserve splitter sizes and report effective visibility once through callback. |
 | `setPaneVisibilityAction` | replacement callback | Does not emit until a visibility transition. |
 | `routeScrollEvent` | watched QObject and live QEvent; returns bool | Does not take ownership. Routes only supported wheel gestures and prevents recursion. |
+| splitter interaction | native handle press/release | Brackets one bounded live-resize burst; a lost native release is settled only after the left mouse button is no longer held. |
 
 ### `ShellWidget`
 

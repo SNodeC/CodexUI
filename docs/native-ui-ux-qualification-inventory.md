@@ -42,7 +42,7 @@ child, partial order, or intermediate lifecycle style.
 
 | Area | Situations and expected result | Qualification |
 | --- | --- | --- |
-| Main window | Initial show, maximize/restore, resize, splitter drag, pane hide/show, minimum useful size | No clipped controls, oscillating layout requests, stale overlay geometry, or whole-window repaint from a descendant update |
+| Main window | Initial show, maximize/restore, resize, splitter drag, pane hide/show, minimum useful size | No clipped controls, oscillating layout requests, stale overlay geometry, or whole-window repaint from a descendant update; splitter widths track immediately, conversation reflow is frame-bounded, and release settles exactly |
 | Top chrome | Connection label/dot/menu, controller button, request indicator, restore-pane buttons | Setters/style polish/paint occur only when the effective displayed value changes; item streaming does no work here |
 | Bottom status | Ready/connecting/disconnected/error and attribution | Stable geometry; exact state/tone; unrelated thread changes do not repaint it |
 | Conversation chrome | Selected-thread title, workspace, last activity, lifecycle state and visibility/filter buttons | Only changed effective fields update; item text streaming does not rewrite thread chrome; final status is immediate |

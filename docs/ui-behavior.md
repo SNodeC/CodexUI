@@ -542,6 +542,13 @@ region and never scrolls the conversation behind it. Command text and output
 retain a gesture that started while they could scroll; only a fresh gesture
 begun at their current boundary is handed to the conversation.
 
+Horizontal splitter drags keep all three pane boundaries live. The conversation
+resizes materialized card widths immediately, coalesces width-dependent rich
+text and passive-card height measurement to at most one pass per display
+interval, and leaves off-screen row heights lazy during the gesture. Releasing
+the handle performs one exact height-index reconciliation while preserving the
+paused visible-card pixel anchor or, in Following mode, the current bottom.
+
 ## Composer geometry
 
 The upcoming-turn controls are anchored to the bottom of the center pane. The

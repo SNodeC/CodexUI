@@ -738,6 +738,27 @@ ConversationView::ConversationView(QWidget *parent)
       setScrollValue(verticalScrollBar()->maximum());
   });
 
+  resizeFrameTimer_ = new QTimer(this);
+  resizeFrameTimer_->setSingleShot(true);
+  resizeFrameTimer_->setTimerType(Qt::PreciseTimer);
+  resizeFrameTimer_->setInterval(16);
+  connect(resizeFrameTimer_, &QTimer::timeout, this, [this] {
+    if (interactiveResize_)
+      reflowAfterResize(false);
+  });
+  resizeSettleTimer_ = new QTimer(this);
+  resizeSettleTimer_->setSingleShot(true);
+  resizeSettleTimer_->setInterval(120);
+  connect(resizeSettleTimer_, &QTimer::timeout, this, [this] {
+    if (!interactiveResize_)
+      return;
+    if (QApplication::mouseButtons().testFlag(Qt::LeftButton)) {
+      resizeSettleTimer_->start();
+      return;
+    }
+    endInteractiveResize();
+  });
+
   connect(verticalScrollBar(), &QScrollBar::sliderPressed, this, [this] {
     sliderDown_ = true;
     pausedByComposerGrowth_ = false;
@@ -2532,6 +2553,73 @@ void ConversationView::updateScrollRange() {
     stagingOverlay_->setGeometry(viewport()->rect());
 }
 
+void ConversationView::beginInteractiveResize() {
+  if (interactiveResize_)
+    return;
+  interactiveResize_ = true;
+  stopFollowingAnimation();
+  setProperty("conversationInteractiveResizeActive", true);
+  incrementProperty(this, "conversationInteractiveResizeBursts");
+}
+
+void ConversationView::endInteractiveResize() {
+  if (!interactiveResize_)
+    return;
+  interactiveResize_ = false;
+  resizeFrameTimer_->stop();
+  resizeSettleTimer_->stop();
+  reflowAfterResize(true);
+  setProperty("conversationInteractiveResizeActive", false);
+  incrementProperty(this, "conversationInteractiveResizeSettlements");
+}
+
+void ConversationView::scheduleInteractiveResizeReflow() {
+  if (!resizeFrameTimer_->isActive())
+    resizeFrameTimer_->start();
+  // This is a safety net for a platform that ends a native mouse grab without
+  // delivering the corresponding release to the splitter handle.
+  resizeSettleTimer_->start();
+}
+
+void ConversationView::reflowAfterResize(bool exact) {
+  if (applying_ || materializing_) {
+    if (!exact)
+      scheduleInteractiveResizeReflow();
+    return;
+  }
+  const Anchor anchor = captureAnchor();
+  const bool follow = mode_ == Mode::Following;
+  if (exact)
+    rebuildHeightIndex();
+
+  for (auto &[key, card] : materializedCards_) {
+    const QModelIndex index = model_->indexForStableKey(key);
+    const ConversationItemModel::Row *row =
+        index.isValid() ? model_->row(index.row()) : nullptr;
+    if (!index.isValid() || !row)
+      continue;
+    const int width = rowWidth(*row);
+    const int height = measureCard(card, width);
+    heightCache_.insert_or_assign(key, HeightRecord{width, height});
+    static_cast<void>(heights_.setHeight(
+        static_cast<std::size_t>(index.row()),
+        height + rowSpacing(index.row())));
+  }
+  updateScrollRange();
+  if (follow)
+    setScrollValue(verticalScrollBar()->maximum());
+  else
+    restoreAnchor(anchor);
+  updateMaterialization(true);
+  viewport()->update();
+  if (exact) {
+    storeCurrentThreadState();
+    incrementProperty(this, "conversationInteractiveResizeExactReflows");
+  } else {
+    incrementProperty(this, "conversationInteractiveResizeFrameReflows");
+  }
+}
+
 QRect ConversationView::rowRect(int rowIndex) const {
   const ConversationItemModel::Row *row = model_->row(rowIndex);
   if (!row || !rowPresented(rowIndex) || rowIndex < 0 ||
@@ -3440,6 +3528,10 @@ bool ConversationView::eventFilter(QObject *watched, QEvent *event) {
   // post the same descendant request again, keeping an idle view busy.
   if (card && widget == card && event->type() == QEvent::LayoutRequest &&
       !applying_ && !materializing_) {
+    if (interactiveResize_) {
+      scheduleInteractiveResizeReflow();
+      return true;
+    }
     const std::string key =
         card->property("conversationAnchorKey").toString().toStdString();
     const QModelIndex index = model_->indexForStableKey(key);
@@ -3681,31 +3773,21 @@ void ConversationView::paintEvent(QPaintEvent *event) {
 }
 
 void ConversationView::resizeEvent(QResizeEvent *event) {
-  const Anchor anchor = captureAnchor();
-  const bool follow = mode_ == Mode::Following;
-  stopFollowingAnimation();
   QAbstractItemView::resizeEvent(event);
   stagingHost_->resize(viewport()->size());
   stagingOverlay_->setGeometry(viewport()->rect());
-  rebuildHeightIndex();
-  for (auto &[key, card] : materializedCards_) {
-    const QModelIndex index = model_->indexForStableKey(key);
-    const ConversationItemModel::Row *row = model_->row(index.row());
-    if (!index.isValid() || !row)
-      continue;
-    const int height = measureCard(card, rowWidth(*row));
-    heightCache_.insert_or_assign(key, HeightRecord{rowWidth(*row), height});
-    static_cast<void>(heights_.setHeight(static_cast<std::size_t>(index.row()),
-                                         height + rowSpacing(index.row())));
+  if (interactiveResize_) {
+    // Borders and child widths follow the pointer immediately. Heights remain
+    // stable until the coalesced frame pass, preventing every mouse event from
+    // synchronously reparsing and measuring the conversation.
+    layoutMaterializedCards();
+    scheduleInteractiveResizeReflow();
+    viewport()->update();
+    incrementProperty(this, "conversationInteractiveResizeEvents");
+    return;
   }
-  updateScrollRange();
-  if (follow)
-    setScrollValue(verticalScrollBar()->maximum());
-  else
-    restoreAnchor(anchor);
-  updateMaterialization(true);
-  viewport()->update();
-  storeCurrentThreadState();
+  stopFollowingAnimation();
+  reflowAfterResize(true);
 }
 
 void ConversationView::wheelEvent(QWheelEvent *event) {

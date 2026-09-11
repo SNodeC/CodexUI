@@ -1563,6 +1563,92 @@ bool outsideTextDragDoesNotReenterTheView() {
   return result;
 }
 
+bool interactiveResizeCoalescesConversationReflow() {
+  ConversationSnapshot snapshot;
+  snapshot.threadId = "interactive-resize";
+  TurnSection section;
+  section.key = "resize-section";
+  section.turnId = "resize-turn";
+  for (int row = 0; row < 320; ++row) {
+    std::string text = "Resize row " + std::to_string(row) + " ";
+    text.append(220 + row % 80, static_cast<char>('a' + row % 26));
+    section.cards.push_back(
+        {AuthoritativeItemKey{"interactive-resize", "resize-turn",
+                              "resize-" + std::to_string(row)},
+         CardKind::AgentMessage,
+         "interactive-resize",
+         "resize-turn",
+         "resize-" + std::to_string(row),
+         AgentMessageData{std::move(text), false}});
+  }
+  snapshot.sections.push_back(std::move(section));
+
+  ConversationView view;
+  view.resize(620, 360);
+  view.show();
+  bool result = expect(view.reconcile(std::move(snapshot)),
+                       "interactive-resize fixture reconciles");
+  settle();
+  view.verticalScrollBar()->triggerAction(QAbstractSlider::SliderPageStepSub);
+  settle();
+  const auto retained = firstVisible(view);
+  view.setCurrentIndex(view.indexAt(view.viewport()->rect().center()));
+  settle();
+  const QModelIndex promoted = view.currentIndex();
+  const std::string promotedKey =
+      promoted.data(ConversationItemModel::StableKeyRole).toString().toStdString();
+  ConversationCard *card = materializedCard(view, promotedKey);
+  result &= expect(!retained.first.empty() && promoted.isValid() && card,
+                   "interactive-resize fixture has an anchored rich card");
+
+  const qulonglong rebuildsBefore =
+      view.property("conversationHeightIndexRebuilds").toULongLong();
+  const qulonglong framesBefore =
+      view.property("conversationInteractiveResizeFrameReflows")
+          .toULongLong();
+  view.beginInteractiveResize();
+  for (int step = 0; step < 80; ++step)
+    view.resize(621 + step * 2, 360);
+  card = materializedCard(view, promotedKey);
+  result &= expect(
+      view.property("conversationInteractiveResizeActive").toBool() &&
+          view.property("conversationHeightIndexRebuilds").toULongLong() ==
+              rebuildsBefore &&
+          view.property("conversationInteractiveResizeEvents").toULongLong() >=
+              80 &&
+          card && card->width() == view.visualRect(promoted).width(),
+      "splitter motion updates live width without one full reflow per event");
+
+  result &= expect(
+      waitUntil(
+          [&] {
+            return view.property("conversationInteractiveResizeFrameReflows")
+                       .toULongLong() > framesBefore;
+          },
+          250) &&
+          view.property("conversationHeightIndexRebuilds").toULongLong() ==
+              rebuildsBefore &&
+          view.property("conversationInteractiveResizeFrameReflows")
+                  .toULongLong() ==
+              framesBefore + 1,
+      "one display-frame pass coalesces a burst of splitter resize events");
+
+  view.endInteractiveResize();
+  settle();
+  const auto retainedAfter = firstVisible(view);
+  result &= expect(
+      !view.property("conversationInteractiveResizeActive").toBool() &&
+          view.property("conversationHeightIndexRebuilds").toULongLong() ==
+              rebuildsBefore + 1 &&
+          view.property("conversationInteractiveResizeSettlements")
+                  .toULongLong() ==
+              1 &&
+          retainedAfter == retained,
+      "splitter release performs one exact reflow and preserves the paused "
+      "viewport anchor");
+  return result;
+}
+
 bool collapsedLargeCardsSkipBodyProjection() {
   FileChangesData changes;
   changes.status = "completed";
@@ -1782,6 +1868,7 @@ int main(int argc, char **argv) {
                       passiveMarkdownHoverKeepsLinkSemanticsWithoutAnEditor() &&
                       selectionFocusAndOneGesturePromotion() &&
                       outsideTextDragDoesNotReenterTheView() &&
+                      interactiveResizeCoalescesConversationReflow() &&
                       collapsedLargeCardsSkipBodyProjection() &&
                       collapsedInteractionDefersEveryHeavyCardBody();
   if (result)
