@@ -901,6 +901,13 @@ QToolButton *copyButton(ConversationCard *card) {
              : nullptr;
 }
 
+bool usesNarrowPhaseCopySpacing(ConversationCard *card, QLabel *phase) {
+  QToolButton *copy = copyButton(card);
+  return phase && copy && phase->parentWidget() == copy->parentWidget() &&
+         phase->parentWidget()->layout()->spacing() == 0 &&
+         copy->geometry().left() - phase->geometry().right() - 1 == 0;
+}
+
 QRect paintedDisclosureBounds(QToolButton *button) {
   if (!button)
     return {};
@@ -1311,9 +1318,8 @@ bool testPausedExpandedCommandStaysPainted() {
   result &= expect(setFolded(commandCard, false),
                    "completed command is expanded before incoming cards");
   QPointer<CommandOutputView> outputView =
-      commandCard ? dynamic_cast<CommandOutputView *>(
-                        commandCard->findChild<QPlainTextEdit *>(
-                            QStringLiteral("commandOutputView")))
+      commandCard ? commandCard->findChild<CommandOutputView *>(
+                        QStringLiteral("commandOutputView"))
                   : nullptr;
   if (outputView && outputView->verticalScrollBar()->maximum() > 0) {
     outputView->verticalScrollBar()->setValue(
@@ -2016,7 +2022,7 @@ bool testCardCopyControls() {
           button->text().isEmpty() && button->height() == fold->height() &&
               std::abs(copyInk.center().y() - foldInk.center().y()) <= 1 &&
               foldInk.left() - copyInk.right() - 1 <= 14 &&
-              button->parentWidget()->layout()->spacing() == 4,
+              button->parentWidget()->layout()->spacing() == 0,
           "copy and disclosure are backgroundless, vertically aligned, and "
           "use canonical compact spacing");
     }
@@ -2055,6 +2061,84 @@ bool testCardCopyControls() {
       QApplication::clipboard()->text() == QStringLiteral("Late **summary**") &&
           QApplication::clipboard()->mimeData()->hasFormat("text/markdown"),
       "late Markdown content copies from the updated source");
+  return result;
+}
+
+bool testUserMessageLineBreakPresentation() {
+  const std::string thread = "line-breaks";
+  const QString source =
+      QStringLiteral("First authored line\n\nThird authored line");
+  ConversationCard card(VisibleCardData{
+      AuthoritativeItemKey{thread, "turn", "user"}, CardKind::UserMessage,
+      thread, "turn", "user",
+      UserMessageData{source.toStdString(), {}}});
+  card.resize(520, 160);
+  card.show();
+  spin();
+
+  MarkdownTextView *body = card.findChild<MarkdownTextView *>();
+  bool result = expect(
+      body && body->markdownSource() == source &&
+          body->sharedDocument()->toPlainText() ==
+              QStringLiteral("First authored line\n\u200B\nThird authored line") &&
+          body->sharedDocument()->blockCount() == 3,
+      "an authoritative turn You card displays the empty row authored by two "
+      "newlines");
+
+  card.setNestedPresentation(true);
+  spin();
+  result &= expect(
+      body && body->markdownSource() == source &&
+          body->sharedDocument()->blockCount() == 3,
+      "an authoritative steering You card keeps the same authored blank row");
+
+  QApplication::clipboard()->clear();
+  copyButton(&card)->click();
+  result &= expect(
+      QApplication::clipboard()->text() == source &&
+          QApplication::clipboard()->mimeData()->data("text/markdown") ==
+              source.toUtf8(),
+      "newline presentation does not alter copied prompt Markdown");
+
+  QApplication::clipboard()->clear();
+  body->setSelection(0, body->sharedDocument()->characterCount() - 1);
+  body->setFocus(Qt::OtherFocusReason);
+  QKeyEvent selectionCopy(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+  QApplication::sendEvent(body, &selectionCopy);
+  result &= expect(
+      QApplication::clipboard()->text() == source,
+      "Ctrl+C omits the presentation-only blank-line marker from a prompt "
+      "selection");
+
+  const CardKey localKey = LocalPromptKey{91};
+  ConversationCard pending(VisibleCardData{
+      localKey, CardKind::LocalPrompt, thread, "turn", {},
+      LocalPromptData{91, source.toStdString(), PromptState::InFlight, {}, {}}});
+  pending.resize(520, 160);
+  pending.show();
+  spin();
+  const VisibleCardData acknowledged{
+      localKey, CardKind::UserMessage, thread, "turn", "user",
+      UserMessageData{source.toStdString(), {}}};
+  result &= expect(pending.apply(acknowledged),
+                   "a pending prompt promotes in place on acknowledgement");
+  MarkdownTextView *promoted = pending.findChild<MarkdownTextView *>();
+  result &= expect(
+      promoted && promoted->markdownSource() == source &&
+          promoted->sharedDocument()->blockCount() == 3,
+      "local-to-authoritative promotion retains the authored blank row");
+
+  const QString fenced = QStringLiteral(
+      "Before\nAfter\n\n```text\ninside\ncode\n```\n\nDone");
+  const QString rendered = presentation::userMessageMarkdown(fenced);
+  result &= expect(
+      rendered == QStringLiteral(
+                      "Before  \nAfter\n\n```text\ninside\ncode\n```\n\nDone"),
+      "prompt newline projection preserves fenced code and paragraph breaks");
+  result &= expect(
+      presentation::userMessageMarkdown(source) ==
+          QStringLiteral("First authored line  \n\u200B  \nThird authored line"),
+      "plain prompt projection represents an empty source line explicitly");
   return result;
 }
 
@@ -2156,9 +2240,8 @@ bool testMutableCardsAndCommandOutput() {
   };
   auto *commandCard = identities[stableKey(
       CardKey{AuthoritativeItemKey{thread, "turn", "command"}})];
-  auto *output = dynamic_cast<CommandOutputView *>(
-      commandCard->findChild<QPlainTextEdit *>(
-          QStringLiteral("commandOutputView")));
+  auto *output = commandCard->findChild<CommandOutputView *>(
+      QStringLiteral("commandOutputView"));
   auto *commandText = dynamic_cast<ContentSizedTextView *>(
       commandCard->findChild<QTextEdit *>(QStringLiteral("commandTextView")));
   auto *commandStatus =
@@ -2203,6 +2286,7 @@ bool testMutableCardsAndCommandOutput() {
           agentPhase->text() == QStringLiteral("update") &&
           agentPhase->property("tone").toString() == QStringLiteral("active") &&
           agentPhase->font().weight() == QFont::Normal &&
+          usesNarrowPhaseCopySpacing(agentCardWidget, agentPhase) &&
           agentPhase->parentWidget()->layout()->indexOf(agentPhase) <
               agentPhase->parentWidget()->layout()->indexOf(
                   copyButton(agentCardWidget)),
@@ -2388,10 +2472,14 @@ bool testMutableCardsAndCommandOutput() {
       "cwd, and duration below output");
   result &=
       expect(!output->isHidden() && output->minimumHeight() == 0 &&
-                 output->maximumHeight() == 220 &&
+                 output->maximumHeight() <= 220 &&
+                 (output->maximumHeight() - 8) %
+                         output->fontMetrics().lineSpacing() ==
+                     0 &&
                  output->toPlainText().endsWith(QStringLiteral("visible")) &&
                  output->verticalScrollBarPolicy() == Qt::ScrollBarAsNeeded,
-             "visible output trims empty lines and grows with the 220px cap");
+             "visible output trims empty lines and grows by whole rows within "
+             "the 220px cap");
 
   QString longOutput;
   for (int line = 0; line < 80; ++line)
@@ -2714,6 +2802,7 @@ bool testCardFoldingGeometryAndRetention() {
           cardTitle(steeringCard) == QStringLiteral("You") && steeringPhase &&
           steeringPhase->text() == QStringLiteral("steering · pending") &&
           steeringPhase->font().weight() == QFont::Normal &&
+          usesNarrowPhaseCopySpacing(steeringCard, steeringPhase) &&
           steeringPhase->parentWidget()->layout()->indexOf(steeringPhase) <
               steeringPhase->parentWidget()->layout()->indexOf(
                   copyButton(steeringCard)) &&
@@ -2799,9 +2888,8 @@ bool testCardFoldingGeometryAndRetention() {
   spin(40);
   result &= expect(applyConversation(view, snapshot),
                    "folded command accepts a streamed content update");
-  auto *output = dynamic_cast<CommandOutputView *>(
-      commandCard->findChild<QPlainTextEdit *>(
-          QStringLiteral("commandOutputView")));
+  auto *output = commandCard->findChild<CommandOutputView *>(
+      QStringLiteral("commandOutputView"));
   result &= expect(
       output &&
           !output->toPlainText().contains(QStringLiteral("streamed line 4")) &&
@@ -3330,9 +3418,9 @@ bool testInitialCommandGeometrySettlement() {
   ConversationCard *commandCard = card(view, stableKey(command.key));
   result &= expect(setFolded(commandCard, false),
                    "initially folded command can be expanded for inspection");
-  auto *outputView = commandCard ? dynamic_cast<CommandOutputView *>(
-                                       commandCard->findChild<QPlainTextEdit *>(
-                                           QStringLiteral("commandOutputView")))
+  auto *outputView = commandCard
+                         ? commandCard->findChild<CommandOutputView *>(
+                               QStringLiteral("commandOutputView"))
                                  : nullptr;
   result &= expect(commandCard && outputView && !outputView->isHidden() &&
                        outputView->height() < outputView->maximumHeight(),
@@ -3589,9 +3677,9 @@ bool testBottomAnchoredCommandOutputGrowth() {
       commandCard
           ? commandCard->findChild<QLabel *>(QStringLiteral("commandStatus"))
           : nullptr;
-  auto *output = commandCard ? dynamic_cast<CommandOutputView *>(
-                                   commandCard->findChild<QPlainTextEdit *>(
-                                       QStringLiteral("commandOutputView")))
+  auto *output = commandCard
+                     ? commandCard->findChild<CommandOutputView *>(
+                           QStringLiteral("commandOutputView"))
                              : nullptr;
   result &= expect(commandCard && metadata && metadata->isHidden() && status &&
                        output && output->isHidden() && view.isAtBottom() &&
@@ -3615,10 +3703,30 @@ bool testBottomAnchoredCommandOutputGrowth() {
   });
   const int cardBottomAfter =
       commandCard->mapTo(view.viewport(), QPoint(0, commandCard->height())).y();
+  QTextCursor initialEnd(output->document());
+  initialEnd.movePosition(QTextCursor::End);
+  const int initialBottomGap =
+      output->viewport()->height() - output->cursorRect(initialEnd).bottom();
+  qreal initialLineHeight = 0;
+  for (QTextBlock block = output->document()->begin(); block.isValid();
+       block = block.next())
+    if (block.layout())
+      initialLineHeight += block.layout()->boundingRect().height();
   result &= expect(!output->isHidden() && output->height() > 2 * 20 &&
                        output->height() == output->sizeHint().height() &&
+                       output->height() ==
+                           8 + static_cast<int>(std::ceil(initialLineHeight)) &&
+                       (output->maximumHeight() - 8) %
+                               output->fontMetrics().lineSpacing() ==
+                           0 &&
+                       initialBottomGap <=
+                           output->document()->documentMargin() + 2 &&
+                       !output->document()->lastBlock().text().isEmpty() &&
+                       output->verticalScrollBar()->value() ==
+                           output->verticalScrollBar()->maximum() &&
                        cardBottomAfter == cardBottomBefore && view.isAtBottom(),
-                   "multiline output takes its needed height and grows upward");
+                   "multiline output uses complete text rows with symmetric "
+                   "padding, no synthetic trailing row, and grows upward");
 
   QString cappedOutput;
   for (int line = 0; line < 80; ++line)
@@ -3627,10 +3735,10 @@ bool testBottomAnchoredCommandOutputGrowth() {
   result &=
       expect(applyConversation(view, snapshot), "live output reaches its cap");
   spinUntil([&] {
-    return output->height() == 220 &&
+    return output->height() == output->maximumHeight() &&
            output->verticalScrollBar()->maximum() > 0;
   });
-  if (!(output->height() == 220 &&
+  if (!(output->height() == output->maximumHeight() &&
         output->verticalScrollBar()->maximum() > 0 &&
         commandCard->mapTo(view.viewport(), QPoint(0, commandCard->height()))
                 .y() == cardBottomBefore))
@@ -3651,11 +3759,20 @@ bool testBottomAnchoredCommandOutputGrowth() {
                      .toString()
                      .toStdString()
               << '\n';
+  QTextCursor cappedEnd(output->document());
+  cappedEnd.movePosition(QTextCursor::End);
+  const int cappedBottomGap =
+      output->viewport()->height() - output->cursorRect(cappedEnd).bottom();
   result &= expect(
-      output->height() == 220 && output->verticalScrollBar()->maximum() > 0 &&
+      output->height() == output->maximumHeight() &&
+          output->verticalScrollBar()->maximum() > 0 && cappedBottomGap <= 2 &&
+          !output->document()->lastBlock().text().isEmpty() &&
+          output->verticalScrollBar()->value() ==
+              output->verticalScrollBar()->maximum() &&
           commandCard->mapTo(view.viewport(), QPoint(0, commandCard->height()))
                   .y() == cardBottomBefore,
-      "capped output keeps its scrollbar and fixed card bottom");
+      "capped output follows its final populated row and keeps its scrollbar "
+      "and fixed card bottom");
 
   const qulonglong geometryBeforeAppend =
       view.property("conversationGeometryPasses").toULongLong();
@@ -3670,7 +3787,10 @@ bool testBottomAnchoredCommandOutputGrowth() {
                    "capped output accepts another streaming append");
   spin();
   result &= expect(
-      retainedCommand == commandCard && output->height() == 220 &&
+      retainedCommand == commandCard &&
+          output->height() == output->maximumHeight() &&
+          output->verticalScrollBar()->value() ==
+              output->verticalScrollBar()->maximum() &&
           view.property("conversationGeometryPasses").toULongLong() ==
               geometryBeforeAppend &&
           commandCard->mapTo(view.viewport(), QPoint(0, commandCard->height()))
@@ -3680,6 +3800,19 @@ bool testBottomAnchoredCommandOutputGrowth() {
   result &= expect(output->textCursor().selectedText() == selectionBeforeAppend,
                    "append-only command streaming preserves output text "
                    "selection");
+  live.status = "completed";
+  result &= expect(applyConversation(view, snapshot),
+                   "the live command reaches completion");
+  spin();
+  QTextCursor completedEnd(output->document());
+  completedEnd.movePosition(QTextCursor::End);
+  result &= expect(
+      output->viewport()->height() - output->cursorRect(completedEnd).bottom() <=
+              2 &&
+          !output->document()->lastBlock().text().isEmpty() &&
+          output->verticalScrollBar()->value() ==
+              output->verticalScrollBar()->maximum(),
+      "command completion retains follow-tail without a synthetic output row");
   return result;
 }
 
@@ -3706,11 +3839,10 @@ bool testCommandOutputStateAcrossNavigation() {
   ConversationCard *commandCard = card(view, stableKey(command.key));
   bool result = expect(setFolded(commandCard, false),
                        "navigation command expands from its compact default");
-  auto *initialOutput = commandCard
-                            ? dynamic_cast<CommandOutputView *>(
-                                  commandCard->findChild<QPlainTextEdit *>(
-                                      QStringLiteral("commandOutputView")))
-                            : nullptr;
+  auto *initialOutput =
+      commandCard ? commandCard->findChild<CommandOutputView *>(
+                        QStringLiteral("commandOutputView"))
+                  : nullptr;
   result &=
       expect(initialOutput && initialOutput->verticalScrollBar()->maximum() > 0,
              "navigation test has independently scrollable output");
@@ -3721,9 +3853,9 @@ bool testCommandOutputStateAcrossNavigation() {
   applyConversation(view, commandThread);
   spin();
   commandCard = card(view, stableKey(command.key));
-  initialOutput = commandCard ? dynamic_cast<CommandOutputView *>(
-                                    commandCard->findChild<QPlainTextEdit *>(
-                                        QStringLiteral("commandOutputView")))
+  initialOutput = commandCard
+                      ? commandCard->findChild<CommandOutputView *>(
+                            QStringLiteral("commandOutputView"))
                               : nullptr;
   result &= expect(initialOutput && initialOutput->followsLatest() &&
                        initialOutput->verticalScrollBar()->value() ==
@@ -3749,11 +3881,10 @@ bool testCommandOutputStateAcrossNavigation() {
   applyConversation(view, commandThread);
   spin();
   commandCard = card(view, stableKey(command.key));
-  auto *restoredOutput = commandCard
-                             ? dynamic_cast<CommandOutputView *>(
-                                   commandCard->findChild<QPlainTextEdit *>(
-                                       QStringLiteral("commandOutputView")))
-                             : nullptr;
+  auto *restoredOutput =
+      commandCard ? commandCard->findChild<CommandOutputView *>(
+                        QStringLiteral("commandOutputView"))
+                  : nullptr;
   result &=
       expect(restoredOutput && !restoredOutput->followsLatest() &&
                  restoredOutput->verticalScrollBar()->value() == pausedValue &&
@@ -4310,9 +4441,8 @@ bool testFocusedGraphCardSurvivesViewportReconciliation() {
   bool result = expect(commandReady && setFolded(commandCard, false),
                        "the focus-pinning fixture exposes its command output");
   QPointer<CommandOutputView> output =
-      commandCard ? dynamic_cast<CommandOutputView *>(
-                        commandCard->findChild<QPlainTextEdit *>(
-                            QStringLiteral("commandOutputView")))
+      commandCard ? commandCard->findChild<CommandOutputView *>(
+                        QStringLiteral("commandOutputView"))
                   : nullptr;
   if (!commandCard || !output)
     return false;
@@ -4442,9 +4572,8 @@ bool testGraphRootFoldSuppressesAndRestoresChildExtent() {
                  rootCard && commandCard && setFolded(commandCard, false),
              "the root-fold fixture materializes an expanded child");
   QPointer<CommandOutputView> output =
-      commandCard ? dynamic_cast<CommandOutputView *>(
-                        commandCard->findChild<QPlainTextEdit *>(
-                            QStringLiteral("commandOutputView")))
+      commandCard ? commandCard->findChild<CommandOutputView *>(
+                        QStringLiteral("commandOutputView"))
                   : nullptr;
   if (!rootCard || !commandCard || !output)
     return false;
@@ -4473,9 +4602,9 @@ bool testGraphRootFoldSuppressesAndRestoresChildExtent() {
            view.verticalScrollBar()->maximum() == expandedExtent;
   });
   commandCard = card(view, stableKey(command.key));
-  output = commandCard ? dynamic_cast<CommandOutputView *>(
-                             commandCard->findChild<QPlainTextEdit *>(
-                                 QStringLiteral("commandOutputView")))
+  output = commandCard
+               ? commandCard->findChild<CommandOutputView *>(
+                     QStringLiteral("commandOutputView"))
                        : nullptr;
   const auto childStateAfter =
       commandCard ? commandCard->commandOutputScrollState() : std::nullopt;
@@ -7496,6 +7625,7 @@ int main(int argc, char **argv) {
   result &= testThreadLocalScrollAndComposerExtent();
   result &= testPromptAdmissionFollowOwnership();
   result &= testCardCopyControls();
+  result &= testUserMessageLineBreakPresentation();
   result &= testMutableCardsAndCommandOutput();
   result &= testCardFoldingGeometryAndRetention();
   result &= testPresentationOptionsRetainCardsAndInitialFolding();

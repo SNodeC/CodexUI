@@ -36,6 +36,7 @@
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <QTextLayout>
 #include <QTimer>
 #include <QToolButton>
 #include <QToolTip>
@@ -58,11 +59,13 @@ namespace {
 constexpr int MaximumCommandOutputHeight = 220;
 constexpr int MaximumCommandTextHeight = 90;
 constexpr int CommandTextPadding = 7;
+constexpr int CommandOutputHorizontalPadding = 7;
+constexpr int CommandOutputVerticalPadding = 4;
 constexpr int PendingAnimationIntervalMilliseconds = 32;
 constexpr qint64 PendingHalfCycleMilliseconds = 850;
 constexpr int ThumbnailMaximumWidth = 280;
 constexpr int ThumbnailMaximumHeight = 180;
-constexpr int CardHeaderActionSpacing = 4;
+constexpr int CardHeaderActionSpacing = 0;
 constexpr int CopyMorphDurationMilliseconds = 160;
 constexpr int CopyCheckHoldMilliseconds = 500;
 constexpr int MarkdownBottomPaintGuard = 4;
@@ -514,9 +517,10 @@ QLabel *makeLabel(const QString &value, const char *kind = "body",
 
 MarkdownTextView *makeMarkdownView(
     const QString &value, std::shared_ptr<QTextDocument> preparedDocument,
-    int initialWidth, QWidget *parent = nullptr) {
+    int initialWidth, QWidget *parent = nullptr,
+    bool preserveSoftLineBreaks = false) {
   return new MarkdownTextView(value, std::move(preparedDocument), initialWidth,
-                              parent);
+                              parent, preserveSoftLineBreaks);
 }
 
 bool setVisibleText(QLabel *label, const QString &text) {
@@ -928,10 +932,11 @@ bool presentationEquals(const VisibleCardData &left,
 MarkdownTextView::MarkdownTextView(
     const QString &markdown,
     std::shared_ptr<QTextDocument> preparedDocument, int initialWidth,
-    QWidget *parent)
+    QWidget *parent, bool preserveSoftLineBreaks)
     : QTextBrowser(parent),
       document_(preparedDocument ? preparedDocument
-                                 : std::make_shared<QTextDocument>()) {
+                                 : std::make_shared<QTextDocument>()),
+      preserveSoftLineBreaks_(preserveSoftLineBreaks) {
   setObjectName(QStringLiteral("markdownTextView"));
   setProperty("kind", "body");
   setStyleSheet(QStringLiteral(
@@ -940,6 +945,11 @@ MarkdownTextView::MarkdownTextView(
   setFrameShape(QFrame::NoFrame);
   setContentsMargins(0, 0, 0, 0);
   setReadOnly(true);
+  setTextInteractionFlags(Qt::TextSelectableByMouse |
+                          Qt::TextSelectableByKeyboard |
+                          Qt::LinksAccessibleByMouse |
+                          Qt::LinksAccessibleByKeyboard);
+  setFocusPolicy(Qt::StrongFocus);
   setOpenExternalLinks(true);
   setOpenLinks(true);
   setLineWrapMode(QTextEdit::WidgetWidth);
@@ -964,8 +974,12 @@ MarkdownTextView::MarkdownTextView(
   configureDocument();
   if (preparedDocument) {
     markdown_ = markdown;
+    renderedMarkdown_ = preserveSoftLineBreaks_
+                            ? presentation::userMessageMarkdown(markdown_)
+                            : markdown_;
     markdownTail_ =
-        presentation::markdownTailState(*document_, QStringView(markdown_));
+        presentation::markdownTailState(*document_,
+                                        QStringView(renderedMarkdown_));
     setProperty("markdownSource", markdown_);
   } else {
     setContent(markdown);
@@ -993,16 +1007,20 @@ void MarkdownTextView::configureDocument() {
 bool MarkdownTextView::setContent(const QString &markdown) {
   if (markdown_ == markdown)
     return false;
+  const QString rendered = preserveSoftLineBreaks_
+                               ? presentation::userMessageMarkdown(markdown)
+                               : markdown;
   const QTextCursor retainedCursor = textCursor();
   const bool retainedSelection = retainedCursor.hasSelection();
   const int retainedPosition = retainedCursor.position();
   const int retainedAnchor = retainedCursor.anchor();
   if (!presentation::appendMarkdownDocument(
-          *document_, QStringView(markdown_), QStringView(markdown),
+          *document_, QStringView(renderedMarkdown_), QStringView(rendered),
           markdownTail_)) {
-    presentation::replaceMarkdownDocument(*document_, markdown, markdownTail_);
+    presentation::replaceMarkdownDocument(*document_, rendered, markdownTail_);
   }
   markdown_ = markdown;
+  renderedMarkdown_ = rendered;
   setProperty("markdownSource", markdown_);
   if (retainedSelection) {
     const int maximum = std::max(0, document_->characterCount() - 1);
@@ -1066,6 +1084,25 @@ QSize MarkdownTextView::sizeHint() const {
 }
 
 QSize MarkdownTextView::minimumSizeHint() const { return {0, 0}; }
+
+void MarkdownTextView::keyPressEvent(QKeyEvent *event) {
+  if (event && event->matches(QKeySequence::Copy) && hasSelectedText()) {
+    // QTextBrowser owns the platform copy semantics. Remove only the
+    // presentation-only glyph used to keep authored blank prompt lines
+    // visible; it is not part of the user's canonical text.
+    copy();
+    if (QClipboard *clipboard = QApplication::clipboard()) {
+      QString text = clipboard->text();
+      if (text.contains(QChar(0x200B))) {
+        text.remove(QChar(0x200B));
+        clipboard->setText(text);
+      }
+    }
+    event->accept();
+    return;
+  }
+  QTextBrowser::keyPressEvent(event);
+}
 
 void MarkdownTextView::refreshPreferredHeight(int documentWidth) const {
   if (preferredDocumentWidth_ == documentWidth && preferredHeight_ > 0)
@@ -1228,20 +1265,28 @@ bool ContentSizedTextView::contentHeightCapped() const noexcept {
 }
 
 CommandOutputView::CommandOutputView(const QString &output, QWidget *parent)
-    : QPlainTextEdit(parent) {
+    : QTextEdit(parent) {
   setReadOnly(true);
+  setAcceptRichText(false);
   setMinimumHeight(0);
-  setMaximumHeight(MaximumCommandOutputHeight);
-  setLineWrapMode(QPlainTextEdit::WidgetWidth);
+  setLineWrapMode(QTextEdit::WidgetWidth);
   setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-  setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-  document()->setDocumentMargin(CommandTextPadding);
+  setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+  document()->setDocumentMargin(0);
   setProperty("kind", "code");
   setObjectName(QStringLiteral("commandOutputView"));
-  setStyleSheet(QStringLiteral(
-      "QPlainTextEdit#commandOutputView{background:#111827;color:#e5e7eb;"
-      "border-radius:6px;}"));
+  setStyleSheet(
+      QStringLiteral("QTextEdit#commandOutputView{background:#111827;"
+                     "color:#e5e7eb;border-radius:6px;padding:%1px %2px;}")
+          .arg(CommandOutputVerticalPadding)
+          .arg(CommandOutputHorizontalPadding));
+  ensurePolished();
+  const int lineHeight = std::max(1, fontMetrics().lineSpacing());
+  const int contentBudget =
+      MaximumCommandOutputHeight - 2 * CommandOutputVerticalPadding;
+  const int maximumRows = std::max(1, contentBudget / lineHeight);
+  setMaximumHeight(2 * CommandOutputVerticalPadding + maximumRows * lineHeight);
 
   connect(verticalScrollBar(), &QScrollBar::valueChanged, this,
           [this](int value) {
@@ -1311,19 +1356,20 @@ bool CommandOutputView::retainsWheelGesture(QWheelEvent *event) {
 }
 
 QSize CommandOutputView::sizeHint() const {
-  QSize result = QPlainTextEdit::sizeHint();
+  QSize result = QTextEdit::sizeHint();
   result.setHeight(preferredHeight_);
   return result;
 }
 
 QSize CommandOutputView::minimumSizeHint() const {
-  QSize result = QPlainTextEdit::minimumSizeHint();
+  QSize result = QTextEdit::minimumSizeHint();
   result.setHeight(0);
   return result;
 }
 
 CommandOutputView::ScrollState CommandOutputView::scrollState() const {
-  return {followsLatest_, preservedScrollValue_};
+  return {followsLatest_, followsLatest_ ? preservedScrollValue_
+                                         : verticalScrollBar()->value()};
 }
 
 bool CommandOutputView::followsLatest() const noexcept {
@@ -1338,8 +1384,11 @@ bool CommandOutputView::setOutput(const QString &output) {
   QElapsedTimer commitTimer;
   commitTimer.start();
   const QString displayOutput = trimmedTrailingLines(output);
-  if (currentOutput_ == displayOutput)
+  if (currentOutput_ == displayOutput) {
+    settleScroll();
+    scheduleScrollSettlement();
     return false;
+  }
 
   const bool retainedHeightIsCapped = isHeightCapped();
   const bool retainedFollow = followsLatest_;
@@ -1373,6 +1422,7 @@ bool CommandOutputView::setOutput(const QString &output) {
     viewport()->update();
   }
   settleScroll();
+  scheduleScrollSettlement();
   setProperty("lastOutputCommitMicros", commitTimer.nsecsElapsed() / 1000);
   return true;
 }
@@ -1383,7 +1433,7 @@ bool CommandOutputView::outputRequiresMaximumHeight(
     return false;
   const int lineHeight = std::max(1, fontMetrics().lineSpacing());
   const int availableHeight =
-      std::max(1, maximumHeight() - 2 * frameWidth());
+      std::max(1, maximumHeight() - 2 * CommandOutputVerticalPadding);
   const int requiredLines = availableHeight / lineHeight + 1;
   const int availableWidth = std::max(1, viewport()->width());
   int visualLines = 0;
@@ -1410,15 +1460,16 @@ bool CommandOutputView::measureAtCurrentWidth(bool notifyParent) {
   if (outputRequiresMaximumHeight(currentOutput_))
     return setPreferredContentHeight(maximumHeight(), notifyParent);
 
-  qreal contentHeight = 2.0 * document()->documentMargin();
+  qreal contentHeight = 2 * CommandOutputVerticalPadding;
   for (QTextBlock block = document()->begin(); block.isValid();
        block = block.next()) {
-    contentHeight += blockBoundingRect(block).height();
-    if (contentHeight + 2 * frameWidth() >= maximumHeight())
+    if (block.layout())
+      contentHeight += block.layout()->boundingRect().height();
+    if (contentHeight >= maximumHeight())
       return setPreferredContentHeight(maximumHeight(), notifyParent);
   }
   return setPreferredContentHeight(
-      2 * frameWidth() + static_cast<int>(std::ceil(contentHeight)),
+      static_cast<int>(std::ceil(contentHeight)),
       notifyParent);
 }
 
@@ -1434,22 +1485,27 @@ bool CommandOutputView::setPreferredContentHeight(int height,
 }
 
 void CommandOutputView::resizeEvent(QResizeEvent *event) {
-  QPlainTextEdit::resizeEvent(event);
+  QTextEdit::resizeEvent(event);
   if (outputRequiresMaximumHeight(currentOutput_)) {
     static_cast<void>(setPreferredContentHeight(maximumHeight(), true));
     setProperty("boundedOutputMeasurements",
                 property("boundedOutputMeasurements").toULongLong() + 1);
+    settleScroll();
+    scheduleScrollSettlement();
     return;
   }
   static_cast<void>(measureAtCurrentWidth(true));
   setProperty("fullOutputMeasurements",
               property("fullOutputMeasurements").toULongLong() + 1);
+  settleScroll();
+  scheduleScrollSettlement();
 }
 
 void CommandOutputView::restoreScrollState(const ScrollState &state) {
   followsLatest_ = state.followsLatest;
   preservedScrollValue_ = std::max(0, state.value);
   settleScroll();
+  scheduleScrollSettlement();
 }
 
 void CommandOutputView::wheelEvent(QWheelEvent *event) {
@@ -1464,7 +1520,7 @@ void CommandOutputView::wheelEvent(QWheelEvent *event) {
   if (atBoundary)
     event->accept();
   else
-    QPlainTextEdit::wheelEvent(event);
+    QTextEdit::wheelEvent(event);
   preservedScrollValue_ = bar->value();
   followsLatest_ = isAtBottom();
 }
@@ -1485,6 +1541,16 @@ void CommandOutputView::settleScroll() {
     preservedScrollValue_ = target;
   programmaticScroll_ = wasProgrammatic;
   settlingScroll_ = false;
+}
+
+void CommandOutputView::scheduleScrollSettlement() {
+  if (scrollSettlementPending_)
+    return;
+  scrollSettlementPending_ = true;
+  QTimer::singleShot(0, this, [this] {
+    scrollSettlementPending_ = false;
+    settleScroll();
+  });
 }
 
 bool CommandOutputView::isAtBottom() const {
@@ -1524,6 +1590,7 @@ public:
     disclosure = new CardDisclosureButton(header);
     headerLayout->addWidget(title, 1);
     headerLayout->addWidget(copy, 0, Qt::AlignRight | Qt::AlignVCenter);
+    headerLayout->addSpacing(4);
     headerLayout->addWidget(disclosure, 0, Qt::AlignRight | Qt::AlignVCenter);
     layout->addWidget(header);
 
@@ -1889,7 +1956,7 @@ public:
         collapsed && deferCollapsedBodyProjection ? QString{}
                                                    : text(message.text),
         takePreparedVisibleMarkdownDocument(), markdownContentWidth(),
-        content);
+        content, true);
     contentLayout->addWidget(markdownBody);
     createImageContainer();
     updateComposition(message);
@@ -2184,7 +2251,7 @@ public:
                                         ? QString{}
                                         : text(prompt.prompt),
                                     takePreparedVisibleMarkdownDocument(),
-                                    markdownContentWidth(), content);
+                                    markdownContentWidth(), content, true);
     metadata = makeLabel({}, "meta", content);
     contentLayout->addWidget(markdownBody);
     contentLayout->addWidget(metadata);

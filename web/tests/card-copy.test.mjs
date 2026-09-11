@@ -4,7 +4,7 @@ import test from "node:test";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 
-import {Card, InspectorAgentCard, cardCopyContent} from "../dist/app/App.js";
+import {Card, InspectorAgentCard, cardCopyContent, userMessageMarkdownText} from "../dist/app/App.js";
 
 function itemCard(kind, itemId, payload) {
     return {
@@ -101,6 +101,22 @@ test("nested user messages expose the steering identity", () => {
     assert.match(markup, />You<\/span>[\s\S]*card-phase steering">steering</u);
     assert.ok(markup.indexOf("card-phase steering") < markup.indexOf("card-copy-button"));
     assert.doesNotMatch(markup, /[·•]\s*steering/u);
+});
+
+test("normal and steering You cards retain authored prompt line breaks", () => {
+    const source = "First authored line\n\nThird authored line";
+    const user = itemCard("userMessage", "multiline", {
+        text: source, imagePaths: [],
+    });
+    for (const nestedCard of [false, true]) {
+        const markup = renderToStaticMarkup(createElement(Card, {
+            card: user, active: nestedCard, collapsed: false, nestedCard,
+            onToggle() {},
+        }));
+        assert.match(markup, /First authored line[\s\S]*<br\/>[\s\S]*\u200B[\s\S]*<br\/>[\s\S]*Third authored line/u);
+    }
+    assert.deepEqual(cardCopyContent(user), {text: source, markdown: true});
+    assert.equal(userMessageMarkdownText(source), "First authored line  \n\u200B  \nThird authored line");
 });
 
 test("local prompt sweep is rendered only after delayed feedback activates", () => {

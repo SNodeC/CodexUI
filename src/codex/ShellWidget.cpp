@@ -4,6 +4,7 @@
 
 #include "codex/ConnectionDialog.h"
 #include "codex/FileSelectionDialog.h"
+#include "codex/ForkNaming.h"
 #include "codex/FrontendSession.h"
 #include "codex/NewThreadDialog.h"
 #include "codex/PendingRequestDialog.h"
@@ -110,6 +111,25 @@ std::string graphString(const nodegraph::Value *value) {
   return value && value->asString() ? *value->asString() : std::string{};
 }
 
+const ui::ThreadListRow *threadRowById(
+    const std::vector<ui::ThreadListRow> &rows, std::string_view id) {
+  for (const ui::ThreadListRow &row : rows) {
+    if (row.id == id)
+      return &row;
+    if (const ui::ThreadListRow *found = threadRowById(row.children, id))
+      return found;
+  }
+  return nullptr;
+}
+
+void collectThreadTitles(const std::vector<ui::ThreadListRow> &rows,
+                         std::vector<std::string> &titles) {
+  for (const ui::ThreadListRow &row : rows) {
+    titles.push_back(row.title);
+    collectThreadTitles(row.children, titles);
+  }
+}
+
 bool fieldChanged(const nodegraph::NodeGraph::ReadAccess &read,
                   const nodegraph::NodeRef &node, std::string_view field,
                   std::uint64_t revision) {
@@ -140,20 +160,24 @@ threadPaneRoute(const nodegraph::GraphChanged &change,
                                  nodegraph::NodeKind::Thread})
                ? ThreadPaneRoute{true, true, {}}
                : ThreadPaneRoute{};
-  constexpr std::array<std::string_view, 14> Fields{"name",
-                                                    "title",
-                                                    "cwd",
-                                                    "workspace",
-                                                    "status",
-                                                    "createdAt",
-                                                    "updatedAt",
-                                                    "recencyAt",
-                                                    "lastActivityAt",
-                                                    "localActivityAt",
-                                                    "localPromptActivityAt",
-                                                    "pendingInteractionCount",
-                                                    "hydrationState",
-                                                    "archived"};
+  constexpr std::array<std::string_view, 17> Fields{
+      "name",
+      "localNameOverlay",
+      "title",
+      "preview",
+      "cwd",
+      "workspace",
+      "status",
+      "createdAt",
+      "updatedAt",
+      "recencyAt",
+      "lastActivityAt",
+      "localActivityAt",
+      "localPromptActivityAt",
+      "confirmedLocalPromptActivityAt",
+      "pendingInteractionCount",
+      "hydrationState",
+      "archived"};
   ThreadPaneRoute route;
   for (const nodegraph::NodeRef &node : change.affected) {
     if (!node || !read->contains(node))
@@ -161,6 +185,19 @@ threadPaneRoute(const nodegraph::GraphChanged &change,
     if (node->id().kind == nodegraph::NodeKind::Runtime) {
       if (read->structureChangedRevision(node) == change.revision)
         return {true, true, {}};
+      continue;
+    }
+    if (node->id().kind == nodegraph::NodeKind::Item) {
+      const auto state = read->state(node);
+      if (!state || graphString(graphField(*state, "type")) != "localPrompt")
+        continue;
+      nodegraph::NodeRef owner = read->parent(node);
+      while (owner && owner->id().kind != nodegraph::NodeKind::Thread)
+        owner = read->parent(owner);
+      if (owner && std::ranges::find(route.rows, owner) == route.rows.end()) {
+        route.affected = true;
+        route.rows.push_back(std::move(owner));
+      }
       continue;
     }
     if (node->id().kind != nodegraph::NodeKind::Thread)
@@ -176,13 +213,16 @@ threadPaneRoute(const nodegraph::GraphChanged &change,
     const bool sortChanged =
         (sortCriterion == middle::ThreadPane::SortCriterion::Alphanumeric &&
          (fieldChanged(*read, node, "name", change.revision) ||
-          fieldChanged(*read, node, "title", change.revision))) ||
+          fieldChanged(*read, node, "localNameOverlay", change.revision) ||
+          fieldChanged(*read, node, "title", change.revision) ||
+          fieldChanged(*read, node, "preview", change.revision))) ||
         (sortCriterion == middle::ThreadPane::SortCriterion::Created &&
          fieldChanged(*read, node, "createdAt", change.revision)) ||
-        (sortCriterion == middle::ThreadPane::SortCriterion::LastChanged &&
-         fieldChanged(*read, node, "updatedAt", change.revision)) ||
         (sortCriterion == middle::ThreadPane::SortCriterion::Recency &&
-         fieldChanged(*read, node, "recencyAt", change.revision));
+         (fieldChanged(*read, node, "recencyAt", change.revision) ||
+          fieldChanged(*read, node, "localPromptActivityAt", change.revision) ||
+          fieldChanged(*read, node, "confirmedLocalPromptActivityAt",
+                       change.revision)));
     if (read->structureChangedRevision(node) == change.revision ||
         sortChanged || fieldChanged(*read, node, "archived", change.revision))
       return {true, true, {}};
@@ -1072,6 +1112,11 @@ struct ShellWidget::Impl final {
   pendingRequest(const std::string &requestKey = {}, bool *busy = nullptr);
   void hydrateSelectedThreadIfNeeded(nodegraph::NodeRef thread);
   void beginNewThreadDialog();
+  [[nodiscard]] std::optional<NewThreadDraft>
+  suggestedForkDraft(const nodegraph::NodeRef &thread) const;
+  void forkThread(const nodegraph::NodeRef &thread, NewThreadDraft draft,
+                  bool includeOptions);
+  void beginForkThreadDialog(const nodegraph::NodeRef &thread);
   void renameThreadDialog(const nodegraph::NodeRef &thread);
   void confirmDeleteThread(const nodegraph::NodeRef &thread);
   [[nodiscard]] bool submitPrompt(QString prompt,
@@ -1318,6 +1363,11 @@ void ShellWidget::Impl::connectUi() {
         {nodegraph::RuntimeActionKind::RefreshThreads},
         QStringLiteral("Thread refresh was not admitted; try again.")));
   };
+  threadActions.loadMore = [this] {
+    static_cast<void>(sendRuntimeAction(
+        {nodegraph::RuntimeActionKind::LoadMoreThreads},
+        QStringLiteral("More threads could not be requested; try again.")));
+  };
   threadActions.hide = [this] { middleRegion->showSidebar(false); };
   threadActions.select = [this](const std::string &id) {
     if (id == DraftThreadId && newThreadDraft) {
@@ -1356,10 +1406,16 @@ void ShellWidget::Impl::connectUi() {
     const nodegraph::NodeRef thread = threadById(id);
     if (!thread)
       return;
-    nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Fork};
-    static_cast<void>(sendNodeAction(
-        std::move(action),
-        QStringLiteral("Thread fork was not admitted; try again.")));
+    const std::optional<NewThreadDraft> draft = suggestedForkDraft(thread);
+    if (!draft) {
+      showNotice(QStringLiteral("Thread state is busy; try Quick fork again."));
+      return;
+    }
+    forkThread(thread, *draft, false);
+  };
+  threadActions.forkWithOptions = [this](const std::string &id) {
+    if (const nodegraph::NodeRef thread = threadById(id))
+      beginForkThreadDialog(thread);
   };
   threadActions.toggleArchive = [this](const std::string &id) {
     const nodegraph::NodeRef thread = threadById(id);
@@ -3023,6 +3079,81 @@ void ShellWidget::Impl::beginNewThreadDialog() {
   render();
 }
 
+std::optional<NewThreadDraft> ShellWidget::Impl::suggestedForkDraft(
+    const nodegraph::NodeRef &thread) const {
+  if (!thread || thread->id().kind != nodegraph::NodeKind::Thread)
+    return std::nullopt;
+  const std::optional<ui::ThreadListSnapshot> snapshot = uiAdapter.threads({});
+  if (!snapshot)
+    return std::nullopt;
+  const ui::ThreadListRow *source =
+      threadRowById(snapshot->roots, thread->id().canonical);
+  if (!source)
+    return std::nullopt;
+
+  std::vector<std::string> titles;
+  collectThreadTitles(snapshot->roots, titles);
+  NewThreadDraft draft;
+  draft.workspace = text(source->cwd);
+  draft.name = text(suggestForkName(source->title, titles));
+
+  if (auto read = session.nodeGraph().tryRead();
+      read && read->contains(thread) && !read->removed(thread)) {
+    const std::shared_ptr<const nodegraph::NodeState> state = read->state(thread);
+    draft.baseInstructions =
+        text(graphString(graphField(*state, "baseInstructions")));
+    draft.developerInstructions =
+        text(graphString(graphField(*state, "developerInstructions")));
+    draft.ephemeral = graphBool(graphField(*state, "ephemeral"));
+  }
+  return draft;
+}
+
+void ShellWidget::Impl::forkThread(const nodegraph::NodeRef &thread,
+                                   NewThreadDraft draft,
+                                   bool includeOptions) {
+  if (!thread || thread->id().kind != nodegraph::NodeKind::Thread)
+    return;
+  nodegraph::NodeAction action{thread, nodegraph::NodeActionKind::Fork};
+  const QString requestedName = draft.name.trimmed();
+  if (!requestedName.isEmpty())
+    action.payload.emplace("requestedName", utf8(requestedName));
+  if (includeOptions) {
+    const QString workspace = draft.workspace.trimmed();
+    if (!workspace.isEmpty())
+      action.payload.emplace("cwd", utf8(workspace));
+    const QString baseInstructions = draft.baseInstructions.trimmed();
+    if (!baseInstructions.isEmpty())
+      action.payload.emplace("baseInstructions", utf8(baseInstructions));
+    const QString developerInstructions =
+        draft.developerInstructions.trimmed();
+    if (!developerInstructions.isEmpty())
+      action.payload.emplace("developerInstructions",
+                             utf8(developerInstructions));
+    action.payload.emplace("ephemeral", draft.ephemeral);
+  }
+  static_cast<void>(sendNodeAction(
+      std::move(action),
+      QStringLiteral("Thread fork was not admitted; try again.")));
+}
+
+void ShellWidget::Impl::beginForkThreadDialog(
+    const nodegraph::NodeRef &thread) {
+  std::optional<NewThreadDraft> draft = suggestedForkDraft(thread);
+  if (!draft) {
+    showNotice(QStringLiteral(
+        "Thread state is busy; try Fork with options again."));
+    return;
+  }
+  NewThreadDialog dialog(*draft, NewThreadDialog::Purpose::Fork, owner);
+  if (dialog.exec() != QDialog::Accepted)
+    return;
+  NewThreadDraft selected = dialog.draft();
+  if (selected.name.trimmed().isEmpty())
+    selected.name = draft->name;
+  forkThread(thread, std::move(selected), true);
+}
+
 void ShellWidget::Impl::renameThreadDialog(const nodegraph::NodeRef &thread) {
   if (!thread || thread->id().kind != nodegraph::NodeKind::Thread)
     return;
@@ -3081,8 +3212,7 @@ void ShellWidget::Impl::confirmDeleteThread(const nodegraph::NodeRef &thread) {
 
 bool ShellWidget::Impl::submitPrompt(QString prompt,
                                      std::vector<AttachmentDraft> attachments) {
-  prompt = prompt.trimmed();
-  if (prompt.isEmpty())
+  if (prompt.trimmed().isEmpty())
     return false;
   TurnSettingsWidget *settings = middleRegion->composer().turnSettings();
   std::vector<nodegraph::Attachment> ownedAttachments;

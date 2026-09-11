@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {BrowserFrontendSession} from "../dist/app/BrowserFrontendSession.js";
+import {BrowserFrontendSession, suggestForkName} from "../dist/app/BrowserFrontendSession.js";
 import {cardKeys, result, stableKey} from "../dist/index.js";
 
 class FakeSocket {
@@ -102,6 +102,8 @@ test("user thread operations are single-flight and report failures", async () =>
     assert.equal(session.operationPending("thread.rename", "thread-1"), false);
     assert.match(session.getSnapshot().notice, /Rename thread failed: rename denied/u);
 
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
     const listsBefore = requests(socket, "thread/list").length;
     session.requestThreads(); session.requestThreads();
     assert.equal(requests(socket, "thread/list").length, listsBefore + 1);
@@ -111,6 +113,122 @@ test("user thread operations are single-flight and report failures", async () =>
     await Promise.resolve(); await Promise.resolve();
     assert.equal(session.operationPending("threads.refresh"), false);
     assert.match(session.getSnapshot().notice, /Refresh threads failed: refresh denied/u);
+    session.dispose();
+});
+
+test("thread catalog loads fast, repairs in the background, and pages on demand", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "thread-pages");
+
+    const first = requests(socket, "thread/list").at(-1);
+    assert.deepEqual(first.payload.params,
+        {sortKey: "recency_at", sortDirection: "desc", limit: 100, useStateDbOnly: true});
+    respond(socket, first, {data: [{id: "newest", recencyAt: 30}], nextCursor: "discarded-fast-cursor"});
+    await waitForPublish();
+    const repair = requests(socket, "thread/list").at(-1);
+    assert.notEqual(repair, first);
+    assert.deepEqual(repair.payload.params,
+        {sortKey: "recency_at", sortDirection: "desc", limit: 100, useStateDbOnly: false});
+    respond(socket, repair, {data: [
+        {id: "repaired", recencyAt: 20}, {id: "newest", recencyAt: 30},
+    ], nextCursor: "older-page"});
+    await Promise.resolve(); await Promise.resolve();
+    session.loadMoreThreads();
+    const older = requests(socket, "thread/list").at(-1);
+    assert.notEqual(older, repair);
+    assert.deepEqual(older.payload.params, {
+        sortKey: "recency_at", sortDirection: "desc", limit: 100,
+        useStateDbOnly: true, cursor: "older-page",
+    });
+    respond(socket, older, {data: [{id: "oldest", recencyAt: 10}], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
+
+    assert.deepEqual(session.threadOrder(), ["newest", "repaired", "oldest"]);
+    session.dispose();
+});
+
+test("thread paging falls back after repair failure and retries transient page errors", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "thread-page-recovery");
+
+    const first = requests(socket, "thread/list").at(-1);
+    respond(socket, first, {data: [{id: "newest", recencyAt: 30}], nextCursor: "fast-page"});
+    await waitForPublish();
+    const repair = requests(socket, "thread/list").at(-1);
+    reject(socket, repair, "repair unavailable");
+    await Promise.resolve(); await Promise.resolve();
+
+    session.loadMoreThreads();
+    const page = requests(socket, "thread/list").at(-1);
+    assert.equal(page.payload.params.cursor, "fast-page",
+        "failed reconciliation retains the DB-only fast cursor");
+    reject(socket, page, "temporary paging failure");
+    await Promise.resolve(); await Promise.resolve();
+
+    session.loadMoreThreads();
+    const retry = requests(socket, "thread/list").at(-1);
+    assert.notEqual(retry, page);
+    assert.equal(retry.payload.params.cursor, "fast-page",
+        "a failed page does not consume its retry cursor");
+    respond(socket, retry, {data: [{id: "older", recencyAt: 20}], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
+    assert.deepEqual(session.threadOrder(), ["newest", "older"]);
+    session.dispose();
+});
+
+test("the first prompt after a successful fork starts without redundant hydration", async () => {
+    const socket = new FakeSocket();
+    const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
+    session.connect(); socket.open(); await readyProvider(socket, "fork-first-prompt");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "fork-source", preview: "Fork source", status: {type: "idle"}},
+    ], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
+
+    session.forkThread("fork-source");
+    const fork = requests(socket, "thread/fork").at(-1);
+    assert.ok(fork);
+    assert.deepEqual(fork.payload.params, {threadId: "fork-source"},
+        "Quick fork changes no copied thread options and never sends a name field");
+    const observedForkTitles = [];
+    const unsubscribe = session.subscribe(() => {
+        const title = session.model.thread("fork-result")?.title;
+        if (title !== undefined) observedForkTitles.push(title);
+    });
+    respond(socket, fork, {thread: {
+        id: "fork-result", forkedFromId: "fork-source", preview: "Fork result",
+        status: {type: "idle"}, turns: [],
+    }});
+    await Promise.resolve(); await Promise.resolve();
+
+    assert.equal(session.getSnapshot().selectedThreadId, "fork-result");
+    assert.equal(session.model.thread("fork-result")?.title, "Fork source (fork 1)",
+        "the automatic chosen name replaces the provider title immediately");
+    assert.deepEqual([...new Set(observedForkTitles)], ["Fork source (fork 1)"],
+        "no published frame exposes the provider title or thread ID");
+    unsubscribe();
+    const rename = requests(socket, "thread/name/set").at(-1);
+    assert.ok(rename);
+    assert.deepEqual(rename.payload.params,
+        {threadId: "fork-result", name: "Fork source (fork 1)"});
+    respond(socket, rename, {});
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/name/updated", params: {
+        threadId: "fork-result", threadName: "Fork source (fork 1)",
+    }}));
+    assert.equal(session.model.thread("fork-result")?.title, "Fork source (fork 1)",
+        "the chosen name survives its app-server acknowledgement");
+    assert.equal(requests(socket, "thread/read").length, 0,
+        "thread/fork already returns the loaded and subscribed thread");
+    assert.equal(await session.submitPrompt("answer this fork"), true);
+    await Promise.resolve(); await Promise.resolve();
+    const start = requests(socket, "turn/start").at(-1);
+    assert.ok(start);
+    assert.equal(start.payload.params.threadId, "fork-result");
+    assert.equal(start.payload.params.input[0].text, "answer this fork");
+    assert.equal(requests(socket, "thread/resume").length, 0,
+        "the fork prompt is never gated behind a redundant resume");
     session.dispose();
 });
 
@@ -133,15 +251,18 @@ test("browser session uses the C++ action routing and preserves prompt-response 
     assert.deepEqual(read.payload.params, {threadId: "thread-1", includeTurns: true});
     respond(socket, read, {thread: {id: "thread-1", preview: "Browser parity", cwd: "/workspace", status: {type: "idle"}, turns: []}});
 
-    assert.equal(await session.submitPrompt("new prompt"), true);
+    const authoredPrompt = "  first authored line\n\nthird authored line\n\n";
+    assert.equal(await session.submitPrompt(authoredPrompt), true);
     await Promise.resolve();
     const start = requests(socket, "turn/start").at(-1);
     assert.ok(start);
     assert.equal(start.payload.params.threadId, "thread-1");
-    assert.equal(start.payload.params.input[0].text, "new prompt");
+    assert.equal(start.payload.params.input[0].text, authoredPrompt);
     assert.match(start.payload.params.clientUserMessageId, /^codexui-/u);
     assert.equal(session.conversation().sections[0].cards[0].payload.showPendingAnimation, false,
         "newly admitted prompts begin without motion");
+    assert.equal(session.conversation().sections[0].cards[0].payload.prompt, authoredPrompt,
+        "the optimistic card retains all authored blank lines");
     await new Promise(resolve => setTimeout(resolve, 1050));
     assert.equal(session.conversation().sections[0].cards[0].payload.showPendingAnimation, true,
         "the session republishes delayed feedback after one second");
@@ -155,7 +276,7 @@ test("browser session uses the C++ action routing and preserves prompt-response 
     socket.receive(appserver({jsonrpc: "2.0", method: "item/started", params: {
         threadId: "thread-1", turnId: "turn-1", item: {
             id: "user-1", type: "userMessage", clientId: start.payload.params.clientUserMessageId,
-            content: [{type: "text", text: "new prompt"}],
+            content: [{type: "text", text: authoredPrompt}],
         },
     }}));
     respond(socket, start, {turn: {id: "turn-1", status: "inProgress"}});
@@ -169,6 +290,8 @@ test("browser session uses the C++ action routing and preserves prompt-response 
     assert.equal(session.model.connection().providerState, "ready");
     assert.equal(session.conversation().sections[0].cards[0].kind, "userMessage",
         "correlated acknowledgement materializes without a post-ack timer");
+    assert.equal(session.conversation().sections[0].cards[0].payload.text, authoredPrompt,
+        "the acknowledged card retains all authored blank lines");
     session.dispose();
 });
 
@@ -269,6 +392,9 @@ test("new threads retain one optimistic row through first-turn acknowledgment", 
     respond(socket, create, {thread: {id: "created-thread", name: "Created thread", cwd: "/workspace", status: {type: "idle"}}});
     assert.equal(await submitted, true);
     await Promise.resolve();
+    assert.equal(session.getSnapshot().optimisticThreads[0]?.title, "Named draft",
+        "the canonical thread handoff never substitutes the provider name or UUID");
+    assert.equal(session.model.thread("created-thread")?.title, "Named draft");
     const rename = requests(socket, "thread/name/set").at(-1);
     assert.equal(rename?.payload.params.name, "Named draft");
     respond(socket, rename, {});
@@ -286,6 +412,14 @@ test("new threads retain one optimistic row through first-turn acknowledgment", 
     assert.notEqual(session.getSnapshot().optimisticThreads[0]?.state, "awaiting");
     assert.equal(session.threadVisualKey("created-thread"), draft?.visualKey,
         "canonical styling retains the optimistic row's React identity");
+    assert.equal(session.model.thread("created-thread")?.title, "Named draft",
+        "turn acknowledgement leaves the chosen name intact");
+    socket.receive(appserver({jsonrpc: "2.0", method: "thread/name/updated", params: {
+        threadId: "created-thread", threadName: "Named draft",
+    }}));
+    assert.equal(session.model.thread("created-thread")?.localNameOverlay, undefined);
+    assert.equal(session.model.thread("created-thread")?.title, "Named draft",
+        "matching name acknowledgement retires the overlay without changing the title");
     session.dispose();
 });
 
@@ -315,55 +449,79 @@ test("new-thread completion preserves later navigation and explicit drafts start
     session.dispose();
 });
 
-test("thread ordering is numeric-first and naturally alphanumeric", () => {
+test("thread ordering exposes Alphanumeric, Created, and Recent contracts", () => {
     const session = new BrowserFrontendSession("ws://bridge.test/", () => new FakeSocket());
     session.model.applyEvent(result(96, 1, "threads.list", "list", true, {threads: [
-        {id: "beta", name: "Beta"}, {id: "ten", name: "10 tasks"},
-        {id: "alpha", name: "alpha"}, {id: "two", name: "2 tasks"},
+        {id: "missing", name: "2 tasks", createdAt: 100, updatedAt: 1000},
+        {id: "old", name: "20 tasks", recencyAt: 10, createdAt: 200, updatedAt: 2000},
+        {id: "new", name: "Alpha", recencyAt: 30, createdAt: 1, updatedAt: 2},
     ]}, "merge"));
-    assert.deepEqual(session.threadOrder("alphanumeric"), ["two", "ten", "alpha", "beta"]);
+    assert.deepEqual(session.threadOrder("recent"), ["new", "old", "missing"]);
+    assert.deepEqual(session.threadOrder("created"), ["old", "missing", "new"]);
+    assert.deepEqual(session.threadOrder("alphanumeric"), ["missing", "old", "new"]);
     session.dispose();
 });
 
-test("thread ordering uses newest creation time and leaves missing values last", () => {
+test("a new turn in a child thread promotes its root Recent group", () => {
     const session = new BrowserFrontendSession("ws://bridge.test/", () => new FakeSocket());
     session.model.applyEvent(result(97, 1, "threads.list", "list", true, {threads: [
-        {id: "missing"}, {id: "old", createdAt: 10}, {id: "new", createdAt: 30},
+        {id: "newer-root", name: "Newer", recencyAt: 30},
+        {id: "older-root", name: "Older", recencyAt: 20},
+        {id: "child", name: "Child", parentThreadId: "older-root", recencyAt: 10},
     ]}, "merge"));
-    assert.deepEqual(session.threadOrder("created"), ["new", "old", "missing"]);
+    assert.deepEqual(session.threadOrder(), ["newer-root", "older-root"]);
+    session.prompts.admit("child", "child turn", [], {}, session.model.thread("child"), undefined, 40_000, 31);
+    assert.deepEqual(session.threadOrder(), ["older-root", "newer-root"]);
     session.dispose();
 });
 
-test("thread ordering uses prompt activity as natural newest update time", async () => {
+test("fork names preserve root and nested lineage without collisions", () => {
+    const titles = ["Original", "Original (fork 1)", "Original (fork 2)",
+        "Original (fork 1.1)", "Original (fork 1.3)", "Original (fork 1.1.1)"];
+    assert.equal(suggestForkName("Original", titles), "Original (fork 3)");
+    assert.equal(suggestForkName("Original (fork 1)", titles), "Original (fork 1.2)");
+    assert.equal(suggestForkName("Original (fork 1.1)", titles), "Original (fork 1.1.2)");
+    assert.equal(suggestForkName("Separate", titles), "Separate (fork 1)");
+});
+
+test("Fork with options sends adjustable fork fields and names separately", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
-    session.connect(); socket.open(); await readyProvider(socket, "updated-promotion");
-    session.model.applyEvent(result(98, 1, "threads.list", "list", true, {threads: [
-        {id: "old", updatedAt: 10}, {id: "new", updatedAt: 30},
-    ]}, "merge"));
-    assert.deepEqual(session.threadOrder("updated"), ["new", "old"]);
-    const realNow = Date.now;
-    try {
-        Date.now = () => 40_000;
-        session.selectThread("old"); await session.submitPrompt("change old thread");
-        assert.deepEqual(session.threadOrder("updated"), ["old", "new"]);
-        Date.now = () => 40_000;
-        session.selectThread("new"); await session.submitPrompt("change new thread");
-        assert.deepEqual(session.threadOrder("updated"), ["new", "old"],
-            "the prior locally changed thread retains its timestamp behind the latest one");
-        assert.deepEqual(session.threadOrder("created"), ["new", "old"], "activity does not affect Created");
-    } finally { Date.now = realNow; }
+    session.connect(); socket.open(); await readyProvider(socket, "fork-options");
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "source", name: "Original (fork 1)", cwd: "/old"},
+        {id: "child", name: "Original (fork 1.1)", cwd: "/old"},
+    ], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.forkDraft("source").name, "Original (fork 1.2)");
+
+    session.forkThread("source", {
+        workspace: "/new", name: "Chosen fork", baseInstructions: "Base",
+        developerInstructions: "Developer", ephemeral: true,
+    });
+    const fork = requests(socket, "thread/fork").at(-1);
+    assert.deepEqual(fork.payload.params, {
+        threadId: "source", cwd: "/new", baseInstructions: "Base",
+        developerInstructions: "Developer", ephemeral: true,
+    });
+    respond(socket, fork, {thread: {id: "advanced", name: "Provider name", cwd: "/new"}});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(session.model.thread("advanced")?.title, "Chosen fork");
+    assert.deepEqual(requests(socket, "thread/name/set").at(-1).payload.params,
+        {threadId: "advanced", name: "Chosen fork"});
     session.dispose();
 });
 
-test("thread ordering retains every locally prompted thread by natural recency", async () => {
+test("Recent promotes on turn admission, reverts rejection, confirms acknowledgement, and shares prompt animation", async () => {
     const socket = new FakeSocket();
     const session = new BrowserFrontendSession("ws://bridge.test/", () => socket);
     session.connect(); socket.open();
     await readyProvider(socket, "promotion");
-    session.model.applyEvent(result(100, 1, "threads.list", "list", true, {threads: [
-        {id: "older", recencyAt: 10}, {id: "recent", recencyAt: 30},
-    ]}, "merge"));
+    respond(socket, requests(socket, "thread/list").at(-1), {data: [
+        {id: "older", recencyAt: 10, updatedAt: 12, status: {type: "idle"}},
+        {id: "recent", recencyAt: 30, updatedAt: 32, status: {type: "idle"}},
+    ], nextCursor: null});
+    await Promise.resolve(); await Promise.resolve();
     assert.deepEqual(session.threadOrder(), ["recent", "older"],
         "Recent is explicit newest-first ordering");
 
@@ -371,22 +529,61 @@ test("thread ordering retains every locally prompted thread by natural recency",
     try {
         Date.now = () => 40_000;
         session.selectThread("older");
+        respond(socket, requests(socket, "thread/read").at(-1), {thread: {
+            id: "older", recencyAt: 10, updatedAt: 12, status: {type: "idle"}, turns: [],
+        }});
+        await Promise.resolve(); await Promise.resolve();
         await session.submitPrompt("use older thread");
+        await Promise.resolve();
+        const rejectedStart = requests(socket, "turn/start").at(-1);
         assert.deepEqual(session.threadOrder(), ["older", "recent"],
             "the admitted prompt updates its thread recency immediately");
+        assert.equal(session.threadPromptAnimating("older"), false,
+            "the thread card and Turn/You card share the calm delay");
+        Date.now = () => 41_001;
+        assert.equal(session.threadPromptAnimating("older"), true,
+            "the thread card begins motion at the Turn/You animation deadline");
+        reject(socket, rejectedStart, "prompt rejected");
+        await Promise.resolve(); await Promise.resolve();
+        assert.deepEqual(session.threadOrder(), ["recent", "older"],
+            "a rejected admission removes its optimistic recency");
+        assert.equal(session.threadPromptAnimating("older"), false,
+            "the exact failed prompt stops both animations");
 
         Date.now = () => 40_000;
+        await session.submitPrompt("confirm older thread");
+        await Promise.resolve();
+        const acceptedOlder = requests(socket, "turn/start").at(-1);
+        respond(socket, acceptedOlder, {turn: {id: "older-turn", status: "inProgress"}});
+        await Promise.resolve(); await Promise.resolve();
+        assert.deepEqual(session.threadOrder(), ["older", "recent"],
+            "acknowledgement confirms the admitted turn order");
+        assert.equal(session.model.thread("older").recencyAt, 10,
+            "client confirmation preserves app-server recency as provider data");
+        assert.equal(session.model.thread("older").updatedAt, 12,
+            "turn ordering never rewrites last-changed data");
+
         session.selectThread("recent");
-        await session.submitPrompt("use recent thread");
+        respond(socket, requests(socket, "thread/read").at(-1), {thread: {
+            id: "recent", recencyAt: 30, updatedAt: 32, status: {type: "idle"}, turns: [],
+        }});
+        await Promise.resolve(); await Promise.resolve();
+        await session.submitPrompt("confirm recent thread");
+        await Promise.resolve();
         assert.deepEqual(session.threadOrder(), ["recent", "older"],
-            "a later prompt does not erase the prior thread's local recency");
+            "same-clock admissions still follow their monotonic admission order");
+        respond(socket, requests(socket, "turn/start").at(-1),
+            {turn: {id: "recent-turn", status: "inProgress"}});
+        await Promise.resolve(); await Promise.resolve();
+        assert.deepEqual(session.threadOrder(), ["recent", "older"]);
     } finally { Date.now = realNow; }
 
     session.model.applyEvent(result(101, 1, "thread.read", "read", true,
         {thread: {id: "older", recencyAt: 11}}, "merge", {threadId: "older"}));
     assert.deepEqual(session.threadOrder(), ["recent", "older"],
         "stale authoritative recency cannot undo newer local activity");
-    assert.equal(session.model.thread("older").recencyAt, 40);
+    assert.equal(session.model.thread("older").recencyAt, 11);
+    assert.ok(session.model.thread("older").localPromptActivityAt > 30);
     session.dispose();
 });
 
@@ -423,7 +620,7 @@ test("thread activity preserves provider time during hydration and advances for 
         "meaningful thread responses advance local activity");
     assert.equal(session.model.thread("tracked").updatedAt, 20);
     assert.equal(session.model.thread("tracked").recencyAt, 30,
-        "non-prompt traffic does not reorder Recent or Last changed");
+        "non-prompt traffic does not reorder Recent or rewrite provider timestamps");
 
     session.model.thread("tracked").lastActivityAt = 1;
     const beforeInbound = Math.floor(Date.now() / 1000);

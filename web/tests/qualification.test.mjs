@@ -56,6 +56,9 @@ test("server-rendered shell exposes keyboard and landmark semantics", () => {
     assert.match(markup, /aria-label="New command cards start expanded"/u);
     assert.match(markup, /aria-label="New image cards start expanded"/u);
     assert.match(markup, /aria-label="Message Codex"/u);
+    assert.match(markup, /aria-label="Thread sort order"/u);
+    assert.match(markup, /<option value="alphanumeric">Alphanumeric<\/option><option value="created">Created<\/option><option value="recent" selected="">Recent<\/option>/u);
+    assert.doesNotMatch(markup, /Last changed/u);
     assert.match(markup, /aria-describedby="composer-keyboard-hint"/u);
     assert.match(markup, /aria-keyshortcuts="Enter Control\+Enter Meta\+Enter"/u);
     assert.match(markup, /id="composer-keyboard-hint">Enter to send · Shift\+Enter for a new line/u);
@@ -84,6 +87,21 @@ test("new-thread dialog exposes the complete native creation draft", () => {
     assert.match(markup, />Developer instructions</u);
     assert.match(markup, />Temporary thread</u);
     assert.match(markup, /value="\/workspace"/u);
+});
+
+test("fork-with-options dialog reuses every creation field and prefills its chosen name", () => {
+    const markup = renderToStaticMarkup(createElement(NewThreadDialog, {
+        initialWorkspace: "/fallback", purpose: "fork", initialDraft: {
+            workspace: "/fork", name: "Original (fork 1.2)",
+            baseInstructions: "Base", developerInstructions: "Developer", ephemeral: true,
+        }, onCancel: () => {}, onContinue: () => {},
+    }));
+    assert.match(markup, />Fork with options</u);
+    assert.match(markup, /value="\/fork"/u);
+    assert.match(markup, /value="Original \(fork 1\.2\)"/u);
+    assert.match(markup, />Base<\/textarea>/u);
+    assert.match(markup, />Developer<\/textarea>/u);
+    assert.match(markup, /type="checkbox" checked=""/u);
 });
 
 test("protocol labels are humanized only at the render boundary", () => {

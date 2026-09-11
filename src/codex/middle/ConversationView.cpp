@@ -243,7 +243,9 @@ PassivePresentation passivePresentation(const VisibleCardData &card,
           result.border = QColor(QStringLiteral("#b7cff9"));
           result.titleColor = QColor(QStringLiteral("#415882"));
           if (includeBlocks)
-            result.blocks.push_back({text(payload.text), true, false});
+            result.blocks.push_back(
+                {presentation::userMessageMarkdown(text(payload.text)), true,
+                 false});
         } else if constexpr (std::is_same_v<Payload, AgentMessageData>) {
           result.title = QStringLiteral("Codex");
           result.status = payload.finalAnswer ? QStringLiteral("final answer")
@@ -3550,6 +3552,15 @@ void ConversationView::mousePressEvent(QMouseEvent *event) {
   QWidget *target = card->childAt(cardPosition);
   if (!target)
     target = card;
+  if (event->button() == Qt::LeftButton) {
+    for (QWidget *candidate = target; candidate && candidate != card;
+         candidate = candidate->parentWidget()) {
+      if (auto *markdown = qobject_cast<MarkdownTextView *>(candidate)) {
+        markdown->setFocus(Qt::MouseFocusReason);
+        break;
+      }
+    }
+  }
   const QPoint localPosition = target->mapFrom(viewport(), viewportPosition);
   QMouseEvent forwarded(event->type(), QPointF(localPosition),
                         event->scenePosition(), event->globalPosition(),

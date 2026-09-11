@@ -3,6 +3,7 @@
 #include "codex/middle/ThreadPane.h"
 
 #include "codex/UiStatus.h"
+#include "codex/middle/MiddleTypes.h"
 #include "codex/ui/UiStyle.h"
 
 #include <QAbstractItemView>
@@ -20,6 +21,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QStyledItemDelegate>
 #include <QTimer>
 #include <QToolButton>
@@ -39,6 +41,8 @@ constexpr int ExpandedRole = Qt::UserRole + 4;
 constexpr int ParentIdRole = Qt::UserRole + 5;
 constexpr int OptimisticRole = Qt::UserRole + 6;
 constexpr int OptimisticFailedRole = Qt::UserRole + 7;
+constexpr int AwaitingPromptRole = Qt::UserRole + 8;
+constexpr int PromptAdmittedAtRole = Qt::UserRole + 9;
 constexpr int ChildIndent = 16;
 constexpr int DisclosureWidth = 16;
 constexpr int DisclosureExtent = 24;
@@ -106,7 +110,9 @@ public:
     if (index.data(ContextMenuRole).toBool())
       effective.state |= QStyle::State_MouseOver;
     QStyledItemDelegate::paint(painter, effective, index);
-    if (!index.data(OptimisticRole).toBool())
+    const bool optimistic = index.data(OptimisticRole).toBool();
+    const bool awaitingPrompt = index.data(AwaitingPromptRole).toBool();
+    if (!optimistic && !awaitingPrompt)
       return;
 
     const QRectF bounds = QRectF(option.rect).adjusted(1.0, 4.0, -1.0, -4.0);
@@ -114,16 +120,23 @@ public:
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
     painter->setBrush(
-        failed ? QColor(QString::fromLatin1(UiStyle::redSurface))
-               : QColor(QString::fromLatin1(UiStyle::orangeSurface)));
-    painter->setPen(QPen(failed ? QColor(QString::fromLatin1(UiStyle::redBorder))
-                                : QColor(QString::fromLatin1(UiStyle::orangeBorderStrong)),
-                         1.0));
+        failed           ? QColor(QString::fromLatin1(UiStyle::redSurface))
+        : awaitingPrompt ? QColor(QString::fromLatin1(UiStyle::blueSurface))
+                         : QColor(QString::fromLatin1(UiStyle::orangeSurface)));
+    painter->setPen(
+        QPen(failed ? QColor(QString::fromLatin1(UiStyle::redBorder))
+             : awaitingPrompt
+                 ? QColor(QString::fromLatin1(UiStyle::blueBorderStrong))
+                 : QColor(QString::fromLatin1(UiStyle::orangeBorderStrong)),
+             awaitingPrompt ? 1.5 : 1.0));
     painter->drawRoundedRect(bounds, 8.0, 8.0);
-    if (!failed) {
-      constexpr qint64 HalfCycleMilliseconds = 900;
-      const qint64 phase =
-          QDateTime::currentMSecsSinceEpoch() % (2 * HalfCycleMilliseconds);
+    const qint64 admittedAt = index.data(PromptAdmittedAtRole).toLongLong();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const bool animate = awaitingPrompt && admittedAt > 0 &&
+                         now >= admittedAt + PendingAnimationDelayMilliseconds;
+    if (animate) {
+      constexpr qint64 HalfCycleMilliseconds = 850;
+      const qint64 phase = now % (2 * HalfCycleMilliseconds);
       const qreal position = phase <= HalfCycleMilliseconds
                                  ? qreal(phase) / HalfCycleMilliseconds
                                  : qreal(2 * HalfCycleMilliseconds - phase) /
@@ -131,9 +144,9 @@ public:
       const qreal center = bounds.left() + position * bounds.width();
       const qreal radius = std::max(24.0, bounds.width() * 0.22);
       QLinearGradient sweep(center - radius, 0.0, center + radius, 0.0);
-      sweep.setColorAt(0.0, QColor(220, 164, 90, 0));
-      sweep.setColorAt(0.5, QColor(236, 188, 112, 105));
-      sweep.setColorAt(1.0, QColor(220, 164, 90, 0));
+      sweep.setColorAt(0.0, QColor(47, 111, 235, 0));
+      sweep.setColorAt(0.5, QColor(117, 160, 239, 105));
+      sweep.setColorAt(1.0, QColor(47, 111, 235, 0));
       QPainterPath clip;
       clip.addRoundedRect(bounds, 8.0, 8.0);
       painter->setClipPath(clip);
@@ -281,13 +294,11 @@ QString activityText(const std::optional<std::int64_t> &timestamp) {
              : activity.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
 }
 
-std::optional<std::int64_t> timestampFor(const ui::ThreadListRow &thread,
-                                         ThreadPane::SortCriterion criterion) {
-  if (criterion == ThreadPane::SortCriterion::Created)
-    return thread.createdAt;
-  if (criterion == ThreadPane::SortCriterion::LastChanged)
-    return thread.updatedAt;
-  return thread.recencyAt;
+std::optional<std::int64_t>
+timestampFor(const ui::ThreadListRow &thread,
+             ThreadPane::SortCriterion criterion) {
+  return criterion == ThreadPane::SortCriterion::Created ? thread.createdAt
+                                                          : thread.recencyAt;
 }
 
 const ui::ThreadListRow *findThread(const ui::ThreadListRow &row,
@@ -301,8 +312,8 @@ const ui::ThreadListRow *findThread(const ui::ThreadListRow &row,
   return nullptr;
 }
 
-const ui::ThreadListRow *findThread(
-    const std::vector<ui::ThreadListRow> &roots, std::string_view id) {
+const ui::ThreadListRow *findThread(const std::vector<ui::ThreadListRow> &roots,
+                                    std::string_view id) {
   for (const ui::ThreadListRow &root : roots) {
     if (const ui::ThreadListRow *found = findThread(root, id))
       return found;
@@ -371,15 +382,17 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   auto *create = new QPushButton(QStringLiteral("+  New thread"));
   create->setObjectName(QStringLiteral("threadNewButton"));
   create->setFixedHeight(36);
-  create->setStyleSheet(QStringLiteral(
-      "QPushButton{background:#ffffff;color:%1;border:1px solid %2;"
-      "border-radius:8px;text-align:left;padding-left:14px;font-weight:600;}"
-      "QPushButton:hover{background:%3;border-color:%1;}"
-      "QPushButton:disabled{background:#f6f8fb;color:#98a2b3;"
-      "border-color:#d7dee8;}")
-                            .arg(QString::fromLatin1(UiStyle::blue),
-                                 QString::fromLatin1(UiStyle::blueBorder),
-                                 QString::fromLatin1(UiStyle::blueSelected)));
+  create->setStyleSheet(
+      QStringLiteral(
+          "QPushButton{background:#ffffff;color:%1;border:1px solid %2;"
+          "border-radius:8px;text-align:left;padding-left:14px;font-weight:600;"
+          "}"
+          "QPushButton:hover{background:%3;border-color:%1;}"
+          "QPushButton:disabled{background:#f6f8fb;color:#98a2b3;"
+          "border-color:#d7dee8;}")
+          .arg(QString::fromLatin1(UiStyle::blue),
+               QString::fromLatin1(UiStyle::blueBorder),
+               QString::fromLatin1(UiStyle::blueSelected)));
   connect(create, &QPushButton::clicked, this, [this] {
     if (actions.newThread)
       actions.newThread();
@@ -389,14 +402,6 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
 
   auto *toolbar = new QHBoxLayout;
   toolbar->setContentsMargins(4, 0, 4, 6);
-  auto *refresh = new QPushButton(QStringLiteral("Refresh"));
-  refresh->setProperty("kind", "subtle");
-  refresh->setFixedHeight(28);
-  connect(refresh, &QPushButton::clicked, this, [this] {
-    if (actions.refresh)
-      actions.refresh();
-  });
-  toolbar->addWidget(refresh);
   toolbar->addStretch();
   sortButton = new UiStyle::ChevronToolButton;
   sortButton->setObjectName(QStringLiteral("threadSortButton"));
@@ -418,7 +423,6 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   };
   addSortAction(QStringLiteral("Alphanumeric"), SortCriterion::Alphanumeric);
   addSortAction(QStringLiteral("Created"), SortCriterion::Created);
-  addSortAction(QStringLiteral("Last changed"), SortCriterion::LastChanged);
   QAction *recent =
       addSortAction(QStringLiteral("Recent"), SortCriterion::Recency);
   recent->setChecked(true);
@@ -440,27 +444,24 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   optimisticAnimation->setObjectName(
       QStringLiteral("optimisticThreadAnimation"));
   optimisticAnimation->setInterval(32);
-  connect(optimisticAnimation, &QTimer::timeout, list, [this] {
-    if (std::ranges::any_of(
-            optimisticThreads,
-            [](const OptimisticThread &thread) { return !thread.failed; }))
-      list->viewport()->update();
-  });
+  connect(optimisticAnimation, &QTimer::timeout, list,
+          [this] { list->viewport()->update(); });
   list->setSelectionMode(QAbstractItemView::SingleSelection);
   list->setContextMenuPolicy(Qt::CustomContextMenu);
   list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   list->setTextElideMode(Qt::ElideRight);
-  list->setStyleSheet(QStringLiteral(
-      "QListWidget#threadList{background:transparent;border:0;outline:0;}"
-      "QListWidget#threadList::item{min-height:30px;background:#ffffff;"
-      "border:1px solid #d7dee8;border-radius:8px;margin:3px 0;"
-      "padding:2px 8px;color:#344054;}"
-      "QListWidget#threadList::item:hover{background:#f1f5fb;"
-      "border-color:#b9c4d2;}"
-      "QListWidget#threadList::item:selected{background:%1;"
-      "border-color:%2;color:#1d2633;font-weight:600;}")
-                          .arg(QString::fromLatin1(UiStyle::blueSelected),
-                               QString::fromLatin1(UiStyle::blueBorder)));
+  list->setStyleSheet(
+      QStringLiteral(
+          "QListWidget#threadList{background:transparent;border:0;outline:0;}"
+          "QListWidget#threadList::item{min-height:30px;background:#ffffff;"
+          "border:1px solid #d7dee8;border-radius:8px;margin:3px 0;"
+          "padding:2px 8px;color:#344054;}"
+          "QListWidget#threadList::item:hover{background:#f1f5fb;"
+          "border-color:#b9c4d2;}"
+          "QListWidget#threadList::item:selected{background:%1;"
+          "border-color:%2;color:#1d2633;font-weight:600;}")
+          .arg(QString::fromLatin1(UiStyle::blueSelected),
+               QString::fromLatin1(UiStyle::blueBorder)));
   connect(list, &QListWidget::itemSelectionChanged, this, [this] {
     if (actions.select) {
       const std::string id = visiblySelectedThreadId();
@@ -470,6 +471,8 @@ ThreadPane::ThreadPane(QWidget *parent) : QFrame(parent) {
   });
   connect(list, &QListWidget::customContextMenuRequested, this,
           [this](const QPoint &position) { showContextMenu(position); });
+  connect(list->verticalScrollBar(), &QScrollBar::valueChanged, this,
+          [this] { requestMoreNearListEnd(); });
   layout->addWidget(list);
 }
 
@@ -483,7 +486,6 @@ void ThreadPane::beginOptimisticThread(std::string id, std::string title,
   optimisticThreads.insert(
       optimisticThreads.begin(),
       OptimisticThread{std::move(id), std::move(title), std::move(cwd), false});
-  optimisticAnimation->start();
   visibleSnapshot.reset();
 }
 
@@ -509,10 +511,6 @@ void ThreadPane::confirmOptimisticThread(const std::string &threadId) {
   std::erase_if(optimisticThreads, [&threadId](const OptimisticThread &thread) {
     return thread.id == threadId;
   });
-  if (std::ranges::none_of(
-          optimisticThreads,
-          [](const OptimisticThread &thread) { return !thread.failed; }))
-    optimisticAnimation->stop();
   visibleSnapshot.reset();
 }
 
@@ -522,10 +520,6 @@ void ThreadPane::failOptimisticThread(const std::string &threadId) {
   if (optimistic == optimisticThreads.end())
     return;
   optimistic->failed = true;
-  if (std::ranges::none_of(
-          optimisticThreads,
-          [](const OptimisticThread &thread) { return !thread.failed; }))
-    optimisticAnimation->stop();
   visibleSnapshot.reset();
 }
 
@@ -553,31 +547,21 @@ ThreadPane::SortCriterion ThreadPane::currentSortCriterion() const noexcept {
 void ThreadPane::updateSortButton() {
   if (!sortButton)
     return;
-  QString label;
+  QString selected;
   switch (sortCriterion) {
   case SortCriterion::Alphanumeric:
-    label = QStringLiteral("A–Z");
+    selected = QStringLiteral("Alphanumeric");
     break;
   case SortCriterion::Created:
-    label = QStringLiteral("Created");
-    break;
-  case SortCriterion::LastChanged:
-    label = QStringLiteral("Changed");
+    selected = QStringLiteral("Created");
     break;
   case SortCriterion::Recency:
-    label = QStringLiteral("Recent");
+    selected = QStringLiteral("Recent");
     break;
   }
-  sortButton->setText(QStringLiteral("Sort: %1").arg(label));
+  sortButton->setText(QStringLiteral("Sort: %1").arg(selected));
   for (QAction *action : sortButton->menu()->actions())
-    action->setChecked(action->text() ==
-                       (sortCriterion == SortCriterion::Alphanumeric
-                            ? QStringLiteral("Alphanumeric")
-                        : sortCriterion == SortCriterion::Created
-                            ? QStringLiteral("Created")
-                        : sortCriterion == SortCriterion::LastChanged
-                            ? QStringLiteral("Last changed")
-                            : QStringLiteral("Recent")));
+    action->setChecked(action->text() == selected);
 }
 
 void ThreadPane::sortRootThreads(std::vector<ui::ThreadListRow> &rows) const {
@@ -588,8 +572,7 @@ void ThreadPane::sortRootThreads(std::vector<ui::ThreadListRow> &rows) const {
   collator.setIgnorePunctuation(true);
   collator.setNumericMode(true);
   std::sort(rows.begin(), rows.end(),
-            [&](const ui::ThreadListRow &left,
-                const ui::ThreadListRow &right) {
+            [&](const ui::ThreadListRow &left, const ui::ThreadListRow &right) {
               if (sortCriterion == SortCriterion::Alphanumeric) {
                 const QString leftTitle = text(left.title).trimmed();
                 const QString rightTitle = text(right.title).trimmed();
@@ -617,6 +600,29 @@ void ThreadPane::sortRootThreads(std::vector<ui::ThreadListRow> &rows) const {
             });
 }
 
+void ThreadPane::updateAnimationTimer() {
+  const bool active =
+      visibleSnapshot &&
+      std::ranges::any_of(visibleSnapshot->rows,
+                          [](const RenderedThreadRow &row) {
+                            return row.awaitingPromptAcknowledgement;
+                          });
+  if (active && !optimisticAnimation->isActive())
+    optimisticAnimation->start();
+  else if (!active)
+    optimisticAnimation->stop();
+}
+
+void ThreadPane::requestMoreNearListEnd() {
+  if (!actions.loadMore || !list || list->count() == 0)
+    return;
+  const QScrollBar *scroll = list->verticalScrollBar();
+  const int threshold = std::max(48, scroll->pageStep() / 2);
+  if (scroll->maximum() == 0 ||
+      scroll->value() >= scroll->maximum() - threshold)
+    actions.loadMore();
+}
+
 void ThreadPane::appendVisibleThread(
     RenderedThreadList &snapshot, const ui::ThreadListRow &thread,
     const std::string &parentId, std::size_t depth,
@@ -625,10 +631,12 @@ void ThreadPane::appendVisibleThread(
     return;
   const bool hasChildren = !thread.children.empty();
   const bool expanded = hasChildren && expandedThreads.contains(thread.id);
-  snapshot.rows.push_back(
-      {thread.id, thread.title, thread.cwd, thread.status,
-       thread.lastActivityAt, parentId,
-       thread.pending, depth, hasChildren, expanded});
+  snapshot.rows.push_back({thread.id, thread.title, thread.cwd, thread.status,
+                           thread.createdAt, thread.recencyAt,
+                           thread.lastActivityAt, parentId, thread.pending,
+                           depth, hasChildren, expanded, false, false,
+                           thread.awaitingPromptAcknowledgement,
+                           thread.pendingPromptAdmittedAtMs});
   if (!expanded)
     return;
   for (const ui::ThreadListRow &child : thread.children)
@@ -698,20 +706,27 @@ bool ThreadPane::applyRowPresentation(const ui::ThreadListRow &row) {
   retained->updatedAt = row.updatedAt;
   retained->recencyAt = row.recencyAt;
   retained->lastActivityAt = row.lastActivityAt;
+  retained->pendingPromptAdmittedAtMs = row.pendingPromptAdmittedAtMs;
   retained->pending = row.pending;
+  retained->awaitingPromptAcknowledgement = row.awaitingPromptAcknowledgement;
   retained->archived = row.archived;
 
   const auto visible = std::ranges::find_if(
-      visibleSnapshot->rows,
-      [&row](const RenderedThreadRow &candidate) { return candidate.id == row.id; });
+      visibleSnapshot->rows, [&row](const RenderedThreadRow &candidate) {
+        return candidate.id == row.id;
+      });
   if (visible == visibleSnapshot->rows.end())
     return true;
   RenderedThreadRow next = *visible;
   next.title = row.title;
   next.cwd = row.cwd;
   next.status = row.status;
+  next.createdAt = row.createdAt;
+  next.recencyAt = row.recencyAt;
   next.lastActivityAt = row.lastActivityAt;
   next.pending = row.pending;
+  next.awaitingPromptAcknowledgement = row.awaitingPromptAcknowledgement;
+  next.pendingPromptAdmittedAtMs = row.pendingPromptAdmittedAtMs;
   if (*visible == next)
     return true;
   *visible = next;
@@ -722,36 +737,44 @@ bool ThreadPane::applyRowPresentation(const ui::ThreadListRow &row) {
   QListWidgetItem *item = found->second;
   const QString title = text(next.title);
   const QString status = text(displayStatus(next.status));
-  QStringList accessibleParts{
-      title, status, QStringLiteral("level %1").arg(next.depth + 1)};
+  QStringList accessibleParts{title, status,
+                              QStringLiteral("level %1").arg(next.depth + 1)};
   if (next.hasChildren)
     accessibleParts.push_back(next.expanded ? QStringLiteral("expanded")
                                             : QStringLiteral("collapsed"));
   const QString accessible = accessibleParts.join(", ");
   if (item->data(Qt::AccessibleTextRole).toString() != accessible)
     item->setData(Qt::AccessibleTextRole, accessible);
-  QStringList details{title,
-                      QStringLiteral("Workspace: %1").arg(
-                          next.cwd.empty() ? QStringLiteral("Unknown")
-                                           : text(next.cwd)),
-                      QStringLiteral("Status: %1").arg(status),
-                      QStringLiteral("Last activity: %1")
-                          .arg(activityText(next.lastActivityAt))};
+  QStringList details{
+      title,
+      QStringLiteral("Workspace: %1")
+          .arg(next.cwd.empty() ? QStringLiteral("Unknown") : text(next.cwd)),
+      QStringLiteral("Status: %1").arg(status),
+      QStringLiteral("Recent turn: %1").arg(activityText(next.recencyAt)),
+      QStringLiteral("Created: %1").arg(activityText(next.createdAt)),
+      QStringLiteral("Last activity: %1")
+          .arg(activityText(next.lastActivityAt))};
   if (!next.parentId.empty()) {
     const ui::ThreadListRow *parent =
         findThread(currentSnapshot->roots, next.parentId);
-    details.push_back(QStringLiteral("Parent: %1").arg(
-        parent && !parent->title.empty() ? text(parent->title)
-                                         : text(next.parentId)));
+    details.push_back(QStringLiteral("Parent: %1")
+                          .arg(parent && !parent->title.empty()
+                                   ? text(parent->title)
+                                   : text(next.parentId)));
   }
   const QString tooltip = details.join(QLatin1Char('\n'));
   if (item->toolTip() != tooltip)
     item->setToolTip(tooltip);
+  item->setData(AwaitingPromptRole, next.awaitingPromptAcknowledgement);
+  item->setData(
+      PromptAdmittedAtRole,
+      static_cast<qlonglong>(next.pendingPromptAdmittedAtMs.value_or(0)));
   updateRow(list->itemWidget(item), next.id, next.title, next.status,
             next.pending, next.depth, next.hasChildren, next.expanded,
             next.optimistic, next.optimisticFailed);
   if (QWidget *rowWidget = list->itemWidget(item))
     rowWidget->update();
+  updateAnimationTimer();
   setProperty("targetedRowPresentationUpdates",
               property("targetedRowPresentationUpdates").toULongLong() + 1);
   return true;
@@ -785,6 +808,8 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
                            thread->title,
                            thread->cwd,
                            thread->status,
+                           thread->createdAt,
+                           thread->recencyAt,
                            thread->lastActivityAt,
                            {},
                            0,
@@ -792,11 +817,15 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
                            false,
                            false,
                            true,
-                           optimisticThread.failed});
+                           optimisticThread.failed,
+                           thread->awaitingPromptAcknowledgement,
+                           thread->pendingPromptAdmittedAtMs});
     } else {
       next.rows.push_back({optimisticThread.id,
                            optimisticThread.title,
                            optimisticThread.cwd,
+                           {},
+                           {},
                            {},
                            {},
                            {},
@@ -816,11 +845,12 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
 
   const bool retainedOrder =
       visibleSnapshot && visibleSnapshot->rows.size() == next.rows.size() &&
-      std::equal(visibleSnapshot->rows.begin(), visibleSnapshot->rows.end(),
-                 next.rows.begin(), [](const RenderedThreadRow &before,
-                                       const RenderedThreadRow &after) {
-                   return before.id == after.id;
-                 });
+      std::equal(
+          visibleSnapshot->rows.begin(), visibleSnapshot->rows.end(),
+          next.rows.begin(),
+          [](const RenderedThreadRow &before, const RenderedThreadRow &after) {
+            return before.id == after.id;
+          });
   if (retainedOrder) {
     const RenderedThreadList previous = *visibleSnapshot;
     visibleSnapshot = std::move(next);
@@ -845,19 +875,22 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
       const QString accessible = accessibleParts.join(", ");
       if (item->data(Qt::AccessibleTextRole).toString() != accessible)
         item->setData(Qt::AccessibleTextRole, accessible);
-      QStringList details{title,
-                          QStringLiteral("Workspace: %1").arg(
-                              row.cwd.empty() ? QStringLiteral("Unknown")
-                                              : text(row.cwd)),
-                          QStringLiteral("Status: %1").arg(status),
-                          QStringLiteral("Last activity: %1").arg(
-                              activityText(row.lastActivityAt))};
+      QStringList details{
+          title,
+          QStringLiteral("Workspace: %1")
+              .arg(row.cwd.empty() ? QStringLiteral("Unknown") : text(row.cwd)),
+          QStringLiteral("Status: %1").arg(status),
+          QStringLiteral("Recent turn: %1").arg(activityText(row.recencyAt)),
+          QStringLiteral("Created: %1").arg(activityText(row.createdAt)),
+          QStringLiteral("Last activity: %1")
+              .arg(activityText(row.lastActivityAt))};
       if (!row.parentId.empty()) {
         const ui::ThreadListRow *parent =
             findThread(currentSnapshot->roots, row.parentId);
-        details.push_back(QStringLiteral("Parent: %1").arg(
-            parent && !parent->title.empty() ? text(parent->title)
-                                             : text(row.parentId)));
+        details.push_back(QStringLiteral("Parent: %1")
+                              .arg(parent && !parent->title.empty()
+                                       ? text(parent->title)
+                                       : text(row.parentId)));
       }
       const QString tooltip = details.join(QLatin1Char('\n'));
       if (item->toolTip() != tooltip)
@@ -868,6 +901,10 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
       item->setData(ParentIdRole, text(row.parentId));
       item->setData(OptimisticRole, row.optimistic);
       item->setData(OptimisticFailedRole, row.optimisticFailed);
+      item->setData(AwaitingPromptRole, row.awaitingPromptAcknowledgement);
+      item->setData(
+          PromptAdmittedAtRole,
+          static_cast<qlonglong>(row.pendingPromptAdmittedAtMs.value_or(0)));
       updateRow(list->itemWidget(item), row.id, row.title, row.status,
                 row.pending, row.depth, row.hasChildren, row.expanded,
                 row.optimistic, row.optimisticFailed);
@@ -884,6 +921,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
       }
     }
     list->blockSignals(false);
+    updateAnimationTimer();
     return;
   }
 
@@ -957,19 +995,22 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
                                              : QStringLiteral("collapsed"));
     item->setData(Qt::DisplayRole, {});
     item->setData(Qt::AccessibleTextRole, accessibleParts.join(", "));
-    QStringList details{title,
-                        QStringLiteral("Workspace: %1").arg(
-                            row.cwd.empty() ? QStringLiteral("Unknown")
-                                            : text(row.cwd)),
-                        QStringLiteral("Status: %1").arg(status),
-                        QStringLiteral("Last activity: %1").arg(
-                            activityText(row.lastActivityAt))};
+    QStringList details{
+        title,
+        QStringLiteral("Workspace: %1")
+            .arg(row.cwd.empty() ? QStringLiteral("Unknown") : text(row.cwd)),
+        QStringLiteral("Status: %1").arg(status),
+        QStringLiteral("Recent turn: %1").arg(activityText(row.recencyAt)),
+        QStringLiteral("Created: %1").arg(activityText(row.createdAt)),
+        QStringLiteral("Last activity: %1")
+            .arg(activityText(row.lastActivityAt))};
     if (!row.parentId.empty()) {
       const ui::ThreadListRow *parent =
           findThread(currentSnapshot->roots, row.parentId);
-      details.push_back(QStringLiteral("Parent: %1").arg(
-          parent && !parent->title.empty() ? text(parent->title)
-                                           : text(row.parentId)));
+      details.push_back(QStringLiteral("Parent: %1")
+                            .arg(parent && !parent->title.empty()
+                                     ? text(parent->title)
+                                     : text(row.parentId)));
     }
     item->setToolTip(details.join(QLatin1Char('\n')));
     item->setData(DepthRole, static_cast<qulonglong>(row.depth));
@@ -978,6 +1019,10 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
     item->setData(ParentIdRole, text(row.parentId));
     item->setData(OptimisticRole, row.optimistic);
     item->setData(OptimisticFailedRole, row.optimisticFailed);
+    item->setData(AwaitingPromptRole, row.awaitingPromptAcknowledgement);
+    item->setData(
+        PromptAdmittedAtRole,
+        static_cast<qlonglong>(row.pendingPromptAdmittedAtMs.value_or(0)));
     updateRow(list->itemWidget(item), row.id, row.title, row.status,
               row.pending, row.depth, row.hasChildren, row.expanded,
               row.optimistic, row.optimisticFailed);
@@ -989,6 +1034,7 @@ void ThreadPane::refresh(const ui::ThreadListSnapshot &input) {
   }
   list->setUpdatesEnabled(true);
   list->blockSignals(false);
+  updateAnimationTimer();
 }
 
 std::string ThreadPane::visiblySelectedThreadId() const {
@@ -1030,10 +1076,16 @@ void ThreadPane::showContextMenu(const QPoint &position) {
     if (actions.rename)
       actions.rename(id);
   });
-  QAction *fork = menu->addAction(QStringLiteral("Fork"), this, [this, id] {
-    if (actions.fork)
-      actions.fork(id);
-  });
+  QAction *fork =
+      menu->addAction(QStringLiteral("Quick fork"), this, [this, id] {
+        if (actions.fork)
+          actions.fork(id);
+      });
+  QAction *forkWithOptions = menu->addAction(
+      QStringLiteral("Fork with options…"), this, [this, id] {
+        if (actions.forkWithOptions)
+          actions.forkWithOptions(id);
+      });
   QAction *archive =
       menu->addAction(thread->archived ? QStringLiteral("Unarchive")
                                        : QStringLiteral("Archive"),
@@ -1049,6 +1101,7 @@ void ThreadPane::showContextMenu(const QPoint &position) {
   reload->setEnabled(providerReady);
   rename->setEnabled(canControl);
   fork->setEnabled(canControl);
+  forkWithOptions->setEnabled(canControl);
   archive->setEnabled(canControl);
   remove->setEnabled(canControl);
   menu->popup(list->viewport()->mapToGlobal(position));

@@ -69,6 +69,8 @@ export interface ThreadPresentation {
     createdAt?: number;
     updatedAt?: number;
     recencyAt?: number;
+    localPromptActivityAt?: number;
+    localNameOverlay?: string;
     lastActivityAt?: number;
     commandCwds: string[];
     changedPaths: string[];
@@ -398,7 +400,16 @@ export class PresentationModel {
     }
 
     threadOrder(): readonly string[] { return this.orderedThreads; }
+    threadIds(): readonly string[] { return [...this.threads.keys()]; }
+    threadTitles(): readonly string[] { return [...this.threads.values()].map(thread => thread.title); }
     thread(threadId: string): ThreadPresentation | undefined { return this.threads.get(threadId); }
+    setThreadTitleLocally(threadId: string, title: string): void {
+        const thread = this.threads.get(threadId);
+        if (thread && title.trim() !== "") {
+            thread.localNameOverlay = title;
+            thread.title = title;
+        }
+    }
     noteThreadActivity(threadId: string, timestamp: number): void {
         if (!Number.isSafeInteger(timestamp)) return;
         let current = threadId;
@@ -415,12 +426,7 @@ export class PresentationModel {
         }
     }
     notePromptActivity(threadId: string, timestamp: number): void {
-        for (const thread of this.threads.values()) {
-            if (thread.updatedAt !== undefined && thread.updatedAt >= timestamp)
-                timestamp = thread.updatedAt + 1;
-            if (thread.recencyAt !== undefined && thread.recencyAt >= timestamp)
-                timestamp = thread.recencyAt + 1;
-        }
+        if (!Number.isSafeInteger(timestamp)) return;
         let current = threadId;
         const visited = new Set<string>();
         while (current !== "" && !visited.has(current)) {
@@ -429,8 +435,8 @@ export class PresentationModel {
             if (!thread) break;
             if (thread.lastActivityAt === undefined || timestamp > thread.lastActivityAt)
                 thread.lastActivityAt = timestamp;
-            thread.updatedAt = timestamp;
-            thread.recencyAt = timestamp;
+            if (thread.localPromptActivityAt === undefined || timestamp > thread.localPromptActivityAt)
+                thread.localPromptActivityAt = timestamp;
             const ownership = this.childOwnerships.get(current);
             if (!ownership) break;
             current = ownership.parentThreadId;
@@ -567,8 +573,9 @@ export class PresentationModel {
         if (type === "thread.name.changed") {
             const thread = this.threads.get(stringMember(scope, "threadId"));
             if (thread && isObject(data) && typeof data.name === "string") {
-                thread.title = data.name;
                 thread.raw.name = data.name;
+                if (thread.localNameOverlay === data.name) delete thread.localNameOverlay;
+                thread.title = thread.localNameOverlay ?? data.name;
             }
             return;
         }
@@ -742,7 +749,9 @@ export class PresentationModel {
         result.raw = replaceTurns ? threadFields : mergePreservingCompleteness(result.raw, threadFields) as JsonObject;
         const name = stringMember(raw, "name");
         const preview = stringMember(raw, "preview");
-        if (name !== "") result.title = name;
+        if (name !== "" && result.localNameOverlay === name) delete result.localNameOverlay;
+        if (result.localNameOverlay !== undefined) result.title = result.localNameOverlay;
+        else if (name !== "") result.title = name;
         else if (preview !== "") result.title = preview.slice(0, 80);
         else if (result.title === "") result.title = id.slice(0, 12);
         if (preview !== "") result.preview = preview;

@@ -3950,6 +3950,56 @@ void correlatedThreadReadsPreserveOnlyInterveningLiveState() {
   }
 }
 
+void chosenNameOverlaySurvivesUntilMatchingAcknowledgement() {
+  NodeGraph graph;
+  ProtocolUpdater updater(graph);
+  {
+    auto write = graph.write();
+    NodeState state;
+    state.fields = {{"name", Value("Chosen name")},
+                    {"localNameOverlay", Value("Chosen name")}};
+    static_cast<void>(
+        write.upsert({NodeKind::Thread, "named-thread"}, std::move(state)));
+    static_cast<void>(write.finish());
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/started", std::nullopt,
+       Value::Object{{"thread", Value(Value::Object{
+                                          {"id", Value("named-thread")},
+                                          {"name", Value("Provider default")}})}}}));
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/name/updated",
+       std::nullopt,
+       Value::Object{{"threadId", Value("named-thread")},
+                     {"threadName", Value("Out-of-order name")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "named-thread"});
+    const Value *overlay = field(read->state(thread), "localNameOverlay");
+    require(overlay && overlay->asString() &&
+                *overlay->asString() == "Chosen name",
+            "provider handoff or mismatched notification dropped the chosen "
+            "name overlay");
+  }
+
+  static_cast<void>(updater.apply(
+      {DecodedMessageKind::ServerNotification, "thread/name/updated",
+       std::nullopt,
+       Value::Object{{"threadId", Value("named-thread")},
+                     {"threadName", Value("Chosen name")}}}));
+  {
+    auto read = graph.tryRead();
+    const NodeRef thread = read->find({NodeKind::Thread, "named-thread"});
+    const auto state = read->state(thread);
+    const Value *name = field(state, "name");
+    require(field(state, "localNameOverlay") == nullptr && name &&
+                name->asString() && *name->asString() == "Chosen name",
+            "matching app-server acknowledgement did not retire the local "
+            "name overlay cleanly");
+  }
+}
+
 void authoritativeReplacementRetiresItemsAndPreservesLocalTail() {
   NodeGraph graph;
   ProtocolUpdater updater(graph);
@@ -4200,6 +4250,7 @@ int main() {
   deletionUnlinksWholeGraph();
   largeThreadDeletionIsNearLinear();
   correlatedThreadReadsPreserveOnlyInterveningLiveState();
+  chosenNameOverlaySurvivesUntilMatchingAcknowledgement();
   authoritativeReplacementRetiresItemsAndPreservesLocalTail();
   rollbackAndRevertReplaceAuthoritativeHistory();
 

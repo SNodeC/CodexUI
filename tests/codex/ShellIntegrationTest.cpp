@@ -17,6 +17,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -1066,8 +1067,8 @@ void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
 
   auto *editor = shell.findChild<codexui::ExpandingPromptEditor *>(
       QStringLiteral("upcomingPromptEditor"));
-  const QString exact = QStringLiteral("  graph prompt stays exact  ");
-  const QString trimmed = exact.trimmed();
+  const QString exact =
+      QStringLiteral("  graph prompt stays exact\n\nincluding blank lines\n\n");
   require(submit(editor, exact), "the real composer emits its submit action");
   std::vector<QtToWorkerMessage> actions = takeQtMessages(channels);
   NodeAction prompt;
@@ -1081,10 +1082,10 @@ void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
   }
   require(promptCount == 1 && prompt.target &&
               prompt.target->id() == NodeId{NodeKind::Thread, "shell-thread"} &&
-              prompt.promptText == trimmed.toStdString() && editor &&
+              prompt.promptText == exact.toStdString() && editor &&
               editor->toPlainText().isEmpty(),
-          "the composer emits one typed prompt with legacy whitespace "
-          "normalization");
+          "the composer emits one typed prompt without removing authored "
+          "blank lines");
 
   PromptTransition transition = worker.admitPrompt(std::move(prompt));
   const NodeRef localPrompt =
@@ -1093,11 +1094,11 @@ void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
       localPrompt != nullptr,
       "the worker turns an admitted action into the one shared prompt node");
   require(spinUntil([&] {
-            return localPromptCard(shell, trimmed.toStdString()) != nullptr;
+            return localPromptCard(shell, exact.toStdString()) != nullptr;
           }),
           "the visible existing card renders directly from the prompt node");
   middle::ConversationCard *card =
-      localPromptCard(shell, trimmed.toStdString());
+      localPromptCard(shell, exact.toStdString());
   QTimer *pendingAnimation =
       card ? card->findChild<QTimer *>(QStringLiteral("pendingAnimationTimer"))
            : nullptr;
@@ -1121,8 +1122,18 @@ void graphBackedShellPreservesDraftsAndPrompts(Configuration &configuration) {
   spin(40);
   require(
       editor->toPlainText() == QStringLiteral("unsent editor draft") &&
-          localPromptCard(shell, trimmed.toStdString()) == card,
+          localPromptCard(shell, exact.toStdString()) == card &&
+          pendingAnimation->isActive(),
       "unrelated graph updates preserve local editor text and card identity");
+
+  auto *threadAnimation =
+      shell.findChild<QTimer *>(QStringLiteral("optimisticThreadAnimation"));
+  require(threadAnimation && threadAnimation->isActive(),
+          "the selected thread card shares the Turn/You pending animation");
+  static_cast<void>(worker.completePrompt(localPrompt, true, {}, "shell-turn"));
+  spin(60);
+  require(!pendingAnimation->isActive() && !threadAnimation->isActive(),
+          "the same prompt acknowledgement stops both card animations");
 }
 
 void initialHydrationUsesTheEstablishedBoundedWindow(
@@ -1633,6 +1644,119 @@ void reloadAndReconnectHydrationStayExplicit(Configuration &configuration) {
               automaticTarget->id() ==
                   NodeId{NodeKind::Thread, "rehydrate-thread"},
           "a recreated selected thread is read once without resending prompts");
+}
+
+void forkActionsExposeLineageAndAdvancedOptions(Configuration &configuration) {
+  FrontendSession session(configuration);
+  ThreadChannels &channels = FrontendSessionTestPeer::channels(session);
+  WorkerLogic worker(FrontendSessionTestPeer::graph(session), channels);
+  ShellWidget shell(session);
+  shell.resize(1500, 850);
+  shell.show();
+
+  makeReady(worker);
+  applyThread(worker, "fork-source", "Original (fork 1)");
+  applyThread(worker, "existing-child", "Original (fork 1.1)");
+  auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
+  require(spinUntil([&] { return threadItem(list, "fork-source"); }),
+          "fork fixture appears in the real thread list");
+  static_cast<void>(takeQtMessages(channels));
+
+  const auto openAction = [&](QStringView label) -> QAction * {
+    const QPoint point =
+        list->visualItemRect(threadItem(list, "fork-source")).center();
+    QMetaObject::invokeMethod(list, "customContextMenuRequested",
+                              Qt::DirectConnection, Q_ARG(QPoint, point));
+    auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+    if (!menu)
+      return nullptr;
+    for (QAction *action : menu->actions())
+      if (action && action->text() == label)
+        return action;
+    return nullptr;
+  };
+
+  QAction *quick = openAction(u"Quick fork");
+  require(quick && openAction(u"Fork with options…"),
+          "thread context menu exposes Quick fork and Fork with options");
+  if (QWidget *popup = QApplication::activePopupWidget())
+    popup->close();
+  quick = openAction(u"Quick fork");
+  if (quick)
+    quick->trigger();
+  std::vector<QtToWorkerMessage> messages = takeQtMessages(channels);
+  const NodeAction *quickFork = nullptr;
+  for (const QtToWorkerMessage &message : messages) {
+    const auto *action = std::get_if<NodeAction>(&message);
+    if (action && action->kind == NodeActionKind::Fork)
+      quickFork = action;
+  }
+  const auto quickName = quickFork
+                             ? quickFork->payload.find("requestedName")
+                             : Value::Object::const_iterator{};
+  require(quickFork && quickName != quickFork->payload.end() &&
+              quickName->second.asString() &&
+              *quickName->second.asString() == "Original (fork 1.2)" &&
+              !quickFork->payload.contains("cwd"),
+          "Quick fork sends only the correct next nested chosen name");
+
+  bool suggestedNameVisible = false;
+  QAction *advanced = openAction(u"Fork with options…");
+  QTimer::singleShot(0, [&] {
+    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if (!dialog)
+      return;
+    const auto lineEdits = dialog->findChildren<QLineEdit *>();
+    const auto plainEdits = dialog->findChildren<QPlainTextEdit *>();
+    QLineEdit *workspace = nullptr;
+    QLineEdit *name = nullptr;
+    for (QLineEdit *edit : lineEdits) {
+      if (edit->text() == QStringLiteral("/tmp"))
+        workspace = edit;
+      else
+        name = edit;
+    }
+    suggestedNameVisible =
+        name && name->text() == QStringLiteral("Original (fork 1.2)");
+    if (workspace)
+      workspace->setText(QStringLiteral("/adjusted-workspace"));
+    if (name)
+      name->setText(QStringLiteral("Chosen advanced fork"));
+    if (plainEdits.size() >= 2) {
+      plainEdits[0]->setPlainText(QStringLiteral("Adjusted base"));
+      plainEdits[1]->setPlainText(QStringLiteral("Adjusted developer"));
+    }
+    if (auto *ephemeral = dialog->findChild<QCheckBox *>())
+      ephemeral->setChecked(true);
+    dialog->accept();
+  });
+  if (advanced)
+    advanced->trigger();
+  messages = takeQtMessages(channels);
+  const NodeAction *advancedFork = nullptr;
+  for (const QtToWorkerMessage &message : messages) {
+    const auto *action = std::get_if<NodeAction>(&message);
+    if (action && action->kind == NodeActionKind::Fork)
+      advancedFork = action;
+  }
+  const auto hasString = [&](std::string_view key, std::string_view value) {
+    if (!advancedFork)
+      return false;
+    const auto found = advancedFork->payload.find(key);
+    return found != advancedFork->payload.end() && found->second.asString() &&
+           *found->second.asString() == value;
+  };
+  const auto ephemeral = advancedFork
+                             ? advancedFork->payload.find("ephemeral")
+                             : Value::Object::const_iterator{};
+  require(advanced && suggestedNameVisible && advancedFork &&
+              hasString("requestedName", "Chosen advanced fork") &&
+              hasString("cwd", "/adjusted-workspace") &&
+              hasString("baseInstructions", "Adjusted base") &&
+              hasString("developerInstructions", "Adjusted developer") &&
+              ephemeral != advancedFork->payload.end() &&
+              ephemeral->second.asBool() && *ephemeral->second.asBool(),
+          "Fork with options prefills lineage and sends every editable field");
 }
 
 void backgroundGraphChangesDoNotRefreshSelectedConversation(
@@ -2262,12 +2386,18 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
   makeReady(worker);
   spin(40);
 
+  const QString chosenName = QStringLiteral("Chosen UI name");
   auto *newThread =
       shell.findChild<QPushButton *>(QStringLiteral("threadNewButton"));
-  QTimer::singleShot(0, &shell, [] {
+  QTimer::singleShot(0, &shell, [chosenName] {
     if (auto *dialog =
-            qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+            qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
+      for (QLineEdit *editor : dialog->findChildren<QLineEdit *>()) {
+        if (editor->placeholderText() == QStringLiteral("Optional thread name"))
+          editor->setText(chosenName);
+      }
       dialog->accept();
+    }
   });
   require(newThread != nullptr, "the existing New thread control is available");
   if (!newThread)
@@ -2278,8 +2408,14 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
   auto *list = shell.findChild<QListWidget *>(QStringLiteral("threadList"));
   QListWidgetItem *draft = threadItem(list, "draft:new-thread");
   QListWidgetItem *const stableDraft = draft;
-  require(draft && list->currentItem() == draft,
-          "the local optimistic draft is selected without a mirror model");
+  QWidget *draftRow = draft ? list->itemWidget(draft) : nullptr;
+  QLabel *draftTitle =
+      draftRow
+          ? draftRow->findChild<QLabel *>(QStringLiteral("threadTitle"))
+          : nullptr;
+  require(draft && list->currentItem() == draft && draftTitle &&
+              draftTitle->text() == chosenName,
+          "the local optimistic draft is selected with its chosen UI name");
 
   static_cast<void>(worker.connectionSettings(
       {{"selected", Value("unix")}, {"endpoint", Value("local")}}));
@@ -2323,8 +2459,10 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
       graphDraft && list && list->currentItem() == stableDraft &&
           list->currentItem()->data(Qt::UserRole).toString().toStdString() ==
               graphDraft->id().canonical &&
-          localPromptCard(shell, promptText.toStdString()),
-      "the same optimistic row hands off to the selected shared graph draft");
+          localPromptCard(shell, promptText.toStdString()) &&
+          draftTitle->text() == chosenName,
+      "the same optimistic row and chosen name hand off to the shared graph "
+      "draft");
 
   if (!transition.command)
     return;
@@ -2339,8 +2477,10 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
     threadPane = dynamic_cast<middle::ThreadPane *>(ancestor);
   require(threadItem(list, "created-thread") == stableDraft &&
               list->currentItem() == stableDraft && threadPane &&
-              threadPane->isOptimisticThread("created-thread"),
-          "the same row is promoted from local to canonical identity");
+              threadPane->isOptimisticThread("created-thread") &&
+              draftTitle->text() == chosenName,
+          "the same row and chosen name survive promotion to the canonical "
+          "thread identity");
 
   static_cast<void>(
       worker.completePrompt(localPrompt, true, {}, "created-turn"));
@@ -2355,9 +2495,11 @@ void optimisticDraftUsesOneTypedCreateAction(Configuration &configuration) {
               !threadPane->isOptimisticThread("created-thread") &&
               acceptedCard &&
               !acceptedCard->property("pendingFeedbackVisible").toBool() &&
-              acceptedAnimation && !acceptedAnimation->isActive(),
+              acceptedAnimation && !acceptedAnimation->isActive() &&
+              draftTitle->text() == chosenName,
           "the exact prompt result confirms the canonical row without "
-          "replacing its widget item and stops optimistic feedback");
+          "replacing its widget item or chosen name, and stops optimistic "
+          "feedback");
 }
 
 void emptyOptimisticDraftIsAbandonedOnThreadSelection(
@@ -3439,6 +3581,7 @@ int main(int argc, char **argv) {
   threadSwitchStagesTheCompleteReplacement(*configuration);
   inactiveThreadNeverReactivatesAStaleTurn(*configuration);
   reloadAndReconnectHydrationStayExplicit(*configuration);
+  forkActionsExposeLineageAndAdvancedOptions(*configuration);
   backgroundGraphChangesDoNotRefreshSelectedConversation(*configuration);
   optimisticDraftUsesOneTypedCreateAction(*configuration);
   emptyOptimisticDraftIsAbandonedOnThreadSelection(*configuration);

@@ -26,6 +26,10 @@ struct MarkdownTailState {
 // Pure display-value helpers shared by the passive delegate and the rich card
 // editor. They own no state and do not decide which renderer a row uses.
 [[nodiscard]] QString statusLabel(std::string_view status);
+// User-authored prompt newlines are intentional visual line breaks. Preserve
+// them in the Markdown presentation without changing the canonical source
+// retained for copy or protocol reconciliation.
+[[nodiscard]] QString userMessageMarkdown(QStringView source);
 [[nodiscard]] QString planMarkdown(const PlanData &plan);
 [[nodiscard]] QString agentMetadata(const AgentActivityData &activity);
 [[nodiscard]] QString fileChangesText(const FileChangesData &changes);

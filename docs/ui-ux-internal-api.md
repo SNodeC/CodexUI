@@ -48,7 +48,7 @@ concrete graph-cutover requirement.
 
 | Surface | Established behavior | Current status |
 | --- | --- | --- |
-| `ThreadPane::Actions` | Emits New, Refresh, Hide, Select, Reload, Rename, Fork, Archive toggle, and Remove exactly once using the row's canonical string ID. | Compatible. Shell resolves the visible ID to the exact current `NodeRef` before admission. |
+| `ThreadPane::Actions` | Emits New, Refresh, Hide, Select, Reload, Rename, Quick fork, Fork with options, Archive toggle, and Remove exactly once using the row's canonical string ID. | Compatible. Shell resolves the visible ID to the exact current `NodeRef` before admission. |
 | `ThreadPane::refresh` | Consumes one complete hierarchy snapshot; retains expansion, selection, sort choice, optimistic rows, hover/context state; identical effective rows do no work. | Compatible after restoring provider/controller gating, effective activity time, unreachable-root retention, and ordered child relations. |
 | optimistic thread methods | Begin one draft row, promote it without replacing its visual identity, mark failure, and remove only on confirmation/abandonment. | Compatible. Promotion is correlated to the admitted creation prompt rather than guessed from later payload fields. |
 | `ConversationView::reconcile` | Consumes one complete `ConversationSnapshot`; keys mutate compatible cards in place; one Turn section owns one opening You card and all nested cards; identical snapshots are a no-op. | Compatible after restoring encoded section keys, canonical root pinning, stable prompt aliasing, and the identical-snapshot early return. |
@@ -149,7 +149,7 @@ always means “no coherent value was available now”, never “render empty”
 ### `middle::ThreadPane`
 
 `ThreadPane` owns the sidebar's QWidgets, selected-row rendering, expanded
-thread IDs, current sort criterion, optimistic row animation, context-menu
+thread IDs, current sort criterion, pending-prompt animation, context-menu
 state, and row comparison values.
 
 Thread/ownership contract: Qt-main only; QObject parenting owns every row and
@@ -157,16 +157,16 @@ popup. The pane owns no graph references or provider state. Callbacks may enter
 shell code synchronously, so all caller graph guards must already be released.
 
 - `ThreadPane(parent)` constructs the established sidebar and restores its
-  persisted local sort/expansion behavior.
+  local expansion behavior. The sort control contains exactly Alphanumeric,
+  Created, and Recent, with Recent selected initially.
 - `setActions(Actions)` replaces the callback bundle. Missing callbacks make
   the corresponding gesture a no-op; callbacks execute without graph locks.
 - `refresh(snapshot)` compares a complete DTO with the last effective rendered
   list. It patches/reorders only as required, preserves local expansion and
   context state, and does nothing for an identical effective list. It never
   initiates hydration or provider operations itself.
-- `beginOptimisticThread(id, title, cwd)` inserts one locally animated draft
-  row using the supplied stable provisional ID without changing canonical
-  graph authority.
+- `beginOptimisticThread(id, title, cwd)` inserts one local draft row using the
+  supplied stable provisional ID without changing canonical graph authority.
 - `promoteOptimisticThread(draftId, authoritativeId)` changes the row's action
   identity in place and preserves its selection/animation/position.
 - `confirmOptimisticThread(threadId)` removes only the matching optimistic
@@ -175,28 +175,53 @@ shell code synchronously, so all caller graph guards must already be released.
   failure presentation so recovery/navigation remains possible.
 - `isOptimisticThread(threadId)` is a side-effect-free membership query used
   only by shell correlation logic.
-- `setSortCriterion(criterion)` changes the local ordering rule, persists it,
-  and reconciles the current snapshot once.
+- `setSortCriterion(criterion)` selects one of Alphanumeric, Created, and
+  Recent and reconciles the current snapshot once. Alphanumeric is natural,
+  case-insensitive title order; Created and Recent are newest-first with
+  missing timestamps last.
 - `currentSortCriterion()` returns that local rule without triggering work.
 - `visiblySelectedThreadId()` returns the ID of the row the user currently
   sees as selected. Outbound prompt routing must use this value, not a stale
   shell selection.
-- `Actions::select/reload/rename/fork/toggleArchive/remove` carry exactly the
-  pointed row ID. `Actions::newThread/refresh/hide` carry no inferred target.
+- `Actions::select/reload/rename/fork/forkWithOptions/toggleArchive/remove`
+  carry exactly the pointed row ID. `Actions::newThread/refresh/loadMore/hide`
+  carry no inferred target. `loadMore` is requested only at the bounded
+  near-list-end threshold; runtime single-flight and cursor guards decide
+  whether a provider request is required.
 
 | Method | Parameters / return | Preconditions and observable effect |
 | --- | --- | --- |
 | constructor | optional QWidget `parent` | Constructs one empty pane; restores only local settings. Performs no callback. |
 | `setActions` | replacement `Actions` value | Post: later gestures use only this bundle. Does not replay a gesture. |
-| `refresh` | complete `ThreadListSnapshot` by const reference | Snapshot remains valid for the call only. Post: rendered hierarchy/selection equals its effective value plus local expansion/sort/optimistic rows. Identical effective input performs no row work. |
+| `refresh` | complete `ThreadListSnapshot` by const reference | Snapshot remains valid for the call only. Post: rendered hierarchy/selection equals its effective value plus the selected ordering, local expansion, and optimistic rows. Identical effective input performs no row work. |
 | `beginOptimisticThread` | provisional `id`, display `title`, `cwd` | `id` must be nonempty and process-locally unique. Duplicate begin updates no canonical graph state. |
 | `promoteOptimisticThread` | exact `draftId`, exact `authoritativeId` | If draft is absent, no-op. Post: callbacks and visible selection use authoritative ID without replacing unrelated rows. |
 | `confirmOptimisticThread` | current provisional/promoted `threadId` | Removes only the matching overlay; canonical row remains. |
 | `failOptimisticThread` | exact optimistic ID | Marks only that overlay failed and keeps it recoverable/selectable as defined by UI behavior. |
 | `isOptimisticThread` | ID; returns bool | Pure local query. |
-| `setSortCriterion` | enum value | Reorders roots atomically using local snapshot and persists choice. Child order/hierarchy is retained. |
+| `setSortCriterion` | enum value | Reorders root groups atomically from the retained snapshot. Child hierarchy remains intact. |
 | `currentSortCriterion` | no parameters; returns enum | Pure local query. |
 | `visiblySelectedThreadId` | no parameters; returns canonical/provisional string | Empty when no visible row is selected. This is the outbound routing source of truth. |
+
+Thread catalog startup is two-stage. The runtime requests one bounded
+`recency_at` descending page with `useStateDbOnly=true`, publishes it, then
+schedules an automatic first-page request with `useStateDbOnly=false`. The
+second request lets app-server reconcile persisted session files into its
+database without delaying the first usable sidebar. Its `nextCursor` becomes
+the paging authority. `LoadMoreThreads` consumes at most one cursor page per
+near-end request using the repaired database, rejects repeated cursors, and
+merges rows through the same graph-backed list projection so selection,
+hierarchy, optimistic names, pending animation, and current sorting survive.
+A provider-generation change invalidates the timer, cursor, and in-flight
+cycle together. No manual repair command is exposed.
+
+`suggestForkName(sourceTitle, existingTitles)` is toolkit-independent and
+returns the first unused direct descendant of the source's parsed fork
+lineage. `NewThreadDialog` accepts either Create or Fork purpose; Fork reuses
+the complete creation form with a prefilled, editable suggested name. The
+client-only `requestedName` is removed before `thread/fork`, applied as a local
+overlay to the returned thread, and synchronized by a separate
+`thread/name/set` request.
 
 ### `middle::ConversationItemModel`
 
@@ -441,6 +466,13 @@ internal image dialog, callback registry, or file-opening cache is retained.
 whether effective content/geometry changed. `CommandOutputView` alone owns its
 inner wheel/follow state; restoring it must not move the outer conversation.
 
+`presentation::userMessageMarkdown` is a presentation-only projection. It
+turns soft newlines in authored user text into visible Markdown line breaks
+while leaving blank lines, existing hard breaks, indented code, and fenced code
+intact. `MarkdownTextView::markdownSource()` and card copy continue to expose
+the original canonical source. Normal and steering user messages use this same
+path in both rich widgets and passive delegate documents.
+
 | Method | Parameters / return | Preconditions and observable effect |
 | --- | --- | --- |
 | `data` | returns const DTO reference | Reference is valid until next successful apply or destruction; caller must not retain it across reconciliation. |
@@ -652,10 +684,12 @@ fields belong in adapter control metadata instead.
 
 Each `ThreadListRow` carries canonical ID, display title fallback, cwd, status,
 created/updated/recency values, effective last activity, pending count,
-archive state, and ordered children. Effective last activity is the maximum of
-provider activity, update/recency, and admitted local prompt activity. The
-widget, not the adapter, owns sorting, expansion, optimistic animation,
-selection visuals, context menus, and row QWidget identity.
+archive state, pending-prompt acknowledgement state/deadline, and ordered
+children. Effective last activity is the maximum of provider activity,
+update/recency, and admitted local prompt activity. The adapter folds confirmed
+and optimistic turn order into effective `recencyAt`; the widget owns the
+Alphanumeric, Created, and Recent comparators, expansion, pending-prompt
+animation, selection visuals, context menus, and row QWidget identity.
 
 ### Conversation
 

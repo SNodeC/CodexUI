@@ -60,6 +60,7 @@ set(
     src/codex/GitDiffProvider.h
     src/codex/FileSelectionDialog.cpp
     src/codex/FileSelectionDialog.h
+    src/codex/ForkNaming.h
     src/codex/MainWindow.cpp
     src/codex/MainWindow.h
     src/codex/NewThreadDialog.cpp

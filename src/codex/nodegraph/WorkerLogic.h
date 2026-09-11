@@ -89,6 +89,9 @@ public:
   [[nodiscard]] ChannelSendStatus threadHydration(const NodeRef &thread,
                                                   std::string state,
                                                   std::string error = {});
+  [[nodiscard]] ChannelSendStatus completeFork(DecodedMessage result,
+                                               std::string threadId,
+                                               std::string chosenName);
   [[nodiscard]] ChannelSendStatus
   completeThreadHydration(DecodedMessage result, const NodeRef &thread,
                           std::string state, std::string error = {});
@@ -182,9 +185,10 @@ private:
                                    const NodeRef &thread) const;
   void resetProviderDerived(NodeGraph::WriteAccess &write,
                             std::string_view reason);
-  void advancePromptActivity(NodeGraph::WriteAccess &write,
-                             const NodeRef &thread,
-                             std::int64_t proposedActivityAt);
+  [[nodiscard]] std::int64_t
+  advancePromptActivity(NodeGraph::WriteAccess &write, const NodeRef &thread,
+                        std::int64_t proposedActivityAt);
+  void recomputePromptActivity(NodeGraph::WriteAccess &write);
   void forgetPrompt(const NodeRef &localPrompt);
 
   NodeGraph &graph_;

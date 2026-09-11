@@ -17,6 +17,7 @@
 
 class QLabel;
 class QPaintEvent;
+class QKeyEvent;
 class QResizeEvent;
 class QTimer;
 class QTextDocument;
@@ -35,7 +36,8 @@ public:
       const QString &markdown,
       std::shared_ptr<QTextDocument> preparedDocument = {},
       int initialWidth = 0,
-      QWidget *parent = nullptr);
+      QWidget *parent = nullptr,
+      bool preserveSoftLineBreaks = false);
   ~MarkdownTextView() override;
 
   bool setContent(const QString &markdown);
@@ -49,13 +51,18 @@ public:
   [[nodiscard]] QSize sizeHint() const override;
   [[nodiscard]] QSize minimumSizeHint() const override;
 
+protected:
+  void keyPressEvent(QKeyEvent *event) override;
+
 private:
   void configureDocument();
   void refreshPreferredHeight(int documentWidth) const;
 
   std::shared_ptr<QTextDocument> document_;
   QString markdown_;
+  QString renderedMarkdown_;
   presentation::MarkdownTailState markdownTail_;
+  bool preserveSoftLineBreaks_ = false;
   mutable int preferredDocumentWidth_ = 0;
   mutable int preferredHeight_ = 0;
 };
@@ -85,7 +92,9 @@ private:
   bool wheelGestureOwned_ = false;
 };
 
-class CommandOutputView final : public QPlainTextEdit {
+class CommandOutputView final : public QTextEdit {
+  Q_OBJECT
+
 public:
   struct ScrollState {
     bool followsLatest = true;
@@ -116,12 +125,14 @@ private:
   [[nodiscard]] bool measureAtCurrentWidth(bool notifyParent);
   [[nodiscard]] bool setPreferredContentHeight(int height, bool notifyParent);
   void settleScroll();
+  void scheduleScrollSettlement();
   [[nodiscard]] bool isAtBottom() const;
   [[nodiscard]] bool outputRequiresMaximumHeight(const QString &output) const;
 
   bool followsLatest_ = true;
   bool programmaticScroll_ = false;
   bool settlingScroll_ = false;
+  bool scrollSettlementPending_ = false;
   bool userScrollActive_ = false;
   bool wheelGestureActive_ = false;
   bool wheelGestureDecided_ = false;

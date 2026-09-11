@@ -124,6 +124,112 @@ QString statusLabel(std::string_view status) {
   return text(codexui::codex::displayStatus(status));
 }
 
+QString userMessageMarkdown(QStringView source) {
+  QString rendered;
+  rendered.reserve(source.size() + source.count(QLatin1Char('\n')) * 3);
+
+  // Markdown treats an empty source line as a paragraph separator and Qt's
+  // Markdown layout consequently paints the two adjacent paragraphs without
+  // the authored empty row. For ordinary prose, keep every editor line in one
+  // paragraph with explicit hard breaks and give empty lines an invisible
+  // layout glyph. The canonical source remains untouched on the view and is
+  // still used for copy and protocol correlation.
+  if (simpleMarkdownParagraphs(source)) {
+    qsizetype lineStart = 0;
+    while (lineStart <= source.size()) {
+      qsizetype lineEnd = source.indexOf(QLatin1Char('\n'), lineStart);
+      const bool hasNewline = lineEnd >= 0;
+      if (!hasNewline)
+        lineEnd = source.size();
+      QStringView line = source.sliced(lineStart, lineEnd - lineStart);
+      if (!line.isEmpty() && line.back() == QLatin1Char('\r'))
+        line.chop(1);
+      rendered += line;
+      if (line.trimmed().isEmpty())
+        rendered += QChar(0x200B);
+      if (hasNewline) {
+        if (!line.endsWith(QLatin1Char('\\')) &&
+            !line.endsWith(QLatin1StringView("  ")))
+          rendered += QLatin1StringView("  ");
+        rendered += QLatin1Char('\n');
+      }
+      if (!hasNewline)
+        break;
+      lineStart = lineEnd + 1;
+    }
+    return rendered;
+  }
+
+  bool fenced = false;
+  QChar fenceMarker;
+  qsizetype fenceLength = 0;
+  qsizetype lineStart = 0;
+  while (lineStart <= source.size()) {
+    qsizetype lineEnd = source.indexOf(QLatin1Char('\n'), lineStart);
+    const bool hasNewline = lineEnd >= 0;
+    if (!hasNewline)
+      lineEnd = source.size();
+    QStringView line = source.sliced(lineStart, lineEnd - lineStart);
+    if (!line.isEmpty() && line.back() == QLatin1Char('\r'))
+      line.chop(1);
+
+    qsizetype indentation = 0;
+    while (indentation < line.size() && indentation < 4 &&
+           line.at(indentation) == QLatin1Char(' '))
+      ++indentation;
+    const bool indentedCode =
+        indentation >= 4 || line.startsWith(QLatin1Char('\t'));
+    const QChar marker = indentation < line.size() ? line.at(indentation)
+                                                    : QChar{};
+    qsizetype markerLength = 0;
+    if (indentation <= 3 &&
+        (marker == QLatin1Char('`') || marker == QLatin1Char('~'))) {
+      while (indentation + markerLength < line.size() &&
+             line.at(indentation + markerLength) == marker)
+        ++markerLength;
+    }
+    const bool opensFence = !fenced && markerLength >= 3;
+    const bool closesFence =
+        fenced && marker == fenceMarker && markerLength >= fenceLength &&
+        line.sliced(indentation + markerLength).trimmed().isEmpty();
+    const bool fenceLine = opensFence || closesFence;
+    const bool insideFence = fenced || opensFence;
+
+    rendered += line;
+    if (hasNewline) {
+      qsizetype nextEnd = source.indexOf(QLatin1Char('\n'), lineEnd + 1);
+      if (nextEnd < 0)
+        nextEnd = source.size();
+      QStringView next = source.sliced(lineEnd + 1, nextEnd - lineEnd - 1);
+      if (!next.isEmpty() && next.back() == QLatin1Char('\r'))
+        next.chop(1);
+      const bool currentBlank = line.trimmed().isEmpty();
+      const bool nextBlank = next.trimmed().isEmpty();
+      const bool alreadyHardBreak =
+          line.endsWith(QLatin1Char('\\')) ||
+          line.endsWith(QLatin1StringView("  "));
+      if (!insideFence && !fenceLine && !indentedCode && !currentBlank &&
+          !nextBlank && !alreadyHardBreak)
+        rendered += QLatin1StringView("  ");
+      rendered += QLatin1Char('\n');
+    }
+
+    if (opensFence) {
+      fenced = true;
+      fenceMarker = marker;
+      fenceLength = markerLength;
+    } else if (closesFence) {
+      fenced = false;
+      fenceMarker = QChar{};
+      fenceLength = 0;
+    }
+    if (!hasNewline)
+      break;
+    lineStart = lineEnd + 1;
+  }
+  return rendered;
+}
+
 QString planMarkdown(const PlanData &plan) {
   if (!plan.legacyText.empty())
     return text(plan.legacyText);

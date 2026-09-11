@@ -404,7 +404,8 @@ bool preservesReadinessActivityAndAuthoritativeBudgetSemantics() {
     static_cast<void>(write.upsert({NodeKind::Connection, "connection"},
                                    std::move(connection)));
     NodeState threadState;
-    threadState.fields = {{"name", "Compatibility thread"},
+    threadState.fields = {{"name", "Provider thread"},
+                          {"localNameOverlay", "Chosen thread"},
                           {"updatedAt", std::int64_t{4}},
                           {"recencyAt", std::int64_t{6}},
                           {"lastActivityAt", std::int64_t{5}},
@@ -421,9 +422,12 @@ bool preservesReadinessActivityAndAuthoritativeBudgetSemantics() {
         itemState("provider-item", "agentMessage", "provider"));
     write.setParent(turn, provider);
     NodeState local = itemState("local-item", "localPrompt", "local");
+    local.fields.emplace("dispatchState", "inFlight");
+    local.fields.emplace("admittedAtMs", std::int64_t{1234});
     const NodeRef localPrompt =
         write.upsert({NodeKind::Item, "local-item"}, std::move(local));
     write.setParent(turn, localPrompt);
+    write.relate(thread, nodegraph::RelationKind::PendingPrompt, localPrompt);
     write.relate(runtime, nodegraph::RelationKind::RootThread, thread);
     static_cast<void>(write.finish());
   }
@@ -438,9 +442,16 @@ bool preservesReadinessActivityAndAuthoritativeBudgetSemantics() {
          require(threads && !threads->providerReady && !threads->canControl,
                  "disconnected transport exposed ready thread controls") &&
          require(threads && threads->roots.size() == 1 &&
+                     threads->roots.front().title == "Chosen thread" &&
+                     threads->roots.front().recencyAt ==
+                         std::optional<std::int64_t>{8} &&
                      threads->roots.front().lastActivityAt ==
-                         std::optional<std::int64_t>{9},
-                 "canonical effective thread activity changed");
+                         std::optional<std::int64_t>{9} &&
+                     threads->roots.front().awaitingPromptAcknowledgement &&
+                     threads->roots.front().pendingPromptAdmittedAtMs ==
+                         std::optional<std::int64_t>{1234},
+                 "chosen-name, Recent, activity, or prompt lifecycle "
+                 "projection changed");
 }
 
 bool preservesThreadRootsAndExactChildTargets() {

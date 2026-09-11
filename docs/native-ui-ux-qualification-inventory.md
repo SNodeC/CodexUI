@@ -63,9 +63,9 @@ with fixed screen geometry and pixel-difference regions.
 | Rows | Name/preview/ID fallback, status dot, hover, selected state, badges/tooltips and exact canonical state vocabulary match the legacy appearance |
 | Selection | Left click changes selection once; background activity never steals it; selecting a child keeps its root visible; removal clears selection safely |
 | Hierarchy | Root/child ownership, expansion/collapse, deep indentation, late parent, fork reassignment and child removal retain complete reachable topology |
-| Sorting | Recent, Created, Last changed and natural Alphanumeric orders; missing timestamps; local prompt ticks; non-sort field changes never scan/reorder |
-| Local draft row | New Thread insertion, animation, promotion to provider ID, failure, abandon-empty, second-create guard and later-navigation preservation use one stable row |
-| Context menu | Right-click targets the pointed row without selection, holds hover while open, dismisses without click-through, and exposes correct reload/rename/fork/archive/delete state |
+| Sorting | Exactly Alphanumeric, Created, and Recent; natural-number titles; newest-first timestamps; missing timestamps last; fast DB-only first page, automatic background file reconciliation, cursor-guarded near-end paging; Recent admission promotion, acknowledgement confirmation, rejection rollback, and criterion-specific re-sorting |
+| Local draft row | New Thread insertion, chosen-name preservation, prompt-bound animation, promotion to provider ID, failure, abandon-empty, second-create guard and later-navigation preservation use one stable row |
+| Context menu | Right-click targets the pointed row without selection, holds hover while open, dismisses without click-through, and exposes correct reload/rename/Quick fork/Fork with options/archive/delete state; advanced fork fields and hierarchical chosen names reach the exact action |
 | Incremental update | Name/status/tooltips patch only the affected row and repaint only its rectangle; no whole-list update suppression |
 | Atomic topology | Insert/remove/reparent/reorder computes a complete target before commit and never exposes partial ordering |
 | Large list | Visible rows plus two-row overscan only; bounded scans complete under unrelated revisions; scroll position and expansion remain stable |
@@ -135,7 +135,10 @@ For each type verify:
   direction, title anchoring, keyboard focus and no geometry change for
   paint-only state;
 - Copy availability, exact plain/Markdown content, 0.5-second check feedback,
-  reduced-motion behavior, overlay placement and no header movement;
+  reduced-motion behavior, overlay placement, uniformly narrow phase-to-Copy
+  spacing and no header movement;
+- authored single newlines remain visible in normal and steering You cards
+  while copied Markdown, blank lines, and fenced code remain exact;
 - retained text truncation notice and copied disclosure at the byte bound;
 - attachment order, encoded filenames, bounded image ribbon, horizontal
   scrolling without vertical growth, missing-image accessibility and modeless

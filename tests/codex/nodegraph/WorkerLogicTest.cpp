@@ -714,7 +714,9 @@ void threadActivityAndPromptOrderingStayInTheGraph() {
   }
   NodeAction first{child, NodeActionKind::SubmitPrompt};
   first.promptText = "promote child root";
-  static_cast<void>(logic.admitPrompt(std::move(first), 20));
+  PromptTransition admitted = logic.admitPrompt(std::move(first), 20);
+  const NodeRef localPrompt =
+      admitted.command ? admitted.command->localPrompt : NodeRef{};
   static_cast<void>(takeWorkerMessages(channels));
   {
     auto read = graph.tryRead();
@@ -725,6 +727,15 @@ void threadActivityAndPromptOrderingStayInTheGraph() {
             signedFieldEquals(read->state(parent), "localActivityAt", 31),
         "prompt admission advances beyond every provider sort key and "
         "propagates to its visible root group");
+  }
+
+  static_cast<void>(logic.failPrompt(localPrompt, "turn/start rejected"));
+  static_cast<void>(takeWorkerMessages(channels));
+  {
+    auto read = graph.tryRead();
+    require(field(read->state(child), "localPromptActivityAt") == nullptr &&
+                field(read->state(parent), "localPromptActivityAt") == nullptr,
+            "a rejected turn admission removes its optimistic Recent value");
   }
 
   static_cast<void>(logic.applyDetailed(
@@ -739,12 +750,11 @@ void threadActivityAndPromptOrderingStayInTheGraph() {
   static_cast<void>(takeWorkerMessages(channels));
   {
     auto read = graph.tryRead();
-    require(
-        signedFieldEquals(read->state(child), "localActivityAt", 40) &&
-            signedFieldEquals(read->state(parent), "localActivityAt", 40) &&
-            signedFieldEquals(read->state(parent), "localPromptActivityAt", 31),
-        "meaningful decoded traffic advances heading activity without "
-        "rewriting prompt ordering state");
+    require(signedFieldEquals(read->state(child), "localActivityAt", 40) &&
+                signedFieldEquals(read->state(parent), "localActivityAt", 40) &&
+                field(read->state(parent), "localPromptActivityAt") == nullptr,
+            "meaningful decoded traffic advances heading activity without "
+            "creating prompt ordering state");
   }
 
   static_cast<void>(logic.applyDetailed(
@@ -794,7 +804,7 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
   const char *const textStorage = first.promptText.data();
   const std::uint8_t *const bytesStorage =
       first.attachments.front().bytes->data();
-  PromptTransition admitted = logic.admitPrompt(std::move(first));
+  PromptTransition admitted = logic.admitPrompt(std::move(first), 10, 10'000);
   require(admitted.command &&
               admitted.command->kind == PromptCommandKind::StartTurn &&
               admitted.command->thread == thread &&
@@ -840,7 +850,7 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
   queued.target = thread;
   queued.kind = NodeActionKind::SubmitPrompt;
   queued.promptText = "second exact prompt";
-  PromptTransition second = logic.admitPrompt(std::move(queued));
+  PromptTransition second = logic.admitPrompt(std::move(queued), 11, 11'000);
   require(!second.command,
           "a second prompt for the same thread remains queued while one "
           "request is in flight");
@@ -851,7 +861,7 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
   parallel.kind = NodeActionKind::SubmitPrompt;
   parallel.promptText = "independent prompt";
   PromptTransition independentAdmission =
-      logic.admitPrompt(std::move(parallel));
+      logic.admitPrompt(std::move(parallel), 12, 12'000);
   require(independentAdmission.command &&
               independentAdmission.command->thread == independent,
           "different threads dispatch independently");
@@ -872,12 +882,21 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
 
   PromptTransition completed =
       logic.completePrompt(firstPrompt, true, {}, "authoritative-turn");
+  bool steeringKeptFirstTurnOrder = false;
+  if (completed.command) {
+    auto read = graph.tryRead();
+    steeringKeptFirstTurnOrder =
+        field(read->state(completed.command->localPrompt), "sortActivityAt") ==
+            nullptr &&
+        signedFieldEquals(read->state(thread), "localPromptActivityAt", 10);
+  }
   require(completed.command &&
               completed.command->kind == PromptCommandKind::SteerTurn &&
               completed.command->expectedTurnId == "authoritative-turn" &&
-              completed.command->promptText == "second exact prompt",
+              completed.command->promptText == "second exact prompt" &&
+              steeringKeptFirstTurnOrder,
           "a successful request releases exactly the next same-thread prompt "
-          "as a steer command");
+          "as a steer command without treating steering as a newer turn");
   static_cast<void>(takeWorkerMessages(channels));
 
   static_cast<void>(logic.apply(
@@ -904,8 +923,8 @@ void localPromptsAreGraphNodesAndDispatchPerThread() {
             read->state(firstPrompt)->status == NodeStatus::Running &&
             stringFieldEquals(read->state(firstPrompt), "dispatchState",
                               "awaitingMaterialization") &&
-            boolFieldEquals(read->state(firstPrompt),
-                            "showPendingAnimation", false),
+            boolFieldEquals(read->state(firstPrompt), "showPendingAnimation",
+                            false),
         "matching authoritative clientId directly relates the user item "
         "to its active local visual identity and transfers canonical "
         "turn-root ownership without overriding the retained UI deadline");
@@ -1544,7 +1563,8 @@ void firstPromptCreatesAndMigratesOneDraftThread() {
       {"turnStart",
        Value(Value::Object{{"approvalPolicy", Value("on-request")}})},
       {"requestedName", Value("Named locally")}};
-  PromptTransition admitted = logic.admitFirstPrompt(std::move(action));
+  PromptTransition admitted =
+      logic.admitFirstPrompt(std::move(action), 100, 100'000);
   require(admitted.command &&
               admitted.command->kind == PromptCommandKind::CreateThread &&
               admitted.command->requestedName == "Named locally" &&
@@ -1572,9 +1592,10 @@ void firstPromptCreatesAndMigratesOneDraftThread() {
     require(draft && draft->id().canonical.starts_with("local-thread:") &&
                 read->related(runtime, RelationKind::RootThread).front() ==
                     draft &&
-                read->parent(read->parent(localPrompt)) == draft,
+                read->parent(read->parent(localPrompt)) == draft &&
+                stringFieldEquals(read->state(draft), "name", "Named locally"),
             "the first prompt is immediately renderable under one draft "
-            "thread and provisional turn");
+            "thread with its chosen name and provisional turn");
   }
 
   static_cast<void>(logic.apply(
@@ -1592,23 +1613,48 @@ void firstPromptCreatesAndMigratesOneDraftThread() {
   {
     auto read = graph.tryRead();
     const NodeRef actual = read->find({NodeKind::Thread, "created-thread"});
-    require(admitted.command->kind == PromptCommandKind::StartTurn &&
-                admitted.command->thread == actual &&
-                admitted.command->options.contains("approvalPolicy") &&
-                !read->find(draft->id()) &&
-                read->parent(read->parent(localPrompt)) == actual &&
-                read->related(actual, RelationKind::PendingPrompt) ==
-                    std::vector<NodeRef>{localPrompt} &&
-                std::ranges::any_of(
-                    migrationMessages,
-                    [&](const auto &message) {
-                      const UiEffect *effect = std::get_if<UiEffect>(&message);
-                      return effect &&
-                             effect->kind == UiEffectKind::SelectThread &&
-                             effect->target == std::optional<NodeRef>(actual);
-                    }),
-            "migration removes the draft shell, selects the canonical thread, "
-            "and changes the retained command to turn/start");
+    require(
+        admitted.command->kind == PromptCommandKind::StartTurn &&
+            admitted.command->thread == actual &&
+            admitted.command->options.contains("approvalPolicy") &&
+            !read->find(draft->id()) &&
+            read->parent(read->parent(localPrompt)) == actual &&
+            read->related(actual, RelationKind::PendingPrompt) ==
+                std::vector<NodeRef>{localPrompt} &&
+            stringFieldEquals(read->state(actual), "name", "Named locally") &&
+            stringFieldEquals(read->state(actual), "localNameOverlay",
+                              "Named locally") &&
+            std::ranges::any_of(
+                migrationMessages,
+                [&](const auto &message) {
+                  const UiEffect *effect = std::get_if<UiEffect>(&message);
+                  return effect && effect->kind == UiEffectKind::SelectThread &&
+                         effect->target == std::optional<NodeRef>(actual);
+                }),
+        "migration removes the draft shell, preserves the chosen name, "
+        "selects the canonical thread, and changes the retained command "
+        "to turn/start");
+  }
+  static_cast<void>(
+      logic.completePrompt(localPrompt, true, {}, "created-turn"));
+  static_cast<void>(takeWorkerMessages(channels));
+  {
+    auto read = graph.tryRead();
+    const NodeRef actual = read->find({NodeKind::Thread, "created-thread"});
+    const Value *sortActivity =
+        field(read->state(localPrompt), "sortActivityAt");
+    const std::int64_t *timestamp =
+        sortActivity ? sortActivity->asInt64() : nullptr;
+    require(timestamp &&
+                signedFieldEquals(read->state(actual),
+                                  "confirmedLocalPromptActivityAt",
+                                  *timestamp) &&
+                signedFieldEquals(read->state(actual), "localPromptActivityAt",
+                                  *timestamp) &&
+                stringFieldEquals(read->state(actual), "localNameOverlay",
+                                  "Named locally"),
+            "turn acknowledgement confirms Recent without dropping the "
+            "chosen-name overlay");
   }
 
   NodeGraph failedGraph;

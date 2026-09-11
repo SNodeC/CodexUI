@@ -1148,8 +1148,7 @@ std::vector<NodeRef> replaceAuthoritativeChildren(
     std::unordered_set<const Node *> submittedNodes;
     submittedNodes.reserve(authoritative.size());
     for (const NodeRef &node : existing)
-      if (node && finalNodes.contains(node.get()) &&
-          retainsSubmittedSlot(node))
+      if (node && finalNodes.contains(node.get()) && retainsSubmittedSlot(node))
         submittedNodes.insert(node.get());
 
     if (!submittedNodes.empty()) {
@@ -2673,8 +2672,14 @@ void ProtocolUpdater::applyGraphUpdate(
     const std::string id = addressedId(message.payload, NodeKind::Thread);
     if (!id.empty()) {
       NodeRef thread = write.upsert({NodeKind::Thread, id});
-      if (const Value *name = member(message.payload, "threadName"))
+      if (const Value *name = member(message.payload, "threadName")) {
         write.setField(thread, "name", *name);
+        const std::string confirmedName = canonicalValue(name);
+        const std::string localName = canonicalValue(
+            member(write.state(thread)->fields, "localNameOverlay"));
+        if (!confirmedName.empty() && confirmedName == localName)
+          write.eraseField(thread, "localNameOverlay");
+      }
     }
     return;
   }
@@ -3144,6 +3149,13 @@ NodeRef ProtocolUpdater::ingestThread(
            write.fieldChangedRevision(thread, field) <= *preserveChangesAfter;
   };
   mergeObject(write, thread, object, "turns", preserveChangesAfter);
+  if (const Value *providerName = member(object, "name")) {
+    const std::string confirmedName = canonicalValue(providerName);
+    const std::string localName =
+        canonicalValue(member(write.state(thread)->fields, "localNameOverlay"));
+    if (!confirmedName.empty() && confirmedName == localName)
+      write.eraseField(thread, "localNameOverlay");
+  }
 
   if (const Value *projectId = member(object, "projectId");
       projectId && acceptsField("projectId"))
@@ -3239,9 +3251,8 @@ ProtocolUpdater::ingestTurn(NodeGraph::WriteAccess &write,
       const std::vector<NodeRef> existing =
           mergeExistingTail(write.children(turn),
                             write.related(turn, RelationKind::TurnRootItem));
-      write.replaceChildren(
-          turn, replaceAuthoritativeChildren(write, turn, std::move(order),
-                                             existing));
+      write.replaceChildren(turn, replaceAuthoritativeChildren(
+                                      write, turn, std::move(order), existing));
     } else if (!order.empty())
       write.replaceChildren(
           turn, mergeExistingTail(std::move(order), write.children(turn)));
@@ -3281,8 +3292,8 @@ ProtocolUpdater::ingestItem(NodeGraph::WriteAccess &write,
     if (!claimsTurnRoot) {
       const std::vector<NodeRef> prompts =
           write.related(item, RelationKind::PromptMaterialization);
-      claimsTurnRoot = std::ranges::any_of(
-          prompts, [&write, &roots](const NodeRef &prompt) {
+      claimsTurnRoot =
+          std::ranges::any_of(prompts, [&write, &roots](const NodeRef &prompt) {
             if (std::ranges::find(roots, prompt) == roots.end())
               return false;
             const Value *dispatch =

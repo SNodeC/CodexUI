@@ -129,6 +129,36 @@ std::optional<std::int64_t> graphInteger(const nodegraph::Value *value) {
   return std::nullopt;
 }
 
+struct PendingPromptPresentation {
+  bool awaitingAcknowledgement = false;
+  std::optional<std::int64_t> admittedAtMs;
+};
+
+PendingPromptPresentation
+pendingPromptPresentation(nodegraph::NodeGraph::ReadAccess &read,
+                          const nodegraph::NodeRef &thread) {
+  PendingPromptPresentation result;
+  for (const nodegraph::NodeRef &prompt :
+       read.related(thread, nodegraph::RelationKind::PendingPrompt)) {
+    if (!prompt || prompt->id().kind != nodegraph::NodeKind::Item)
+      continue;
+    const auto state = read.state(prompt);
+    if (!state || graphString(graphField(*state, "type")) != "localPrompt")
+      continue;
+    const std::string dispatch =
+        graphString(graphField(*state, "dispatchState"));
+    if (dispatch != "queued" && dispatch != "dispatching" &&
+        dispatch != "inFlight")
+      continue;
+    result.awaitingAcknowledgement = true;
+    const auto admittedAt = graphInteger(graphField(*state, "admittedAtMs"));
+    if (admittedAt &&
+        (!result.admittedAtMs || *admittedAt < *result.admittedAtMs))
+      result.admittedAtMs = admittedAt;
+  }
+  return result;
+}
+
 std::vector<std::string> graphStrings(const nodegraph::Value *value) {
   std::vector<std::string> result;
   const auto *array = value ? value->asArray() : nullptr;
@@ -872,7 +902,9 @@ NodeGraphUiAdapter::threadRow(const nodegraph::NodeRef &thread) const {
   };
   ThreadListRow row;
   row.id = thread->id().canonical;
-  row.title = graphString(graphField(*state, "name"));
+  row.title = graphString(graphField(*state, "localNameOverlay"));
+  if (row.title.empty())
+    row.title = graphString(graphField(*state, "name"));
   if (row.title.empty())
     row.title = graphString(graphField(*state, "preview"));
   if (row.title.empty())
@@ -882,6 +914,9 @@ NodeGraphUiAdapter::threadRow(const nodegraph::NodeRef &thread) const {
   row.createdAt = timestamp("createdAt");
   row.updatedAt = timestamp("updatedAt");
   row.recencyAt = timestamp("recencyAt");
+  if (const auto local = timestamp("localPromptActivityAt");
+      local && (!row.recencyAt || *local > *row.recencyAt))
+    row.recencyAt = local;
   for (const std::string_view field : {
            std::string_view("lastActivityAt"), std::string_view("updatedAt"),
            std::string_view("recencyAt"),
@@ -893,6 +928,10 @@ NodeGraphUiAdapter::threadRow(const nodegraph::NodeRef &thread) const {
   }
   row.pending =
       graphSize(graphField(*state, "pendingInteractionCount")).value_or(0);
+  const PendingPromptPresentation prompt =
+      pendingPromptPresentation(*read, thread);
+  row.awaitingPromptAcknowledgement = prompt.awaitingAcknowledgement;
+  row.pendingPromptAdmittedAtMs = prompt.admittedAtMs;
   row.archived = graphBool(graphField(*state, "archived"));
   return row;
 }
@@ -961,7 +1000,9 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread) const {
     if (!state)
       return row;
     row.id = node->id().canonical;
-    row.title = graphString(graphField(*state, "name"));
+    row.title = graphString(graphField(*state, "localNameOverlay"));
+    if (row.title.empty())
+      row.title = graphString(graphField(*state, "name"));
     if (row.title.empty())
       row.title = graphString(graphField(*state, "preview"));
     if (row.title.empty())
@@ -971,6 +1012,9 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread) const {
     row.createdAt = timestamp(*state, "createdAt");
     row.updatedAt = timestamp(*state, "updatedAt");
     row.recencyAt = timestamp(*state, "recencyAt");
+    if (const auto local = timestamp(*state, "localPromptActivityAt");
+        local && (!row.recencyAt || *local > *row.recencyAt))
+      row.recencyAt = local;
     for (const std::string_view field : {
              std::string_view("lastActivityAt"),
              std::string_view("updatedAt"), std::string_view("recencyAt"),
@@ -983,6 +1027,10 @@ NodeGraphUiAdapter::threads(const nodegraph::NodeRef &selectedThread) const {
     }
     row.pending = graphSize(graphField(*state, "pendingInteractionCount"))
                       .value_or(0);
+    const PendingPromptPresentation prompt =
+        pendingPromptPresentation(*read, node);
+    row.awaitingPromptAcknowledgement = prompt.awaitingAcknowledgement;
+    row.pendingPromptAdmittedAtMs = prompt.admittedAtMs;
     row.archived = graphBool(graphField(*state, "archived"));
     std::unordered_set<const nodegraph::Node *> localChildren;
     for (const nodegraph::RelationKind kind :

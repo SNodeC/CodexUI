@@ -26,16 +26,18 @@ namespace middle {
 
 class ThreadPane final : public QFrame {
 public:
-  enum class SortCriterion { Alphanumeric, Created, LastChanged, Recency };
+  enum class SortCriterion { Alphanumeric, Created, Recency };
 
   struct Actions {
     std::function<void()> newThread;
     std::function<void()> refresh;
+    std::function<void()> loadMore;
     std::function<void()> hide;
     std::function<void(const std::string &)> select;
     std::function<void(const std::string &)> reload;
     std::function<void(const std::string &)> rename;
     std::function<void(const std::string &)> fork;
+    std::function<void(const std::string &)> forkWithOptions;
     std::function<void(const std::string &)> toggleArchive;
     std::function<void(const std::string &)> remove;
   };
@@ -62,6 +64,8 @@ private:
     std::string title;
     std::string cwd;
     std::string status;
+    std::optional<std::int64_t> createdAt;
+    std::optional<std::int64_t> recencyAt;
     std::optional<std::int64_t> lastActivityAt;
     std::string parentId;
     std::size_t pending = 0;
@@ -70,6 +74,8 @@ private:
     bool expanded = false;
     bool optimistic = false;
     bool optimisticFailed = false;
+    bool awaitingPromptAcknowledgement = false;
+    std::optional<std::int64_t> pendingPromptAdmittedAtMs;
 
     bool operator==(const RenderedThreadRow &) const = default;
   };
@@ -88,6 +94,8 @@ private:
   };
   void updateSortButton();
   void sortRootThreads(std::vector<ui::ThreadListRow> &rows) const;
+  void updateAnimationTimer();
+  void requestMoreNearListEnd();
   void appendVisibleThread(RenderedThreadList &snapshot,
                            const ui::ThreadListRow &thread,
                            const std::string &parentId, std::size_t depth,

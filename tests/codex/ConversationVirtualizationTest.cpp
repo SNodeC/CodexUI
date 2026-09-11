@@ -1320,12 +1320,10 @@ bool largeIncomingCommandUsesBoundedFinalWidthLayout() {
   const qint64 appendMicros = timer.nsecsElapsed() / 1000;
   settle();
   ConversationCard *commandCard = materializedCard(view, key);
-  CommandOutputView *commandOutput = commandCard
-                                         ? dynamic_cast<CommandOutputView *>(
-                                               commandCard->findChild<QPlainTextEdit *>(
-                                                   QStringLiteral(
-                                                       "commandOutputView")))
-                                         : nullptr;
+  CommandOutputView *commandOutput =
+      commandCard ? commandCard->findChild<CommandOutputView *>(
+                        QStringLiteral("commandOutputView"))
+                  : nullptr;
   result &= expect(
       commandOutput && commandOutput->viewport()->width() > 500 &&
           commandOutput->property("boundedOutputMeasurements").toULongLong() >=
@@ -1551,6 +1549,17 @@ bool outsideTextDragDoesNotReenterTheView() {
   settle();
   result &= expect(body->hasSelectedText(),
                    "dragging from outside update glyphs selects text");
+  const QString selected = body->selectedText();
+  result &= expect(body->hasFocus(),
+                   "a real Markdown drag leaves its editor focused");
+  QApplication::clipboard()->clear();
+  if (QWidget *focused = QApplication::focusWidget()) {
+    QKeyEvent copy(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+    QApplication::sendEvent(focused, &copy);
+  }
+  result &= expect(!selected.isEmpty() &&
+                       QApplication::clipboard()->text() == selected,
+                   "a real Markdown drag copies with the next Ctrl+C");
   return result;
 }
 
